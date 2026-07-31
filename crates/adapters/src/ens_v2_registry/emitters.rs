@@ -3,19 +3,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
 use bigname_manifests::{
-    WatchedContractSource, load_historical_watched_contracts_by_chain,
-    load_historical_watched_contracts_scoped_with_progress, load_watched_contracts,
-    load_watched_contracts_scoped_with_progress,
+    WatchedContractSource, load_historical_watched_contracts_by_chain, load_watched_contracts,
 };
 use sqlx::PgPool;
 #[cfg(test)]
 use sqlx::types::Uuid;
 
-use crate::{
-    adapter_manifest::required_source_manifest_id,
-    checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress},
-    startup_progress::{STARTUP_ADAPTER_PROGRESS_PAGE_ROWS, StartupManifestProgress},
-};
+use crate::adapter_manifest::required_source_manifest_id;
 
 use super::{
     constants::*,
@@ -28,34 +22,8 @@ pub(super) async fn load_active_emitters(
     chain: &str,
     scoped_emitter_identities: Option<&HashSet<(String, String)>>,
     include_historical: bool,
-    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Vec<ActiveEmitter>> {
-    let source_families = vec![
-        SOURCE_FAMILY_ENS_V2_ROOT_L1.to_owned(),
-        SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
-    ];
-    let watched_contracts = if let Some(progress) = progress.as_deref_mut() {
-        let mut manifest_progress = StartupManifestProgress::new(progress);
-        if include_historical {
-            load_historical_watched_contracts_scoped_with_progress(
-                pool,
-                chain,
-                &source_families,
-                &mut manifest_progress,
-            )
-            .await
-            .context("failed to load historical watched contracts for ENSv2 registry adapter")?
-        } else {
-            load_watched_contracts_scoped_with_progress(
-                pool,
-                Some(chain),
-                &source_families,
-                &mut manifest_progress,
-            )
-            .await
-            .context("failed to load watched contracts for ENSv2 registry adapter")?
-        }
-    } else if include_historical {
+    let watched_contracts = if include_historical {
         load_historical_watched_contracts_by_chain(pool, chain)
             .await
             .context("failed to load historical watched contracts for ENSv2 registry adapter")?
@@ -73,17 +41,14 @@ pub(super) async fn load_active_emitters(
     }
 
     let mut manifest_ids = HashSet::new();
-    for (index, watched_contract) in watched_contracts.iter().enumerate() {
+    for watched_contract in &watched_contracts {
         manifest_ids.insert(required_source_manifest_id(watched_contract)?);
-        record_processed_progress(pool, progress, index + 1, watched_contracts.len()).await?;
     }
     let manifest_ids = manifest_ids.into_iter().collect::<Vec<_>>();
     let active_manifests = load_active_manifest_metadata(pool, &manifest_ids).await?;
-    record_startup_adapter_progress(pool, progress).await?;
 
-    let watched_contract_count = watched_contracts.len();
     let mut emitters_by_scope = BTreeMap::new();
-    for (index, watched_contract) in watched_contracts.into_iter().enumerate() {
+    for watched_contract in watched_contracts {
         let source_manifest_id = watched_contract
             .source_manifest_id
             .context("watched contract missing source_manifest_id after validation")?;
@@ -139,28 +104,14 @@ pub(super) async fn load_active_emitters(
                 emitters_by_scope.insert(scope_key, candidate);
             }
         }
-        record_processed_progress(pool, progress, index + 1, watched_contract_count).await?;
     }
 
     let emitter_count = emitters_by_scope.len();
     let mut emitters = Vec::with_capacity(emitter_count);
-    for (index, emitter) in emitters_by_scope.into_values().enumerate() {
+    for emitter in emitters_by_scope.into_values() {
         emitters.push(emitter);
-        record_processed_progress(pool, progress, index + 1, emitter_count).await?;
     }
     Ok(emitters)
-}
-
-async fn record_processed_progress(
-    pool: &PgPool,
-    progress: &mut Option<&mut dyn StartupAdapterProgress>,
-    completed: usize,
-    total: usize,
-) -> Result<()> {
-    if completed == total || completed.is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS) {
-        record_startup_adapter_progress(pool, progress).await?;
-    }
-    Ok(())
 }
 
 pub(super) fn source_scope_target_intersects_active_emitter(

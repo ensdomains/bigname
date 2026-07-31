@@ -19,39 +19,6 @@ use super::super::{
     planning::CatchupChunk,
 };
 
-#[path = "jobs/finalization.rs"]
-mod finalization;
-pub(super) use finalization::{
-    has_pending_ens_v2_finalization_jobs, precreate_ens_v2_finalization_jobs,
-    resume_pending_ens_v2_finalization_jobs,
-};
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum OpsCatchupAdapterPhase {
-    Ordinary,
-    EnsV2HistoryCollection,
-    EnsV2Finalization,
-}
-
-impl OpsCatchupAdapterPhase {
-    const fn adapter_sync_mode(self) -> BackfillAdapterSyncMode {
-        match self {
-            Self::Ordinary => BackfillAdapterSyncMode::Inline,
-            Self::EnsV2HistoryCollection | Self::EnsV2Finalization => {
-                BackfillAdapterSyncMode::InlineWithoutEnsV2Adapters
-            }
-        }
-    }
-
-    const fn idempotency_suffix(self) -> Option<&'static str> {
-        match self {
-            Self::Ordinary => None,
-            Self::EnsV2HistoryCollection => Some("history-collection"),
-            Self::EnsV2Finalization => Some("finalization"),
-        }
-    }
-}
-
 // Chunk execution keeps its provider, finalized head, configuration, and outcome explicit.
 #[expect(clippy::too_many_arguments)]
 pub(super) async fn run_ops_finalized_catchup_chunk(
@@ -62,12 +29,10 @@ pub(super) async fn run_ops_finalized_catchup_chunk(
     chunk: &CatchupChunk,
     finalized_head_block_number: i64,
     finalized_head_block_hash: &str,
-    adapter_phase: OpsCatchupAdapterPhase,
     outcome: &mut OpsCatchupOutcome,
 ) -> Result<bool> {
     let source_plan = chunk.source_plan(chain)?;
-    let run_config =
-        ops_catchup_run_config(config, chain, &source_plan, chunk.range, adapter_phase)?;
+    let run_config = ops_catchup_run_config(config, chain, &source_plan, chunk.range)?;
     let record = create_hash_pinned_backfill_job(pool, &source_plan, &run_config).await?;
     if record.job.status == BackfillLifecycleStatus::Completed {
         return Ok(true);
@@ -182,7 +147,6 @@ fn ops_catchup_run_config(
     chain: &str,
     source_plan: &WatchedSourceSelectorPlan,
     range: BackfillBlockRange,
-    adapter_phase: OpsCatchupAdapterPhase,
 ) -> Result<BackfillJobRunConfig> {
     Ok(BackfillJobRunConfig {
         deployment_profile: config.deployment_profile.clone(),
@@ -191,7 +155,6 @@ fn ops_catchup_run_config(
             chain,
             &source_plan.source_identity_hash(),
             range,
-            adapter_phase,
         ),
         scope_idempotency_to_raw_log_retention_generation: true,
         coverage_recovery_reservation_fence: None,
@@ -200,7 +163,7 @@ fn ops_catchup_run_config(
         lease_token: generated_backfill_lease_token()?,
         lease_expires_at: backfill_lease_expires_at(config.lease_duration_secs)?,
         hash_pinned_chunk_blocks: DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
-        adapter_sync_mode: adapter_phase.adapter_sync_mode(),
+        adapter_sync_mode: BackfillAdapterSyncMode::Inline,
         header_audit_mode: config.header_audit_mode,
     })
 }
@@ -210,56 +173,9 @@ pub(crate) fn ops_catchup_idempotency_key(
     chain: &str,
     source_identity_hash: &str,
     range: BackfillBlockRange,
-    adapter_phase: OpsCatchupAdapterPhase,
 ) -> String {
-    let base = format!(
+    format!(
         "indexer-ops-finalized-catchup:v2:deployment_profile={deployment_profile}:chain={chain}:source_identity_hash={source_identity_hash}:from={}:to={}",
         range.from_block, range.to_block
-    );
-    if let Some(phase) = adapter_phase.idempotency_suffix() {
-        format!("{base}:ens_v2_recovery_phase={phase}")
-    } else {
-        base
-    }
-}
-
-#[cfg(test)]
-type ProofPublicationFailureKey = (String, String);
-
-#[cfg(test)]
-static PROOF_PUBLICATION_FAILURES: bigname_test_support::ScopedTestHookRegistry<
-    ProofPublicationFailureKey,
-    (),
-> = bigname_test_support::ScopedTestHookRegistry::new();
-
-#[cfg(test)]
-pub(crate) async fn install_after_ens_v2_proof_publication_failure(
-    pool: &sqlx::PgPool,
-    chain: &str,
-) -> Result<bigname_test_support::ScopedTestHookGuard<ProofPublicationFailureKey, ()>> {
-    let database = bigname_test_support::current_test_database(pool).await?;
-    Ok(PROOF_PUBLICATION_FAILURES.install((database, chain.to_owned()), ()))
-}
-
-#[cfg(test)]
-pub(super) async fn maybe_fail_after_ens_v2_proof_publication(
-    pool: &sqlx::PgPool,
-    chain: &str,
-) -> Result<()> {
-    let database = bigname_test_support::current_test_database(pool).await?;
-    if PROOF_PUBLICATION_FAILURES
-        .take(&(database, chain.to_owned()))
-        .is_some()
-    {
-        bail!("injected failure after ENSv2 retained-history proof publication");
-    }
-    Ok(())
-}
-
-#[cfg(not(test))]
-pub(super) async fn maybe_fail_after_ens_v2_proof_publication(
-    _pool: &sqlx::PgPool,
-    _chain: &str,
-) -> Result<()> {
-    Ok(())
+    )
 }

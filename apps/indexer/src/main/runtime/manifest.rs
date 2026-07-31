@@ -3,7 +3,6 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use bigname_adapters::{
     ManifestNormalizedEventKindSyncSummary, ManifestNormalizedEventSyncSummary,
-    StartupAdapterProgress,
 };
 use bigname_manifests::{
     DiscoveryAdmissionState, ManifestLoadStatus, ManifestLoadSummary, ManifestRepository,
@@ -13,9 +12,7 @@ use bigname_manifests::{
     load_watched_contract_summary_and_chain_plan_with_progress,
 };
 
-use crate::resolver_profile_convergence::{
-    journal_resolver_profile_authority, journal_resolver_profile_authority_with_progress,
-};
+use crate::StartupAdapterProgress;
 use crate::run::startup_heartbeat::StartupAdapterHeartbeat;
 
 pub(crate) fn load_manifest_repository(manifests_root: &Path) -> Result<ManifestRepository> {
@@ -129,16 +126,6 @@ where
     let sync_summary =
         sync_repository_or_load_stored_for_pending_rederive(pool, manifest_repository, progress)
             .await?;
-    // Repository sync is the manifest-authority mutation boundary. Journal
-    // its resolver-profile effects before any later bootstrap work can fail.
-    match progress.as_deref_mut() {
-        Some(progress) => {
-            journal_resolver_profile_authority_with_progress(pool, progress).await?;
-        }
-        None => {
-            journal_resolver_profile_authority(pool).await?;
-        }
-    }
     let (
         sync_summary,
         discovery_admission,
@@ -157,13 +144,14 @@ where
             verify_stored_manifest_state(&sync_summary, &admission_state)?;
             let (watched_contract_summary, watched_chain_plan) =
                 load_active_watched_plan(pool, progress).await?;
-            let manifest_normalized_event_summary = match progress.as_deref_mut() {
-                Some(progress) => {
-                    bigname_adapters::sync_manifest_normalized_events_with_progress(pool, progress)
-                        .await?
-                }
-                None => bigname_adapters::sync_manifest_normalized_events(pool).await?,
-            };
+            if let Some(progress) = progress.as_deref_mut() {
+                StartupAdapterProgress::record(progress, pool).await?;
+            }
+            let manifest_normalized_event_summary =
+                bigname_adapters::sync_manifest_normalized_events(pool).await?;
+            if let Some(progress) = progress.as_deref_mut() {
+                StartupAdapterProgress::record(progress, pool).await?;
+            }
             (
                 sync_summary,
                 discovery_admission_snapshot(&admission_state),

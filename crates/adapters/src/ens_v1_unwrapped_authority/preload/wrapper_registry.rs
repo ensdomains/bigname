@@ -392,6 +392,11 @@ pub(in crate::ens_v1_unwrapped_authority) fn preload_registry_history(
                 .get("binding_source_family")
                 .or_else(|| provenance.get("source_family"))
                 .and_then(Value::as_str)
+                .or_else(|| {
+                    registry_owner_state
+                        .and_then(|state| state.reference.as_ref())
+                        .map(|reference| reference.source_family.as_str())
+                })
                 .unwrap_or_else(|| default_registry_source_family(&binding_ref.namespace)),
         )
         .map(|profile| profile.registry_source_family().to_owned())
@@ -400,11 +405,21 @@ pub(in crate::ens_v1_unwrapped_authority) fn preload_registry_history(
     let source_manifest_id = provenance
         .get("binding_manifest_id")
         .and_then(Value::as_i64)
+        .or_else(|| {
+            registry_owner_state
+                .and_then(|state| state.reference.as_ref())
+                .map(|reference| reference.source_manifest_id)
+        })
         .or_else(|| manifest_id_from_authority_key(&authority_key))
         .unwrap_or(0);
     let manifest_version = provenance
         .get("binding_manifest_version")
         .and_then(Value::as_i64)
+        .or_else(|| {
+            registry_owner_state
+                .and_then(|state| state.reference.as_ref())
+                .map(|reference| reference.manifest_version)
+        })
         .unwrap_or(1);
     let authority = AuthorityAnchor {
         kind: AuthorityKind::RegistryOnly,

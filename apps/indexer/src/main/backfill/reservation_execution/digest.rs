@@ -4,7 +4,7 @@ use alloy_primitives::{Keccak256, hex};
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use bigname_adapters::StartupAdapterProgress;
+use crate::StartupAdapterProgress;
 use bigname_manifests::WatchedBackfillTarget;
 
 const DIGEST_PROGRESS_ITEMS: usize = 1_000;

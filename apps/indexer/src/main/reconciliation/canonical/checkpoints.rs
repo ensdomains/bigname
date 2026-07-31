@@ -1,5 +1,5 @@
+use crate::StartupAdapterProgress;
 use anyhow::Result;
-use bigname_adapters::StartupAdapterProgress;
 use bigname_storage::{
     CanonicalityState, CheckpointBlockRef, chain_lineage_contains_ancestor,
     load_chain_lineage_block, upsert_chain_lineage_blocks_recanonicalizing_orphaned,

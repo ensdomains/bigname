@@ -216,43 +216,14 @@ Postgres is the hot indexed and replay-focused store. Lineage anchors, selected 
 
 Backfill enters as bounded persisted jobs with resumable range checkpoints and uses the same stages as live intake. Backfill checkpoint state is operational worker state — it does not promote canonical, safe, or finalized chain checkpoints.
 
-At process startup, each full-corpus adapter family may reuse its last completed
-result instead of scanning retained raw logs again. Reuse requires an exact
-match on the chain's raw-log retention [generation](glossary.md),
-discovery-[admission epoch](glossary.md), the adapter's declared derivation
-version, and the applied database migration state. Its raw-log [input
-revision](glossary.md), trigger-maintained per-chain [lineage mutation
-revision](glossary.md#lineage-mutation-revision), and highest canonical lineage
-block may advance only when gap-free per-revision evidence proves every
-intervening mutation was strictly above the recorded inclusive scan extent.
-The current lineage head must still cover that extent and must exactly match
-the recorded head when the lineage revision did not advance. A mutation at or
-below the extent, missing or gapped evidence, a checkpoint predating the
-raw-log [block-revision evidence
-floor](glossary.md#block-revision-evidence-floor), retention-generation change,
-or other incomplete, unknown, or mismatched checkpoint state always runs the
-full family sync.
-Log-derived families may fully reuse a completed result across that proven
-tail. `ens_v1_unwrapped_authority` instead converts a completed result to its
-existing partial checkpoint at the recorded extent whenever the accepted
-canonical head is above that extent, then processes the later blocks before
-publishing completion at the new head. That family derives time-bound
-transitions during finalization from canonical block timestamps, so an empty
-later block can change its output without adding a raw log.
-`ens_v1_subregistry_discovery` continues to reuse completed results across
-proven tails: its assignments, discovery reconciliation, and normalized events
-are derived from canonical raw logs, and an empty head extension adds no
-discovery input.
-Completed ENSv1 subregistry state also retains the staged observation set and
-completed streamed reconciliation outcome, so an unchanged restart does not
-repeat that full walk. These rows are operational startup evidence only: they
-do not change manifest or discovery authority, canonicality, normalized-event
-ownership, projection readiness, or chain checkpoints. ENSv2 registry
-discovery may itself advance the admission epoch; startup repeats that family
-against the new epoch until a pass leaves the key stable, and publishes no
-reusable completion for an intermediate pass. Timer and discovery-refresh
-passes run without this boot checkpoint context: they tolerate concurrent live
-intake and never publish startup completion rows.
+At process startup, the old indexer invokes each adapter's plain full-corpus
+`sync_*` entry point over retained raw facts. It does not reuse or publish
+startup adapter checkpoints, dispatch on per-family adapter derivation
+versions, or repeat ENSv2 discovery to a provider-backed coverage fixed point.
+Restart therefore repeats the idempotent adapter upserts. The private ENSv1
+subregistry checkpoint implementation remains with that still-retained
+discovery adapter, but the production startup caller supplies no checkpoint
+context.
 
 Reconciliation, fetch, notification, and historical-backfill detail live in [`chain-intake.md`](chain-intake.md).
 

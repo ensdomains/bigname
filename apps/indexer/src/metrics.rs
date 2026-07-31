@@ -6,12 +6,8 @@ use bigname_metrics::{
 
 use crate::provider::{ChainProvider, ChainProviderKind};
 
-#[path = "metrics/reconcile.rs"]
-mod reconcile;
-
 struct IndexerMetrics {
     registry: MetricsRegistry,
-    reconcile: reconcile::ReconcileMetrics,
     catchup_chunks: IntCounterVec,
     catchup_chunk_duration: HistogramVec,
     catchup_raw_logs_scanned: IntCounterVec,
@@ -62,7 +58,6 @@ impl IndexerMetrics {
             schema_version: bigname_storage::latest_migration_version(),
         })?;
         Ok(Self {
-            reconcile: reconcile::ReconcileMetrics::new(&registry)?,
             catchup_chunks: registry.int_counter_vec(
                 "catchup_chunks_total",
                 "Completed normalized-event catch-up chunks.",
@@ -170,13 +165,6 @@ pub(crate) async fn spawn_listener(bind_addr: SocketAddr) -> anyhow::Result<()> 
         }
     });
     Ok(())
-}
-
-pub(crate) async fn configure_reconcile_progress(
-    pool: &sqlx::PgPool,
-    deployment_profile: &str,
-) -> anyhow::Result<()> {
-    reconcile::configure(pool, deployment_profile).await
 }
 
 pub(crate) fn record_catchup_chunk(
@@ -292,14 +280,6 @@ pub(crate) fn with_coverage_provider_queries<Output>(
     COVERAGE_PROVIDER_QUERY_CONTEXT.scope((), Box::pin(future))
 }
 
-pub(crate) fn with_coverage_provider_metrics<Output>(
-    chain: &str,
-    provider_kind: ChainProviderKind,
-    future: impl Future<Output = Output>,
-) -> impl Future<Output = Output> {
-    with_provider_metrics(chain, provider_kind, with_coverage_provider_queries(future))
-}
-
 pub(crate) fn provider_lookup_timer(provider: &ChainProvider) -> Option<HistogramTimer> {
     let context = PROVIDER_METRIC_CONTEXT
         .try_with(Clone::clone)
@@ -377,14 +357,6 @@ pub(crate) fn coverage_violation_scan_observations(chain: &str) -> u64 {
 }
 
 #[cfg(test)]
-pub(crate) fn coverage_recovery_jobs(chain: &str, outcome: &str) -> u64 {
-    indexer_metrics()
-        .coverage_recovery_jobs
-        .with_label_values(&[chain, outcome])
-        .get()
-}
-
-#[cfg(test)]
 pub(crate) fn provider_lookup_observations(chain: &str, provider_kind: &str) -> u64 {
     indexer_metrics()
         .provider_lookup_duration
@@ -402,7 +374,6 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_endpoint_serves_parseable_indexer_scrape() -> Result<()> {
-        reconcile::initialize_endpoint_test_series();
         indexer_metrics()
             .catchup_chunks
             .with_label_values(&["metrics-test-chain"])
@@ -423,10 +394,6 @@ mod tests {
         ensure!(body.contains("# TYPE build_info gauge"));
         ensure!(body.contains("# TYPE catchup_chunks_total counter"));
         ensure!(body.contains("# TYPE normalized_events_derived_total counter"));
-        ensure!(body.contains(
-            "# TYPE startup_adapter_reconcile_normalized_events_processed_total counter"
-        ));
-        ensure!(body.contains("# TYPE startup_adapter_reconcile_staged_items gauge"));
         Ok(())
     }
 

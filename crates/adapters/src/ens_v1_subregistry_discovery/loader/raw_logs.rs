@@ -164,7 +164,6 @@ pub(in crate::ens_v1_subregistry_discovery) async fn stream_registry_raw_logs_th
     emitters: &[ActiveEmitter],
     through_block_number: i64,
     page_limit: i64,
-    startup_progress: &mut Option<&mut dyn crate::StartupAdapterProgress>,
     mut handle_raw_log: impl FnMut(RegistryRawLogRow) -> Result<()>,
 ) -> Result<usize> {
     let mut start_after = None;
@@ -188,7 +187,6 @@ pub(in crate::ens_v1_subregistry_discovery) async fn stream_registry_raw_logs_th
             scanned_log_count += 1;
         }
         start_after = Some(last_position);
-        crate::checkpoint_context::record_startup_adapter_progress(pool, startup_progress).await?;
     }
     Ok(scanned_log_count)
 }

@@ -2,9 +2,7 @@ use bigname_storage::sql_row;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context, Result};
-use bigname_manifests::{
-    WatchedContractSource, load_watched_contracts, load_watched_contracts_scoped_with_progress,
-};
+use bigname_manifests::{WatchedContractSource, load_watched_contracts};
 use futures_util::TryStreamExt;
 use sqlx::{PgPool, Row, types::Uuid};
 
@@ -14,11 +12,6 @@ use crate::adapter_manifest::{
     load_latest_active_manifest_metadata_for_source_family, required_source_manifest_id,
 };
 pub(crate) use crate::evm_abi::{keccak256_bytes, keccak256_hex};
-use crate::{
-    checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress},
-    startup_progress::{STARTUP_ADAPTER_PROGRESS_PAGE_ROWS, StartupManifestProgress},
-};
-
 mod interval;
 #[cfg(test)]
 pub(crate) use interval::active_emitter_for_block;
@@ -129,42 +122,26 @@ pub(crate) async fn load_active_emitters(
     source_family: &str,
     resolver_edge_kind: &str,
     adapter_label: &str,
-    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Vec<ActiveEmitter>> {
-    let watched_contracts = if let Some(progress) = progress.as_deref_mut() {
-        let mut manifest_progress = StartupManifestProgress::new(progress);
-        load_watched_contracts_scoped_with_progress(
-            pool,
-            Some(chain),
-            &[source_family.to_owned()],
-            &mut manifest_progress,
-        )
+    let watched_contracts = load_watched_contracts(pool)
         .await
-        .with_context(|| format!("failed to load watched contracts for {adapter_label} adapter"))?
-    } else {
-        load_watched_contracts(pool).await.with_context(|| {
-            format!("failed to load watched contracts for {adapter_label} adapter")
-        })?
-    };
+        .with_context(|| format!("failed to load watched contracts for {adapter_label} adapter"))?;
     let watched_contracts = watched_contracts
         .into_iter()
         .filter(|contract| contract.chain == chain)
         .collect::<Vec<_>>();
 
     let mut manifest_ids = HashSet::new();
-    for (index, watched_contract) in watched_contracts.iter().enumerate() {
+    for watched_contract in &watched_contracts {
         manifest_ids.insert(required_source_manifest_id(watched_contract)?);
-        record_common_progress(pool, progress, index + 1, watched_contracts.len()).await?;
     }
     let manifest_ids = manifest_ids.into_iter().collect::<Vec<_>>();
     let context_label = format!("{adapter_label} emitters");
     let active_manifests =
         load_active_manifest_metadata(pool, &manifest_ids, &context_label).await?;
 
-    record_startup_adapter_progress(pool, progress).await?;
-    let watched_contract_count = watched_contracts.len();
     let mut emitters_by_scope = BTreeMap::<EmitterScopeKey, ActiveEmitter>::new();
-    for (index, watched_contract) in watched_contracts.into_iter().enumerate() {
+    for watched_contract in watched_contracts {
         if watched_contract.source == WatchedContractSource::DiscoveryEdge {
             continue;
         }
@@ -191,14 +168,12 @@ pub(crate) async fn load_active_emitters(
                 discovery_interval: false,
             },
         );
-        record_common_progress(pool, progress, index + 1, watched_contract_count).await?;
     }
     if let Some(manifest) =
         load_active_source_family_manifest_metadata(pool, chain, source_family).await?
     {
         for emitter in
-            load_discovered_resolver_emitters(pool, chain, resolver_edge_kind, &manifest, progress)
-                .await?
+            load_discovered_resolver_emitters(pool, chain, resolver_edge_kind, &manifest).await?
         {
             insert_distinct_emitter(&mut emitters_by_scope, emitter);
         }
@@ -212,7 +187,6 @@ async fn load_discovered_resolver_emitters(
     chain: &str,
     resolver_edge_kind: &str,
     manifest: &ActiveManifestMetadata,
-    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Vec<ActiveEmitter>> {
     let mut rows = sqlx::query(
         r#"
@@ -324,33 +298,8 @@ async fn load_discovered_resolver_emitters(
             )?,
             discovery_interval: true,
         });
-        if emitters
-            .len()
-            .is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS)
-        {
-            record_startup_adapter_progress(pool, progress).await?;
-        }
-    }
-    if !emitters.is_empty()
-        && !emitters
-            .len()
-            .is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS)
-    {
-        record_startup_adapter_progress(pool, progress).await?;
     }
     Ok(emitters)
-}
-
-async fn record_common_progress(
-    pool: &PgPool,
-    progress: &mut Option<&mut dyn StartupAdapterProgress>,
-    completed: usize,
-    total: usize,
-) -> Result<()> {
-    if completed == total || completed.is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS) {
-        record_startup_adapter_progress(pool, progress).await?;
-    }
-    Ok(())
 }
 
 async fn load_active_source_family_manifest_metadata(

@@ -8,9 +8,8 @@ use crate::registry_migration_cache::MigratedRegistryNodes;
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
     CanonicalityState, NameSurface, NormalizedEvent, Resource, SurfaceBinding, SurfaceBindingKind,
-    TokenLineage, acquire_raw_log_staging_read_guard, upsert_name_surfaces_without_snapshots,
-    upsert_resources_without_snapshots, upsert_surface_bindings_without_snapshots,
-    upsert_token_lineages_without_snapshots,
+    TokenLineage, upsert_name_surfaces_without_snapshots, upsert_resources_without_snapshots,
+    upsert_surface_bindings_without_snapshots, upsert_token_lineages_without_snapshots,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -451,10 +450,8 @@ mod apply_registrar;
 mod apply_registry;
 mod apply_resolver;
 mod apply_wrapper;
-mod checkpoint;
 mod constants;
 mod event_builders;
-mod event_persistence;
 mod event_state;
 mod event_topics;
 mod finalization;
@@ -469,31 +466,19 @@ mod preload;
 mod profiles;
 mod release_events;
 mod resolver_gate;
-mod resolver_profile_reconciliation;
 mod reverse_claims;
 mod scope;
 mod transition;
 
 pub use self::pipeline::{
-    sync_ens_v1_unwrapped_authority,
-    sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit,
-    sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit_and_progress,
-    sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit,
-    sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit_and_progress,
-};
-pub use checkpoint::clear_replay_adapter_checkpoints;
-pub use resolver_profile_reconciliation::{
-    ResolverProfileEventReconciliation, ResolverProfileEventReconciliationPublication,
-    ResolverProfileEventReconciliationSummary, begin_resolver_profile_event_reconciliation,
-    reconcile_resolver_profile_events,
+    sync_ens_v1_unwrapped_authority, sync_ens_v1_unwrapped_authority_through_block,
 };
 
 use self::{
     abi::*, apply::*, apply_registrar::*, apply_registry::*, apply_resolver::*, apply_wrapper::*,
-    checkpoint::*, event_builders::*, event_state::*, event_topics::*, finalization::*, ids::*,
-    loading::*, materialization::*, migration_guard::*, names::*, observation::*, permissions::*,
-    preload::*, profiles::*, release_events::*, resolver_gate::*, reverse_claims::*, scope::*,
-    transition::*,
+    event_builders::*, event_state::*, event_topics::*, finalization::*, ids::*, loading::*,
+    materialization::*, migration_guard::*, names::*, observation::*, permissions::*, preload::*,
+    profiles::*, release_events::*, resolver_gate::*, reverse_claims::*, scope::*, transition::*,
 };
 use constants::*;
 

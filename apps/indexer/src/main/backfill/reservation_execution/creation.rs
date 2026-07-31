@@ -32,6 +32,7 @@ pub(crate) async fn create_verified_hash_pinned_backfill_job(
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn create_hash_pinned_backfill_job_with_progress(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,

@@ -8,7 +8,6 @@ use crate::reconciliation::{
     ChainCoverageFrontiers, HeaderAuditMode, poll_provider_heads_with_adapter_sync_and_progress,
 };
 use crate::replay::deployment_profile_from_manifest_root;
-use crate::resolver_profile_convergence::drain_resolver_profile_input_changes_with_progress;
 use crate::run::startup_heartbeat::{
     RequiredSubtaskActivity, StartupAdapterHeartbeat, StartupHeartbeat,
 };
@@ -38,16 +37,12 @@ mod discovery_refresh;
 #[path = "poll_loop/replay_handoff.rs"]
 mod replay_handoff;
 
-#[cfg(test)]
-pub(crate) use discovery_refresh::refresh_discovery_watch_state;
 use discovery_refresh::refresh_discovery_watch_state_with_heartbeat;
+use replay_handoff::renew_live_poll_adapter_sync_permit;
 #[cfg(test)]
 pub(crate) use replay_handoff::{
     ReplayHandoffLatchStatus, install_replay_handoff_before_latch_test_hook,
     latch_replay_handoff_if_stable,
-};
-use replay_handoff::{
-    manifest_refresh_adapter_sync_before_handoff_readiness, renew_live_poll_adapter_sync_permit,
 };
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn run_poll_loop(
@@ -59,14 +54,12 @@ pub(crate) async fn run_poll_loop(
     initial_watched_plan_admission_epochs: BTreeMap<String, i64>,
     provider_registry: &ProviderRegistry,
     poll_interval_secs: u64,
-    adapter_sync_page_logs: usize,
     runtime_watch_scope: RuntimeWatchScope,
     adapter_sync_on_manifest_refresh: bool,
     adapter_sync_on_live_poll: bool,
     adapter_sync_on_live_poll_after_normalized_replay_catchup: bool,
     manifest_observation_refresh_enabled: bool,
     discovery_refresh_enabled: bool,
-    resolver_profile_convergence_enabled: bool,
     resync_adapter_owned_state_on_discovery_refresh: bool,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: Vec<String>,
@@ -194,30 +187,6 @@ pub(crate) async fn run_poll_loop(
                                         );
                                         continue;
                                     }
-                                    if manifest_refresh_adapter_sync_before_handoff_readiness(
-                                        adapter_sync_on_live_poll,
-                                        adapter_sync_on_manifest_refresh,
-                                        live_poll_adapter_sync_restored_after_replay,
-                                    )
-                                        && !{
-                                            let mut progress = StartupAdapterHeartbeat::new(
-                                                heartbeat,
-                                                &heartbeat_chains,
-                                            );
-                                            discovery_refresh::resolver_profile_drain_succeeded(
-                                                drain_resolver_profile_input_changes_with_progress(
-                                                    pool,
-                                                    &mut progress,
-                                                )
-                                                .await,
-                                                "timer",
-                                                "repository_manifest_reload",
-                                            )
-                                        }
-                                    {
-                                        continue;
-                                    }
-
                                     if manifest_state_changed {
                                         let previous_watch_state = watched_chain_plan_state(
                                             &manifest_runtime_state.watched_chain_plan,
@@ -470,7 +439,6 @@ pub(crate) async fn run_poll_loop(
                         &event_silent_reverse_resolver_addresses,
                         coverage_frontiers,
                         &latched_bootstrap_finalized_heads,
-                        adapter_sync_page_logs,
                         heartbeat,
                         &heartbeat_chains,
                     )
@@ -569,10 +537,7 @@ pub(crate) async fn run_poll_loop(
                         &mut manifest_runtime_state,
                         &mut intake_chain_tasks,
                         resync_adapter_owned_state_on_discovery_refresh,
-                        resolver_profile_convergence_enabled,
                         &mut watched_plan_admission_epochs,
-                        &deployment_profile,
-                        adapter_sync_page_logs,
                         heartbeat,
                         &heartbeat_chains,
                     )

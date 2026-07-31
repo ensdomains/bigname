@@ -1311,73 +1311,9 @@ async fn focused_discovery_sync_before_widen_admits_bootstrap_edges_into_the_liv
     // widen, so the live plan admits the target without deriving all seven adapter families.
     sync_discovery_adapter_owned_raw_log_state(
         database.pool(),
-        "test",
         &bootstrap_state.watched_chain_plan,
-        DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS,
     )
     .await?;
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoints
-             WHERE deployment_profile = 'test'
-               AND checkpoint_scope = 'startup_adapter_sync'",
-        )
-        .fetch_one(database.pool())
-        .await?,
-        2,
-        "both discovery families must retain completed cross-boot checkpoints"
-    );
-    let staged_item_count = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoint_items
-             WHERE deployment_profile = 'test'
-               AND checkpoint_scope = 'startup_adapter_sync'",
-        )
-        .fetch_one(database.pool())
-        .await?;
-    assert!(
-        staged_item_count > 0,
-        "the completed streamed walk must retain its staged assignment evidence"
-    );
-
-    // A second boot with the same input key must verify the completed rows
-    // without entering either adapter. Any adapter entry would mutate its
-    // checkpoint while loading/completing and trip this guard.
-    sqlx::query(
-        r#"
-        CREATE FUNCTION reject_reused_startup_checkpoint_mutation() RETURNS TRIGGER AS $function$
-        BEGIN
-            RAISE EXCEPTION 'unchanged startup checkpoint was mutated';
-        END;
-        $function$ LANGUAGE plpgsql
-        "#,
-    )
-    .execute(database.pool())
-    .await?;
-    sqlx::query(
-        "CREATE TRIGGER reject_reused_startup_checkpoint_mutation
-         BEFORE INSERT OR UPDATE OR DELETE ON normalized_replay_adapter_checkpoints
-         FOR EACH ROW EXECUTE FUNCTION reject_reused_startup_checkpoint_mutation()",
-    )
-    .execute(database.pool())
-    .await?;
-    sync_discovery_adapter_owned_raw_log_state(
-        database.pool(),
-        "test",
-        &bootstrap_state.watched_chain_plan,
-        DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS,
-    )
-    .await?;
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoint_items
-             WHERE deployment_profile = 'test'
-               AND checkpoint_scope = 'startup_adapter_sync'",
-        )
-        .fetch_one(database.pool())
-        .await?,
-        staged_item_count,
-        "the unchanged boot must reuse the completed walk without rebuilding staged items"
-    );
     let widened_state =
         widen_runtime_state_to_live_watch_scope(database.pool(), &bootstrap_state).await?;
     assert_eq!(
@@ -1529,83 +1465,6 @@ async fn stored_discovery_refresh_reloads_only_when_admission_epochs_move() -> R
 
     database.cleanup().await?;
     Ok(())
-}
-
-#[tokio::test]
-async fn discovery_refresh_does_not_advance_epoch_when_convergence_fails() -> Result<()> {
-    let database = TestDatabase::new().await?;
-    let manifests = TestManifestDir::new()?;
-    manifests.write_manifest_for_source_family("ens_v1_registry_l1", &ens_v1_manifest_contents())?;
-    let repository = load_manifest_repository(&manifests.path)?;
-    let mut state = build_manifest_runtime_state(database.pool(), &repository).await?;
-    let mut tasks = sync_intake_chain_tasks(database.pool(), &state.watched_chain_plan).await?;
-    let original_addresses = tasks[0].addresses.clone();
-    let mut admission_epochs = Some(
-        bigname_manifests::load_discovery_admission_epochs(database.pool()).await?,
-    );
-    let loaded_epochs = admission_epochs.clone();
-
-    let canonical_head = provider_block(
-        "0xcacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacaca",
-        None,
-        7,
-    );
-    insert_raw_new_owner_log(
-        database.pool(),
-        "ethereum-mainnet",
-        &canonical_head,
-        "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
-        "0x0000000000000000000000000000000000000002",
-        CanonicalityState::Canonical,
-    )
-    .await?;
-    sync_discovery_adapter_owned_raw_log_state(
-        database.pool(),
-        "test",
-        &state.watched_chain_plan,
-        DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS,
-    )
-    .await?;
-    sqlx::query("DROP TABLE resolver_profile_input_changes CASCADE")
-        .execute(database.pool())
-        .await?;
-
-    let provider_registry = ProviderRegistry::from_chain_rpc_urls(&[])?;
-    assert!(
-        !refresh_discovery_watch_state(
-            database.pool(),
-            &provider_registry,
-            &mut state,
-            &mut tasks,
-            false,
-            true,
-            &mut admission_epochs,
-        )
-        .await?
-    );
-    assert_eq!(
-        admission_epochs, loaded_epochs,
-        "a failed convergence drain must leave the loaded-plan sentinel unchanged"
-    );
-    assert_eq!(tasks[0].addresses, original_addresses);
-
-    assert!(
-        refresh_discovery_watch_state(
-            database.pool(),
-            &provider_registry,
-            &mut state,
-            &mut tasks,
-            false,
-            false,
-            &mut admission_epochs,
-        )
-        .await?,
-        "raw-only refresh must apply the stored plan without draining resolver-profile work"
-    );
-    assert_ne!(admission_epochs, loaded_epochs);
-    assert_eq!(tasks[0].addresses.len(), original_addresses.len() + 1);
-
-    database.cleanup().await
 }
 
 #[tokio::test]

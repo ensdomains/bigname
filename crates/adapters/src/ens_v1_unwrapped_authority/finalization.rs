@@ -12,34 +12,6 @@ pub(super) struct FinalizedHistory {
     pub(super) current_registry_owner: Option<String>,
 }
 
-pub(super) fn refresh_registration_release_boundaries(
-    histories: &mut BTreeMap<String, NameHistory>,
-    block_index: &CanonicalBlockIndex,
-) -> Result<()> {
-    for history in histories.values_mut() {
-        if let Some(lease) = history.current_registration.as_mut() {
-            refresh_registration_release_boundary(lease, block_index)?;
-        }
-        if let Some(lease) = history.superseded_registration.as_mut() {
-            refresh_registration_release_boundary(lease, block_index)?;
-        }
-    }
-    Ok(())
-}
-
-fn refresh_registration_release_boundary(
-    lease: &mut RegistrationLease,
-    block_index: &CanonicalBlockIndex,
-) -> Result<()> {
-    if lease.release_ref.is_none() {
-        lease.release_ref = block_index.first_block_after(
-            release_after_grace(lease.expiry)?,
-            &lease.start_ref.namespace,
-        );
-    }
-    Ok(())
-}
-
 pub(super) fn finalize_history(
     mut history: NameHistory,
     head_ref: &BoundaryRef,

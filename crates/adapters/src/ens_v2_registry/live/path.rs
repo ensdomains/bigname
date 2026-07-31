@@ -7,7 +7,6 @@ use super::super::types::ActiveEmitter;
 pub(super) struct RegistryCacheMetadata {
     pub(super) raw_log_input_revision: i64,
     pub(super) raw_log_retention_generation: i64,
-    pub(super) retained_raw_log_history_complete: bool,
     pub(super) discovery_admission_epoch: i64,
 }
 
@@ -189,13 +188,9 @@ pub(super) async fn load_registry_cache_metadata(
     pool: &PgPool,
     chain: &str,
 ) -> Result<RegistryCacheMetadata> {
-    let (
-        raw_log_input_revision,
-        raw_log_retention_generation,
-        retained_raw_log_history_complete,
-        discovery_admission_epoch,
-    ) = sqlx::query_as::<_, (i64, i64, bool, i64)>(
-        r#"
+    let (raw_log_input_revision, raw_log_retention_generation, discovery_admission_epoch) =
+        sqlx::query_as::<_, (i64, i64, i64)>(
+            r#"
             SELECT
                 COALESCE((
                     SELECT revision
@@ -208,25 +203,19 @@ pub(super) async fn load_registry_cache_metadata(
                     WHERE chain_id = $1
                 ), -1)::BIGINT,
                 COALESCE((
-                    SELECT retained_history_complete
-                    FROM raw_log_staging_input_revisions
-                    WHERE chain_id = $1
-                ), FALSE),
-                COALESCE((
                     SELECT epoch
                     FROM discovery_admission_epochs
                     WHERE chain_id = $1
                 ), 0)::BIGINT
             "#,
-    )
-    .bind(chain)
-    .fetch_one(pool)
-    .await
-    .with_context(|| format!("failed to load ENSv2 live-cache metadata for {chain}"))?;
+        )
+        .bind(chain)
+        .fetch_one(pool)
+        .await
+        .with_context(|| format!("failed to load ENSv2 live-cache metadata for {chain}"))?;
     Ok(RegistryCacheMetadata {
         raw_log_input_revision,
         raw_log_retention_generation,
-        retained_raw_log_history_complete,
         discovery_admission_epoch,
     })
 }

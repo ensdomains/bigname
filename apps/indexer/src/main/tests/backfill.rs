@@ -63,11 +63,8 @@ struct CountingSourceIdentityProgress {
     count: usize,
 }
 
-impl bigname_adapters::StartupAdapterProgress for CountingSourceIdentityProgress {
-    fn record<'a>(
-        &'a mut self,
-        _pool: &'a PgPool,
-    ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
+impl crate::StartupAdapterProgress for CountingSourceIdentityProgress {
+    fn record<'a>(&'a mut self, _pool: &'a PgPool) -> crate::StartupAdapterProgressFuture<'a> {
         Box::pin(async move {
             self.count += 1;
             Ok(())
@@ -3693,7 +3690,6 @@ async fn source_family_backfill_persists_selector_identity_and_tx_sibling_facts(
     .await?;
     establish_backfill_ens_v2_retained_history_proof(database.pool(), "ethereum-mainnet", 42)
         .await?;
-
     let range = BackfillBlockRange::new(42, 42)?;
     let source_plan = load_watched_source_selector_plan(
         database.pool(),
@@ -4945,7 +4941,6 @@ async fn source_scoped_backfill_does_not_normalize_preexisting_unselected_raw_lo
     .await?;
     establish_backfill_ens_v2_retained_history_proof(database.pool(), "ethereum-mainnet", 42)
         .await?;
-
     let block_42 = provider_block(
         "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         Some("0x9999999999999999999999999999999999999999999999999999999999999999"),

@@ -22,7 +22,6 @@ mod stored_verification_execution;
 #[path = "reservation_execution/tests.rs"]
 mod tests;
 use anyhow::{Context, Result, bail, ensure};
-use bigname_adapters::StartupAdapterProgress;
 use bigname_manifests::WatchedSourceSelectorPlan;
 use bigname_storage::{
     BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,
@@ -34,6 +33,7 @@ use serde_json::{Value, json};
 use tracing::info;
 
 use crate::{
+    StartupAdapterProgress,
     provider::ChainProviderOps,
     source_scope::{
         watched_source_plan_uses_basenames_registry_scan_all,
@@ -70,6 +70,7 @@ pub(super) use lease_heartbeat::{
     run_with_backfill_lease_heartbeat, validate_hash_pinned_chunk_blocks,
 };
 pub(super) use progress::run_reserved_hash_pinned_backfill_range_with_progress;
+#[cfg(test)]
 pub(crate) use progress::run_resumable_hash_pinned_backfill_job_with_progress;
 pub(crate) use scan_all::effective_hash_pinned_adapter_sync_mode;
 use scan_all::{
@@ -88,8 +89,7 @@ pub(crate) const COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD: usize = 10_0
 pub(crate) use creation::coinbase_sql_backfill_job_source_identity_payload;
 pub(crate) use creation::{
     create_coinbase_sql_backfill_job, create_coinbase_sql_backfill_job_with_ranges,
-    create_hash_pinned_backfill_job, create_hash_pinned_backfill_job_with_progress,
-    create_hash_pinned_backfill_job_with_ranges,
+    create_hash_pinned_backfill_job, create_hash_pinned_backfill_job_with_ranges,
     create_hash_pinned_backfill_job_with_ranges_with_progress,
     create_verified_coinbase_sql_backfill_job, create_verified_hash_pinned_backfill_job,
     hash_pinned_backfill_range_specs, verified_backfill_job_source_identity_payload,

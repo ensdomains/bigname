@@ -24,40 +24,6 @@ use super::{
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 const LIVE_TEST_DEPLOYMENT_PROFILE: &str = "sepolia";
 
-struct PauseAfterNormalizedEventProgress {
-    event_kind: &'static str,
-    reached_publication: Option<tokio::sync::oneshot::Sender<()>>,
-    resume: Option<tokio::sync::oneshot::Receiver<()>>,
-}
-
-impl StartupAdapterProgress for PauseAfterNormalizedEventProgress {
-    fn record<'a>(
-        &'a mut self,
-        pool: &'a PgPool,
-    ) -> crate::checkpoint_context::StartupAdapterProgressFuture<'a> {
-        Box::pin(async move {
-            let event_is_published = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (SELECT 1 FROM normalized_events WHERE event_kind = $1)",
-            )
-            .bind(self.event_kind)
-            .fetch_one(pool)
-            .await?;
-            if event_is_published && let Some(reached_publication) = self.reached_publication.take()
-            {
-                reached_publication.send(()).map_err(|_| {
-                    anyhow::anyhow!("publication-fence test observer stopped waiting")
-                })?;
-                self.resume
-                    .take()
-                    .context("publication-fence test resume signal is missing")?
-                    .await
-                    .context("publication-fence test resume sender was dropped")?;
-            }
-            Ok(())
-        })
-    }
-}
-
 async fn sync_ens_v2_registry_resource_surface_live_poll(
     pool: &PgPool,
     chain: &str,
@@ -72,35 +38,6 @@ async fn sync_ens_v2_registry_resource_surface_live_poll(
         block_hashes,
     )
     .await
-}
-
-#[test]
-fn missing_coverage_error_remains_downcastable_through_context() {
-    let error = anyhow::Error::new(EnsV2MissingCoverage {
-        chain: "sepolia".to_owned(),
-        retention_generation: 3,
-        source_family: SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
-        address: "0x0000000000000000000000000000000000000001".to_owned(),
-        required_from_block: 10,
-        required_to_block: 20,
-    })
-    .context("full-source adapter sync failed");
-
-    assert!(is_ens_v2_missing_coverage(&error));
-}
-
-#[test]
-fn ens_v2_guard_release_preserves_primary_operation_error_priority() {
-    let primary = prioritize_operation_error::<()>(
-        Err(anyhow::anyhow!("primary operation failed")),
-        Err(anyhow::anyhow!("guard release failed")),
-    )
-    .expect_err("the primary operation error must win");
-    assert_eq!(primary.to_string(), "primary operation failed");
-
-    let release = prioritize_operation_error(Ok(()), Err(anyhow::anyhow!("guard release failed")))
-        .expect_err("a release error must surface after successful work");
-    assert_eq!(release.to_string(), "guard release failed");
 }
 
 #[test]
@@ -422,8 +359,8 @@ async fn ens_v2_resumed_replay_does_not_reseed_a_removed_manifest_suffix() -> Re
         None,
         None,
         true,
+        true,
         false,
-        None,
         None,
     )
     .await?;
@@ -445,8 +382,8 @@ async fn ens_v2_resumed_replay_does_not_reseed_a_removed_manifest_suffix() -> Re
         None,
         Some(RegistryReplayState::default()),
         true,
+        true,
         false,
-        None,
         None,
     )
     .await?;
@@ -1926,86 +1863,6 @@ async fn ens_v2_incremental_batches_match_full_replay_normalized_events() -> Res
 }
 
 #[tokio::test]
-async fn ens_v2_cold_incremental_reconstruction_requires_retained_history_proof() -> Result<()> {
-    let database = TestDatabase::new().await?;
-    let chain = "ethereum-sepolia";
-    let registry = "0x00000000000000000000000000000000000000aa";
-    let manifest_id = insert_test_registry_manifest(database.pool(), chain).await?;
-    insert_test_registry_contract(
-        database.pool(),
-        manifest_id,
-        "registry",
-        Uuid::from_u128(0x161f),
-        registry,
-        0,
-    )
-    .await?;
-    let block_hashes = [lifecycle_block_hash(10), lifecycle_block_hash(11)];
-    let mut blocks = [
-        test_raw_block(chain, &block_hashes[0], 10),
-        test_raw_block(chain, &block_hashes[1], 11),
-    ];
-    blocks[1].parent_hash = Some(block_hashes[0].clone());
-    upsert_raw_blocks(database.pool(), &blocks).await?;
-    upsert_raw_logs(
-        database.pool(),
-        &[
-            label_registered_raw_log(
-                chain,
-                &block_hashes[0],
-                10,
-                registry,
-                0,
-                "alice",
-                1,
-                "alice",
-            ),
-            token_resource_raw_log(chain, &block_hashes[0], 10, registry, 1, 1, 101),
-            expiry_updated_raw_log(chain, &block_hashes[1], 11, registry, 0, 1, 2_000_000_000),
-        ],
-    )
-    .await?;
-    sqlx::query(
-        r#"
-        UPDATE raw_log_staging_input_revisions
-        SET retained_history_complete = false,
-            incomplete_since = clock_timestamp(),
-            proven_retention_generation = NULL,
-            proven_discovery_admission_epoch = NULL,
-            proven_through_block = NULL
-        WHERE chain_id = $1
-        "#,
-    )
-    .bind(chain)
-    .execute(database.pool())
-    .await?;
-
-    let error =
-        EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope_canonical_only(
-            database.pool(),
-            chain,
-            std::slice::from_ref(&block_hashes[1]),
-            &[(
-                SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
-                registry.to_owned(),
-                11,
-                11,
-            )],
-        )
-        .await
-        .err()
-        .context("cold state reconstruction must reject unproven retained history")?;
-    assert!(
-        format!("{error:#}").contains(
-            "incremental prior-state reconstruction requires a current retained-history proof"
-        ),
-        "unexpected retained-history error: {error:#}"
-    );
-
-    database.cleanup().await
-}
-
-#[tokio::test]
 async fn ens_v2_cold_incremental_reconstruction_requires_complete_selected_ancestry() -> Result<()>
 {
     let database = TestDatabase::new().await?;
@@ -2078,13 +1935,10 @@ async fn ens_v2_registry_raw_log_prefix_rejects_canonical_only_ancestry() -> Res
         Some(0),
         None,
     )];
-    let mut progress = None;
-
-    let error =
-        load_registry_raw_log_prefix(database.pool(), chain, &emitters, &before, &mut progress)
-            .await
-            .err()
-            .context("registry raw-log prefix must reject canonical-only ancestry")?;
+    let error = load_registry_raw_log_prefix(database.pool(), chain, &emitters, &before)
+        .await
+        .err()
+        .context("registry raw-log prefix must reject canonical-only ancestry")?;
     assert!(
         format!("{error:#}")
             .contains("incremental prior-state reconstruction cannot prove selected-path ancestry"),
@@ -2094,113 +1948,6 @@ async fn ens_v2_registry_raw_log_prefix_rejects_canonical_only_ancestry() -> Res
         format!("{error:#}").contains("safe or finalized boundary"),
         "canonical-only ancestry must not self-certify as a stable boundary: {error:#}"
     );
-
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn ens_v2_cold_incremental_holds_raw_log_fence_through_publication() -> Result<()> {
-    let database = TestDatabase::new().await?;
-    let chain = "ethereum-sepolia";
-    let registry = "0x00000000000000000000000000000000000000aa";
-    let manifest_id = insert_test_registry_manifest(database.pool(), chain).await?;
-    insert_test_registry_contract(
-        database.pool(),
-        manifest_id,
-        "registry",
-        Uuid::from_u128(0x1621),
-        registry,
-        0,
-    )
-    .await?;
-    let block_hashes = [lifecycle_block_hash(10), lifecycle_block_hash(11)];
-    let mut blocks = [
-        test_raw_block(chain, &block_hashes[0], 10),
-        test_raw_block(chain, &block_hashes[1], 11),
-    ];
-    blocks[1].parent_hash = Some(block_hashes[0].clone());
-    upsert_raw_blocks(database.pool(), &blocks).await?;
-    upsert_raw_logs(
-        database.pool(),
-        &[
-            label_registered_raw_log(
-                chain,
-                &block_hashes[0],
-                10,
-                registry,
-                0,
-                "alice",
-                1,
-                "alice",
-            ),
-            token_resource_raw_log(chain, &block_hashes[0], 10, registry, 1, 1, 101),
-            expiry_updated_raw_log(chain, &block_hashes[1], 11, registry, 0, 1, 2_000_000_000),
-        ],
-    )
-    .await?;
-    refresh_test_raw_log_closure_proof(database.pool(), chain, 11).await?;
-
-    let (reached_publication, publication_reached) = tokio::sync::oneshot::channel();
-    let (resume_publication, resume) = tokio::sync::oneshot::channel();
-    let sync_pool = database.pool().clone();
-    let selected_hash = block_hashes[1].clone();
-    let selected_registry = registry.to_owned();
-    let sync = tokio::spawn(async move {
-        let mut progress = PauseAfterNormalizedEventProgress {
-            event_kind: EVENT_KIND_EXPIRY_CHANGED,
-            reached_publication: Some(reached_publication),
-            resume: Some(resume),
-        };
-        EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope_canonical_only_and_progress(
-            &sync_pool,
-            chain,
-            &[selected_hash],
-            &[(
-                SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
-                selected_registry,
-                11,
-                11,
-            )],
-            &mut progress,
-        )
-        .await
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(2), publication_reached)
-        .await
-        .context("restricted ENSv2 sync did not reach normalized-event publication")?
-        .context("restricted ENSv2 sync stopped before publication")?;
-
-    let mutation_pool = database.pool().clone();
-    let prefix_hash = block_hashes[0].clone();
-    let mut mutation = tokio::spawn(async move {
-        sqlx::query(
-            "UPDATE raw_logs SET data = '0x01' \
-             WHERE chain_id = $1 AND block_hash = $2 AND log_index = 0",
-        )
-        .bind(chain)
-        .bind(prefix_hash)
-        .execute(&mutation_pool)
-        .await
-    });
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(150), &mut mutation)
-            .await
-            .is_err(),
-        "same-chain semantic raw-log mutation must wait through restricted publication"
-    );
-
-    resume_publication
-        .send(())
-        .map_err(|_| anyhow::anyhow!("restricted ENSv2 sync stopped before test resume"))?;
-    let summary = tokio::time::timeout(std::time::Duration::from_secs(2), sync)
-        .await
-        .context("restricted ENSv2 sync did not release its publication fence")??
-        .context("restricted ENSv2 sync failed")?;
-    assert_eq!(summary.matched_log_count, 1);
-    tokio::time::timeout(std::time::Duration::from_secs(2), mutation)
-        .await
-        .context("raw-log mutation did not resume after restricted publication")??
-        .context("raw-log mutation failed after restricted publication")?;
 
     database.cleanup().await
 }
@@ -4442,17 +4189,6 @@ async fn ens_v2_live_poll_cache_is_incremental_and_rehydrates_on_unsafe_anchors(
         mixed_position_page.scanned_log_count, 5,
         "a page containing any position at or below the cache anchor must fully rehydrate"
     );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT proven_through_block FROM raw_log_staging_input_revisions WHERE chain_id = $1"
-        )
-        .bind(chain)
-        .fetch_one(database.pool())
-        .await?,
-        12,
-        "a complete live path must advance the durable proof before a cache restart"
-    );
-
     invalidate_live_registry_replay_state(database.pool(), chain);
     let restarted = sync_ens_v2_registry_resource_surface_live_poll(
         database.pool(),
@@ -4506,246 +4242,6 @@ async fn ens_v2_live_poll_cache_is_incremental_and_rehydrates_on_unsafe_anchors(
         active_targets,
         vec![normalize_address(observed_child)],
         "a stale lineage fallback must discard orphaned discoveries while preserving selected observed facts"
-    );
-
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn ens_v2_overweight_live_checkpoint_advances_and_preserves_completed_state_on_failure()
--> Result<()> {
-    let database = TestDatabase::new().await?;
-    let chain = "ethereum-sepolia";
-    let registry = "0x00000000000000000000000000000000000000aa";
-    let child_a = "0x00000000000000000000000000000000000000c1";
-    let child_b = "0x00000000000000000000000000000000000000c2";
-    let child_c = "0x00000000000000000000000000000000000000c3";
-    let block_10_hash = lifecycle_branch_block_hash(10, 0);
-    let block_11_hash = lifecycle_branch_block_hash(11, 0);
-    let block_12_hash = lifecycle_branch_block_hash(12, 0);
-    let manifest_id = insert_test_registry_manifest(database.pool(), chain).await?;
-    insert_test_registry_contract(
-        database.pool(),
-        manifest_id,
-        "registry",
-        Uuid::from_u128(0x0001_7521),
-        registry,
-        0,
-    )
-    .await?;
-
-    let mut block_11 = test_raw_block(chain, &block_11_hash, 11);
-    block_11.parent_hash = Some(block_10_hash.clone());
-    upsert_raw_blocks(
-        database.pool(),
-        &[test_raw_block(chain, &block_10_hash, 10), block_11],
-    )
-    .await?;
-    upsert_raw_logs(
-        database.pool(),
-        &[
-            label_registered_raw_log(chain, &block_10_hash, 10, registry, 0, "parent", 1, "alice"),
-            subregistry_updated_raw_log(chain, &block_10_hash, 10, registry, 1, 1, child_a),
-        ],
-    )
-    .await?;
-    insert_completed_registry_coverage(
-        database.pool(),
-        chain,
-        &[
-            (SOURCE_FAMILY_ENS_V2_REGISTRY_L1, registry),
-            (SOURCE_FAMILY_ENS_V2_REGISTRY_L1, child_a),
-            (SOURCE_FAMILY_ENS_V2_REGISTRY_L1, child_b),
-        ],
-        0,
-        11,
-    )
-    .await?;
-
-    let initial = live::sync_ens_v2_registry_resource_surface_live_poll_with_tiny_cache(
-        database.pool(),
-        LIVE_TEST_DEPLOYMENT_PROFILE,
-        chain,
-        10,
-        std::slice::from_ref(&block_10_hash),
-    )
-    .await?;
-    assert_eq!(initial.scanned_log_count, 2);
-    let (status, target, checkpoint_revision) =
-        load_live_registry_checkpoint_position(database.pool(), chain).await?;
-    assert_eq!(status, "completed");
-    assert_eq!(target, 10);
-    assert!(
-        sqlx::query_scalar::<_, i64>(
-            r#"
-            SELECT COUNT(*)::BIGINT
-            FROM normalized_replay_adapter_checkpoint_items
-            WHERE deployment_profile = $1
-              AND chain_id = $2
-              AND cursor_kind = $3
-              AND adapter = $4
-              AND checkpoint_scope = $5
-            "#,
-        )
-        .bind(LIVE_TEST_DEPLOYMENT_PROFILE)
-        .bind(chain)
-        .bind(live::LIVE_REGISTRY_REPLAY_CHECKPOINT_CURSOR_KIND)
-        .bind(live::LIVE_REGISTRY_REPLAY_CHECKPOINT_ADAPTER)
-        .bind(live::LIVE_REGISTRY_REPLAY_CHECKPOINT_SCOPE)
-        .fetch_one(database.pool())
-        .await?
-            > 0
-    );
-    invalidate_live_registry_replay_state(database.pool(), chain);
-
-    upsert_raw_logs(
-        database.pool(),
-        &[subregistry_updated_raw_log(
-            chain,
-            &block_11_hash,
-            11,
-            registry,
-            0,
-            1,
-            child_b,
-        )],
-    )
-    .await?;
-    let current_revision = sqlx::query_scalar::<_, i64>(
-        "SELECT revision FROM raw_log_staging_input_revisions WHERE chain_id = $1",
-    )
-    .bind(chain)
-    .fetch_one(database.pool())
-    .await?;
-    assert!(current_revision > checkpoint_revision);
-
-    let advanced = live::sync_ens_v2_registry_resource_surface_live_poll_with_tiny_cache(
-        database.pool(),
-        LIVE_TEST_DEPLOYMENT_PROFILE,
-        chain,
-        11,
-        std::slice::from_ref(&block_11_hash),
-    )
-    .await?;
-    assert_eq!(
-        advanced.scanned_log_count, 1,
-        "an overweight durable snapshot must hydrate only the advancing block"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            r#"
-            SELECT lower(provenance ->> 'to_address')
-            FROM discovery_edges
-            WHERE discovery_source = $1
-              AND deactivated_at IS NULL
-            "#,
-        )
-        .bind(format!("ens_v2_registry_subregistry:{chain}"))
-        .fetch_one(database.pool())
-        .await?,
-        normalize_address(child_b)
-    );
-    let (status, target, checkpoint_revision) =
-        load_live_registry_checkpoint_position(database.pool(), chain).await?;
-    assert_eq!((status.as_str(), target), ("completed", 11));
-    assert_eq!(checkpoint_revision, current_revision);
-
-    let prior_item_count = sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT COUNT(*)::BIGINT
-        FROM normalized_replay_adapter_checkpoint_items
-        WHERE deployment_profile = $1
-          AND chain_id = $2
-          AND cursor_kind = $3
-          AND adapter = $4
-          AND checkpoint_scope = $5
-        "#,
-    )
-    .bind(LIVE_TEST_DEPLOYMENT_PROFILE)
-    .bind(chain)
-    .bind(live::LIVE_REGISTRY_REPLAY_CHECKPOINT_CURSOR_KIND)
-    .bind(live::LIVE_REGISTRY_REPLAY_CHECKPOINT_ADAPTER)
-    .bind(live::LIVE_REGISTRY_REPLAY_CHECKPOINT_SCOPE)
-    .fetch_one(database.pool())
-    .await?;
-    let mut block_12 = test_raw_block(chain, &block_12_hash, 12);
-    block_12.parent_hash = Some(block_11_hash.clone());
-    upsert_raw_blocks(database.pool(), &[block_12]).await?;
-    upsert_raw_logs(
-        database.pool(),
-        &[subregistry_updated_raw_log(
-            chain,
-            &block_12_hash,
-            12,
-            registry,
-            0,
-            1,
-            child_c,
-        )],
-    )
-    .await?;
-
-    let error = live::sync_ens_v2_registry_resource_surface_live_poll_with_tiny_cache(
-        database.pool(),
-        LIVE_TEST_DEPLOYMENT_PROFILE,
-        chain,
-        12,
-        std::slice::from_ref(&block_12_hash),
-    )
-    .await
-    .err()
-    .context("new discovery without retained coverage must fail after checkpoint staging")?;
-    assert!(error.downcast_ref::<EnsV2MissingCoverage>().is_some());
-    let (status, target, _) =
-        load_live_registry_checkpoint_position(database.pool(), chain).await?;
-    assert_eq!(
-        (status.as_str(), target),
-        ("completed", 11),
-        "failed checkpoint publication must preserve the prior completed resume state"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            r#"
-            SELECT COUNT(*)::BIGINT
-            FROM normalized_replay_adapter_checkpoint_items
-            WHERE deployment_profile = $1
-              AND chain_id = $2
-              AND cursor_kind = $3
-              AND adapter = $4
-              AND checkpoint_scope = $5
-            "#,
-        )
-        .bind(LIVE_TEST_DEPLOYMENT_PROFILE)
-        .bind(chain)
-        .bind(live::LIVE_REGISTRY_REPLAY_CHECKPOINT_CURSOR_KIND)
-        .bind(live::LIVE_REGISTRY_REPLAY_CHECKPOINT_ADAPTER)
-        .bind(live::LIVE_REGISTRY_REPLAY_CHECKPOINT_SCOPE)
-        .fetch_one(database.pool())
-        .await?,
-        prior_item_count,
-        "failed checkpoint publication must preserve the prior completed items"
-    );
-    assert_eq!(
-        sqlx::query_as::<_, (String, i64)>(
-            r#"
-            SELECT status, replay_target_block_number
-            FROM normalized_replay_adapter_checkpoints
-            WHERE deployment_profile = $1
-              AND chain_id = $2
-              AND cursor_kind = $3
-              AND adapter = $4
-              AND checkpoint_scope = $5
-            "#,
-        )
-        .bind(LIVE_TEST_DEPLOYMENT_PROFILE)
-        .bind(chain)
-        .bind(live::LIVE_REGISTRY_REPLAY_CHECKPOINT_CURSOR_KIND)
-        .bind(live::LIVE_REGISTRY_REPLAY_CHECKPOINT_ADAPTER)
-        .bind(live::LIVE_REGISTRY_REPLAY_CHECKPOINT_STAGING_SCOPE)
-        .fetch_one(database.pool())
-        .await?,
-        ("running".to_owned(), 12),
-        "the unpublished candidate must remain isolated from the durable resume checkpoint"
     );
 
     database.cleanup().await
@@ -4814,9 +4310,12 @@ async fn ens_v2_live_poll_rehydrates_for_a_lower_id_log_committed_after_the_cach
     )
     .await?;
     assert_eq!(initial.scanned_log_count, 2);
-    let (status, target, checkpoint_revision) =
-        load_live_registry_checkpoint_position(database.pool(), chain).await?;
-    assert_eq!((status.as_str(), target), ("completed", 10));
+    let checkpoint_revision = sqlx::query_scalar::<_, i64>(
+        "SELECT revision FROM raw_log_staging_input_revisions WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .fetch_one(database.pool())
+    .await?;
     invalidate_live_registry_replay_state(database.pool(), chain);
 
     let late_log = subregistry_updated_raw_log(chain, &block_10_hash, 10, registry, 2, 1, child_b);
@@ -4861,721 +4360,6 @@ async fn ens_v2_live_poll_rehydrates_for_a_lower_id_log_committed_after_the_cach
     .fetch_all(database.pool())
     .await?;
     assert_eq!(active_targets, vec![normalize_address(child_b)]);
-    let (status, target, checkpoint_revision) =
-        load_live_registry_checkpoint_position(database.pool(), chain).await?;
-    assert_eq!((status.as_str(), target), ("completed", 11));
-    assert_eq!(checkpoint_revision, current_revision);
-
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn ens_v2_cold_live_poll_fails_closed_after_raw_log_staging_compaction() -> Result<()> {
-    let database = TestDatabase::new().await?;
-    let chain = "ethereum-sepolia";
-    let registry = "0x00000000000000000000000000000000000000aa";
-    let root_registry = "0x00000000000000000000000000000000000000bb";
-    let child = "0x00000000000000000000000000000000000000c1";
-    let block_hash = lifecycle_branch_block_hash(10, 0);
-    let manifest_id = insert_test_registry_manifest(database.pool(), chain).await?;
-    insert_test_registry_contract(
-        database.pool(),
-        manifest_id,
-        "registry",
-        Uuid::from_u128(0x1753),
-        registry,
-        0,
-    )
-    .await?;
-    let root_manifest_id = insert_test_root_manifest(database.pool(), chain).await?;
-    insert_test_registry_contract(
-        database.pool(),
-        root_manifest_id,
-        "root",
-        Uuid::from_u128(0x1754),
-        root_registry,
-        0,
-    )
-    .await?;
-    upsert_raw_blocks(database.pool(), &[test_raw_block(chain, &block_hash, 10)]).await?;
-    upsert_raw_logs(
-        database.pool(),
-        &[
-            label_registered_raw_log(chain, &block_hash, 10, registry, 0, "parent", 1, "alice"),
-            subregistry_updated_raw_log(chain, &block_hash, 10, registry, 1, 1, child),
-        ],
-    )
-    .await?;
-    insert_completed_registry_coverage(
-        database.pool(),
-        chain,
-        &[
-            (SOURCE_FAMILY_ENS_V2_ROOT_L1, root_registry),
-            (SOURCE_FAMILY_ENS_V2_REGISTRY_L1, registry),
-            (SOURCE_FAMILY_ENS_V2_REGISTRY_L1, child),
-        ],
-        0,
-        10,
-    )
-    .await?;
-    sync_ens_v2_registry_resource_surface_live_poll(
-        database.pool(),
-        chain,
-        10,
-        std::slice::from_ref(&block_hash),
-    )
-    .await?;
-    invalidate_live_registry_replay_state(database.pool(), chain);
-
-    sqlx::query("TRUNCATE raw_logs")
-        .execute(database.pool())
-        .await?;
-    let non_live_error =
-        sync_ens_v2_registry_resource_surface_through_block(database.pool(), chain, 10)
-            .await
-            .err()
-            .context("non-live full-source replay must reject compacted raw-log history")?;
-    assert_eq!(
-        ens_v2_missing_coverage(&non_live_error),
-        Some(&EnsV2MissingCoverage {
-            chain: chain.to_owned(),
-            retention_generation: 1,
-            source_family: SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
-            address: normalize_address(registry),
-            required_from_block: 0,
-            required_to_block: 10,
-        }),
-        "an already-admitted restart requirement must remain an exact typed recovery tuple through context"
-    );
-    let error = sync_ens_v2_registry_resource_surface_live_poll(
-        database.pool(),
-        chain,
-        10,
-        std::slice::from_ref(&block_hash),
-    )
-    .await
-    .err()
-    .context("cold live replay must reject compacted raw-log history")?;
-    assert_eq!(
-        ens_v2_missing_coverage(&error),
-        Some(&EnsV2MissingCoverage {
-            chain: chain.to_owned(),
-            retention_generation: 1,
-            source_family: SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
-            address: normalize_address(registry),
-            required_from_block: 0,
-            required_to_block: 10,
-        }),
-        "cold live replay must preserve the exact typed restart requirement"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = $1 AND deactivated_at IS NULL"
-        )
-        .bind(format!("ens_v2_registry_subregistry:{chain}"))
-        .fetch_one(database.pool())
-        .await?,
-        1,
-        "failing closed must leave the previously admitted discovery edge active"
-    );
-
-    let registration =
-        label_registered_raw_log(chain, &block_hash, 10, registry, 0, "parent", 1, "alice");
-    let subregistry = subregistry_updated_raw_log(chain, &block_hash, 10, registry, 1, 1, child);
-    upsert_raw_logs(database.pool(), std::slice::from_ref(&registration)).await?;
-    insert_completed_registry_coverage(
-        database.pool(),
-        chain,
-        &[
-            (SOURCE_FAMILY_ENS_V2_ROOT_L1, root_registry),
-            (SOURCE_FAMILY_ENS_V2_REGISTRY_L1, registry),
-            (SOURCE_FAMILY_ENS_V2_REGISTRY_L1, child),
-        ],
-        0,
-        10,
-    )
-    .await?;
-    let missing_witness = sync_ens_v2_registry_resource_surface_live_poll(
-        database.pool(),
-        chain,
-        10,
-        std::slice::from_ref(&block_hash),
-    )
-    .await
-    .err()
-    .context("post-compaction coverage without the discovery raw log must not restore closure")?;
-    assert!(
-        format!("{missing_witness:#}").contains("missing raw-log witnesses"),
-        "unexpected missing-witness refusal: {missing_witness:#}"
-    );
-
-    upsert_raw_logs(database.pool(), &[subregistry]).await?;
-    let restored = sync_ens_v2_registry_resource_surface_live_poll(
-        database.pool(),
-        chain,
-        10,
-        std::slice::from_ref(&block_hash),
-    )
-    .await?;
-    assert_eq!(restored.scanned_log_count, 2);
-    assert!(
-        sqlx::query_scalar::<_, bool>(
-            "SELECT retained_history_complete FROM raw_log_staging_input_revisions WHERE chain_id = $1"
-        )
-        .bind(chain)
-        .fetch_one(database.pool())
-        .await?
-    );
-
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn ens_v2_proof_advance_requires_coverage_for_newly_admitted_registry_interval() -> Result<()>
-{
-    let database = TestDatabase::new().await?;
-    let chain = "ethereum-sepolia";
-    let registry = "0x00000000000000000000000000000000000000aa";
-    let root_registry = "0x00000000000000000000000000000000000000bb";
-    let child = "0x00000000000000000000000000000000000000c1";
-    let block_hash = lifecycle_branch_block_hash(10, 0);
-    let manifest_id = insert_test_registry_manifest(database.pool(), chain).await?;
-    insert_test_registry_contract(
-        database.pool(),
-        manifest_id,
-        "registry",
-        Uuid::from_u128(0x1755),
-        registry,
-        0,
-    )
-    .await?;
-    let root_manifest_id = insert_test_root_manifest(database.pool(), chain).await?;
-    insert_test_registry_contract(
-        database.pool(),
-        root_manifest_id,
-        "root",
-        Uuid::from_u128(0x1756),
-        root_registry,
-        0,
-    )
-    .await?;
-    upsert_raw_blocks(database.pool(), &[test_raw_block(chain, &block_hash, 10)]).await?;
-    upsert_raw_logs(
-        database.pool(),
-        &[subregistry_updated_raw_log(
-            chain,
-            &block_hash,
-            10,
-            registry,
-            0,
-            1,
-            child,
-        )],
-    )
-    .await?;
-
-    let error = sync_ens_v2_registry_resource_surface_through_block(database.pool(), chain, 10)
-        .await
-        .err()
-        .context("a pre-sync proof must not authorize a newly admitted historical child")?;
-    let newly_required = error
-        .downcast_ref::<EnsV2MissingCoverage>()
-        .context("newly admitted interval refusal must be typed")?;
-    assert_eq!(
-        newly_required,
-        &EnsV2MissingCoverage {
-            chain: chain.to_owned(),
-            retention_generation: 0,
-            source_family: SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
-            address: normalize_address(child),
-            required_from_block: 10,
-            required_to_block: 10,
-        }
-    );
-    let current_epoch =
-        bigname_manifests::load_discovery_admission_epoch(database.pool(), chain).await?;
-    assert!(current_epoch > 0);
-    assert_eq!(
-        sqlx::query_as::<_, (bool, Option<i64>)>(
-            r#"
-            SELECT
-                retained_history_complete,
-                proven_discovery_admission_epoch
-            FROM raw_log_staging_input_revisions
-            WHERE chain_id = $1
-            "#,
-        )
-        .bind(chain)
-        .fetch_one(database.pool())
-        .await?,
-        (true, Some(0)),
-        "the failed advance must leave the pre-sync proof unusable at the new epoch"
-    );
-
-    insert_completed_registry_coverage(
-        database.pool(),
-        chain,
-        &[
-            (SOURCE_FAMILY_ENS_V2_ROOT_L1, root_registry),
-            (SOURCE_FAMILY_ENS_V2_REGISTRY_L1, registry),
-            (SOURCE_FAMILY_ENS_V2_REGISTRY_L1, child),
-        ],
-        0,
-        10,
-    )
-    .await?;
-    let retry =
-        sync_ens_v2_registry_resource_surface_through_block(database.pool(), chain, 10).await?;
-    assert_eq!(retry.scanned_log_count, 1);
-    assert_eq!(
-        sqlx::query_as::<_, (bool, Option<i64>, Option<i64>)>(
-            r#"
-            SELECT
-                retained_history_complete,
-                proven_discovery_admission_epoch,
-                proven_through_block
-            FROM raw_log_staging_input_revisions
-            WHERE chain_id = $1
-            "#,
-        )
-        .bind(chain)
-        .fetch_one(database.pool())
-        .await?,
-        (true, Some(current_epoch), Some(10)),
-        "current-generation coverage must let the retry establish the post-sync proof"
-    );
-
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn ens_v2_proof_advance_requires_history_for_newly_admitted_resolver_interval() -> Result<()>
-{
-    let database = TestDatabase::new().await?;
-    let chain = "ethereum-sepolia";
-    let registry = "0x00000000000000000000000000000000000000aa";
-    let root_registry = "0x00000000000000000000000000000000000000bb";
-    let resolver = "0x00000000000000000000000000000000000000c1";
-    let block_hash = lifecycle_branch_block_hash(10, 0);
-    let manifest_id = insert_test_registry_manifest(database.pool(), chain).await?;
-    insert_test_resolver_manifest(database.pool(), chain).await?;
-    insert_test_registry_contract(
-        database.pool(),
-        manifest_id,
-        "registry",
-        Uuid::from_u128(0x1757),
-        registry,
-        0,
-    )
-    .await?;
-    let root_manifest_id = insert_test_root_manifest(database.pool(), chain).await?;
-    insert_test_registry_contract(
-        database.pool(),
-        root_manifest_id,
-        "root",
-        Uuid::from_u128(0x1758),
-        root_registry,
-        0,
-    )
-    .await?;
-    upsert_raw_blocks(database.pool(), &[test_raw_block(chain, &block_hash, 10)]).await?;
-    upsert_raw_logs(
-        database.pool(),
-        &[
-            label_registered_raw_log(chain, &block_hash, 10, registry, 0, "parent", 1, "alice"),
-            resolver_updated_raw_log(chain, &block_hash, 10, registry, 1, 1, resolver),
-        ],
-    )
-    .await?;
-
-    let error = sync_ens_v2_registry_resource_surface_through_block(database.pool(), chain, 10)
-        .await
-        .err()
-        .context("a pre-sync proof must not authorize newly admitted resolver history")?;
-    let newly_required = error
-        .downcast_ref::<EnsV2MissingCoverage>()
-        .context("newly admitted resolver-history refusal must be typed")?;
-    assert_eq!(
-        newly_required,
-        &EnsV2MissingCoverage {
-            chain: chain.to_owned(),
-            retention_generation: 0,
-            source_family: SOURCE_FAMILY_ENS_V2_RESOLVER_L1.to_owned(),
-            address: normalize_address(resolver),
-            required_from_block: 10,
-            required_to_block: 10,
-        }
-    );
-    let current_epoch =
-        bigname_manifests::load_discovery_admission_epoch(database.pool(), chain).await?;
-    assert!(current_epoch > 0);
-    assert_eq!(
-        sqlx::query_as::<_, (bool, Option<i64>)>(
-            r#"
-            SELECT
-                retained_history_complete,
-                proven_discovery_admission_epoch
-            FROM raw_log_staging_input_revisions
-            WHERE chain_id = $1
-            "#,
-        )
-        .bind(chain)
-        .fetch_one(database.pool())
-        .await?,
-        (true, Some(0)),
-        "the failed resolver-history check must not advance the closure proof"
-    );
-
-    insert_completed_registry_coverage(
-        database.pool(),
-        chain,
-        &[
-            (SOURCE_FAMILY_ENS_V2_ROOT_L1, root_registry),
-            (SOURCE_FAMILY_ENS_V2_REGISTRY_L1, registry),
-            (SOURCE_FAMILY_ENS_V2_RESOLVER_L1, resolver),
-        ],
-        0,
-        10,
-    )
-    .await?;
-    let retry =
-        sync_ens_v2_registry_resource_surface_through_block(database.pool(), chain, 10).await?;
-    assert_eq!(retry.scanned_log_count, 2);
-    assert_eq!(
-        sqlx::query_as::<_, (bool, Option<i64>, Option<i64>)>(
-            r#"
-            SELECT
-                retained_history_complete,
-                proven_discovery_admission_epoch,
-                proven_through_block
-            FROM raw_log_staging_input_revisions
-            WHERE chain_id = $1
-            "#,
-        )
-        .bind(chain)
-        .fetch_one(database.pool())
-        .await?,
-        (true, Some(current_epoch), Some(10)),
-        "resolver history coverage must let the retry advance the root/registry proof"
-    );
-
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn ens_v2_live_coverage_requires_preexisting_resolver_for_selected_interval() -> Result<()> {
-    let database = TestDatabase::new().await?;
-    let chain = "ethereum-sepolia";
-    let registry = "0x00000000000000000000000000000000000000aa";
-    let root_registry = "0x00000000000000000000000000000000000000bb";
-    let resolver = "0x00000000000000000000000000000000000000c1";
-    let block_10_hash = lifecycle_branch_block_hash(10, 0);
-    let block_11_hash = lifecycle_branch_block_hash(11, 0);
-    let manifest_id = insert_test_registry_manifest(database.pool(), chain).await?;
-    insert_test_resolver_manifest(database.pool(), chain).await?;
-    insert_test_registry_contract(
-        database.pool(),
-        manifest_id,
-        "registry",
-        Uuid::from_u128(0x1759),
-        registry,
-        0,
-    )
-    .await?;
-    let root_manifest_id = insert_test_root_manifest(database.pool(), chain).await?;
-    insert_test_registry_contract(
-        database.pool(),
-        root_manifest_id,
-        "root",
-        Uuid::from_u128(0x175a),
-        root_registry,
-        0,
-    )
-    .await?;
-    upsert_raw_blocks(
-        database.pool(),
-        &[test_raw_block(chain, &block_10_hash, 10)],
-    )
-    .await?;
-    upsert_raw_logs(
-        database.pool(),
-        &[
-            label_registered_raw_log(chain, &block_10_hash, 10, registry, 0, "parent", 1, "alice"),
-            resolver_updated_raw_log(chain, &block_10_hash, 10, registry, 1, 1, resolver),
-        ],
-    )
-    .await?;
-    insert_completed_registry_coverage(
-        database.pool(),
-        chain,
-        &[
-            (SOURCE_FAMILY_ENS_V2_ROOT_L1, root_registry),
-            (SOURCE_FAMILY_ENS_V2_REGISTRY_L1, registry),
-            (SOURCE_FAMILY_ENS_V2_RESOLVER_L1, resolver),
-        ],
-        0,
-        10,
-    )
-    .await?;
-    let initial =
-        sync_ens_v2_registry_resource_surface_through_block(database.pool(), chain, 10).await?;
-    assert_eq!(initial.scanned_log_count, 2);
-    refresh_test_raw_log_closure_proof(database.pool(), chain, 10).await?;
-
-    let block_10 = test_raw_block(chain, &block_10_hash, 10);
-    let mut block_11 = test_raw_block(chain, &block_11_hash, 11);
-    block_11.parent_hash = Some(block_10_hash.clone());
-    upsert_chain_lineage_blocks(
-        database.pool(),
-        &[
-            raw_block_to_test_lineage(&block_10),
-            raw_block_to_test_lineage(&block_11),
-        ],
-    )
-    .await?;
-    let selected_block_hashes = vec![block_11_hash];
-    let selected_registry_addresses = vec![
-        normalize_address(root_registry),
-        normalize_address(registry),
-    ];
-
-    let error = record_ens_v2_live_selected_raw_log_coverage(
-        database.pool(),
-        chain,
-        &selected_registry_addresses,
-        &selected_block_hashes,
-    )
-    .await
-    .err()
-    .context("live coverage must include an already admitted resolver")?;
-    assert_resolver_live_coverage_requirement(&error, chain, resolver, 11, 11)?;
-
-    let mut complete_selection = selected_registry_addresses.clone();
-    complete_selection.push(normalize_address(resolver));
-    record_ens_v2_live_selected_raw_log_coverage(
-        database.pool(),
-        chain,
-        &complete_selection,
-        &selected_block_hashes,
-    )
-    .await?;
-    assert_eq!(
-        sqlx::query_scalar::<_, Option<i64>>(
-            r#"
-            SELECT proven_through_block
-            FROM raw_log_staging_input_revisions
-            WHERE chain_id = $1
-            "#,
-        )
-        .bind(chain)
-        .fetch_one(database.pool())
-        .await?,
-        Some(11),
-        "complete live selection must advance the retained-history boundary"
-    );
-
-    let error = record_ens_v2_live_selected_raw_log_coverage(
-        database.pool(),
-        chain,
-        &selected_registry_addresses,
-        &selected_block_hashes,
-    )
-    .await
-    .err()
-    .context("an already-valid proof must not bypass resolver live coverage")?;
-    assert_resolver_live_coverage_requirement(&error, chain, resolver, 11, 11)?;
-
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn ens_v2_full_source_raw_log_guard_blocks_compaction_until_release() -> Result<()> {
-    let database = TestDatabase::new().await?;
-    let chain = "ethereum-sepolia";
-    let registry = "0x00000000000000000000000000000000000000aa";
-    let block_hash = lifecycle_branch_block_hash(10, 0);
-    let manifest_id = insert_test_registry_manifest(database.pool(), chain).await?;
-    insert_test_registry_contract(
-        database.pool(),
-        manifest_id,
-        "registry",
-        Uuid::from_u128(0x1760),
-        registry,
-        0,
-    )
-    .await?;
-    upsert_raw_blocks(database.pool(), &[test_raw_block(chain, &block_hash, 10)]).await?;
-    upsert_raw_logs(
-        database.pool(),
-        &[label_registered_raw_log(
-            chain,
-            &block_hash,
-            10,
-            registry,
-            0,
-            "parent",
-            1,
-            "alice",
-        )],
-    )
-    .await?;
-
-    let guard = live::FullSourceRawLogHistoryGuard::acquire(
-        acquire_registry_sync_fence(database.pool(), chain).await?,
-        chain,
-    )
-    .await?;
-    let compaction_pool = database.pool().clone();
-    let mut compaction = tokio::spawn(async move {
-        sqlx::query("TRUNCATE raw_logs")
-            .execute(&compaction_pool)
-            .await
-    });
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(150), &mut compaction)
-            .await
-            .is_err(),
-        "raw-log compaction must wait while a full-source read fence is held"
-    );
-    guard.abort().await?;
-    tokio::time::timeout(std::time::Duration::from_secs(2), compaction)
-        .await
-        .context("raw-log compaction did not resume after the full-source fence released")??
-        .context("raw-log compaction failed after the full-source fence released")?;
-
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn ens_v2_raw_log_guard_serializes_semantic_mutation_by_old_and_new_chain() -> Result<()> {
-    let database = TestDatabase::new().await?;
-    let chain_a = "ethereum-sepolia-a";
-    let chain_b = "ethereum-sepolia-b";
-    let registry = "0x00000000000000000000000000000000000000aa";
-    let shared_hash = lifecycle_branch_block_hash(10, 1);
-    let chain_b_only_hash = lifecycle_branch_block_hash(10, 2);
-    upsert_raw_blocks(
-        database.pool(),
-        &[
-            test_raw_block(chain_a, &shared_hash, 10),
-            test_raw_block(chain_b, &shared_hash, 10),
-            test_raw_block(chain_b, &chain_b_only_hash, 10),
-        ],
-    )
-    .await?;
-    upsert_raw_logs(
-        database.pool(),
-        &[
-            label_registered_raw_log(chain_a, &shared_hash, 10, registry, 0, "parent", 1, "alice"),
-            label_registered_raw_log(
-                chain_b,
-                &chain_b_only_hash,
-                10,
-                registry,
-                0,
-                "parent",
-                2,
-                "bob",
-            ),
-        ],
-    )
-    .await?;
-
-    let guard = live::FullSourceRawLogHistoryGuard::acquire(
-        acquire_registry_sync_fence(database.pool(), chain_a).await?,
-        chain_a,
-    )
-    .await?;
-    let revision_before = sqlx::query_scalar::<_, i64>(
-        "SELECT revision FROM raw_log_staging_input_revisions WHERE chain_id = $1",
-    )
-    .bind(chain_a)
-    .fetch_one(database.pool())
-    .await?;
-    tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        sqlx::query(
-            "UPDATE raw_logs SET observed_at = observed_at + INTERVAL '1 second' WHERE chain_id = $1",
-        )
-        .bind(chain_a)
-        .execute(database.pool()),
-    )
-    .await
-    .context("observed-at-only update blocked behind the semantic mutation fence")??;
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT revision FROM raw_log_staging_input_revisions WHERE chain_id = $1",
-        )
-        .bind(chain_a)
-        .fetch_one(database.pool())
-        .await?,
-        revision_before,
-        "observed-at-only updates must not advance the semantic revision"
-    );
-    tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        sqlx::query("UPDATE raw_logs SET data = '0x01' WHERE chain_id = $1")
-            .bind(chain_b)
-            .execute(database.pool()),
-    )
-    .await
-    .context("other-chain semantic update blocked behind a chain-scoped fence")??;
-
-    let move_pool = database.pool().clone();
-    let move_hash = shared_hash.clone();
-    let mut move_from_guarded_chain = tokio::spawn(async move {
-        sqlx::query("UPDATE raw_logs SET chain_id = $2 WHERE chain_id = $1 AND block_hash = $3")
-            .bind(chain_a)
-            .bind(chain_b)
-            .bind(move_hash)
-            .execute(&move_pool)
-            .await
-    });
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_millis(150),
-            &mut move_from_guarded_chain,
-        )
-        .await
-        .is_err(),
-        "a semantic update must lock its old chain"
-    );
-    guard.abort().await?;
-    tokio::time::timeout(std::time::Duration::from_secs(2), move_from_guarded_chain)
-        .await
-        .context("old-chain update did not resume after its fence released")??
-        .context("old-chain update failed after its fence released")?;
-
-    let guard = live::FullSourceRawLogHistoryGuard::acquire(
-        acquire_registry_sync_fence(database.pool(), chain_a).await?,
-        chain_a,
-    )
-    .await?;
-    let move_pool = database.pool().clone();
-    let move_hash = shared_hash.clone();
-    let mut move_to_guarded_chain = tokio::spawn(async move {
-        sqlx::query("UPDATE raw_logs SET chain_id = $2 WHERE chain_id = $1 AND block_hash = $3")
-            .bind(chain_b)
-            .bind(chain_a)
-            .bind(move_hash)
-            .execute(&move_pool)
-            .await
-    });
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_millis(150),
-            &mut move_to_guarded_chain,
-        )
-        .await
-        .is_err(),
-        "a semantic update must lock its new chain"
-    );
-    guard.abort().await?;
-    tokio::time::timeout(std::time::Duration::from_secs(2), move_to_guarded_chain)
-        .await
-        .context("new-chain update did not resume after its fence released")??
-        .context("new-chain update failed after its fence released")?;
-
     database.cleanup().await
 }
 
@@ -5689,29 +4473,6 @@ async fn ens_v2_first_raw_log_insert_starts_with_incomplete_retained_history() -
     .fetch_one(database.pool())
     .await?;
     assert_eq!(state, (0, false, None));
-
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn ens_v2_full_source_sync_is_a_noop_without_authoritative_closure() -> Result<()> {
-    let database = TestDatabase::new().await?;
-    let chain = "base-mainnet";
-
-    let summary = sync_ens_v2_registry_resource_surface(database.pool(), chain).await?;
-    assert_eq!(summary.scanned_log_count, 0);
-    assert_eq!(summary.matched_log_count, 0);
-    assert_eq!(summary.active_edge_count, 0);
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT FROM raw_log_staging_input_revisions WHERE chain_id = $1"
-        )
-        .bind(chain)
-        .fetch_one(database.pool())
-        .await?,
-        0,
-        "probing a non-ENSv2 watched chain must not invent retained-history state"
-    );
 
     database.cleanup().await
 }
@@ -6310,89 +5071,47 @@ async fn ens_v2_live_poll_hydrates_only_the_selected_target_ancestor_path() -> R
 }
 
 #[tokio::test]
-async fn ens_v2_registry_sync_entrypoints_share_a_database_fence() -> Result<()> {
+async fn ens_v2_plain_full_sync_preserves_discovery_after_retention_rotation() -> Result<()> {
     let database = TestDatabase::new().await?;
     let chain = "ethereum-sepolia";
     let registry = "0x00000000000000000000000000000000000000aa";
-    let block_hash = lifecycle_branch_block_hash(1, 1);
-    let manifest_id = insert_test_registry_manifest(database.pool(), chain).await?;
-    insert_test_registry_contract(
-        database.pool(),
-        manifest_id,
-        "registry",
-        Uuid::from_u128(0x1781),
-        registry,
-        0,
-    )
-    .await?;
-    upsert_raw_blocks(database.pool(), &[test_raw_block(chain, &block_hash, 1)]).await?;
-
-    let fence = acquire_registry_sync_fence(database.pool(), chain).await?;
-    let pool = database.pool().clone();
-    let chain = chain.to_owned();
-    let selected_hash = block_hash.clone();
-    let mut waiting_sync = tokio::spawn(async move {
-        sync_ens_v2_registry_resource_surface_live_poll(&pool, &chain, 1, &[selected_hash]).await
-    });
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(150), &mut waiting_sync)
-            .await
-            .is_err(),
-        "a concurrent registry sync must wait for the database-visible chain fence"
-    );
-    fence.commit().await?;
-    tokio::time::timeout(std::time::Duration::from_secs(5), waiting_sync)
-        .await
-        .context("registry sync did not resume after its database fence was released")?
-        .context("registry sync task panicked")??;
-
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn ens_v2_full_closure_removes_losing_only_discovery_watch_target() -> Result<()> {
-    let database = TestDatabase::new().await?;
-    let chain = "ethereum-sepolia";
-    let registry = "0x00000000000000000000000000000000000000aa";
-    let losing_child = "0x00000000000000000000000000000000000000c1";
-    let registry_id = Uuid::from_u128(0x1731);
+    let child = "0x00000000000000000000000000000000000000c1";
     let block_10_hash = lifecycle_branch_block_hash(10, 0);
-    let losing_11_hash = lifecycle_branch_block_hash(11, 1);
-    let winning_11_hash = lifecycle_branch_block_hash(11, 2);
+    let block_11_hash = lifecycle_branch_block_hash(11, 0);
     let manifest_id = insert_test_registry_manifest(database.pool(), chain).await?;
     insert_test_registry_contract(
         database.pool(),
         manifest_id,
         "registry",
-        registry_id,
+        Uuid::from_u128(0x1730),
         registry,
         0,
     )
     .await?;
-    let mut losing_11 = test_raw_block(chain, &losing_11_hash, 11);
-    losing_11.parent_hash = Some(block_10_hash.clone());
+    let mut block_11 = test_raw_block(chain, &block_11_hash, 11);
+    block_11.parent_hash = Some(block_10_hash.clone());
     upsert_raw_blocks(
         database.pool(),
-        &[test_raw_block(chain, &block_10_hash, 10), losing_11],
+        &[test_raw_block(chain, &block_10_hash, 10), block_11],
     )
     .await?;
     upsert_raw_logs(
         database.pool(),
         &[
             label_registered_raw_log(chain, &block_10_hash, 10, registry, 0, "parent", 1, "alice"),
-            subregistry_updated_raw_log(chain, &losing_11_hash, 11, registry, 0, 1, losing_child),
+            subregistry_updated_raw_log(chain, &block_10_hash, 10, registry, 1, 1, child),
         ],
     )
     .await?;
     EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope(
         database.pool(),
         chain,
-        &[block_10_hash.clone(), losing_11_hash.clone()],
+        std::slice::from_ref(&block_10_hash),
         &[(
             SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
             registry.to_owned(),
             10,
-            11,
+            10,
         )],
     )
     .await?;
@@ -6400,105 +5119,53 @@ async fn ens_v2_full_closure_removes_losing_only_discovery_watch_target() -> Res
         bigname_manifests::load_watched_contracts(database.pool())
             .await?
             .iter()
-            .any(|contract| contract.address == normalize_address(losing_child))
-    );
-
-    let orphaned_event_count =
-        bigname_storage::mark_block_derived_normalized_events_range_orphaned(
-            database.pool(),
-            chain,
-            &losing_11_hash,
-            Some(&block_10_hash),
-        )
-        .await?;
-    assert!(
-        orphaned_event_count > 0,
-        "the losing registry transition must remain as orphaned audit evidence"
-    );
-    bigname_storage::mark_raw_block_facts_range_orphaned(
-        database.pool(),
-        chain,
-        &losing_11_hash,
-        Some(&block_10_hash),
-    )
-    .await?;
-    bigname_storage::mark_raw_block_range_orphaned(
-        database.pool(),
-        chain,
-        &losing_11_hash,
-        Some(&block_10_hash),
-    )
-    .await?;
-    let mut winning_11 = test_raw_block(chain, &winning_11_hash, 11);
-    winning_11.parent_hash = Some(block_10_hash.clone());
-    upsert_raw_blocks(database.pool(), &[winning_11]).await?;
-
-    refresh_test_raw_log_closure_proof(database.pool(), chain, 11).await?;
-    sync_ens_v2_registry_resource_surface_through_block(database.pool(), chain, 11).await?;
-    assert!(
-        bigname_manifests::load_watched_contracts(database.pool())
-            .await?
-            .iter()
-            .all(|contract| contract.address != normalize_address(losing_child)),
-        "full canonical closure must deactivate a discovery edge absent from the winning history"
+            .any(|contract| contract.address == normalize_address(child))
     );
 
     sqlx::query("TRUNCATE raw_logs")
         .execute(database.pool())
         .await
-        .context("failed to compact the losing-branch raw-log corpus")?;
+        .context("failed to rotate the raw-log corpus")?;
     upsert_raw_logs(
         database.pool(),
-        &[label_registered_raw_log(
+        &[transfer_single_raw_log(
             chain,
-            &block_10_hash,
-            10,
+            &block_11_hash,
+            11,
             registry,
             0,
-            "parent",
+            "0x0000000000000000000000000000000000000f00",
+            ZERO_ADDRESS,
+            "0x0000000000000000000000000000000000000b0b",
+            2,
             1,
-            "alice",
         )],
     )
     .await?;
-    insert_completed_registry_coverage(
-        database.pool(),
-        chain,
-        &[
-            (SOURCE_FAMILY_ENS_V2_REGISTRY_L1, registry),
-            (SOURCE_FAMILY_ENS_V2_REGISTRY_L1, losing_child),
-        ],
-        0,
-        11,
-    )
-    .await?;
 
-    sync_ens_v2_registry_resource_surface_through_block(database.pool(), chain, 11)
-        .await
-        .context("canonical retained-history recovery must ignore losing-branch audit witnesses")?;
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            r#"
-            SELECT COUNT(*)::BIGINT
-            FROM normalized_events
-            WHERE chain_id = $1
-              AND block_hash = $2
-              AND canonicality_state = 'orphaned'::canonicality_state
-            "#,
-        )
-        .bind(chain)
-        .bind(&losing_11_hash)
-        .fetch_one(database.pool())
-        .await?,
-        orphaned_event_count as i64,
-        "recovery must preserve losing-branch normalized events as audit truth"
-    );
+    sync_ens_v2_registry_resource_surface_through_block(database.pool(), chain, 11).await?;
     assert!(
         bigname_manifests::load_watched_contracts(database.pool())
             .await?
             .iter()
-            .all(|contract| contract.address != normalize_address(losing_child)),
-        "recovery must not reactivate the losing-branch watch target"
+            .any(|contract| contract.address == normalize_address(child)),
+        "a retained suffix cannot prove that an omitted historical discovery is absent"
+    );
+
+    invalidate_live_registry_replay_state(database.pool(), chain);
+    sync_ens_v2_registry_resource_surface_live_poll(
+        database.pool(),
+        chain,
+        11,
+        std::slice::from_ref(&block_11_hash),
+    )
+    .await?;
+    assert!(
+        bigname_manifests::load_watched_contracts(database.pool())
+            .await?
+            .iter()
+            .any(|contract| contract.address == normalize_address(child)),
+        "cold live hydration from a retained suffix cannot prove historical absence"
     );
 
     database.cleanup().await
@@ -8028,30 +6695,6 @@ fn raw_block_to_test_lineage(block: &RawBlock) -> ChainLineageBlock {
     }
 }
 
-fn assert_resolver_live_coverage_requirement(
-    error: &anyhow::Error,
-    chain: &str,
-    resolver: &str,
-    required_from_block: i64,
-    required_to_block: i64,
-) -> Result<()> {
-    let newly_required = error
-        .downcast_ref::<EnsV2MissingCoverage>()
-        .context("resolver live-coverage refusal must be typed")?;
-    assert_eq!(
-        newly_required,
-        &EnsV2MissingCoverage {
-            chain: chain.to_owned(),
-            retention_generation: 0,
-            source_family: SOURCE_FAMILY_ENS_V2_RESOLVER_L1.to_owned(),
-            address: normalize_address(resolver),
-            required_from_block,
-            required_to_block,
-        }
-    );
-    Ok(())
-}
-
 fn test_active_emitter(
     address: &str,
     contract_instance_id: Uuid,
@@ -8336,31 +6979,6 @@ fn token_regenerated_raw_log(
         data: Vec::new(),
         canonicality_state: CanonicalityState::Finalized,
     }
-}
-
-async fn load_live_registry_checkpoint_position(
-    pool: &PgPool,
-    chain: &str,
-) -> Result<(String, i64, i64)> {
-    sqlx::query_as::<_, (String, i64, i64)>(
-        r#"
-        SELECT status, replay_target_block_number, raw_log_input_revision
-        FROM normalized_replay_adapter_checkpoints
-        WHERE deployment_profile = $1
-          AND chain_id = $2
-          AND cursor_kind = $3
-          AND adapter = $4
-          AND checkpoint_scope = $5
-        "#,
-    )
-    .bind(LIVE_TEST_DEPLOYMENT_PROFILE)
-    .bind(chain)
-    .bind(live::LIVE_REGISTRY_REPLAY_CHECKPOINT_CURSOR_KIND)
-    .bind(live::LIVE_REGISTRY_REPLAY_CHECKPOINT_ADAPTER)
-    .bind(live::LIVE_REGISTRY_REPLAY_CHECKPOINT_SCOPE)
-    .fetch_one(pool)
-    .await
-    .context("failed to load ENSv2 live replay checkpoint position")
 }
 
 fn subregistry_updated_raw_log(

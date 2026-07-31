@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(test)]
 pub(crate) async fn run_resumable_hash_pinned_backfill_job_with_progress(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
@@ -10,8 +11,13 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job_with_progress(
     config.adapter_sync_mode =
         effective_hash_pinned_adapter_sync_mode(source_plan, config.adapter_sync_mode);
     validate_hash_pinned_chunk_blocks(config.hash_pinned_chunk_blocks)?;
-    let record =
-        create_hash_pinned_backfill_job_with_progress(pool, source_plan, &config, progress).await?;
+    let record = creation::create_hash_pinned_backfill_job_with_progress(
+        pool,
+        source_plan,
+        &config,
+        progress,
+    )
+    .await?;
     run_precreated_hash_pinned_backfill_job_inner(
         pool,
         source_plan,

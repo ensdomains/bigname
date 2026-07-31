@@ -5,7 +5,6 @@ use super::{
     DiscoveryEdgeMutation, EnsV1SubregistryDiscoverySyncSummary, checkpoint,
     sync_ens_v1_subregistry_discovery_with_scope,
 };
-use crate::checkpoint_context::StartupAdapterProgress;
 
 pub async fn sync_ens_v1_subregistry_discovery(
     pool: &PgPool,
@@ -23,7 +22,6 @@ pub async fn sync_ens_v1_subregistry_discovery(
         None,
         checkpoint::PAGE_LIMIT,
         None,
-        &mut None,
     )
     .await
     .map(|(summary, _, _)| summary)
@@ -51,7 +49,6 @@ pub async fn sync_ens_v1_subregistry_discovery_through_block(
         None,
         checkpoint::PAGE_LIMIT,
         None,
-        &mut None,
     )
     .await
     .map(|(summary, _, _)| summary)
@@ -78,32 +75,6 @@ pub async fn sync_ens_v1_subregistry_discovery_through_block_with_expected_admis
         None,
         checkpoint::PAGE_LIMIT,
         None,
-        &mut None,
-    )
-    .await
-    .map(|(summary, _, _)| summary)
-}
-
-pub async fn sync_ens_v1_subregistry_discovery_through_block_with_expected_admission_epoch_and_progress(
-    pool: &PgPool,
-    chain: &str,
-    through_block_number: i64,
-    expected_admission_epoch: i64,
-    progress: &mut dyn StartupAdapterProgress,
-) -> Result<EnsV1SubregistryDiscoverySyncSummary> {
-    sync_ens_v1_subregistry_discovery_with_scope(
-        pool,
-        chain,
-        false,
-        &[],
-        None,
-        DiscoveryEdgeMutation::Reconcile,
-        Some(through_block_number),
-        Some(expected_admission_epoch),
-        None,
-        checkpoint::PAGE_LIMIT,
-        None,
-        &mut Some(progress),
     )
     .await
     .map(|(summary, _, _)| summary)
@@ -128,32 +99,6 @@ impl EnsV1SubregistryDiscoverySyncSummary {
             None,
             checkpoint::PAGE_LIMIT,
             None,
-            &mut None,
-        )
-        .await
-        .map(|(summary, _, _)| summary)
-    }
-
-    pub async fn sync_for_block_hashes_with_source_scope_and_progress(
-        pool: &PgPool,
-        chain: &str,
-        block_hashes: &[String],
-        source_scope: &[(String, String, i64, i64)],
-        progress: &mut dyn StartupAdapterProgress,
-    ) -> Result<Self> {
-        sync_ens_v1_subregistry_discovery_with_scope(
-            pool,
-            chain,
-            true,
-            block_hashes,
-            Some(source_scope),
-            DiscoveryEdgeMutation::Reconcile,
-            None,
-            None,
-            None,
-            checkpoint::PAGE_LIMIT,
-            None,
-            &mut Some(progress),
         )
         .await
         .map(|(summary, _, _)| summary)
@@ -177,32 +122,6 @@ impl EnsV1SubregistryDiscoverySyncSummary {
             None,
             checkpoint::PAGE_LIMIT,
             None,
-            &mut None,
-        )
-        .await
-        .map(|(summary, _, _)| summary)
-    }
-
-    pub async fn sync_for_block_hashes_with_source_scope_without_discovery_reconciliation_and_progress(
-        pool: &PgPool,
-        chain: &str,
-        block_hashes: &[String],
-        source_scope: &[(String, String, i64, i64)],
-        progress: &mut dyn StartupAdapterProgress,
-    ) -> Result<Self> {
-        sync_ens_v1_subregistry_discovery_with_scope(
-            pool,
-            chain,
-            true,
-            block_hashes,
-            Some(source_scope),
-            DiscoveryEdgeMutation::Skip,
-            None,
-            None,
-            None,
-            checkpoint::PAGE_LIMIT,
-            None,
-            &mut Some(progress),
         )
         .await
         .map(|(summary, _, _)| summary)
@@ -225,31 +144,6 @@ impl EnsV1SubregistryDiscoverySyncSummary {
             None,
             checkpoint::PAGE_LIMIT,
             None,
-            &mut None,
-        )
-        .await
-        .map(|(summary, _, _)| summary)
-    }
-
-    pub async fn sync_for_block_hashes_without_discovery_reconciliation_and_progress(
-        pool: &PgPool,
-        chain: &str,
-        block_hashes: &[String],
-        progress: &mut dyn StartupAdapterProgress,
-    ) -> Result<Self> {
-        sync_ens_v1_subregistry_discovery_with_scope(
-            pool,
-            chain,
-            true,
-            block_hashes,
-            None,
-            DiscoveryEdgeMutation::Skip,
-            None,
-            None,
-            None,
-            checkpoint::PAGE_LIMIT,
-            None,
-            &mut Some(progress),
         )
         .await
         .map(|(summary, _, _)| summary)

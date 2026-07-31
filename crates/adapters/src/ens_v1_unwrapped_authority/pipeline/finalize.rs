@@ -1,8 +1,7 @@
 use super::{
-    close_binding_overlaps, count_events_by_kind,
+    count_events_by_kind,
     materialize::{AuthorityMaterialization, materialize_authority_histories},
-    merge_event_kind_counts, normalize_surface_bindings_for_upsert,
-    prepend_existing_open_binding_closures,
+    normalize_surface_bindings_for_upsert,
     summary::*,
     *,
 };
@@ -20,7 +19,7 @@ pub(super) struct PreMaterializationTimings {
     pub(super) apply_ms: u128,
 }
 
-pub(super) struct FinalizeAuthoritySync<'a, 'progress> {
+pub(super) struct FinalizeAuthoritySync<'a> {
     pub(super) pool: &'a PgPool,
     pub(super) chain: &'a str,
     pub(super) restrict_to_block_hashes: bool,
@@ -34,15 +33,12 @@ pub(super) struct FinalizeAuthoritySync<'a, 'progress> {
     pub(super) generic_resolver_event_sources: &'a [GenericResolverEventSource],
     pub(super) histories: BTreeMap<String, NameHistory>,
     pub(super) reverse_histories: BTreeMap<String, ReverseClaimSourceHistory>,
-    pub(super) flushed_events: UnwrappedAuthorityReplayFlushedEvents,
-    pub(super) active_replay_checkpoint: &'a mut Option<UnwrappedAuthorityReplayCheckpoint>,
-    pub(super) startup_progress: Option<&'progress mut dyn StartupAdapterProgress>,
     pub(super) pre_timings: PreMaterializationTimings,
     pub(super) total_started: Instant,
 }
 
 pub(super) async fn finalize_authority_sync(
-    mut input: FinalizeAuthoritySync<'_, '_>,
+    input: FinalizeAuthoritySync<'_>,
 ) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
     let head_block = input
         .block_index
@@ -75,7 +71,7 @@ pub(super) async fn finalize_authority_sync(
         resource_count,
         surface_count,
         mut bindings,
-        mut events,
+        events,
         token_lineages_upsert_ms,
         resources_upsert_ms,
         surfaces_upsert_ms,
@@ -85,71 +81,27 @@ pub(super) async fn finalize_authority_sync(
         &head_ref,
         input.histories,
         input.reverse_histories,
-        &mut input.startup_progress,
     )
     .await?;
-    record_startup_adapter_progress(input.pool, &mut input.startup_progress).await?;
     let materialization_ms = materialization_started.elapsed().as_millis();
 
     let normalize_started = Instant::now();
-    let mut by_kind = input.flushed_events.by_kind.clone();
-    merge_event_kind_counts(&mut by_kind, count_events_by_kind(&events));
+    let by_kind = count_events_by_kind(&events);
     normalize_surface_bindings_for_upsert(&mut bindings)?;
-    record_startup_adapter_progress(input.pool, &mut input.startup_progress).await?;
     let normalize_ms = normalize_started.elapsed().as_millis();
-    let closure_started = Instant::now();
-    let closure_count = prepend_existing_open_binding_closures_with_progress(
-        input.pool,
-        &mut bindings,
-        &mut input.startup_progress,
-    )
-    .await?;
-    let closure_ms = closure_started.elapsed().as_millis();
-    let binding_closures_started = Instant::now();
-    if closure_count > 0 {
-        upsert_binding_batches(
-            input.pool,
-            &bindings[..closure_count],
-            &mut input.startup_progress,
-        )
-        .await?;
-    }
-    let binding_closures_upsert_ms = binding_closures_started.elapsed().as_millis();
-    let (binding_overlap_repair_count, binding_overlap_repair_ms) = close_binding_overlaps(
-        input.pool,
-        &bindings[closure_count..],
-        &mut input.startup_progress,
-    )
-    .await?;
+
     let bindings_started = Instant::now();
-    upsert_binding_batches(
-        input.pool,
-        &bindings[closure_count..],
-        &mut input.startup_progress,
-    )
-    .await?;
+    upsert_surface_bindings_without_snapshots(input.pool, &bindings).await?;
     let bindings_upsert_ms = bindings_started.elapsed().as_millis();
     let binding_count = bindings.len();
-    drop(bindings);
-    if let Some(checkpoint) = input
-        .active_replay_checkpoint
-        .as_mut()
-        .filter(|checkpoint| checkpoint.is_startup())
-    {
-        checkpoint
-            .publish_startup_events(
-                input.pool,
-                &mut input.flushed_events,
-                &mut input.startup_progress,
-            )
-            .await?;
-    }
+
     let normalized_events_started = Instant::now();
     let normalized_event_count = events.len();
     let event_inserted_count =
-        upsert_event_batches(input.pool, &mut events, &mut input.startup_progress).await?;
+        bigname_storage::upsert_normalized_events_with_summary(input.pool, &events)
+            .await?
+            .inserted_count;
     let normalized_events_upsert_ms = normalized_events_started.elapsed().as_millis();
-    drop(events);
 
     log_replay_timing(ReplayTimingLog::new(
         input.chain,
@@ -166,12 +118,7 @@ pub(super) async fn finalize_authority_sync(
             resource_count,
             binding_count,
         ),
-        (
-            normalized_event_count,
-            event_inserted_count,
-            input.flushed_events.total_count,
-            input.flushed_events.inserted_count,
-        ),
+        (normalized_event_count, event_inserted_count, 0, 0),
         ReplayTimings::new(
             (
                 input.pre_timings.active_emitters_ms,
@@ -187,14 +134,14 @@ pub(super) async fn finalize_authority_sync(
                 input.pre_timings.migrated_registry_nodes_ms,
                 input.pre_timings.apply_ms,
             ),
-            (materialization_ms, normalize_ms, closure_ms),
+            (materialization_ms, normalize_ms, 0),
             (
                 token_lineages_upsert_ms,
                 resources_upsert_ms,
                 surfaces_upsert_ms,
-                binding_closures_upsert_ms,
-                binding_overlap_repair_count,
-                binding_overlap_repair_ms,
+                0,
+                0,
+                0,
                 bindings_upsert_ms,
                 normalized_events_upsert_ms,
             ),
@@ -202,93 +149,12 @@ pub(super) async fn finalize_authority_sync(
         ),
     ));
 
-    let summary = build_summary(
+    Ok(build_summary(
         input.scanned_log_count,
         input.matched_log_count,
         (surface_count, resource_count, binding_count),
-        (
-            input.flushed_events.total_count,
-            input.flushed_events.inserted_count,
-        ),
+        (0, 0),
         (normalized_event_count, event_inserted_count),
         by_kind,
-    );
-    if let Some(checkpoint) = input.active_replay_checkpoint.as_mut() {
-        checkpoint.mark_completed(input.pool, &summary).await?;
-        record_startup_adapter_progress(input.pool, &mut input.startup_progress).await?;
-    }
-    Ok(summary)
-}
-
-const FINALIZATION_BINDING_NAME_BATCH_SIZE: usize = 1_000;
-const FINALIZATION_EVENT_BATCH_SIZE: usize = 5_000;
-
-async fn prepend_existing_open_binding_closures_with_progress(
-    pool: &PgPool,
-    bindings: &mut Vec<SurfaceBinding>,
-    startup_progress: &mut Option<&mut dyn StartupAdapterProgress>,
-) -> Result<usize> {
-    if startup_progress.is_none() {
-        return prepend_existing_open_binding_closures(pool, bindings).await;
-    }
-
-    let mut source = std::mem::take(bindings).into_iter().peekable();
-    let mut closures = Vec::new();
-    let mut incoming = Vec::new();
-    while source.peek().is_some() {
-        let mut batch = Vec::new();
-        for _ in 0..FINALIZATION_BINDING_NAME_BATCH_SIZE {
-            let Some(logical_name_id) =
-                source.peek().map(|binding| binding.logical_name_id.clone())
-            else {
-                break;
-            };
-            while source
-                .peek()
-                .is_some_and(|binding| binding.logical_name_id == logical_name_id)
-            {
-                batch.push(source.next().expect("peeked binding must remain available"));
-            }
-        }
-        let closure_count = prepend_existing_open_binding_closures(pool, &mut batch).await?;
-        incoming.extend(batch.drain(closure_count..));
-        closures.extend(batch);
-        record_startup_adapter_progress(pool, startup_progress).await?;
-    }
-    let closure_count = closures.len();
-    closures.append(&mut incoming);
-    *bindings = closures;
-    Ok(closure_count)
-}
-
-async fn upsert_binding_batches(
-    pool: &PgPool,
-    bindings: &[SurfaceBinding],
-    startup_progress: &mut Option<&mut dyn StartupAdapterProgress>,
-) -> Result<()> {
-    if startup_progress.is_none() {
-        return upsert_surface_bindings_without_snapshots(pool, bindings).await;
-    }
-    for chunk in bindings.chunks(FINALIZATION_BINDING_NAME_BATCH_SIZE) {
-        upsert_surface_bindings_without_snapshots(pool, chunk).await?;
-        record_startup_adapter_progress(pool, startup_progress).await?;
-    }
-    Ok(())
-}
-
-async fn upsert_event_batches(
-    pool: &PgPool,
-    events: &mut [NormalizedEvent],
-    startup_progress: &mut Option<&mut dyn StartupAdapterProgress>,
-) -> Result<usize> {
-    if startup_progress.is_none() {
-        return event_persistence::upsert_events_preserving_manifest_provenance(pool, events).await;
-    }
-    let mut inserted_count = 0usize;
-    for chunk in events.chunks_mut(FINALIZATION_EVENT_BATCH_SIZE) {
-        inserted_count +=
-            event_persistence::upsert_events_preserving_manifest_provenance(pool, chunk).await?;
-        record_startup_adapter_progress(pool, startup_progress).await?;
-    }
-    Ok(inserted_count)
+    ))
 }

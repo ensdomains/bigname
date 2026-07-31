@@ -6,13 +6,107 @@ use bigname_manifests::{
     FullDiscoveryReconciliationOptions, discovery_observation_evm_event_position,
     reconcile_discovery_observations, reconcile_scoped_discovery_observation_transitions,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::PgPool;
 
 use super::{constants::ZERO_ADDRESS, util::normalize_address};
 
 type MaterializedObservation = (String, i64, String, Option<i64>, Option<i64>, String);
 const DISCOVERY_TRANSITION_CHUNK_SIZE: usize = 128;
+
+type OrphanedDiscoveryStartRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    String,
+    Option<i64>,
+    Option<i64>,
+);
+
+pub(super) async fn load_orphaned_discovery_start_tombstones(
+    pool: &PgPool,
+    chain: &str,
+) -> Result<Vec<DiscoveryObservation>> {
+    let discovery_sources = [
+        ens_v2_subregistry_discovery_source(chain),
+        ens_v2_resolver_discovery_source(chain),
+    ];
+    let rows = sqlx::query_as::<_, OrphanedDiscoveryStartRow>(
+        r#"
+        SELECT
+            edge.chain_id,
+            edge.provenance ->> 'from_address',
+            edge.edge_kind,
+            edge.discovery_source,
+            edge.provenance ->> 'observation_key',
+            edge.active_from_block_number,
+            edge.active_from_block_hash,
+            (edge.provenance ->> 'transaction_index')::BIGINT,
+            (edge.provenance ->> 'log_index')::BIGINT
+        FROM discovery_edges edge
+        JOIN chain_lineage start_block
+          ON start_block.chain_id = edge.chain_id
+         AND start_block.block_hash = edge.active_from_block_hash
+         AND start_block.canonicality_state = 'orphaned'::canonicality_state
+        WHERE edge.chain_id = $1
+          AND edge.discovery_source = ANY($2::TEXT[])
+          AND edge.deactivated_at IS NULL
+          AND edge.active_from_block_number IS NOT NULL
+          AND edge.active_from_block_hash IS NOT NULL
+          AND edge.provenance ->> 'from_address' IS NOT NULL
+          AND edge.provenance ->> 'observation_key' IS NOT NULL
+        ORDER BY edge.discovery_source, edge.discovery_edge_id
+        "#,
+    )
+    .bind(chain)
+    .bind(&discovery_sources)
+    .fetch_all(pool)
+    .await
+    .with_context(|| format!("failed to load orphaned ENSv2 discovery starts for {chain}"))?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                chain,
+                from_address,
+                edge_kind,
+                discovery_source,
+                observation_key,
+                block_number,
+                block_hash,
+                transaction_index,
+                log_index,
+            )| DiscoveryObservation {
+                chain: chain.clone(),
+                from_address: from_address.clone(),
+                to_address: ZERO_ADDRESS.to_owned(),
+                edge_kind,
+                discovery_source,
+                active_from_block_number: Some(block_number),
+                active_from_block_hash: Some(block_hash.clone()),
+                active_to_block_number: None,
+                active_to_block_hash: None,
+                provenance: json!({
+                    "source": "orphaned_discovery_edge",
+                    "source_event": "CanonicalityChanged",
+                    "observation_key": observation_key,
+                    "from_address": from_address,
+                    "to_address": ZERO_ADDRESS,
+                    "chain_id": chain,
+                    "block_hash": block_hash,
+                    "block_number": block_number,
+                    "transaction_index": transaction_index,
+                    "log_index": log_index,
+                    "tombstone": true,
+                }),
+            },
+        )
+        .collect())
+}
 
 pub(super) fn latest_discovery_observations(
     observations: Vec<DiscoveryObservation>,
@@ -138,7 +232,7 @@ async fn reconcile_discovery_observation_history(
                 normalize_address(&observation.to_address),
             );
             source_latest_observations.insert(observation_key.clone(), observation.clone());
-            if materialized_observations.contains(&observation_position) {
+            if reconcile_full_sources && materialized_observations.contains(&observation_position) {
                 continue;
             }
             transition_states.push(vec![observation.clone()]);

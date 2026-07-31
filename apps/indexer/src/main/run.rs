@@ -21,7 +21,6 @@ use crate::{
     provider_configuration::ProviderSourceArgs,
     reconciliation::{HeaderAuditMode, MAX_REPORTED_LEGACY_CLOSURE_COVERAGE_GAPS},
     replay::deployment_profile_from_manifest_root,
-    resolver_profile_convergence::drain_resolver_profile_input_changes_with_progress,
     run_mode::IndexerRunMode,
     runtime::{
         IntakeChainTask, ManifestRuntimeState,
@@ -99,7 +98,6 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         "bigname-indexer",
     )
     .await?;
-    crate::metrics::configure_reconcile_progress(&pool, &deployment_profile).await?;
     bigname_storage::register_service_loop(
         &pool,
         bigname_storage::INDEXER_SERVICE_NAME,
@@ -234,15 +232,6 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         .map(|task| task.chain.clone())
         .collect::<Vec<_>>();
     startup_heartbeat.record(&pool, &live_chain_ids).await?;
-    if adapter_sync_mode != BackfillAdapterSyncMode::RawOnly
-        && !run_mode.normalized_replay_catchup_enabled
-    {
-        let mut progress = startup_heartbeat::StartupAdapterHeartbeat::new(
-            &mut startup_heartbeat,
-            &live_chain_ids,
-        );
-        drain_resolver_profile_input_changes_with_progress(&pool, &mut progress).await?;
-    }
     let (subtasks, subtask_monitor) = subtask_supervision::channel("indexer");
     if run_mode.normalized_replay_catchup_enabled {
         let mut catchup_config = NormalizedReplayCatchupConfig::new(
@@ -399,14 +388,12 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
             watched_plan_admission_epochs,
             &provider_registry,
             args.poll_interval_secs,
-            args.startup_discovery_page_logs,
             run_mode.live_watch_scope,
             run_mode.broad_runtime_refresh_enabled,
             run_mode.live_poll_adapter_sync_enabled,
             run_mode.live_poll_adapter_sync_after_normalized_replay_catchup,
             run_mode.broad_runtime_refresh_enabled,
             run_mode.discovery_refresh_enabled,
-            run_mode.resolver_profile_convergence_enabled,
             run_mode.broad_runtime_refresh_enabled,
             header_audit_mode,
             args.event_silent_reverse_resolver_addresses,
@@ -469,9 +456,7 @@ async fn sync_post_bootstrap_adapter_state_with_heartbeat(
         );
         sync_discovery_adapter_owned_raw_log_state_with_heartbeat(
             pool,
-            deployment_profile,
             watched_chain_plan,
-            startup_discovery_page_logs,
             heartbeat,
             heartbeat_chain_ids,
         )
@@ -537,79 +522,6 @@ async fn widen_to_live_watch_scope(
         live_intake_chain_tasks,
         watched_plan_admission_epochs,
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use anyhow::Context;
-    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
-
-    use super::*;
-
-    #[tokio::test]
-    async fn post_bootstrap_discovery_sync_records_page_progress() -> Result<()> {
-        let database = TestDatabase::create_migrated(
-            TestDatabaseConfig::new("bigname_indexer_post_bootstrap_heartbeat_test"),
-            &bigname_storage::MIGRATOR,
-            "failed to migrate post-bootstrap heartbeat test database",
-        )
-        .await?;
-        let instance_id = "post-bootstrap-page-progress-test";
-        bigname_storage::register_service_loop(
-            database.pool(),
-            bigname_storage::INDEXER_SERVICE_NAME,
-            instance_id,
-        )
-        .await?;
-        sqlx::query(
-            r#"
-            UPDATE service_loop_heartbeats
-            SET started_at = clock_timestamp() - INTERVAL '2 minutes',
-                heartbeat_at = clock_timestamp() - INTERVAL '1 minute'
-            WHERE service_name = 'indexer'
-              AND instance_id = $1
-            "#,
-        )
-        .bind(instance_id)
-        .execute(database.pool())
-        .await?;
-
-        let watched_chain_plan = vec![bigname_manifests::WatchedChainPlan {
-            chain: "ethereum-mainnet".to_owned(),
-            addresses: Vec::new(),
-            manifest_root_entry_count: 0,
-            manifest_contract_entry_count: 0,
-            discovery_edge_entry_count: 0,
-        }];
-        let chain_ids = vec!["ethereum-mainnet".to_owned()];
-        let mut heartbeat = StartupHeartbeat::new(instance_id.to_owned(), Duration::ZERO);
-        sync_post_bootstrap_adapter_state_with_heartbeat(
-            database.pool(),
-            "test",
-            &watched_chain_plan,
-            1,
-            &IndexerRunMode::new(BackfillAdapterSyncMode::Auto, false),
-            &mut heartbeat,
-            &chain_ids,
-        )
-        .await?;
-        assert!(
-            heartbeat.adapter_progress_count() > 0,
-            "the production post-bootstrap branch must forward page progress"
-        );
-        let heartbeat = bigname_storage::load_service_loop_heartbeat(
-            database.pool(),
-            bigname_storage::INDEXER_SERVICE_NAME,
-            instance_id,
-        )
-        .await?
-        .context("post-bootstrap sync must retain its registered heartbeat")?;
-        assert!(
-            heartbeat.age_seconds <= 1,
-            "page progress must refresh the post-bootstrap heartbeat"
-        );
-        database.cleanup().await
-    }
 }
 
 #[cfg(test)]

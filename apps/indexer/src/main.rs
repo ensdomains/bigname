@@ -34,8 +34,6 @@ mod reconciliation;
 mod repair;
 #[path = "main/replay.rs"]
 mod replay;
-#[path = "main/resolver_profile_convergence.rs"]
-mod resolver_profile_convergence;
 #[path = "main/rewind.rs"]
 mod rewind;
 #[path = "main/run.rs"]
@@ -46,6 +44,8 @@ mod run_mode;
 mod runtime;
 #[path = "main/source_scope.rs"]
 mod source_scope;
+#[path = "main/startup_progress.rs"]
+mod startup_progress;
 #[cfg(test)]
 #[path = "main/tests.rs"]
 mod tests;
@@ -55,8 +55,7 @@ use backfill::{
     CoinbaseSqlBackfillConfig, CoinbaseSqlSourceRegistry, hash_pinned_backfill_range_specs,
     is_base_chain, load_existing_job_id, run_resumable_coinbase_sql_backfill_job,
     run_resumable_coinbase_sql_backfill_job_concurrently, run_resumable_hash_pinned_backfill_job,
-    selected_backfill_source, standalone_backfill_profile_convergence_enabled,
-    warn_if_stale_generation_backfill_job_was_reused,
+    selected_backfill_source, warn_if_stale_generation_backfill_job_was_reused,
 };
 #[cfg(test)]
 use bigname_manifests::{
@@ -95,12 +94,13 @@ pub(crate) use replay::{
     generated_backfill_lease_token,
 };
 use replay::{backfill_source_selector, replay_normalized_events_selection};
-use resolver_profile_convergence::drain_resolver_profile_input_changes;
 #[allow(unused_imports)]
 use runtime::*;
 #[cfg(test)]
 use std::path::PathBuf;
 use {clap::Parser, tracing::info};
+
+pub(crate) use startup_progress::{StartupAdapterProgress, StartupAdapterProgressFuture};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -227,13 +227,6 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
     };
     let lease_expires_at = backfill_lease_expires_at(args.lease_duration_secs)?;
     let adapter_sync_mode = BackfillAdapterSyncMode::parse(&args.hash_pinned_adapter_sync)?;
-    let profile_convergence_enabled = standalone_backfill_profile_convergence_enabled(
-        &pool,
-        &source_plan,
-        selected_backfill_source,
-        adapter_sync_mode,
-    )
-    .await?;
     let header_audit_mode =
         HeaderAuditMode::from_retain_audit_fields(args.retain_header_audit_fields);
     let config = BackfillJobRunConfig {
@@ -308,11 +301,6 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
         job_outcome.backfill_job_id,
     )
     .await?;
-    if profile_convergence_enabled {
-        let profile_convergence = drain_resolver_profile_input_changes(&pool).await?;
-        profile_convergence
-            .ensure_chain_completion_allowed(&args.chain, "standalone backfill completion")?;
-    }
     Ok(())
 }
 

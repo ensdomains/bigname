@@ -34,31 +34,6 @@ use super::{
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
 const TEST_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
-#[derive(Default)]
-struct CountingStartupAdapterProgress {
-    record_count: usize,
-    completed_record_count: usize,
-}
-
-impl StartupAdapterProgress for CountingStartupAdapterProgress {
-    fn record<'a>(&'a mut self, pool: &'a PgPool) -> crate::StartupAdapterProgressFuture<'a> {
-        self.record_count += 1;
-        Box::pin(async move {
-            let status = sqlx::query_scalar::<_, String>(
-                "SELECT status FROM normalized_replay_adapter_checkpoints \
-                 WHERE adapter = 'ens_v1_subregistry_discovery' \
-                 ORDER BY updated_at DESC LIMIT 1",
-            )
-            .fetch_optional(pool)
-            .await?;
-            if status.as_deref() == Some("completed") {
-                self.completed_record_count += 1;
-            }
-            Ok(())
-        })
-    }
-}
-
 struct TestDir {
     path: PathBuf,
 }
@@ -808,43 +783,6 @@ async fn canonical_new_owner_log_persists_one_active_subregistry_edge_and_expand
 }
 
 #[tokio::test]
-async fn source_scoped_emitter_loading_preserves_startup_progress() -> Result<()> {
-    let _permit = crate::acquire_test_db_permit().await;
-    let test_dir = TestDir::new()?;
-    let database = TestDatabase::new().await?;
-    let chain = "ethereum-mainnet";
-    let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
-
-    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &manifest_contents(true))?;
-    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
-    let source_scope = normalized_registry_source_scope_targets(&[(
-        ENS_V1_REGISTRY_SOURCE_FAMILY.to_owned(),
-        registry_address.to_owned(),
-        42,
-        42,
-    )]);
-    let mut progress = CountingStartupAdapterProgress::default();
-    let emitters = {
-        let mut progress_ref = Some(&mut progress as &mut dyn StartupAdapterProgress);
-        load_active_emitters(
-            database.pool(),
-            chain,
-            Some(&source_scope),
-            false,
-            &mut progress_ref,
-        )
-        .await?
-    };
-
-    assert!(!emitters.is_empty());
-    assert!(
-        progress.record_count > 0,
-        "source-scoped emitter loading must preserve the progress-aware row path"
-    );
-    database.cleanup().await
-}
-
-#[tokio::test]
 async fn startup_checkpointed_subregistry_matches_uncheckpointed_edges_and_events() -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;
     let test_dir = TestDir::new()?;
@@ -889,23 +827,13 @@ async fn startup_checkpointed_subregistry_matches_uncheckpointed_edges_and_event
 
     sync_ens_v1_subregistry_discovery(expected_database.pool(), chain).await?;
     let startup_checkpoint = StartupAdapterCheckpointContext::new("test", 43)?;
-    let mut startup_progress = CountingStartupAdapterProgress::default();
-    sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit_and_progress(
+    sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit(
         startup_database.pool(),
         chain,
         &startup_checkpoint,
         1,
-        &mut startup_progress,
     )
     .await?;
-    assert!(
-        startup_progress.record_count > 3,
-        "checkpoint ingestion and the paged reconciliation/event finalization must repeatedly report startup progress"
-    );
-    assert!(
-        startup_progress.completed_record_count > 0,
-        "the completed finalization boundary must report startup progress"
-    );
 
     assert_eq!(
         load_subregistry_discovery_outputs(startup_database.pool()).await?,
@@ -928,8 +856,7 @@ async fn startup_checkpointed_subregistry_matches_uncheckpointed_edges_and_event
         "startup checkpoints must use their own key and reach completion"
     );
 
-    crate::clear_startup_adapter_checkpoints(startup_database.pool(), chain, &startup_checkpoint)
-        .await?;
+    clear_startup_adapter_checkpoints(startup_database.pool(), chain, &startup_checkpoint).await?;
     expected_database.cleanup().await?;
     startup_database.cleanup().await
 }
@@ -1444,7 +1371,7 @@ async fn startup_subregistry_resumes_across_page_limit_change() -> Result<()> {
         "resume must continue after the durable log position without touching the old page-two boundary"
     );
 
-    crate::clear_startup_adapter_checkpoints(database.pool(), chain, &startup_checkpoint).await?;
+    clear_startup_adapter_checkpoints(database.pool(), chain, &startup_checkpoint).await?;
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoints

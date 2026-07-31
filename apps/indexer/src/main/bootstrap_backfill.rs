@@ -19,7 +19,7 @@ use crate::{
         HeaderAuditMode, RawFactNormalizedEventReplayRequest,
         RawFactNormalizedEventReplaySelection, log_raw_fact_normalized_event_replay_outcome,
     },
-    run::startup_heartbeat::{StartupAdapterHeartbeat, StartupHeartbeat},
+    run::startup_heartbeat::StartupHeartbeat,
     runtime::{IntakeChainTask, validate_provider_registry_for_intake_tasks},
 };
 
@@ -37,8 +37,6 @@ mod orchestration;
 mod planning;
 #[path = "bootstrap_backfill/progress.rs"]
 mod progress;
-#[path = "bootstrap_backfill/recovery.rs"]
-mod recovery;
 #[path = "bootstrap_backfill/replay.rs"]
 mod replay;
 
@@ -64,20 +62,8 @@ use progress::{
     bootstrap_source_identity_with_optional_progress, extend_bootstrap_targets_with_progress,
     load_bootstrap_source_plan_with_optional_progress,
     load_discovery_bootstrap_targets_with_optional_progress,
-    load_retained_recovery_targets_with_optional_progress,
     narrow_bootstrap_source_plan_with_optional_progress,
     plan_bootstrap_segments_with_optional_progress, record_bootstrap_progress,
-};
-#[cfg(test)]
-pub(crate) use recovery::install_forced_retention_rotation;
-use recovery::{
-    BootstrapConvergenceTracker, BootstrapPassStatus, finish_bootstrap_convergence_pass,
-    finish_bootstrap_convergence_pass_with_progress,
-    load_bootstrap_retention_snapshot_with_progress,
-};
-pub(crate) use recovery::{
-    automatic_backfill_retention_snapshot_is_stable,
-    converge_ens_v2_retained_history_through_block, load_bootstrap_retention_snapshot,
 };
 #[cfg(not(test))]
 use replay::replay_completed_bootstrap_raw_range;

@@ -59,7 +59,7 @@ pub(crate) use poll_loop::run_poll_loop;
 #[cfg(test)]
 pub(crate) use poll_loop::{
     ReplayHandoffLatchStatus, install_replay_handoff_before_latch_test_hook,
-    latch_replay_handoff_if_stable, refresh_discovery_watch_state,
+    latch_replay_handoff_if_stable,
 };
 #[cfg(test)]
 pub(crate) use refresh::{

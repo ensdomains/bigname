@@ -22,25 +22,10 @@ use super::{
         DERIVATION_KIND_MANIFEST_SYNC, EVENT_KIND_CAPABILITY_CHANGED,
         EVENT_KIND_PROXY_IMPLEMENTATION_CHANGED, EVENT_KIND_SOURCE_MANIFEST_UPDATED,
     },
-    sync_manifest_normalized_events, sync_manifest_normalized_events_with_progress,
+    sync_manifest_normalized_events,
 };
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Default)]
-struct CountingManifestEventProgress(usize);
-
-impl bigname_manifests::ManifestRuntimeProgress for CountingManifestEventProgress {
-    fn record<'a>(
-        &'a mut self,
-        _pool: &'a PgPool,
-    ) -> bigname_manifests::ManifestRuntimeProgressFuture<'a> {
-        Box::pin(async move {
-            self.0 += 1;
-            Ok(())
-        })
-    }
-}
 
 struct TestDatabase {
     admin_pool: PgPool,
@@ -378,13 +363,7 @@ async fn sync_manifest_normalized_events_is_idempotent() -> Result<()> {
     )
     .await?;
 
-    let mut progress = CountingManifestEventProgress::default();
-    let first_summary =
-        sync_manifest_normalized_events_with_progress(database.pool(), &mut progress).await?;
-    assert!(
-        progress.0 >= 4,
-        "manifest observation loading, event construction, and publication must report progress"
-    );
+    let first_summary = sync_manifest_normalized_events(database.pool()).await?;
     assert_eq!(first_summary.total_synced_count, 4);
     assert_eq!(first_summary.total_inserted_count, 4);
     assert_eq!(

@@ -216,12 +216,10 @@ stopped advancing. Worker
 bootstrap replay and projection apply refresh the process row only at actual
 progress boundaries; the indexer registers before startup bootstrap and
 refreshes after completed hash-pinned progress units of at most 32 blocks
-inside the configured checkpoint chunk, then after completed startup adapter
-checkpoint stream pages and bounded discovery, identity, binding, and
-normalized-event finalization batches. Live manifest and discovery refresh
-adapter passes reuse those checkpoint-page callbacks and family-boundary beats.
-A free-running heartbeat task does not
-keep a stuck operation healthy. Worker rebuilds refresh at their
+inside the configured checkpoint chunk. Startup adapter synchronization uses
+plain full-family entry points and records liveness only after completed family
+boundaries, not while a family call is pending; it has no adapter-checkpoint
+page callbacks. Worker rebuilds refresh at their
 existing projection batch boundaries. A monolithic worker SQL or hydration
 operation instead sets `loops.worker.phase` and uses
 `BIGNAME_API_WORKER_REBUILD_PHASE_MAX_AGE_SECS` (default 43,200) in the API and

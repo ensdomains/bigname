@@ -3,7 +3,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use bigname_domain::normalization::{ENS_NORMALIZER_VERSION, normalize_name};
 use bigname_manifests::WatchedContractSource;
 use bigname_storage::SurfaceBinding;
@@ -12,7 +12,6 @@ use sqlx::types::Uuid;
 
 use super::{
     constants::*,
-    live::RegistryReplayState,
     types::{ActiveEmitter, NameMetadata, ObservationRef, RegistryNameState},
     util::{dns_encode, event_position_timestamp, hex_string, keccak256_bytes, namehash_bytes},
 };
@@ -171,36 +170,6 @@ pub(super) fn insert_registry_name_state(
         .entry(name_key)
         .or_default()
         .insert(key);
-}
-
-pub(super) fn rebuild_registry_state_indexes(state: &mut RegistryReplayState) -> Result<()> {
-    state.state_keys_by_registry_namehash.clear();
-    state.current_token_alias_by_canonical_key.clear();
-    for (key, value) in &state.states_by_registry_token {
-        ensure!(
-            key.0 == value.registry_address,
-            "ENSv2 registry-state key address does not match its state"
-        );
-        state
-            .state_keys_by_registry_namehash
-            .entry((value.registry_address.clone(), value.name.namehash.clone()))
-            .or_default()
-            .insert(key.clone());
-    }
-    for (alias, canonical_key) in &state.token_aliases {
-        ensure!(
-            state.states_by_registry_token.contains_key(canonical_key),
-            "ENSv2 token alias target is absent from registry state"
-        );
-        ensure!(
-            state
-                .current_token_alias_by_canonical_key
-                .insert(canonical_key.clone(), alias.clone())
-                .is_none(),
-            "ENSv2 registry state has multiple current aliases for one token"
-        );
-    }
-    Ok(())
 }
 
 pub(super) fn discovery_observation_key(registry: &str, token_id: &str) -> String {

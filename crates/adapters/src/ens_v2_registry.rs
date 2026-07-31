@@ -20,19 +20,13 @@ mod live;
 mod load;
 mod names;
 mod normalized;
-mod recovery;
 mod restricted;
-mod startup;
 mod types;
 mod util;
 
 use crate::{
     adapter_manifest::load_required_active_manifest_event_topic0s_by_signature,
-    checkpoint_context::{
-        StartupAdapterProgress, reborrow_startup_adapter_progress, record_startup_adapter_progress,
-    },
     normalized_event_support::count_events_by_kind,
-    startup_progress::record_processed_row_progress,
 };
 use constants::*;
 use decode::build_registry_observations;
@@ -46,31 +40,17 @@ use identity::{
     build_token_lineage, coalesce_name_surfaces_for_upsert, normalize_surface_bindings_for_upsert,
     upsert_surface_bindings_close_before_open,
 };
-use live::{
-    FullSourceRawLogHistoryGuard, RegistryReplayState, acquire_registry_sync_fence,
-    clear_live_registry_replay_checkpoints_for_chain, has_authoritative_ens_v2_closure_through,
-    has_authoritative_ens_v2_closure_through_with_progress, invalidate_live_registry_replay_state,
-    release_registry_sync_fence,
-};
-use load::{RawLogCanonicalityFilter, load_registry_raw_logs_with_progress};
+use live::{RegistryReplayState, invalidate_live_registry_replay_state};
+use load::{RawLogCanonicalityFilter, load_registry_raw_logs};
 use names::initial_registry_suffixes;
 use restricted::{reconstruct_prior_registry_state, requires_prior_registry_state};
-use startup::persist_registry_outputs_with_progress;
 use types::*;
 use util::normalize_address;
 
 pub use entrypoints::{
     sync_ens_v2_registry_resource_surface, sync_ens_v2_registry_resource_surface_through_block,
-    sync_ens_v2_registry_resource_surface_through_block_with_progress,
-    sync_ens_v2_registry_resource_surface_with_progress,
 };
-pub use live::{
-    ensure_ens_v2_retained_history_proof_through, record_ens_v2_live_selected_raw_log_coverage,
-    record_ens_v2_live_selected_raw_log_coverage_with_progress,
-    sync_ens_v2_registry_resource_surface_live_poll,
-    sync_ens_v2_registry_resource_surface_live_poll_with_progress,
-};
-pub use recovery::{EnsV2MissingCoverage, ens_v2_missing_coverage, is_ens_v2_missing_coverage};
+pub use live::sync_ens_v2_registry_resource_surface_live_poll;
 
 #[cfg(test)]
 use crate::evm_abi::keccak_signature_hex;
@@ -81,7 +61,7 @@ use bigname_storage::{CanonicalityState, upsert_surface_bindings};
 #[cfg(test)]
 use emitters::{preferred_emitters_by_scope, source_rank};
 #[cfg(test)]
-use load::{load_registry_raw_log_prefix, load_registry_raw_logs};
+use load::load_registry_raw_log_prefix;
 #[cfg(test)]
 use serde_json::{Value, json};
 #[cfg(test)]
@@ -115,96 +95,10 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
     source_scope: Option<&[(String, String, i64, i64)]>,
     canonicality_filter: RawLogCanonicalityFilter,
     max_block_number: Option<i64>,
-    mut progress: Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<EnsV2RegistryResourceSurfaceSyncSummary> {
-    let mut registry_sync_fence = Some(acquire_registry_sync_fence(pool, chain).await?);
     // Non-live entrypoints may rewrite persisted state behind the process-local live cache.
     invalidate_live_registry_replay_state(pool, chain);
-    clear_live_registry_replay_checkpoints_for_chain(pool, chain).await?;
-    let restricted_source_guard = if restrict_to_block_hashes {
-        let fence = registry_sync_fence
-            .take()
-            .context("ENSv2 registry sync fence is absent before restricted-source upgrade")?;
-        Some(FullSourceRawLogHistoryGuard::acquire(fence, chain).await?)
-    } else {
-        None
-    };
-    let full_source_guard = if !restrict_to_block_hashes {
-        let full_source_target = if let Some(target) = max_block_number {
-            target
-        } else {
-            sqlx::query_scalar::<_, Option<i64>>(
-                r#"
-                SELECT MAX(block_number)::BIGINT
-                FROM chain_lineage
-                WHERE chain_id = $1
-                  AND canonicality_state <> 'orphaned'::canonicality_state
-                "#,
-            )
-            .bind(chain)
-            .fetch_one(pool)
-            .await
-            .with_context(|| format!("failed to load ENSv2 full-source target for {chain}"))?
-            .unwrap_or(0)
-        };
-        let has_authoritative_closure = match progress.as_deref_mut() {
-            Some(progress) => {
-                has_authoritative_ens_v2_closure_through_with_progress(
-                    pool,
-                    chain,
-                    full_source_target,
-                    progress,
-                )
-                .await?
-            }
-            None => {
-                has_authoritative_ens_v2_closure_through(pool, chain, full_source_target).await?
-            }
-        };
-        if !has_authoritative_closure {
-            let fence = registry_sync_fence
-                .take()
-                .context("ENSv2 registry sync fence is absent before empty-source release")?;
-            release_registry_sync_fence(fence, chain).await?;
-            return Ok(EnsV2RegistryResourceSurfaceSyncSummary::empty(0));
-        }
-        let fence = registry_sync_fence
-            .take()
-            .context("ENSv2 registry sync fence is absent before full-source upgrade")?;
-        let guard = FullSourceRawLogHistoryGuard::acquire(fence, chain).await?;
-        let proof = match progress.as_deref_mut() {
-            Some(progress) => {
-                guard
-                    .ensure_proof_through_with_progress(pool, full_source_target, progress)
-                    .await?
-            }
-            None => guard.ensure_proof_through(pool, full_source_target).await?,
-        };
-        let pre_sync_requirements = match progress.as_deref_mut() {
-            Some(progress) => {
-                guard
-                    .load_requirements_through_with_progress(
-                        pool,
-                        proof,
-                        full_source_target,
-                        progress,
-                    )
-                    .await?
-            }
-            None => {
-                guard
-                    .load_requirements_through(pool, proof, full_source_target)
-                    .await?
-            }
-        };
-        Some((guard, proof, full_source_target, pre_sync_requirements))
-    } else {
-        None
-    };
-    let expected_discovery_admission_epoch = full_source_guard
-        .as_ref()
-        .map(|(_, proof, _, _)| proof.discovery_admission_epoch);
-    let sync_result = sync_ens_v2_registry_resource_surface_with_scope_and_state(
+    sync_ens_v2_registry_resource_surface_with_scope_and_state(
         pool,
         chain,
         restrict_to_block_hashes,
@@ -214,76 +108,12 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
         max_block_number,
         None,
         true,
-        !restrict_to_block_hashes,
-        expected_discovery_admission_epoch,
-        reborrow_startup_adapter_progress(&mut progress),
+        true,
+        false,
+        None,
     )
-    .await;
-    let result = match (sync_result, full_source_guard) {
-        (
-            Ok((summary, replay_state)),
-            Some((guard, proof, full_source_target, pre_sync_requirements)),
-        ) => {
-            match progress {
-                Some(progress) => {
-                    guard
-                        .finish_with_progress(
-                            pool,
-                            proof,
-                            full_source_target,
-                            summary.discovery_admission_epoch_bump_count,
-                            &pre_sync_requirements,
-                            None,
-                            progress,
-                        )
-                        .await?;
-                }
-                None => {
-                    guard
-                        .finish(
-                            pool,
-                            proof,
-                            full_source_target,
-                            summary.discovery_admission_epoch_bump_count,
-                            &pre_sync_requirements,
-                            None,
-                        )
-                        .await?;
-                }
-            }
-            Ok((summary, replay_state))
-        }
-        (Ok(result), None) => Ok(result),
-        (Err(error), Some((guard, _, _, _))) => {
-            let _ = guard.abort().await;
-            Err(error)
-        }
-        (Err(error), None) => Err(error),
-    };
-    let result = if let Some(guard) = restricted_source_guard {
-        let guard_result = if result.is_ok() {
-            guard.release().await
-        } else {
-            guard.abort().await
-        };
-        prioritize_operation_error(result, guard_result)
-    } else {
-        result
-    };
-    let release = if let Some(registry_sync_fence) = registry_sync_fence {
-        release_registry_sync_fence(registry_sync_fence, chain).await
-    } else {
-        Ok(())
-    };
-    prioritize_operation_error(result.map(|(summary, _)| summary), release)
-}
-
-fn prioritize_operation_error<T>(operation: Result<T>, release: Result<()>) -> Result<T> {
-    match (operation, release) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-    }
+    .await
+    .map(|(summary, _)| summary)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -297,12 +127,13 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
     max_block_number: Option<i64>,
     replay_state: Option<RegistryReplayState>,
     include_historical_emitters: bool,
+    reconstruct_restricted_prior_state: bool,
     reconcile_full_sources: bool,
     expected_discovery_admission_epoch: Option<i64>,
-    mut progress: Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<(EnsV2RegistryResourceSurfaceSyncSummary, RegistryReplayState)> {
     let is_resumed_replay = replay_state.is_some();
     let mut replay_state = replay_state.unwrap_or_default();
+    let reconcile_orphaned_starts = source_scope.is_none();
     let source_scope = source_scope.map(normalized_source_scope_targets);
     if source_scope.as_ref().is_some_and(Vec::is_empty) {
         return Ok((
@@ -322,7 +153,6 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
         chain,
         scoped_emitter_identities.as_ref(),
         include_historical_emitters,
-        &mut progress,
     )
     .await?;
     if active_emitters.is_empty() {
@@ -343,7 +173,7 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
     )
     .await?;
 
-    let raw_logs = load_registry_raw_logs_with_progress(
+    let raw_logs = load_registry_raw_logs(
         pool,
         chain,
         &active_emitters,
@@ -352,7 +182,6 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
         source_scope.as_deref(),
         canonicality_filter,
         max_block_number,
-        &mut progress,
     )
     .await?;
     let scanned_log_count = raw_logs.len();
@@ -371,21 +200,16 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
         .collect();
     let reconstruct_each_selected_log = !is_resumed_replay
         && restrict_to_block_hashes
-        && !reconcile_full_sources
+        && reconstruct_restricted_prior_state
         && requires_prior_registry_state(&observations_by_log);
     let mut linked_resource_states = BTreeMap::<Uuid, RegistryNameState>::new();
     let mut closed_bindings = BTreeMap::<Uuid, SurfaceBinding>::new();
     let mut observations = Vec::<DiscoveryObservation>::new();
     let mut graph_events = Vec::<NormalizedEvent>::new();
 
-    for (index, (raw_log, observations_for_log)) in raw_logs
-        .iter()
-        .zip(observations_by_log.into_iter())
-        .enumerate()
-    {
+    for (raw_log, observations_for_log) in raw_logs.iter().zip(observations_by_log.into_iter()) {
         if reconstruct_each_selected_log && !observations_for_log.is_empty() {
-            replay_state =
-                reconstruct_prior_registry_state(pool, chain, raw_log, &mut progress).await?;
+            replay_state = reconstruct_prior_registry_state(pool, chain, raw_log).await?;
         }
         if !observations_for_log.is_empty() {
             let mut context = RegistryObservationContext {
@@ -405,11 +229,16 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
                 apply_registry_observation(observation, &mut context)?;
             }
         }
-        record_processed_row_progress(pool, &mut progress, index + 1, raw_logs.len()).await?;
+    }
+
+    if reconcile_orphaned_starts {
+        let mut orphaned_starts =
+            discovery::load_orphaned_discovery_start_tombstones(pool, chain).await?;
+        orphaned_starts.append(&mut observations);
+        observations = orphaned_starts;
     }
 
     let latest_observations = latest_discovery_observations(observations.clone())?;
-    record_startup_adapter_progress(pool, &mut progress).await?;
     let reconciliation = reconcile_discovery_observation_history_for_chain(
         pool,
         chain,
@@ -420,9 +249,7 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
     )
     .await
     .with_context(|| format!("failed to reconcile ENSv2 discovery observations for {chain}"))?;
-    record_startup_adapter_progress(pool, &mut progress).await?;
     hydrate_subregistry_event_target_ids(pool, &mut graph_events).await?;
-    record_startup_adapter_progress(pool, &mut progress).await?;
 
     let mut token_lineages = Vec::<TokenLineage>::new();
     let mut resources = Vec::<Resource>::new();
@@ -430,16 +257,8 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
     let mut bindings = Vec::<SurfaceBinding>::new();
     let mut events = graph_events;
 
-    let linked_resource_state_count = linked_resource_states.len();
-    for (index, state) in linked_resource_states.values().enumerate() {
+    for state in linked_resource_states.values() {
         let Some(link) = state.resource.as_ref() else {
-            record_processed_row_progress(
-                pool,
-                &mut progress,
-                index + 1,
-                linked_resource_state_count,
-            )
-            .await?;
             continue;
         };
         token_lineages.push(build_token_lineage(pool, state, link).await?);
@@ -451,8 +270,6 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
             bindings.push(build_surface_binding(pool, state, link).await?);
         }
         events.extend(build_resource_events(state, link));
-        record_processed_row_progress(pool, &mut progress, index + 1, linked_resource_state_count)
-            .await?;
     }
     let materialized_binding_ids = bindings
         .iter()
@@ -467,32 +284,14 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
 
     let by_kind = count_events_by_kind(&events);
     coalesce_name_surfaces_for_upsert(&mut surfaces)?;
-    record_startup_adapter_progress(pool, &mut progress).await?;
     normalize_surface_bindings_for_upsert(pool, &mut bindings).await?;
-    record_startup_adapter_progress(pool, &mut progress).await?;
-    let normalized_event_inserted_count = match progress {
-        Some(progress) => {
-            persist_registry_outputs_with_progress(
-                pool,
-                &token_lineages,
-                &resources,
-                &surfaces,
-                &bindings,
-                &events,
-                progress,
-            )
-            .await?
-        }
-        None => {
-            upsert_token_lineages(pool, &token_lineages).await?;
-            upsert_resources(pool, &resources).await?;
-            upsert_name_surfaces(pool, &surfaces).await?;
-            upsert_surface_bindings_close_before_open(pool, &bindings).await?;
-            upsert_normalized_events_with_summary(pool, &events)
-                .await?
-                .inserted_count
-        }
-    };
+    upsert_token_lineages(pool, &token_lineages).await?;
+    upsert_resources(pool, &resources).await?;
+    upsert_name_surfaces(pool, &surfaces).await?;
+    upsert_surface_bindings_close_before_open(pool, &bindings).await?;
+    let normalized_event_inserted_count = upsert_normalized_events_with_summary(pool, &events)
+        .await?
+        .inserted_count;
 
     let summary = EnsV2RegistryResourceSurfaceSyncSummary {
         scanned_log_count,

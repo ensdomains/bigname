@@ -50,7 +50,7 @@ pub(crate) async fn sync_live_adapter_backlog_after_normalized_replay_with_progr
     pool: &sqlx::PgPool,
     deployment_profile: &str,
     chains: &[String],
-    progress: &mut dyn bigname_adapters::StartupAdapterProgress,
+    progress: &mut dyn crate::StartupAdapterProgress,
 ) -> Result<LiveAdapterBacklogSyncSummary> {
     sync_live_adapter_backlog_after_normalized_replay_inner(
         pool,
@@ -65,7 +65,7 @@ async fn sync_live_adapter_backlog_after_normalized_replay_inner(
     pool: &sqlx::PgPool,
     deployment_profile: &str,
     chains: &[String],
-    progress: &mut Option<&mut dyn bigname_adapters::StartupAdapterProgress>,
+    progress: &mut Option<&mut dyn crate::StartupAdapterProgress>,
 ) -> Result<LiveAdapterBacklogSyncSummary> {
     let mut aggregate = LiveAdapterBacklogSyncSummary::default();
 
@@ -204,12 +204,11 @@ async fn sync_backlog_page(
     deployment_profile: &str,
     chain: &str,
     hashes: &[String],
-    progress: &mut Option<&mut dyn bigname_adapters::StartupAdapterProgress>,
+    progress: &mut Option<&mut dyn crate::StartupAdapterProgress>,
 ) -> Result<super::super::types::PersistedRawPayloadAdapterSyncSummary> {
     match progress.as_mut() {
         Some(progress) => {
-            let mut page_progress =
-                Some(&mut **progress as &mut dyn bigname_adapters::StartupAdapterProgress);
+            let mut page_progress = Some(&mut **progress as &mut dyn crate::StartupAdapterProgress);
             sync_live_adapter_state_from_persisted_raw_payloads_with_progress(
                 pool,
                 deployment_profile,
@@ -233,7 +232,7 @@ async fn sync_backlog_page(
 
 async fn record_backlog_progress(
     pool: &sqlx::PgPool,
-    progress: &mut Option<&mut dyn bigname_adapters::StartupAdapterProgress>,
+    progress: &mut Option<&mut dyn crate::StartupAdapterProgress>,
 ) -> Result<()> {
     if let Some(progress) = progress.as_mut() {
         progress.record(pool).await?;

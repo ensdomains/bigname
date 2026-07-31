@@ -1,5 +1,5 @@
+use crate::StartupAdapterProgress;
 use anyhow::Result;
-use bigname_adapters::StartupAdapterProgress;
 use bigname_storage::ChainCheckpoint;
 
 use crate::{

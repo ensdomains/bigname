@@ -5,8 +5,6 @@ use std::sync::{Arc, OnceLock};
 
 mod adapter_manifest;
 mod block_derived_normalized_events;
-mod checkpoint_codec;
-mod checkpoint_context;
 mod ens_v1_reverse_claim;
 mod ens_v1_subregistry_discovery;
 mod ens_v1_unwrapped_authority;
@@ -19,105 +17,46 @@ mod evm_abi;
 mod manifest_normalized_events;
 mod normalized_event_support;
 mod registry_migration_cache;
-mod startup_progress;
-mod startup_versions;
 
 pub use block_derived_normalized_events::{
     BlockDerivedNormalizedEventKindSyncSummary, BlockDerivedNormalizedEventSyncSummary,
-    sync_block_derived_normalized_events, sync_block_derived_normalized_events_with_progress,
+    sync_block_derived_normalized_events,
     sync_block_derived_normalized_events_with_scanned_log_count,
-    sync_block_derived_normalized_events_with_scanned_log_count_and_progress,
-    sync_block_derived_normalized_events_with_stateless_replay_authority,
-    sync_block_derived_normalized_events_with_stateless_replay_authority_and_progress,
-};
-pub use checkpoint_context::{
-    ReplayAdapterCheckpointContext, StartupAdapterCheckpointContext, StartupAdapterProgress,
-    StartupAdapterProgressFuture, clear_startup_adapter_checkpoints,
 };
 pub use ens_v1_reverse_claim::{
     EnsV1ReverseClaimKindSyncSummary, EnsV1ReverseClaimSyncSummary, sync_ens_v1_reverse_claim,
-    sync_ens_v1_reverse_claim_range, sync_ens_v1_reverse_claim_with_progress,
+    sync_ens_v1_reverse_claim_range,
 };
 pub use ens_v1_subregistry_discovery::{
     EnsV1SubregistryDiscoverySyncSummary, sync_ens_v1_subregistry_discovery,
     sync_ens_v1_subregistry_discovery_through_block,
     sync_ens_v1_subregistry_discovery_through_block_with_expected_admission_epoch,
-    sync_ens_v1_subregistry_discovery_through_block_with_expected_admission_epoch_and_progress,
-    sync_ens_v1_subregistry_discovery_with_replay_checkpoint,
-    sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit,
-    sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit_and_progress,
-    sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit,
-    sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit_and_progress,
 };
 pub use ens_v1_unwrapped_authority::{
-    EnsV1TextRecordChange, EnsV1UnwrappedAuthoritySyncSummary, ResolverProfileEventReconciliation,
-    ResolverProfileEventReconciliationPublication, ResolverProfileEventReconciliationSummary,
-    begin_resolver_profile_event_reconciliation, decode_ens_v1_text_record_change,
-    reconcile_resolver_profile_events, sync_ens_v1_unwrapped_authority,
-    sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit,
-    sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit_and_progress,
-    sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit,
-    sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit_and_progress,
+    EnsV1TextRecordChange, EnsV1UnwrappedAuthoritySyncSummary, decode_ens_v1_text_record_change,
+    sync_ens_v1_unwrapped_authority, sync_ens_v1_unwrapped_authority_through_block,
 };
 pub use ens_v2_permissions::{
     EnsV2PermissionsKindSyncSummary, EnsV2PermissionsSyncSummary, sync_ens_v2_permissions,
-    sync_ens_v2_permissions_through_block, sync_ens_v2_permissions_through_block_with_progress,
-    sync_ens_v2_permissions_with_progress,
+    sync_ens_v2_permissions_through_block,
 };
 pub use ens_v2_registrar::{
     EnsV2RegistrarKindSyncSummary, EnsV2RegistrarSyncSummary, sync_ens_v2_registrar,
-    sync_ens_v2_registrar_through_block, sync_ens_v2_registrar_through_block_with_progress,
-    sync_ens_v2_registrar_with_progress,
+    sync_ens_v2_registrar_through_block,
 };
 pub use ens_v2_registry::{
-    EnsV2MissingCoverage, EnsV2RegistryResourceSurfaceSyncSummary, ens_v2_missing_coverage,
-    ensure_ens_v2_retained_history_proof_through, is_ens_v2_missing_coverage,
-    record_ens_v2_live_selected_raw_log_coverage,
-    record_ens_v2_live_selected_raw_log_coverage_with_progress,
-    sync_ens_v2_registry_resource_surface, sync_ens_v2_registry_resource_surface_live_poll,
-    sync_ens_v2_registry_resource_surface_live_poll_with_progress,
+    EnsV2RegistryResourceSurfaceSyncSummary, sync_ens_v2_registry_resource_surface,
+    sync_ens_v2_registry_resource_surface_live_poll,
     sync_ens_v2_registry_resource_surface_through_block,
-    sync_ens_v2_registry_resource_surface_through_block_with_progress,
-    sync_ens_v2_registry_resource_surface_with_progress,
 };
 pub use ens_v2_resolver::{
     EnsV2ResolverKindSyncSummary, EnsV2ResolverSyncSummary, sync_ens_v2_resolver,
-    sync_ens_v2_resolver_through_block, sync_ens_v2_resolver_through_block_with_progress,
-    sync_ens_v2_resolver_with_progress,
+    sync_ens_v2_resolver_through_block,
 };
 pub use manifest_normalized_events::{
     ManifestNormalizedEventKindSyncSummary, ManifestNormalizedEventSyncSummary,
-    sync_manifest_normalized_events, sync_manifest_normalized_events_with_progress,
+    sync_manifest_normalized_events,
 };
-pub use startup_versions::{
-    ENS_V1_REVERSE_CLAIM_STARTUP_VERSION, ENS_V1_SUBREGISTRY_DISCOVERY_STARTUP_VERSION,
-    ENS_V1_UNWRAPPED_AUTHORITY_STARTUP_VERSION, ENS_V2_PERMISSIONS_STARTUP_VERSION,
-    ENS_V2_REGISTRAR_STARTUP_VERSION, ENS_V2_REGISTRY_RESOURCE_SURFACE_STARTUP_VERSION,
-    ENS_V2_RESOLVER_STARTUP_VERSION, StartupAdapterVersion,
-};
-
-pub async fn clear_replay_adapter_checkpoints(
-    pool: &sqlx::PgPool,
-    deployment_profile: &str,
-    chain: &str,
-    cursor_kind: &str,
-) -> anyhow::Result<()> {
-    ens_v1_subregistry_discovery::clear_replay_adapter_checkpoints(
-        pool,
-        deployment_profile,
-        chain,
-        cursor_kind,
-    )
-    .await?;
-    ens_v1_unwrapped_authority::clear_replay_adapter_checkpoints(
-        pool,
-        deployment_profile,
-        chain,
-        cursor_kind,
-    )
-    .await
-}
-
 #[cfg(test)]
 static TEST_DB_SEMAPHORE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
 

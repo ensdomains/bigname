@@ -15,10 +15,7 @@ use super::{
     names::initial_registry_suffixes,
     types::{RegistryNameState, RegistryObservation, RegistryRawLogRow},
 };
-use crate::{
-    adapter_manifest::load_required_active_manifest_event_topic0s_by_signature,
-    checkpoint_context::StartupAdapterProgress, startup_progress::record_processed_row_progress,
-};
+use crate::adapter_manifest::load_required_active_manifest_event_topic0s_by_signature;
 
 pub(super) fn requires_prior_registry_state(
     observations_by_log: &[Vec<RegistryObservation>],
@@ -39,11 +36,10 @@ pub(super) async fn reconstruct_prior_registry_state(
     pool: &PgPool,
     chain: &str,
     before: &RegistryRawLogRow,
-    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<RegistryReplayState> {
     let input_revision =
         load_proven_restricted_history_revision(pool, chain, before.block_number).await?;
-    let emitters = load_active_emitters(pool, chain, None, true, progress).await?;
+    let emitters = load_active_emitters(pool, chain, None, true).await?;
     let manifest_ids = emitters
         .iter()
         .map(|emitter| emitter.source_manifest_id)
@@ -55,7 +51,7 @@ pub(super) async fn reconstruct_prior_registry_state(
         "ENSv2 registry history",
     )
     .await?;
-    let raw_logs = load_registry_raw_log_prefix(pool, chain, &emitters, before, progress).await?;
+    let raw_logs = load_registry_raw_log_prefix(pool, chain, &emitters, before).await?;
     let mut replay_state = RegistryReplayState {
         registry_suffix_by_address: initial_registry_suffixes(&emitters),
         registry_contract_by_address: emitters
@@ -77,7 +73,7 @@ pub(super) async fn reconstruct_prior_registry_state(
     let mut observations = Vec::<DiscoveryObservation>::new();
     let mut graph_events = Vec::<NormalizedEvent>::new();
 
-    for (index, raw_log) in raw_logs.iter().enumerate() {
+    for raw_log in &raw_logs {
         let decoded = build_registry_observations(raw_log, &event_topics).with_context(|| {
             format!(
                 "failed to decode retained ENSv2 registry history at block {} log {}",
@@ -103,7 +99,6 @@ pub(super) async fn reconstruct_prior_registry_state(
         closed_bindings.clear();
         observations.clear();
         graph_events.clear();
-        record_processed_row_progress(pool, progress, index + 1, raw_logs.len()).await?;
     }
 
     let final_input_revision =

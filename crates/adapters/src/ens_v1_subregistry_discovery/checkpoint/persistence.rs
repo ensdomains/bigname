@@ -3,9 +3,9 @@ use bigname_storage::RawLogStagingInputVersion;
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Row};
 
-use crate::checkpoint_context::AdapterCheckpointContext;
-
-use super::{ADAPTER, RegistryRawLogPosition, SubregistryReplayCheckpoint};
+use super::{
+    ADAPTER, AdapterCheckpointContext, RegistryRawLogPosition, SubregistryReplayCheckpoint,
+};
 
 pub(super) async fn load_checkpoint_row(
     pool: &PgPool,

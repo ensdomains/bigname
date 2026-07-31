@@ -16,8 +16,7 @@ use crate::normalized_replay_catchup::FullClosureCoverageViolations;
 use crate::reconciliation::canonical::stored_lineage::find_uncovered_generation_bound_coverage_with_current_topics;
 
 use super::{
-    SOURCE_FAMILY_BASENAMES_BASE_REGISTRY, SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
-    SOURCE_FAMILY_ENS_V2_RESOLVER_L1, source_family_in,
+    SOURCE_FAMILY_BASENAMES_BASE_REGISTRY, SOURCE_FAMILY_ENS_V1_REGISTRY_L1, source_family_in,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -177,21 +176,6 @@ pub(super) async fn ensure_full_closure_retention_authority(
             generation_covered_families.join(", ")
         );
         if !proof.uncovered.is_empty() {
-            if let Some(uncovered) = proof
-                .uncovered
-                .iter()
-                .find(|tuple| tuple.source_family == SOURCE_FAMILY_ENS_V2_RESOLVER_L1)
-            {
-                return Err(bigname_adapters::EnsV2MissingCoverage {
-                    chain: chain.to_owned(),
-                    retention_generation,
-                    source_family: uncovered.source_family.clone(),
-                    address: uncovered.address.clone(),
-                    required_from_block: uncovered.required_from_block,
-                    required_to_block: uncovered.required_to_block,
-                }
-                .into());
-            }
             return Err(anyhow::Error::new(FullClosureCoverageViolations {
                 chain: chain.to_owned(),
                 retention_generation,

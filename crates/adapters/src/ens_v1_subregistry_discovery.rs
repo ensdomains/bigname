@@ -4,13 +4,12 @@ use anyhow::{Result, ensure};
 use bigname_manifests::{FullDiscoveryReconciliationOptions, reconcile_discovery_observations};
 use sqlx::PgPool;
 
-use crate::checkpoint_context::{
-    AdapterCheckpointContext, StartupAdapterProgress, record_startup_adapter_progress,
-};
 use crate::registry_migration_cache::MigratedRegistryNodes;
 
 mod application;
 mod assignment;
+// Retained with the rest of subregistry discovery until its atomic PR 2 removal.
+#[allow(dead_code)]
 mod checkpoint;
 mod constants;
 mod emitter;
@@ -21,8 +20,10 @@ mod loader;
 mod migration_guard;
 mod mode;
 mod reconciliation;
+#[allow(dead_code)]
 mod replay;
 mod scope;
+#[allow(dead_code)]
 mod startup;
 mod types;
 
@@ -31,7 +32,7 @@ use assignment::{
     ObservedRegistryAssignment, build_registry_assignment, ens_v1_resolver_discovery_source,
     ens_v1_subregistry_discovery_source,
 };
-use checkpoint::SubregistryReplayCheckpoint;
+use checkpoint::{AdapterCheckpointContext, SubregistryReplayCheckpoint};
 use constants::*;
 use emitter::{emit_registry_changed_events, emit_registry_changed_events_from_checkpoint};
 use hex_topic::ZERO_ADDRESS;
@@ -44,31 +45,25 @@ use migration_guard::{
 };
 use mode::{DiscoveryEdgeMutation, EnsV1SubregistryDiscoverySyncOutcome};
 use reconciliation::{
-    count_active_assignments_with_progress,
-    reconcile_subregistry_discovery_from_assignments_through_block,
+    count_active_assignments, reconcile_subregistry_discovery_from_assignments_through_block,
     reconcile_subregistry_discovery_from_checkpoint,
 };
 use scope::{load_migrated_registry_nodes_before_block, normalized_registry_source_scope_targets};
 pub use types::EnsV1SubregistryDiscoverySyncSummary;
 
-pub use crate::checkpoint_context::{
+#[cfg(test)]
+use checkpoint::{
     ReplayAdapterCheckpointContext, StartupAdapterCheckpointContext,
+    clear_startup_adapter_checkpoints,
 };
-pub use checkpoint::clear_replay_adapter_checkpoints;
 pub use entrypoints::{
     sync_ens_v1_subregistry_discovery, sync_ens_v1_subregistry_discovery_through_block,
     sync_ens_v1_subregistry_discovery_through_block_with_expected_admission_epoch,
-    sync_ens_v1_subregistry_discovery_through_block_with_expected_admission_epoch_and_progress,
 };
-pub use replay::{
-    sync_ens_v1_subregistry_discovery_with_replay_checkpoint,
-    sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit,
-    sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit_and_progress,
-};
-pub use startup::{
-    sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit,
-    sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit_and_progress,
-};
+#[cfg(test)]
+use replay::sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit;
+#[cfg(test)]
+use startup::sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit;
 
 async fn sync_ens_v1_subregistry_discovery_with_scope(
     pool: &PgPool,
@@ -82,7 +77,6 @@ async fn sync_ens_v1_subregistry_discovery_with_scope(
     checkpoint_context: Option<&AdapterCheckpointContext>,
     checkpoint_page_limit: i64,
     checkpoint_progress_log_every_pages: Option<usize>,
-    startup_progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<EnsV1SubregistryDiscoverySyncOutcome> {
     ensure!(
         full_source_through_block.is_none()
@@ -120,10 +114,8 @@ async fn sync_ens_v1_subregistry_discovery_with_scope(
         chain,
         source_scope.as_deref(),
         full_source_through_block.is_some(),
-        startup_progress,
     )
     .await?;
-    record_startup_adapter_progress(pool, startup_progress).await?;
     let current_registry = current_registry_emitter(&emitters, full_source_through_block).cloned();
     let discovery_sources = [
         ens_v1_subregistry_discovery_source(chain),
@@ -171,7 +163,6 @@ async fn sync_ens_v1_subregistry_discovery_with_scope(
                     checkpoint,
                     checkpoint_page_limit,
                     checkpoint_progress_log_every_pages,
-                    startup_progress,
                     &mut migrated_registry_nodes,
                 )
                 .await?;
@@ -186,7 +177,6 @@ async fn sync_ens_v1_subregistry_discovery_with_scope(
                     &emitters,
                     through_block,
                     checkpoint_page_limit,
-                    startup_progress,
                     |raw_log| {
                         let applied = apply_registry_raw_log(
                             &raw_log,
@@ -253,15 +243,12 @@ async fn sync_ens_v1_subregistry_discovery_with_scope(
             }
         }
         matched_log_count += apply_registry_raw_logs(
-            pool,
             &raw_logs,
             chain,
             current_registry.as_ref(),
             &mut latest_assignments,
             &mut migrated_registry_nodes,
-            startup_progress,
-        )
-        .await?;
+        )?;
     }
 
     let finalize_from_checkpoint = active_checkpoint
@@ -295,7 +282,7 @@ async fn sync_ens_v1_subregistry_discovery_with_scope(
             .active_assignment_count(pool, &discovery_sources)
             .await?
     } else {
-        count_active_assignments_with_progress(pool, &latest_assignments, startup_progress).await?
+        count_active_assignments(&latest_assignments)
     };
 
     let mut reconciliation = EnsV1SubregistryDiscoverySyncSummary {
@@ -318,7 +305,6 @@ async fn sync_ens_v1_subregistry_discovery_with_scope(
                     .expect("finalizing checkpoint should be present"),
                 &discovery_sources,
                 &mut reconciliation,
-                startup_progress,
             )
             .await?;
             if reconciliation.inserted_edge_count > 0 {
@@ -365,7 +351,6 @@ async fn sync_ens_v1_subregistry_discovery_with_scope(
                 through_block,
                 full_source_expected_admission_epoch,
                 &mut reconciliation,
-                startup_progress,
             )
             .await?;
         } else {
@@ -398,24 +383,16 @@ async fn sync_ens_v1_subregistry_discovery_with_scope(
                 .as_ref()
                 .expect("finalizing checkpoint should be present"),
             &discovery_sources,
-            startup_progress,
         )
         .await?
     } else {
-        emit_registry_changed_events(
-            pool,
-            &latest_assignments,
-            &discovery_sources,
-            startup_progress,
-        )
-        .await?
+        emit_registry_changed_events(pool, &latest_assignments, &discovery_sources).await?
     };
     reconciliation.total_normalized_event_count = event_summary.synced_count;
     reconciliation.total_normalized_event_inserted_count = event_summary.inserted_count;
 
     if let Some(checkpoint) = active_checkpoint.as_mut() {
         checkpoint.mark_completed(pool, &reconciliation).await?;
-        record_startup_adapter_progress(pool, startup_progress).await?;
     }
 
     Ok((
@@ -433,7 +410,6 @@ async fn sync_checkpointed_registry_raw_logs(
     checkpoint: &mut SubregistryReplayCheckpoint,
     checkpoint_page_limit: i64,
     progress_log_every_pages: Option<usize>,
-    startup_progress: &mut Option<&mut dyn StartupAdapterProgress>,
     migrated_registry_nodes: &mut MigratedRegistryNodes,
 ) -> Result<(usize, usize)> {
     if checkpoint.stream_complete() {
@@ -462,7 +438,6 @@ async fn sync_checkpointed_registry_raw_logs(
             checkpoint
                 .mark_stream_complete(pool, scanned_log_count, matched_log_count)
                 .await?;
-            record_startup_adapter_progress(pool, startup_progress).await?;
             break;
         };
 
@@ -511,7 +486,6 @@ async fn sync_checkpointed_registry_raw_logs(
             scanned_log_count,
             matched_log_count,
         );
-        record_startup_adapter_progress(pool, startup_progress).await?;
         start_after = Some(last_position);
     }
 

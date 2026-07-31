@@ -6,8 +6,8 @@ use std::{
     },
 };
 
+use crate::StartupAdapterProgress;
 use anyhow::{Context, Result, ensure};
-use bigname_adapters::StartupAdapterProgress;
 use tracing::info;
 
 use crate::reconciliation::{
@@ -22,10 +22,7 @@ use crate::reconciliation::{
     },
 };
 
-use super::{
-    FullClosureCheckpointCompletion, FullClosureReplayLockWaitHeartbeat,
-    sync_full_closure_with_checkpoint_completion_and_prelude,
-};
+use super::{FullClosureReplayLockWaitHeartbeat, sync_full_closure_with_prelude};
 
 #[cfg(test)]
 #[path = "automatic/test_hook.rs"]
@@ -49,18 +46,12 @@ impl fmt::Display for AutomaticStatelessReplayCompleted {
 
 impl std::error::Error for AutomaticStatelessReplayCompleted {}
 
-pub(crate) fn automatic_stateless_replay_completed(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<AutomaticStatelessReplayCompleted>()
-        .is_some()
-}
-
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn sync_automatic_two_phase_full_closure_normalized_events(
     pool: &sqlx::PgPool,
     deployment_profile: &str,
     chain: &str,
-    checkpoint_cursor_kind: &str,
+    replay_cursor_kind: &str,
     range_start_block_number: i64,
     target_block_number: i64,
     stateless_ranges: &[(i64, i64)],
@@ -72,7 +63,7 @@ pub(crate) async fn sync_automatic_two_phase_full_closure_normalized_events(
 ) -> Result<AutomaticTwoPhaseFullClosureSyncResult> {
     info!(
         service = "indexer",
-        replay_cursor_kind = checkpoint_cursor_kind,
+        replay_cursor_kind,
         chain,
         range_start_block_number,
         target_block_number,
@@ -83,16 +74,14 @@ pub(crate) async fn sync_automatic_two_phase_full_closure_normalized_events(
 
     let stateless_replay_completed = Arc::new(AtomicBool::new(false));
     let stateless_replay_completed_in_prelude = Arc::clone(&stateless_replay_completed);
-    let sync = sync_full_closure_with_checkpoint_completion_and_prelude(
+    let sync = sync_full_closure_with_prelude(
         pool,
         deployment_profile,
         chain,
-        checkpoint_cursor_kind,
         range_start_block_number,
         target_block_number,
         adapters,
         max_raw_logs_per_page,
-        FullClosureCheckpointCompletion::Retain,
         lock_wait_heartbeat,
         &mut Some(closure_progress),
         move || async move {

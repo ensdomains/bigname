@@ -338,14 +338,7 @@ pub(crate) async fn run_hash_pinned_backfill_range(
     upsert_raw_code_hashes(pool, &code_hashes).await?;
     if !logs.is_empty() && adapter_sync_mode.runs_inline_adapters() {
         if source_plan.selector_kind == WatchedSourceSelectorKind::WholeActiveWatchedChain {
-            sync_inline_adapters(
-                pool,
-                &watched_chain.chain,
-                &block_hashes,
-                None,
-                adapter_sync_mode,
-            )
-            .await?;
+            sync_inline_adapters(pool, &watched_chain.chain, &block_hashes, None).await?;
         } else {
             // Built lazily: RawOnly jobs (scan-all shapes) never reach this
             // branch, and constructing the scope clones every selected
@@ -361,7 +354,6 @@ pub(crate) async fn run_hash_pinned_backfill_range(
                 &watched_chain.chain,
                 &block_hashes,
                 Some(&adapter_sync_scope),
-                adapter_sync_mode,
             )
             .await?;
         }

@@ -2,11 +2,10 @@ use anyhow::{Context, Result, ensure};
 use bigname_storage::acquire_raw_log_staging_read_guard;
 use sqlx::PgPool;
 
-use crate::checkpoint_context::{AdapterCheckpointContext, StartupAdapterProgress};
-
 use super::{
-    DiscoveryEdgeMutation, EnsV1SubregistryDiscoverySyncSummary, ReplayAdapterCheckpointContext,
-    checkpoint::PAGE_LIMIT, sync_ens_v1_subregistry_discovery_with_scope,
+    DiscoveryEdgeMutation, EnsV1SubregistryDiscoverySyncSummary,
+    checkpoint::{AdapterCheckpointContext, PAGE_LIMIT, ReplayAdapterCheckpointContext},
+    sync_ens_v1_subregistry_discovery_with_scope,
 };
 
 /// The checkpointed replay holds the raw-log staging guard and the streamed
@@ -45,26 +44,6 @@ pub async fn sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_li
         &checkpoint,
         max_raw_logs_per_page,
         None,
-        None,
-    )
-    .await
-}
-
-pub async fn sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit_and_progress(
-    pool: &PgPool,
-    chain: &str,
-    checkpoint: &ReplayAdapterCheckpointContext,
-    max_raw_logs_per_page: usize,
-    progress: &mut dyn StartupAdapterProgress,
-) -> Result<EnsV1SubregistryDiscoverySyncSummary> {
-    let checkpoint = AdapterCheckpointContext::for_replay(checkpoint);
-    sync_ens_v1_subregistry_discovery_with_checkpoint_context(
-        pool,
-        chain,
-        &checkpoint,
-        max_raw_logs_per_page,
-        None,
-        Some(progress),
     )
     .await
 }
@@ -75,7 +54,6 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_checkpoint_context(
     checkpoint: &AdapterCheckpointContext,
     max_raw_logs_per_page: usize,
     progress_log_every_pages: Option<usize>,
-    mut startup_progress: Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<EnsV1SubregistryDiscoverySyncSummary> {
     ensure!(
         max_raw_logs_per_page > 0,
@@ -105,7 +83,6 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_checkpoint_context(
             Some(&checkpoint),
             checkpoint_page_limit,
             progress_log_every_pages,
-            &mut startup_progress,
         )
         .await?;
         if !repeat_checkpoint_replay {

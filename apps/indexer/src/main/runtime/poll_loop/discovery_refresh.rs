@@ -4,10 +4,6 @@ use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use crate::provider::ProviderRegistry;
-use crate::resolver_profile_convergence::{
-    ResolverProfileConvergenceSummary, drain_resolver_profile_input_changes,
-    drain_resolver_profile_input_changes_with_progress,
-};
 use crate::run::startup_heartbeat::{StartupAdapterHeartbeat, StartupHeartbeat};
 
 use super::super::adapter_sync::sync_adapter_owned_raw_log_state_live_with_heartbeat;
@@ -41,32 +37,6 @@ use super::super::refresh::{
 /// moved since the last successful reload, so a quiet watched surface costs
 /// one tiny sentinel read per tick instead of a full plan scan.
 ///
-/// `resolver_profile_convergence_enabled` is false for raw-only operation, so
-/// reloading a stored plan cannot drain adapter-owned resolver-profile work in
-/// a mode that explicitly defers those writes.
-#[cfg(test)]
-pub(crate) async fn refresh_discovery_watch_state(
-    pool: &sqlx::PgPool,
-    provider_registry: &ProviderRegistry,
-    manifest_runtime_state: &mut ManifestRuntimeState,
-    intake_chain_tasks: &mut Vec<IntakeChainTask>,
-    sync_adapter_state_before_refresh: bool,
-    resolver_profile_convergence_enabled: bool,
-    last_admission_epochs: &mut Option<BTreeMap<String, i64>>,
-) -> Result<bool> {
-    refresh_discovery_watch_state_inner(
-        pool,
-        provider_registry,
-        manifest_runtime_state,
-        intake_chain_tasks,
-        sync_adapter_state_before_refresh,
-        resolver_profile_convergence_enabled,
-        last_admission_epochs,
-        None,
-    )
-    .await
-}
-
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn refresh_discovery_watch_state_with_heartbeat(
     pool: &sqlx::PgPool,
@@ -74,10 +44,7 @@ pub(crate) async fn refresh_discovery_watch_state_with_heartbeat(
     manifest_runtime_state: &mut ManifestRuntimeState,
     intake_chain_tasks: &mut Vec<IntakeChainTask>,
     sync_adapter_state_before_refresh: bool,
-    resolver_profile_convergence_enabled: bool,
     last_admission_epochs: &mut Option<BTreeMap<String, i64>>,
-    deployment_profile: &str,
-    adapter_sync_page_logs: usize,
     heartbeat: &mut StartupHeartbeat,
     heartbeat_chain_ids: &[String],
 ) -> Result<bool> {
@@ -87,35 +54,27 @@ pub(crate) async fn refresh_discovery_watch_state_with_heartbeat(
         manifest_runtime_state,
         intake_chain_tasks,
         sync_adapter_state_before_refresh,
-        resolver_profile_convergence_enabled,
         last_admission_epochs,
-        Some((
-            deployment_profile,
-            adapter_sync_page_logs,
-            heartbeat,
-            heartbeat_chain_ids,
-        )),
+        Some((heartbeat, heartbeat_chain_ids)),
     )
     .await
 }
 
-type AdapterSyncHeartbeat<'a> = (&'a str, usize, &'a mut StartupHeartbeat, &'a [String]);
+type AdapterSyncHeartbeat<'a> = (&'a mut StartupHeartbeat, &'a [String]);
 
-#[expect(clippy::too_many_arguments)]
 async fn refresh_discovery_watch_state_inner(
     pool: &sqlx::PgPool,
     provider_registry: &ProviderRegistry,
     manifest_runtime_state: &mut ManifestRuntimeState,
     intake_chain_tasks: &mut Vec<IntakeChainTask>,
     sync_adapter_state_before_refresh: bool,
-    resolver_profile_convergence_enabled: bool,
     last_admission_epochs: &mut Option<BTreeMap<String, i64>>,
     mut adapter_sync_heartbeat: Option<AdapterSyncHeartbeat<'_>>,
 ) -> Result<bool> {
     // The whole-corpus re-derivation must run before the sentinel read: it is
     // what materializes new edges (and bumps epochs) on the broad-refresh path.
     let adapter_sync_result: Result<()> = if sync_adapter_state_before_refresh {
-        let (_, _, heartbeat, chain_ids) = adapter_sync_heartbeat
+        let (heartbeat, chain_ids) = adapter_sync_heartbeat
             .as_mut()
             .context("discovery adapter refresh requires a live loop heartbeat")?;
         sync_adapter_owned_raw_log_state_live_with_heartbeat(
@@ -130,7 +89,7 @@ async fn refresh_discovery_watch_state_inner(
     };
     let refreshed_state = match adapter_sync_result {
         Ok(()) => match adapter_sync_heartbeat.as_mut() {
-            Some((_, _, heartbeat, chain_ids)) => {
+            Some((heartbeat, chain_ids)) => {
                 let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
                 refresh_runtime_state_from_stored_discovery_when_epochs_move_with_progress(
                     pool,
@@ -151,18 +110,6 @@ async fn refresh_discovery_watch_state_inner(
         },
         Err(error) => Err(error),
     };
-    if refreshed_state.is_ok() && resolver_profile_convergence_enabled {
-        let drain_result = match adapter_sync_heartbeat.as_mut() {
-            Some((_, _, heartbeat, chain_ids)) => {
-                let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
-                drain_resolver_profile_input_changes_with_progress(pool, &mut progress).await
-            }
-            None => drain_resolver_profile_input_changes(pool).await,
-        };
-        if !resolver_profile_drain_succeeded(drain_result, "timer", "stored_discovery_state") {
-            return Ok(false);
-        }
-    }
     match refreshed_state {
         Ok(Some(refresh)) => {
             let Some((next_manifest_runtime_state, next_tasks)) = refresh.refreshed_state else {
@@ -177,7 +124,7 @@ async fn refresh_discovery_watch_state_inner(
             let next_watch_state =
                 watched_chain_plan_state(&next_manifest_runtime_state.watched_chain_plan);
             let watched_plan_changed = match adapter_sync_heartbeat.as_mut() {
-                Some((_, _, heartbeat, chain_ids)) => {
+                Some((heartbeat, chain_ids)) => {
                     let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
                     !watched_chain_plans_equal_with_progress(
                         pool,
@@ -252,52 +199,5 @@ async fn refresh_discovery_watch_state_inner(
             );
             Ok(false)
         }
-    }
-}
-
-pub(super) fn resolver_profile_drain_succeeded(
-    result: Result<ResolverProfileConvergenceSummary>,
-    refresh_reason: &'static str,
-    plan_source: &'static str,
-) -> bool {
-    match result {
-        Ok(_) => true,
-        Err(error) => {
-            warn!(
-                service = "indexer",
-                command = "resolver-profile-convergence",
-                refresh_reason,
-                plan_source,
-                error = ?error,
-                "failed to drain resolver-profile input changes; durable pending work will be retried on a later poll tick"
-            );
-            false
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use anyhow::anyhow;
-
-    use super::resolver_profile_drain_succeeded;
-    use crate::resolver_profile_convergence::ResolverProfileConvergenceSummary;
-
-    #[test]
-    fn poll_loop_retries_transient_resolver_profile_drain_errors() {
-        assert!(!resolver_profile_drain_succeeded(
-            Err(anyhow!("transient database timeout")),
-            "timer",
-            "test",
-        ));
-    }
-
-    #[test]
-    fn poll_loop_accepts_successful_resolver_profile_drain() {
-        assert!(resolver_profile_drain_succeeded(
-            Ok(ResolverProfileConvergenceSummary::default()),
-            "timer",
-            "test",
-        ));
     }
 }

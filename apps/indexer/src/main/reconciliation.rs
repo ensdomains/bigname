@@ -21,10 +21,8 @@ mod types;
 pub(crate) use adapter_sync::{
     AutomaticTwoPhaseFullClosureSyncResult, BacklogHandoffStatus,
     FullClosureReplayLockWaitDeadlineExceeded, FullClosureReplayLockWaitHeartbeat,
-    automatic_stateless_replay_completed, sync_adapter_state_from_persisted_raw_payloads,
-    sync_adapter_state_from_persisted_raw_payloads_without_ens_v2_adapters,
+    sync_adapter_state_from_persisted_raw_payloads,
     sync_adapter_state_from_scoped_persisted_raw_payloads,
-    sync_adapter_state_from_scoped_persisted_raw_payloads_without_ens_v2_adapters,
     sync_automatic_two_phase_full_closure_normalized_events,
     sync_live_adapter_backlog_after_normalized_replay_with_progress,
     sync_live_adapter_state_from_persisted_raw_payloads,
@@ -34,10 +32,8 @@ pub(crate) use adapter_sync::{
 };
 #[cfg(test)]
 pub(crate) use adapter_sync::{
-    PersistedRawPayloadAdapterSyncModeForTest, install_after_stateless_failure,
-    install_backlog_after_adapter_sync_test_hook, install_ownership_release_test_hook,
-    install_post_discovery_mutation_failure_for_test, install_stateless_page_observer,
-    sync_ens_v2_registry_for_mode_for_test,
+    install_after_stateless_failure, install_backlog_after_adapter_sync_test_hook,
+    install_ownership_release_test_hook, install_stateless_page_observer,
     sync_full_closure_normalized_events_from_persisted_raw_payloads,
     sync_live_adapter_backlog_after_normalized_replay,
 };
@@ -45,12 +41,11 @@ pub(crate) use adapter_sync::{
 pub(crate) use canonical::reconcile_canonical_head_with_adapter_progress;
 #[allow(unused_imports)]
 pub(crate) use canonical::{
-    ChainCoverageFrontiers, EnsV2LiveCoverageRecoveryStatus, RawCodeBaselineFrontier,
-    orphan_canonical_branch, orphan_reorg_losing_branch_payloads, poll_provider_heads,
+    ChainCoverageFrontiers, RawCodeBaselineFrontier, orphan_canonical_branch,
+    orphan_reorg_losing_branch_payloads, poll_provider_heads,
     poll_provider_heads_with_adapter_sync, poll_provider_heads_with_adapter_sync_and_progress,
     reconcile_canonical_head, reconcile_fetched_heads, reconcile_fetched_heads_with_adapter_sync,
-    reconcile_intake_chain_task, recover_ens_v2_live_coverage_requirement,
-    recover_ens_v2_live_coverage_requirement_with_progress,
+    reconcile_intake_chain_task,
 };
 #[allow(unused_imports)]
 pub(crate) use lineage::{

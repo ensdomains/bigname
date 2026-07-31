@@ -1,9 +1,7 @@
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 
-use crate::checkpoint_context::{AdapterCheckpointContext, FULL_CLOSURE_CHECKPOINT_SCOPE};
-
-use super::ADAPTER;
+use super::{ADAPTER, AdapterCheckpointContext, FULL_CLOSURE_CHECKPOINT_SCOPE};
 
 pub async fn clear_replay_adapter_checkpoints(
     pool: &PgPool,

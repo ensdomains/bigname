@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
+use crate::StartupAdapterProgress;
 use anyhow::Result;
-use bigname_adapters::StartupAdapterProgress;
 use bigname_manifests::{
     ManifestRuntimeProgress, ManifestRuntimeProgressFuture, RequiredWatchedTuple,
     UncoveredWatchedTuple, find_uncovered_required_watched_tuples_in_transaction,

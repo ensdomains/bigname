@@ -94,11 +94,8 @@ pub(super) async fn replay_full_closure_or_dependency_normalized_events(
 
 struct NoopNormalizedReplayProgress;
 
-impl bigname_adapters::StartupAdapterProgress for NoopNormalizedReplayProgress {
-    fn record<'a>(
-        &'a mut self,
-        _pool: &'a PgPool,
-    ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
+impl crate::StartupAdapterProgress for NoopNormalizedReplayProgress {
+    fn record<'a>(&'a mut self, _pool: &'a PgPool) -> crate::StartupAdapterProgressFuture<'a> {
         Box::pin(std::future::ready(Ok(())))
     }
 }
@@ -108,7 +105,7 @@ pub(super) async fn record_normalized_replay_progress(
     progress: &mut Option<&mut NormalizedReplayHeartbeat>,
 ) -> Result<()> {
     if let Some(progress) = progress.as_deref_mut() {
-        bigname_adapters::StartupAdapterProgress::record(progress, pool).await?;
+        crate::StartupAdapterProgress::record(progress, pool).await?;
     }
     Ok(())
 }

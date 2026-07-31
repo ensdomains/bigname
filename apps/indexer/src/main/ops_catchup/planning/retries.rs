@@ -8,19 +8,16 @@ use super::CatchupTarget;
 
 pub(in crate::ops_catchup) struct CompletedCatchupPass {
     retention_generation: i64,
-    included_historical_recovery_targets: bool,
     targets: Vec<CatchupTarget>,
 }
 
 impl CompletedCatchupPass {
     pub(in crate::ops_catchup) fn new(
         retention_generation: i64,
-        included_historical_recovery_targets: bool,
         targets: Vec<CatchupTarget>,
     ) -> Self {
         Self {
             retention_generation,
-            included_historical_recovery_targets,
             targets,
         }
     }
@@ -32,16 +29,13 @@ impl CompletedCatchupPass {
 pub(in crate::ops_catchup) fn retry_required_ranges(
     previous: Option<&CompletedCatchupPass>,
     retention_generation: i64,
-    includes_historical_recovery_targets: bool,
     targets: &[CatchupTarget],
     finalized_head_block_number: i64,
 ) -> Result<Option<Vec<BackfillBlockRange>>> {
     let Some(previous) = previous else {
         return Ok(None);
     };
-    if previous.retention_generation != retention_generation
-        || previous.included_historical_recovery_targets != includes_historical_recovery_targets
-    {
+    if previous.retention_generation != retention_generation {
         return Ok(None);
     }
 
@@ -148,14 +142,14 @@ mod tests {
     fn retry_ranges_cover_only_changed_target_intervals() -> Result<()> {
         let previous_targets = vec![target(1, 1, None)];
         let current_targets = vec![target(1, 1, None), target(2, 40, Some(70))];
-        let previous = CompletedCatchupPass::new(3, false, previous_targets);
+        let previous = CompletedCatchupPass::new(3, previous_targets);
 
         assert_eq!(
-            retry_required_ranges(Some(&previous), 3, false, &current_targets, 100)?,
+            retry_required_ranges(Some(&previous), 3, &current_targets, 100)?,
             Some(vec![BackfillBlockRange::new(40, 70)?])
         );
         assert_eq!(
-            retry_required_ranges(Some(&previous), 4, false, &current_targets, 100)?,
+            retry_required_ranges(Some(&previous), 4, &current_targets, 100)?,
             None,
             "retention rotation must force current-generation work for the whole plan"
         );

@@ -4,8 +4,6 @@ use anyhow::Result;
 use bigname_storage::upsert_normalized_events_with_summary;
 use sqlx::PgPool;
 
-use crate::checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress};
-
 use super::{
     assignment::ObservedRegistryAssignment,
     checkpoint::{EVENT_PAGE_LIMIT, SubregistryReplayCheckpoint},
@@ -26,7 +24,6 @@ pub(super) async fn emit_registry_changed_events(
     pool: &PgPool,
     latest_assignments: &BTreeMap<String, ObservedRegistryAssignment>,
     discovery_sources: &[String],
-    startup_progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<RegistryChangedEventEmitSummary> {
     let discovery_sources = discovery_sources
         .iter()
@@ -41,26 +38,13 @@ pub(super) async fn emit_registry_changed_events(
         }
         assignments.push(assignment);
         if assignments.len() >= NORMALIZED_EVENT_UPSERT_CHUNK_SIZE {
-            emit_registry_changed_event_chunk(
-                pool,
-                &assignments,
-                &mut events,
-                &mut summary,
-                startup_progress,
-            )
-            .await?;
+            emit_registry_changed_event_chunk(pool, &assignments, &mut events, &mut summary)
+                .await?;
             assignments.clear();
         }
     }
-    emit_registry_changed_event_chunk(
-        pool,
-        &assignments,
-        &mut events,
-        &mut summary,
-        startup_progress,
-    )
-    .await?;
-    flush_registry_changed_events(pool, &mut events, &mut summary, startup_progress).await?;
+    emit_registry_changed_event_chunk(pool, &assignments, &mut events, &mut summary).await?;
+    flush_registry_changed_events(pool, &mut events, &mut summary).await?;
     Ok(summary)
 }
 
@@ -71,7 +55,6 @@ pub(super) async fn emit_registry_changed_events_from_checkpoint(
     pool: &PgPool,
     checkpoint: &SubregistryReplayCheckpoint,
     discovery_sources: &[String],
-    startup_progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<RegistryChangedEventEmitSummary> {
     let mut events = Vec::with_capacity(usize::try_from(EVENT_PAGE_LIMIT)?);
     let mut summary = RegistryChangedEventEmitSummary::default();
@@ -94,18 +77,11 @@ pub(super) async fn emit_registry_changed_events_from_checkpoint(
                 .iter()
                 .map(|(_, assignment)| assignment)
                 .collect::<Vec<_>>();
-            emit_registry_changed_event_chunk(
-                pool,
-                &assignments,
-                &mut events,
-                &mut summary,
-                startup_progress,
-            )
-            .await?;
-            record_startup_adapter_progress(pool, startup_progress).await?;
+            emit_registry_changed_event_chunk(pool, &assignments, &mut events, &mut summary)
+                .await?;
         }
     }
-    flush_registry_changed_events(pool, &mut events, &mut summary, startup_progress).await?;
+    flush_registry_changed_events(pool, &mut events, &mut summary).await?;
     Ok(summary)
 }
 
@@ -114,7 +90,6 @@ pub(super) async fn emit_registry_changed_event_chunk(
     assignments: &[&ObservedRegistryAssignment],
     events: &mut Vec<bigname_storage::NormalizedEvent>,
     summary: &mut RegistryChangedEventEmitSummary,
-    startup_progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<()> {
     if assignments.is_empty() {
         return Ok(());
@@ -134,7 +109,7 @@ pub(super) async fn emit_registry_changed_event_chunk(
             events.push(event);
         }
         if events.len() >= NORMALIZED_EVENT_UPSERT_CHUNK_SIZE {
-            flush_registry_changed_events(pool, events, summary, startup_progress).await?;
+            flush_registry_changed_events(pool, events, summary).await?;
         }
     }
 
@@ -145,7 +120,6 @@ pub(super) async fn flush_registry_changed_events(
     pool: &PgPool,
     events: &mut Vec<bigname_storage::NormalizedEvent>,
     summary: &mut RegistryChangedEventEmitSummary,
-    startup_progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<()> {
     if events.is_empty() {
         return Ok(());
@@ -155,7 +129,6 @@ pub(super) async fn flush_registry_changed_events(
     summary.synced_count += events.len();
     summary.inserted_count += upsert.inserted_count;
     events.clear();
-    record_startup_adapter_progress(pool, startup_progress).await?;
     Ok(())
 }
 

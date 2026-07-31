@@ -3,22 +3,14 @@ use bigname_domain::normalization::normalize_name;
 use bigname_storage::sql_row;
 use sqlx::PgPool;
 
-use crate::ens_v2_common::{
-    ActiveEmitter, active_emitter_for_log, emitters_by_address, normalize_address,
-    source_scope_bindings,
-};
-use crate::{
-    checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress},
-    startup_progress::{
-        RawLogPagePosition, STARTUP_ADAPTER_PROGRESS_PAGE_ROWS,
-        STARTUP_ADAPTER_PROGRESS_PAGE_ROWS_I64,
-    },
-};
-
 use super::{
     constants::{RESOLVER_EDGE_KIND, SOURCE_FAMILY_ENS_V2_RESOLVER_L1},
     types::{NameLink, ResolverRawLogRow},
     util::{event_position_timestamp, logical_name_id},
+};
+use crate::ens_v2_common::{
+    ActiveEmitter, active_emitter_for_log, emitters_by_address, normalize_address,
+    source_scope_bindings,
 };
 
 pub(super) async fn load_name_link_by_namehash(
@@ -151,7 +143,6 @@ pub(super) async fn load_resolver_raw_logs(
     block_hashes: &[String],
     source_scope: Option<&[(String, String, i64, i64)]>,
     max_block_number: Option<i64>,
-    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Vec<ResolverRawLogRow>> {
     if emitters.is_empty() {
         return Ok(Vec::new());
@@ -169,16 +160,7 @@ pub(super) async fn load_resolver_raw_logs(
     }
     let has_max_block_number = max_block_number.is_some();
     let max_block_number = max_block_number.unwrap_or(i64::MAX);
-    let paged = progress.is_some();
-    let page_limit = if paged {
-        STARTUP_ADAPTER_PROGRESS_PAGE_ROWS_I64
-    } else {
-        i64::MAX
-    };
-    let mut start_after = None::<RawLogPagePosition>;
-    let mut output = Vec::new();
-    loop {
-        let rows = sqlx::query(
+    let rows = sqlx::query(
             r#"
             SELECT
                 rl.chain_id,
@@ -247,90 +229,60 @@ pub(super) async fn load_resolver_raw_logs(
         .bind(&scope_to_blocks)
         .bind(has_max_block_number)
         .bind(max_block_number)
-        .bind(start_after.as_ref().map(|position| position.block_number))
-        .bind(
-            start_after
-                .as_ref()
-                .map(|position| position.transaction_index),
-        )
-        .bind(start_after.as_ref().map(|position| position.log_index))
-        .bind(
-            start_after
-                .as_ref()
-                .map(|position| position.emitting_address.as_str()),
-        )
-        .bind(
-            start_after
-                .as_ref()
-                .map(|position| position.block_hash.as_str()),
-        )
-        .bind(page_limit)
+        .bind(Option::<i64>::None)
+        .bind(Option::<i64>::None)
+        .bind(Option::<i64>::None)
+        .bind(Option::<&str>::None)
+        .bind(Option::<&str>::None)
+        .bind(i64::MAX)
         .fetch_all(pool)
         .await
         .with_context(|| format!("failed to load ENSv2 resolver raw logs for chain {chain}"))?;
-        if rows.is_empty() {
-            break;
-        }
-        let page_len = rows.len();
-        let last_position =
-            RawLogPagePosition::from_row(rows.last().expect("non-empty resolver raw-log page"))?;
-        for row in rows {
-            let emitting_address =
-                normalize_address(&sql_row::get::<String>(&row, "emitting_address")?);
-            let block_number = sql_row::get(&row, "block_number")?;
-            let transaction_index = sql_row::get(&row, "transaction_index")?;
-            let log_index = sql_row::get(&row, "log_index")?;
-            let Some(emitter) =
-                active_emitters_by_address
-                    .get(&emitting_address)
-                    .and_then(|emitters| {
-                        active_emitter_for_log(emitters, block_number, transaction_index, log_index)
-                    })
-            else {
-                continue;
-            };
-            output.push(ResolverRawLogRow {
-                chain_id: sql_row::get(&row, "chain_id")?,
-                block_hash: sql_row::get(&row, "block_hash")?,
-                block_number,
-                event_position_timestamp: sql_row::get(&row, "event_position_timestamp")?,
-                transaction_hash: sql_row::get(&row, "transaction_hash")?,
-                transaction_index,
-                log_index,
-                emitting_address,
-                emitting_contract_instance_id: emitter.contract_instance_id,
-                topics: sql_row::get(&row, "topics")?,
-                data: sql_row::get(&row, "data")?,
-                canonicality_state: sql_row::get(&row, "canonicality_state")?,
-                source_manifest_id: emitter.source_manifest_id,
-                namespace: emitter.namespace.clone(),
-                source_family: emitter.source_family.clone(),
-                manifest_version: emitter.manifest_version,
-            });
-        }
-        if paged {
-            record_startup_adapter_progress(pool, progress).await?;
-        }
-        if !paged || page_len < STARTUP_ADAPTER_PROGRESS_PAGE_ROWS {
-            break;
-        }
-        start_after = Some(last_position);
+    let mut output = Vec::with_capacity(rows.len());
+    for row in rows {
+        let emitting_address =
+            normalize_address(&sql_row::get::<String>(&row, "emitting_address")?);
+        let block_number = sql_row::get(&row, "block_number")?;
+        let transaction_index = sql_row::get(&row, "transaction_index")?;
+        let log_index = sql_row::get(&row, "log_index")?;
+        let Some(emitter) =
+            active_emitters_by_address
+                .get(&emitting_address)
+                .and_then(|emitters| {
+                    active_emitter_for_log(emitters, block_number, transaction_index, log_index)
+                })
+        else {
+            continue;
+        };
+        output.push(ResolverRawLogRow {
+            chain_id: sql_row::get(&row, "chain_id")?,
+            block_hash: sql_row::get(&row, "block_hash")?,
+            block_number,
+            event_position_timestamp: sql_row::get(&row, "event_position_timestamp")?,
+            transaction_hash: sql_row::get(&row, "transaction_hash")?,
+            transaction_index,
+            log_index,
+            emitting_address,
+            emitting_contract_instance_id: emitter.contract_instance_id,
+            topics: sql_row::get(&row, "topics")?,
+            data: sql_row::get(&row, "data")?,
+            canonicality_state: sql_row::get(&row, "canonicality_state")?,
+            source_manifest_id: emitter.source_manifest_id,
+            namespace: emitter.namespace.clone(),
+            source_family: emitter.source_family.clone(),
+            manifest_version: emitter.manifest_version,
+        });
     }
     Ok(output)
 }
 
-pub(super) async fn load_active_emitters(
-    pool: &PgPool,
-    chain: &str,
-    progress: &mut Option<&mut dyn StartupAdapterProgress>,
-) -> Result<Vec<ActiveEmitter>> {
+pub(super) async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec<ActiveEmitter>> {
     crate::ens_v2_common::load_active_emitters(
         pool,
         chain,
         SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
         RESOLVER_EDGE_KIND,
         "ENSv2 resolver",
-        progress,
     )
     .await
 }

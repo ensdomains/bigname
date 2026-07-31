@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, btree_map, btree_set};
 
+use crate::StartupAdapterProgress;
 use anyhow::Result;
-use bigname_adapters::StartupAdapterProgress;
 use bigname_domain::block_interval::{InclusiveBlockInterval, coalesce_inclusive_block_intervals};
 use bigname_manifests::{WatchedBackfillTarget, WatchedSourceSelectorPlan};
 use bigname_storage::{

@@ -8,15 +8,11 @@ use super::super::*;
 use anyhow::{Context, Result};
 use bigname_manifests::{
     WatchedContract, WatchedContractSource, load_manifest_declared_watched_contracts,
-    load_watched_contracts_by_chain, load_watched_contracts_scoped_with_progress,
+    load_watched_contracts_by_chain,
 };
 use sqlx::{PgPool, types::Uuid};
 
-use crate::{
-    adapter_manifest::required_source_manifest_id,
-    checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress},
-    startup_progress::{STARTUP_ADAPTER_PROGRESS_PAGE_ROWS, StartupManifestProgress},
-};
+use crate::adapter_manifest::required_source_manifest_id;
 
 #[path = "active_emitters/manifest.rs"]
 mod manifest;
@@ -26,24 +22,19 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_active_emitters(
     pool: &PgPool,
     chain: &str,
     source_scope: Option<&[AuthorityRawLogSourceScopeTarget]>,
-    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Vec<ActiveEmitter>> {
-    let watched_contracts =
-        load_scoped_watched_contracts(pool, chain, source_scope, progress).await?;
+    let watched_contracts = load_scoped_watched_contracts(pool, chain, source_scope).await?;
     if watched_contracts.is_empty() {
         return Ok(Vec::new());
     }
-    let contract_roles = load_manifest_contract_roles(pool, &watched_contracts, progress).await?;
+    let contract_roles = load_manifest_contract_roles(pool, &watched_contracts).await?;
 
     let mut manifest_ids = HashSet::new();
-    for (index, contract) in watched_contracts.iter().enumerate() {
+    for contract in &watched_contracts {
         manifest_ids.insert(required_source_manifest_id(contract)?);
-        record_emitter_progress(pool, progress, index + 1, watched_contracts.len()).await?;
     }
     let manifest_ids = manifest_ids.into_iter().collect::<Vec<_>>();
     let active_manifests = load_active_manifest_metadata(pool, &manifest_ids).await?;
-    record_startup_adapter_progress(pool, progress).await?;
-    let watched_contract_count = watched_contracts.len();
     let mut emitters = BTreeMap::new();
     for (index, watched_contract) in watched_contracts.into_iter().enumerate() {
         let source_manifest_id = required_source_manifest_id(&watched_contract)?;
@@ -89,7 +80,6 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_active_emitters(
             ),
             candidate,
         );
-        record_emitter_progress(pool, progress, index + 1, watched_contract_count).await?;
     }
     Ok(emitters.into_values().collect())
 }
@@ -152,23 +142,8 @@ async fn load_scoped_watched_contracts(
     pool: &PgPool,
     chain: &str,
     source_scope: Option<&[AuthorityRawLogSourceScopeTarget]>,
-    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Vec<WatchedContract>> {
     let Some(source_scope) = source_scope else {
-        if let Some(progress) = progress.as_deref_mut() {
-            let source_families = unwrapped_authority_source_families();
-            let mut manifest_progress = StartupManifestProgress::new(progress);
-            return load_watched_contracts_scoped_with_progress(
-                pool,
-                Some(chain),
-                &source_families,
-                &mut manifest_progress,
-            )
-            .await
-            .context(
-                "failed to stream watched contracts for ENSv1 unwrapped authority attribution",
-            );
-        }
         return load_watched_contracts_by_chain(pool, chain)
             .await
             .context("failed to load watched contracts for ENSv1 unwrapped authority attribution");
