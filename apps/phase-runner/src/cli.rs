@@ -1,0 +1,336 @@
+use std::{collections::BTreeSet, path::PathBuf, str::FromStr, time::Duration};
+
+use clap::{Args, Parser, Subcommand};
+use uuid::Uuid;
+
+use crate::{
+    config::{
+        CapacityConfig, ChainConfig, RuntimeConfig, SeedBasis, SourceConfig, TimingConfig,
+        group_sources,
+    },
+    error::{ErrorKind, RunnerError, RunnerResult},
+    phase::{BlockRange, PhaseName},
+    runner::RedoPhase,
+};
+
+#[derive(Debug, Parser)]
+#[command(name = "phase-runner")]
+#[command(about = "Run the per-chain indexing phases")]
+pub struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Supervise every configured chain.
+    Run(RunArgs),
+    /// Run one phase over an explicit block range.
+    Redo(RedoArgs),
+}
+
+#[derive(Clone, Debug, Args)]
+struct ConnectionArgs {
+    #[arg(long, env = "BIGNAME_DATABASE_URL")]
+    database_url: String,
+
+    #[arg(long, env = "BIGNAME_PHASE_RUNNER_INSTANCE_ID")]
+    instance_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Args)]
+struct CapacityArgs {
+    #[arg(long, env = "BIGNAME_PHASE_RUNNER_DATABASE_MAX_BYTES")]
+    database_max_bytes: Option<u64>,
+
+    #[arg(
+        long,
+        env = "BIGNAME_PHASE_RUNNER_MINIMUM_FREE_DISK_BYTES",
+        default_value_t = 0
+    )]
+    minimum_free_disk_bytes: u64,
+
+    #[arg(long, env = "BIGNAME_PHASE_RUNNER_WRITABLE_PATH", default_value = ".")]
+    writable_path: PathBuf,
+
+    #[arg(
+        long,
+        env = "BIGNAME_PHASE_RUNNER_CAPACITY_POLL_MS",
+        default_value_t = 5_000
+    )]
+    capacity_poll_ms: u64,
+}
+
+#[derive(Clone, Debug, Args)]
+struct TimingArgs {
+    #[arg(
+        long,
+        env = "BIGNAME_PHASE_RUNNER_INITIAL_BACKOFF_MS",
+        default_value_t = 1_000
+    )]
+    initial_backoff_ms: u64,
+
+    #[arg(
+        long,
+        env = "BIGNAME_PHASE_RUNNER_MAXIMUM_BACKOFF_MS",
+        default_value_t = 30_000
+    )]
+    maximum_backoff_ms: u64,
+
+    #[arg(
+        long,
+        env = "BIGNAME_PHASE_RUNNER_LIVE_POLL_MS",
+        default_value_t = 1_000
+    )]
+    live_poll_ms: u64,
+}
+
+#[derive(Debug, Args)]
+struct RunArgs {
+    #[command(flatten)]
+    connection: ConnectionArgs,
+
+    #[command(flatten)]
+    capacity: CapacityArgs,
+
+    #[command(flatten)]
+    timing: TimingArgs,
+
+    #[arg(
+        long = "chain",
+        env = "BIGNAME_PHASE_RUNNER_CHAINS",
+        value_delimiter = ','
+    )]
+    chains: Vec<String>,
+
+    #[arg(
+        long = "source",
+        env = "BIGNAME_PHASE_RUNNER_SOURCES",
+        value_delimiter = ',',
+        help = "CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV"
+    )]
+    sources: Vec<String>,
+
+    #[arg(
+        long,
+        env = "BIGNAME_PHASE_RUNNER_VERIFY_BEFORE_LIVE",
+        value_delimiter = ','
+    )]
+    verify_before_live: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct RedoArgs {
+    #[command(flatten)]
+    connection: ConnectionArgs,
+
+    #[command(flatten)]
+    capacity: CapacityArgs,
+
+    #[command(flatten)]
+    timing: TimingArgs,
+
+    #[arg(long)]
+    chain: String,
+
+    #[arg(
+        long,
+        help = "ingest, interpret, project, verify, live, or recompute-flags"
+    )]
+    phase: String,
+
+    #[arg(long)]
+    from_block: i64,
+
+    #[arg(long)]
+    to_block: i64,
+
+    #[arg(
+        long = "source",
+        env = "BIGNAME_PHASE_RUNNER_SOURCES",
+        value_delimiter = ',',
+        help = "CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV"
+    )]
+    sources: Vec<String>,
+}
+
+pub enum ResolvedCommand {
+    Run {
+        database_url: String,
+        runtime: RuntimeConfig,
+    },
+    Redo {
+        database_url: String,
+        instance_id: String,
+        chain: ChainConfig,
+        capacity: CapacityConfig,
+        timing: TimingConfig,
+        phase: RedoPhase,
+        range: BlockRange,
+    },
+}
+
+impl Cli {
+    pub fn resolve(self) -> RunnerResult<ResolvedCommand> {
+        match self.command {
+            Command::Run(args) => resolve_run(args),
+            Command::Redo(args) => resolve_redo(args),
+        }
+    }
+}
+
+fn resolve_run(args: RunArgs) -> RunnerResult<ResolvedCommand> {
+    if args.chains.is_empty() {
+        return Err(RunnerError::new(
+            ErrorKind::Configuration,
+            "at least one --chain must be configured",
+        ));
+    }
+    let sources = args
+        .sources
+        .iter()
+        .map(|source| parse_source(source))
+        .collect::<RunnerResult<Vec<_>>>()?;
+    let verify_before_live = args.verify_before_live.into_iter().collect::<BTreeSet<_>>();
+    for chain in &verify_before_live {
+        if !args.chains.contains(chain) {
+            return Err(RunnerError::new(
+                ErrorKind::Configuration,
+                format!("verify-before-live names unconfigured chain {chain:?}"),
+            ));
+        }
+    }
+    let chains = group_sources(&args.chains, sources, &verify_before_live)?;
+    let capacity = resolve_capacity(args.capacity)?;
+    let timing = resolve_timing(args.timing)?;
+    let instance_id = resolve_instance_id(args.connection.instance_id)?;
+    let runtime = RuntimeConfig::new(instance_id, chains, capacity, timing)?;
+    Ok(ResolvedCommand::Run {
+        database_url: args.connection.database_url,
+        runtime,
+    })
+}
+
+fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
+    let phase = parse_redo_phase(&args.phase)?;
+    let range = BlockRange::new(args.from_block, args.to_block)?;
+    let sources = args
+        .sources
+        .iter()
+        .map(|source| parse_source(source))
+        .collect::<RunnerResult<Vec<_>>>()?;
+    if sources.iter().any(|source| source.chain_id != args.chain) {
+        return Err(RunnerError::new(
+            ErrorKind::Configuration,
+            "redo source belongs to a different chain",
+        ));
+    }
+    if phase == RedoPhase::Phase(PhaseName::Ingest) && sources.is_empty() {
+        return Err(RunnerError::new(
+            ErrorKind::Configuration,
+            "redo ingest requires at least one --source",
+        ));
+    }
+    Ok(ResolvedCommand::Redo {
+        database_url: args.connection.database_url,
+        instance_id: resolve_instance_id(args.connection.instance_id)?,
+        chain: ChainConfig::new(args.chain, sources, false)?,
+        capacity: resolve_capacity(args.capacity)?,
+        timing: resolve_timing(args.timing)?,
+        phase,
+        range,
+    })
+}
+
+fn resolve_instance_id(instance_id: Option<String>) -> RunnerResult<String> {
+    let instance_id = instance_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    if instance_id.trim().is_empty() {
+        return Err(RunnerError::new(
+            ErrorKind::Configuration,
+            "runner instance id must not be empty",
+        ));
+    }
+    Ok(instance_id)
+}
+
+fn resolve_capacity(args: CapacityArgs) -> RunnerResult<CapacityConfig> {
+    if args.capacity_poll_ms == 0 {
+        return Err(RunnerError::new(
+            ErrorKind::Configuration,
+            "capacity poll interval must be positive",
+        ));
+    }
+    Ok(CapacityConfig {
+        database_max_bytes: args.database_max_bytes,
+        minimum_free_disk_bytes: args.minimum_free_disk_bytes,
+        writable_path: args.writable_path,
+        poll_interval: Duration::from_millis(args.capacity_poll_ms),
+    })
+}
+
+fn resolve_timing(args: TimingArgs) -> RunnerResult<TimingConfig> {
+    let timing = TimingConfig {
+        initial_backoff: Duration::from_millis(args.initial_backoff_ms),
+        maximum_backoff: Duration::from_millis(args.maximum_backoff_ms),
+        live_poll_interval: Duration::from_millis(args.live_poll_ms),
+    };
+    timing.validate()?;
+    Ok(timing)
+}
+
+fn parse_redo_phase(value: &str) -> RunnerResult<RedoPhase> {
+    if value == "recompute-flags" {
+        return Ok(RedoPhase::RecomputeFlags);
+    }
+    PhaseName::from_str(value).map(RedoPhase::Phase)
+}
+
+fn parse_source(specification: &str) -> RunnerResult<SourceConfig> {
+    let (descriptor, environment_name) = specification
+        .split_once('=')
+        .ok_or_else(|| invalid_source("missing =URL_ENV", specification))?;
+    if environment_name.trim().is_empty() {
+        return Err(invalid_source(
+            "URL environment name is empty",
+            specification,
+        ));
+    }
+    let fields = descriptor.split(':').collect::<Vec<_>>();
+    if fields.len() != 5 {
+        return Err(invalid_source(
+            "expected CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV",
+            specification,
+        ));
+    }
+    let endpoint = std::env::var(environment_name).map_err(|_| {
+        RunnerError::new(
+            ErrorKind::Configuration,
+            format!(
+                "source {} for chain {} requires environment variable {environment_name}",
+                fields[1], fields[0]
+            ),
+        )
+    })?;
+    let start_block_number = fields[4]
+        .parse::<i64>()
+        .map_err(|_| invalid_source("START_BLOCK is not an integer", specification))?;
+    SourceConfig::new(
+        fields[0],
+        fields[1],
+        fields[2],
+        SeedBasis::parse(fields[3])?,
+        start_block_number,
+        endpoint,
+    )
+}
+
+fn invalid_source(reason: &str, specification: &str) -> RunnerError {
+    let descriptor = specification
+        .split_once('=')
+        .map(|(descriptor, _)| descriptor)
+        .unwrap_or(specification);
+    RunnerError::new(
+        ErrorKind::Configuration,
+        format!("invalid source descriptor {descriptor:?}: {reason}"),
+    )
+}

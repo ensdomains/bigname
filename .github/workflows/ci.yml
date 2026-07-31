@@ -170,6 +170,8 @@ jobs:
             packages: "-p bigname-indexer"
           - name: worker
             packages: "-p bigname-worker"
+          - name: phase-runner
+            packages: "-p phase-runner -p bigname-content-hash"
           - name: core
             packages: >-
               -p bigname-domain

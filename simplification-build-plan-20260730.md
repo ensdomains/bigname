@@ -235,9 +235,9 @@ headroom first (raw is double-stored until D3).
 (+hydrate) → verify ‖ live; redo covers the same five + recompute-flags.
 Ownership rule restated structurally: ONE writer binary; raw writes only in
 ingest modules, derived writes only in interpret/project modules — D5
-audits that formulation. A3 content-hash input = interpreter +
-manifest-authority + projection crates and complete manifest ABI event blocks
-(decode fragment plus emitter roles and normalized-event mappings), EXCLUDING
+audits that formulation. A3 content-hash input = all adapter sources,
+worker sources minus explicit wiring/test exclusions,
+manifest-authority sources, and each whole `[[abi.events]]` block, EXCLUDING
 the normalizer version (flag recompute path owns that). New watched signatures
 still require amendment A's ingest before rebuild. A2 defines the
 heartbeat/readiness contract:

@@ -1,10 +1,13 @@
 use std::{
+    collections::BTreeSet,
     ffi::OsStr,
     fs, io,
     path::{Path, PathBuf},
 };
 
 use alloy_primitives::{hex, keccak256};
+
+use crate::source_paths;
 
 const ADAPTER_SOURCE_ROOT: &str = "crates/adapters/src";
 const MANIFEST_AUTHORITY_SOURCE_ROOT: &str = "crates/manifests/src";
@@ -13,6 +16,9 @@ const WORKER_SOURCE_ROOT: &str = "apps/worker/src";
 const MINIMUM_MANIFEST_EVENT_COUNT: usize = 111;
 const MINIMUM_EVENT_MANIFEST_COUNT: usize = 16;
 const HASH_FORMAT: &[u8] = b"bigname-interpreter-content-v3\0";
+
+// `apps/phase-runner` is deliberately outside these roots: it may orchestrate phase work, but
+// semantic interpretation or projection code must never live there.
 
 struct SourceExclusion {
     relative_path: &'static str,
@@ -148,9 +154,18 @@ pub(crate) fn compute(workspace_root: &Path) -> io::Result<String> {
 
 fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
     let mut inputs = Vec::new();
+    let cfg_test_sources = source_paths::cfg_test_sources(
+        workspace_root,
+        &[
+            ADAPTER_SOURCE_ROOT,
+            MANIFEST_AUTHORITY_SOURCE_ROOT,
+            WORKER_SOURCE_ROOT,
+        ],
+    )?;
     collect_rust_sources(
         workspace_root,
         &workspace_root.join(ADAPTER_SOURCE_ROOT),
+        &cfg_test_sources,
         &mut inputs,
     )?;
     // ENSv2 registry interpretation delegates discovery reconciliation and identity writes to
@@ -159,11 +174,13 @@ fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
     collect_rust_sources(
         workspace_root,
         &workspace_root.join(MANIFEST_AUTHORITY_SOURCE_ROOT),
+        &cfg_test_sources,
         &mut inputs,
     )?;
     collect_rust_sources(
         workspace_root,
         &workspace_root.join(WORKER_SOURCE_ROOT),
+        &cfg_test_sources,
         &mut inputs,
     )?;
     collect_manifest_event_blocks(workspace_root, &mut inputs)?;
@@ -173,6 +190,7 @@ fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
 fn collect_rust_sources(
     workspace_root: &Path,
     directory: &Path,
+    cfg_test_sources: &BTreeSet<String>,
     inputs: &mut Vec<Input>,
 ) -> io::Result<()> {
     if !directory.exists() {
@@ -183,9 +201,9 @@ fn collect_rust_sources(
     for entry in entries {
         let path = entry.path();
         if path.is_dir() {
-            collect_rust_sources(workspace_root, &path, inputs)?;
+            collect_rust_sources(workspace_root, &path, cfg_test_sources, inputs)?;
         } else if path.extension() == Some(OsStr::new("rs"))
-            && source_exclusion(workspace_root, &path)?.is_none()
+            && source_exclusion(workspace_root, &path, cfg_test_sources)?.is_none()
         {
             collect_file(workspace_root, &path, inputs)?;
         }
@@ -193,13 +211,21 @@ fn collect_rust_sources(
     Ok(())
 }
 
-fn source_exclusion(workspace_root: &Path, path: &Path) -> io::Result<Option<&'static str>> {
+fn source_exclusion(
+    workspace_root: &Path,
+    path: &Path,
+    cfg_test_sources: &BTreeSet<String>,
+) -> io::Result<Option<&'static str>> {
     let relative_path = relative_key(workspace_root, path)?;
     if let Some(exclusion) = CFG_TEST_SOURCE_EXCLUSIONS
         .iter()
         .find(|exclusion| exclusion.relative_path == relative_path)
     {
         return Ok(Some(exclusion.reason));
+    }
+
+    if cfg_test_sources.contains(&relative_path) {
+        return Ok(Some("cfg(test)-gated external module"));
     }
 
     let source_relative_path = if let Some(path) = relative_path.strip_prefix(ADAPTER_SOURCE_ROOT) {
@@ -211,21 +237,6 @@ fn source_exclusion(workspace_root: &Path, path: &Path) -> io::Result<Option<&'s
     } else {
         return Ok(None);
     };
-    let source_path = Path::new(source_relative_path);
-    // External test modules follow the repository's `tests.rs`, `*_tests.rs`, or `tests/`
-    // convention and are never production interpreter inputs. A production `*_support.rs`
-    // file is not excluded by this rule.
-    if source_path
-        .components()
-        .any(|component| component.as_os_str() == OsStr::new("tests"))
-        || source_path
-            .file_name()
-            .and_then(OsStr::to_str)
-            .is_some_and(|name| name == "tests.rs" || name.ends_with("_tests.rs"))
-    {
-        return Ok(Some("conventionally named external test module"));
-    }
-
     if relative_path.starts_with(WORKER_SOURCE_ROOT) {
         return Ok(WORKER_SOURCE_EXCLUSIONS
             .iter()
@@ -410,7 +421,15 @@ pub(crate) fn excluded_source_reason(
     workspace_root: &Path,
     path: &Path,
 ) -> io::Result<Option<&'static str>> {
-    source_exclusion(workspace_root, path)
+    let cfg_test_sources = source_paths::cfg_test_sources(
+        workspace_root,
+        &[
+            ADAPTER_SOURCE_ROOT,
+            MANIFEST_AUTHORITY_SOURCE_ROOT,
+            WORKER_SOURCE_ROOT,
+        ],
+    )?;
+    source_exclusion(workspace_root, path, &cfg_test_sources)
 }
 
 #[cfg(test)]

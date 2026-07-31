@@ -1044,6 +1044,53 @@ BEGIN
     WHERE chain_id = 'schema-v2-check'
       AND phase_name = 'verify';
 
+    INSERT INTO chain_phase_state (
+        chain_id,
+        phase_name
+    )
+    VALUES (
+        'schema-v2-redo-failure',
+        'interpret'
+    );
+
+    UPDATE chain_phase_state
+    SET phase_status = 'running',
+        redo_in_progress = true,
+        redo_mode = 'redo',
+        redo_previous_phase_status = 'idle',
+        redo_from_block_number = 0,
+        redo_to_block_number = 1,
+        last_error = 'deterministic redo failure',
+        started_at = now()
+    WHERE chain_id = 'schema-v2-redo-failure'
+      AND phase_name = 'interpret';
+
+    BEGIN
+        INSERT INTO chain_phase_state (
+            chain_id,
+            phase_name,
+            phase_status,
+            last_error,
+            started_at
+        )
+        VALUES (
+            'schema-v2-invalid-running-error',
+            'interpret',
+            'running',
+            'invalid normal-run error',
+            now()
+        );
+        RAISE EXCEPTION
+            'a normal running phase accepted last_error';
+    EXCEPTION
+        WHEN check_violation THEN
+            NULL;
+    END;
+
+    DELETE FROM chain_phase_state
+    WHERE chain_id = 'schema-v2-redo-failure'
+      AND phase_name = 'interpret';
+
     BEGIN
         INSERT INTO chain_phase_state (
             chain_id,

@@ -3,18 +3,21 @@ resolver = "2"
 members = [
     "apps/api",
     "apps/indexer",
+    "apps/phase-runner",
     "apps/worker",
     "crates/domain",
     "crates/metrics",
     "crates/storage",
     "crates/manifests",
     "crates/adapters",
+    "crates/content-hash",
     "crates/execution",
     "crates/test-support",
 ]
 default-members = [
     "apps/api",
     "apps/indexer",
+    "apps/phase-runner",
     "apps/worker",
 ]
 
@@ -42,11 +45,13 @@ serde = { version = "1.0.228", features = ["derive"] }
 futures-util = "0.3.31"
 sqlx = { version = "0.8.6", default-features = false, features = ["macros", "migrate", "postgres", "runtime-tokio-rustls", "uuid"] }
 tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7.18", features = ["rt"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt", "json"] }
 uuid = { version = "1.18.1", features = ["serde", "v4"] }
 
 bigname-adapters = { path = "crates/adapters" }
+bigname-content-hash = { path = "crates/content-hash" }
 bigname-domain = { path = "crates/domain" }
 bigname-execution = { path = "crates/execution" }
 bigname-manifests = { path = "crates/manifests" }

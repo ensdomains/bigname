@@ -1709,6 +1709,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bigname-content-hash"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+]
+
+[[package]]
 name = "bigname-domain"
 version = "0.1.0"
 dependencies = [
@@ -1821,8 +1828,8 @@ dependencies = [
 name = "bigname-test-support"
 version = "0.1.0"
 dependencies = [
- "alloy-primitives",
  "anyhow",
+ "bigname-content-hash",
  "bigname-storage",
  "sqlx",
  "tokio",
@@ -5679,6 +5686,22 @@ checksum = "e9567389417feee6ce15dd6527a8a1ecac205ef62c2932bcf3d9f6fc5b78b414"
 dependencies = [
  "futures",
  "rustc_version 0.4.1",
+]
+
+[[package]]
+name = "phase-runner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bigname-content-hash",
+ "bigname-test-support",
+ "clap",
+ "sqlx",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+ "uuid",
 ]
 
 [[package]]
@@ -10448,6 +10471,7 @@ dependencies = [
  "futures-core",
  "futures-io",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "slab",
  "tokio",
