@@ -1,8 +1,13 @@
 use crate::{
     IngestError, Result,
-    engine::{BASE_COINBASE_SEAM_BLOCK, BatchRequest, HeadMarkers, Marker, SourceDescriptor},
+    engine::{BatchRequest, HeadMarkers, Marker, SourceDescriptor},
     provider::{Block, HeadSnapshot, ProviderKind, normalized_kind},
 };
+
+// Both Base sources deliberately include this block: the Coinbase bulk range
+// ends here and RPC begins here, so warehouse lag cannot leave a gap. Stored
+// rows use shared block-hash and log-position keys, making the overlap idempotent.
+pub const BASE_COINBASE_SEAM_BLOCK: i64 = 48_428_000;
 
 pub fn validate_request(request: &BatchRequest) -> Result<()> {
     if request.chain_id.trim().is_empty() || request.sources.is_empty() {

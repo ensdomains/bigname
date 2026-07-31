@@ -33,7 +33,16 @@ pub async fn store(
     immutable::verify_receipts(&mut transaction, chain_id, &facts.receipts).await?;
     immutable::verify_logs(&mut transaction, chain_id, &facts.logs).await?;
     if let Some((from, to, provider_logs, queries)) = coinbase_window {
-        recount_loaded_window(&mut transaction, chain_id, from, to, provider_logs, queries).await?;
+        recount_loaded_window(
+            &mut transaction,
+            chain_id,
+            from,
+            to,
+            provider_logs,
+            &facts.logs,
+            queries,
+        )
+        .await?;
     }
     transaction.commit().await.map_err(|error| {
         crate::IngestError::database(

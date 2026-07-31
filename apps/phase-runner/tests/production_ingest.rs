@@ -67,13 +67,6 @@ async fn production_ingest_writes_raw_facts_cursors_heads_and_handoff() -> Resul
 
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            if task.is_finished() {
-                let result = (&mut task)
-                    .await
-                    .context("production ingest task panicked")?;
-                result.context("production ingest task exited before completion")?;
-                anyhow::bail!("production ingest task exited before ingest completed");
-            }
             let phase_state: Option<(String, Option<String>)> = sqlx::query_as(
                 "
                 SELECT phase_status, last_error
@@ -96,6 +89,13 @@ async fn production_ingest_writes_raw_facts_cursors_heads_and_handoff() -> Resul
                     );
                 }
                 _ => {}
+            }
+            if task.is_finished() {
+                let result = (&mut task)
+                    .await
+                    .context("production ingest task panicked")?;
+                result.context("production ingest task exited before completion")?;
+                anyhow::bail!("production ingest task exited before ingest completed");
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

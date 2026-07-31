@@ -1683,7 +1683,7 @@ fn routing_phase_set(good_live: Arc<Notify>) -> RunnerResult<PhaseSet> {
                 };
                 if name == PhaseName::Live {
                     good_live.notify_one();
-                    Ok(PhaseBatchOutcome::Continue(progress))
+                    Ok(PhaseBatchOutcome::Idle(progress))
                 } else {
                     Ok(PhaseBatchOutcome::Complete(progress))
                 }
@@ -1711,7 +1711,7 @@ fn panic_routing_phase_set(
                 if name == PhaseName::Live {
                     panic_trigger.notify_one();
                     good_live.notify_one();
-                    Ok(PhaseBatchOutcome::Continue(PhaseProgress::default()))
+                    Ok(PhaseBatchOutcome::Idle(PhaseProgress::default()))
                 } else if name == PhaseName::Verify {
                     Ok(PhaseBatchOutcome::Complete(PhaseProgress {
                         verification_level: Some(VerificationLevel::QuickSynced),

@@ -186,12 +186,13 @@ pub struct PhaseProgress {
 pub enum PhaseBatchOutcome {
     Complete(PhaseProgress),
     Continue(PhaseProgress),
+    Idle(PhaseProgress),
 }
 
 impl PhaseBatchOutcome {
     pub fn progress(&self) -> &PhaseProgress {
         match self {
-            Self::Complete(progress) | Self::Continue(progress) => progress,
+            Self::Complete(progress) | Self::Continue(progress) | Self::Idle(progress) => progress,
         }
     }
 }
@@ -263,7 +264,7 @@ impl Phase for LoopbackPhase {
             };
 
             if context.phase == PhaseName::Live && matches!(context.mode, RunMode::Normal) {
-                Ok(PhaseBatchOutcome::Continue(progress))
+                Ok(PhaseBatchOutcome::Idle(progress))
             } else {
                 Ok(PhaseBatchOutcome::Complete(progress))
             }

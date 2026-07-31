@@ -9,13 +9,12 @@ use crate::{
     fetching::{estimated_write_bytes, fetch_selected_facts},
     manifest::load_watch_filter,
     plan::{
-        primary_source, publishable_heads, redo_source_target, sort_sources, target_number,
-        validate_request,
+        BASE_COINBASE_SEAM_BLOCK, primary_source, publishable_heads, redo_source_target,
+        sort_sources, target_number, validate_request,
     },
     provider::{ChainProvider, ProviderKind, SharedProvider, normalized_kind, provider_error},
 };
 
-pub const BASE_COINBASE_SEAM_BLOCK: i64 = 48_428_000;
 const BLOCKS_PER_BATCH: i64 = 256;
 const COINBASE_BLOCKS_PER_BATCH: i64 = 1_024;
 

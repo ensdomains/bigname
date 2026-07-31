@@ -171,7 +171,7 @@ jobs:
           - name: worker
             packages: "-p bigname-worker"
           - name: phase-runner
-            packages: "-p phase-runner -p bigname-content-hash"
+            packages: "-p phase-runner -p bigname-ingest -p bigname-content-hash"
           - name: core
             packages: >-
               -p bigname-domain

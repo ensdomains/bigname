@@ -176,9 +176,12 @@ pub(super) fn retryable(error: &anyhow::Error) -> bool {
         return true;
     }
     let message = format!("{error:#}").to_ascii_lowercase();
-    ["http 429", "http 500", "http 502", "http 503", "http 504"]
-        .iter()
-        .any(|needle| message.contains(needle))
+    [
+        "http 429", "http 500", "http 502", "http 503", "http 504", "http 520", "http 521",
+        "http 522", "http 524",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
         || [
             "too many requests",
             "rate limit",
@@ -191,6 +194,9 @@ pub(super) fn retryable(error: &anyhow::Error) -> bool {
             "timeout",
             "connection reset",
             "connection closed",
+            "provider block hashes changed during range log lookup",
+            "provider returned log outside resolved block",
+            "reth db block hashes changed during log lookup",
             "-32005",
         ]
         .iter()
@@ -230,4 +236,32 @@ pub(super) fn validate_endpoint(endpoint: &str) -> Result<Url> {
         bail!("RPC endpoint must use http:// or https://");
     }
     Ok(endpoint)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mid_fetch_reorg_races_are_retryable() {
+        for message in [
+            "provider block hashes changed during range log lookup",
+            "provider returned log outside resolved block 10 0xabc",
+            "Reth DB block hashes changed during log lookup",
+        ] {
+            assert!(retryable(&anyhow::anyhow!(message)), "{message}");
+        }
+    }
+
+    #[test]
+    fn hosted_rpc_edge_gateway_statuses_are_retryable() {
+        for status in [520, 521, 522, 524] {
+            assert!(
+                retryable(&anyhow::anyhow!(
+                    "provider request failed with HTTP {status}"
+                )),
+                "HTTP {status}"
+            );
+        }
+    }
 }

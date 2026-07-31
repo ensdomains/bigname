@@ -268,10 +268,13 @@ async fn ensure_ingest_cursor(pool: &PgPool, source: &SourceConfig) -> RunnerRes
     .execute(pool)
     .await
     .map_err(|error| {
-        RunnerError::transient(format!(
-            "failed to initialize ingest cursor {} for chain {}: {error}",
-            source.source_key, source.chain_id
-        ))
+        RunnerError::database(
+            format!(
+                "failed to initialize ingest cursor {} for chain {}",
+                source.source_key, source.chain_id
+            ),
+            error,
+        )
     })?;
     let stored: (String, i64) = sqlx::query_as(
         "
@@ -286,10 +289,13 @@ async fn ensure_ingest_cursor(pool: &PgPool, source: &SourceConfig) -> RunnerRes
     .fetch_one(pool)
     .await
     .map_err(|error| {
-        RunnerError::transient(format!(
-            "failed to check ingest cursor {} for chain {}: {error}",
-            source.source_key, source.chain_id
-        ))
+        RunnerError::database(
+            format!(
+                "failed to check ingest cursor {} for chain {}",
+                source.source_key, source.chain_id
+            ),
+            error,
+        )
     })?;
     if stored
         != (
@@ -382,10 +388,13 @@ pub(crate) async fn upsert_ingest_cursor(
     .execute(pool)
     .await
     .map_err(|error| {
-        RunnerError::transient(format!(
-            "failed to update ingest cursor {} for chain {}: {error}",
-            source.source_key, source.chain_id
-        ))
+        RunnerError::database(
+            format!(
+                "failed to update ingest cursor {} for chain {}",
+                source.source_key, source.chain_id
+            ),
+            error,
+        )
     })?;
     Ok(())
 }

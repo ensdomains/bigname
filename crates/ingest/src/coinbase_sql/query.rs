@@ -107,18 +107,6 @@ pub(super) fn build_query(
     let log_action_expr = active_action_expression("l.action");
     let active_transactions_cte = active_transactions_cte(network, pack.from_block, pack.to_block);
 
-    // The union of the decoded and encoded arms is wrapped in a subquery
-    // before ORDER BY/LIMIT: ClickHouse binds a trailing ORDER BY/LIMIT after
-    // `a UNION ALL b` to the LAST arm only, so the unwrapped shape left the
-    // decoded arm unordered (nondeterministic per execution) and never
-    // applied the page limit globally — both of which the cursor pagination
-    // relies on. The sort key is not unique across arms: a decode-transition
-    // twin (same log in both arms) sorts adjacently in arbitrary arm order,
-    // and a page boundary splitting the pair can keep the encoded twin while
-    // the strict cursor excludes the decoded one — the row then degrades to
-    // the validation-provider synthesis path (one extra lookup, same data).
-    // A decoded-first tie-breaker column would remove that cost but deviates
-    // from the live-proven query shape; adopt only with fresh live proof.
     Ok(format!(
         r#"WITH {active_transactions_cte},
 decoded_log_rows AS (
