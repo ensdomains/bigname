@@ -1,0 +1,493 @@
+{
+  "cases": [
+    {
+      "id": "existing_domain_shape",
+      "response": {
+        "data": {
+          "domain": {
+            "createdAt": 1700000000,
+            "expiryDate": 1900000000,
+            "id": "0xa11ce",
+            "name": "Alice.eth",
+            "normalizedName": "alice.eth",
+            "owner": {
+              "id": "0x000000000000000000000000000000000000000a"
+            },
+            "resolver": {
+              "address": "0x000000000000000000000000000000000000def0",
+              "addresses": [],
+              "contentHash": null,
+              "id": "0x000000000000000000000000000000000000def0",
+              "texts": []
+            },
+            "tokenId": null
+          }
+        }
+      }
+    },
+    {
+      "id": "existing_domain_by_name",
+      "response": {
+        "data": {
+          "domain": {
+            "id": "0xa11ce",
+            "name": "Alice.eth",
+            "normalizedName": "alice.eth",
+            "owner": {
+              "id": "0x000000000000000000000000000000000000000a"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "existing_domain_missing",
+      "response": {
+        "data": {
+          "domain": null
+        }
+      }
+    },
+    {
+      "id": "existing_domains_first_page",
+      "response": {
+        "data": {
+          "domains": [
+            {
+              "id": "0xa11ce",
+              "name": "Alice.eth",
+              "owner": {
+                "id": "0x000000000000000000000000000000000000000a"
+              }
+            },
+            {
+              "id": "0xb0b",
+              "name": "Bob.eth",
+              "owner": {
+                "id": "0x000000000000000000000000000000000000000a"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "existing_domains_second_page",
+      "response": {
+        "data": {
+          "domains": [
+            {
+              "name": "Bob.eth"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "existing_owner_filter",
+      "response": {
+        "data": {
+          "domains": [
+            {
+              "id": "0xa11ce"
+            },
+            {
+              "id": "0xb0b"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "existing_empty_owner_filter",
+      "response": {
+        "data": {
+          "domains": []
+        }
+      }
+    },
+    {
+      "id": "existing_empty_owner_count",
+      "response": {
+        "data": {
+          "domainConnection": {
+            "totalCount": 0
+          }
+        }
+      }
+    },
+    {
+      "id": "existing_owned_names_count",
+      "response": {
+        "data": {
+          "registrationConnection": {
+            "totalCount": 1
+          }
+        }
+      }
+    },
+    {
+      "id": "existing_migrated_names_count",
+      "response": {
+        "data": {
+          "domainConnection": {
+            "totalCount": 1
+          }
+        }
+      }
+    },
+    {
+      "id": "existing_all_names_count",
+      "response": {
+        "data": {
+          "domainConnection": {
+            "totalCount": 2
+          }
+        }
+      }
+    },
+    {
+      "id": "existing_owner_registrant_fallback",
+      "response": {
+        "data": {
+          "domain": {
+            "expiryDate": 1950000000,
+            "owner": {
+              "id": "0x000000000000000000000000000000000000000d"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "existing_owner_zero_address_fallback",
+      "response": {
+        "data": {
+          "domain": {
+            "createdAt": 0,
+            "expiryDate": null,
+            "owner": {
+              "id": "0x0000000000000000000000000000000000000000"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "existing_name_descending",
+      "response": {
+        "data": {
+          "domains": [
+            {
+              "name": "Dave.eth"
+            },
+            {
+              "name": "Carol.eth"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "existing_expiry_ascending",
+      "response": {
+        "data": {
+          "domains": [
+            {
+              "name": "Carol.eth"
+            },
+            {
+              "name": "Dave.eth"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "existing_expiry_descending",
+      "response": {
+        "data": {
+          "domains": [
+            {
+              "name": "Dave.eth"
+            },
+            {
+              "name": "Carol.eth"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "existing_registrant_list_filter",
+      "response": {
+        "data": {
+          "registrationConnection": {
+            "totalCount": 2
+          }
+        }
+      }
+    },
+    {
+      "id": "existing_name_contains_filter",
+      "response": {
+        "data": {
+          "domains": [
+            {
+              "name": "Carol.eth"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "existing_domains_record_hit_and_miss",
+      "response": {
+        "data": {
+          "domains": [
+            {
+              "name": "Alice.eth",
+              "resolver": {
+                "address": "0x000000000000000000000000000000000000def0",
+                "addresses": [
+                  {
+                    "address": "0x00000000000000000000000000000000000000bb",
+                    "coinType": 2147483658
+                  },
+                  {
+                    "address": "0x00000000000000000000000000000000000000aa",
+                    "coinType": 60
+                  }
+                ],
+                "contentHash": "0xe30101701220aabbccdd",
+                "texts": [
+                  "avatar",
+                  "url"
+                ]
+              }
+            },
+            {
+              "name": "Bob.eth",
+              "resolver": {
+                "address": "0x000000000000000000000000000000000000def0",
+                "addresses": [],
+                "contentHash": null,
+                "texts": []
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "existing_domain_records",
+      "response": {
+        "data": {
+          "domain": {
+            "resolver": {
+              "address": "0x000000000000000000000000000000000000def0",
+              "addresses": [
+                {
+                  "address": "0x00000000000000000000000000000000000000bb",
+                  "coinType": 2147483658
+                },
+                {
+                  "address": "0x00000000000000000000000000000000000000aa",
+                  "coinType": 60
+                }
+              ],
+              "contentHash": "0xe30101701220aabbccdd",
+              "id": "0x000000000000000000000000000000000000def0",
+              "texts": [
+                "avatar",
+                "url"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "existing_domain_without_records",
+      "response": {
+        "data": {
+          "domain": {
+            "resolver": {
+              "addresses": [],
+              "contentHash": null,
+              "texts": []
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "manager_domain",
+      "response": {
+        "data": {
+          "domain": {
+            "createdAt": 1700000000,
+            "expiryDate": 1900000000,
+            "id": "0xa11ce",
+            "name": "Alice.eth",
+            "normalizedName": "alice.eth",
+            "owner": {
+              "id": "0x000000000000000000000000000000000000000a"
+            },
+            "resolver": {
+              "address": "0x000000000000000000000000000000000000def0",
+              "addresses": [
+                {
+                  "address": "0x00000000000000000000000000000000000000bb",
+                  "coinType": 2147483658
+                },
+                {
+                  "address": "0x00000000000000000000000000000000000000aa",
+                  "coinType": 60
+                }
+              ],
+              "contentHash": "0xe30101701220aabbccdd",
+              "id": "0x000000000000000000000000000000000000def0",
+              "texts": [
+                "avatar",
+                "url"
+              ]
+            },
+            "tokenId": null
+          }
+        }
+      }
+    },
+    {
+      "id": "manager_domains",
+      "response": {
+        "data": {
+          "domains": [
+            {
+              "createdAt": 1700000000,
+              "expiryDate": 1900000000,
+              "id": "0xa11ce",
+              "name": "Alice.eth",
+              "normalizedName": "alice.eth",
+              "owner": {
+                "id": "0x000000000000000000000000000000000000000a"
+              },
+              "resolver": {
+                "address": "0x000000000000000000000000000000000000def0",
+                "addresses": [
+                  {
+                    "address": "0x00000000000000000000000000000000000000bb",
+                    "coinType": 2147483658
+                  },
+                  {
+                    "address": "0x00000000000000000000000000000000000000aa",
+                    "coinType": 60
+                  }
+                ],
+                "contentHash": "0xe30101701220aabbccdd",
+                "id": "0x000000000000000000000000000000000000def0",
+                "texts": [
+                  "avatar",
+                  "url"
+                ]
+              },
+              "tokenId": null
+            },
+            {
+              "createdAt": 1650000000,
+              "expiryDate": 1800000000,
+              "id": "0xb0b",
+              "name": "Bob.eth",
+              "normalizedName": "bob.eth",
+              "owner": {
+                "id": "0x000000000000000000000000000000000000000a"
+              },
+              "resolver": {
+                "address": "0x000000000000000000000000000000000000def0",
+                "addresses": [],
+                "contentHash": null,
+                "id": "0x000000000000000000000000000000000000def0",
+                "texts": []
+              },
+              "tokenId": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "manager_owned_names_count",
+      "response": {
+        "data": {
+          "registrationConnection": {
+            "totalCount": 1
+          }
+        }
+      }
+    },
+    {
+      "id": "manager_migrated_names_count",
+      "response": {
+        "data": {
+          "domainConnection": {
+            "totalCount": 1
+          }
+        }
+      }
+    },
+    {
+      "id": "existing_domains_records_for_each_name",
+      "response": {
+        "data": {
+          "domains": [
+            {
+              "name": "Alice.eth",
+              "resolver": {
+                "addresses": [
+                  {
+                    "address": "0x00000000000000000000000000000000000000bb",
+                    "coinType": 2147483658
+                  },
+                  {
+                    "address": "0x00000000000000000000000000000000000000aa",
+                    "coinType": 60
+                  }
+                ],
+                "contentHash": "0xe30101701220aabbccdd"
+              }
+            },
+            {
+              "name": "Bob.eth",
+              "resolver": {
+                "addresses": [
+                  {
+                    "address": "0x00000000000000000000000000000000000000cc",
+                    "coinType": 60
+                  }
+                ],
+                "contentHash": "0xe301017012209988"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "existing_sepolia_record_anchor_fallback",
+      "response": {
+        "data": {
+          "domain": {
+            "resolver": {
+              "addresses": [],
+              "contentHash": null,
+              "texts": [
+                "avatar",
+                "com.github"
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
+}
