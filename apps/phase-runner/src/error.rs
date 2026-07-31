@@ -1,5 +1,7 @@
 use std::{error::Error, fmt};
 
+pub(crate) const VERIFICATION_MISMATCH_PREFIX: &str = "verification mismatch: ";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErrorKind {
     Transient,
@@ -37,6 +39,31 @@ impl RunnerError {
 
     pub fn verification_mismatch(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::VerificationMismatch, message)
+    }
+
+    pub(crate) fn database(message: impl Into<String>, error: sqlx::Error) -> Self {
+        let message = format!("{}: {error}", message.into());
+        if matches!(
+            &error,
+            sqlx::Error::Database(database)
+                if database.code().is_some_and(|code| code.starts_with("23"))
+        ) {
+            Self::data_integrity(message)
+        } else {
+            Self::transient(message)
+        }
+    }
+
+    pub(crate) fn with_secondary(self, action: &str, secondary: Self) -> Self {
+        let kind = if self.is_retryable() {
+            secondary.kind
+        } else {
+            self.kind
+        };
+        Self::new(
+            kind,
+            format!("{self}; additionally failed to {action}: {secondary}"),
+        )
     }
 
     pub(crate) fn lock_connection_lost(message: impl Into<String>) -> Self {

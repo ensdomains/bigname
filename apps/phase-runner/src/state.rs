@@ -7,7 +7,7 @@ use crate::{
     error::{ErrorKind, RunnerError, RunnerResult},
     heads::BlockMarker,
     phase::{PhaseName, PhaseProgress, PhaseResume, RunMode},
-    redo_state::{self, RedoSession},
+    redo_state::{self, RedoOutcome, RedoSession},
     state_persistence::{
         load_phase_resume, load_redo_resume, update_ingest_cursors, update_progress,
         update_redo_progress,
@@ -217,9 +217,9 @@ impl PhaseStore {
         chain_id: &str,
         phase: PhaseName,
         session: RedoSession,
-        completed: bool,
+        outcome: RedoOutcome<'_>,
     ) -> RunnerResult<()> {
-        redo_state::finish(&self.pool, chain_id, phase, session, completed).await
+        redo_state::finish(&self.pool, chain_id, phase, session, outcome).await
     }
 
     pub async fn pause_phase(&self, chain_id: &str, phase: PhaseName) -> RunnerResult<()> {

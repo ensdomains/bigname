@@ -2,16 +2,22 @@ use sqlx::PgPool;
 
 use crate::{
     error::{RunnerError, RunnerResult},
-    phase::{BlockRange, PhaseName, RunMode},
+    phase::{BlockRange, PhaseName, PhaseProgress, RunMode},
     state::PhaseStatus,
     transitions::{
-        PhaseStateRow, invalid_transition, lock_chain_phase_state, require_start, row_for,
+        PhaseStateRow, invalid_transition, lock_chain_phase_state, redo_rerun_instruction,
+        require_start, row_for,
     },
 };
 
 pub(crate) struct RedoSession {
     previous: PhaseStateRow,
     interrupted_before_redo: bool,
+}
+
+pub(crate) enum RedoOutcome<'a> {
+    Completed(&'a PhaseProgress),
+    Failed(&'a RunnerError),
 }
 
 pub(crate) async fn begin(
@@ -21,9 +27,10 @@ pub(crate) async fn begin(
     mode: &RunMode,
 ) -> RunnerResult<RedoSession> {
     let mut transaction = pool.begin().await.map_err(|error| {
-        RunnerError::transient(format!(
-            "failed to begin redo transition for chain {chain_id} phase {phase}: {error}"
-        ))
+        RunnerError::database(
+            format!("failed to begin redo transition for chain {chain_id} phase {phase}"),
+            error,
+        )
     })?;
     let rows = lock_chain_phase_state(&mut transaction, chain_id).await?;
     require_start(&rows, chain_id, phase, mode)?;
@@ -83,7 +90,7 @@ pub(crate) async fn begin(
             redo_current_block_hash = CASE WHEN $6 THEN redo_current_block_hash END,
             redo_target_block_number = CASE WHEN $6 THEN redo_target_block_number END,
             redo_target_block_hash = CASE WHEN $6 THEN redo_target_block_hash END,
-            last_error = NULL,
+            last_error = CASE WHEN redo_in_progress THEN last_error END,
             started_at = now(),
             finished_at = NULL,
             updated_at = now()
@@ -100,14 +107,16 @@ pub(crate) async fn begin(
     .execute(&mut *transaction)
     .await
     .map_err(|error| {
-        RunnerError::transient(format!(
-            "failed to start redo for chain {chain_id} phase {phase}: {error}"
-        ))
+        RunnerError::database(
+            format!("failed to start redo for chain {chain_id} phase {phase}"),
+            error,
+        )
     })?;
     transaction.commit().await.map_err(|error| {
-        RunnerError::transient(format!(
-            "failed to commit redo start for chain {chain_id} phase {phase}: {error}"
-        ))
+        RunnerError::database(
+            format!("failed to commit redo start for chain {chain_id} phase {phase}"),
+            error,
+        )
     })?;
     Ok(RedoSession {
         interrupted_before_redo: matches!(status, PhaseStatus::Running | PhaseStatus::Paused),
@@ -167,9 +176,10 @@ async fn require_recorded_extent(
     .fetch_one(&mut **transaction)
     .await
     .map_err(|error| {
-        RunnerError::transient(format!(
-            "failed to load recorded redo extent for chain {chain_id} phase {phase}: {error}"
-        ))
+        RunnerError::database(
+            format!("failed to load recorded redo extent for chain {chain_id} phase {phase}"),
+            error,
+        )
     })?;
     if range.to > to || from.is_some_and(|from| range.from < from) {
         let from = from.unwrap_or(0);
@@ -201,18 +211,15 @@ fn require_interrupted_redo_coverage(
     if previous.redo_mode.as_deref() == Some(requested_mode) && covers_interrupted_range {
         return Ok(());
     }
-    let phase_argument = if previous.redo_mode.as_deref() == Some("recompute_flags") {
-        "recompute-flags"
-    } else {
-        phase.as_str()
-    };
-    let range_argument = interrupted_range
-        .map(|(from, to)| format!(" --from-block {from} --to-block {to}"))
-        .unwrap_or_default();
+    let instruction = redo_rerun_instruction(
+        chain_id,
+        phase,
+        previous.redo_mode.as_deref(),
+        interrupted_range.map(|(from, to)| BlockRange { from, to }),
+    );
     Err(RunnerError::data_integrity(format!(
-        "chain {chain_id} phase {phase} has an interrupted redo; rerun \
-         `phase-runner redo --chain {chain_id} --phase {phase_argument}{range_argument}` before \
-         starting a different redo"
+        "chain {chain_id} phase {phase} has an interrupted redo; {instruction} before starting a \
+         different redo"
     )))
 }
 
@@ -239,9 +246,10 @@ async fn require_full_hash_redo(
     .fetch_one(&mut **transaction)
     .await
     .map_err(|error| {
-        RunnerError::transient(format!(
-            "failed to load full redo bounds for chain {chain_id}: {error}"
-        ))
+        RunnerError::database(
+            format!("failed to load full redo bounds for chain {chain_id}"),
+            error,
+        )
     })?;
     let (Some(from), Some(to)) = bounds else {
         return Err(RunnerError::new(
@@ -275,13 +283,50 @@ pub(crate) async fn finish(
     chain_id: &str,
     phase: PhaseName,
     session: RedoSession,
-    completed: bool,
+    outcome: RedoOutcome<'_>,
 ) -> RunnerResult<()> {
-    // A partial redo may already have committed derived writes. Keep its marker and redo cursor
-    // durable so normal execution cannot cross that mixed epoch.
-    if !completed {
-        return Ok(());
-    }
+    let progress = match outcome {
+        RedoOutcome::Completed(progress) => progress,
+        RedoOutcome::Failed(error) => {
+            // A partial redo may already have committed derived writes. Keep its marker and redo
+            // cursor durable so normal execution cannot cross that mixed epoch.
+            let result = sqlx::query(
+                "
+                UPDATE chain_phase_state
+                SET last_error = $3,
+                    updated_at = now()
+                WHERE chain_id = $1
+                  AND phase_name = $2
+                  AND redo_in_progress
+                ",
+            )
+            .bind(chain_id)
+            .bind(phase.as_str())
+            .bind(error.to_string())
+            .execute(pool)
+            .await
+            .map_err(|database_error| {
+                RunnerError::database(
+                    format!("failed to record redo failure for chain {chain_id} phase {phase}"),
+                    database_error,
+                )
+            })?;
+            if result.rows_affected() != 1 {
+                return Err(RunnerError::data_integrity(format!(
+                    "redo failure requires an active redo for chain {chain_id} phase {phase}"
+                )));
+            }
+            return Ok(());
+        }
+    };
+    crate::state_persistence::validate_progress(phase, progress, true)?;
+    let verification_level = if phase == PhaseName::Verify {
+        progress
+            .verification_level
+            .map(|level| level.as_str().to_owned())
+    } else {
+        session.previous.verification_level.clone()
+    };
     let RedoSession {
         previous,
         interrupted_before_redo,
@@ -329,7 +374,7 @@ pub(crate) async fn finish(
     .bind(chain_id)
     .bind(phase.as_str())
     .bind(previous.phase_status)
-    .bind(previous.verification_level)
+    .bind(verification_level)
     .bind(previous.current_block_number)
     .bind(previous.current_block_hash)
     .bind(previous.target_block_number)
@@ -344,9 +389,10 @@ pub(crate) async fn finish(
     .execute(pool)
     .await
     .map_err(|error| {
-        RunnerError::transient(format!(
-            "failed to restore phase state after redo for chain {chain_id} phase {phase}: {error}"
-        ))
+        RunnerError::database(
+            format!("failed to restore phase state after redo for chain {chain_id} phase {phase}"),
+            error,
+        )
     })?;
     Ok(())
 }

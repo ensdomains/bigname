@@ -94,6 +94,11 @@ the normal phase cursor, and the pre-redo lifecycle state remains durable
 across retries; an unfinished redo remains marked and blocks normal resume
 until the named redo command is run again.
 
+There is no redo abort. A partially applied redo cannot be safely un-applied,
+so the only path back to normal operation is a redo that covers the unfinished
+range and completes. If a redo fails deterministically, fix the code and run
+that redo again.
+
 ## What does not exist here
 
 No checkpoints keyed to migrations or versions. No retention generations

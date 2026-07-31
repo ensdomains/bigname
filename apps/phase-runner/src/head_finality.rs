@@ -49,6 +49,7 @@ pub(crate) async fn path_floor(
     if let Some(marker) = previous_boundary {
         return Ok(marker.number);
     }
+    // The lineage walk is only deep on the first publication, before any finality boundary exists.
     sqlx::query_scalar::<_, Option<i64>>(
         "
         SELECT min(block_number)

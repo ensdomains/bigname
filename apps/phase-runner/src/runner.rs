@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -7,18 +7,24 @@ use crate::{
     capacity::CapacityGuard,
     config::{ChainConfig, RuntimeConfig, TimingConfig},
     database::RunnerDatabase,
-    error::{ErrorKind, RunnerError, RunnerResult},
+    error::{ErrorKind, RunnerError, RunnerResult, VERIFICATION_MISMATCH_PREFIX},
     heads::publish_heads,
     ingest_progress,
     phase::{BlockRange, Phase, PhaseBatchOutcome, PhaseName, PhaseSet, RunMode},
     phase_lock::PhaseLock,
-    runner_support::{Backoff, HeartbeatThrottle, PhaseLoopResult},
+    runner_support::{
+        Backoff, HeartbeatThrottle, PhaseLoopResult, cancelled_redo_error,
+        finish_failed_redo_start, incomplete_redo_error, record_live_mismatch_with_lock,
+        redo_outcome,
+    },
     state::{PhaseStore, StartDisposition},
-    state_persistence::validate_progress,
+    state_persistence::{record_live_verification_mismatch, validate_progress},
 };
 
 #[path = "runner_context.rs"]
 mod context;
+
+type LiveMismatchReason = Arc<OnceLock<String>>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RedoPhase {
@@ -128,17 +134,19 @@ impl PhaseRunner {
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
         let pair_cancellation = cancellation.child_token();
+        let live_mismatch = Arc::new(OnceLock::new());
         let verify = self.run_phase_with_restart(
             chain,
             PhaseName::Verify,
             RunMode::Normal,
             pair_cancellation.clone(),
         );
-        let live = self.run_phase_with_restart(
+        let live = self.run_phase_with_restart_inner(
             chain,
             PhaseName::Live,
             RunMode::Normal,
             pair_cancellation.clone(),
+            Some(Arc::clone(&live_mismatch)),
         );
         tokio::pin!(verify);
         tokio::pin!(live);
@@ -146,9 +154,17 @@ impl PhaseRunner {
         tokio::select! {
             verify_result = &mut verify => {
                 if let Err(error) = verify_result {
+                    if error.kind() == ErrorKind::VerificationMismatch {
+                        let _ = live_mismatch.set(error.to_string());
+                    }
                     pair_cancellation.cancel();
-                    let _ = live.await;
-                    return Err(error);
+                    return match live.await {
+                        Ok(()) => Err(error),
+                        Err(live_error) => Err(error.with_secondary(
+                            "stop live after verification failed",
+                            live_error,
+                        )),
+                    };
                 }
                 live.await
             }
@@ -171,10 +187,39 @@ impl PhaseRunner {
         mode: RunMode,
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
+        self.run_phase_with_restart_inner(chain, phase_name, mode, cancellation, None)
+            .await
+    }
+
+    async fn run_phase_with_restart_inner(
+        &self,
+        chain: &ChainConfig,
+        phase_name: PhaseName,
+        mode: RunMode,
+        cancellation: CancellationToken,
+        live_mismatch: Option<LiveMismatchReason>,
+    ) -> RunnerResult<()> {
         let phase = self.phases.get(phase_name);
         let mut backoff = Backoff::new(&self.timing);
         loop {
             if cancellation.is_cancelled() {
+                if mode.is_redo() {
+                    return Err(
+                        cancelled_redo_error(&self.store, &chain.chain_id, phase_name).await?,
+                    );
+                }
+                if phase_name == PhaseName::Live
+                    && matches!(mode, RunMode::Normal)
+                    && let Some(reason) = live_mismatch.as_deref().and_then(OnceLock::get)
+                {
+                    record_live_mismatch_with_lock(
+                        &self.database,
+                        &self.store,
+                        &chain.chain_id,
+                        reason,
+                    )
+                    .await?;
+                }
                 return Ok(());
             }
             match self
@@ -183,6 +228,7 @@ impl PhaseRunner {
                     Arc::clone(&phase),
                     mode.clone(),
                     cancellation.clone(),
+                    live_mismatch.as_deref(),
                 )
                 .await
             {
@@ -197,7 +243,29 @@ impl PhaseRunner {
                         "phase failed with a retryable error"
                     );
                     tokio::select! {
-                        () = cancellation.cancelled() => return Ok(()),
+                        () = cancellation.cancelled() => {
+                            if mode.is_redo() {
+                                return Err(cancelled_redo_error(
+                                    &self.store,
+                                    &chain.chain_id,
+                                    phase_name,
+                                )
+                                .await?);
+                            }
+                            if phase_name == PhaseName::Live
+                                && let Some(reason) =
+                                    live_mismatch.as_deref().and_then(OnceLock::get)
+                            {
+                                record_live_mismatch_with_lock(
+                                    &self.database,
+                                    &self.store,
+                                    &chain.chain_id,
+                                    reason,
+                                )
+                                .await?;
+                            }
+                            return Ok(());
+                        }
                         () = tokio::time::sleep(delay) => {}
                     }
                 }
@@ -212,6 +280,7 @@ impl PhaseRunner {
         phase: Arc<dyn Phase>,
         mode: RunMode,
         cancellation: CancellationToken,
+        live_mismatch: Option<&OnceLock<String>>,
     ) -> RunnerResult<()> {
         let phase_name = phase.name();
         let mut phase_lock =
@@ -219,7 +288,14 @@ impl PhaseRunner {
                 .await?;
         phase_lock.check_alive().await?;
         let result = self
-            .run_locked_phase(chain, phase, mode, cancellation, &mut phase_lock)
+            .run_locked_phase(
+                chain,
+                phase,
+                mode,
+                cancellation,
+                live_mismatch,
+                &mut phase_lock,
+            )
             .await;
         let release = phase_lock.release().await;
         match (result, release) {
@@ -244,6 +320,7 @@ impl PhaseRunner {
         phase: Arc<dyn Phase>,
         mode: RunMode,
         cancellation: CancellationToken,
+        live_mismatch: Option<&OnceLock<String>>,
         phase_lock: &mut PhaseLock,
     ) -> RunnerResult<()> {
         let phase_name = phase.name();
@@ -272,21 +349,34 @@ impl PhaseRunner {
         {
             phase_lock.check_alive().await?;
             if let Some(session) = redo_session {
-                self.store
-                    .finish_redo(&chain.chain_id, phase_name, session, false)
-                    .await
-                    .map_err(|restore| {
-                        RunnerError::transient(format!(
-                            "{error}; additionally failed to restore phase state: {restore}"
-                        ))
-                    })?;
+                return finish_failed_redo_start(
+                    &self.store,
+                    &chain.chain_id,
+                    phase_name,
+                    session,
+                    error,
+                )
+                .await;
             }
             return Err(error);
         }
         let mut heartbeat = HeartbeatThrottle::new();
         let result = self
-            .run_phase_batches(chain, phase, mode, cancellation, &mut heartbeat, phase_lock)
+            .run_phase_batches(
+                chain,
+                phase,
+                mode.clone(),
+                cancellation,
+                &mut heartbeat,
+                phase_lock,
+            )
             .await;
+        let result = match result {
+            Ok(PhaseLoopResult::Cancelled) if mode.is_redo() => {
+                Err(incomplete_redo_error(&chain.chain_id, phase_name, &mode))
+            }
+            result => result,
+        };
         if let Err(error) = &result
             && !error.permits_pool_writes_after_error()
         {
@@ -294,19 +384,17 @@ impl PhaseRunner {
         }
         if let Some(session) = redo_session {
             phase_lock.check_alive().await?;
-            let completed = matches!(&result, Ok(PhaseLoopResult::Completed(_)));
             let restore = self
                 .store
-                .finish_redo(&chain.chain_id, phase_name, session, completed)
+                .finish_redo(&chain.chain_id, phase_name, session, redo_outcome(&result))
                 .await;
             return match (result, restore) {
                 (Ok(_), Ok(())) => Ok(()),
                 (Ok(_), Err(error)) => Err(error),
                 (Err(error), Ok(())) => Err(error),
-                (Err(error), Err(restore_error)) => Err(RunnerError::transient(format!(
-                    "{error}; additionally failed to restore phase state after redo: \
-                     {restore_error}"
-                ))),
+                (Err(error), Err(restore_error)) => {
+                    Err(error.with_secondary("record phase state after redo", restore_error))
+                }
             };
         }
         match result {
@@ -316,17 +404,39 @@ impl PhaseRunner {
                     .complete_phase(&chain.chain_id, phase_name, &progress)
                     .await
             }
-            Ok(PhaseLoopResult::Cancelled) => Ok(()),
+            Ok(PhaseLoopResult::Cancelled) => {
+                phase_lock.check_alive().await?;
+                if phase_name == PhaseName::Live
+                    && let Some(reason) = live_mismatch.and_then(OnceLock::get)
+                    && !record_live_verification_mismatch(
+                        self.store.pool(),
+                        &chain.chain_id,
+                        reason,
+                    )
+                    .await?
+                {
+                    return Err(RunnerError::data_integrity(format!(
+                        "verification mismatch could not mark live failed for chain {}",
+                        chain.chain_id
+                    )));
+                }
+                Ok(())
+            }
             Err(error) => {
                 phase_lock.check_alive().await?;
+                let failure_reason = if phase_name == PhaseName::Verify
+                    && error.kind() == ErrorKind::VerificationMismatch
+                {
+                    format!("{VERIFICATION_MISMATCH_PREFIX}{error}")
+                } else {
+                    error.to_string()
+                };
                 if let Err(record_error) = self
                     .store
-                    .fail_phase(&chain.chain_id, phase_name, &error.to_string())
+                    .fail_phase(&chain.chain_id, phase_name, &failure_reason)
                     .await
                 {
-                    return Err(RunnerError::transient(format!(
-                        "{error}; additionally failed to record phase failure: {record_error}"
-                    )));
+                    return Err(error.with_secondary("record phase failure", record_error));
                 }
                 Err(error)
             }

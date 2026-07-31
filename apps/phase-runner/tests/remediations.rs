@@ -313,11 +313,13 @@ async fn failed_redo_keeps_its_durable_marker_and_blocks_normal_resume() -> Resu
     .expect_err("the second redo batch must fail");
     assert_eq!(error.kind(), ErrorKind::DataIntegrity);
 
-    let state: (bool, Option<i64>, Option<i64>) = sqlx::query_as(
+    let state: (String, bool, Option<i64>, Option<i64>, Option<String>) = sqlx::query_as(
         "
-        SELECT redo_in_progress,
+        SELECT phase_status,
+               redo_in_progress,
                redo_current_block_number,
-               current_block_number
+               current_block_number,
+               last_error
         FROM chain_phase_state
         WHERE chain_id = $1
           AND phase_name = 'interpret'
@@ -326,13 +328,331 @@ async fn failed_redo_keeps_its_durable_marker_and_blocks_normal_resume() -> Resu
     .bind(chain_id)
     .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(state, (true, Some(5), Some(9)));
+    assert_eq!(state.0, "running");
+    assert!(state.1);
+    assert_eq!(state.2, Some(5));
+    assert_eq!(state.3, Some(9));
+    assert_eq!(
+        state.4.as_deref(),
+        Some("simulated terminal redo batch failure")
+    );
 
     let normal_error = store
         .start_phase(chain_id, PhaseName::Interpret, &RunMode::Normal)
         .await
         .expect_err("normal mode must refuse a failed partial redo");
     assert!(normal_error.to_string().contains("phase-runner redo"));
+
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let cancellation_error = runner(
+        scratch.runner(),
+        PhaseSet::loopback(),
+        "failed-redo-marker-cancelled-retry",
+    )?
+    .redo(
+        &chain(chain_id, SeedBasis::BaseSeam)?,
+        RedoPhase::Phase(PhaseName::Interpret),
+        BlockRange::new(5, 6)?,
+        cancelled,
+    )
+    .await
+    .expect_err("cancelling a retry of a durable redo marker must fail");
+    assert!(cancellation_error.to_string().contains("is incomplete"));
+    assert!(
+        cancellation_error
+            .to_string()
+            .contains("--from-block 5 --to-block 6")
+    );
+
+    runner(
+        scratch.runner(),
+        PhaseSet::loopback(),
+        "failed-redo-marker-recovery",
+    )?
+    .redo(
+        &chain(chain_id, SeedBasis::BaseSeam)?,
+        RedoPhase::Phase(PhaseName::Interpret),
+        BlockRange::new(5, 6)?,
+        CancellationToken::new(),
+    )
+    .await?;
+    let recovered: (bool, Option<String>) = sqlx::query_as(
+        "
+        SELECT redo_in_progress, last_error
+        FROM chain_phase_state
+        WHERE chain_id = $1
+          AND phase_name = 'interpret'
+        ",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(recovered, (false, None));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn cancelled_redo_before_start_is_nonzero_without_a_blocked_phase_claim() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_cancelled_redo_before_start").await?;
+    let chain_id = "cancelled-redo-before-start-chain";
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    seed_ingest_extent(scratch.pool(), chain_id, 0, 9).await?;
+    mark_phase_with_extent(
+        scratch.pool(),
+        chain_id,
+        PhaseName::Interpret,
+        9,
+        Some(phase_runner::INTERPRETER_CONTENT_HASH),
+    )
+    .await?;
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+
+    let error = runner(
+        scratch.runner(),
+        PhaseSet::loopback(),
+        "cancelled-redo-before-start-runner",
+    )?
+    .redo(
+        &chain(chain_id, SeedBasis::BaseSeam)?,
+        RedoPhase::Phase(PhaseName::Interpret),
+        BlockRange::new(5, 6)?,
+        cancellation,
+    )
+    .await
+    .expect_err("a cancelled redo command must return a nonzero result");
+    assert!(error.to_string().contains("cancelled before it started"));
+    assert!(
+        error
+            .to_string()
+            .contains("no unfinished redo was recorded")
+    );
+    assert!(!error.to_string().contains("remains blocked"));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn out_of_range_redo_progress_constraint_is_terminal_and_recorded() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_redo_constraint").await?;
+    let chain_id = "redo-constraint-chain";
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    seed_ingest_extent(scratch.pool(), chain_id, 0, 9).await?;
+    mark_phase_with_extent(
+        scratch.pool(),
+        chain_id,
+        PhaseName::Interpret,
+        9,
+        Some(phase_runner::INTERPRETER_CONTENT_HASH),
+    )
+    .await?;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let phase_calls = Arc::clone(&calls);
+    let phase = Arc::new(FunctionPhase {
+        name: PhaseName::Interpret,
+        handler: Arc::new(move |_| {
+            phase_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(PhaseBatchOutcome::Continue(progress_at(
+                4,
+                6,
+                "redo-constraint",
+            )))
+        }),
+    });
+    let error = tokio::time::timeout(
+        Duration::from_secs(2),
+        runner(
+            scratch.runner(),
+            phase_set_replacing(PhaseName::Interpret, phase)?,
+            "redo-constraint-runner",
+        )?
+        .redo(
+            &chain(chain_id, SeedBasis::BaseSeam)?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(5, 6)?,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("a constraint violation must not enter retry backoff")
+    .expect_err("out-of-range redo progress must fail");
+    let error_message = error.to_string();
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(!error.is_retryable());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(error_message.contains("failed to record redo progress"));
+
+    let state: (String, bool, Option<String>) = sqlx::query_as(
+        "
+        SELECT phase_status, redo_in_progress, last_error
+        FROM chain_phase_state
+        WHERE chain_id = $1
+          AND phase_name = 'interpret'
+        ",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(state.0, "running");
+    assert!(state.1);
+    assert_eq!(state.2.as_deref(), Some(error_message.as_str()));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn cancelled_redo_is_incomplete_and_returns_the_required_rerun_command() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_cancelled_redo").await?;
+    let chain_id = "cancelled-redo-chain";
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    seed_ingest_extent(scratch.pool(), chain_id, 0, 9).await?;
+    mark_phase_with_extent(
+        scratch.pool(),
+        chain_id,
+        PhaseName::Interpret,
+        9,
+        Some(phase_runner::INTERPRETER_CONTENT_HASH),
+    )
+    .await?;
+
+    let entered = Arc::new(Notify::new());
+    let phase_entered = Arc::clone(&entered);
+    let phase = Arc::new(FunctionPhase {
+        name: PhaseName::Interpret,
+        handler: Arc::new(move |_| {
+            phase_entered.notify_one();
+            Ok(PhaseBatchOutcome::Continue(progress_at(
+                5,
+                6,
+                "cancelled-redo",
+            )))
+        }),
+    });
+    let cancellation = CancellationToken::new();
+    let run_cancellation = cancellation.clone();
+    let configured_chain = chain(chain_id, SeedBasis::BaseSeam)?;
+    let redo_runner = runner(
+        scratch.runner(),
+        phase_set_replacing(PhaseName::Interpret, phase)?,
+        "cancelled-redo-runner",
+    )?;
+    let task = tokio::spawn(async move {
+        redo_runner
+            .redo(
+                &configured_chain,
+                RedoPhase::Phase(PhaseName::Interpret),
+                BlockRange::new(5, 6).expect("fixed range"),
+                run_cancellation,
+            )
+            .await
+    });
+    entered.notified().await;
+    cancellation.cancel();
+    let error = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("cancelled redo did not stop")
+        .expect("cancelled redo task panicked")
+        .expect_err("a cancelled redo must return a nonzero result");
+    let error_message = error.to_string();
+    let instruction = "rerun `phase-runner redo --chain cancelled-redo-chain --phase interpret \
+                       --from-block 5 --to-block 6`";
+    assert_eq!(error.kind(), ErrorKind::InvalidTransition);
+    assert!(error_message.contains("is incomplete"));
+    assert!(error_message.contains("the phase remains blocked from normal restart"));
+    assert!(error_message.contains(instruction));
+
+    let state: (String, bool, Option<String>) = sqlx::query_as(
+        "
+        SELECT phase_status, redo_in_progress, last_error
+        FROM chain_phase_state
+        WHERE chain_id = $1
+          AND phase_name = 'interpret'
+        ",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(state.0, "running");
+    assert!(state.1);
+    assert_eq!(state.2.as_deref(), Some(error_message.as_str()));
+
+    let normal_error = store
+        .start_phase(chain_id, PhaseName::Interpret, &RunMode::Normal)
+        .await
+        .expect_err("normal restart must remain blocked");
+    assert!(normal_error.to_string().contains(instruction));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn cancelled_redo_during_retry_backoff_is_incomplete() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_cancelled_redo_backoff").await?;
+    let chain_id = "cancelled-redo-backoff-chain";
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    seed_ingest_extent(scratch.pool(), chain_id, 0, 9).await?;
+    mark_phase_with_extent(
+        scratch.pool(),
+        chain_id,
+        PhaseName::Interpret,
+        9,
+        Some(phase_runner::INTERPRETER_CONTENT_HASH),
+    )
+    .await?;
+
+    let failed_once = Arc::new(Notify::new());
+    let phase_failed_once = Arc::clone(&failed_once);
+    let phase = Arc::new(FunctionPhase {
+        name: PhaseName::Interpret,
+        handler: Arc::new(move |_| {
+            phase_failed_once.notify_one();
+            Err(RunnerError::transient(
+                "simulated transient redo failure before backoff",
+            ))
+        }),
+    });
+    let cancellation = CancellationToken::new();
+    let run_cancellation = cancellation.clone();
+    let configured_chain = chain(chain_id, SeedBasis::BaseSeam)?;
+    let redo_runner = runner_with_timing(
+        scratch.runner(),
+        phase_set_replacing(PhaseName::Interpret, phase)?,
+        "cancelled-redo-backoff-runner",
+        TimingConfig {
+            initial_backoff: Duration::from_secs(1),
+            maximum_backoff: Duration::from_secs(1),
+            live_poll_interval: Duration::from_millis(1),
+        },
+    )?;
+    let task = tokio::spawn(async move {
+        redo_runner
+            .redo(
+                &configured_chain,
+                RedoPhase::Phase(PhaseName::Interpret),
+                BlockRange::new(5, 6).expect("fixed range"),
+                run_cancellation,
+            )
+            .await
+    });
+    failed_once.notified().await;
+    wait_for_no_advisory_locks(scratch.pool()).await?;
+    cancellation.cancel();
+
+    let error = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("redo retry backoff did not observe cancellation")
+        .expect("redo retry task panicked")
+        .expect_err("cancellation during redo retry backoff must return a nonzero result");
+    assert!(error.to_string().contains("is incomplete"));
+    assert!(
+        error
+            .to_string()
+            .contains("the phase remains blocked from normal restart")
+    );
+    assert!(error.to_string().contains("--from-block 5 --to-block 6"));
     scratch.cleanup().await
 }
 
@@ -681,6 +1001,7 @@ async fn finalized_head_can_be_introduced_below_the_existing_safe_head() -> Resu
 #[tokio::test]
 async fn verification_mismatch_cancels_live_for_that_chain_but_not_other_chains() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_verify_live_overlap").await?;
+    require_live_lock_for_mismatch_failure(scratch.pool()).await?;
     let bad_chain = "overlap-bad-chain";
     let good_chain = "overlap-good-chain";
     seed_lineage(scratch.pool(), bad_chain, 0).await?;
@@ -698,6 +1019,7 @@ async fn verification_mismatch_cancels_live_for_that_chain_but_not_other_chains(
         Arc::clone(&good_live_entered),
         Arc::clone(&bad_live_batches),
         Arc::clone(&good_live_batches),
+        Arc::new(Notify::new()),
     )?;
     let runner = Arc::new(runner(
         scratch.runner(),
@@ -719,6 +1041,24 @@ async fn verification_mismatch_cancels_live_for_that_chain_but_not_other_chains(
 
     good_live_entered.notified().await;
     wait_for_phase_status(scratch.pool(), bad_chain, PhaseName::Verify, "failed").await?;
+    wait_for_phase_status(scratch.pool(), bad_chain, PhaseName::Live, "failed").await?;
+    let bad_live_state: (String, Option<String>) = sqlx::query_as(
+        "
+        SELECT phase_status, last_error
+        FROM chain_phase_state
+        WHERE chain_id = $1
+          AND phase_name = 'live'
+        ",
+    )
+    .bind(bad_chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(bad_live_state.0, "failed");
+    let bad_live_error = bad_live_state
+        .1
+        .expect("verification mismatch cancellation must record its cause");
+    assert!(bad_live_error.contains("verification mismatch"));
+    assert!(bad_live_error.contains("stored verification disagrees with the live source"));
     tokio::time::sleep(Duration::from_millis(20)).await;
     let bad_batches_after_mismatch = bad_live_batches.load(Ordering::SeqCst);
     assert!(bad_batches_after_mismatch > 0);
@@ -749,6 +1089,185 @@ async fn verification_mismatch_cancels_live_for_that_chain_but_not_other_chains(
     assert_eq!(
         report.stopped_chains[0].1.kind(),
         ErrorKind::VerificationMismatch
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn verification_mismatch_replaces_a_live_retry_error_during_backoff() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_verify_live_backoff").await?;
+    require_live_lock_for_mismatch_failure(scratch.pool()).await?;
+    let chain_id = "verify-live-backoff-chain";
+    seed_lineage(scratch.pool(), chain_id, 0).await?;
+
+    let live_failed_once = Arc::new(Notify::new());
+    let ingest = Arc::new(FunctionPhase {
+        name: PhaseName::Ingest,
+        handler: Arc::new(|context| {
+            let marker = BlockMarker::new(0, format!("{}-block-0", context.chain_id))?;
+            Ok(PhaseBatchOutcome::Complete(PhaseProgress {
+                current: Some(marker.clone()),
+                target: Some(marker.clone()),
+                live_handoff: Some(marker.clone()),
+                heads: Some(HeadMarkers {
+                    latest: marker,
+                    safe: None,
+                    finalized: None,
+                }),
+                ..PhaseProgress::default()
+            }))
+        }),
+    }) as Arc<dyn Phase>;
+    let verify = Arc::new(BackoffMismatchVerifyPhase {
+        live_failed_once: Arc::clone(&live_failed_once),
+    }) as Arc<dyn Phase>;
+    let live = Arc::new(FunctionPhase {
+        name: PhaseName::Live,
+        handler: Arc::new(move |_| {
+            live_failed_once.notify_one();
+            Err(RunnerError::transient(
+                "simulated transient live failure before retry backoff",
+            ))
+        }),
+    }) as Arc<dyn Phase>;
+    let phases = PhaseSet::new([
+        ingest,
+        complete_phase(PhaseName::Interpret),
+        complete_phase(PhaseName::Project),
+        verify,
+        live,
+    ])?;
+    let error = runner_with_timing(
+        scratch.runner(),
+        phases,
+        "verify-live-backoff-runner",
+        TimingConfig {
+            initial_backoff: Duration::from_secs(1),
+            maximum_backoff: Duration::from_secs(1),
+            live_poll_interval: Duration::from_millis(1),
+        },
+    )?
+    .run_chain(
+        &chain(chain_id, SeedBasis::BaseSeam)?,
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("verification mismatch must stop the chain");
+    assert_eq!(error.kind(), ErrorKind::VerificationMismatch);
+
+    let last_error: Option<String> = sqlx::query_scalar(
+        "
+        SELECT last_error
+        FROM chain_phase_state
+        WHERE chain_id = $1
+          AND phase_name = 'live'
+        ",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    let last_error = last_error.expect("live failure must remain durable");
+    assert!(last_error.contains("verification mismatch"));
+    assert!(last_error.contains("verification failed during live retry backoff"));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn verification_mismatch_reports_live_failure_persistence_errors() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_verify_live_record_failure").await?;
+    reject_live_mismatch_failure(scratch.pool()).await?;
+    let chain_id = "verify-live-record-failure-chain";
+    seed_lineage(scratch.pool(), chain_id, 0).await?;
+
+    let bad_live_entered = Arc::new(Notify::new());
+    let release_bad_live = Arc::new(Notify::new());
+    let phases = overlap_phase_set(
+        chain_id,
+        Arc::clone(&bad_live_entered),
+        Arc::clone(&release_bad_live),
+        Arc::new(Notify::new()),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(Notify::new()),
+    )?;
+    let error = runner(
+        scratch.runner(),
+        phases,
+        "verify-live-record-failure-runner",
+    )?
+    .run_chain(
+        &chain(chain_id, SeedBasis::BaseSeam)?,
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("verification mismatch must stop the chain");
+    assert_eq!(error.kind(), ErrorKind::VerificationMismatch);
+    assert!(
+        error
+            .to_string()
+            .contains("simulated live mismatch persistence failure")
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn verification_mismatch_remains_terminal_when_failure_recording_fails() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_verify_record_failure").await?;
+    reject_verify_mismatch_failure(scratch.pool()).await?;
+    let chain_id = "verify-record-failure-chain";
+    seed_lineage(scratch.pool(), chain_id, 0).await?;
+
+    let mismatch_emitted = Arc::new(Notify::new());
+    let phases = overlap_phase_set(
+        chain_id,
+        Arc::new(Notify::new()),
+        Arc::new(Notify::new()),
+        Arc::new(Notify::new()),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::clone(&mismatch_emitted),
+    )?;
+    let cancellation = CancellationToken::new();
+    let task_cancellation = cancellation.clone();
+    let phase_runner = runner(scratch.runner(), phases, "verify-record-failure-runner")?;
+    let chain = chain(chain_id, SeedBasis::BaseSeam)?;
+    let mut task =
+        tokio::spawn(async move { phase_runner.run_chain(&chain, task_cancellation).await });
+    tokio::time::timeout(Duration::from_secs(5), mismatch_emitted.notified())
+        .await
+        .expect("verification mismatch was not emitted");
+    let error = match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+        Ok(result) => result?,
+        Err(_) => {
+            cancellation.cancel();
+            let _ = tokio::time::timeout(Duration::from_secs(2), &mut task).await;
+            anyhow::bail!("verification mismatch was retried after failure recording failed");
+        }
+    }
+    .expect_err("verification mismatch must remain terminal");
+    assert_eq!(error.kind(), ErrorKind::VerificationMismatch);
+    assert!(
+        error
+            .to_string()
+            .contains("simulated verify mismatch persistence failure")
+    );
+    let live_state: (String, Option<String>) = sqlx::query_as(
+        "
+        SELECT phase_status, last_error
+        FROM chain_phase_state
+        WHERE chain_id = $1
+          AND phase_name = 'live'
+        ",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(live_state.0, "failed");
+    assert!(
+        live_state
+            .1
+            .as_deref()
+            .is_some_and(|error| error.contains("verification mismatch"))
     );
     scratch.cleanup().await
 }
@@ -1028,6 +1547,71 @@ async fn verify_phase_cannot_complete_without_a_verification_level() -> Result<(
     scratch.cleanup().await
 }
 
+#[tokio::test]
+async fn verify_redo_persists_the_verification_level_reported_by_the_redo() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_verify_redo_level").await?;
+    let chain_id = "verify-redo-level-chain";
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    seed_ingest_extent(scratch.pool(), chain_id, 0, 9).await?;
+    mark_phase_with_extent(
+        scratch.pool(),
+        chain_id,
+        PhaseName::Project,
+        9,
+        Some(phase_runner::INTERPRETER_CONTENT_HASH),
+    )
+    .await?;
+    mark_phase_with_extent(scratch.pool(), chain_id, PhaseName::Verify, 9, None).await?;
+    sqlx::query(
+        "
+        UPDATE chain_phase_state
+        SET verification_level = 'quick_synced'
+        WHERE chain_id = $1
+          AND phase_name = 'verify'
+        ",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+
+    let phase = Arc::new(FunctionPhase {
+        name: PhaseName::Verify,
+        handler: Arc::new(|_| {
+            Ok(PhaseBatchOutcome::Complete(PhaseProgress {
+                verification_level: Some(VerificationLevel::NodeChecked),
+                ..progress_at(6, 6, "verify-redo-level")
+            }))
+        }),
+    });
+    runner(
+        scratch.runner(),
+        phase_set_replacing(PhaseName::Verify, phase)?,
+        "verify-redo-level-runner",
+    )?
+    .redo(
+        &chain(chain_id, SeedBasis::BaseSeam)?,
+        RedoPhase::Phase(PhaseName::Verify),
+        BlockRange::new(5, 6)?,
+        CancellationToken::new(),
+    )
+    .await?;
+
+    let level: Option<String> = sqlx::query_scalar(
+        "
+        SELECT verification_level
+        FROM chain_phase_state
+        WHERE chain_id = $1
+          AND phase_name = 'verify'
+        ",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(level.as_deref(), Some("node_checked"));
+    scratch.cleanup().await
+}
+
 fn runner(
     database: phase_runner::database::RunnerDatabase,
     phases: PhaseSet,
@@ -1272,6 +1856,105 @@ async fn wait_for_phase_status(
     Ok(())
 }
 
+async fn require_live_lock_for_mismatch_failure(pool: &sqlx::PgPool) -> Result<()> {
+    sqlx::raw_sql(
+        "
+        CREATE FUNCTION require_live_lock_for_mismatch_failure()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+            lock_key bigint;
+        BEGIN
+            IF NEW.phase_name = 'live'
+               AND NEW.phase_status = 'failed'
+               AND NEW.last_error LIKE '%verification mismatch%'
+            THEN
+                lock_key := hashtextextended(
+                    format('phase-runner:%s:live', NEW.chain_id),
+                    0
+                );
+                IF pg_try_advisory_lock(lock_key) THEN
+                    PERFORM pg_advisory_unlock(lock_key);
+                    RAISE EXCEPTION
+                        'verification mismatch wrote live failure without its phase lock';
+                END IF;
+            END IF;
+            RETURN NEW;
+        END
+        $$;
+
+        CREATE TRIGGER require_live_lock_for_mismatch_failure
+        BEFORE UPDATE ON chain_phase_state
+        FOR EACH ROW
+        EXECUTE FUNCTION require_live_lock_for_mismatch_failure();
+        ",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn reject_live_mismatch_failure(pool: &sqlx::PgPool) -> Result<()> {
+    sqlx::raw_sql(
+        "
+        CREATE FUNCTION reject_live_mismatch_failure()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF NEW.phase_name = 'live'
+               AND NEW.phase_status = 'failed'
+               AND NEW.last_error LIKE '%verification mismatch%'
+            THEN
+                RAISE EXCEPTION
+                    'simulated live mismatch persistence failure';
+            END IF;
+            RETURN NEW;
+        END
+        $$;
+
+        CREATE TRIGGER reject_live_mismatch_failure
+        BEFORE UPDATE ON chain_phase_state
+        FOR EACH ROW
+        EXECUTE FUNCTION reject_live_mismatch_failure();
+        ",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn reject_verify_mismatch_failure(pool: &sqlx::PgPool) -> Result<()> {
+    sqlx::raw_sql(
+        "
+        CREATE FUNCTION reject_verify_mismatch_failure()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF NEW.phase_name = 'verify'
+               AND NEW.phase_status = 'failed'
+               AND NEW.last_error LIKE 'verification mismatch:%'
+            THEN
+                RAISE EXCEPTION
+                    'simulated verify mismatch persistence failure';
+            END IF;
+            RETURN NEW;
+        END
+        $$;
+
+        CREATE TRIGGER reject_verify_mismatch_failure
+        BEFORE UPDATE ON chain_phase_state
+        FOR EACH ROW
+        EXECUTE FUNCTION reject_verify_mismatch_failure();
+        ",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 struct AlwaysAvailable;
 
 impl CapacityProbe for AlwaysAvailable {
@@ -1389,6 +2072,7 @@ fn overlap_phase_set(
     good_live_entered: Arc<Notify>,
     bad_live_batches: Arc<AtomicUsize>,
     good_live_batches: Arc<AtomicUsize>,
+    bad_mismatch_emitted: Arc<Notify>,
 ) -> RunnerResult<PhaseSet> {
     let bad_chain = Arc::<str>::from(bad_chain);
     let ingest = Arc::new(FunctionPhase {
@@ -1414,6 +2098,7 @@ fn overlap_phase_set(
         bad_chain: Arc::clone(&bad_chain),
         bad_live_entered: Arc::clone(&bad_live_entered),
         release_bad_live: Arc::clone(&release_bad_live),
+        bad_mismatch_emitted,
     }) as Arc<dyn Phase>;
     let live = Arc::new(OverlapLivePhase {
         bad_chain,
@@ -1437,6 +2122,7 @@ struct OverlapVerifyPhase {
     bad_chain: Arc<str>,
     bad_live_entered: Arc<Notify>,
     release_bad_live: Arc<Notify>,
+    bad_mismatch_emitted: Arc<Notify>,
 }
 
 impl Phase for OverlapVerifyPhase {
@@ -1449,6 +2135,7 @@ impl Phase for OverlapVerifyPhase {
             if context.chain_id == self.bad_chain.as_ref() {
                 self.bad_live_entered.notified().await;
                 self.release_bad_live.notify_one();
+                self.bad_mismatch_emitted.notify_one();
                 return Err(RunnerError::verification_mismatch(
                     "stored verification disagrees with the live source",
                 ));
@@ -1468,6 +2155,25 @@ struct OverlapLivePhase {
     good_live_entered: Arc<Notify>,
     bad_live_batches: Arc<AtomicUsize>,
     good_live_batches: Arc<AtomicUsize>,
+}
+
+struct BackoffMismatchVerifyPhase {
+    live_failed_once: Arc<Notify>,
+}
+
+impl Phase for BackoffMismatchVerifyPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Verify
+    }
+
+    fn run_batch(&self, _context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            self.live_failed_once.notified().await;
+            Err(RunnerError::verification_mismatch(
+                "verification failed during live retry backoff",
+            ))
+        })
+    }
 }
 
 impl Phase for OverlapLivePhase {

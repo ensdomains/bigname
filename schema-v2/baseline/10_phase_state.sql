@@ -233,7 +233,15 @@ CREATE TABLE IF NOT EXISTS chain_phase_state (
     ),
     CHECK (
         (phase_status = 'failed' AND last_error IS NOT NULL)
-        OR (phase_status <> 'failed' AND last_error IS NULL)
+        OR (
+            redo_in_progress
+            AND phase_status IN ('running', 'paused')
+        )
+        OR (
+            phase_status <> 'failed'
+            AND NOT redo_in_progress
+            AND last_error IS NULL
+        )
     ),
     CHECK (last_error IS NULL OR btrim(last_error) <> '')
 );

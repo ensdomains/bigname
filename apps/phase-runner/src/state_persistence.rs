@@ -99,9 +99,10 @@ pub(crate) async fn update_redo_progress(
     .execute(pool)
     .await
     .map_err(|error| {
-        RunnerError::transient(format!(
-            "failed to record redo progress for chain {chain_id} phase {phase}: {error}"
-        ))
+        RunnerError::database(
+            format!("failed to record redo progress for chain {chain_id} phase {phase}"),
+            error,
+        )
     })?;
     if result.rows_affected() != 1 {
         return Err(RunnerError::data_integrity(format!(
@@ -127,6 +128,67 @@ pub(crate) fn validate_progress(
         ));
     }
     Ok(())
+}
+
+pub(crate) async fn load_redo_marker(
+    pool: &PgPool,
+    chain_id: &str,
+    phase: PhaseName,
+) -> RunnerResult<Option<(String, i64, i64)>> {
+    sqlx::query_as(
+        "
+        SELECT redo_mode,
+               redo_from_block_number,
+               redo_to_block_number
+        FROM chain_phase_state
+        WHERE chain_id = $1
+          AND phase_name = $2
+          AND redo_in_progress
+        ",
+    )
+    .bind(chain_id)
+    .bind(phase.as_str())
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        RunnerError::database(
+            format!("failed to load unfinished redo for chain {chain_id} phase {phase}"),
+            error,
+        )
+    })
+}
+
+pub(crate) async fn record_live_verification_mismatch(
+    pool: &PgPool,
+    chain_id: &str,
+    reason: &str,
+) -> RunnerResult<bool> {
+    let result = sqlx::query(
+        "
+        UPDATE chain_phase_state
+        SET phase_status = 'failed',
+            last_error = 'live phase stopped because verify reported a verification mismatch: '
+                || $2,
+            started_at = COALESCE(started_at, now()),
+            finished_at = now(),
+            updated_at = now()
+        WHERE chain_id = $1
+          AND phase_name = 'live'
+          AND phase_status IN ('idle', 'running', 'paused', 'failed')
+          AND NOT redo_in_progress
+        ",
+    )
+    .bind(chain_id)
+    .bind(reason)
+    .execute(pool)
+    .await
+    .map_err(|error| {
+        RunnerError::database(
+            format!("failed to record live verification mismatch for chain {chain_id}"),
+            error,
+        )
+    })?;
+    Ok(result.rows_affected() == 1)
 }
 
 pub(crate) async fn update_ingest_cursors(

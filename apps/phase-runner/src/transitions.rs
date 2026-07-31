@@ -2,7 +2,7 @@ use sqlx::{FromRow, Postgres, Transaction};
 
 use crate::{
     error::{ErrorKind, RunnerError, RunnerResult},
-    phase::{PhaseName, RunMode},
+    phase::{BlockRange, PhaseName, RunMode},
     state::PhaseStatus,
 };
 
@@ -126,24 +126,38 @@ fn require_no_interrupted_redo(
     if !row.redo_in_progress {
         return Ok(());
     }
-    let phase_argument = if row.redo_mode.as_deref() == Some("recompute_flags") {
-        "recompute-flags"
-    } else {
-        phase.as_str()
-    };
-    let range = row
-        .redo_from_block_number
-        .zip(row.redo_to_block_number)
-        .map(|(from, to)| format!(" --from-block {from} --to-block {to}"))
-        .unwrap_or_default();
+    let instruction = redo_rerun_instruction(
+        chain_id,
+        phase,
+        row.redo_mode.as_deref(),
+        row.redo_from_block_number
+            .zip(row.redo_to_block_number)
+            .map(|(from, to)| BlockRange { from, to }),
+    );
     Err(RunnerError::new(
         ErrorKind::InvalidTransition,
         format!(
             "cannot resume normal phase {phase} for chain {chain_id}: an explicit redo was \
-             interrupted; rerun `phase-runner redo --chain {chain_id} --phase {phase_argument}\
-             {range}`"
+             interrupted; {instruction}"
         ),
     ))
+}
+
+pub(crate) fn redo_rerun_instruction(
+    chain_id: &str,
+    phase: PhaseName,
+    redo_mode: Option<&str>,
+    range: Option<BlockRange>,
+) -> String {
+    let phase_argument = if redo_mode == Some("recompute_flags") {
+        "recompute-flags"
+    } else {
+        phase.as_str()
+    };
+    let range_argument = range
+        .map(|range| format!(" --from-block {} --to-block {}", range.from, range.to))
+        .unwrap_or_default();
+    format!("rerun `phase-runner redo --chain {chain_id} --phase {phase_argument}{range_argument}`")
 }
 
 fn require_compatible_active_phase(
