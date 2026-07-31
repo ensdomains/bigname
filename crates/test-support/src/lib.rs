@@ -12,6 +12,11 @@ use sqlx::{
 
 mod test_hook_registry;
 
+pub mod interpreter_content_hash {
+    pub use bigname_content_hash::{INTERPRETER_CONTENT_HASH, interpreter_content_hash};
+}
+
+pub use bigname_content_hash::{INTERPRETER_CONTENT_HASH, interpreter_content_hash};
 pub use test_hook_registry::{ScopedTestHookGuard, ScopedTestHookRegistry};
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);

@@ -1,5 +1,5 @@
 [package]
-name = "bigname-test-support"
+name = "phase-runner"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,10 +8,15 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+clap.workspace = true
 sqlx.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
 
-bigname-storage.workspace = true
 bigname-content-hash.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
+bigname-test-support.workspace = true
