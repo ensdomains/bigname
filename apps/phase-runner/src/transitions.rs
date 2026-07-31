@@ -16,6 +16,14 @@ pub(crate) struct PhaseStateRow {
     pub target_block_number: Option<i64>,
     pub target_block_hash: Option<String>,
     pub input_content_hash: Option<String>,
+    pub redo_in_progress: bool,
+    pub redo_mode: Option<String>,
+    pub redo_previous_phase_status: Option<String>,
+    pub redo_previous_last_error: Option<String>,
+    pub redo_previous_started_at: Option<String>,
+    pub redo_previous_finished_at: Option<String>,
+    pub redo_from_block_number: Option<i64>,
+    pub redo_to_block_number: Option<i64>,
     pub live_handoff_block_number: Option<i64>,
     pub live_handoff_block_hash: Option<String>,
     pub last_error: Option<String>,
@@ -43,6 +51,14 @@ pub(crate) async fn lock_chain_phase_state(
                target_block_number,
                target_block_hash,
                input_content_hash,
+               redo_in_progress,
+               redo_mode,
+               redo_previous_phase_status,
+               redo_previous_last_error,
+               redo_previous_started_at::text AS redo_previous_started_at,
+               redo_previous_finished_at::text AS redo_previous_finished_at,
+               redo_from_block_number,
+               redo_to_block_number,
                live_handoff_block_number,
                live_handoff_block_hash,
                last_error,
@@ -88,12 +104,46 @@ pub(crate) fn require_start(
     phase: PhaseName,
     mode: &RunMode,
 ) -> RunnerResult<()> {
+    require_no_interrupted_redo(rows, chain_id, phase, mode)?;
     require_compatible_active_phase(rows, chain_id, phase)?;
     require_prerequisite(rows, chain_id, phase)?;
     if phase.writes_derived_data() {
         require_content_hash(rows, chain_id, phase, mode)?;
     }
     Ok(())
+}
+
+fn require_no_interrupted_redo(
+    rows: &[PhaseStateRow],
+    chain_id: &str,
+    phase: PhaseName,
+    mode: &RunMode,
+) -> RunnerResult<()> {
+    if !matches!(mode, RunMode::Normal) {
+        return Ok(());
+    }
+    let row = row_for(rows, phase)?;
+    if !row.redo_in_progress {
+        return Ok(());
+    }
+    let phase_argument = if row.redo_mode.as_deref() == Some("recompute_flags") {
+        "recompute-flags"
+    } else {
+        phase.as_str()
+    };
+    let range = row
+        .redo_from_block_number
+        .zip(row.redo_to_block_number)
+        .map(|(from, to)| format!(" --from-block {from} --to-block {to}"))
+        .unwrap_or_default();
+    Err(RunnerError::new(
+        ErrorKind::InvalidTransition,
+        format!(
+            "cannot resume normal phase {phase} for chain {chain_id}: an explicit redo was \
+             interrupted; rerun `phase-runner redo --chain {chain_id} --phase {phase_argument}\
+             {range}`"
+        ),
+    ))
 }
 
 fn require_compatible_active_phase(

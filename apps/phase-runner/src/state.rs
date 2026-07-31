@@ -8,7 +8,10 @@ use crate::{
     heads::BlockMarker,
     phase::{PhaseName, PhaseProgress, PhaseResume, RunMode},
     redo_state::{self, RedoSession},
-    state_persistence::{load_phase_resume, update_ingest_cursors, update_progress},
+    state_persistence::{
+        load_phase_resume, load_redo_resume, update_ingest_cursors, update_progress,
+        update_redo_progress,
+    },
     transitions::{invalid_transition, lock_chain_phase_state, require_start, row_for},
 };
 
@@ -268,9 +271,14 @@ impl PhaseStore {
         &self,
         chain_id: &str,
         phase: PhaseName,
+        mode: &RunMode,
         progress: &PhaseProgress,
     ) -> RunnerResult<()> {
-        update_progress(&self.pool, chain_id, phase, progress, "updated_at = now()").await
+        if mode.is_redo() {
+            update_redo_progress(&self.pool, chain_id, phase, progress).await
+        } else {
+            update_progress(&self.pool, chain_id, phase, progress, "updated_at = now()").await
+        }
     }
 
     pub async fn complete_phase(
@@ -288,6 +296,7 @@ impl PhaseStore {
                 PhaseStatus::Completed,
             ));
         }
+        crate::state_persistence::validate_progress(phase, progress, true)?;
         update_progress(
             &self.pool,
             chain_id,
@@ -467,8 +476,13 @@ impl PhaseStore {
         &self,
         chain_id: &str,
         phase: PhaseName,
+        mode: &RunMode,
     ) -> RunnerResult<PhaseResume> {
-        load_phase_resume(&self.pool, chain_id, phase).await
+        if mode.is_redo() {
+            load_redo_resume(&self.pool, chain_id, phase).await
+        } else {
+            load_phase_resume(&self.pool, chain_id, phase).await
+        }
     }
 
     pub async fn update_ingest_cursors(

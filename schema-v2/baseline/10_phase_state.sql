@@ -58,6 +58,18 @@ CREATE TABLE IF NOT EXISTS chain_phase_state (
     target_block_number bigint,
     target_block_hash text,
     input_content_hash text,
+    redo_in_progress boolean NOT NULL DEFAULT false,
+    redo_mode text,
+    redo_previous_phase_status text,
+    redo_previous_last_error text,
+    redo_previous_started_at timestamptz,
+    redo_previous_finished_at timestamptz,
+    redo_from_block_number bigint,
+    redo_to_block_number bigint,
+    redo_current_block_number bigint,
+    redo_current_block_hash text,
+    redo_target_block_number bigint,
+    redo_target_block_hash text,
     live_handoff_block_number bigint,
     live_handoff_block_hash text,
     last_error text,
@@ -101,6 +113,98 @@ CREATE TABLE IF NOT EXISTS chain_phase_state (
     CHECK (
         input_content_hash IS NULL
         OR btrim(input_content_hash) <> ''
+    ),
+    CHECK (
+        redo_mode IS NULL
+        OR redo_mode IN ('redo', 'recompute_flags')
+    ),
+    CHECK (
+        (redo_current_block_number IS NULL)
+        = (redo_current_block_hash IS NULL)
+    ),
+    CHECK (
+        (redo_target_block_number IS NULL)
+        = (redo_target_block_hash IS NULL)
+    ),
+    CHECK (
+        (
+            NOT redo_in_progress
+            AND redo_mode IS NULL
+            AND redo_previous_phase_status IS NULL
+            AND redo_previous_last_error IS NULL
+            AND redo_previous_started_at IS NULL
+            AND redo_previous_finished_at IS NULL
+            AND redo_from_block_number IS NULL
+            AND redo_to_block_number IS NULL
+            AND redo_current_block_number IS NULL
+            AND redo_current_block_hash IS NULL
+            AND redo_target_block_number IS NULL
+            AND redo_target_block_hash IS NULL
+        )
+        OR (
+            redo_in_progress
+            AND phase_status IN ('running', 'paused')
+            AND redo_mode IS NOT NULL
+            AND redo_previous_phase_status IN (
+                'idle',
+                'running',
+                'paused',
+                'completed',
+                'failed'
+            )
+            AND (
+                (
+                    redo_previous_phase_status = 'idle'
+                    AND redo_previous_started_at IS NULL
+                    AND redo_previous_finished_at IS NULL
+                )
+                OR (
+                    redo_previous_phase_status IN ('running', 'paused')
+                    AND redo_previous_started_at IS NOT NULL
+                    AND redo_previous_finished_at IS NULL
+                )
+                OR (
+                    redo_previous_phase_status IN ('completed', 'failed')
+                    AND redo_previous_started_at IS NOT NULL
+                    AND redo_previous_finished_at IS NOT NULL
+                    AND redo_previous_finished_at >= redo_previous_started_at
+                )
+            )
+            AND (
+                (
+                    redo_previous_phase_status = 'failed'
+                    AND redo_previous_last_error IS NOT NULL
+                    AND btrim(redo_previous_last_error) <> ''
+                )
+                OR (
+                    redo_previous_phase_status <> 'failed'
+                    AND redo_previous_last_error IS NULL
+                )
+            )
+            AND redo_from_block_number IS NOT NULL
+            AND redo_from_block_number >= 0
+            AND redo_to_block_number IS NOT NULL
+            AND redo_to_block_number >= redo_from_block_number
+            AND (
+                redo_current_block_number IS NULL
+                OR redo_current_block_number BETWEEN
+                    redo_from_block_number AND redo_to_block_number
+            )
+            AND (
+                redo_target_block_number IS NULL
+                OR redo_target_block_number BETWEEN
+                    redo_from_block_number AND redo_to_block_number
+            )
+            AND (
+                redo_current_block_number IS NULL
+                OR redo_target_block_number IS NULL
+                OR redo_current_block_number <= redo_target_block_number
+            )
+            AND (
+                redo_mode <> 'recompute_flags'
+                OR phase_name = 'interpret'
+            )
+        )
     ),
     CHECK (
         (live_handoff_block_number IS NULL)
@@ -180,6 +284,30 @@ COMMENT ON COLUMN chain_phase_state.target_block_hash IS
     'This value identifies the phase target block.';
 COMMENT ON COLUMN chain_phase_state.input_content_hash IS
     'This value identifies the interpretation inputs.';
+COMMENT ON COLUMN chain_phase_state.redo_in_progress IS
+    'This value records an unfinished explicit redo.';
+COMMENT ON COLUMN chain_phase_state.redo_mode IS
+    'This value identifies the explicit redo operation.';
+COMMENT ON COLUMN chain_phase_state.redo_previous_phase_status IS
+    'This value preserves the normal phase state while an explicit redo is active.';
+COMMENT ON COLUMN chain_phase_state.redo_previous_last_error IS
+    'This value preserves the normal phase error while an explicit redo is active.';
+COMMENT ON COLUMN chain_phase_state.redo_previous_started_at IS
+    'This value preserves the normal phase start time while an explicit redo is active.';
+COMMENT ON COLUMN chain_phase_state.redo_previous_finished_at IS
+    'This value preserves the normal phase finish time while an explicit redo is active.';
+COMMENT ON COLUMN chain_phase_state.redo_from_block_number IS
+    'This value is the first block in the explicit redo range.';
+COMMENT ON COLUMN chain_phase_state.redo_to_block_number IS
+    'This value is the last block in the explicit redo range.';
+COMMENT ON COLUMN chain_phase_state.redo_current_block_number IS
+    'This value is the latest block completed only by the active redo.';
+COMMENT ON COLUMN chain_phase_state.redo_current_block_hash IS
+    'This value identifies the latest block completed only by the active redo.';
+COMMENT ON COLUMN chain_phase_state.redo_target_block_number IS
+    'This value is the current target block only for the active redo.';
+COMMENT ON COLUMN chain_phase_state.redo_target_block_hash IS
+    'This value identifies the current target block only for the active redo.';
 COMMENT ON COLUMN chain_phase_state.live_handoff_block_number IS
     'This value is the first live block height.';
 COMMENT ON COLUMN chain_phase_state.live_handoff_block_hash IS

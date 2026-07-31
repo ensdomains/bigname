@@ -257,7 +257,8 @@ impl Phase for LoopbackPhase {
                     .flatten(),
                 heads: publish_heads.then_some(context.available_heads).flatten(),
                 source_progress,
-                verification_level: None,
+                verification_level: (context.phase == PhaseName::Verify)
+                    .then_some(VerificationLevel::QuickSynced),
                 estimated_write_bytes: 0,
             };
 

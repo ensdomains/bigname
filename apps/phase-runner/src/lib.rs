@@ -5,6 +5,7 @@ pub mod database;
 pub mod error;
 mod head_finality;
 pub mod heads;
+mod ingest_progress;
 pub mod phase;
 pub mod phase_lock;
 mod redo_state;

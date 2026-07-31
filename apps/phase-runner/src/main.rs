@@ -7,7 +7,7 @@ use phase_runner::{
     cli::{Cli, ResolvedCommand},
     database::RunnerDatabase,
     phase::PhaseSet,
-    runner::PhaseRunner,
+    runner::{PhaseRunner, SupervisorReport},
 };
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
@@ -44,7 +44,8 @@ async fn main() -> Result<()> {
                 runtime.instance_id.clone(),
                 runtime.timing.clone(),
             )?);
-            runner.run(&runtime, cancellation).await?;
+            let report = runner.run(&runtime, cancellation).await?;
+            require_clean_supervisor_exit(report)?;
         }
         ResolvedCommand::Redo {
             database_url,
@@ -67,4 +68,42 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn require_clean_supervisor_exit(report: SupervisorReport) -> Result<()> {
+    if report.stopped_chains.is_empty() {
+        return Ok(());
+    }
+    let failures = report
+        .stopped_chains
+        .iter()
+        .map(|(chain_id, error)| format!("{chain_id} ({:?}): {error}", error.kind()))
+        .collect::<Vec<_>>()
+        .join("; ");
+    anyhow::bail!(
+        "{} chain supervisor(s) stopped on terminal errors: {failures}",
+        report.stopped_chains.len()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use phase_runner::error::RunnerError;
+
+    use super::*;
+
+    #[test]
+    fn terminal_chain_report_makes_run_command_fail() {
+        let report = SupervisorReport {
+            stopped_chains: vec![(
+                "broken-chain".to_owned(),
+                RunnerError::data_integrity("bad lineage"),
+            )],
+        };
+
+        let error = require_clean_supervisor_exit(report)
+            .expect_err("a terminal chain failure must produce a nonzero main result");
+        assert!(error.to_string().contains("broken-chain"));
+        assert!(error.to_string().contains("DataIntegrity"));
+    }
 }

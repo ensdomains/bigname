@@ -11,7 +11,7 @@ pub(crate) async fn require_monotonic(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     proposed: &HeadMarkers,
-) -> RunnerResult<()> {
+) -> RunnerResult<Option<BlockMarker>> {
     let current: Option<StoredFinality> = sqlx::query_as(
         "
             SELECT safe_block_number,
@@ -31,43 +31,74 @@ pub(crate) async fn require_monotonic(
             "failed to lock current head markers for chain {chain_id}: {error}"
         ))
     })?;
-    let Some((safe_number, _, finalized_number, finalized_hash)) = current else {
+    let Some((safe_number, safe_hash, finalized_number, finalized_hash)) = current else {
+        return Ok(None);
+    };
+    let safe = marker_from_pair(safe_number, safe_hash);
+    let finalized = marker_from_pair(finalized_number, finalized_hash);
+    require_not_regressed("safe", safe.as_ref(), proposed.safe.as_ref())?;
+    require_not_regressed("finalized", finalized.as_ref(), proposed.finalized.as_ref())?;
+    Ok(finalized.or(safe))
+}
+
+pub(crate) async fn path_floor(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    previous_boundary: Option<&BlockMarker>,
+) -> RunnerResult<i64> {
+    if let Some(marker) = previous_boundary {
+        return Ok(marker.number);
+    }
+    sqlx::query_scalar::<_, Option<i64>>(
+        "
+        SELECT min(block_number)
+        FROM chain_lineage
+        WHERE chain_id = $1
+          AND canonicality_state <> 'orphaned'
+        ",
+    )
+    .bind(chain_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|error| {
+        RunnerError::transient(format!(
+            "failed to load lineage floor for chain {chain_id}: {error}"
+        ))
+    })?
+    .ok_or_else(|| RunnerError::data_integrity(format!("chain {chain_id} has no stored lineage")))
+}
+
+fn require_not_regressed(
+    label: &str,
+    current: Option<&BlockMarker>,
+    proposed: Option<&BlockMarker>,
+) -> RunnerResult<()> {
+    let Some(current) = current else {
         return Ok(());
     };
-    require_not_regressed("safe", safe_number, proposed.safe.as_ref())?;
-    require_not_regressed("finalized", finalized_number, proposed.finalized.as_ref())?;
-    if let (Some(number), Some(hash), Some(marker)) = (
-        finalized_number,
-        finalized_hash.as_deref(),
-        proposed.finalized.as_ref(),
-    ) && marker.number == number
-        && marker.hash != hash
-    {
+    let Some(proposed) = proposed else {
         return Err(RunnerError::data_integrity(format!(
-            "finalized head marker at height {number} cannot change hash"
+            "{label} head marker cannot disappear after reaching height {}",
+            current.number
+        )));
+    };
+    if proposed.number < current.number {
+        return Err(RunnerError::data_integrity(format!(
+            "{label} head marker cannot move backward from height {} to {}",
+            current.number, proposed.number
+        )));
+    }
+    if proposed.number == current.number && proposed.hash != current.hash {
+        return Err(RunnerError::data_integrity(format!(
+            "{label} head marker at height {} cannot change hash",
+            current.number
         )));
     }
     Ok(())
 }
 
-fn require_not_regressed(
-    label: &str,
-    current_number: Option<i64>,
-    proposed: Option<&BlockMarker>,
-) -> RunnerResult<()> {
-    let Some(current_number) = current_number else {
-        return Ok(());
-    };
-    let Some(proposed) = proposed else {
-        return Err(RunnerError::data_integrity(format!(
-            "{label} head marker cannot disappear after reaching height {current_number}"
-        )));
-    };
-    if proposed.number < current_number {
-        return Err(RunnerError::data_integrity(format!(
-            "{label} head marker cannot move backward from height {current_number} to {}",
-            proposed.number
-        )));
-    }
-    Ok(())
+fn marker_from_pair(number: Option<i64>, hash: Option<String>) -> Option<BlockMarker> {
+    number
+        .zip(hash)
+        .map(|(number, hash)| BlockMarker { number, hash })
 }

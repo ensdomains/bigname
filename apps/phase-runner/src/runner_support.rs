@@ -60,3 +60,23 @@ impl HeartbeatThrottle {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restart_backoff_doubles_and_stays_capped() {
+        let timing = TimingConfig {
+            initial_backoff: Duration::from_millis(3),
+            maximum_backoff: Duration::from_millis(10),
+            live_poll_interval: Duration::from_millis(1),
+        };
+        let mut backoff = Backoff::new(&timing);
+
+        assert_eq!(backoff.next_delay(), Duration::from_millis(3));
+        assert_eq!(backoff.next_delay(), Duration::from_millis(6));
+        assert_eq!(backoff.next_delay(), Duration::from_millis(10));
+        assert_eq!(backoff.next_delay(), Duration::from_millis(10));
+    }
+}

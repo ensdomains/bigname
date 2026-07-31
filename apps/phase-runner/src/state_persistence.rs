@@ -21,11 +21,7 @@ pub(crate) async fn update_progress(
     progress: &PhaseProgress,
     status_assignment: &str,
 ) -> RunnerResult<()> {
-    if phase != PhaseName::Verify && progress.verification_level.is_some() {
-        return Err(RunnerError::data_integrity(format!(
-            "phase {phase} reported a verification level"
-        )));
-    }
+    validate_progress(phase, progress, false)?;
     let query = format!(
         "
         UPDATE chain_phase_state
@@ -74,11 +70,71 @@ pub(crate) async fn update_progress(
     Ok(())
 }
 
+pub(crate) async fn update_redo_progress(
+    pool: &PgPool,
+    chain_id: &str,
+    phase: PhaseName,
+    progress: &PhaseProgress,
+) -> RunnerResult<()> {
+    validate_progress(phase, progress, false)?;
+    let result = sqlx::query(
+        "
+        UPDATE chain_phase_state
+        SET redo_current_block_number = $3,
+            redo_current_block_hash = $4,
+            redo_target_block_number = $5,
+            redo_target_block_hash = $6,
+            updated_at = now()
+        WHERE chain_id = $1
+          AND phase_name = $2
+          AND redo_in_progress
+        ",
+    )
+    .bind(chain_id)
+    .bind(phase.as_str())
+    .bind(progress.current.as_ref().map(|marker| marker.number))
+    .bind(progress.current.as_ref().map(|marker| marker.hash.as_str()))
+    .bind(progress.target.as_ref().map(|marker| marker.number))
+    .bind(progress.target.as_ref().map(|marker| marker.hash.as_str()))
+    .execute(pool)
+    .await
+    .map_err(|error| {
+        RunnerError::transient(format!(
+            "failed to record redo progress for chain {chain_id} phase {phase}: {error}"
+        ))
+    })?;
+    if result.rows_affected() != 1 {
+        return Err(RunnerError::data_integrity(format!(
+            "redo progress requires an active redo for chain {chain_id} phase {phase}"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_progress(
+    phase: PhaseName,
+    progress: &PhaseProgress,
+    completing: bool,
+) -> RunnerResult<()> {
+    if phase != PhaseName::Verify && progress.verification_level.is_some() {
+        return Err(RunnerError::data_integrity(format!(
+            "phase {phase} reported a verification level"
+        )));
+    }
+    if phase == PhaseName::Verify && completing && progress.verification_level.is_none() {
+        return Err(RunnerError::data_integrity(
+            "verify phase cannot complete without a verification level",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn update_ingest_cursors(
     pool: &PgPool,
     sources: &[SourceConfig],
     progress: &PhaseProgress,
 ) -> RunnerResult<()> {
+    crate::ingest_progress::validate(sources, progress, false)?;
     let sources_by_key = sources
         .iter()
         .map(|source| (source.source_key.as_str(), source))
@@ -312,6 +368,44 @@ pub(crate) async fn load_phase_resume(
         current,
         target,
         ingest_cursors: Arc::from(ingest_cursors),
+    })
+}
+
+pub(crate) async fn load_redo_resume(
+    pool: &PgPool,
+    chain_id: &str,
+    phase: PhaseName,
+) -> RunnerResult<PhaseResume> {
+    let position: Option<StoredPhasePosition> = sqlx::query_as(
+        "
+        SELECT redo_current_block_number,
+               redo_current_block_hash,
+               redo_target_block_number,
+               redo_target_block_hash
+        FROM chain_phase_state
+        WHERE chain_id = $1
+          AND phase_name = $2
+          AND redo_in_progress
+        ",
+    )
+    .bind(chain_id)
+    .bind(phase.as_str())
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        RunnerError::transient(format!(
+            "failed to load redo resume position for chain {chain_id} phase {phase}: {error}"
+        ))
+    })?;
+    let (current_number, current_hash, target_number, target_hash) = position.ok_or_else(|| {
+        RunnerError::data_integrity(format!(
+            "active redo state is missing for chain {chain_id} phase {phase}"
+        ))
+    })?;
+    Ok(PhaseResume {
+        current: marker_from_pair(current_number, current_hash),
+        target: marker_from_pair(target_number, target_hash),
+        ingest_cursors: Arc::from([]),
     })
 }
 

@@ -50,6 +50,9 @@ positions. The ingest→live handoff datum is "ingest ended at block N";
 - Raw-table writes exist only in ingest modules. Derived-table writes
   exist only in interpret/project modules. The verifier has no write
   capability (compile-level: no pool with write role).
+- Semantic event interpretation and projection code must never live in
+  `apps/phase-runner`: the runner is deliberately outside the interpreter
+  content-hash roots and only orchestrates the hashed implementations.
 - One Postgres advisory lock per (chain, phase). A second process
   attempting the same phase fails loudly. This is the entire
   writer-exclusion apparatus (~20 lines).
@@ -73,6 +76,10 @@ positions. The ingest→live handoff datum is "ingest ended at block N";
   reachability + newest heartbeat age. /v2/status derives per-chain state
   from `chain_phase_state` + head markers + heartbeat age, and reports the trust
   label: Ethereum node-checked; Base quick-synced → cross-checked.
+- `/healthz` and `/v2/status` route wiring lands in Stage C; Stage A2 owns
+  only the state and heartbeat writes those routes will read.
+- Every phase batch must finish within the configured heartbeat staleness
+  window so a healthy runner is not reported stale while one batch is active.
 - The ops_catchup disk/DB capacity guard is re-homed here: every phase
   loop checks free-disk and database-size floors between batches and
   pauses (does not die) below the floor, with a status flag.
@@ -82,7 +89,10 @@ positions. The ingest→live handoff datum is "ingest ended at block N";
 The redo debug command drives the same five phase implementations plus
 `recompute-flags` (normalization flag recompute, no replay), scoped by
 chain + range + phase. It takes the same advisory locks. Rewind is redo's
-undo half for reorg-shaped repairs.
+undo half for reorg-shaped repairs. Redo progress is stored separately from
+the normal phase cursor, and the pre-redo lifecycle state remains durable
+across retries; an unfinished redo remains marked and blocks normal resume
+until the named redo command is run again.
 
 ## What does not exist here
 

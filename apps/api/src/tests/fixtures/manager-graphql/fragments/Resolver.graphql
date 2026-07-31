@@ -1,0 +1,10 @@
+fragment Resolver on Resolver {
+  id
+  address
+  texts
+  contentHash
+  addresses {
+    coinType
+    address
+  }
+}

@@ -44,11 +44,17 @@ Nothing else. Target ≈ 3–4k SQL.
   checks these structurally at Stage D5.)
 
 **A3. Semantic tripwires.** Interpreter content-hash (ponder-style: hash
-the interpreter crate sources; hash change ⇒ redo trigger). Golden fixture
-harness in CI: fixed raw-event corpus → expected interpreter output,
-committed; any output change anywhere fails CI; intentional changes update
-fixtures and thereby bump the hash. Reuses the conformance inliner/fixture
-pattern.
+the interpreter, manifest-authority, and projection sources plus complete
+manifest event blocks; hash change ⇒ redo trigger). Complete event blocks
+cover decode and mapping semantics: `fragment`, `emitter_roles`, and
+`normalized_events`. Watch-set-only changes remain ingest work under
+amendment A and do not rely on this hash.
+The file-level scan conservatively hashes inline `#[cfg(test)]` modules in
+production files, and B-stage internal cuts are expected to bump the hash
+during the rewrite. Golden fixture harness in CI: fixed raw-event corpus →
+expected interpreter output, committed; any output change anywhere fails CI;
+intentional changes update fixtures and thereby bump the hash. Reuses the
+conformance inliner/fixture pattern.
 
 ## Stage B — Port the keep-set
 
@@ -229,9 +235,12 @@ headroom first (raw is double-stored until D3).
 (+hydrate) → verify ‖ live; redo covers the same five + recompute-flags.
 Ownership rule restated structurally: ONE writer binary; raw writes only in
 ingest modules, derived writes only in interpret/project modules — D5
-audits that formulation. A3 content-hash input = interpreter + projection
-crates and manifest ABI fragments, EXCLUDING the normalizer version (flag
-recompute path owns that). A2 defines the heartbeat/readiness contract:
+audits that formulation. A3 content-hash input = all adapter sources,
+worker sources minus explicit wiring/test exclusions,
+manifest-authority sources, and each whole `[[abi.events]]` block, EXCLUDING
+the normalizer version (flag recompute path owns that). New watched signatures
+still require amendment A's ingest before rebuild. A2 defines the
+heartbeat/readiness contract:
 per-chain per-phase heartbeat rows under new service names; /v2/status and
 health re-derive from them (old indexer/worker names retire). C4 mechanism:
 annotation-derive OpenAPI (utoipa-style), not hand-assembly. C1 checklist

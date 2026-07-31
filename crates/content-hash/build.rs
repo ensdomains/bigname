@@ -2,6 +2,8 @@ use std::{env, path::PathBuf};
 
 #[path = "src/compute.rs"]
 mod compute;
+#[path = "src/source_paths.rs"]
+mod source_paths;
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest directory"));
@@ -13,6 +15,10 @@ fn main() {
     println!(
         "cargo:rerun-if-changed={}",
         manifest_dir.join("src/compute.rs").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("src/source_paths.rs").display()
     );
     for path in compute::watched_paths(workspace_root) {
         println!("cargo:rerun-if-changed={}", path.display());

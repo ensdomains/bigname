@@ -175,18 +175,28 @@ pub async fn publish_heads(pool: &PgPool, chain_id: &str, heads: &HeadMarkers) -
             "failed to begin head publication for chain {chain_id}: {error}"
         ))
     })?;
-    crate::head_finality::require_monotonic(&mut transaction, chain_id, heads).await?;
-    let path = load_latest_path(&mut transaction, chain_id, &heads.latest).await?;
+    let previous_boundary =
+        crate::head_finality::require_monotonic(&mut transaction, chain_id, heads).await?;
+    let mut path_floor =
+        crate::head_finality::path_floor(&mut transaction, chain_id, previous_boundary.as_ref())
+            .await?;
+    if let Some(proposed_boundary) = heads.finalized.as_ref().or(heads.safe.as_ref()) {
+        path_floor = path_floor.min(proposed_boundary.number);
+    }
+    let path = load_latest_path(
+        &mut transaction,
+        chain_id,
+        &heads.latest,
+        path_floor,
+        previous_boundary.as_ref(),
+    )
+    .await?;
     require_marker_on_path("safe", heads.safe.as_ref(), &path)?;
     require_marker_on_path("finalized", heads.finalized.as_ref(), &path)?;
     let hashes = path
         .iter()
         .map(|(_, hash)| hash.as_str())
         .collect::<Vec<_>>();
-    let path_floor = path
-        .last()
-        .map(|(number, _)| *number)
-        .ok_or_else(|| RunnerError::data_integrity("latest path is empty"))?;
 
     replace_readable_path(&mut transaction, chain_id, &hashes, path_floor).await?;
     promote_to_canonical(&mut transaction, chain_id, &hashes).await?;
@@ -194,7 +204,7 @@ pub async fn publish_heads(pool: &PgPool, chain_id: &str, heads: &HeadMarkers) -
         promote_to_safe(&mut transaction, chain_id, &hashes, safe.number).await?;
     }
     if let Some(finalized) = &heads.finalized {
-        promote_to_finalized(&mut transaction, chain_id, &hashes, finalized.number).await?;
+        promote_to_finalized(&mut transaction, chain_id, finalized.number).await?;
     }
 
     sqlx::query(
@@ -295,8 +305,10 @@ async fn load_latest_path(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     latest: &BlockMarker,
+    path_floor: i64,
+    expected_floor: Option<&BlockMarker>,
 ) -> RunnerResult<Vec<(i64, String)>> {
-    let path = sqlx::query_as::<_, (i64, String)>(
+    let path = sqlx::query_as::<_, (i64, String, Option<String>)>(
         "
         WITH RECURSIVE latest_path AS (
             SELECT block_number, block_hash, parent_hash
@@ -311,8 +323,9 @@ async fn load_latest_path(
               ON parent.chain_id = $1
              AND parent.block_hash = child.parent_hash
              AND parent.block_number = child.block_number - 1
+            WHERE child.block_number > $4
         )
-        SELECT block_number, block_hash
+        SELECT block_number, block_hash, parent_hash
         FROM latest_path
         ORDER BY block_number DESC
         ",
@@ -320,6 +333,7 @@ async fn load_latest_path(
     .bind(chain_id)
     .bind(&latest.hash)
     .bind(latest.number)
+    .bind(path_floor)
     .fetch_all(&mut **transaction)
     .await
     .map_err(|error| {
@@ -327,13 +341,34 @@ async fn load_latest_path(
             "failed to load latest path for chain {chain_id}: {error}"
         ))
     })?;
-    if path.first() != Some(&(latest.number, latest.hash.clone())) {
+    if path.first().map(|(number, hash, _)| (*number, hash)) != Some((latest.number, &latest.hash))
+    {
         return Err(RunnerError::data_integrity(format!(
             "latest head {} at block {} is missing from chain lineage for {chain_id}",
             latest.hash, latest.number
         )));
     }
-    Ok(path)
+    let reached_floor = path
+        .last()
+        .is_some_and(|(number, _, _)| *number == path_floor);
+    let reached_expected_boundary = expected_floor.is_none_or(|expected| {
+        path.iter()
+            .any(|(number, hash, _)| *number == expected.number && hash == &expected.hash)
+    });
+    if !reached_floor || !reached_expected_boundary {
+        let stopped_at = path
+            .last()
+            .map(|(number, hash, _)| format!("{hash} at block {number}"))
+            .unwrap_or_else(|| "an empty path".to_owned());
+        return Err(RunnerError::data_integrity(format!(
+            "lineage gap for chain {chain_id}: latest path stopped at {stopped_at} before \
+             reaching required boundary block {path_floor}"
+        )));
+    }
+    Ok(path
+        .into_iter()
+        .map(|(number, hash, _)| (number, hash))
+        .collect())
 }
 
 fn require_marker_on_path(
@@ -404,7 +439,6 @@ async fn promote_to_safe(
 async fn promote_to_finalized(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
-    hashes: &[&str],
     through: i64,
 ) -> RunnerResult<()> {
     sqlx::query(
@@ -412,13 +446,11 @@ async fn promote_to_finalized(
         UPDATE chain_lineage
         SET canonicality_state = 'finalized'
         WHERE chain_id = $1
-          AND block_hash = ANY($2)
-          AND block_number <= $3
+          AND block_number <= $2
           AND canonicality_state = 'safe'
         ",
     )
     .bind(chain_id)
-    .bind(hashes)
     .bind(through)
     .execute(&mut **transaction)
     .await

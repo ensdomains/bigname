@@ -1,4 +1,7 @@
+use std::{future::Future, time::Duration};
+
 use sqlx::{Connection, PgConnection, postgres::PgConnectOptions};
+use tokio::time::MissedTickBehavior;
 
 use crate::{
     error::{ErrorKind, RunnerError, RunnerResult},
@@ -51,6 +54,38 @@ impl PhaseLock {
             chain_id: chain_id.to_owned(),
             phase,
         })
+    }
+
+    pub async fn check_alive(&mut self) -> RunnerResult<()> {
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(&mut self.connection)
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                RunnerError::lock_connection_lost(format!(
+                    "advisory-lock connection was lost for chain {} phase {}; stopping this phase \
+                     attempt before further writes: {error}",
+                    self.chain_id, self.phase
+                ))
+            })
+    }
+
+    pub async fn run_while_alive<T>(
+        &mut self,
+        check_interval: Duration,
+        future: impl Future<Output = RunnerResult<T>>,
+    ) -> RunnerResult<T> {
+        tokio::pin!(future);
+        let mut checks = tokio::time::interval(check_interval);
+        checks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        checks.tick().await;
+        loop {
+            tokio::select! {
+                biased;
+                _ = checks.tick() => self.check_alive().await?,
+                result = &mut future => return result,
+            }
+        }
     }
 
     pub async fn release(mut self) -> RunnerResult<()> {

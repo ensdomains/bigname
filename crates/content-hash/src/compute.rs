@@ -1,10 +1,13 @@
 use std::{
+    collections::BTreeSet,
     ffi::OsStr,
     fs, io,
     path::{Path, PathBuf},
 };
 
 use alloy_primitives::{hex, keccak256};
+
+use crate::source_paths;
 
 const ADAPTER_SOURCE_ROOT: &str = "crates/adapters/src";
 const MANIFEST_AUTHORITY_SOURCE_ROOT: &str = "crates/manifests/src";
@@ -14,6 +17,9 @@ const MINIMUM_MANIFEST_EVENT_COUNT: usize = 111;
 const MINIMUM_EVENT_MANIFEST_COUNT: usize = 16;
 const HASH_FORMAT: &[u8] = b"bigname-interpreter-content-v3\0";
 
+// `apps/phase-runner` is deliberately outside these roots: it may orchestrate phase work, but
+// semantic interpretation or projection code must never live there.
+
 struct SourceExclusion {
     relative_path: &'static str,
     includes_descendants: bool,
@@ -21,16 +27,19 @@ struct SourceExclusion {
 }
 
 const WORKER_SOURCE_EXCLUSIONS: &[SourceExclusion] = &[
+    // The binary entrypoint only parses the CLI and starts runtime wiring.
     SourceExclusion {
         relative_path: "main.rs",
         includes_descendants: false,
         reason: "worker binary entrypoint wiring",
     },
+    // clap declarations select commands but do not interpret or project indexed facts.
     SourceExclusion {
         relative_path: "cli.rs",
         includes_descendants: false,
         reason: "worker CLI declarations",
     },
+    // Command dispatch and its submodules only connect command-line requests to owned behavior.
     SourceExclusion {
         relative_path: "commands.rs",
         includes_descendants: false,
@@ -41,16 +50,19 @@ const WORKER_SOURCE_EXCLUSIONS: &[SourceExclusion] = &[
         includes_descendants: true,
         reason: "worker CLI command handlers",
     },
+    // Tracing, metrics, and listener setup do not change interpreter output.
     SourceExclusion {
         relative_path: "runtime.rs",
         includes_descendants: false,
         reason: "worker runtime and observability wiring",
     },
+    // The healthcheck reads service state but does not derive or apply indexed state.
     SourceExclusion {
         relative_path: "healthcheck.rs",
         includes_descendants: false,
         reason: "worker healthcheck wiring",
     },
+    // Inspect commands are read-only operational views over already persisted state.
     SourceExclusion {
         relative_path: "inspect.rs",
         includes_descendants: false,
@@ -63,30 +75,48 @@ const WORKER_SOURCE_EXCLUSIONS: &[SourceExclusion] = &[
     },
 ];
 
+#[allow(dead_code)]
 struct CfgTestSourceExclusion {
     relative_path: &'static str,
+    parent_module: &'static str,
+    module_declaration: &'static str,
     reason: &'static str,
 }
 
 const CFG_TEST_SOURCE_EXCLUSIONS: &[CfgTestSourceExclusion] = &[
+    // Resolver preimage builders are compiled only for adapter tests.
     CfgTestSourceExclusion {
         relative_path: "crates/adapters/src/ens_v2_resolver/testsupport.rs",
+        parent_module: "crates/adapters/src/ens_v2_resolver.rs",
+        module_declaration: "pub(crate) mod testsupport;",
         reason: "cfg(test)-gated ENSv2 resolver test support",
     },
+    // Projection rebuild hooks are compiled only for worker tests.
     CfgTestSourceExclusion {
         relative_path: "apps/worker/src/primary_name/projection/test_hooks.rs",
+        parent_module: "apps/worker/src/primary_name/projection.rs",
+        module_declaration: "pub(crate) mod test_hooks;",
         reason: "cfg(test)-gated primary-name projection hooks",
     },
+    // Hydration hooks are compiled only for worker tests.
     CfgTestSourceExclusion {
         relative_path: "apps/worker/src/primary_name/hydration/test_hooks.rs",
+        parent_module: "apps/worker/src/primary_name/hydration.rs",
+        module_declaration: "pub(crate) mod test_hooks;",
         reason: "cfg(test)-gated primary-name hydration hooks",
     },
+    // Record hydration seed helpers are compiled only for worker tests.
     CfgTestSourceExclusion {
         relative_path: "apps/worker/src/record_inventory/hydration_tests_support.rs",
+        parent_module: "apps/worker/src/record_inventory/hydration.rs",
+        module_declaration: "pub(super) mod tests_support;",
         reason: "cfg(test)-gated record-inventory hydration support",
     },
+    // The staging fingerprint exists only to regression-test the durable staging contract.
     CfgTestSourceExclusion {
         relative_path: "apps/worker/src/replay/staging/fingerprint.rs",
+        parent_module: "apps/worker/src/replay/staging.rs",
+        module_declaration: "pub(crate) mod fingerprint;",
         reason: "cfg(test)-gated projection staging fingerprint",
     },
 ];
@@ -124,20 +154,33 @@ pub(crate) fn compute(workspace_root: &Path) -> io::Result<String> {
 
 fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
     let mut inputs = Vec::new();
+    let cfg_test_sources = source_paths::cfg_test_sources(
+        workspace_root,
+        &[
+            ADAPTER_SOURCE_ROOT,
+            MANIFEST_AUTHORITY_SOURCE_ROOT,
+            WORKER_SOURCE_ROOT,
+        ],
+    )?;
     collect_rust_sources(
         workspace_root,
         &workspace_root.join(ADAPTER_SOURCE_ROOT),
+        &cfg_test_sources,
         &mut inputs,
     )?;
-    // Registry interpretation delegates discovery and identity writes to the manifest crate.
+    // ENSv2 registry interpretation delegates discovery reconciliation and identity writes to
+    // this crate. Scan the whole production source tree so a new manifest-authority dependency
+    // cannot silently change interpreter output without changing the content hash.
     collect_rust_sources(
         workspace_root,
         &workspace_root.join(MANIFEST_AUTHORITY_SOURCE_ROOT),
+        &cfg_test_sources,
         &mut inputs,
     )?;
     collect_rust_sources(
         workspace_root,
         &workspace_root.join(WORKER_SOURCE_ROOT),
+        &cfg_test_sources,
         &mut inputs,
     )?;
     collect_manifest_event_blocks(workspace_root, &mut inputs)?;
@@ -147,6 +190,7 @@ fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
 fn collect_rust_sources(
     workspace_root: &Path,
     directory: &Path,
+    cfg_test_sources: &BTreeSet<String>,
     inputs: &mut Vec<Input>,
 ) -> io::Result<()> {
     if !directory.exists() {
@@ -157,9 +201,9 @@ fn collect_rust_sources(
     for entry in entries {
         let path = entry.path();
         if path.is_dir() {
-            collect_rust_sources(workspace_root, &path, inputs)?;
+            collect_rust_sources(workspace_root, &path, cfg_test_sources, inputs)?;
         } else if path.extension() == Some(OsStr::new("rs"))
-            && source_exclusion(workspace_root, &path)?.is_none()
+            && source_exclusion(workspace_root, &path, cfg_test_sources)?.is_none()
         {
             collect_file(workspace_root, &path, inputs)?;
         }
@@ -167,13 +211,21 @@ fn collect_rust_sources(
     Ok(())
 }
 
-fn source_exclusion(workspace_root: &Path, path: &Path) -> io::Result<Option<&'static str>> {
+fn source_exclusion(
+    workspace_root: &Path,
+    path: &Path,
+    cfg_test_sources: &BTreeSet<String>,
+) -> io::Result<Option<&'static str>> {
     let relative_path = relative_key(workspace_root, path)?;
     if let Some(exclusion) = CFG_TEST_SOURCE_EXCLUSIONS
         .iter()
         .find(|exclusion| exclusion.relative_path == relative_path)
     {
         return Ok(Some(exclusion.reason));
+    }
+
+    if cfg_test_sources.contains(&relative_path) {
+        return Ok(Some("cfg(test)-gated external module"));
     }
 
     let source_relative_path = if let Some(path) = relative_path.strip_prefix(ADAPTER_SOURCE_ROOT) {
@@ -185,19 +237,6 @@ fn source_exclusion(workspace_root: &Path, path: &Path) -> io::Result<Option<&'s
     } else {
         return Ok(None);
     };
-    let source_path = Path::new(source_relative_path);
-    // Conventionally named external test modules are not production hash inputs.
-    if source_path
-        .components()
-        .any(|component| component.as_os_str() == OsStr::new("tests"))
-        || source_path
-            .file_name()
-            .and_then(OsStr::to_str)
-            .is_some_and(|name| name == "tests.rs" || name.ends_with("_tests.rs"))
-    {
-        return Ok(Some("conventionally named external test module"));
-    }
-
     if relative_path.starts_with(WORKER_SOURCE_ROOT) {
         return Ok(WORKER_SOURCE_EXCLUSIONS
             .iter()
@@ -365,4 +404,43 @@ impl SourceExclusion {
                     .strip_prefix(self.relative_path)
                     .is_some_and(|suffix| suffix.starts_with('/')))
     }
+}
+
+#[cfg(test)]
+pub(crate) fn hashed_source_paths(workspace_root: &Path) -> io::Result<Vec<String>> {
+    collect_inputs(workspace_root).map(|inputs| {
+        inputs
+            .into_iter()
+            .filter_map(|input| input.key.strip_prefix("source:").map(str::to_owned))
+            .collect()
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn excluded_source_reason(
+    workspace_root: &Path,
+    path: &Path,
+) -> io::Result<Option<&'static str>> {
+    let cfg_test_sources = source_paths::cfg_test_sources(
+        workspace_root,
+        &[
+            ADAPTER_SOURCE_ROOT,
+            MANIFEST_AUTHORITY_SOURCE_ROOT,
+            WORKER_SOURCE_ROOT,
+        ],
+    )?;
+    source_exclusion(workspace_root, path, &cfg_test_sources)
+}
+
+#[cfg(test)]
+pub(crate) fn cfg_test_source_exclusions()
+-> impl Iterator<Item = (&'static str, &'static str, &'static str, &'static str)> {
+    CFG_TEST_SOURCE_EXCLUSIONS.iter().map(|exclusion| {
+        (
+            exclusion.relative_path,
+            exclusion.parent_module,
+            exclusion.module_declaration,
+            exclusion.reason,
+        )
+    })
 }

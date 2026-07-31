@@ -88,7 +88,14 @@ async fn phase_transitions_are_legal_and_persisted() -> Result<()> {
         PhaseStatus::Running
     );
     store
-        .complete_phase(chain, PhaseName::Verify, &PhaseProgress::default())
+        .complete_phase(
+            chain,
+            PhaseName::Verify,
+            &PhaseProgress {
+                verification_level: Some(VerificationLevel::QuickSynced),
+                ..PhaseProgress::default()
+            },
+        )
         .await?;
     store
         .complete_phase(chain, PhaseName::Live, &PhaseProgress::default())
@@ -118,6 +125,13 @@ async fn second_runner_fails_loudly_when_phase_lock_is_held() -> Result<()> {
     let store = PhaseStore::new(scratch.runner().pool().clone());
     store.initialize_chain("lock-chain").await?;
     mark_completed(scratch.pool(), "lock-chain", PhaseName::Ingest, None).await?;
+    mark_completed(
+        scratch.pool(),
+        "lock-chain",
+        PhaseName::Interpret,
+        Some(phase_runner::INTERPRETER_CONTENT_HASH),
+    )
+    .await?;
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let blocking = Arc::new(BlockingPhase {
@@ -326,6 +340,19 @@ async fn capacity_breach_pauses_and_then_resumes_the_phase() -> Result<()> {
         Some(phase_runner::INTERPRETER_CONTENT_HASH),
     )
     .await?;
+    sqlx::query(
+        "
+        UPDATE chain_phase_state
+        SET current_block_number = 0,
+            current_block_hash = 'capacity-chain-block-0',
+            target_block_number = 0,
+            target_block_hash = 'capacity-chain-block-0'
+        WHERE chain_id = 'capacity-chain'
+          AND phase_name = 'verify'
+        ",
+    )
+    .execute(scratch.pool())
+    .await?;
     let probe = Arc::new(GatedCapacityProbe::default());
     let capacity = CapacityGuard::new(
         CapacityConfig {
@@ -402,6 +429,7 @@ async fn transient_phase_error_restarts_with_backoff() -> Result<()> {
         Some(phase_runner::INTERPRETER_CONTENT_HASH),
     )
     .await?;
+    mark_completed(scratch.pool(), "restart-chain", PhaseName::Verify, None).await?;
     let calls = Arc::new(AtomicUsize::new(0));
     let flaky = Arc::new(FunctionPhase {
         name: PhaseName::Verify,
@@ -411,7 +439,10 @@ async fn transient_phase_error_restarts_with_backoff() -> Result<()> {
                 if calls.fetch_add(1, Ordering::SeqCst) == 0 {
                     Err(RunnerError::transient("temporary provider outage"))
                 } else {
-                    Ok(PhaseBatchOutcome::Complete(PhaseProgress::default()))
+                    Ok(PhaseBatchOutcome::Complete(PhaseProgress {
+                        verification_level: Some(VerificationLevel::QuickSynced),
+                        ..PhaseProgress::default()
+                    }))
                 }
             })
         },
@@ -758,7 +789,9 @@ async fn redo_after_an_interrupted_phase_requires_normal_resume() -> Result<()> 
             .await?,
         StartDisposition::Started
     );
-    let resumed = store.phase_resume(chain_id, PhaseName::Interpret).await?;
+    let resumed = store
+        .phase_resume(chain_id, PhaseName::Interpret, &RunMode::Normal)
+        .await?;
     assert_eq!(resumed.current.map(|marker| marker.number), Some(4));
     scratch.cleanup().await
 }
@@ -977,6 +1010,35 @@ async fn partial_redo_cannot_adopt_hash_after_failed_interpret() -> Result<()> {
             Some("keccak256:older-binary".to_owned())
         )
     );
+
+    runner(
+        scratch.runner(),
+        PhaseSet::loopback(),
+        available_capacity(),
+        "failed-hash-full-redo-runner",
+    )?
+    .redo(
+        &chain(chain_id)?,
+        RedoPhase::Phase(PhaseName::Interpret),
+        BlockRange::new(0, 9)?,
+        CancellationToken::new(),
+    )
+    .await?;
+    let recovered_hash: Option<String> = sqlx::query_scalar(
+        "
+        SELECT input_content_hash
+        FROM chain_phase_state
+        WHERE chain_id = $1
+          AND phase_name = 'interpret'
+        ",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        recovered_hash,
+        Some(phase_runner::INTERPRETER_CONTENT_HASH.to_owned())
+    );
     scratch.cleanup().await
 }
 
@@ -1166,27 +1228,18 @@ async fn different_writer_phases_cannot_overlap_on_one_chain() -> Result<()> {
 #[tokio::test]
 async fn ingest_cursor_records_the_distinct_source_target() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_cursor_target").await?;
-    let phase = Arc::new(FunctionPhase {
-        name: PhaseName::Ingest,
-        handler: Arc::new(|_| {
-            let current = BlockMarker::new(1, "cursor-target-block-1")?;
-            let target = BlockMarker::new(3, "cursor-target-block-3")?;
-            Ok(PhaseBatchOutcome::Complete(PhaseProgress {
-                current: Some(current.clone()),
-                target: Some(target),
-                live_handoff: Some(current),
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    let configured_chain = chain("cursor-target-chain")?;
+    store
+        .update_ingest_cursors(
+            configured_chain.sources.as_ref(),
+            &PhaseProgress {
+                current: Some(BlockMarker::new(1, "cursor-target-block-1")?),
+                target: Some(BlockMarker::new(3, "cursor-target-block-3")?),
                 ..PhaseProgress::default()
-            }))
-        }),
-    });
-    runner(
-        scratch.runner(),
-        phase_set_replacing(PhaseName::Ingest, phase)?,
-        available_capacity(),
-        "cursor-target-runner",
-    )?
-    .run_chain(&chain("cursor-target-chain")?, CancellationToken::new())
-    .await?;
+            },
+        )
+        .await?;
 
     let cursor: (i64, Option<i64>, Option<i64>) = sqlx::query_as(
         "
@@ -1207,31 +1260,6 @@ async fn ingest_cursor_records_the_distinct_source_target() -> Result<()> {
 #[tokio::test]
 async fn ingest_cursors_record_independent_source_progress() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_source_cursors").await?;
-    let phase = Arc::new(FunctionPhase {
-        name: PhaseName::Ingest,
-        handler: Arc::new(|_| {
-            let first = BlockMarker::new(1, "source-cursors-block-1")?;
-            let second = BlockMarker::new(3, "source-cursors-block-3")?;
-            Ok(PhaseBatchOutcome::Complete(PhaseProgress {
-                current: Some(second.clone()),
-                target: Some(BlockMarker::new(9, "source-cursors-block-9")?),
-                live_handoff: Some(second.clone()),
-                source_progress: vec![
-                    SourceProgress {
-                        source_key: "bulk".to_owned(),
-                        current: Some(first),
-                        target: Some(BlockMarker::new(5, "source-cursors-block-5")?),
-                    },
-                    SourceProgress {
-                        source_key: "rpc".to_owned(),
-                        current: Some(second),
-                        target: Some(BlockMarker::new(9, "source-cursors-block-9")?),
-                    },
-                ],
-                ..PhaseProgress::default()
-            }))
-        }),
-    });
     let chain = ChainConfig::new(
         "source-cursors-chain",
         vec![
@@ -1254,14 +1282,29 @@ async fn ingest_cursors_record_independent_source_progress() -> Result<()> {
         ],
         true,
     )?;
-    runner(
-        scratch.runner(),
-        phase_set_replacing(PhaseName::Ingest, phase)?,
-        available_capacity(),
-        "source-cursors-runner",
-    )?
-    .run_chain(&chain, CancellationToken::new())
-    .await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store
+        .update_ingest_cursors(
+            chain.sources.as_ref(),
+            &PhaseProgress {
+                current: Some(BlockMarker::new(3, "source-cursors-block-3")?),
+                target: Some(BlockMarker::new(9, "source-cursors-block-9")?),
+                source_progress: vec![
+                    SourceProgress {
+                        source_key: "bulk".to_owned(),
+                        current: Some(BlockMarker::new(1, "source-cursors-block-1")?),
+                        target: Some(BlockMarker::new(5, "source-cursors-block-5")?),
+                    },
+                    SourceProgress {
+                        source_key: "rpc".to_owned(),
+                        current: Some(BlockMarker::new(3, "source-cursors-block-3")?),
+                        target: Some(BlockMarker::new(9, "source-cursors-block-9")?),
+                    },
+                ],
+                ..PhaseProgress::default()
+            },
+        )
+        .await?;
 
     let cursors: Vec<(String, i64, Option<i64>, Option<i64>)> = sqlx::query_as(
         "
@@ -1400,6 +1443,7 @@ async fn verify_phase_cannot_publish_chain_heads() -> Result<()> {
                     },
                     PhaseName::Verify => PhaseProgress {
                         heads: Some(verify_heads.clone()),
+                        verification_level: Some(VerificationLevel::QuickSynced),
                         ..PhaseProgress::default()
                     },
                     _ => PhaseProgress::default(),
@@ -1561,7 +1605,13 @@ fn phase_set_replacing(name: PhaseName, replacement: Arc<dyn Phase>) -> RunnerRe
         } else {
             Arc::new(FunctionPhase {
                 name: phase,
-                handler: Arc::new(|_| Ok(PhaseBatchOutcome::Complete(PhaseProgress::default()))),
+                handler: Arc::new(move |_| {
+                    Ok(PhaseBatchOutcome::Complete(PhaseProgress {
+                        verification_level: (phase == PhaseName::Verify)
+                            .then_some(VerificationLevel::QuickSynced),
+                        ..PhaseProgress::default()
+                    }))
+                }),
             }) as Arc<dyn Phase>
         }
     });
@@ -1574,18 +1624,23 @@ fn complete_phase_set(ingest_heads: Option<HeadMarkers>) -> PhaseSet {
         Arc::new(FunctionPhase {
             name,
             handler: Arc::new(move |_| {
-                let progress = if name == PhaseName::Ingest {
-                    let marker = heads.as_ref().map(|heads| heads.latest.clone());
-                    PhaseProgress {
-                        current: marker.clone(),
-                        target: marker.clone(),
-                        live_handoff: marker,
-                        heads: heads.clone(),
-                        estimated_write_bytes: 0,
-                        ..PhaseProgress::default()
+                let progress = match name {
+                    PhaseName::Ingest => {
+                        let marker = heads.as_ref().map(|heads| heads.latest.clone());
+                        PhaseProgress {
+                            current: marker.clone(),
+                            target: marker.clone(),
+                            live_handoff: marker,
+                            heads: heads.clone(),
+                            estimated_write_bytes: 0,
+                            ..PhaseProgress::default()
+                        }
                     }
-                } else {
-                    PhaseProgress::default()
+                    PhaseName::Verify => PhaseProgress {
+                        verification_level: Some(VerificationLevel::QuickSynced),
+                        ..PhaseProgress::default()
+                    },
+                    _ => PhaseProgress::default(),
                 };
                 Ok(PhaseBatchOutcome::Complete(progress))
             }),
@@ -1607,8 +1662,8 @@ fn routing_phase_set(good_live: Arc<Notify>) -> RunnerResult<PhaseSet> {
                     number: 0,
                     hash: format!("{}-block-0", context.chain_id),
                 };
-                let progress = if name == PhaseName::Ingest {
-                    PhaseProgress {
+                let progress = match name {
+                    PhaseName::Ingest => PhaseProgress {
                         current: Some(marker.clone()),
                         target: Some(marker.clone()),
                         live_handoff: Some(marker.clone()),
@@ -1619,9 +1674,12 @@ fn routing_phase_set(good_live: Arc<Notify>) -> RunnerResult<PhaseSet> {
                         }),
                         estimated_write_bytes: 0,
                         ..PhaseProgress::default()
-                    }
-                } else {
-                    PhaseProgress::default()
+                    },
+                    PhaseName::Verify => PhaseProgress {
+                        verification_level: Some(VerificationLevel::QuickSynced),
+                        ..PhaseProgress::default()
+                    },
+                    _ => PhaseProgress::default(),
                 };
                 if name == PhaseName::Live {
                     good_live.notify_one();
@@ -1654,6 +1712,11 @@ fn panic_routing_phase_set(
                     panic_trigger.notify_one();
                     good_live.notify_one();
                     Ok(PhaseBatchOutcome::Continue(PhaseProgress::default()))
+                } else if name == PhaseName::Verify {
+                    Ok(PhaseBatchOutcome::Complete(PhaseProgress {
+                        verification_level: Some(VerificationLevel::QuickSynced),
+                        ..PhaseProgress::default()
+                    }))
                 } else {
                     Ok(PhaseBatchOutcome::Complete(PhaseProgress::default()))
                 }
@@ -1735,6 +1798,10 @@ async fn mark_completed(
         UPDATE chain_phase_state
         SET phase_status = 'completed',
             input_content_hash = $3,
+            current_block_number = COALESCE(current_block_number, 100),
+            current_block_hash = COALESCE(current_block_hash, 'test-extent-block-100'),
+            target_block_number = COALESCE(target_block_number, 100),
+            target_block_hash = COALESCE(target_block_hash, 'test-extent-block-100'),
             started_at = now(),
             finished_at = now(),
             updated_at = now()

@@ -1,0 +1,5 @@
+query Domain($id: String!) {
+  domain(id: $id) {
+    ...Domain
+  }
+}
