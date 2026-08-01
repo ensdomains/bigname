@@ -2185,12 +2185,13 @@ async fn silent_winning_reorg_removes_losing_ensv2_discovery_authority() -> Resu
             'active',
             'ensip15@ens-normalize-0.1.1',
             'tests/ens_v2_registry_l1/v1.toml',
-            DEFAULT
+            $3
         )
         "#,
     )
     .bind(manifest_id)
     .bind(chain)
+    .bind(test_manifest_payload())
     .execute(database.pool())
     .await
     .context("failed to insert the ENSv2 registry manifest for silent-reorg repair")?;
@@ -2230,7 +2231,7 @@ async fn silent_winning_reorg_removes_losing_ensv2_discovery_authority() -> Resu
     insert_manifest_discovery_rule(
         database.pool(),
         manifest_id,
-        "subregistry",
+        "registry_announcement",
         "registry",
         "reachable_from_root",
     )
@@ -2284,11 +2285,9 @@ async fn silent_winning_reorg_removes_losing_ensv2_discovery_authority() -> Resu
 
     let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
         block: losing_block.clone(),
-        logs: vec![rpc_ens_v2_subregistry_updated_log_payload(
+        logs: vec![rpc_ens_v2_registry_created_log_payload(
             &losing_block,
-            registry_address,
             losing_child_address,
-            1,
             0,
         )],
     }])
@@ -2314,7 +2313,7 @@ async fn silent_winning_reorg_removes_losing_ensv2_discovery_authority() -> Resu
             .await?
             .iter()
             .any(|contract| contract.address == losing_child_address),
-        "the losing live SubregistryUpdated must initially admit its child"
+        "the losing live RegistryCreated must initially admit its emitter"
     );
     let losing_discovery_epoch = sqlx::query_scalar::<_, i64>(
         "SELECT epoch FROM discovery_admission_epochs WHERE chain_id = $1",
@@ -2426,7 +2425,7 @@ async fn silent_winning_reorg_removes_losing_ensv2_discovery_authority() -> Resu
         &refreshed_task,
         &provider,
         &ProviderHeadSnapshot {
-            canonical: later_block,
+            canonical: later_block.clone(),
             safe: Some(caught_up_block.clone()),
             finalized: Some(caught_up_block),
         },
@@ -2435,10 +2434,11 @@ async fn silent_winning_reorg_removes_losing_ensv2_discovery_authority() -> Resu
     .context("later block must advance without selecting the losing child")?;
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT FROM raw_logs WHERE chain_id = $1 AND emitting_address = $2",
+            "SELECT COUNT(*)::BIGINT FROM raw_logs WHERE chain_id = $1 AND emitting_address = $2 AND block_hash = $3",
         )
         .bind(chain)
         .bind(losing_child_address)
+        .bind(&later_block.block_hash)
         .fetch_one(database.pool())
         .await?,
         0,
@@ -2449,7 +2449,11 @@ async fn silent_winning_reorg_removes_losing_ensv2_discovery_authority() -> Resu
     database.cleanup().await
 }
 
+// Retained until the transitional legacy replay contracts are co-deleted in
+// stage B2 PR 3. The owner-based producer exercised here was removed by the
+// ratified discovery semantics.
 #[derive(Clone, Copy)]
+#[cfg(any())]
 struct LegacyRegistrySilentReorgFixture {
     chain: &'static str,
     namespace: &'static str,
@@ -2459,6 +2463,7 @@ struct LegacyRegistrySilentReorgFixture {
     seed: u128,
 }
 
+#[cfg(any())]
 fn rpc_legacy_registry_new_owner_log_payload(
     block: &ProviderBlock,
     address: &str,
@@ -2483,6 +2488,7 @@ fn rpc_legacy_registry_new_owner_log_payload(
     })
 }
 
+#[cfg(any())]
 fn legacy_registry_new_owner_raw_log(
     chain: &str,
     block: &ProviderBlock,
@@ -2511,6 +2517,7 @@ fn legacy_registry_new_owner_raw_log(
 }
 
 #[tokio::test]
+#[cfg(any())]
 async fn silent_winning_reorg_removes_losing_legacy_registry_discovery_authority() -> Result<()> {
     for fixture in [
         LegacyRegistrySilentReorgFixture {
@@ -2542,6 +2549,7 @@ async fn silent_winning_reorg_removes_losing_legacy_registry_discovery_authority
     Ok(())
 }
 
+#[cfg(any())]
 async fn assert_silent_winning_reorg_removes_losing_legacy_registry_discovery_authority(
     fixture: LegacyRegistrySilentReorgFixture,
 ) -> Result<()> {

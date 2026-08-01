@@ -3,10 +3,7 @@ use bigname_manifests::WatchedChainPlan;
 
 use crate::run::startup_heartbeat::StartupHeartbeat;
 
-use super::super::logging::{
-    log_ens_v1_subregistry_discovery_sync_summary,
-    log_ens_v2_registry_resource_surface_sync_summary,
-};
+use super::super::logging::log_ens_v2_registry_resource_surface_sync_summary;
 use super::{await_full_source_adapter_with_optional_heartbeat, record_startup_sync_progress};
 
 /// Materialize only the discovery edges needed by the post-bootstrap live-plan widen. Auto
@@ -42,23 +39,6 @@ async fn sync_discovery_adapter_owned_raw_log_state_inner(
 ) -> Result<()> {
     record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
     for chain in watched_chain_plan {
-        let summary = await_full_source_adapter_with_optional_heartbeat(
-            pool,
-            &chain.chain,
-            &mut startup_heartbeat,
-            false,
-            bigname_adapters::sync_ens_v1_subregistry_discovery(pool, &chain.chain),
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "failed to sync ENSv1 registry discovery from stored raw logs for chain {}",
-                chain.chain
-            )
-        })?;
-        log_ens_v1_subregistry_discovery_sync_summary(&chain.chain, &summary);
-        record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
-
         let summary = await_full_source_adapter_with_optional_heartbeat(
             pool,
             &chain.chain,

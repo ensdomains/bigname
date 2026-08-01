@@ -1,58 +1,65 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-
 use anyhow::Result;
 use bigname_manifests::DiscoveryObservation;
-use bigname_storage::{
-    NormalizedEvent, SurfaceBinding, SurfaceBindingKind, ens_v2_registry_resource_id,
-};
+use bigname_storage::{SurfaceBindingKind, ens_v2_registry_resource_id};
 use serde_json::json;
-use sqlx::types::Uuid;
 
 use super::{
     constants::*,
     discovery::{ens_v2_resolver_discovery_source, ens_v2_subregistry_discovery_source},
     names::{
-        RegistryNameKey, RegistryTokenKey, closed_surface_binding_for_terminal,
-        deactivate_registry_suffix, discovery_observation_key, insert_registry_name_state,
-        name_under_registry, observe_name, remember_linked_resource_state, state_for_token_mut,
-        take_states_for_name,
+        discovery_observation_key, insert_registry_name_state, name_under_registry, observe_name,
+        remember_linked_resource_state, state_for_token_mut,
     },
-    normalized::normalized_event,
-    types::{ObservationRef, RegistryNameState, RegistryObservation, RegistryResourceLink},
+    normalized::{normalized_event, proxy_upgraded_event},
+    types::{RegistryNameState, RegistryObservation, RegistryResourceLink},
     util::{deterministic_uuid, normalize_address, null_if_zero_address},
 };
-
+mod context;
 mod hydration;
+mod parent;
 mod terminal;
+mod topology;
 mod transfer;
 
+pub(super) use context::RegistryObservationContext;
 pub(super) use hydration::hydrate_subregistry_event_target_ids;
-use terminal::{
-    append_terminal_discovery_observations, append_terminal_role_events,
-    append_terminal_surface_unbound_event, apply_label_unregistered, apply_token_regenerated,
+use parent::apply_parent_updated;
+use terminal::{apply_label_unregistered, apply_token_regenerated, retire_replaced_name_states};
+use topology::{
+    apply_expiry_topology, apply_label_topology, apply_subregistry_topology,
+    apply_unregister_topology, refresh_expired_topology_before_non_topology_event,
 };
 use transfer::apply_token_control_transferred;
-
-pub(super) struct RegistryObservationContext<'a> {
-    pub(super) registry_suffix_by_address: &'a mut HashMap<String, String>,
-    pub(super) registry_contract_by_address: &'a mut HashMap<String, Uuid>,
-    pub(super) states_by_registry_token: &'a mut BTreeMap<(String, String), RegistryNameState>,
-    pub(super) state_keys_by_registry_namehash:
-        &'a mut HashMap<RegistryNameKey, BTreeSet<RegistryTokenKey>>,
-    pub(super) linked_resource_states: &'a mut BTreeMap<Uuid, RegistryNameState>,
-    pub(super) closed_bindings: &'a mut BTreeMap<Uuid, SurfaceBinding>,
-    pub(super) token_aliases: &'a mut HashMap<(String, String), (String, String)>,
-    pub(super) current_token_alias_by_canonical_key:
-        &'a mut HashMap<RegistryTokenKey, RegistryTokenKey>,
-    pub(super) observations: &'a mut Vec<DiscoveryObservation>,
-    pub(super) graph_events: &'a mut Vec<NormalizedEvent>,
-}
 
 pub(super) fn apply_registry_observation(
     observation: RegistryObservation,
     context: &mut RegistryObservationContext<'_>,
 ) -> Result<()> {
+    refresh_expired_topology_before_non_topology_event(&observation, context)?;
     match observation {
+        RegistryObservation::RegistryCreated { reference } => {
+            context.graph_events.push(normalized_event(
+                &reference,
+                None,
+                None,
+                EVENT_KIND_REGISTRY_CREATED,
+                json!({}),
+                json!({
+                    "source_event": "RegistryCreated",
+                    "registry_address": reference.emitting_address,
+                    "registry_contract_instance_id": reference.emitting_contract_instance_id.to_string(),
+                }),
+                format!("registry-created:{}", reference.emitting_address),
+            ));
+        }
+        RegistryObservation::Upgraded {
+            implementation,
+            reference,
+        } => {
+            context
+                .graph_events
+                .push(proxy_upgraded_event(&reference, implementation));
+        }
         RegistryObservation::LabelRegistered {
             token_id,
             labelhash,
@@ -62,18 +69,45 @@ pub(super) fn apply_registry_observation(
             sender,
             reference,
         } => {
-            let Some(full_name) = name_under_registry(
+            apply_label_topology(
+                &token_id,
+                &label,
+                expiry,
+                &reference,
+                "LabelRegistered",
+                context,
+            )?;
+            let observed_name = name_under_registry(
                 &reference.emitting_address,
                 &label,
                 context.registry_suffix_by_address,
-            ) else {
+                context.root_registry_addresses,
+                context.current_subregistry_by_parent_label,
+                context.current_parent_claim_by_registry,
+                &reference,
+            )
+            .and_then(|full_name| {
+                observe_name(&reference.namespace, &full_name, &reference, &label)
+                    .ok()
+                    .map(|name| (full_name, name))
+            });
+            retire_replaced_name_states(
+                &reference.emitting_address,
+                &label,
+                observed_name
+                    .as_ref()
+                    .map(|(_, name)| name.namehash.as_str()),
+                &token_id,
+                &reference,
+                "LabelRegistered",
+                "replacement_registration",
+                false,
+                context,
+            );
+            let Some((full_name, name)) = observed_name else {
                 return Ok(());
             };
             let key = (reference.emitting_address.clone(), token_id.clone());
-            let Ok(name) = observe_name(&reference.namespace, &full_name, &reference, &label)
-            else {
-                return Ok(());
-            };
             let state = RegistryNameState {
                 token_id,
                 labelhash,
@@ -94,15 +128,8 @@ pub(super) fn apply_registry_observation(
                 resolver: None,
                 subregistry: None,
                 binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+                name_reachable: true,
             };
-            retire_replaced_name_states(
-                &state,
-                &reference,
-                "LabelRegistered",
-                "replacement_registration",
-                false,
-                context,
-            );
             context.graph_events.push(normalized_event(
                 &reference,
                 Some(state.name.logical_name_id.clone()),
@@ -138,18 +165,45 @@ pub(super) fn apply_registry_observation(
             sender,
             reference,
         } => {
-            let Some(full_name) = name_under_registry(
+            apply_label_topology(
+                &token_id,
+                &label,
+                expiry,
+                &reference,
+                "LabelReserved",
+                context,
+            )?;
+            let observed_name = name_under_registry(
                 &reference.emitting_address,
                 &label,
                 context.registry_suffix_by_address,
-            ) else {
+                context.root_registry_addresses,
+                context.current_subregistry_by_parent_label,
+                context.current_parent_claim_by_registry,
+                &reference,
+            )
+            .and_then(|full_name| {
+                observe_name(&reference.namespace, &full_name, &reference, &label)
+                    .ok()
+                    .map(|name| (full_name, name))
+            });
+            retire_replaced_name_states(
+                &reference.emitting_address,
+                &label,
+                observed_name
+                    .as_ref()
+                    .map(|(_, name)| name.namehash.as_str()),
+                &token_id,
+                &reference,
+                "LabelReserved",
+                "replacement_reservation",
+                true,
+                context,
+            );
+            let Some((full_name, name)) = observed_name else {
                 return Ok(());
             };
             let key = (reference.emitting_address.clone(), token_id.clone());
-            let Ok(name) = observe_name(&reference.namespace, &full_name, &reference, &label)
-            else {
-                return Ok(());
-            };
             let state = RegistryNameState {
                 token_id: token_id.clone(),
                 labelhash: labelhash.clone(),
@@ -170,15 +224,8 @@ pub(super) fn apply_registry_observation(
                 resolver: None,
                 subregistry: None,
                 binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+                name_reachable: true,
             };
-            retire_replaced_name_states(
-                &state,
-                &reference,
-                "LabelReserved",
-                "replacement_reservation",
-                true,
-                context,
-            );
             insert_registry_name_state(
                 context.states_by_registry_token,
                 context.state_keys_by_registry_namehash,
@@ -206,13 +253,17 @@ pub(super) fn apply_registry_observation(
             token_id,
             sender,
             reference,
-        } => apply_label_unregistered(token_id, sender, reference, context),
+        } => {
+            apply_unregister_topology(&token_id, &reference, context)?;
+            apply_label_unregistered(token_id, sender, reference, context);
+        }
         RegistryObservation::ExpiryUpdated {
             token_id,
             new_expiry,
             sender,
             reference,
         } => {
+            apply_expiry_topology(&token_id, new_expiry, &reference, context)?;
             if let Some(state) = state_for_token_mut(
                 context.states_by_registry_token,
                 context.token_aliases,
@@ -222,10 +273,15 @@ pub(super) fn apply_registry_observation(
                 let before_expiry = state.expiry;
                 state.expiry = Some(new_expiry);
                 state.current_ref = reference.clone();
-                remember_linked_resource_state(context.linked_resource_states, state);
+                let logical_name_id = state
+                    .name_reachable
+                    .then(|| state.name.logical_name_id.clone());
+                if state.name_reachable {
+                    remember_linked_resource_state(context.linked_resource_states, state);
+                }
                 context.graph_events.push(normalized_event(
                     &reference,
-                    Some(state.name.logical_name_id.clone()),
+                    logical_name_id.clone(),
                     state.resource.as_ref().map(|link| link.resource_id),
                     EVENT_KIND_EXPIRY_CHANGED,
                     json!({"expiry": before_expiry}),
@@ -239,7 +295,7 @@ pub(super) fn apply_registry_observation(
                 ));
                 context.graph_events.push(normalized_event(
                     &reference,
-                    Some(state.name.logical_name_id.clone()),
+                    logical_name_id,
                     state.resource.as_ref().map(|link| link.resource_id),
                     EVENT_KIND_REGISTRATION_RENEWED,
                     json!({"expiry": before_expiry}),
@@ -260,6 +316,7 @@ pub(super) fn apply_registry_observation(
             sender,
             reference,
         } => {
+            apply_subregistry_topology(&token_id, &subregistry, &reference, context)?;
             let mut logical_name_id = None;
             let mut resource_id = None;
             let observation_key = discovery_observation_key(&reference.emitting_address, &token_id);
@@ -270,23 +327,15 @@ pub(super) fn apply_registry_observation(
                 &token_id,
             ) {
                 let before = state.subregistry.clone();
-                if before.as_deref() != Some(subregistry.as_str()) {
-                    deactivate_registry_suffix(
-                        context.registry_suffix_by_address,
-                        before.as_deref(),
-                        &state.full_name,
-                    );
-                }
                 state.subregistry = Some(subregistry.clone());
                 state.current_ref = reference.clone();
-                logical_name_id = Some(state.name.logical_name_id.clone());
+                logical_name_id = state
+                    .name_reachable
+                    .then(|| state.name.logical_name_id.clone());
                 resource_id = state.resource.as_ref().map(|link| link.resource_id);
-                if subregistry != ZERO_ADDRESS {
-                    context
-                        .registry_suffix_by_address
-                        .insert(subregistry.clone(), state.full_name.clone());
+                if state.name_reachable {
+                    remember_linked_resource_state(context.linked_resource_states, state);
                 }
-                remember_linked_resource_state(context.linked_resource_states, state);
                 context.graph_events.push(normalized_event(
                     &reference,
                     logical_name_id.clone(),
@@ -350,10 +399,15 @@ pub(super) fn apply_registry_observation(
                 let before = state.resolver.clone();
                 state.resolver = Some(resolver.clone());
                 state.current_ref = reference.clone();
-                remember_linked_resource_state(context.linked_resource_states, state);
+                let logical_name_id = state
+                    .name_reachable
+                    .then(|| state.name.logical_name_id.clone());
+                if state.name_reachable {
+                    remember_linked_resource_state(context.linked_resource_states, state);
+                }
                 context.graph_events.push(normalized_event(
                     &reference,
-                    Some(state.name.logical_name_id.clone()),
+                    logical_name_id.clone(),
                     state.resource.as_ref().map(|link| link.resource_id),
                     EVENT_KIND_RESOLVER_CHANGED,
                     json!({"resolver": before}),
@@ -382,7 +436,7 @@ pub(super) fn apply_registry_observation(
                         "token_id": token_id,
                         "from_address": reference.emitting_address,
                         "to_address": resolver.clone(),
-                        "logical_name_id": state.name.logical_name_id,
+                        "logical_name_id": logical_name_id,
                         "resource_id": state.resource.as_ref().map(|link| link.resource_id.to_string()),
                         "chain_id": reference.chain_id,
                         "block_hash": reference.block_hash,
@@ -430,6 +484,11 @@ pub(super) fn apply_registry_observation(
                     token_lineage_id,
                     surface_binding_id,
                     linked_ref: reference.clone(),
+                    linked_logical_name_id: state
+                        .name_reachable
+                        .then(|| state.name.logical_name_id.clone()),
+                    binding_ref: reference.clone(),
+                    binding_source_event: "TokenResource".to_owned(),
                 });
                 state.current_ref = reference;
                 remember_linked_resource_state(context.linked_resource_states, state);
@@ -465,100 +524,8 @@ pub(super) fn apply_registry_observation(
             label,
             sender,
             reference,
-        } => {
-            if let Some(full_name) =
-                name_under_registry(&parent, &label, context.registry_suffix_by_address)
-            {
-                context
-                    .registry_suffix_by_address
-                    .insert(reference.emitting_address.clone(), full_name.clone());
-                context.graph_events.push(normalized_event(
-                    &reference,
-                    None,
-                    None,
-                    EVENT_KIND_PARENT_CHANGED,
-                    json!({}),
-                    json!({
-                        "source_event": "ParentUpdated",
-                        "parent": null_if_zero_address(&parent),
-                        "label": label,
-                        "registry_name": full_name,
-                        "sender": sender,
-                        "registry_contract_instance_id": reference.emitting_contract_instance_id.to_string(),
-                        "parent_contract_instance_id": context.registry_contract_by_address
-                            .get(&parent)
-                            .map(ToString::to_string),
-                    }),
-                    format!("parent-updated:{}", reference.emitting_address),
-                ));
-            }
-        }
+        } => apply_parent_updated(parent, label, sender, reference, context)?,
     }
 
     Ok(())
-}
-
-fn retire_replaced_name_states(
-    next_state: &RegistryNameState,
-    reference: &ObservationRef,
-    source_event: &str,
-    terminal_reason: &str,
-    close_surface_binding: bool,
-    context: &mut RegistryObservationContext<'_>,
-) {
-    let replaced = take_states_for_name(
-        context.states_by_registry_token,
-        context.token_aliases,
-        context.state_keys_by_registry_namehash,
-        context.current_token_alias_by_canonical_key,
-        &next_state.registry_address,
-        &next_state.name.namehash,
-    );
-    let latest = replaced.iter().max_by_key(|state| {
-        (
-            state.current_ref.block_number,
-            state.current_ref.transaction_index,
-            state.current_ref.log_index,
-        )
-    });
-    if let Some(latest) = latest {
-        append_terminal_discovery_observations(
-            latest,
-            &next_state.token_id,
-            reference,
-            source_event,
-            terminal_reason,
-            context.observations,
-        );
-        append_terminal_role_events(
-            latest,
-            &next_state.token_id,
-            reference,
-            source_event,
-            terminal_reason,
-            context.graph_events,
-        );
-    }
-    for state in replaced {
-        if close_surface_binding {
-            if let Some(binding) = closed_surface_binding_for_terminal(&state, reference) {
-                context
-                    .closed_bindings
-                    .insert(binding.surface_binding_id, binding);
-            }
-            append_terminal_surface_unbound_event(
-                &state,
-                &next_state.token_id,
-                reference,
-                source_event,
-                terminal_reason,
-                context.graph_events,
-            );
-        }
-        deactivate_registry_suffix(
-            context.registry_suffix_by_address,
-            state.subregistry.as_deref(),
-            &state.full_name,
-        );
-    }
 }

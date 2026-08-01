@@ -441,6 +441,11 @@ async fn seed_manifest(pool: &PgPool, manifest: &Manifest) -> Result<()> {
                 "from_role": "registry",
                 "admission": "reachable_from_root",
             },
+            {
+                "edge_kind": "registry_announcement",
+                "from_role": "registry",
+                "admission": "reachable_from_root",
+            },
         ])
     } else {
         serde_json::json!([])
@@ -541,7 +546,8 @@ async fn seed_manifest(pool: &PgPool, manifest: &Manifest) -> Result<()> {
                 manifest_id, edge_kind, from_role, admission
             )
             VALUES ($1, 'subregistry', 'registry', 'reachable_from_root'),
-                   ($1, 'resolver', 'registry', 'reachable_from_root')
+                   ($1, 'resolver', 'registry', 'reachable_from_root'),
+                   ($1, 'registry_announcement', 'registry', 'reachable_from_root')
             "#,
         )
         .bind(manifest_id)
@@ -741,6 +747,44 @@ fn validate_required_corpus_coverage(suite: &OutputSuite) -> Result<()> {
             "RegistrarNameRegistered"
         ),
         "ENSv2 registrar corpus case must derive a registration"
+    );
+
+    let owner_leaf = output_case(suite, "ens_v1_new_owner_without_contract_discovery")?;
+    ensure!(
+        has_event_kind(&owner_leaf.state, "SubregistryChanged")
+            && empty_json_array(&owner_leaf.state.discovery_edges),
+        "ENSv1 NewOwner corpus case must retain child history without admitting the owner"
+    );
+
+    let announced = output_case(suite, "ens_v2_registry_created_unlinked")?;
+    ensure!(
+        has_event_kind(&announced.state, "RegistryCreated")
+            && announced
+                .state
+                .discovery_edges
+                .as_array()
+                .is_some_and(|rows| rows.iter().any(|row| {
+                    row["edge_kind"] == "registry_announcement"
+                        && row["from_contract_instance_id"]
+                            == "00000000-0000-0000-0000-000000000001"
+                        && row["to_contract_instance_id"] == "00000000-0000-0000-0000-000000000002"
+                })),
+        "RegistryCreated corpus case must admit the unlinked emitting registry"
+    );
+
+    let unpointed = output_case(suite, "ens_v1_match_all_unpointed_resolver")?;
+    ensure!(
+        has_event_kind(&unpointed.state, "RecordChanged")
+            && empty_json_array(&unpointed.state.discovery_edges),
+        "ENSv1 match-all corpus case must retain the record without a discovery edge"
+    );
+
+    ensure!(
+        has_event_kind(
+            &output_case(suite, "proxy_upgraded_history")?.state,
+            "Upgraded"
+        ),
+        "proxy history corpus case must derive Upgraded"
     );
 
     let renewal = output_case(suite, "ens_v1_registration_then_renewal")?;

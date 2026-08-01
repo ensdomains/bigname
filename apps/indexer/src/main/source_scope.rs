@@ -2,7 +2,10 @@ use std::collections::BTreeSet;
 
 use bigname_manifests::{WatchedContract, WatchedSourceSelectorPlan};
 
-use crate::ens_v1_resolver::{GENERIC_SOURCE_SCOPE_ADDRESS, SOURCE_FAMILY_ENS_V1_RESOLVER_L1};
+use crate::ens_v1_resolver::{
+    GENERIC_SOURCE_SCOPE_ADDRESS, SOURCE_FAMILY_BASENAMES_BASE_RESOLVER,
+    SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SourceScope {
@@ -15,6 +18,9 @@ impl SourceScope {
         from_block: i64,
         to_block: i64,
     ) -> Self {
+        // This path defines historical provider fetch scope. D1 owns widening
+        // it for Base resolver and ENSv2 RegistryCreated history; B2 only
+        // changes interpretation and replay of raw facts already retained.
         let mut targets = Vec::new();
         if watched_source_plan_uses_generic_resolver_scope(source_plan) {
             targets.push(SourceScopeTarget {
@@ -50,12 +56,12 @@ impl SourceScope {
         chain: &str,
         from_block: i64,
         to_block: i64,
-        include_generic_resolver_scope: bool,
+        match_all_source_families: &BTreeSet<String>,
     ) -> Self {
         let mut targets = BTreeSet::new();
-        if include_generic_resolver_scope {
+        for source_family in match_all_source_families {
             targets.insert(SourceScopeTarget {
-                source_family: SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+                source_family: source_family.clone(),
                 address: GENERIC_SOURCE_SCOPE_ADDRESS.to_owned(),
                 from_block,
                 to_block,
@@ -66,8 +72,11 @@ impl SourceScope {
             if contract.chain != chain {
                 continue;
             }
-            if include_generic_resolver_scope
-                && contract.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+            if match_all_source_families.contains(&contract.source_family)
+                && matches!(
+                    contract.source_family.as_str(),
+                    SOURCE_FAMILY_ENS_V1_RESOLVER_L1 | SOURCE_FAMILY_BASENAMES_BASE_RESOLVER
+                )
             {
                 continue;
             }
@@ -99,14 +108,14 @@ impl SourceScope {
         watched_contracts: &[WatchedContract],
         chain: &str,
         through_block: i64,
-        include_generic_resolver_scope: bool,
+        match_all_source_families: &BTreeSet<String>,
     ) -> Self {
         Self::from_watched_contracts(
             watched_contracts,
             chain,
             0,
             through_block,
-            include_generic_resolver_scope,
+            match_all_source_families,
         )
     }
 
@@ -262,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn watched_contract_scope_clips_ranges_and_adds_generic_resolver_once() {
+    fn watched_contract_scope_clips_ranges_and_adds_selected_match_all_families() {
         let watched_contracts = vec![
             WatchedContract {
                 chain: "ethereum-mainnet".to_owned(),
@@ -301,7 +310,7 @@ mod tests {
             "ethereum-mainnet",
             10,
             30,
-            true,
+            &BTreeSet::from([SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned()]),
         );
 
         assert_eq!(
@@ -348,13 +357,13 @@ mod tests {
             "ethereum-mainnet",
             60,
             60,
-            false,
+            &BTreeSet::new(),
         );
         let closure_validation = SourceScope::from_historical_watched_contracts_through(
             &watched_contracts,
             "ethereum-mainnet",
             60,
-            false,
+            &BTreeSet::new(),
         );
 
         assert_eq!(

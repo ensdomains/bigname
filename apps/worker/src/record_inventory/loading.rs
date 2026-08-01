@@ -136,7 +136,10 @@ async fn load_resource_relevant_events(
             ne.raw_fact_ref,
             ne.canonicality_state::TEXT AS canonicality_state,
             ne.after_state,
-            LOWER(rl.emitting_address) AS emitting_address
+            LOWER(COALESCE(
+                NULLIF(BTRIM(ne.raw_fact_ref->>'emitting_address'), ''),
+                rl.emitting_address
+            )) AS emitting_address
         FROM normalized_events ne
         JOIN resources resource
           ON resource.resource_id = ne.resource_id
@@ -209,7 +212,10 @@ async fn load_logical_name_resolver_events(
             ne.raw_fact_ref,
             ne.canonicality_state::TEXT AS canonicality_state,
             ne.after_state,
-            LOWER(rl.emitting_address) AS emitting_address
+            LOWER(COALESCE(
+                NULLIF(BTRIM(ne.raw_fact_ref->>'emitting_address'), ''),
+                rl.emitting_address
+            )) AS emitting_address
         FROM normalized_events ne
         JOIN resources resource
           ON resource.resource_id = ne.resource_id

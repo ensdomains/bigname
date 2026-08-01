@@ -89,6 +89,10 @@ pub(crate) use replay::{
     replay_stateless_only_raw_fact_normalized_events, select_log_bounded_replay_to_block,
     unsupported_closure_replay_adapters,
 };
+#[cfg(test)]
+pub(crate) use replay::{
+    load_replay_adapter_source_scopes, scoped::load_replay_raw_log_selection_for_scoped_range,
+};
 #[allow(unused_imports)]
 pub(crate) use types::{
     CanonicalReconciliation, CanonicalReconciliationStatus, ChainReconciliationOutcome,

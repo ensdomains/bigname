@@ -2,10 +2,9 @@ use std::{future::Future, time::Instant};
 
 use crate::StartupAdapterProgress;
 use crate::runtime::{
-    log_ens_v1_reverse_claim_sync_summary, log_ens_v1_subregistry_discovery_sync_summary,
-    log_ens_v1_unwrapped_authority_sync_summary, log_ens_v2_permissions_sync_summary,
-    log_ens_v2_registrar_sync_summary, log_ens_v2_registry_resource_surface_sync_summary,
-    log_ens_v2_resolver_sync_summary,
+    log_ens_v1_reverse_claim_sync_summary, log_ens_v1_unwrapped_authority_sync_summary,
+    log_ens_v2_permissions_sync_summary, log_ens_v2_registrar_sync_summary,
+    log_ens_v2_registry_resource_surface_sync_summary, log_ens_v2_resolver_sync_summary,
 };
 use anyhow::{Context, Result};
 use bigname_storage::acquire_raw_log_staging_read_guard;
@@ -248,37 +247,6 @@ async fn sync_full_closure_normalized_events_without_lock(
             summary.total_synced_count,
             summary.total_inserted_count,
         );
-        record_full_closure_progress(pool, progress).await?;
-    }
-
-    if adapters.contains(&NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery) {
-        let adapter_started = Instant::now();
-        let summary = bigname_adapters::sync_ens_v1_subregistry_discovery_through_block(
-            pool,
-            chain,
-            target_block_number,
-        )
-        .await?;
-        log_adapter_call_timing(
-            chain,
-            "ens_v1_subregistry_discovery",
-            "sync_ens_v1_subregistry_discovery",
-            0,
-            0,
-            summary.scanned_log_count,
-            summary.matched_log_count,
-            summary.total_normalized_event_count,
-            summary.total_normalized_event_inserted_count,
-            adapter_started.elapsed().as_millis(),
-        );
-        log_ens_v1_subregistry_discovery_sync_summary(chain, &summary);
-        aggregate.add_counts(
-            summary.scanned_log_count,
-            summary.matched_log_count,
-            summary.total_normalized_event_count,
-            summary.total_normalized_event_inserted_count,
-        );
-        trim_allocator_after_full_closure_adapter("ens_v1_subregistry_discovery");
         record_full_closure_progress(pool, progress).await?;
     }
 

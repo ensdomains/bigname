@@ -1,6 +1,6 @@
-# Active ENSv1 registry admission on Ethereum mainnet with registry-observed
-# resolver discovery and migration-aware ENSRegistryOld intake.
-# ENSv1 emits resolver changes from the registry event surface:
+# Active ENSv1 registry admission on Ethereum mainnet with migration-aware
+# ENSRegistryOld intake. Resolver changes are binding state, not discovery.
+# The registry event surface declares NewResolver:
 # (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174 @ ens_v1@91c966f).
@@ -11,6 +11,7 @@ chain = "ethereum-mainnet"
 deployment_epoch = "ens_v1"
 rollout_status = "active"
 normalizer_version = "ensip15@ens-normalize-0.1.1"
+discovery_rules = []
 
 [capability_flags]
 declared_children = { status = "supported", notes = "registry-controlled child surfaces are authoritative inputs" }
@@ -41,15 +42,8 @@ address = "0x314159265dd8dbb310642f98f50c066173c1259b"
 proxy_kind = "none"
 start_block = 3327417
 
-[[discovery_rules]]
-edge_kind = "subregistry"
-from_role = "registry"
-admission = "reachable_from_root"
-
-[[discovery_rules]]
-edge_kind = "resolver"
-from_role = "registry"
-admission = "reachable_from_root"
+# ENSv1 owner and resolver-pointer changes update name state only. They do
+# not admit contract instances or create discovery edges.
 
 # Registry event ABI fragments consumed by manifest-derived authority topic
 # lookup. Event declarations are pinned in the ENS registry interface:
@@ -61,7 +55,7 @@ admission = "reachable_from_root"
 name = "NewOwner"
 fragment = "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)"
 emitter_roles = ["registry", "registry_old"]
-normalized_events = ["AuthorityTransferred"]
+normalized_events = ["SubregistryChanged", "AuthorityTransferred"]
 
 [[abi.events]]
 name = "Transfer"

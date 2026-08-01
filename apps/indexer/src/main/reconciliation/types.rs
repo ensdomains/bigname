@@ -178,11 +178,4 @@ impl PersistedRawPayloadAdapterSyncSummary {
         self.total_synced_count += total_synced_count;
         self.total_inserted_count += total_inserted_count;
     }
-
-    pub(super) fn add_stateless_replay_authority(
-        &mut self,
-        summary: &bigname_storage::NormalizedEventReplayAuthoritySummary,
-    ) {
-        self.stateless_replay_authority.add(summary);
-    }
 }

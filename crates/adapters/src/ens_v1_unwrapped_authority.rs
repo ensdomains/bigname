@@ -165,6 +165,8 @@ struct RegistryOwnerObservation {
     labelhash: String,
     namehash: Option<String>,
     owner: String,
+    #[serde(default)]
+    emitting_address: String,
     reference: ObservationRef,
 }
 
@@ -431,7 +433,8 @@ struct NameHistory {
     wrapper_authorities: BTreeMap<String, WrapperAuthority>,
     current_registry_owner: Option<String>,
     current_resolver: Option<String>,
-    current_record_version: Option<i64>,
+    #[serde(default)]
+    record_versions_by_resolver: BTreeMap<String, i64>,
     open_binding: Option<OpenBinding>,
     bindings: Vec<BindingSegment>,
     events: Vec<NormalizedEvent>,

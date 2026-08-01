@@ -1361,7 +1361,11 @@ async fn seed_supported_basenames_rebuild_inputs(
                 block_hash: Some("0xbase-binding-supported".to_owned()),
                 transaction_hash: Some("0xtxbaserecordversion".to_owned()),
                 log_index: Some(0),
-                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:supported-basenames:record-version"}),
+                raw_fact_ref: json!({
+                    "kind": "raw_log",
+                    "event_identity": "api-test:supported-basenames:record-version",
+                    "emitting_address": "0x0000000000000000000000000000000000000abc",
+                }),
                 derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
                 canonicality_state: CanonicalityState::Canonical,
                 before_state: json!({
@@ -1385,7 +1389,11 @@ async fn seed_supported_basenames_rebuild_inputs(
                 block_hash: Some("0xbase-binding-supported".to_owned()),
                 transaction_hash: Some("0xtxbaseaddr".to_owned()),
                 log_index: Some(1),
-                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:supported-basenames:addr"}),
+                raw_fact_ref: json!({
+                    "kind": "raw_log",
+                    "event_identity": "api-test:supported-basenames:addr",
+                    "emitting_address": "0x0000000000000000000000000000000000000abc",
+                }),
                 derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
                 canonicality_state: CanonicalityState::Canonical,
                 before_state: json!({}),
@@ -1409,7 +1417,11 @@ async fn seed_supported_basenames_rebuild_inputs(
                 block_hash: Some("0xbase-binding-supported".to_owned()),
                 transaction_hash: Some("0xtxbasetext".to_owned()),
                 log_index: Some(2),
-                raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:supported-basenames:text"}),
+                raw_fact_ref: json!({
+                    "kind": "raw_log",
+                    "event_identity": "api-test:supported-basenames:text",
+                    "emitting_address": "0x0000000000000000000000000000000000000abc",
+                }),
                 derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
                 canonicality_state: CanonicalityState::Canonical,
                 before_state: json!({}),

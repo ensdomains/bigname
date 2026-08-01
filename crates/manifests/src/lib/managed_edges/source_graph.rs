@@ -52,7 +52,8 @@ pub(crate) async fn reconcile_manifest_source_graph_with_progress(
     .await?;
 
     let stale_source_edge_count =
-        deactivate_discovery_edges_without_active_source_manifest(executor, pool, progress).await?;
+        deactivate_discovery_edges_without_active_source_authority(executor, pool, progress)
+            .await?;
     cleared_edge_count += stale_source_edge_count;
 
     let mutated_address_chains =
@@ -409,7 +410,7 @@ async fn reconcile_managed_edges(
     Ok(cleared_edge_count)
 }
 
-async fn deactivate_discovery_edges_without_active_source_manifest(
+async fn deactivate_discovery_edges_without_active_source_authority(
     executor: &mut sqlx::postgres::PgConnection,
     pool: &PgPool,
     progress: &mut Option<&mut dyn ManifestRuntimeProgress>,
@@ -433,12 +434,23 @@ async fn deactivate_discovery_edges_without_active_source_manifest(
                   FROM manifest_versions mv
                   WHERE mv.manifest_id = de.source_manifest_id
                     AND mv.rollout_status = 'active'
+                    AND (
+                        de.discovery_source IN ($2, $3)
+                        OR EXISTS (
+                            SELECT 1
+                            FROM manifest_discovery_rules mdr
+                            WHERE mdr.manifest_id = mv.manifest_id
+                              AND mdr.edge_kind = de.edge_kind
+                        )
+                    )
               )
             ORDER BY de.discovery_edge_id
-            LIMIT $2
+            LIMIT $4
             "#,
         )
         .bind(cursor)
+        .bind(MANIFEST_PROXY_IMPLEMENTATION_DISCOVERY_SOURCE)
+        .bind(MANIFEST_SUCCESSOR_DISCOVERY_SOURCE)
         .bind(PAGE_ROWS)
         .fetch_all(&mut *executor)
         .await
@@ -460,7 +472,7 @@ async fn deactivate_discovery_edges_without_active_source_manifest(
             .bind(&stale_ids)
             .execute(&mut *executor)
             .await
-            .context("failed to deactivate discovery edges without an active source manifest")?;
+            .context("failed to deactivate discovery edges without active manifest authority")?;
             deactivated_edge_count += result.rows_affected() as usize;
             mutated_chains.extend(page.iter().map(|(_, chain)| chain.clone()));
         }

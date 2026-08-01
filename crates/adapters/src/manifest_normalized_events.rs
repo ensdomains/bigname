@@ -7,7 +7,6 @@ use sqlx::PgPool;
 
 mod builders;
 mod constants;
-mod drift_alerts;
 mod loading;
 mod types;
 mod utils;

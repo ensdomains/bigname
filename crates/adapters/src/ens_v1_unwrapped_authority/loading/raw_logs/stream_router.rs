@@ -11,6 +11,7 @@ pub(in crate::ens_v1_unwrapped_authority) struct AuthorityRawLogStreamSourceRout
     watched_topic0s: HashSet<String>,
     generic_resolver_event_sources: &'a [GenericResolverEventSource],
     generic_topic0s: HashSet<String>,
+    generic_topic0s_by_source_family: HashMap<String, HashSet<String>>,
     generic_resolver_emitter_addresses: Option<HashSet<String>>,
 }
 
@@ -74,15 +75,21 @@ impl<'a> AuthorityRawLogStreamSourceRouter<'a> {
             .map(|topic0| topic0.to_ascii_lowercase())
             .collect::<HashSet<_>>();
 
-        let generic_topic0s = if generic_resolver_event_sources.is_empty() {
-            HashSet::new()
-        } else {
-            event_topics
-                .ens_resolver_event_topic0s()?
+        let mut generic_topic0s = HashSet::new();
+        let mut generic_topic0s_by_source_family = HashMap::new();
+        for source_family in generic_resolver_event_sources
+            .iter()
+            .map(|source| source.source_family.as_str())
+            .collect::<BTreeSet<_>>()
+        {
+            let source_topic0s = event_topics
+                .resolver_event_topic0s(source_family)?
                 .into_iter()
                 .map(|topic0| topic0.to_ascii_lowercase())
-                .collect::<HashSet<_>>()
-        };
+                .collect::<HashSet<_>>();
+            generic_topic0s.extend(source_topic0s.iter().cloned());
+            generic_topic0s_by_source_family.insert(source_family.to_owned(), source_topic0s);
+        }
 
         Ok(Self {
             watched_emitters,
@@ -90,6 +97,7 @@ impl<'a> AuthorityRawLogStreamSourceRouter<'a> {
             watched_topic0s,
             generic_resolver_event_sources,
             generic_topic0s,
+            generic_topic0s_by_source_family,
             generic_resolver_emitter_addresses: generic_resolver_emitter_addresses
                 .map(|addresses| addresses.iter().cloned().collect::<HashSet<_>>()),
         })
@@ -124,6 +132,11 @@ impl<'a> AuthorityRawLogStreamSourceRouter<'a> {
                 self.generic_resolver_event_sources
                     .iter()
                     .filter(|source| generic_source_active_at_block(source, block_number))
+                    .filter(|source| {
+                        self.generic_topic0s_by_source_family
+                            .get(&source.source_family)
+                            .is_some_and(|topic0s| topic0s.contains(topic0))
+                    })
                     .map(AuthorityRawLogStreamSource::Generic),
             );
         }

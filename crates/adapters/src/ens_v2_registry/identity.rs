@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
-    CanonicalityState, NameSurface, NormalizedEvent, Resource, SurfaceBinding, SurfaceBindingKind,
-    TokenLineage, load_name_surface_including_noncanonical, load_resource_including_noncanonical,
+    CanonicalityState, NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
+    load_name_surface_including_noncanonical, load_resource_including_noncanonical,
     load_surface_binding_including_noncanonical, load_token_lineage_including_noncanonical,
     sql_row, upsert_surface_bindings,
 };
@@ -12,13 +12,14 @@ use sqlx::{PgPool, types::Uuid};
 
 use super::{
     constants::*,
-    normalized::normalized_event,
     types::{NameMetadata, ObservationRef, RegistryNameState, RegistryResourceLink},
     util::event_position_timestamp,
 };
 
 mod anchors;
 use anchors::stable_row_anchor_for_reobservation;
+mod events;
+pub(super) use events::{build_resource_events, build_token_resource_linked_event};
 
 const EXISTING_BINDING_NAME_CHUNK_SIZE: usize = 5_000;
 
@@ -289,103 +290,6 @@ pub(super) async fn upsert_surface_bindings_close_before_open(
     Ok(())
 }
 
-pub(super) fn build_resource_events(
-    state: &RegistryNameState,
-    link: &RegistryResourceLink,
-) -> Vec<NormalizedEvent> {
-    let mut events = Vec::new();
-    events.push(normalized_event(
-        &link.linked_ref,
-        Some(state.name.logical_name_id.clone()),
-        Some(link.resource_id),
-        EVENT_KIND_TOKEN_RESOURCE_LINKED,
-        json!({}),
-        json!({
-            "source_event": "TokenResource",
-            "token_id": link.observed_token_id,
-            "upstream_resource": link.upstream_resource,
-            "resource_id": link.resource_id.to_string(),
-            "token_lineage_id": link.token_lineage_id.to_string(),
-            "current_token_id": link.observed_token_id,
-            "registry_contract_instance_id": state.registry_contract_instance_id.to_string(),
-        }),
-        format!("token-resource-linked:{}", link.upstream_resource),
-    ));
-    events.push(normalized_event(
-        &link.linked_ref,
-        Some(state.name.logical_name_id.clone()),
-        Some(link.resource_id),
-        EVENT_KIND_SURFACE_BOUND,
-        json!({}),
-        json!({
-            "binding_kind": state.binding_kind.as_str(),
-            "surface_binding_id": link.surface_binding_id.to_string(),
-            "logical_name_id": state.name.logical_name_id,
-            "resource_id": link.resource_id.to_string(),
-            "upstream_resource": link.upstream_resource,
-            "token_id": link.observed_token_id,
-            "current_token_id": link.observed_token_id,
-        }),
-        format!("surface-bound:{}", link.surface_binding_id),
-    ));
-    if state.status == "registered" {
-        events.push(normalized_event(
-            &state.first_ref,
-            Some(state.name.logical_name_id.clone()),
-            Some(link.resource_id),
-            EVENT_KIND_REGISTRATION_GRANTED,
-            json!({}),
-            json!({
-                "authority_kind": "ens_v2_registry",
-                "authority_key": format!(
-                    "ens-v2-registry:{}:{}:{}",
-                    state.first_ref.chain_id, state.registry_contract_instance_id, link.upstream_resource
-                ),
-                "registrant": state.owner,
-                "expiry": link.observed_expiry,
-                "labelhash": state.labelhash,
-                "token_id": link.observed_token_id,
-                "current_token_id": link.observed_token_id,
-                "upstream_resource": link.upstream_resource,
-                "status": "registered",
-                "registry_contract_instance_id": state.registry_contract_instance_id.to_string(),
-            }),
-            format!("registration-granted:{}", link.upstream_resource),
-        ));
-        events.push(normalized_event(
-            &state.first_ref,
-            Some(state.name.logical_name_id.clone()),
-            Some(link.resource_id),
-            EVENT_KIND_AUTHORITY_TRANSFERRED,
-            json!({}),
-            json!({
-                "owner": state.owner,
-                "token_id": link.observed_token_id,
-                "current_token_id": link.observed_token_id,
-                "upstream_resource": link.upstream_resource,
-            }),
-            format!("authority-transferred:{}", link.upstream_resource),
-        ));
-    }
-    if let Some(expiry) = link.observed_expiry {
-        events.push(normalized_event(
-            &state.first_ref,
-            Some(state.name.logical_name_id.clone()),
-            Some(link.resource_id),
-            EVENT_KIND_EXPIRY_CHANGED,
-            json!({}),
-            json!({
-                "expiry": expiry,
-                "token_id": link.observed_token_id,
-                "current_token_id": link.observed_token_id,
-                "upstream_resource": link.upstream_resource,
-            }),
-            format!("expiry-current:{}", link.upstream_resource),
-        ));
-    }
-    events
-}
-
 pub(super) async fn build_name_surface(
     pool: &PgPool,
     name: &NameMetadata,
@@ -531,7 +435,7 @@ pub(super) async fn build_surface_binding(
             &existing.chain_id,
             &existing.block_hash,
             existing.block_number,
-            &link.linked_ref,
+            &link.binding_ref,
         );
         return Ok(SurfaceBinding {
             surface_binding_id: existing.surface_binding_id,
@@ -544,7 +448,7 @@ pub(super) async fn build_surface_binding(
             block_hash,
             block_number,
             provenance: existing.provenance,
-            canonicality_state: link.linked_ref.canonicality_state,
+            canonicality_state: link.binding_ref.canonicality_state,
         });
     }
     Ok(SurfaceBinding {
@@ -552,11 +456,11 @@ pub(super) async fn build_surface_binding(
         logical_name_id: state.name.logical_name_id.clone(),
         resource_id: link.resource_id,
         binding_kind: state.binding_kind,
-        active_from: event_position_timestamp(&link.linked_ref),
+        active_from: event_position_timestamp(&link.binding_ref),
         active_to: None,
-        chain_id: link.linked_ref.chain_id.clone(),
-        block_hash: link.linked_ref.block_hash.clone(),
-        block_number: link.linked_ref.block_number,
+        chain_id: link.binding_ref.chain_id.clone(),
+        block_hash: link.binding_ref.block_hash.clone(),
+        block_number: link.binding_ref.block_number,
         provenance: json!({
             "adapter": DERIVATION_KIND_ENS_V2_REGISTRY_RESOURCE_SURFACE,
             "binding_kind": state.binding_kind.as_str(),
@@ -565,7 +469,7 @@ pub(super) async fn build_surface_binding(
             "token_id": link.observed_token_id,
             "current_token_id": link.observed_token_id,
         }),
-        canonicality_state: link.linked_ref.canonicality_state,
+        canonicality_state: link.binding_ref.canonicality_state,
     })
 }
 

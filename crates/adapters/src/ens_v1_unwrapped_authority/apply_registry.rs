@@ -100,6 +100,76 @@ pub(super) fn apply_registry_owner_changed(
     Ok(())
 }
 
+pub(super) fn build_registry_child_changed_event(
+    event: &RegistryOwnerObservation,
+) -> Result<NormalizedEvent> {
+    let parent_node = event
+        .parent_node
+        .as_deref()
+        .context("registry child change is missing its parent node")?;
+    let child_node = event
+        .namehash
+        .as_deref()
+        .context("registry child change is missing its child node")?;
+    let tombstone = event.owner.eq_ignore_ascii_case(ZERO_ADDRESS);
+    let transaction_hash = event
+        .reference
+        .transaction_hash
+        .as_deref()
+        .unwrap_or_default();
+    let log_index = event.reference.log_index.unwrap_or_default();
+
+    Ok(NormalizedEvent {
+        event_identity: format!(
+            "{}:{}:{}:{}:{}:{}",
+            DERIVATION_KIND_ENS_V1_SUBREGISTRY_CHANGED,
+            event.reference.source_manifest_id,
+            event.reference.block_hash,
+            transaction_hash,
+            log_index,
+            event.emitting_address
+        ),
+        namespace: event.reference.namespace.clone(),
+        logical_name_id: None,
+        resource_id: None,
+        event_kind: EVENT_KIND_SUBREGISTRY_CHANGED.to_owned(),
+        source_family: event.reference.source_family.clone(),
+        manifest_version: event.reference.manifest_version,
+        source_manifest_id: source_manifest_id_if_known(event.reference.source_manifest_id),
+        chain_id: Some(event.reference.chain_id.clone()),
+        block_number: Some(event.reference.block_number),
+        block_hash: Some(event.reference.block_hash.clone()),
+        transaction_hash: event.reference.transaction_hash.clone(),
+        log_index: event.reference.log_index,
+        raw_fact_ref: json!({
+            "kind": "raw_log",
+            "chain_id": event.reference.chain_id,
+            "block_hash": event.reference.block_hash,
+            "block_number": event.reference.block_number,
+            "transaction_hash": event.reference.transaction_hash,
+            "transaction_index": event.reference.transaction_index,
+            "log_index": event.reference.log_index,
+            "emitting_address": event.emitting_address,
+        }),
+        derivation_kind: DERIVATION_KIND_ENS_V1_SUBREGISTRY_CHANGED.to_owned(),
+        canonicality_state: event.reference.canonicality_state,
+        before_state: json!({}),
+        after_state: json!({
+            "source_event": "NewOwner",
+            "parent_node": parent_node,
+            "labelhash": event.labelhash,
+            "child_node": child_node,
+            "owner": event.owner,
+            "emitting_address": event.emitting_address,
+            "tombstone": tombstone,
+            // This retained field name is consumed by the transitional child
+            // projection. It means the child assignment is active; no owner
+            // address is admitted to `discovery_edges`.
+            "active_edge": !tombstone,
+        }),
+    })
+}
+
 fn registry_owner_restores_superseded_registrar(
     history: &NameHistory,
     event: &RegistryOwnerObservation,

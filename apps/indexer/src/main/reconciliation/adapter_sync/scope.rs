@@ -2,7 +2,10 @@ use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, bail};
 
-use crate::ens_v1_resolver::{GENERIC_SOURCE_SCOPE_ADDRESS, SOURCE_FAMILY_ENS_V1_RESOLVER_L1};
+use crate::ens_v1_resolver::{
+    GENERIC_SOURCE_SCOPE_ADDRESS, SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+    load_match_all_topic0s_by_source_family,
+};
 
 pub(super) async fn load_live_adapter_target_block_number(
     pool: &sqlx::PgPool,
@@ -67,27 +70,40 @@ pub(super) async fn load_live_adapter_source_scope(
         bail!("adapter sync block range is empty for non-empty block-hash input on chain {chain}");
     };
 
-    let raw_log_count: i64 = sqlx::query_scalar(
+    let raw_log_topic0s: Vec<String> = sqlx::query_scalar(
         r#"
-        SELECT COUNT(*)::BIGINT
+        SELECT DISTINCT LOWER(topics[1])
         FROM raw_logs
         WHERE chain_id = $1
           AND block_hash = ANY($2::TEXT[])
           AND canonicality_state <> 'orphaned'::canonicality_state
+          AND cardinality(topics) > 0
+        ORDER BY 1
         "#,
     )
     .bind(chain)
     .bind(&unique_block_hashes)
-    .fetch_one(pool)
+    .fetch_all(pool)
     .await
     .with_context(|| {
         format!(
-            "failed to count raw-log emitters for chain {chain} adapter sync range {from_block}..={to_block}"
+            "failed to load raw-log topics for chain {chain} adapter sync range {from_block}..={to_block}"
         )
     })?;
-    if raw_log_count == 0 {
+    if raw_log_topic0s.is_empty() {
         return Ok(Vec::new());
     }
+    let raw_log_topic0s = raw_log_topic0s.into_iter().collect::<BTreeSet<_>>();
+    let match_all_source_families = load_match_all_topic0s_by_source_family(pool, chain)
+        .await?
+        .into_iter()
+        .filter_map(|(source_family, topic0s)| {
+            topic0s
+                .iter()
+                .any(|topic0| raw_log_topic0s.contains(topic0))
+                .then_some(source_family)
+        })
+        .collect::<BTreeSet<_>>();
 
     let scoped_rows = load_live_adapter_source_scope_rows(pool, chain, &unique_block_hashes)
         .await
@@ -101,6 +117,7 @@ pub(super) async fn load_live_adapter_source_scope(
         scoped_rows,
         from_block,
         to_block,
+        &match_all_source_families,
     ))
 }
 
@@ -388,10 +405,14 @@ fn collapse_live_adapter_source_scope(
     rows: Vec<(String, String, i64, i64)>,
     from_block: i64,
     to_block: i64,
+    match_all_source_families: &BTreeSet<String>,
 ) -> Vec<(String, String, i64, i64)> {
-    let include_generic_resolver_scope = rows
-        .iter()
-        .any(|(source_family, _, _, _)| source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1);
+    let include_generic_resolver_scope =
+        match_all_source_families.contains(SOURCE_FAMILY_ENS_V1_RESOLVER_L1);
+    let include_generic_basenames_resolver_scope = match_all_source_families
+        .contains(crate::ens_v1_resolver::SOURCE_FAMILY_BASENAMES_BASE_RESOLVER);
+    let include_registry_announcement_scope = match_all_source_families
+        .contains(crate::ens_v1_resolver::SOURCE_FAMILY_ENS_V2_REGISTRY_L1);
     let mut targets = BTreeSet::new();
     if include_generic_resolver_scope {
         targets.insert((
@@ -401,9 +422,28 @@ fn collapse_live_adapter_source_scope(
             to_block,
         ));
     }
+    if include_generic_basenames_resolver_scope {
+        targets.insert((
+            crate::ens_v1_resolver::SOURCE_FAMILY_BASENAMES_BASE_RESOLVER.to_owned(),
+            GENERIC_SOURCE_SCOPE_ADDRESS.to_owned(),
+            from_block,
+            to_block,
+        ));
+    }
+    if include_registry_announcement_scope {
+        targets.insert((
+            crate::ens_v1_resolver::SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+            GENERIC_SOURCE_SCOPE_ADDRESS.to_owned(),
+            from_block,
+            to_block,
+        ));
+    }
 
     for (source_family, address, effective_from_block, effective_to_block) in rows {
-        if include_generic_resolver_scope && source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1 {
+        if (include_generic_resolver_scope && source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+            || (include_generic_basenames_resolver_scope
+                && source_family == crate::ens_v1_resolver::SOURCE_FAMILY_BASENAMES_BASE_RESOLVER)
+        {
             continue;
         }
         targets.insert((

@@ -222,7 +222,7 @@ async fn ops_catchup_does_not_leave_precreated_job_pending_when_retention_rotate
 }
 
 #[tokio::test]
-async fn ops_catchup_retry_reloads_targets_admitted_during_prior_pass() -> Result<()> {
+async fn ops_catchup_owner_assignment_does_not_expand_the_target_plan() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_ops_catchup_backfill_job_tables(database.pool()).await?;
     let chain = "ethereum-mainnet";
@@ -279,18 +279,18 @@ async fn ops_catchup_retry_reloads_targets_admitted_during_prior_pass() -> Resul
     )
     .await?;
 
-    assert!(
-        outcome.drained_job_count >= 2,
-        "discovery-epoch retry must execute a second target plan"
-    );
+    assert_eq!(outcome.drained_job_count, 1);
     assert_eq!(
         outcome.planned_chunk_count, 1,
-        "the outcome reports the stable expanded plan once, not both convergence passes"
+        "owner assignments must not cause a discovery convergence pass"
     );
-    assert_eq!(outcome.skipped_unknown_start_target_count, 0);
+    assert_eq!(
+        outcome.skipped_unknown_start_target_count, 1,
+        "the synthetic declaration without a stored start remains skipped; NewOwner must not add another target"
+    );
     assert_eq!(outcome.skipped_future_target_count, 0);
     assert!(
-        sqlx::query_scalar::<_, bool>(
+        !sqlx::query_scalar::<_, bool>(
             r#"
             SELECT EXISTS (
                 SELECT 1
@@ -305,10 +305,10 @@ async fn ops_catchup_retry_reloads_targets_admitted_during_prior_pass() -> Resul
         .bind(child_address)
         .fetch_one(database.pool())
         .await?,
-        "the retry must reload the newly admitted child and fetch its later log inside the same finalized range"
+        "the owner address must not become a watched contract"
     );
     assert!(
-        requests
+        !requests
             .lock()
             .expect("request log must not be poisoned")
             .iter()
@@ -325,7 +325,7 @@ async fn ops_catchup_retry_reloads_targets_admitted_during_prior_pass() -> Resul
                 }),
                 _ => false,
             }),
-        "the retry must issue a provider log request that includes the newly admitted child"
+        "the provider plan must not request logs from the owner address"
     );
 
     server.abort();

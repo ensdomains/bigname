@@ -12,12 +12,82 @@ use crate::ens_v2_registry::{
     names::{
         closed_surface_binding_for_terminal, deactivate_registry_suffix, discovery_observation_key,
         remember_linked_resource_state, replace_token_alias, resolve_token_key,
-        take_state_for_unregister,
+        take_state_for_unregister, take_states_for_replacement,
     },
     normalized::normalized_event,
     types::{ObservationRef, RegistryNameState},
     util::normalize_address,
 };
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn retire_replaced_name_states(
+    registry_address: &str,
+    label: &str,
+    namehash: Option<&str>,
+    next_token_id: &str,
+    reference: &ObservationRef,
+    source_event: &str,
+    terminal_reason: &str,
+    close_surface_binding: bool,
+    context: &mut RegistryObservationContext<'_>,
+) {
+    let replaced = take_states_for_replacement(
+        context.states_by_registry_token,
+        context.token_aliases,
+        context.state_keys_by_registry_namehash,
+        context.current_token_alias_by_canonical_key,
+        registry_address,
+        label,
+        namehash,
+    );
+    let latest = replaced.iter().max_by_key(|state| {
+        (
+            state.current_ref.block_number,
+            state.current_ref.transaction_index,
+            state.current_ref.log_index,
+        )
+    });
+    if let Some(latest) = latest {
+        append_terminal_discovery_observations(
+            latest,
+            next_token_id,
+            reference,
+            source_event,
+            terminal_reason,
+            context.observations,
+        );
+        append_terminal_role_events(
+            latest,
+            next_token_id,
+            reference,
+            source_event,
+            terminal_reason,
+            context.graph_events,
+        );
+    }
+    for state in replaced {
+        if close_surface_binding {
+            if let Some(binding) = closed_surface_binding_for_terminal(&state, reference) {
+                context
+                    .closed_bindings
+                    .insert(binding.surface_binding_id, binding);
+            }
+            append_terminal_surface_unbound_event(
+                &state,
+                next_token_id,
+                reference,
+                source_event,
+                terminal_reason,
+                context.graph_events,
+            );
+        }
+        deactivate_registry_suffix(
+            context.registry_suffix_by_address,
+            state.subregistry.as_deref(),
+            &state.full_name,
+        );
+    }
+}
 
 pub(super) fn apply_label_unregistered(
     token_id: String,
@@ -51,10 +121,12 @@ pub(super) fn apply_label_unregistered(
         "unregistered",
         context.graph_events,
     );
-    if let Some(binding) = closed_surface_binding_for_terminal(&state, &reference) {
-        context
-            .closed_bindings
-            .insert(binding.surface_binding_id, binding);
+    if state.name_reachable {
+        if let Some(binding) = closed_surface_binding_for_terminal(&state, &reference) {
+            context
+                .closed_bindings
+                .insert(binding.surface_binding_id, binding);
+        }
     }
     let before_status = state.status;
     state.status = "unregistered";
@@ -66,7 +138,9 @@ pub(super) fn apply_label_unregistered(
     );
     context.graph_events.push(normalized_event(
         &reference,
-        Some(state.name.logical_name_id.clone()),
+        state
+            .name_reachable
+            .then(|| state.name.logical_name_id.clone()),
         state.resource.as_ref().map(|link| link.resource_id),
         EVENT_KIND_REGISTRATION_RELEASED,
         json!({"status": before_status}),
@@ -89,7 +163,9 @@ pub(super) fn append_terminal_role_events(
     terminal_reason: &str,
     graph_events: &mut Vec<bigname_storage::NormalizedEvent>,
 ) {
-    let logical_name_id = Some(state.name.logical_name_id.clone());
+    let logical_name_id = state
+        .name_reachable
+        .then(|| state.name.logical_name_id.clone());
     let resource_id = state.resource.as_ref().map(|link| link.resource_id);
     if state
         .subregistry
@@ -264,7 +340,9 @@ pub(super) fn apply_token_regenerated(
     );
     context.graph_events.push(normalized_event(
         &reference,
-        Some(state.name.logical_name_id.clone()),
+        state
+            .name_reachable
+            .then(|| state.name.logical_name_id.clone()),
         state.resource.as_ref().map(|link| link.resource_id),
         EVENT_KIND_TOKEN_REGENERATED,
         json!({"token_id": previous_token_id}),

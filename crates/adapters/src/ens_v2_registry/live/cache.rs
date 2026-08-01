@@ -120,10 +120,36 @@ fn replay_state_weight(state: &RegistryReplayState) -> usize {
         .iter()
         .map(|(address, suffix)| address.len() + suffix.len() + 32)
         .sum::<usize>();
+    let root_weight = state
+        .root_registry_addresses
+        .iter()
+        .map(|address| address.len() + 32)
+        .sum::<usize>();
     let contract_weight = state
         .registry_contract_by_address
         .keys()
         .map(|address| address.len() + 32)
+        .sum::<usize>();
+    let current_subregistry_weight = state
+        .current_subregistry_by_parent_label
+        .iter()
+        .map(|((parent, label), link)| parent.len() + label.len() + link.subregistry.len() + 72)
+        .sum::<usize>();
+    let current_parent_claim_weight = state
+        .current_parent_claim_by_registry
+        .iter()
+        .map(|(registry, claim)| registry.len() + claim.parent.len() + claim.label.len() + 64)
+        .sum::<usize>();
+    let entry_topology_weight = state
+        .entry_topology_by_registry_token
+        .iter()
+        .map(|((registry, token), entry)| {
+            registry.len()
+                + token.len()
+                + entry.label.len()
+                + entry.subregistry.as_ref().map_or(0, String::len)
+                + 80
+        })
         .sum::<usize>();
     let alias_weight = state
         .token_aliases
@@ -159,7 +185,14 @@ fn replay_state_weight(state: &RegistryReplayState) -> usize {
                 + 512
         })
         .sum::<usize>();
-    suffix_weight + contract_weight + alias_weight + state_weight
+    suffix_weight
+        + root_weight
+        + contract_weight
+        + current_subregistry_weight
+        + current_parent_claim_weight
+        + entry_topology_weight
+        + alias_weight
+        + state_weight
 }
 
 #[cfg(test)]

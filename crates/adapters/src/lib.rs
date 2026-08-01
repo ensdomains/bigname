@@ -6,7 +6,6 @@ use std::sync::{Arc, OnceLock};
 mod adapter_manifest;
 mod block_derived_normalized_events;
 mod ens_v1_reverse_claim;
-mod ens_v1_subregistry_discovery;
 mod ens_v1_unwrapped_authority;
 mod ens_v2_common;
 mod ens_v2_permissions;
@@ -26,11 +25,6 @@ pub use block_derived_normalized_events::{
 pub use ens_v1_reverse_claim::{
     EnsV1ReverseClaimKindSyncSummary, EnsV1ReverseClaimSyncSummary, sync_ens_v1_reverse_claim,
     sync_ens_v1_reverse_claim_range,
-};
-pub use ens_v1_subregistry_discovery::{
-    EnsV1SubregistryDiscoverySyncSummary, sync_ens_v1_subregistry_discovery,
-    sync_ens_v1_subregistry_discovery_through_block,
-    sync_ens_v1_subregistry_discovery_through_block_with_expected_admission_epoch,
 };
 pub use ens_v1_unwrapped_authority::{
     EnsV1TextRecordChange, EnsV1UnwrappedAuthoritySyncSummary, decode_ens_v1_text_record_change,

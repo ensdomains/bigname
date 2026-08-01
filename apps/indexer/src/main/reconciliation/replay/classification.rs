@@ -348,6 +348,9 @@ pub(crate) async fn ensure_full_closure_retention_authority_for_adapters(
         .await
 }
 
+// PR 3 removes the transitional legacy-registry replay path that still owns
+// this retention proof. Keep it compiling until that caller is co-deleted.
+#[allow(dead_code)]
 pub(crate) async fn ensure_legacy_registry_closure_retention_authority_for_adapters(
     pool: &sqlx::PgPool,
     chain: &str,

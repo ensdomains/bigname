@@ -89,7 +89,7 @@ discovery_watched_intervals AS (
             )
         ) AS rollout_eligible,
         (
-            de.edge_kind <> 'migration'
+            de.edge_kind NOT IN ('migration', 'subregistry')
             AND (
                 de.active_from_block_number IS NULL
                 OR cia.active_to_block_number IS NULL

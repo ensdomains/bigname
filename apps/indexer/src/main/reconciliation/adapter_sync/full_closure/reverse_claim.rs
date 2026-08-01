@@ -121,7 +121,7 @@ async fn load_reverse_claim_replay_scope(
         chain,
         range_start_block_number,
         target_block_number,
-        false,
+        &std::collections::BTreeSet::new(),
     );
     let adapter_sync_scope = source_scope.adapter_sync_scope();
     let targets = source_scope.into_targets();

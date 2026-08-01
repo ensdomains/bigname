@@ -1,13 +1,8 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use bigname_manifests::{
-    ManifestCodeHashObservation, ManifestDeclaredContractDriftInput, ManifestDriftInputs,
-    WatchedContractSource,
-};
-use bigname_storage::CanonicalityState;
+use bigname_manifests::{ManifestDeclaredContractDriftInput, ManifestDriftInputs};
 use serde_json::Value;
-use sqlx::types::Uuid;
 
 pub(super) fn active_proxy_contracts_by_manifest(
     drift_inputs: &ManifestDriftInputs,
@@ -51,29 +46,6 @@ pub(super) fn event_identity(prefix: &str, key: Value) -> Result<String> {
         "{prefix}:{}",
         serde_json::to_string(&key).context("failed to serialize normalized-event identity")?
     ))
-}
-
-pub(super) fn code_hash_observation_key(
-    chain: &str,
-    contract_instance_id: Uuid,
-    address: &str,
-) -> (String, Uuid, String) {
-    (chain.to_owned(), contract_instance_id, address.to_owned())
-}
-
-pub(super) fn watched_contract_source_name(
-    observation: &ManifestCodeHashObservation,
-) -> &'static str {
-    match observation.source {
-        WatchedContractSource::ManifestRoot => "manifest_root",
-        WatchedContractSource::ManifestContract => "manifest_contract",
-        WatchedContractSource::DiscoveryEdge => "discovery_edge",
-    }
-}
-
-pub(super) fn canonicality_state_from_view(value: &str) -> Result<CanonicalityState> {
-    CanonicalityState::parse(value)
-        .with_context(|| format!("failed to parse manifest drift canonicality state {value}"))
 }
 
 pub(super) fn manifest_version_i64(manifest_version: u64) -> Result<i64> {

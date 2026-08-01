@@ -2833,6 +2833,135 @@ async fn normalized_event_upsert_rejects_identity_mismatch() -> Result<()> {
 }
 
 #[tokio::test]
+async fn normalized_event_upsert_enriches_ens_v1_resolver_emitter_provenance() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut existing = normalized_event(
+        "ens-v1-resolver-emitter-provenance",
+        "RecordChanged",
+        CanonicalityState::Canonical,
+    );
+    existing.source_family = "ens_v1_resolver_l1".to_owned();
+    existing.derivation_kind = "ens_v1_unwrapped_authority".to_owned();
+    existing.block_number = Some(42);
+    existing.block_hash = Some("0xresolver-emitter-block".to_owned());
+    existing.transaction_hash = Some("0xresolver-emitter-transaction".to_owned());
+    existing.log_index = Some(7);
+    existing.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "ethereum-mainnet",
+        "block_hash": "0xresolver-emitter-block",
+        "block_number": 42,
+        "transaction_hash": "0xresolver-emitter-transaction",
+        "transaction_index": 3,
+        "log_index": 7,
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&existing)).await?;
+
+    let mut enriched = existing.clone();
+    enriched.raw_fact_ref["emitting_address"] = json!("0x00000000000000000000000000000000000000cc");
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&enriched)).await?;
+
+    assert_eq!(
+        sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT raw_fact_ref FROM normalized_events WHERE event_identity = $1",
+        )
+        .bind(&enriched.event_identity)
+        .fetch_one(database.pool())
+        .await?,
+        enriched.raw_fact_ref
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM projection_normalized_event_changes change
+            JOIN normalized_events event
+              ON event.normalized_event_id = change.normalized_event_id
+            WHERE event.event_identity = $1
+              AND change.change_kind = 'content_update'
+            "#,
+        )
+        .bind(&enriched.event_identity)
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "resolver emitter provenance enrichment must invalidate downstream projections"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_upsert_accepts_rehomed_subregistry_event() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let identity = "ens_v1_subregistry_changed:1:0xblock:0xtx:7:0xregistry";
+    let mut old = subregistry_reconcile_event(identity);
+    old.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "ethereum-mainnet",
+        "block_hash": "0xblock",
+        "block_number": 1,
+        "transaction_hash": "0xtx",
+        "transaction_index": 0,
+        "log_index": 7,
+        "emitting_address": "0xregistry",
+        "topic0": "0xtopic0",
+        "topic1": "0xparent",
+        "topic2": "0xlabel",
+        "data_hex": "0xowner",
+    });
+    old.after_state = json!({
+        "source_event": "NewOwner",
+        "discovery_source": "ens_v1_registry_subregistry",
+        "edge_kind": "subregistry",
+        "observation_key": "0xchild",
+        "parent_node": "0xparent",
+        "labelhash": "0xlabel",
+        "child_node": "0xchild",
+        "emitting_address": "0xregistry",
+        "owner": "0xowner",
+        "tombstone": false,
+        "from_contract_instance_id": "00000000-0000-0000-0000-000000000001",
+        "to_contract_instance_id": "00000000-0000-0000-0000-000000000002",
+        "active_edge": true,
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&old)).await?;
+
+    let mut rehomed = old.clone();
+    rehomed.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "ethereum-mainnet",
+        "block_hash": "0xblock",
+        "block_number": 1,
+        "transaction_hash": "0xtx",
+        "transaction_index": 0,
+        "log_index": 7,
+        "emitting_address": "0xregistry",
+    });
+    rehomed.after_state = json!({
+        "source_event": "NewOwner",
+        "parent_node": "0xparent",
+        "labelhash": "0xlabel",
+        "child_node": "0xchild",
+        "owner": "0xowner",
+        "emitting_address": "0xregistry",
+        "tombstone": false,
+        "active_edge": true,
+    });
+
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&rehomed)).await?;
+    let repaired = sqlx::query_as::<_, (serde_json::Value, serde_json::Value)>(
+        "SELECT raw_fact_ref, after_state FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(repaired, (rehomed.raw_fact_ref, rehomed.after_state));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn normalized_event_upsert_repairs_ens_v2_registration_link_time_expiry() -> Result<()> {
     let database = TestDatabase::new().await?;
     let stale = ens_v2_registration_grant_event(2_000_000_000);

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use bigname_adapters::{EnsV1SubregistryDiscoverySyncSummary, EnsV1UnwrappedAuthoritySyncSummary};
+use bigname_adapters::EnsV1UnwrappedAuthoritySyncSummary;
 use serde_json::json;
 use sqlx::{Row, postgres::PgPoolOptions};
 use std::collections::BTreeSet;
@@ -40,14 +40,6 @@ async fn main() -> Result<()> {
         selection.transaction_hashes.as_deref(),
     )
     .await?;
-    let subregistry_summary =
-        EnsV1SubregistryDiscoverySyncSummary::sync_for_block_hashes_with_source_scope(
-            &pool,
-            &chain,
-            &selection.block_hashes,
-            &source_scope,
-        )
-        .await?;
     let authority_summary = if let Some(transaction_hashes) =
         selection.transaction_hashes.as_deref()
     {
@@ -71,17 +63,6 @@ async fn main() -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
-            "subregistry_discovery": {
-                "scanned_log_count": subregistry_summary.scanned_log_count,
-                "matched_log_count": subregistry_summary.matched_log_count,
-                "active_observation_count": subregistry_summary.active_observation_count,
-                "active_edge_count": subregistry_summary.active_edge_count,
-                "admitted_edge_count": subregistry_summary.admitted_edge_count,
-                "inserted_edge_count": subregistry_summary.inserted_edge_count,
-                "deactivated_edge_count": subregistry_summary.deactivated_edge_count,
-                "total_normalized_event_count": subregistry_summary.total_normalized_event_count,
-                "total_normalized_event_inserted_count": subregistry_summary.total_normalized_event_inserted_count,
-            },
             "unwrapped_authority": {
                 "scanned_log_count": authority_summary.scanned_log_count,
                 "matched_log_count": authority_summary.matched_log_count,

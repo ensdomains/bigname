@@ -51,3 +51,51 @@ pub(super) fn normalized_event(
         after_state,
     }
 }
+
+pub(super) fn proxy_upgraded_event(
+    reference: &ObservationRef,
+    implementation: String,
+) -> NormalizedEvent {
+    NormalizedEvent {
+        event_identity: format!(
+            "proxy_upgraded:{}:{}:{}:{}:{}",
+            reference.source_manifest_id,
+            reference.block_hash,
+            reference.transaction_hash,
+            reference.log_index,
+            reference.emitting_address,
+        ),
+        namespace: reference.namespace.clone(),
+        logical_name_id: None,
+        resource_id: None,
+        event_kind: EVENT_KIND_UPGRADED.to_owned(),
+        source_family: reference.source_family.clone(),
+        manifest_version: reference.manifest_version,
+        source_manifest_id: Some(reference.source_manifest_id),
+        chain_id: Some(reference.chain_id.clone()),
+        block_number: Some(reference.block_number),
+        block_hash: Some(reference.block_hash.clone()),
+        transaction_hash: Some(reference.transaction_hash.clone()),
+        log_index: Some(reference.log_index),
+        raw_fact_ref: json!({
+            "kind": "raw_log",
+            "chain_id": reference.chain_id,
+            "block_hash": reference.block_hash,
+            "block_number": reference.block_number,
+            "transaction_hash": reference.transaction_hash,
+            "transaction_index": reference.transaction_index,
+            "log_index": reference.log_index,
+            "emitting_address": reference.emitting_address,
+            "emitting_contract_instance_id": reference.emitting_contract_instance_id.to_string(),
+        }),
+        derivation_kind: "proxy_upgrade_history".to_owned(),
+        canonicality_state: reference.canonicality_state,
+        before_state: json!({}),
+        after_state: json!({
+            "source_event": "Upgraded",
+            "proxy_address": reference.emitting_address,
+            "contract_instance_id": reference.emitting_contract_instance_id.to_string(),
+            "implementation": implementation,
+        }),
+    }
+}

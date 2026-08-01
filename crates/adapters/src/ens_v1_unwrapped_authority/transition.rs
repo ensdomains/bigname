@@ -11,8 +11,6 @@ pub(super) fn transition_authority(
         return Ok(());
     }
 
-    history.current_record_version = None;
-
     if let Some(open_binding) = history.open_binding.take() {
         if open_binding.active_from < effective_time {
             history.bindings.push(BindingSegment {
@@ -273,11 +271,6 @@ pub(super) fn clear_stale_wrapper_authority_for_registration_grant(
         &reference.as_boundary_ref(),
         reference.block_timestamp,
     )
-}
-
-pub(super) fn current_resolver_matches(history: &NameHistory, resolver: &str) -> bool {
-    nonzero_address(history.current_resolver.as_deref())
-        .is_some_and(|current| current.eq_ignore_ascii_case(resolver))
 }
 
 pub(super) fn nonzero_address(value: Option<&str>) -> Option<String> {

@@ -306,6 +306,7 @@ const TEST_MANIFEST_EVENT_SIGNATURES: &[&str] = &[
     "NewTTL(bytes32,uint64)",
     "ParentUpdated(address,string,address)",
     "ResolverUpdated(uint256,address,address)",
+    "RegistryCreated()",
     "SubregistryUpdated(uint256,address,address)",
     "TextChanged(bytes32,string,string)",
     "TextChanged(bytes32,string,string,string)",
@@ -315,6 +316,7 @@ const TEST_MANIFEST_EVENT_SIGNATURES: &[&str] = &[
     "Transfer(bytes32,address)",
     "TransferBatch(address,address,address,uint256[],uint256[])",
     "TransferSingle(address,address,address,uint256,uint256)",
+    "Upgraded(address)",
     "VersionChanged(bytes32,uint64)",
 ];
 
@@ -2690,6 +2692,7 @@ struct ProviderBlockFixture {
 }
 
 type ProviderLogHook = dyn Fn(&serde_json::Map<String, Value>, Value) -> Value + Send + Sync;
+type ProviderCodeHook = dyn Fn(&str) -> String + Send + Sync;
 
 async fn bundle_provider(
     blocks: Vec<ProviderBlock>,
@@ -2709,12 +2712,37 @@ async fn bundle_provider(
 async fn bundle_provider_with_fixtures(
     fixtures: Vec<ProviderBlockFixture>,
 ) -> Result<(provider::JsonRpcProvider, JoinHandle<()>)> {
-    bundle_provider_with_fixtures_and_log_hook(fixtures, Arc::new(|_, logs| logs)).await
+    bundle_provider_with_fixtures_and_hooks(
+        fixtures,
+        Arc::new(|_, logs| logs),
+        Arc::new(default_provider_code),
+    )
+    .await
 }
 
 async fn bundle_provider_with_fixtures_and_log_hook(
     fixtures: Vec<ProviderBlockFixture>,
     log_hook: Arc<ProviderLogHook>,
+) -> Result<(provider::JsonRpcProvider, JoinHandle<()>)> {
+    bundle_provider_with_fixtures_and_hooks(
+        fixtures,
+        log_hook,
+        Arc::new(default_provider_code),
+    )
+    .await
+}
+
+async fn bundle_provider_with_fixtures_and_code_hook(
+    fixtures: Vec<ProviderBlockFixture>,
+    code_hook: Arc<ProviderCodeHook>,
+) -> Result<(provider::JsonRpcProvider, JoinHandle<()>)> {
+    bundle_provider_with_fixtures_and_hooks(fixtures, Arc::new(|_, logs| logs), code_hook).await
+}
+
+async fn bundle_provider_with_fixtures_and_hooks(
+    fixtures: Vec<ProviderBlockFixture>,
+    log_hook: Arc<ProviderLogHook>,
+    code_hook: Arc<ProviderCodeHook>,
 ) -> Result<(provider::JsonRpcProvider, JoinHandle<()>)> {
     let blocks = Arc::new(
         fixtures
@@ -2825,12 +2853,7 @@ async fn bundle_provider_with_fixtures_and_log_hook(
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_ascii_lowercase();
-                let code = if address == "0x0000000000000000000000000000000000000002" {
-                    "0x"
-                } else {
-                    "0x6001600155"
-                };
-                Value::String(code.to_owned())
+                Value::String(code_hook(&address))
             }
             _ => panic!("unexpected RPC request: {body}"),
         };
@@ -2844,6 +2867,15 @@ async fn bundle_provider_with_fixtures_and_log_hook(
     .await?;
 
     Ok((provider::JsonRpcProvider::new(&url)?, server))
+}
+
+fn default_provider_code(address: &str) -> String {
+    if address == "0x0000000000000000000000000000000000000002" {
+        "0x"
+    } else {
+        "0x6001600155"
+    }
+    .to_owned()
 }
 
 fn support_logs_for_filter(

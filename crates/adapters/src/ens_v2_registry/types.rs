@@ -16,6 +16,14 @@ pub(super) struct ActiveEmitter {
     pub(super) source_rank: i32,
     pub(super) active_from_block_number: Option<i64>,
     pub(super) active_to_block_number: Option<i64>,
+    pub(super) activation_positions: Vec<EmitterActivationPosition>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) struct EmitterActivationPosition {
+    pub(super) block_hash: String,
+    pub(super) transaction_index: i64,
+    pub(super) log_index: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -79,6 +87,26 @@ pub(super) struct RegistryNameState {
     pub(super) resolver: Option<String>,
     pub(super) subregistry: Option<String>,
     pub(super) binding_kind: SurfaceBindingKind,
+    pub(super) name_reachable: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct CurrentSubregistryLink {
+    pub(super) subregistry: String,
+    pub(super) expiry: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct CurrentParentClaim {
+    pub(super) parent: String,
+    pub(super) label: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RegistryEntryTopology {
+    pub(super) label: String,
+    pub(super) expiry: Option<u64>,
+    pub(super) subregistry: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -90,6 +118,9 @@ pub(super) struct RegistryResourceLink {
     pub(super) token_lineage_id: Uuid,
     pub(super) surface_binding_id: Uuid,
     pub(super) linked_ref: ObservationRef,
+    pub(super) linked_logical_name_id: Option<String>,
+    pub(super) binding_ref: ObservationRef,
+    pub(super) binding_source_event: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -125,6 +156,13 @@ pub(super) struct ObservationRef {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum RegistryObservation {
+    RegistryCreated {
+        reference: ObservationRef,
+    },
+    Upgraded {
+        implementation: String,
+        reference: ObservationRef,
+    },
     LabelRegistered {
         token_id: String,
         labelhash: String,

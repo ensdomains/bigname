@@ -1,6 +1,6 @@
-# Bootstrap seed for the canonical Basenames registry on Base mainnet with
-# registry-observed resolver discovery admission.
-# Registry deployment and resolver-setting surface:
+# Bootstrap seed for the canonical Basenames registry on Base mainnet.
+# Resolver changes are binding state, not discovery. Registry deployment and
+# resolver-setting surface:
 # (upstream: .refs/basenames/README.md:L28 @ basenames@1809bbc)
 # (upstream: .refs/basenames/src/L2/Registry.sol:L113 @ basenames@1809bbc)
 # (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc).
@@ -11,6 +11,7 @@ chain = "base-mainnet"
 deployment_epoch = "basenames_v1"
 rollout_status = "active"
 normalizer_version = "ensip15@ens-normalize-0.1.1"
+discovery_rules = []
 
 [capability_flags]
 declared_children = { status = "supported", notes = "registry-controlled child surfaces are authoritative inputs on Base mainnet" }
@@ -24,15 +25,8 @@ role = "registry"
 address = "0xb94704422c2a1e396835a571837aa5ae53285a95"
 proxy_kind = "none"
 
-[[discovery_rules]]
-edge_kind = "subregistry"
-from_role = "registry"
-admission = "reachable_from_root"
-
-[[discovery_rules]]
-edge_kind = "resolver"
-from_role = "registry"
-admission = "reachable_from_root"
+# Basenames owner and resolver-pointer changes update name state only. They
+# do not admit contract instances or create discovery edges.
 
 # Registry event ABI fragments consumed by manifest-derived authority topic
 # lookup. The Basenames registry inherits the ENS event surface and emits the
@@ -45,7 +39,7 @@ admission = "reachable_from_root"
 name = "NewOwner"
 fragment = "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)"
 emitter_roles = ["registry"]
-normalized_events = ["AuthorityTransferred"]
+normalized_events = ["SubregistryChanged", "AuthorityTransferred"]
 
 [[abi.events]]
 name = "Transfer"

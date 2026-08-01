@@ -10,7 +10,7 @@ use bigname_storage::load_raw_log_staging_input_version;
 use sqlx::Row;
 
 use crate::ens_v1_resolver::{
-    GENERIC_SOURCE_SCOPE_ADDRESS, SOURCE_FAMILY_ENS_V1_RESOLVER_L1, generic_resolver_record_topic0s,
+    GENERIC_SOURCE_SCOPE_ADDRESS, load_match_all_topic0s_by_source_family,
 };
 use crate::normalized_replay_catchup::FullClosureCoverageViolations;
 use crate::reconciliation::canonical::stored_lineage::find_uncovered_generation_bound_coverage_with_current_topics;
@@ -47,6 +47,8 @@ fn retention_closure_authority_kind(source_families: &[&str]) -> RetentionClosur
 pub(crate) const MAX_REPORTED_LEGACY_CLOSURE_COVERAGE_GAPS: i64 = 20;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+// PR 3 co-deletes the legacy registry replay error with its remaining path.
+#[allow(dead_code)]
 pub(crate) struct LegacyRegistryNewlyRequiredCoverage {
     pub(crate) chain: String,
     pub(crate) retention_generation: i64,
@@ -73,6 +75,9 @@ impl std::fmt::Display for LegacyRegistryNewlyRequiredCoverage {
 
 impl std::error::Error for LegacyRegistryNewlyRequiredCoverage {}
 
+// PR 3 co-deletes this proof with legacy registry replay. Its fields remain
+// intact so that the transitional path retains its pre-PR-3 contract.
+#[allow(dead_code)]
 struct GenerationBoundCoverageProof {
     input_version: bigname_storage::RawLogStagingInputVersion,
     admission_epoch: i64,
@@ -197,6 +202,8 @@ pub(super) async fn ensure_full_closure_retention_authority(
 /// jobs in the current generation. The returned admission epoch must be
 /// carried into the absence-aware discovery writer, which rechecks it under
 /// its writer fence before changing any edge.
+// PR 3 removes this transitional legacy-registry replay authority check.
+#[allow(dead_code)]
 pub(super) async fn ensure_legacy_registry_closure_retention_authority(
     pool: &sqlx::PgPool,
     chain: &str,
@@ -338,10 +345,16 @@ pub(super) async fn earliest_required_raw_fact_block(
         from_blocks.push(from_block);
         to_blocks.push(to_block);
     }
-    let generic_resolver_topic0s = generic_resolver_record_topic0s()
-        .into_iter()
-        .map(|topic0| topic0.to_ascii_lowercase())
-        .collect::<Vec<_>>();
+    let match_all_topic0s_by_source_family =
+        load_match_all_topic0s_by_source_family(pool, chain).await?;
+    let mut match_all_source_families = Vec::new();
+    let mut match_all_topic0s = Vec::new();
+    for (source_family, topic0s) in match_all_topic0s_by_source_family {
+        for topic0 in topic0s {
+            match_all_source_families.push(source_family.clone());
+            match_all_topic0s.push(topic0);
+        }
+    }
 
     let row = sqlx::query(
         r#"
@@ -381,9 +394,16 @@ pub(super) async fn earliest_required_raw_fact_block(
                     AND LOWER(logs.emitting_address) = required_scope.address
                   )
                   OR (
-                    required_scope.source_family = $7
-                    AND required_scope.address = $6
-                    AND LOWER(logs.topics[1]) = ANY($8::TEXT[])
+                    required_scope.address = $6
+                    AND EXISTS (
+                      SELECT 1
+                      FROM unnest($7::TEXT[], $8::TEXT[]) AS match_all(
+                        source_family,
+                        topic0
+                      )
+                      WHERE match_all.source_family = required_scope.source_family
+                        AND match_all.topic0 = LOWER(logs.topics[1])
+                    )
                   )
                 )
           )
@@ -395,8 +415,8 @@ pub(super) async fn earliest_required_raw_fact_block(
     .bind(&from_blocks)
     .bind(&to_blocks)
     .bind(GENERIC_SOURCE_SCOPE_ADDRESS)
-    .bind(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
-    .bind(&generic_resolver_topic0s)
+    .bind(&match_all_source_families)
+    .bind(&match_all_topic0s)
     .fetch_one(pool)
     .await
     .with_context(|| {

@@ -32,6 +32,8 @@ const ABI_EVENT_ALIAS_CHANGED: &str = "AliasChanged";
 const ABI_EVENT_NAMED_RESOURCE: &str = "NamedResource";
 const ABI_EVENT_NAMED_TEXT_RESOURCE: &str = "NamedTextResource";
 const ABI_EVENT_NAMED_ADDR_RESOURCE: &str = "NamedAddrResource";
+const ABI_EVENT_REGISTRY_CREATED: &str = "RegistryCreated";
+const ABI_EVENT_UPGRADED: &str = "Upgraded";
 const SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR: &str = "basenames_base_registrar";
 const WRAPPED_NAME_REGISTERED_SIGNATURE: &str =
     "NameRegistered(string,bytes32,address,uint256,uint256,uint256)";
@@ -218,6 +220,14 @@ fn manifest_abi_events(source_family: &str) -> Vec<Value> {
         })],
         SOURCE_FAMILY_ENS_V2_ROOT_L1 | SOURCE_FAMILY_ENS_V2_REGISTRY_L1 => vec![
             json!({
+                "name": ABI_EVENT_REGISTRY_CREATED,
+                "fragment": "event RegistryCreated()",
+            }),
+            json!({
+                "name": ABI_EVENT_UPGRADED,
+                "fragment": "event Upgraded(address indexed implementation)",
+            }),
+            json!({
                 "name": ABI_EVENT_LABEL_REGISTERED,
                 "fragment": "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)",
             }),
@@ -241,6 +251,10 @@ fn manifest_abi_events(source_family: &str) -> Vec<Value> {
             }),
         ],
         SOURCE_FAMILY_ENS_V2_RESOLVER_L1 => vec![
+            json!({
+                "name": ABI_EVENT_UPGRADED,
+                "fragment": "event Upgraded(address indexed implementation)",
+            }),
             json!({
                 "name": ABI_EVENT_ALIAS_CHANGED,
                 "fragment": "event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName)",
@@ -1244,6 +1258,10 @@ fn test_preimage_observed_event_topics() -> event_topics::PreimageObservedEventT
             test_source_manifest_id(SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR),
             ActiveManifestEventTopic0sBySignature::new(HashMap::from([
                 (
+                    "Upgraded(address)".to_owned(),
+                    keccak_signature_hex("Upgraded(address)"),
+                ),
+                (
                     BASENAMES_NAME_REGISTERED_SIGNATURE.to_owned(),
                     keccak_signature_hex(BASENAMES_NAME_REGISTERED_SIGNATURE),
                 ),
@@ -1263,6 +1281,14 @@ fn test_preimage_observed_event_topics() -> event_topics::PreimageObservedEventT
         (
             test_source_manifest_id(SOURCE_FAMILY_ENS_V2_REGISTRY_L1),
             ActiveManifestEventTopic0sBySignature::new(HashMap::from([
+                (
+                    "RegistryCreated()".to_owned(),
+                    keccak_signature_hex("RegistryCreated()"),
+                ),
+                (
+                    "Upgraded(address)".to_owned(),
+                    keccak_signature_hex("Upgraded(address)"),
+                ),
                 (
                     LABEL_REGISTERED_SIGNATURE.to_owned(),
                     keccak_signature_hex(
@@ -1299,6 +1325,10 @@ fn test_preimage_observed_event_topics() -> event_topics::PreimageObservedEventT
         (
             test_source_manifest_id(SOURCE_FAMILY_ENS_V2_RESOLVER_L1),
             ActiveManifestEventTopic0sBySignature::new(HashMap::from([
+                (
+                    "Upgraded(address)".to_owned(),
+                    keccak_signature_hex("Upgraded(address)"),
+                ),
                 (
                     ALIAS_CHANGED_SIGNATURE.to_owned(),
                     keccak_signature_hex("AliasChanged(bytes,bytes,bytes,bytes)"),
@@ -1349,6 +1379,7 @@ fn watched_log(
         topics,
         data,
         canonicality_state: CanonicalityState::Finalized,
+        emitting_contract_instance_id: Uuid::nil(),
         source_manifest_id: test_source_manifest_id(source_family),
         namespace: "ens".to_owned(),
         source_family: source_family.to_owned(),

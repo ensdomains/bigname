@@ -1,6 +1,6 @@
 # Interpreter fixtures
 
-`raw-events.json` contains 11 bounded raw-log cases. Each case runs in a new
+`raw-events.json` contains 15 bounded raw-log cases. Each case runs in a new
 migrated database so its block, transaction, and log positions remain
 unchanged. `expected-outputs.json` records every
 [normalized event](../../../../../docs/glossary.md) and every row in the
@@ -39,6 +39,24 @@ The seven A3 additions exercise:
   (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L35 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L37 @ ens_v1@91c966f).
+
+The four B2 discovery-semantics additions exercise:
+
+- an ENSv1 registry `NewOwner` child-history event whose owner remains a leaf
+  and creates no discovery edge
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L82 @ ens_v1@91c966f);
+
+- an ENSv2 registry instance announced by its constructor's
+  `RegistryCreated` event without any parent link
+  (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@ccaeb58);
+- an ENSv1 `AddrChanged` record selected by the match-all resolver signature
+  scope even though no registry resolver pointer or discovery edge names the
+  emitting address
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddrResolver.sol:L6 @ ens_v1@91c966f);
+- the standard proxy `Upgraded` event as contract-scoped history
+  (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/interfaces/IERC1967.sol:L13 @ basenames@1809bbc).
 
 The fixture metadata carries the full pinned upstream citations. The harness
 also asserts the required event kinds, the renewal's non-empty before-state,

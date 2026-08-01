@@ -31,6 +31,7 @@ pub(super) async fn load_orphaned_discovery_start_tombstones(
     chain: &str,
 ) -> Result<Vec<DiscoveryObservation>> {
     let discovery_sources = [
+        ens_v2_registry_announcement_discovery_source(chain),
         ens_v2_subregistry_discovery_source(chain),
         ens_v2_resolver_discovery_source(chain),
     ];
@@ -374,6 +375,10 @@ async fn load_active_discovery_edge_count(pool: &PgPool, discovery_source: &str)
 
 pub(super) fn ens_v2_subregistry_discovery_source(chain: &str) -> String {
     format!("ens_v2_registry_subregistry:{chain}")
+}
+
+pub(super) fn ens_v2_registry_announcement_discovery_source(chain: &str) -> String {
+    format!("ens_v2_registry_announcement:{chain}")
 }
 
 pub(super) fn ens_v2_resolver_discovery_source(chain: &str) -> String {

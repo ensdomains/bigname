@@ -1,6 +1,8 @@
 pub(super) const DERIVATION_KIND_RAW_LOG_PREIMAGE_OBSERVATION: &str =
     "raw_log_preimage_observation";
 pub(super) const EVENT_KIND_PREIMAGE_OBSERVED: &str = "PreimageObserved";
+pub(super) const DERIVATION_KIND_PROXY_UPGRADE_HISTORY: &str = "proxy_upgrade_history";
+pub(super) const EVENT_KIND_UPGRADED: &str = "Upgraded";
 pub(super) const SOURCE_FAMILY_ENS_V1_REGISTRAR_L1: &str = "ens_v1_registrar_l1";
 pub(super) const SOURCE_FAMILY_ENS_V1_WRAPPER_L1: &str = "ens_v1_wrapper_l1";
 pub(super) const SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR: &str = "basenames_base_registrar";
@@ -46,6 +48,7 @@ pub(super) const NAMED_RESOURCE_SIGNATURE: &str = "NamedResource(uint256,bytes)"
 pub(super) const NAMED_TEXT_RESOURCE_SIGNATURE: &str =
     "NamedTextResource(uint256,bytes,bytes32,string)";
 pub(super) const NAMED_ADDR_RESOURCE_SIGNATURE: &str = "NamedAddrResource(uint256,bytes,uint256)";
+pub(super) const UPGRADED_SIGNATURE: &str = "Upgraded(address)";
 
 pub(super) const ENS_V1_WRAPPER_PREIMAGE_EVENT_SIGNATURES: [&str; 1] = [NAME_WRAPPED_SIGNATURE];
 pub(super) const ENS_V1_REGISTRAR_PREIMAGE_EVENT_SIGNATURES: [&str; 5] = [

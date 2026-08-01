@@ -36,10 +36,6 @@ impl FullSourceReconciliationScope {
         self.adapters.contains(&adapter)
     }
 
-    pub(super) fn reconciles_legacy_registry(&self) -> bool {
-        self.includes(NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery)
-    }
-
     pub(super) fn reconciles_ens_v2_registry(&self) -> bool {
         self.includes(NormalizedEventReplayAdapter::EnsV2RegistryResourceSurface)
     }

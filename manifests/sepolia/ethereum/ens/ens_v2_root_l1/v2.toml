@@ -31,10 +31,11 @@ edge_kind = "subregistry"
 from_role = "root_registry"
 admission = "reachable_from_root"
 
-# RootRegistry follows the registry event ABI consumed by ENSv2 registry adapters.
-# Current intake excludes RegistryCreated and URIUpdated. The
-# replacement admits RegistryCreated only after its mandatory historical fetch;
-# URIUpdated remains excluded.
+# RootRegistry follows the address-scoped registry event ABI consumed by ENSv2
+# registry adapters. RegistryCreated belongs to the ens_v2_registry_l1
+# match-all scope rather than being duplicated here; URIUpdated remains
+# excluded. Historical RegistryCreated intake remains the separate one-time
+# fetch described in docs/manifests.md.
 # LabelRegistered: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L18 @ ens_v2@48b3e2d).
 [[abi.events]]
 name = "LabelRegistered"

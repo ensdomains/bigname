@@ -579,7 +579,8 @@ async fn live_loop_adapter_sync_tolerates_mid_sync_revision_advance() -> Result<
         )
         .fetch_one(database.pool())
         .await?,
-        1
+        1,
+        "live adapter sync must retain its ReverseChanged write across the tolerated revision advance"
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
@@ -751,7 +752,8 @@ async fn live_adapter_sync_continues_after_block_derived_events() -> Result<()> 
         )
         .fetch_one(database.pool())
         .await?,
-        1
+        1,
+        "the reverse-claim adapter must still run after block-derived event synchronization"
     );
 
     database.cleanup().await?;
@@ -2227,7 +2229,8 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
         )
         .fetch_one(database.pool())
         .await?,
-        1
+        0,
+        "registry resolver changes must not be duplicated by the deleted discovery adapter"
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(

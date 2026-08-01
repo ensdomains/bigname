@@ -6,118 +6,24 @@ use uuid::Uuid;
 
 use crate::{ResolverProfileAdmission, WatchedContract, WatchedContractSource, normalize_address};
 
+#[path = "resolver_profiles/address_only.rs"]
+mod address_only;
+#[path = "resolver_profiles/basenames.rs"]
+mod basenames;
 #[path = "resolver_profiles/ens_v1.rs"]
 mod ens_v1;
 
+pub use basenames::*;
 pub use ens_v1::*;
 
-use super::{
-    drift::{
-        load_manifest_code_hash_observations,
-        load_manifest_code_hash_observations_for_watched_contracts,
-    },
-    types::ManifestCodeHashObservation,
-    watched::load_watched_contracts_by_source_family,
-};
+use super::types::ManifestCodeHashObservation;
 
-const BASENAMES_BASE_RESOLVER_SOURCE_FAMILY: &str = "basenames_base_resolver";
-const BASENAMES_L2_RESOLVER_ROLE: &str = "resolver";
-const BASENAMES_L2_RESOLVER_COMPATIBLE_PROFILE: &str = "l2_resolver_compatible";
-const BASENAMES_L2_RESOLVER_PROFILE_FACT_FAMILIES: [&str; 2] =
-    ["resolver_record", "resolver_authorization"];
 pub(super) const RESOLVER_PROFILE_STATUS_PENDING: &str = "pending";
 pub(super) const RESOLVER_PROFILE_STATUS_SUPPORTED: &str = "supported";
 pub(super) const RESOLVER_PROFILE_STATUS_UNSUPPORTED: &str = "unsupported";
-const RESOLVER_PROFILE_BASIS_BASENAMES_L2_RESOLVER_SEED: &str = "manifest_l2_resolver_seed";
 pub(super) const RESOLVER_PROFILE_BASIS_CODE_HASH_MATCH: &str = "code_hash_match";
 pub(super) const RESOLVER_PROFILE_BASIS_CODE_HASH_PENDING: &str = "code_hash_pending";
 pub(super) const RESOLVER_PROFILE_BASIS_CODE_HASH_MISMATCH: &str = "code_hash_mismatch";
-
-pub async fn load_basenames_l2_resolver_profile_admissions(
-    pool: &PgPool,
-) -> Result<Vec<ResolverProfileAdmission>> {
-    let l2_resolver_seed_ids = load_resolver_profile_seed_ids(
-        pool,
-        "basenames",
-        BASENAMES_BASE_RESOLVER_SOURCE_FAMILY,
-        BASENAMES_L2_RESOLVER_ROLE,
-        "Basenames L2Resolver",
-    )
-    .await?;
-    let watched_contracts =
-        load_watched_contracts_by_source_family(pool, BASENAMES_BASE_RESOLVER_SOURCE_FAMILY)
-            .await?;
-    let code_hash_observations = load_manifest_code_hash_observations(pool).await?;
-
-    Ok(derive_basenames_l2_resolver_profile_admissions(
-        &watched_contracts,
-        &code_hash_observations,
-        &l2_resolver_seed_ids,
-    ))
-}
-
-pub async fn load_basenames_l2_resolver_profile_admissions_for_targets(
-    pool: &PgPool,
-    targets: &[(String, String)],
-) -> Result<Vec<ResolverProfileAdmission>> {
-    if targets.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let l2_resolver_seed_contracts = load_resolver_profile_seed_watched_contracts(
-        pool,
-        "basenames",
-        BASENAMES_BASE_RESOLVER_SOURCE_FAMILY,
-        BASENAMES_L2_RESOLVER_ROLE,
-        "Basenames L2Resolver",
-    )
-    .await?;
-    let l2_resolver_seed_ids = l2_resolver_seed_contracts
-        .iter()
-        .map(|contract| contract.contract_instance_id)
-        .collect::<Vec<_>>();
-    let target_contracts = load_resolver_profile_target_watched_contracts(
-        pool,
-        BASENAMES_BASE_RESOLVER_SOURCE_FAMILY,
-        targets,
-    )
-    .await?;
-    let mut code_hash_targets = l2_resolver_seed_contracts.clone();
-    code_hash_targets.extend(target_contracts.clone());
-    let code_hash_observations =
-        load_manifest_code_hash_observations_for_watched_contracts(pool, &code_hash_targets)
-            .await?;
-
-    Ok(derive_code_hash_resolver_profile_admissions(
-        &target_contracts,
-        &code_hash_observations,
-        &l2_resolver_seed_ids,
-        ResolverProfileAdmissionConfig {
-            source_family: BASENAMES_BASE_RESOLVER_SOURCE_FAMILY,
-            profile: BASENAMES_L2_RESOLVER_COMPATIBLE_PROFILE,
-            fact_families: &BASENAMES_L2_RESOLVER_PROFILE_FACT_FAMILIES,
-            manifest_seed_basis: RESOLVER_PROFILE_BASIS_BASENAMES_L2_RESOLVER_SEED,
-        },
-    ))
-}
-
-pub fn derive_basenames_l2_resolver_profile_admissions(
-    watched_contracts: &[WatchedContract],
-    code_hash_observations: &[ManifestCodeHashObservation],
-    l2_resolver_seed_ids: &[Uuid],
-) -> Vec<ResolverProfileAdmission> {
-    derive_code_hash_resolver_profile_admissions(
-        watched_contracts,
-        code_hash_observations,
-        l2_resolver_seed_ids,
-        ResolverProfileAdmissionConfig {
-            source_family: BASENAMES_BASE_RESOLVER_SOURCE_FAMILY,
-            profile: BASENAMES_L2_RESOLVER_COMPATIBLE_PROFILE,
-            fact_families: &BASENAMES_L2_RESOLVER_PROFILE_FACT_FAMILIES,
-            manifest_seed_basis: RESOLVER_PROFILE_BASIS_BASENAMES_L2_RESOLVER_SEED,
-        },
-    )
-}
 
 pub(super) async fn load_resolver_profile_seed_ids(
     pool: &PgPool,
@@ -647,7 +553,7 @@ pub(super) fn derive_code_hash_resolver_profile_admissions(
         .filter(|contract| contract.source_family == config.source_family)
     {
         let profile_match = classify_resolver_profile_match(
-            watched_contract.contract_instance_id,
+            Some(watched_contract.contract_instance_id),
             &resolver_seed_ids,
             &seed_code_hashes,
             observed_code_hashes.get(&watched_contract.contract_instance_id),
@@ -658,9 +564,9 @@ pub(super) fn derive_code_hash_resolver_profile_admissions(
             admissions.push(ResolverProfileAdmission {
                 chain: watched_contract.chain.clone(),
                 source_family: watched_contract.source_family.clone(),
-                contract_instance_id: watched_contract.contract_instance_id,
+                contract_instance_id: Some(watched_contract.contract_instance_id),
                 address: watched_contract.address.clone(),
-                source: watched_contract.source,
+                source: Some(watched_contract.source),
                 source_manifest_id: watched_contract.source_manifest_id,
                 active_from_block_number: watched_contract.active_from_block_number,
                 active_to_block_number: watched_contract.active_to_block_number,
@@ -714,13 +620,15 @@ struct ResolverProfileMatch {
 }
 
 fn classify_resolver_profile_match(
-    contract_instance_id: Uuid,
+    contract_instance_id: Option<Uuid>,
     resolver_seed_ids: &BTreeSet<Uuid>,
     seed_code_hashes: &[(Uuid, String)],
     observed_code_hash: Option<&String>,
     manifest_seed_basis: &str,
 ) -> ResolverProfileMatch {
-    if resolver_seed_ids.contains(&contract_instance_id) {
+    if let Some(contract_instance_id) = contract_instance_id
+        && resolver_seed_ids.contains(&contract_instance_id)
+    {
         return ResolverProfileMatch {
             status: RESOLVER_PROFILE_STATUS_SUPPORTED.to_owned(),
             admission_basis: manifest_seed_basis.to_owned(),

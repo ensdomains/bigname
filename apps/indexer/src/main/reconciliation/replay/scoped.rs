@@ -5,10 +5,7 @@ use sqlx::Row;
 
 use super::ReplayRawLogSelection;
 use crate::{
-    ens_v1_resolver::{
-        GENERIC_SOURCE_SCOPE_ADDRESS, SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
-        generic_resolver_record_topic0s,
-    },
+    ens_v1_resolver::{GENERIC_SOURCE_SCOPE_ADDRESS, load_match_all_topic0s_by_source_family},
     reconciliation::types::RawFactNormalizedEventReplaySourceScope,
 };
 
@@ -30,7 +27,16 @@ pub(crate) async fn load_replay_raw_log_selection_for_scoped_range(
     }
     let (source_families, addresses, from_blocks, to_blocks) =
         source_scope_filter_bindings(&source_scope);
-    let ens_v1_resolver_event_topic0s = generic_resolver_record_topic0s();
+    let match_all_topic0s_by_source_family =
+        load_match_all_topic0s_by_source_family(pool, chain).await?;
+    let mut match_all_source_families = Vec::new();
+    let mut match_all_topic0s = Vec::new();
+    for (source_family, topic0s) in match_all_topic0s_by_source_family {
+        for topic0 in topic0s {
+            match_all_source_families.push(source_family.clone());
+            match_all_topic0s.push(topic0);
+        }
+    }
 
     let canonical_raw_log_count = sqlx::query_scalar::<_, i64>(
         r#"
@@ -59,9 +65,16 @@ pub(crate) async fn load_replay_raw_log_selection_for_scoped_range(
               WHERE (
                     LOWER(logs.emitting_address) = source_scope.address
                     OR (
-                        source_scope.source_family = $8
-                        AND source_scope.address = $9
-                        AND LOWER(logs.topics[1]) = ANY($10::TEXT[])
+                        source_scope.address = $8
+                        AND EXISTS (
+                            SELECT 1
+                            FROM unnest($9::TEXT[], $10::TEXT[]) AS match_all(
+                                source_family,
+                                topic0
+                            )
+                            WHERE match_all.source_family = source_scope.source_family
+                              AND match_all.topic0 = LOWER(logs.topics[1])
+                        )
                     )
                 )
                 AND logs.block_number >= source_scope.from_block
@@ -76,9 +89,9 @@ pub(crate) async fn load_replay_raw_log_selection_for_scoped_range(
     .bind(&addresses)
     .bind(&from_blocks)
     .bind(&to_blocks)
-    .bind(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
     .bind(GENERIC_SOURCE_SCOPE_ADDRESS)
-    .bind(&ens_v1_resolver_event_topic0s)
+    .bind(&match_all_source_families)
+    .bind(&match_all_topic0s)
     .fetch_one(pool)
     .await
     .with_context(|| {
@@ -116,9 +129,16 @@ pub(crate) async fn load_replay_raw_log_selection_for_scoped_range(
               WHERE (
                     LOWER(logs.emitting_address) = source_scope.address
                     OR (
-                        source_scope.source_family = $8
-                        AND source_scope.address = $9
-                        AND LOWER(logs.topics[1]) = ANY($10::TEXT[])
+                        source_scope.address = $8
+                        AND EXISTS (
+                            SELECT 1
+                            FROM unnest($9::TEXT[], $10::TEXT[]) AS match_all(
+                                source_family,
+                                topic0
+                            )
+                            WHERE match_all.source_family = source_scope.source_family
+                              AND match_all.topic0 = LOWER(logs.topics[1])
+                        )
                     )
                 )
                 AND logs.block_number >= source_scope.from_block
@@ -135,9 +155,9 @@ pub(crate) async fn load_replay_raw_log_selection_for_scoped_range(
     .bind(&addresses)
     .bind(&from_blocks)
     .bind(&to_blocks)
-    .bind(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
     .bind(GENERIC_SOURCE_SCOPE_ADDRESS)
-    .bind(&ens_v1_resolver_event_topic0s)
+    .bind(&match_all_source_families)
+    .bind(&match_all_topic0s)
     .fetch_all(pool)
     .await
     .with_context(|| {
@@ -177,9 +197,16 @@ pub(crate) async fn load_replay_raw_log_selection_for_scoped_range(
               WHERE (
                     LOWER(logs.emitting_address) = source_scope.address
                     OR (
-                        source_scope.source_family = $8
-                        AND source_scope.address = $9
-                        AND LOWER(logs.topics[1]) = ANY($10::TEXT[])
+                        source_scope.address = $8
+                        AND EXISTS (
+                            SELECT 1
+                            FROM unnest($9::TEXT[], $10::TEXT[]) AS match_all(
+                                source_family,
+                                topic0
+                            )
+                            WHERE match_all.source_family = source_scope.source_family
+                              AND match_all.topic0 = LOWER(logs.topics[1])
+                        )
                     )
                 )
                 AND logs.block_number >= source_scope.from_block
@@ -196,9 +223,9 @@ pub(crate) async fn load_replay_raw_log_selection_for_scoped_range(
     .bind(&addresses)
     .bind(&from_blocks)
     .bind(&to_blocks)
-    .bind(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
     .bind(GENERIC_SOURCE_SCOPE_ADDRESS)
-    .bind(&ens_v1_resolver_event_topic0s)
+    .bind(&match_all_source_families)
+    .bind(&match_all_topic0s)
     .fetch_all(pool)
     .await
     .with_context(|| {

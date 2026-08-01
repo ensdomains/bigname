@@ -35,8 +35,10 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
     let active_emitters = load_active_emitters(pool, chain, source_scope.as_deref()).await?;
     let mut raw_log_active_emitters = Vec::new();
     for emitter in &active_emitters {
-        if generic_resolver_event_sources.is_empty()
-            || emitter.source_family != SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+        if !generic_resolver_event_sources
+            .iter()
+            .any(|source| source.source_family == emitter.source_family)
+            || !is_generic_resolver_source_family(&emitter.source_family)
         {
             raw_log_active_emitters.push(emitter.clone());
         }
@@ -55,6 +57,7 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
     let max_raw_logs_per_page = FULL_REPLAY_RAW_LOG_STREAM_DEFAULT_MAX_LOGS_PER_PAGE;
     let mut histories = BTreeMap::<String, NameHistory>::new();
     let mut reverse_histories = BTreeMap::<String, ReverseClaimSourceHistory>::new();
+    let mut registry_child_events = Vec::<NormalizedEvent>::new();
     let mut known_names_by_namehash = HashMap::<String, NameMetadata>::new();
     let mut known_name_refs_by_namehash = HashMap::<String, ObservationRef>::new();
     let mut namehash_to_labelhash = HashMap::<String, String>::new();
@@ -160,6 +163,7 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
                     raw_log,
                     &mut histories,
                     &mut reverse_histories,
+                    &mut registry_child_events,
                     &mut known_names_by_namehash,
                     &mut known_name_refs_by_namehash,
                     &mut namehash_to_labelhash,
@@ -308,6 +312,7 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
                 raw_log,
                 &mut histories,
                 &mut reverse_histories,
+                &mut registry_child_events,
                 &mut known_names_by_namehash,
                 &mut known_name_refs_by_namehash,
                 &mut namehash_to_labelhash,
@@ -343,6 +348,7 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
         generic_resolver_event_sources: &generic_resolver_event_sources,
         histories,
         reverse_histories,
+        registry_child_events,
         pre_timings: PreMaterializationTimings {
             active_emitters_ms,
             raw_log_load_ms,

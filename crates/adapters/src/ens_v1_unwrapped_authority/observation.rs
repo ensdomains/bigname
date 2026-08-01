@@ -185,6 +185,7 @@ pub(super) fn build_authority_observation(
                 labelhash,
                 namehash: Some(namehash),
                 owner: decode_owner_address(&raw_log.data)?,
+                emitting_address: raw_log.emitting_address.clone(),
                 reference: raw_log.reference(),
             },
         )));
@@ -204,6 +205,7 @@ pub(super) fn build_authority_observation(
                         .context("Transfer log is missing indexed node")?,
                 )?),
                 owner: decode_owner_address(&raw_log.data)?,
+                emitting_address: raw_log.emitting_address.clone(),
                 reference: raw_log.reference(),
             },
         )));

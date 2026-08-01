@@ -149,20 +149,23 @@ proxy_kind = "none"
 start_block = 3648359
 
 # Resolver event ABI fragments consumed by manifest-derived authority topic
-# lookup. Profile events are declared in the pinned ENSv1 resolver interfaces:
+# lookup. These events have no emitter_roles because the complete signature set
+# is matched across every Ethereum emitter; NewResolver does not provide the
+# resolver event address set. Profile events are declared in the pinned ENSv1
+# resolver interfaces:
 # (upstream: .refs/ens_v1/contracts/resolvers/profiles/IABIResolver.sol:L5 @ ens_v1@91c966f)
-# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddrResolver.sol:L23 @ ens_v1@91c966f)
-# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L35 @ ens_v1@91c966f)
-# (upstream: .refs/ens_v1/contracts/resolvers/Resolver.sol:L215 @ ens_v1@91c966f)
-# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IContentHashResolver.sol:L82 @ ens_v1@91c966f)
-# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDNSRecordResolver.sol:L94 @ ens_v1@91c966f)
-# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDNSRecordResolver.sol:L101 @ ens_v1@91c966f)
-# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDNSZoneResolver.sol:L119 @ ens_v1@91c966f)
-# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDataResolver.sol:L136 @ ens_v1@91c966f)
-# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IInterfaceResolver.sol:L156 @ ens_v1@91c966f)
-# (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L50 @ ens_v1@91c966f)
-# (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L62 @ ens_v1@91c966f)
-# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IVersionableResolver.sol:L179 @ ens_v1@91c966f).
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddrResolver.sol:L6 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L6 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/Resolver.sol:L33 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IContentHashResolver.sol:L5 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDNSRecordResolver.sol:L6 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDNSRecordResolver.sol:L13 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDNSZoneResolver.sol:L6 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDataResolver.sol:L7 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IInterfaceResolver.sol:L5 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L5 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L5 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/resolvers/profiles/IVersionableResolver.sol:L5 @ ens_v1@91c966f).
 # Legacy TextChanged without value follows pinned ENS subgraph admission:
 # (upstream: .refs/ens_subgraph/subgraph.yaml:L109 @ ens_subgraph@723f1b6).
 [[abi.events]]

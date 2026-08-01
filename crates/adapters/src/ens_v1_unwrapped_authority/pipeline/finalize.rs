@@ -33,6 +33,7 @@ pub(super) struct FinalizeAuthoritySync<'a> {
     pub(super) generic_resolver_event_sources: &'a [GenericResolverEventSource],
     pub(super) histories: BTreeMap<String, NameHistory>,
     pub(super) reverse_histories: BTreeMap<String, ReverseClaimSourceHistory>,
+    pub(super) registry_child_events: Vec<NormalizedEvent>,
     pub(super) pre_timings: PreMaterializationTimings,
     pub(super) total_started: Instant,
 }
@@ -71,7 +72,7 @@ pub(super) async fn finalize_authority_sync(
         resource_count,
         surface_count,
         mut bindings,
-        events,
+        mut events,
         token_lineages_upsert_ms,
         resources_upsert_ms,
         surfaces_upsert_ms,
@@ -83,6 +84,7 @@ pub(super) async fn finalize_authority_sync(
         input.reverse_histories,
     )
     .await?;
+    events.extend(input.registry_child_events);
     let materialization_ms = materialization_started.elapsed().as_millis();
 
     let normalize_started = Instant::now();

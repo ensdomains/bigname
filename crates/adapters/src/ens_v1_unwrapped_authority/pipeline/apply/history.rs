@@ -34,7 +34,7 @@ pub(super) fn apply_authority_observation_for_history_key(
                 wrapper_authorities: BTreeMap::new(),
                 current_registry_owner: None,
                 current_resolver: None,
-                current_record_version: None,
+                record_versions_by_resolver: BTreeMap::new(),
                 open_binding: None,
                 bindings: Vec::new(),
                 events: Vec::new(),

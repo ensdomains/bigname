@@ -692,7 +692,7 @@ async fn cia_narrowed_registry_interval_keeps_positioned_close_boundary() -> Res
         registry_contract_instance_id,
         registry_address,
         close_block - 99,
-        &[TestRegistryDiscoveryEdge {
+        &[TestRegistryAnnouncementEdge {
             active_from_block_number: close_block - 100,
             active_from_log_index: 2,
             active_to_block_number: Some(close_block),
@@ -780,7 +780,7 @@ async fn cia_terminal_block_does_not_reuse_later_edge_close_position() -> Result
         registry_contract_instance_id,
         registry_address,
         close_block - 100,
-        &[TestRegistryDiscoveryEdge {
+        &[TestRegistryAnnouncementEdge {
             active_from_block_number: close_block - 100,
             active_from_log_index: 2,
             active_to_block_number: Some(close_block + 10),
@@ -882,14 +882,14 @@ async fn same_block_registry_close_then_reattach_has_no_derivation_gap_or_overla
         registry_address,
         attach_block - 100,
         &[
-            TestRegistryDiscoveryEdge {
+            TestRegistryAnnouncementEdge {
                 active_from_block_number: attach_block - 100,
                 active_from_log_index: 1,
                 active_to_block_number: Some(attach_block),
                 active_to_log_index: Some(5),
                 active: false,
             },
-            TestRegistryDiscoveryEdge {
+            TestRegistryAnnouncementEdge {
                 active_from_block_number: attach_block,
                 active_from_log_index: 10,
                 active_to_block_number: None,
@@ -1037,6 +1037,104 @@ async fn cia_narrowed_resolver_interval_excludes_uncovered_raw_logs() -> Result<
         permission_block_numbers_for_emitter(database.pool(), resolver_address).await?,
         vec![active_from_block, active_to_block],
         "resolver replay must use the same address-intersected interval as the watched provider range"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn discovered_resolver_upgraded_history_respects_activation_block() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let resolver_address = "0x0000000000000000000000000000000000000276";
+    let pre_activation_implementation = "0x0000000000000000000000000000000000000011";
+    let active_implementation = "0x0000000000000000000000000000000000000022";
+    let active_from_block = 11_163_925;
+    let pre_activation_block = active_from_block - 1;
+    let pre_activation_block_hash = permission_test_block_hash(pre_activation_block);
+    let block_hash = permission_test_block_hash(active_from_block);
+
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+    insert_test_discovered_resolver(
+        database.pool(),
+        chain,
+        resolver_address,
+        active_from_block,
+        &block_hash,
+    )
+    .await?;
+
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            permissions_test_raw_block(chain, &pre_activation_block_hash, pre_activation_block),
+            permissions_test_raw_block(chain, &block_hash, active_from_block),
+        ],
+    )
+    .await?;
+    let upgraded_log = |block_number, block_hash: &str, implementation: &str| RawLog {
+        chain_id: chain.to_owned(),
+        block_hash: block_hash.to_owned(),
+        block_number,
+        transaction_hash: format!("0xresolverupgraded{block_number}"),
+        transaction_index: 0,
+        log_index: 0,
+        emitting_address: normalize_address(resolver_address),
+        topics: vec![
+            keccak_signature_hex("Upgraded(address)"),
+            address_topic(implementation),
+        ],
+        data: Vec::new(),
+        canonicality_state: CanonicalityState::Finalized,
+    };
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            upgraded_log(
+                pre_activation_block,
+                &pre_activation_block_hash,
+                pre_activation_implementation,
+            ),
+            upgraded_log(active_from_block, &block_hash, active_implementation),
+        ],
+    )
+    .await?;
+
+    let summary = crate::ens_v2_resolver::EnsV2ResolverSyncSummary::sync_for_block_hashes(
+        database.pool(),
+        chain,
+        &[pre_activation_block_hash, block_hash],
+    )
+    .await?;
+    assert_eq!(summary.scanned_log_count, 1);
+    assert_eq!(summary.matched_log_count, 1);
+    assert_eq!(summary.total_synced_count, 1);
+    assert_eq!(
+        summary
+            .by_kind
+            .get("Upgraded")
+            .map(|kind| kind.synced_count),
+        Some(1)
+    );
+
+    let upgraded = sqlx::query_as::<_, (i64, Value)>(
+        r#"
+        SELECT log_index, after_state
+        FROM normalized_events
+        WHERE event_kind = 'Upgraded'
+          AND lower(raw_fact_ref ->> 'emitting_address') = lower($1)
+        "#,
+    )
+    .bind(resolver_address)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(upgraded.0, 0);
+    assert_eq!(
+        upgraded.1["implementation"],
+        json!(active_implementation),
+        "the pre-activation-block upgrade must stay raw-only"
     );
 
     database.cleanup().await
@@ -2742,7 +2840,7 @@ async fn insert_test_discovered_resolver(
 }
 
 #[derive(Clone, Copy)]
-struct TestRegistryDiscoveryEdge {
+struct TestRegistryAnnouncementEdge {
     active_from_block_number: i64,
     active_from_log_index: i64,
     active_to_block_number: Option<i64>,
@@ -2756,7 +2854,7 @@ async fn insert_test_discovered_registry(
     registry_contract_instance_id: Uuid,
     registry_address: &str,
     address_active_from_block_number: i64,
-    edges: &[TestRegistryDiscoveryEdge],
+    edges: &[TestRegistryAnnouncementEdge],
 ) -> Result<()> {
     let (source_manifest_id, from_contract_instance_id) = sqlx::query_as::<_, (i64, Uuid)>(
         r#"
@@ -2832,7 +2930,7 @@ async fn insert_test_discovered_registry(
             )
             VALUES (
                 $1,
-                'subregistry',
+                'registry_announcement',
                 $2,
                 $3,
                 $4,

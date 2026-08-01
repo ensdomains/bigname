@@ -5,15 +5,16 @@ use anyhow::{Context, Result, bail};
 use bigname_manifests::{
     WatchedContractSource, load_historical_watched_contracts_by_chain, load_watched_contracts,
 };
-use sqlx::PgPool;
-#[cfg(test)]
-use sqlx::types::Uuid;
+use sqlx::{PgPool, types::Uuid};
 
 use crate::adapter_manifest::required_source_manifest_id;
 
 use super::{
     constants::*,
-    types::{ActiveEmitter, ActiveManifestMetadata, RegistryRawLogSourceScopeTarget},
+    types::{
+        ActiveEmitter, ActiveManifestMetadata, EmitterActivationPosition,
+        RegistryRawLogSourceScopeTarget,
+    },
     util::normalize_address,
 };
 
@@ -46,6 +47,8 @@ pub(super) async fn load_active_emitters(
     }
     let manifest_ids = manifest_ids.into_iter().collect::<Vec<_>>();
     let active_manifests = load_active_manifest_metadata(pool, &manifest_ids).await?;
+    let activation_positions =
+        load_discovery_activation_positions(pool, chain, &watched_contracts).await?;
 
     let mut emitters_by_scope = BTreeMap::new();
     for watched_contract in watched_contracts {
@@ -90,6 +93,13 @@ pub(super) async fn load_active_emitters(
             source_rank: source_rank(watched_contract.source),
             active_from_block_number: watched_contract.active_from_block_number,
             active_to_block_number: watched_contract.active_to_block_number,
+            activation_positions: watched_contract
+                .active_from_block_number
+                .and_then(|active_from| {
+                    activation_positions.get(&(watched_contract.contract_instance_id, active_from))
+                })
+                .cloned()
+                .unwrap_or_default(),
         };
 
         let scope_key = (
@@ -114,11 +124,85 @@ pub(super) async fn load_active_emitters(
     Ok(emitters)
 }
 
+async fn load_discovery_activation_positions(
+    pool: &PgPool,
+    chain: &str,
+    watched_contracts: &[bigname_manifests::WatchedContract],
+) -> Result<HashMap<(Uuid, i64), Vec<EmitterActivationPosition>>> {
+    let contract_instance_ids = watched_contracts
+        .iter()
+        .filter(|contract| contract.source == WatchedContractSource::DiscoveryEdge)
+        .map(|contract| contract.contract_instance_id)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if contract_instance_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = sqlx::query_as::<_, (Uuid, i64, String, Option<i64>, Option<i64>)>(
+        r#"
+        SELECT
+            edge.to_contract_instance_id,
+            edge.active_from_block_number,
+            edge.active_from_block_hash,
+            (edge.provenance ->> 'transaction_index')::BIGINT,
+            (edge.provenance ->> 'log_index')::BIGINT
+        FROM discovery_edges edge
+        WHERE edge.chain_id = $1
+          AND edge.to_contract_instance_id = ANY($2::UUID[])
+          AND edge.edge_kind = 'registry_announcement'
+          AND edge.active_from_block_number IS NOT NULL
+          AND edge.active_from_block_hash IS NOT NULL
+        ORDER BY
+            edge.to_contract_instance_id,
+            edge.active_from_block_number,
+            edge.active_from_block_hash,
+            (edge.provenance ->> 'transaction_index')::BIGINT NULLS LAST,
+            (edge.provenance ->> 'log_index')::BIGINT NULLS LAST,
+            edge.discovery_edge_id
+        "#,
+    )
+    .bind(chain)
+    .bind(&contract_instance_ids)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!("failed to load ENSv2 registry discovery activation positions for {chain}")
+    })?;
+
+    let mut positions = HashMap::<(Uuid, i64), Vec<EmitterActivationPosition>>::new();
+    for (contract_instance_id, block_number, block_hash, transaction_index, log_index) in rows {
+        let position = match (transaction_index, log_index) {
+            (Some(transaction_index), Some(log_index)) => EmitterActivationPosition {
+                block_hash,
+                transaction_index,
+                log_index,
+            },
+            (None, None) => continue,
+            _ => bail!(
+                "ENSv2 registry discovery activation for {contract_instance_id} at block {block_number} must contain both transaction_index and log_index or neither"
+            ),
+        };
+        positions
+            .entry((contract_instance_id, block_number))
+            .or_default()
+            .push(position);
+    }
+    for values in positions.values_mut() {
+        values.sort();
+        values.dedup();
+    }
+    Ok(positions)
+}
+
 pub(super) fn source_scope_target_intersects_active_emitter(
     target: &RegistryRawLogSourceScopeTarget,
     emitter: &ActiveEmitter,
 ) -> bool {
-    if target.source_family != emitter.source_family || target.address != emitter.address {
+    if target.source_family != emitter.source_family
+        || (target.address != emitter.address && !is_generic_registry_scope_target(target))
+    {
         return false;
     }
 
@@ -236,6 +320,11 @@ pub(super) fn normalized_source_scope_targets(
         .collect()
 }
 
+pub(super) fn is_generic_registry_scope_target(target: &RegistryRawLogSourceScopeTarget) -> bool {
+    target.source_family == SOURCE_FAMILY_ENS_V2_REGISTRY_L1
+        && target.address == GENERIC_SOURCE_SCOPE_ADDRESS
+}
+
 pub(super) fn scoped_ranges_for_active_emitters(
     source_scope: &[RegistryRawLogSourceScopeTarget],
     emitters: &[ActiveEmitter],
@@ -251,35 +340,104 @@ pub(super) fn scoped_ranges_for_active_emitters(
                 target.address
             );
         }
-        if emitters
+        if is_generic_registry_scope_target(target) {
+            ranges.extend(
+                emitters
+                    .iter()
+                    .filter(|emitter| {
+                        source_scope_target_intersects_active_emitter(target, emitter)
+                    })
+                    .map(|emitter| RegistryRawLogSourceScopeTarget {
+                        source_family: target.source_family.clone(),
+                        address: emitter.address.clone(),
+                        effective_from_block: target
+                            .effective_from_block
+                            .max(emitter.active_from_block_number.unwrap_or(0)),
+                        effective_to_block: target
+                            .effective_to_block
+                            .min(emitter.active_to_block_number.unwrap_or(i64::MAX)),
+                    }),
+            );
+        } else if emitters
             .iter()
             .any(|emitter| source_scope_target_intersects_active_emitter(target, emitter))
         {
             ranges.push(target.clone());
         }
     }
+    ranges.sort_by(|left, right| {
+        (
+            left.source_family.as_str(),
+            left.address.as_str(),
+            left.effective_from_block,
+            left.effective_to_block,
+        )
+            .cmp(&(
+                right.source_family.as_str(),
+                right.address.as_str(),
+                right.effective_from_block,
+                right.effective_to_block,
+            ))
+    });
+    ranges.dedup();
     Ok(ranges)
 }
 
-pub(super) fn emitter_for_block_and_scope<'a>(
+pub(super) fn emitter_for_log_and_scope<'a>(
     emitters: &'a [ActiveEmitter],
     block_number: i64,
+    block_hash: &str,
+    transaction_index: i64,
+    log_index: i64,
     source_scope: Option<&[RegistryRawLogSourceScopeTarget]>,
 ) -> Option<&'a ActiveEmitter> {
     let Some(source_scope) = source_scope else {
-        return emitters
-            .iter()
-            .find(|emitter| emitter_active_at_block(emitter, block_number));
+        return emitters.iter().find(|emitter| {
+            emitter_active_at_log_position(
+                emitter,
+                block_number,
+                block_hash,
+                transaction_index,
+                log_index,
+            )
+        });
     };
 
     emitters.iter().find(|emitter| {
-        emitter_active_at_block(emitter, block_number)
-            && source_scope.iter().any(|target| {
-                target.source_family == emitter.source_family
-                    && target.address == emitter.address
-                    && block_number >= target.effective_from_block
-                    && block_number <= target.effective_to_block
-            })
+        emitter_active_at_log_position(
+            emitter,
+            block_number,
+            block_hash,
+            transaction_index,
+            log_index,
+        ) && source_scope.iter().any(|target| {
+            target.source_family == emitter.source_family
+                && (target.address == emitter.address || is_generic_registry_scope_target(target))
+                && block_number >= target.effective_from_block
+                && block_number <= target.effective_to_block
+        })
+    })
+}
+
+fn emitter_active_at_log_position(
+    emitter: &ActiveEmitter,
+    block_number: i64,
+    block_hash: &str,
+    transaction_index: i64,
+    log_index: i64,
+) -> bool {
+    if !emitter_active_at_block(emitter, block_number) {
+        return false;
+    }
+    if emitter.active_from_block_number != Some(block_number)
+        || emitter.activation_positions.is_empty()
+    {
+        return true;
+    }
+
+    emitter.activation_positions.iter().any(|position| {
+        position.block_hash == block_hash
+            && (transaction_index, log_index) >= (position.transaction_index, position.log_index)
     })
 }
 

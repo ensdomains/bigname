@@ -78,11 +78,10 @@ impl ResolverProfileGate {
     }
 
     fn from_admissions(admissions: Vec<bigname_manifests::ResolverProfileAdmission>) -> Self {
-        // ENSv1 generic resolver topics are observation admission, not
-        // complete-profile admission. A pending profile may therefore emit a
-        // decoded current-resolver fact while its family coverage stays
-        // pending in the projection. Explicitly unsupported known profiles
-        // remain rejected here.
+        // ENSv1 match-all topics admit normalized history independently of
+        // resolver-profile status; these sets still report completeness and
+        // coverage state. Basenames continues to use profile status as its
+        // resolver-local interpretation gate.
         let classified_profile_addresses = admissions
             .iter()
             .map(|admission| {
@@ -210,6 +209,13 @@ impl ResolverProfileGate {
             return Ok(false);
         }
 
+        // ENSv1 record-history admission is the manifest's ENS-specific
+        // signature set. Resolver profiles describe completeness; they do not
+        // suppress a matching log from normalized history.
+        if raw_log.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1 {
+            return Ok(false);
+        }
+
         let Some(topic0) = raw_log.topics.first() else {
             return Ok(false);
         };
@@ -230,21 +236,6 @@ impl ResolverProfileGate {
                 fact_family,
             ))
         }) {
-            return Ok(false);
-        }
-
-        // Generic ENSv1 topic intake is deliberately wider than resolver
-        // profile discovery. No admission row means the resolver is still
-        // unclassified, so a decoded fact remains observable while complete
-        // family coverage stays pending. Once the address has an explicit
-        // profile classification, unsupported facts remain rejected above.
-        if source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1
-            && !self.classified_profile_addresses.contains(&(
-                chain_id,
-                source_family,
-                emitting_address,
-            ))
-        {
             return Ok(false);
         }
 
@@ -487,7 +478,7 @@ mod tests {
             &resolver_log(supported_resolver, name_changed_topic0(),),
             &event_topics
         )?);
-        assert!(gate.rejects_resolver_local_fact(
+        assert!(!gate.rejects_resolver_local_fact(
             &resolver_log(unsupported_resolver, name_changed_topic0(),),
             &event_topics
         )?);
@@ -535,7 +526,7 @@ mod tests {
             &resolver_log(eth_only_resolver, addr_changed_topic0(),),
             &event_topics
         )?);
-        assert!(gate.rejects_resolver_local_fact(
+        assert!(!gate.rejects_resolver_local_fact(
             &resolver_log(eth_only_resolver, address_changed_topic0(),),
             &event_topics
         )?);

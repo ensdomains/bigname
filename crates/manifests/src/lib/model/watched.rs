@@ -231,9 +231,13 @@ pub struct ManifestBootstrapTarget {
 pub struct ResolverProfileAdmission {
     pub chain: String,
     pub source_family: String,
-    pub contract_instance_id: Uuid,
+    /// The persistent contract identity when classification came from a
+    /// manifest declaration or discovery edge. Match-all resolver logs and
+    /// registry resolver pointers can supply an address-only classification
+    /// input, so this is absent for those inputs.
+    pub contract_instance_id: Option<Uuid>,
     pub address: String,
-    pub source: WatchedContractSource,
+    pub source: Option<WatchedContractSource>,
     pub source_manifest_id: Option<i64>,
     pub active_from_block_number: Option<i64>,
     pub active_to_block_number: Option<i64>,
