@@ -478,6 +478,26 @@ fn checked_in_manifest_contents(
     );
 }
 
+fn with_test_registry_discovery_rules(manifest: String) -> String {
+    assert!(
+        manifest.contains("discovery_rules = []"),
+        "test discovery rules require a binding-only registry manifest"
+    );
+    manifest.replacen(
+        "discovery_rules = []",
+        r#"[[discovery_rules]]
+edge_kind = "subregistry"
+from_role = "registry"
+admission = "reachable_from_root"
+
+[[discovery_rules]]
+edge_kind = "resolver"
+from_role = "registry"
+admission = "reachable_from_root""#,
+        1,
+    )
+}
+
 fn checked_in_manifest_root(profile_root: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -2249,6 +2269,7 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
             .map(|event| event.name.as_str())
             .collect::<Vec<_>>(),
         vec![
+            "RegistryCreated",
             "LabelRegistered",
             "LabelReserved",
             "LabelUnregistered",
@@ -2261,6 +2282,7 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
             "EACRolesChanged",
             "TokenRegenerated",
             "ParentUpdated",
+            "Upgraded",
         ]
     );
 
@@ -2361,6 +2383,7 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
             "NamedTextResource",
             "NamedAddrResource",
             "EACRolesChanged",
+            "Upgraded",
         ]
     );
 
@@ -2549,7 +2572,7 @@ async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Resul
     assert_eq!(summary.root_count, 7);
     assert_eq!(summary.contract_count, 7);
     assert_eq!(summary.capability_count, 8);
-    assert_eq!(summary.discovery_rule_count, 6);
+    assert_eq!(summary.discovery_rule_count, 7);
     assert_eq!(
         summary.removed_manifest_count,
         main_repository.manifests().len()
@@ -2930,7 +2953,7 @@ async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Resul
     assert_eq!(admission_state.active_manifest_count, 4);
     assert_eq!(admission_state.active_root_count, 3);
     assert_eq!(admission_state.active_contract_count, 3);
-    assert_eq!(admission_state.active_rule_count, 3);
+    assert_eq!(admission_state.active_rule_count, 4);
     assert!(admission_state.has_authoritative_address(
         "ethereum-sepolia",
         "0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c"
@@ -2968,7 +2991,7 @@ async fn active_manifest_abi_events_derive_topics_from_payload() -> Result<()> {
         .map(|event| event.source_family.as_str())
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(events.len(), 12);
+    assert_eq!(events.len(), 14);
     assert!(chain_families.contains("ens_v2_registry_l1"));
     assert!(
         chain_families.len() > 1,
@@ -2997,6 +3020,22 @@ async fn active_manifest_abi_events_derive_topics_from_payload() -> Result<()> {
     );
     assert_eq!(label_registered.emitter_roles, ["registry"]);
     assert_eq!(label_registered.normalized_events, ["RegistrationGranted"]);
+
+    let registry_created = events
+        .iter()
+        .find(|event| event.name == "RegistryCreated")
+        .expect("registry manifest must declare RegistryCreated ABI");
+    assert_eq!(registry_created.canonical_signature, "RegistryCreated()");
+    assert!(registry_created.emitter_roles.is_empty());
+    assert_eq!(registry_created.normalized_events, ["RegistryCreated"]);
+
+    let upgraded = events
+        .iter()
+        .find(|event| event.name == "Upgraded")
+        .expect("registry manifest must declare Upgraded ABI");
+    assert_eq!(upgraded.canonical_signature, "Upgraded(address)");
+    assert_eq!(upgraded.emitter_roles, ["registry"]);
+    assert_eq!(upgraded.normalized_events, ["Upgraded"]);
 
     for (name, signature) in [
         (
@@ -3306,7 +3345,7 @@ async fn rejects_conflicting_active_start_blocks_for_same_contract_instance() ->
 }
 
 #[tokio::test]
-async fn checked_in_registry_manifests_admit_resolver_discovery() -> Result<()> {
+async fn checked_in_v1_registry_manifests_use_binding_only_resolver_semantics() -> Result<()> {
     for case in [
         (
             "ens",
@@ -3318,9 +3357,6 @@ async fn checked_in_registry_manifests_admit_resolver_discovery() -> Result<()> 
             "ethereum-mainnet",
             "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
             "0xF29100983E058B709F3D539b0c765937B804AC15",
-            22_764_828,
-            22_764_928,
-            22_764_850,
             [
                 "(upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f)",
                 "(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89 @ ens_v1@91c966f)",
@@ -3337,9 +3373,6 @@ async fn checked_in_registry_manifests_admit_resolver_discovery() -> Result<()> 
             "base-mainnet",
             "0xb94704422c2a1e396835a571837aa5ae53285a95",
             "0xC6d566A56A1aFf6508b41f6c90ff131615583BCD",
-            100,
-            200,
-            123,
             [
                 "(upstream: .refs/basenames/README.md:L28 @ basenames@1809bbc)",
                 "(upstream: .refs/basenames/src/L2/Registry.sol:L113 @ basenames@1809bbc)",
@@ -3357,9 +3390,6 @@ async fn checked_in_registry_manifests_admit_resolver_discovery() -> Result<()> 
             chain,
             registry_address,
             resolver_address,
-            resolver_range_start,
-            resolver_range_end,
-            resolver_discovery_from,
             citations,
         ) = case;
         let test_dir = TestDir::new()?;
@@ -3393,20 +3423,36 @@ async fn checked_in_registry_manifests_admit_resolver_discovery() -> Result<()> 
             .manifest;
         assert_eq!(loaded_manifest.manifest_version, registry_manifest_version);
         assert_eq!(loaded_manifest.rollout_status, RolloutStatus::Active);
+        assert!(
+            loaded_manifest.discovery_rules.is_empty(),
+            "v1 registry manifests must not admit owner or resolver-pointer discovery"
+        );
+        let new_owner = loaded_manifest
+            .abi
+            .events
+            .iter()
+            .find(|event| event.name == "NewOwner")
+            .expect("v1 registry manifest must declare NewOwner");
         assert_eq!(
-            loaded_manifest.discovery_rules,
-            vec![
-                DiscoveryRule {
-                    edge_kind: "subregistry".to_owned(),
-                    from_role: "registry".to_owned(),
-                    admission: "reachable_from_root".to_owned(),
-                },
-                DiscoveryRule {
-                    edge_kind: "resolver".to_owned(),
-                    from_role: "registry".to_owned(),
-                    admission: "reachable_from_root".to_owned(),
-                },
-            ]
+            new_owner.normalized_events,
+            ["SubregistryChanged", "AuthorityTransferred"]
+        );
+        let loaded_resolver_manifest = &repository
+            .manifests()
+            .iter()
+            .find(|loaded_manifest| {
+                loaded_manifest.manifest.source_family == resolver_source_family
+            })
+            .expect("resolver manifest must load")
+            .manifest;
+        assert!(loaded_resolver_manifest.discovery_rules.is_empty());
+        assert!(
+            loaded_resolver_manifest
+                .abi
+                .events
+                .iter()
+                .all(|event| event.emitter_roles.is_empty()),
+            "generic resolver events must use the match-all emitter scope"
         );
 
         let summary = sync_repository(database.pool(), &repository).await?;
@@ -3416,7 +3462,7 @@ async fn checked_in_registry_manifests_admit_resolver_discovery() -> Result<()> 
         assert_eq!(summary.root_count, 1);
         assert_eq!(summary.contract_count, expected_contract_count);
         assert_eq!(summary.capability_count, 1);
-        assert_eq!(summary.discovery_rule_count, 2);
+        assert_eq!(summary.discovery_rule_count, 0);
 
         let active_manifests =
             load_active_manifests_for_namespace(database.pool(), namespace).await?;
@@ -3428,54 +3474,39 @@ async fn checked_in_registry_manifests_admit_resolver_discovery() -> Result<()> 
         assert!(active_manifests.iter().any(|manifest| {
             manifest.source_family == resolver_source_family && manifest.manifest_version == 1
         }));
-        let registry_manifest_id =
-            active_manifest_id_for_source_family(database.pool(), namespace, source_family).await?;
-        let resolver_manifest_id = active_manifest_id_for_source_family(
-            database.pool(),
-            namespace,
-            resolver_source_family,
-        )
-        .await?;
-
         let admission_state = load_discovery_admission_state(database.pool()).await?;
         assert_eq!(admission_state.active_manifest_count, 2);
-        assert_eq!(admission_state.active_rule_count, 2);
+        assert_eq!(admission_state.active_rule_count, 0);
         assert!(admission_state.has_authoritative_address(chain, registry_address));
         assert!(admission_state.has_authoritative_address(chain, resolver_address));
 
-        let persistence_summary = persist_discovery_observation(
-            database.pool(),
-            &DiscoveryObservation {
-                chain: chain.to_owned(),
-                from_address: registry_address.to_owned(),
-                to_address: resolver_address.to_owned(),
-                edge_kind: "resolver".to_owned(),
-                discovery_source: "registry_resolver_observation".to_owned(),
-                active_from_block_number: Some(resolver_discovery_from),
-                active_from_block_hash: Some(
-                    "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
-                ),
-                active_to_block_number: None,
-                active_to_block_hash: None,
-                provenance: serde_json::json!({
-                    "provider": "unit-test",
-                    "kind": "resolver",
-                }),
-            },
-        )
-        .await?;
-        assert_eq!(persistence_summary.admitted_edge_count, 1);
-        assert_eq!(persistence_summary.inserted_edge_count, 1);
-        assert_eq!(persistence_summary.admitted_edges[0].edge_kind, "resolver");
-        assert_eq!(
-            persistence_summary.admitted_edges[0].admission,
-            "reachable_from_root"
-        );
-        assert_eq!(persistence_summary.admitted_edges[0].from_role, "registry");
-        assert_eq!(
-            persistence_summary.admitted_edges[0].source_manifest_id,
-            registry_manifest_id
-        );
+        for edge_kind in ["subregistry", "resolver"] {
+            let persistence_summary = persist_discovery_observation(
+                database.pool(),
+                &DiscoveryObservation {
+                    chain: chain.to_owned(),
+                    from_address: registry_address.to_owned(),
+                    to_address: resolver_address.to_owned(),
+                    edge_kind: edge_kind.to_owned(),
+                    discovery_source: "retired_registry_discovery_observation".to_owned(),
+                    active_from_block_number: Some(123),
+                    active_from_block_hash: Some(
+                        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                            .to_owned(),
+                    ),
+                    active_to_block_number: None,
+                    active_to_block_hash: None,
+                    provenance: serde_json::json!({
+                        "provider": "unit-test",
+                        "kind": edge_kind,
+                    }),
+                },
+            )
+            .await?;
+            assert_eq!(persistence_summary.admitted_edge_count, 0);
+            assert_eq!(persistence_summary.inserted_edge_count, 0);
+            assert!(persistence_summary.admitted_edges.is_empty());
+        }
 
         let resolver_address = normalize_address(resolver_address);
         let watched_contracts = load_watched_contracts(database.pool()).await?;
@@ -3483,56 +3514,15 @@ async fn checked_in_registry_manifests_admit_resolver_discovery() -> Result<()> 
             contract.chain == chain
                 && contract.source_family == resolver_source_family
                 && contract.address == resolver_address
-                && contract.source == WatchedContractSource::DiscoveryEdge
-                && contract.source_manifest_id == Some(resolver_manifest_id)
+                && contract.source == WatchedContractSource::ManifestContract
         }));
-        let resolver_contract_instance_id = persistence_summary.admitted_edges[0]
-            .to_contract_instance_id
-            .expect("resolver discovery must admit a target contract instance");
-        let resolver_source_plan = load_watched_source_selector_plan(
-            database.pool(),
-            chain,
-            WatchedSourceSelector::SourceFamily(resolver_source_family.to_owned()),
-            resolver_range_start,
-            resolver_range_end,
-        )
-        .await?;
-        assert!(resolver_source_plan.selected_targets.iter().any(|target| {
-            target.source_family == resolver_source_family
-                && target.contract_instance_id == resolver_contract_instance_id
-                && target.address == resolver_address
-                && target.effective_from_block == resolver_range_start
-                && target.effective_to_block == resolver_range_end
-        }));
-        assert!(resolver_source_plan.selected_targets.iter().any(|target| {
-            target.source_family == resolver_source_family
-                && target.contract_instance_id == resolver_contract_instance_id
-                && target.address == resolver_address
-                && target.effective_from_block == resolver_discovery_from
-                && target.effective_to_block == resolver_range_end
-        }));
-        let discovery_edge = sqlx::query(
-            r#"
-            SELECT source_manifest_id, provenance
-            FROM discovery_edges
-            WHERE edge_kind = 'resolver'
-              AND deactivated_at IS NULL
-            "#,
-        )
-        .fetch_one(database.pool())
-        .await?;
         assert_eq!(
-            discovery_edge
-                .try_get::<Option<i64>, _>("source_manifest_id")?
-                .expect("resolver discovery edge must retain source manifest provenance"),
-            registry_manifest_id
-        );
-        assert!(
-            !discovery_edge
-                .try_get::<serde_json::Value, _>("provenance")?
-                .as_object()
-                .expect("resolver discovery provenance must be an object")
-                .contains_key(PROPAGATED_ROLE_PROVENANCE_FIELD)
+            query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE deactivated_at IS NULL"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            0
         );
 
         database.cleanup().await?;
@@ -3582,6 +3572,8 @@ async fn checked_in_ens_registry_v3_admits_current_and_old_registry_targets() ->
 
     assert_eq!(registry_v2.rollout_status, RolloutStatus::Deprecated);
     assert_eq!(registry_v3.rollout_status, RolloutStatus::Active);
+    assert_eq!(registry_v2.discovery_rules.len(), 2);
+    assert!(registry_v3.discovery_rules.is_empty());
     assert_eq!(registry_v3.roots.len(), 1);
     assert_eq!(registry_v3.roots[0].start_block, Some(9_380_380));
     assert_eq!(registry_v3.contracts.len(), 2);
@@ -3619,7 +3611,7 @@ async fn checked_in_ens_registry_v3_admits_current_and_old_registry_targets() ->
     assert_eq!(summary.root_count, 2);
     assert_eq!(summary.contract_count, 3);
     assert_eq!(summary.capability_count, 2);
-    assert_eq!(summary.discovery_rule_count, 4);
+    assert_eq!(summary.discovery_rule_count, 2);
 
     assert_eq!(
         load_manifest_rollout_statuses(database.pool(), "ens").await?,
@@ -3776,7 +3768,11 @@ async fn ens_v1_resolver_public_resolver_profile_admission_keeps_unknowns_watch_
 {
     let test_dir = TestDir::new()?;
     let database = TestDatabase::new().await?;
-    let registry_manifest = checked_in_manifest_contents("ens", "ens_v1_registry_l1", "v3")?;
+    let registry_manifest = with_test_registry_discovery_rules(checked_in_manifest_contents(
+        "ens",
+        "ens_v1_registry_l1",
+        "v3",
+    )?);
     let resolver_manifest = checked_in_manifest_contents("ens", "ens_v1_resolver_l1", "v1")?;
     test_dir.write_manifest("ens", "ens_v1_registry_l1", "v3", &registry_manifest)?;
     test_dir.write_manifest("ens", "ens_v1_resolver_l1", "v1", &resolver_manifest)?;
@@ -4005,14 +4001,93 @@ async fn ens_v1_resolver_public_resolver_profile_admission_keeps_unknowns_watch_
 }
 
 #[tokio::test]
-async fn scoped_resolver_profile_rejects_unadmitted_code_hash_target() -> Result<()> {
+async fn scoped_ens_v1_resolver_profile_classifies_identityless_target_by_code_hash() -> Result<()>
+{
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_v1_resolver_l1",
+        "v1",
+        &checked_in_manifest_contents("ens", "ens_v1_resolver_l1", "v1")?,
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    let public_resolver_seed_address = "0xF29100983E058B709F3D539b0c765937B804AC15";
+    let identityless_resolver_address = "0x0000000000000000000000000000000000000240";
+    let public_resolver_code_hash = "keccak256:ens-v1-identityless-public-resolver-compatible";
+    let seed_contract_instance_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-mainnet",
+        public_resolver_seed_address,
+    )
+    .await?;
+
+    for (block_number, address) in [
+        (100, public_resolver_seed_address),
+        (110, identityless_resolver_address),
+    ] {
+        let block_hash = format!("0x{block_number:064x}");
+        insert_raw_code_hash_observation(
+            database.pool(),
+            RawCodeHashObservation {
+                chain: "ethereum-mainnet",
+                block_hash: &block_hash,
+                block_number,
+                contract_address: address,
+                code_hash: public_resolver_code_hash,
+                code_byte_length: 1,
+                canonicality_state: "canonical",
+            },
+        )
+        .await?;
+    }
+
+    let admissions = load_ens_v1_public_resolver_profile_admissions_for_targets(
+        database.pool(),
+        &[(
+            "ethereum-mainnet".to_owned(),
+            identityless_resolver_address.to_owned(),
+        )],
+    )
+    .await?;
+
+    assert_eq!(admissions.len(), 14);
+    assert!(admissions.iter().all(|admission| {
+        admission.address == normalize_address(identityless_resolver_address)
+            && admission.admission_basis == "code_hash_match"
+            && admission.observed_code_hash.as_deref() == Some(public_resolver_code_hash)
+            && admission.matched_code_hash.as_deref() == Some(public_resolver_code_hash)
+            && admission.matched_contract_instance_id == Some(seed_contract_instance_id)
+            && admission.contract_instance_id.is_none()
+            && admission.source.is_none()
+    }));
+    assert_eq!(
+        admissions
+            .iter()
+            .map(|admission| (admission.fact_family.as_str(), admission.status.as_str()))
+            .collect::<BTreeMap<_, _>>(),
+        latest_public_resolver_fact_statuses()
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn scoped_resolver_profile_classifies_targets_with_or_without_discovery_edges() -> Result<()>
+{
     let test_dir = TestDir::new()?;
     let database = TestDatabase::new().await?;
     test_dir.write_manifest(
         "ens",
         "ens_v1_registry_l1",
         "v3",
-        &checked_in_manifest_contents("ens", "ens_v1_registry_l1", "v3")?,
+        &with_test_registry_discovery_rules(checked_in_manifest_contents(
+            "ens",
+            "ens_v1_registry_l1",
+            "v3",
+        )?),
     )?;
     test_dir.write_manifest(
         "ens",
@@ -4096,7 +4171,7 @@ async fn scoped_resolver_profile_rejects_unadmitted_code_hash_target() -> Result
     )
     .await?;
 
-    assert_eq!(admissions.len(), 14);
+    assert_eq!(admissions.len(), 28);
     assert_ens_v1_profile_admission_rows_with_statuses(
         &admissions,
         EnsV1ProfileAdmissionStatusExpectation {
@@ -4110,12 +4185,19 @@ async fn scoped_resolver_profile_rejects_unadmitted_code_hash_target() -> Result
             matched_contract_instance_id: Some(seed_contract_instance_id),
         },
     );
-    assert!(
-        admissions
-            .iter()
-            .all(|admission| admission.address != normalize_address(unadmitted_resolver_address)),
-        "unadmitted target must not graduate to a scoped resolver profile"
-    );
+    let identityless_rows = admissions
+        .iter()
+        .filter(|admission| admission.address == normalize_address(unadmitted_resolver_address))
+        .collect::<Vec<_>>();
+    assert_eq!(identityless_rows.len(), 14);
+    assert!(identityless_rows.iter().all(|admission| {
+        admission.contract_instance_id.is_none()
+            && admission.source.is_none()
+            && admission.admission_basis == "code_hash_match"
+            && admission.observed_code_hash.as_deref() == Some(public_resolver_code_hash)
+            && admission.matched_code_hash.as_deref() == Some(public_resolver_code_hash)
+            && admission.matched_contract_instance_id == Some(seed_contract_instance_id)
+    }));
 
     database.cleanup().await?;
     Ok(())
@@ -4151,11 +4233,10 @@ async fn ens_v1_known_legacy_resolver_profile_does_not_flatten_latest_capabiliti
             .iter()
             .all(|row| row.profile == "public_resolver_legacy_multicoin_dns")
     );
-    assert!(legacy_rows.iter().all(
-        |row| row.contract_instance_id == legacy_contract_instance_id
-            && row.source == WatchedContractSource::ManifestContract
-            && row.admission_basis == "first_party_known_resolver_admission"
-    ));
+    assert!(legacy_rows.iter().all(|row| row.contract_instance_id
+        == Some(legacy_contract_instance_id)
+        && row.source == Some(WatchedContractSource::ManifestContract)
+        && row.admission_basis == "first_party_known_resolver_admission"));
     let statuses = legacy_rows
         .iter()
         .map(|row| (row.fact_family.as_str(), row.status.as_str()))
@@ -4299,7 +4380,7 @@ fn assert_profile_admission_rows_with_statuses(
     for row in rows {
         assert_eq!(row.chain, chain);
         assert_eq!(row.source_family, source_family);
-        assert_eq!(row.contract_instance_id, contract_instance_id);
+        assert_eq!(row.contract_instance_id, Some(contract_instance_id));
         assert_eq!(row.profile, profile);
         assert_eq!(row.status.as_str(), fact_statuses[row.fact_family.as_str()]);
         assert_eq!(row.admission_basis, admission_basis);
@@ -4332,7 +4413,10 @@ fn assert_profile_admission_rows_for_profile(
     for row in rows {
         assert_eq!(row.chain, expectation.chain);
         assert_eq!(row.source_family, expectation.source_family);
-        assert_eq!(row.contract_instance_id, expectation.contract_instance_id);
+        assert_eq!(
+            row.contract_instance_id,
+            Some(expectation.contract_instance_id)
+        );
         assert_eq!(row.profile, expectation.profile);
         assert_eq!(row.status, expectation.status);
         assert_eq!(row.admission_basis, expectation.admission_basis);
@@ -4393,11 +4477,69 @@ fn latest_public_resolver_fact_statuses() -> BTreeMap<&'static str, &'static str
 }
 
 #[tokio::test]
+async fn scoped_basenames_resolver_profile_classifies_identityless_target_by_code_hash()
+-> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    test_dir.write_manifest(
+        "basenames",
+        "basenames_base_resolver",
+        "v1",
+        &checked_in_manifest_contents("basenames", "basenames_base_resolver", "v1")?,
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    let seed_address = "0xC6d566A56A1aFf6508b41f6c90ff131615583BCD";
+    let identityless_address = "0x0000000000000000000000000000000000000300";
+    let code_hash = "keccak256:basenames-identityless-l2-resolver-compatible";
+    let seed_contract_instance_id =
+        load_single_contract_instance_for_address(database.pool(), "base-mainnet", seed_address)
+            .await?;
+    for (block_number, address) in [(100, seed_address), (110, identityless_address)] {
+        let block_hash = format!("0x{block_number:064x}");
+        insert_raw_code_hash_observation(
+            database.pool(),
+            RawCodeHashObservation {
+                chain: "base-mainnet",
+                block_hash: &block_hash,
+                block_number,
+                contract_address: address,
+                code_hash,
+                code_byte_length: 1,
+                canonicality_state: "canonical",
+            },
+        )
+        .await?;
+    }
+
+    let admissions = load_basenames_l2_resolver_profile_admissions_for_targets(
+        database.pool(),
+        &[("base-mainnet".to_owned(), identityless_address.to_owned())],
+    )
+    .await?;
+    assert_eq!(admissions.len(), 2);
+    assert!(admissions.iter().all(|admission| {
+        admission.address == normalize_address(identityless_address)
+            && admission.status == "supported"
+            && admission.admission_basis == "code_hash_match"
+            && admission.contract_instance_id.is_none()
+            && admission.source.is_none()
+            && admission.matched_contract_instance_id == Some(seed_contract_instance_id)
+    }));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn basenames_l2_resolver_profile_admission_keeps_unknowns_watch_only() -> Result<()> {
     let test_dir = TestDir::new()?;
     let database = TestDatabase::new().await?;
-    let registry_manifest =
-        checked_in_manifest_contents("basenames", "basenames_base_registry", "v2")?;
+    let registry_manifest = with_test_registry_discovery_rules(checked_in_manifest_contents(
+        "basenames",
+        "basenames_base_registry",
+        "v2",
+    )?);
     let resolver_manifest =
         checked_in_manifest_contents("basenames", "basenames_base_resolver", "v1")?;
 
@@ -4721,7 +4863,11 @@ async fn dynamic_resolver_backfill_selector_loads_edge_address_intersections() -
             namespace,
             registry_source_family,
             registry_version_tag,
-            &checked_in_manifest_contents(namespace, registry_source_family, registry_version_tag)?,
+            &with_test_registry_discovery_rules(checked_in_manifest_contents(
+                namespace,
+                registry_source_family,
+                registry_version_tag,
+            )?),
         )?;
         test_dir.write_manifest(
             namespace,
@@ -4945,7 +5091,11 @@ async fn resolver_discovery_edges_do_not_become_transitive_registry_parents() ->
         "ens",
         "ens_v1_registry_l1",
         "v3",
-        &checked_in_manifest_contents("ens", "ens_v1_registry_l1", "v3")?,
+        &with_test_registry_discovery_rules(checked_in_manifest_contents(
+            "ens",
+            "ens_v1_registry_l1",
+            "v3",
+        )?),
     )?;
     sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
 
@@ -5030,7 +5180,11 @@ async fn scoped_discovery_reconciliation_keeps_unrelated_active_addresses() -> R
         "ens",
         "ens_v1_registry_l1",
         "v3",
-        &checked_in_manifest_contents("ens", "ens_v1_registry_l1", "v3")?,
+        &with_test_registry_discovery_rules(checked_in_manifest_contents(
+            "ens",
+            "ens_v1_registry_l1",
+            "v3",
+        )?),
     )?;
     sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
 
@@ -6793,6 +6947,81 @@ async fn removing_manifest_deactivates_active_discovery_edges_from_that_source()
 }
 
 #[tokio::test]
+async fn removing_discovery_rule_deactivates_active_edges_from_that_source() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+
+    let manifest_with_rule = registry_manifest_contents("active");
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &manifest_with_rule)?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    let persistence_summary = persist_discovery_observation(
+        database.pool(),
+        &DiscoveryObservation {
+            chain: "ethereum-mainnet".to_owned(),
+            from_address: "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E".to_owned(),
+            to_address: "0x00000000000000000000000000000000000000CC".to_owned(),
+            edge_kind: "subregistry".to_owned(),
+            discovery_source: "manifest-rule-removal-cleanup-test".to_owned(),
+            active_from_block_number: Some(123),
+            active_from_block_hash: Some(
+                "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            ),
+            active_to_block_number: None,
+            active_to_block_hash: None,
+            provenance: serde_json::json!({
+                "provider": "unit-test",
+                "kind": "subregistry",
+            }),
+        },
+    )
+    .await?;
+    let child_contract_instance_id = persistence_summary.admitted_edges[0]
+        .to_contract_instance_id
+        .expect("persisted discovery edge must admit a target contract instance");
+
+    let manifest_without_rule = manifest_with_rule
+        .replace(
+            "normalizer_version = \"ensip15@ens-normalize-0.1.1\"\n",
+            "normalizer_version = \"ensip15@ens-normalize-0.1.1\"\ndiscovery_rules = []\n",
+        )
+        .replace(
+            r#"
+[[discovery_rules]]
+edge_kind = "subregistry"
+from_role = "registry"
+admission = "reachable_from_root"
+"#,
+            "",
+        );
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &manifest_without_rule)?;
+    let summary = sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+    assert_eq!(summary.removed_manifest_count, 0);
+    assert_eq!(summary.discovery_rule_count, 0);
+    assert_eq!(summary.cleared_discovery_edge_count, 1);
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE deactivated_at IS NULL"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM contract_instance_addresses WHERE contract_instance_id = $1 AND deactivated_at IS NULL"
+        )
+        .bind(child_contract_instance_id)
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn persist_discovery_observation_ignores_zero_address_targets() -> Result<()> {
     let test_dir = TestDir::new()?;
     let database = TestDatabase::new().await?;
@@ -8082,7 +8311,7 @@ async fn watched_plan_does_not_expand_migration_edges() -> Result<()> {
 }
 
 #[tokio::test]
-async fn rebuilds_watched_plan_from_active_contract_instance_address_ranges() -> Result<()> {
+async fn subregistry_edges_preserve_topology_without_expanding_the_watched_plan() -> Result<()> {
     let test_dir = TestDir::new()?;
     let database = TestDatabase::new().await?;
 
@@ -8127,9 +8356,18 @@ async fn rebuilds_watched_plan_from_active_contract_instance_address_ranges() ->
             .to_contract_instance_id
             .is_some()
     );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE edge_kind = 'subregistry' AND deactivated_at IS NULL"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "the parent-child relationship remains stored as topology"
+    );
 
     let watched_contracts = load_watched_contracts(database.pool()).await?;
-    assert_eq!(watched_contracts.len(), 4);
+    assert_eq!(watched_contracts.len(), 3);
     assert!(watched_contracts.iter().any(|contract| {
         contract.address == "0x0000000000000000000000000000000000000001"
             && contract.source == WatchedContractSource::ManifestRoot
@@ -8143,17 +8381,18 @@ async fn rebuilds_watched_plan_from_active_contract_instance_address_ranges() ->
             && contract.source == WatchedContractSource::DiscoveryEdge
             && contract.source_family == "ens_v2_registry_l1"
     }));
-    assert!(watched_contracts.iter().any(|contract| {
-        contract.address == "0x00000000000000000000000000000000000000cc"
-            && contract.source == WatchedContractSource::DiscoveryEdge
-            && contract.source_family == "ens_v2_registry_l1"
-    }));
+    assert!(
+        watched_contracts
+            .iter()
+            .all(|contract| contract.address != "0x00000000000000000000000000000000000000cc"),
+        "a subregistry relationship without RegistryCreated must not admit the child emitter"
+    );
 
     let watched_summary = load_watched_contract_summary(database.pool()).await?;
-    assert_eq!(watched_summary.unique_contract_count, 4);
+    assert_eq!(watched_summary.unique_contract_count, 3);
     assert_eq!(watched_summary.manifest_root_count, 1);
     assert_eq!(watched_summary.manifest_contract_count, 1);
-    assert_eq!(watched_summary.discovery_edge_count, 2);
+    assert_eq!(watched_summary.discovery_edge_count, 1);
 
     let watched_chain_plan = load_watched_chain_plan(database.pool()).await?;
     assert_eq!(
@@ -8163,12 +8402,11 @@ async fn rebuilds_watched_plan_from_active_contract_instance_address_ranges() ->
             addresses: vec![
                 "0x0000000000000000000000000000000000000001".to_owned(),
                 "0x00000000000000000000000000000000000000aa".to_owned(),
-                "0x00000000000000000000000000000000000000cc".to_owned(),
                 "0x00000000000000000000000000000000000000dd".to_owned(),
             ],
             manifest_root_entry_count: 1,
             manifest_contract_entry_count: 1,
-            discovery_edge_entry_count: 2,
+            discovery_edge_entry_count: 1,
         }]
     );
 
@@ -8184,7 +8422,7 @@ async fn rebuilds_watched_plan_from_active_contract_instance_address_ranges() ->
         selected_source_family_plan.watched_chain_plan,
         watched_chain_plan[0]
     );
-    assert_eq!(selected_source_family_plan.selected_targets.len(), 4);
+    assert_eq!(selected_source_family_plan.selected_targets.len(), 3);
     assert!(
         selected_source_family_plan
             .selected_targets
@@ -8194,13 +8432,12 @@ async fn rebuilds_watched_plan_from_active_contract_instance_address_ranges() ->
     let mut sorted_targets = selected_source_family_plan.selected_targets.clone();
     sorted_targets.sort();
     assert_eq!(selected_source_family_plan.selected_targets, sorted_targets);
-    assert_eq!(
+    assert!(
         selected_source_family_plan
             .selected_targets
             .iter()
-            .find(|target| { target.address == "0x00000000000000000000000000000000000000cc" })
-            .map(|target| (target.effective_from_block, target.effective_to_block)),
-        Some((123, 200))
+            .all(|target| target.address != "0x00000000000000000000000000000000000000cc"),
+        "source-scoped replay must not select a topology-only child"
     );
 
     database.cleanup().await?;
@@ -8812,7 +9049,11 @@ async fn closed_historical_discovery_interval_remains_required_for_coverage() ->
         "ens",
         registry_source_family,
         "v3",
-        &checked_in_manifest_contents("ens", registry_source_family, "v3")?,
+        &with_test_registry_discovery_rules(checked_in_manifest_contents(
+            "ens",
+            registry_source_family,
+            "v3",
+        )?),
     )?;
     test_dir.write_manifest(
         "ens",
@@ -9005,7 +9246,8 @@ async fn closed_historical_discovery_interval_remains_required_for_coverage() ->
 }
 
 #[tokio::test]
-async fn ens_v2_recovery_targets_keep_closed_discovery_identity_and_exact_interval() -> Result<()> {
+async fn ens_v2_recovery_targets_keep_closed_registry_announcement_identity_and_exact_interval()
+-> Result<()> {
     let test_dir = TestDir::new()?;
     let database = TestDatabase::new().await?;
     let chain = "ethereum-mainnet";
@@ -9040,13 +9282,13 @@ proxy_kind = "none"
 start_block = 100
 
 [[discovery_rules]]
-edge_kind = "subregistry"
+edge_kind = "registry_announcement"
 from_role = "registry"
 admission = "reachable_from_root"
 
 [[abi.events]]
-name = "SubregistryUpdated"
-fragment = "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)"
+name = "RegistryCreated"
+fragment = "event RegistryCreated()"
 "#
         ),
     )?;
@@ -9058,7 +9300,7 @@ fragment = "event SubregistryUpdated(uint256 indexed tokenId, address indexed su
             chain: chain.to_owned(),
             from_address: registry_address.to_owned(),
             to_address: child_address.to_owned(),
-            edge_kind: "subregistry".to_owned(),
+            edge_kind: "registry_announcement".to_owned(),
             discovery_source: "recovery-target-test".to_owned(),
             active_from_block_number: Some(120),
             active_from_block_hash: Some(format!("0x{:064x}", 120)),
@@ -9079,7 +9321,7 @@ fragment = "event SubregistryUpdated(uint256 indexed tokenId, address indexed su
         UPDATE discovery_edges
         SET deactivated_at = now()
         WHERE to_contract_instance_id = $1
-          AND edge_kind = 'subregistry'
+          AND edge_kind = 'registry_announcement'
         "#,
     )
     .bind(child_contract_instance_id)

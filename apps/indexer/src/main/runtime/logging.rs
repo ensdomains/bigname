@@ -1,7 +1,6 @@
 use bigname_adapters::{
     BlockDerivedNormalizedEventSyncSummary, EnsV1ReverseClaimSyncSummary,
-    EnsV1SubregistryDiscoverySyncSummary, EnsV1UnwrappedAuthoritySyncSummary,
-    EnsV2PermissionsSyncSummary, EnsV2RegistrarSyncSummary,
+    EnsV1UnwrappedAuthoritySyncSummary, EnsV2PermissionsSyncSummary, EnsV2RegistrarSyncSummary,
     EnsV2RegistryResourceSurfaceSyncSummary, EnsV2ResolverSyncSummary,
     ManifestNormalizedEventSyncSummary,
 };
@@ -258,34 +257,6 @@ pub(crate) fn log_watched_contract_summary(summary: &WatchedContractSummary) {
             "watched contract entries rebuilt for chain"
         );
     }
-}
-
-pub(crate) fn log_ens_v1_subregistry_discovery_sync_summary(
-    chain: &str,
-    summary: &EnsV1SubregistryDiscoverySyncSummary,
-) {
-    if summary.scanned_log_count == 0
-        && summary.inserted_edge_count == 0
-        && summary.deactivated_edge_count == 0
-    {
-        return;
-    }
-
-    info!(
-        service = "indexer",
-        chain,
-        discovery_source_family = "ens_v1_registry",
-        discovery_scanned_log_count = summary.scanned_log_count,
-        discovery_matched_log_count = summary.matched_log_count,
-        discovery_active_observation_count = summary.active_observation_count,
-        discovery_active_edge_count = summary.active_edge_count,
-        discovery_admitted_edge_count = summary.admitted_edge_count,
-        discovery_inserted_edge_count = summary.inserted_edge_count,
-        discovery_deactivated_edge_count = summary.deactivated_edge_count,
-        normalized_event_sync_total_count = summary.total_normalized_event_count,
-        normalized_event_inserted_total_count = summary.total_normalized_event_inserted_count,
-        "ENSv1 registry discovery synced from stored raw logs"
-    );
 }
 
 pub(crate) fn log_ens_v2_registry_resource_surface_sync_summary(

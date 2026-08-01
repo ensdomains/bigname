@@ -1297,6 +1297,7 @@ fn build_authority_observation_decodes_registry_transfer_owner_change() -> Resul
             labelhash: String::new(),
             namehash: Some(alice.namehash),
             owner: owner.to_owned(),
+            emitting_address: raw_log.emitting_address.clone(),
             reference: raw_log.reference(),
         })
     );
@@ -2443,6 +2444,7 @@ fn registry_owner_divergence_supersedes_live_registrar_before_wrap() -> Result<(
             labelhash,
             namehash: None,
             owner: registry_owner.to_owned(),
+            emitting_address: String::new(),
             reference: registry_ref,
         },
     )?;
@@ -2579,6 +2581,7 @@ fn registrar_renewal_keeps_registry_owner_authority_after_divergence() -> Result
             labelhash: labelhash.clone(),
             namehash: None,
             owner: registry_owner.to_owned(),
+            emitting_address: String::new(),
             reference: registry_ref,
         },
     )?;
@@ -2724,6 +2727,7 @@ fn registry_transfer_restores_superseded_registrar_matching_owner_before_release
             labelhash: labelhash.clone(),
             namehash: None,
             owner: registry_owner.to_owned(),
+            emitting_address: String::new(),
             reference: registry_ref,
         },
     )?;
@@ -2740,6 +2744,7 @@ fn registry_transfer_restores_superseded_registrar_matching_owner_before_release
             labelhash: String::new(),
             namehash: Some(alice.namehash.clone()),
             owner: registrant.to_owned(),
+            emitting_address: String::new(),
             reference: transfer_ref,
         },
     )?;
@@ -2870,6 +2875,7 @@ fn registry_new_owner_reclaim_restores_registrar_before_release() -> Result<()> 
             labelhash: labelhash.clone(),
             namehash: None,
             owner: registry_owner.to_owned(),
+            emitting_address: String::new(),
             reference: registry_ref,
         },
     )?;
@@ -2883,6 +2889,7 @@ fn registry_new_owner_reclaim_restores_registrar_before_release() -> Result<()> 
             labelhash,
             namehash: Some(alice.namehash),
             owner: registrant.to_owned(),
+            emitting_address: String::new(),
             reference: reclaim_ref,
         },
     )?;
@@ -3009,6 +3016,7 @@ fn token_transfer_restores_superseded_registrar_matching_registry_owner() -> Res
             labelhash: labelhash.clone(),
             namehash: None,
             owner: registry_owner.to_owned(),
+            emitting_address: String::new(),
             reference: registry_ref,
         },
     )?;
@@ -3176,6 +3184,7 @@ fn token_transfer_away_from_registry_owner_promotes_registry_only_authority() ->
             labelhash: labelhash.clone(),
             namehash: None,
             owner: registry_owner.to_owned(),
+            emitting_address: String::new(),
             reference: registry_ref,
         },
     )?;
@@ -10578,7 +10587,10 @@ async fn sync_ens_v1_unwrapped_authority_generic_resolver_events_do_not_require_
                 transaction_index: 0,
                 log_index: 1,
                 emitting_address: resolver_address.to_owned(),
-                topics: vec![name_changed_topic0(), reverse_node.clone()],
+                topics: vec![
+                    name_changed_topic0().to_ascii_uppercase(),
+                    reverse_node.clone(),
+                ],
                 data: encode_dynamic_string_log_data("alice.eth"),
                 canonicality_state: CanonicalityState::Canonical,
             },
@@ -10636,7 +10648,32 @@ async fn sync_ens_v1_unwrapped_authority_generic_resolver_events_do_not_require_
     )
     .await?;
 
-    let summary = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
+    let block_hashes = vec![
+        block_hash.to_owned(),
+        closed_block_hash.to_owned(),
+        reopened_block_hash.to_owned(),
+    ];
+    let source_scope = vec![
+        (
+            SOURCE_FAMILY_ENS_V1_REGISTRY_L1.to_owned(),
+            registry_address.to_owned(),
+            42,
+            44,
+        ),
+        (
+            SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+            GENERIC_SOURCE_SCOPE_ADDRESS.to_owned(),
+            42,
+            44,
+        ),
+    ];
+    let summary = EnsV1UnwrappedAuthoritySyncSummary::sync_for_block_hashes_with_source_scope(
+        database.pool(),
+        "ethereum-mainnet",
+        &block_hashes,
+        &source_scope,
+    )
+    .await?;
     // Topic-first intake matches the unclassified emitter without a discovery
     // range, but authority normalization still rejects it because it is not
     // the node's selected current resolver.
@@ -10690,7 +10727,7 @@ async fn sync_ens_v1_unwrapped_authority_generic_resolver_events_do_not_require_
 }
 
 #[tokio::test]
-async fn sync_ens_v1_unwrapped_authority_gates_discovered_ensv1_resolver_event_facts_by_profile()
+async fn sync_ens_v1_unwrapped_authority_retains_signature_matched_history_independent_of_profile()
 -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;
     let database = TestDatabase::new().await?;
@@ -11037,18 +11074,18 @@ async fn sync_ens_v1_unwrapped_authority_gates_discovered_ensv1_resolver_event_f
 
     let summary = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
     assert_eq!(summary.scanned_log_count, 12);
-    assert_eq!(summary.matched_log_count, 10);
+    assert_eq!(summary.matched_log_count, 12);
     assert_eq!(
         summary.by_kind.get(EVENT_KIND_RESOLVER_CHANGED),
         Some(&4_usize)
     );
     assert_eq!(
         summary.by_kind.get(EVENT_KIND_RECORD_CHANGED),
-        Some(&3_usize)
+        Some(&4_usize)
     );
     assert_eq!(
         summary.by_kind.get(EVENT_KIND_RECORD_VERSION_CHANGED),
-        Some(&2_usize)
+        Some(&3_usize)
     );
     assert_eq!(
         sqlx::query_scalar::<_, Vec<String>>(
@@ -11071,7 +11108,8 @@ async fn sync_ens_v1_unwrapped_authority_gates_discovered_ensv1_resolver_event_f
         .await?,
         vec![
             "supported.eth".to_owned(),
-            "pending.eth".to_owned()
+            "pending.eth".to_owned(),
+            "unsupported.eth".to_owned(),
         ]
     );
     assert_eq!(
@@ -11090,7 +11128,7 @@ async fn sync_ens_v1_unwrapped_authority_gates_discovered_ensv1_resolver_event_f
         .bind(vec![8_i64, 9])
         .fetch_one(database.pool())
         .await?,
-        0
+        2
     );
     assert_eq!(
         sqlx::query_as::<_, (String, String)>(
@@ -11102,6 +11140,112 @@ async fn sync_ens_v1_unwrapped_authority_gates_discovered_ensv1_resolver_event_f
             "text:description".to_owned(),
             "unlisted resolver text".to_owned()
         )
+    );
+
+    let later_block_hash = "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+    let later_transaction_hash = "0xtxcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+    upsert_raw_blocks(
+        database.pool(),
+        &[raw_block(
+            later_block_hash,
+            Some(block_hash),
+            43,
+            1_700_000_043,
+        )],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: later_block_hash.to_owned(),
+                block_number: 43,
+                transaction_hash: later_transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: supported_resolver_address.to_owned(),
+                topics: vec![version_changed_topic0(), alice.namehash.clone()],
+                data: encode_resolver_version_changed_log_data(10),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: later_block_hash.to_owned(),
+                block_number: 43,
+                transaction_hash: later_transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 1,
+                emitting_address: pending_resolver_address.to_owned(),
+                topics: vec![version_changed_topic0(), alice.namehash.clone()],
+                data: encode_resolver_version_changed_log_data(11),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: later_block_hash.to_owned(),
+                block_number: 43,
+                transaction_hash: later_transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 2,
+                emitting_address: supported_resolver_address.to_owned(),
+                topics: vec![version_changed_topic0(), alice.namehash.clone()],
+                data: encode_resolver_version_changed_log_data(12),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+
+    let later_summary =
+        EnsV1UnwrappedAuthoritySyncSummary::sync_for_block_hashes_with_source_scope(
+            database.pool(),
+            "ethereum-mainnet",
+            &[later_block_hash.to_owned()],
+            &[(
+                SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+                GENERIC_SOURCE_SCOPE_ADDRESS.to_owned(),
+                43,
+                43,
+            )],
+        )
+        .await?;
+    assert_eq!(later_summary.scanned_log_count, 3);
+    assert_eq!(later_summary.matched_log_count, 3);
+    assert_eq!(
+        sqlx::query_as::<_, (String, Option<String>, String)>(
+            "SELECT LOWER(raw_log.emitting_address), event.before_state->>'record_version', event.after_state->>'record_version' \
+             FROM normalized_events event \
+             JOIN raw_logs raw_log \
+               ON raw_log.chain_id = event.chain_id \
+              AND raw_log.block_hash = event.block_hash \
+              AND raw_log.transaction_hash = event.transaction_hash \
+              AND raw_log.log_index = event.log_index \
+             WHERE event.block_hash = $1 \
+               AND event.event_kind = 'RecordVersionChanged' \
+             ORDER BY event.log_index"
+        )
+        .bind(later_block_hash)
+        .fetch_all(database.pool())
+        .await?,
+        vec![
+            (
+                supported_resolver_address.to_owned(),
+                Some("7".to_owned()),
+                "10".to_owned(),
+            ),
+            (
+                pending_resolver_address.to_owned(),
+                Some("8".to_owned()),
+                "11".to_owned(),
+            ),
+            (
+                supported_resolver_address.to_owned(),
+                Some("10".to_owned()),
+                "12".to_owned(),
+            ),
+        ],
+        "restricted replay must preload and advance record versions independently per resolver emitter"
     );
 
     database.cleanup().await
@@ -11819,7 +11963,7 @@ async fn sync_ens_v1_unwrapped_authority_backfills_basenames_primary_claim_sourc
 }
 
 #[tokio::test]
-async fn sync_ens_v1_unwrapped_authority_drops_resolver_record_logs_without_current_context()
+async fn sync_ens_v1_unwrapped_authority_retains_match_all_resolver_history_without_current_pointer()
 -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;
     let database = TestDatabase::new().await?;
@@ -11969,15 +12113,18 @@ async fn sync_ens_v1_unwrapped_authority_drops_resolver_record_logs_without_curr
     let summary = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
     assert_eq!(summary.scanned_log_count, 4);
     assert_eq!(summary.matched_log_count, 4);
-    assert_eq!(summary.total_normalized_event_count, 7);
-    assert_eq!(summary.by_kind.get(EVENT_KIND_RECORD_CHANGED), None);
+    assert_eq!(summary.total_normalized_event_count, 9);
+    assert_eq!(
+        summary.by_kind.get(EVENT_KIND_RECORD_CHANGED),
+        Some(&2_usize)
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'RecordChanged'"
         )
         .fetch_one(database.pool())
         .await?,
-        0
+        2
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(

@@ -6,6 +6,8 @@ pub(super) const DERIVATION_KIND_ENS_V2_REGISTRY_RESOURCE_SURFACE: &str =
     "ens_v2_registry_resource_surface";
 pub(super) const RESOLVER_EDGE_KIND: &str = "resolver";
 pub(super) const SUBREGISTRY_EDGE_KIND: &str = "subregistry";
+pub(super) const REGISTRY_ANNOUNCEMENT_EDGE_KIND: &str = "registry_announcement";
+pub(super) const GENERIC_SOURCE_SCOPE_ADDRESS: &str = "*";
 pub(super) const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
 pub(super) const EVENT_KIND_REGISTRATION_GRANTED: &str = "RegistrationGranted";
@@ -22,6 +24,11 @@ pub(super) const EVENT_KIND_TOKEN_REGENERATED: &str = "TokenRegenerated";
 pub(super) const EVENT_KIND_TOKEN_CONTROL_TRANSFERRED: &str = "TokenControlTransferred";
 pub(super) const EVENT_KIND_SURFACE_BOUND: &str = "SurfaceBound";
 pub(super) const EVENT_KIND_SURFACE_UNBOUND: &str = "SurfaceUnbound";
+pub(super) const EVENT_KIND_REGISTRY_CREATED: &str = "RegistryCreated";
+pub(super) const EVENT_KIND_UPGRADED: &str = "Upgraded";
+
+pub(super) const ABI_EVENT_REGISTRY_CREATED_SIGNATURE: &str = "RegistryCreated()";
+pub(super) const ABI_EVENT_UPGRADED_SIGNATURE: &str = "Upgraded(address)";
 
 pub(super) const ABI_EVENT_LABEL_REGISTERED_SIGNATURE: &str =
     "LabelRegistered(uint256,bytes32,string,address,uint64,address)";
@@ -42,7 +49,9 @@ pub(super) const ABI_EVENT_TRANSFER_SINGLE_SIGNATURE: &str =
 pub(super) const ABI_EVENT_TRANSFER_BATCH_SIGNATURE: &str =
     "TransferBatch(address,address,address,uint256[],uint256[])";
 
-pub(super) const ABI_EVENT_SIGNATURES: [&str; 11] = [
+pub(super) const ABI_EVENT_SIGNATURES: [&str; 13] = [
+    ABI_EVENT_REGISTRY_CREATED_SIGNATURE,
+    ABI_EVENT_UPGRADED_SIGNATURE,
     ABI_EVENT_LABEL_REGISTERED_SIGNATURE,
     ABI_EVENT_LABEL_RESERVED_SIGNATURE,
     ABI_EVENT_LABEL_UNREGISTERED_SIGNATURE,

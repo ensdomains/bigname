@@ -22,7 +22,7 @@ pub(super) async fn load_generic_resolver_event_raw_logs(
         .iter()
         .map(|source| source.effective_to_block.unwrap_or(i64::MAX))
         .collect::<Vec<_>>();
-    let topic0s = event_topics.ens_resolver_event_topic0s()?;
+    let topic0s = event_topics.resolver_event_topic0s_for_sources(sources)?;
     let (has_block_range, from_block, to_block) = block_range
         .map(|(from_block, to_block)| (true, from_block, to_block))
         .unwrap_or((false, 0, 0));
@@ -90,23 +90,30 @@ pub(super) async fn load_generic_resolver_event_raw_logs(
         .map(|row| {
             let address = sql_row::get::<String>(&row, "emitting_address")?.to_ascii_lowercase();
             let block_number = sql_row::get(&row, "block_number")?;
-            let source =
-                generic_resolver_event_source_for_block(sources, block_number).with_context(
-                    || {
-                        format!(
-                            "missing generic ENSv1 resolver-event source metadata for chain {chain} block {block_number}"
-                        )
-                    },
-                )?;
+            let topics = sql_row::get::<Vec<String>>(&row, "topics")?;
+            let topic0 = topics.first().context("generic resolver raw log has no topic0")?;
+            let source = generic_resolver_event_source_for_block_and_topic(
+                sources,
+                block_number,
+                topic0,
+                event_topics,
+            )
+            .with_context(|| {
+                format!(
+                    "missing generic resolver-event source metadata for chain {chain} block {block_number} topic {topic0}"
+                )
+            })?;
             authority_raw_log_from_generic_resolver_source(row, address, block_number, source)
         })
         .collect()
 }
 
-fn generic_resolver_event_source_for_block(
-    sources: &[GenericResolverEventSource],
+fn generic_resolver_event_source_for_block_and_topic<'a>(
+    sources: &'a [GenericResolverEventSource],
     block_number: i64,
-) -> Option<&GenericResolverEventSource> {
+    topic0: &str,
+    event_topics: &AuthorityEventTopics,
+) -> Option<&'a GenericResolverEventSource> {
     sources
         .iter()
         .filter(|source| {
@@ -117,7 +124,20 @@ fn generic_resolver_event_source_for_block(
                     .effective_to_block
                     .is_none_or(|to_block| block_number <= to_block)
         })
-        .min_by(|left, right| left.source_manifest_id.cmp(&right.source_manifest_id))
+        .filter(|source| {
+            event_topics
+                .resolver_event_topic0s(&source.source_family)
+                .is_ok_and(|topic0s| {
+                    topic0s
+                        .iter()
+                        .any(|candidate| candidate.eq_ignore_ascii_case(topic0))
+                })
+        })
+        .min_by(|left, right| {
+            left.source_family
+                .cmp(&right.source_family)
+                .then(left.source_manifest_id.cmp(&right.source_manifest_id))
+        })
 }
 
 fn authority_raw_log_from_generic_resolver_source(

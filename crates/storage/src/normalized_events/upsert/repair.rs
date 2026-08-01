@@ -25,6 +25,8 @@ mod ens_v1_renewal;
 mod ens_v1_reverse_resolver_before_state;
 #[path = "repair/ens_v1_same_tx_registration_setup.rs"]
 mod ens_v1_same_tx_registration_setup;
+#[path = "repair/ens_v1_subregistry_owner_discovery.rs"]
+mod ens_v1_subregistry_owner_discovery;
 #[path = "repair/ens_v1_wrapper_token_before_state.rs"]
 mod ens_v1_wrapper_token_before_state;
 #[path = "repair/ens_v2_permission_selector.rs"]
@@ -77,6 +79,10 @@ pub(super) use ens_v1_same_tx_registration_setup::{
     ens_v1_same_tx_registration_setup_before_state_repair_allowed,
     repair_ens_v1_same_tx_registration_setup_before_states,
 };
+pub(super) use ens_v1_subregistry_owner_discovery::{
+    ens_v1_subregistry_owner_discovery_payload_repair_allowed,
+    repair_ens_v1_subregistry_owner_discovery_payloads,
+};
 pub(super) use ens_v1_wrapper_token_before_state::{
     ens_v1_wrapper_token_before_state_repair_allowed, repair_ens_v1_wrapper_token_before_states,
 };
@@ -96,6 +102,9 @@ pub(super) async fn repair_after_state_conflicts(
     events: &[NormalizedEvent],
     existing_by_identity: &HashMap<String, NormalizedEvent>,
 ) -> Result<usize> {
+    let subregistry_owner_discovery =
+        repair_ens_v1_subregistry_owner_discovery_payloads(executor, events, existing_by_identity)
+            .await?;
     let primary_claim_source =
         repair_primary_claim_source_after_states(executor, events, existing_by_identity).await?;
     let resolver_observation_key = repair_ens_v1_registry_resolver_observation_key_after_states(
@@ -157,7 +166,8 @@ pub(super) async fn repair_after_state_conflicts(
     let ens_v2_permission_selector =
         repair_ens_v2_permission_selector_links(executor, events, existing_by_identity).await?;
 
-    Ok(primary_claim_source.len()
+    Ok(subregistry_owner_discovery.len()
+        + primary_claim_source.len()
         + resolver_observation_key.len()
         + authority_epoch_registry_owner.len()
         + authority_epoch_resolver_boundary.len()
@@ -208,7 +218,8 @@ pub(super) fn normalized_event_identity_repair_allowed(
     incoming: &NormalizedEvent,
     differing_fields: &[&'static str],
 ) -> bool {
-    primary_claim_source_after_state_repair_allowed(existing, incoming, differing_fields)
+    ens_v1_subregistry_owner_discovery_payload_repair_allowed(existing, incoming, differing_fields)
+        || primary_claim_source_after_state_repair_allowed(existing, incoming, differing_fields)
         || ens_v1_registry_resolver_observation_key_after_state_repair_allowed(
             existing,
             incoming,

@@ -16,6 +16,14 @@ pub(super) struct ActiveEmitter {
     pub(super) source_rank: i32,
     pub(super) active_from_block_number: Option<i64>,
     pub(super) active_to_block_number: Option<i64>,
+    pub(super) activation_positions: Vec<EmitterActivationPosition>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) struct EmitterActivationPosition {
+    pub(super) block_hash: String,
+    pub(super) transaction_index: i64,
+    pub(super) log_index: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -125,6 +133,13 @@ pub(super) struct ObservationRef {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum RegistryObservation {
+    RegistryCreated {
+        reference: ObservationRef,
+    },
+    Upgraded {
+        implementation: String,
+        reference: ObservationRef,
+    },
     LabelRegistered {
         token_id: String,
         labelhash: String,

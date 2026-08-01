@@ -428,9 +428,10 @@ route inventory or a claim that every protocol transition is covered.
 - `basenames_lifecycle::legacy_reverse_registrar_stays_registry_and_raw_record_only`
   — drives helper `claimForBaseAddr` and `setNameForAddr`; a claim-only ingest
   derives `NewOwner`, while the combined replay retains the latter child
-  assignment and resolver discovery keeps `NewResolver` with no logical name.
-  `NameChanged` remains raw-only; no normalized record, reverse child
-  placeholder, or primary candidate is inferred
+  assignment and the `NewResolver` binding with no logical name. `NewResolver`
+  creates no resolver discovery history or edge. `NameChanged` remains
+  raw-only; no normalized record, reverse child placeholder, or primary
+  candidate is inferred
   (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L158 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L193 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/L2/resolver/NameResolver.sol:L30 @ basenames@1809bbc).
@@ -440,6 +441,29 @@ route inventory or a claim that every protocol transition is covered.
   `registerOnly` retains only the raw token mint and creates no registry node
   (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L237 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L248 @ basenames@1809bbc).
+- `discovery_semantics::ens_v2_prefetched_discovery_and_lifecycle_semantics`
+  — restores interpretation-level role grant/revoke, subregistry swap, and
+  unregister/re-register coverage with all raw blocks and logs supplied before
+  each interpreter pass. It asserts children present/absent across the swap and
+  admits a registry that has a `RegistryCreated` announcement but no parent
+  link. The announcement is declared and emitted by the pinned registry
+  (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@ccaeb58).
+  This scenario deliberately makes no in-session discovered-target fetch or
+  live-checkpoint claim.
+- `discovery_semantics::ens_v1_match_all_resolver_without_pointer_from_prefetched_raw_facts`
+  — writes an ETH address record through a resolver absent from both manifest
+  targets and discovery edges while the name's registry resolver remains zero.
+  Signature-selected interpretation retains both wire events emitted for the
+  ETH update
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L59 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L61 @ ens_v1@91c966f).
+- `discovery_semantics::declared_proxy_upgraded_history_from_prefetched_raw_facts`
+  — preloads the Basenames controller proxy's constructor log and derives one
+  normalized `Upgraded` history event on that contract. ERC-1967 declares the
+  event and the proxy constructor installs the initial implementation
+  (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/interfaces/IERC1967.sol:L13 @ basenames@1809bbc)
+  (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Proxy.sol:L27 @ basenames@1809bbc).
 - `ens_v2_lifecycle::renewal_preserves_promoted_coverage_and_registry_edges_follow` —
   registrar renewal after registry expiry but within the post-audit grace period
   derives both fragments and preserves the promoted

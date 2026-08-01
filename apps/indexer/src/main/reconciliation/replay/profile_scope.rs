@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use anyhow::{Context, Result, bail};
 use bigname_manifests::{
     WatchedSourceSelector, load_historical_watched_contracts_by_chain,
@@ -7,7 +9,7 @@ use bigname_manifests::{
 
 use super::scoped::replay_source_scope_from_requested_scope;
 use crate::{
-    ens_v1_resolver::{SOURCE_FAMILY_ENS_V1_RESOLVER_L1, generic_resolver_record_topic0s},
+    ens_v1_resolver::load_match_all_topic0s_by_source_family,
     reconciliation::types::{
         RawFactNormalizedEventReplayRequest, RawFactNormalizedEventReplaySelection,
         RawFactNormalizedEventReplaySourceScope,
@@ -16,9 +18,9 @@ use crate::{
 };
 
 #[derive(Debug, Default, Eq, PartialEq)]
-pub(super) struct ReplayAdapterSourceScopes {
-    pub(super) execution: Vec<(String, String, i64, i64)>,
-    pub(super) closure_validation: Vec<(String, String, i64, i64)>,
+pub(crate) struct ReplayAdapterSourceScopes {
+    pub(crate) execution: Vec<(String, String, i64, i64)>,
+    pub(crate) closure_validation: Vec<(String, String, i64, i64)>,
 }
 
 pub(super) async fn ensure_replay_matches_deployment_profile_scope(
@@ -61,7 +63,7 @@ pub(super) async fn ensure_replay_matches_deployment_profile_scope(
     Ok(())
 }
 
-pub(super) async fn load_replay_adapter_source_scopes(
+pub(crate) async fn load_replay_adapter_source_scopes(
     pool: &sqlx::PgPool,
     request: &RawFactNormalizedEventReplayRequest,
     range: Option<(i64, i64)>,
@@ -108,20 +110,14 @@ pub(super) async fn load_replay_adapter_source_scopes(
                 })?
         }
     };
-    let include_generic_resolver_scope =
-        active_ens_v1_resolver_manifest_exists(pool, &request.chain).await?
-            && selected_replay_includes_generic_resolver_logs(
-                pool,
-                &request.chain,
-                &request.selection,
-            )
-            .await?;
+    let match_all_source_families =
+        selected_replay_match_all_source_families(pool, &request.chain, &request.selection).await?;
     let execution = SourceScope::from_watched_contracts(
         &watched_contracts,
         &request.chain,
         from_block,
         to_block,
-        include_generic_resolver_scope,
+        &match_all_source_families,
     );
     let closure_validation = match &request.selection {
         RawFactNormalizedEventReplaySelection::BlockRange { .. } => {
@@ -129,7 +125,7 @@ pub(super) async fn load_replay_adapter_source_scopes(
                 &watched_contracts,
                 &request.chain,
                 to_block,
-                include_generic_resolver_scope,
+                &match_all_source_families,
             )
         }
         RawFactNormalizedEventReplaySelection::BlockHashes(_)
@@ -142,153 +138,150 @@ pub(super) async fn load_replay_adapter_source_scopes(
     })
 }
 
-async fn selected_replay_includes_generic_resolver_logs(
+async fn selected_replay_match_all_source_families(
     pool: &sqlx::PgPool,
     chain: &str,
     selection: &RawFactNormalizedEventReplaySelection,
-) -> Result<bool> {
-    let topic0s = generic_resolver_record_topic0s()
+) -> Result<BTreeSet<String>> {
+    let topic0s_by_source_family = load_match_all_topic0s_by_source_family(pool, chain).await?;
+    let candidate_topic0s = topic0s_by_source_family
+        .values()
+        .flatten()
+        .cloned()
+        .collect::<BTreeSet<_>>()
         .into_iter()
-        .map(|topic0| topic0.to_ascii_lowercase())
         .collect::<Vec<_>>();
-    match selection {
+    if candidate_topic0s.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+
+    let selected_topic0s = match selection {
         RawFactNormalizedEventReplaySelection::BlockRange {
             from_block,
             to_block,
         } => {
-            selected_range_includes_generic_resolver_logs(
+            selected_range_match_all_topic0s(
                 pool,
                 chain,
                 *from_block,
                 *to_block,
-                &topic0s,
+                &candidate_topic0s,
             )
             .await
         }
         RawFactNormalizedEventReplaySelection::BlockHashes(block_hashes) => {
-            selected_block_hashes_include_generic_resolver_logs(pool, chain, block_hashes, &topic0s)
+            selected_block_hashes_match_all_topic0s(pool, chain, block_hashes, &candidate_topic0s)
                 .await
         }
-        RawFactNormalizedEventReplaySelection::ScopedBlockRange { .. } => Ok(false),
-    }
+        RawFactNormalizedEventReplaySelection::ScopedBlockRange { .. } => Ok(BTreeSet::new()),
+    }?;
+
+    Ok(topic0s_by_source_family
+        .into_iter()
+        .filter_map(|(source_family, topic0s)| {
+            topic0s
+                .iter()
+                .any(|topic0| selected_topic0s.contains(topic0))
+                .then_some(source_family)
+        })
+        .collect())
 }
 
-async fn selected_range_includes_generic_resolver_logs(
+async fn selected_range_match_all_topic0s(
     pool: &sqlx::PgPool,
     chain: &str,
     from_block: i64,
     to_block: i64,
     topic0s: &[String],
-) -> Result<bool> {
-    sqlx::query_scalar::<_, bool>(
+) -> Result<BTreeSet<String>> {
+    let selected = sqlx::query_scalar::<_, String>(
         r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM raw_logs AS logs
-            JOIN chain_lineage AS lineage
-              ON lineage.chain_id = logs.chain_id
-             AND lineage.block_hash = logs.block_hash
-            WHERE logs.chain_id = $1
-              AND logs.block_number >= $2
-              AND logs.block_number <= $3
-              AND LOWER(logs.topics[1]) = ANY($4::TEXT[])
-              AND lineage.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
-              AND logs.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
-        )
+        SELECT DISTINCT LOWER(logs.topics[1])
+        FROM raw_logs AS logs
+        JOIN chain_lineage AS lineage
+          ON lineage.chain_id = logs.chain_id
+         AND lineage.block_hash = logs.block_hash
+        WHERE logs.chain_id = $1
+          AND logs.block_number >= $2
+          AND logs.block_number <= $3
+          AND LOWER(logs.topics[1]) = ANY($4::TEXT[])
+          AND lineage.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND logs.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+        ORDER BY 1
         "#,
     )
     .bind(chain)
     .bind(from_block)
     .bind(to_block)
     .bind(topic0s)
-    .fetch_one(pool)
+    .fetch_all(pool)
     .await
     .with_context(|| {
         format!(
-            "failed to check generic ENSv1 resolver replay logs for chain {chain} range {from_block}..={to_block}"
+            "failed to load selected match-all replay topics for chain {chain} range {from_block}..={to_block}"
         )
-    })
+    })?;
+    Ok(selected.into_iter().collect())
 }
 
-async fn selected_block_hashes_include_generic_resolver_logs(
+async fn selected_block_hashes_match_all_topic0s(
     pool: &sqlx::PgPool,
     chain: &str,
     block_hashes: &[String],
     topic0s: &[String],
-) -> Result<bool> {
+) -> Result<BTreeSet<String>> {
     if block_hashes.is_empty() {
-        return Ok(false);
+        return Ok(BTreeSet::new());
     }
 
-    sqlx::query_scalar::<_, bool>(
+    let selected = sqlx::query_scalar::<_, String>(
         r#"
         WITH selected_blocks AS (
             SELECT DISTINCT block_hash
             FROM UNNEST($2::TEXT[]) AS selected(block_hash)
         )
-        SELECT EXISTS (
-            SELECT 1
-            FROM selected_blocks selected
-            JOIN raw_logs AS logs
-              ON logs.chain_id = $1
-             AND logs.block_hash = selected.block_hash
-            JOIN chain_lineage AS lineage
-              ON lineage.chain_id = logs.chain_id
-             AND lineage.block_hash = logs.block_hash
-            WHERE LOWER(logs.topics[1]) = ANY($3::TEXT[])
-              AND lineage.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
-              AND logs.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
-        )
+        SELECT DISTINCT LOWER(logs.topics[1])
+        FROM selected_blocks selected
+        JOIN raw_logs AS logs
+          ON logs.chain_id = $1
+         AND logs.block_hash = selected.block_hash
+        JOIN chain_lineage AS lineage
+          ON lineage.chain_id = logs.chain_id
+         AND lineage.block_hash = logs.block_hash
+        WHERE LOWER(logs.topics[1]) = ANY($3::TEXT[])
+          AND lineage.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND logs.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+        ORDER BY 1
         "#,
     )
     .bind(chain)
     .bind(block_hashes)
     .bind(topic0s)
-    .fetch_one(pool)
+    .fetch_all(pool)
     .await
     .with_context(|| {
         format!(
-            "failed to check generic ENSv1 resolver replay logs for chain {chain} across {} blocks",
+            "failed to load selected match-all replay topics for chain {chain} across {} blocks",
             block_hashes.len()
         )
-    })
-}
-
-async fn active_ens_v1_resolver_manifest_exists(pool: &sqlx::PgPool, chain: &str) -> Result<bool> {
-    sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM manifest_versions
-            WHERE chain = $1
-              AND source_family = $2
-              AND rollout_status = 'active'::manifest_rollout_status
-        )
-        "#,
-    )
-    .bind(chain)
-    .bind(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
-    .fetch_one(pool)
-    .await
-    .with_context(|| {
-        format!("failed to check active ENSv1 resolver manifest for replay on chain {chain}")
-    })
+    })?;
+    Ok(selected.into_iter().collect())
 }
 
 fn replay_selection_source_scope(

@@ -8,6 +8,7 @@ pub(super) const EVENT_KIND_PREIMAGE_OBSERVED: &str = "PreimageObserved";
 pub(super) const EVENT_KIND_ALIAS_CHANGED: &str = "AliasChanged";
 pub(super) const EVENT_KIND_RECORD_CHANGED: &str = "RecordChanged";
 pub(super) const EVENT_KIND_RECORD_VERSION_CHANGED: &str = "RecordVersionChanged";
+pub(super) const EVENT_KIND_UPGRADED: &str = "Upgraded";
 
 pub(super) const ABI_EVENT_ADDRESS_CHANGED_SIGNATURE: &str =
     "AddressChanged(bytes32,uint256,bytes)";
@@ -23,8 +24,10 @@ pub(super) const ABI_EVENT_NAMED_TEXT_RESOURCE_SIGNATURE: &str =
     "NamedTextResource(uint256,bytes,bytes32,string)";
 pub(super) const ABI_EVENT_NAMED_ADDR_RESOURCE_SIGNATURE: &str =
     "NamedAddrResource(uint256,bytes,uint256)";
+pub(super) const ABI_EVENT_UPGRADED_SIGNATURE: &str = "Upgraded(address)";
 
-pub(super) const ABI_EVENT_SIGNATURES: [&str; 9] = [
+pub(super) const ABI_EVENT_SIGNATURES: [&str; 10] = [
+    ABI_EVENT_UPGRADED_SIGNATURE,
     ABI_EVENT_ADDRESS_CHANGED_SIGNATURE,
     ABI_EVENT_TEXT_CHANGED_SIGNATURE,
     ABI_EVENT_CONTENTHASH_CHANGED_SIGNATURE,

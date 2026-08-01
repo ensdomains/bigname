@@ -245,7 +245,7 @@ async fn load_watched_contract_summary_rebuilds_counts_from_storage() -> Result<
     insert_active_discovery_edge(
         database.pool(),
         "ethereum-mainnet",
-        "subregistry",
+        "registry_announcement",
         contract_contract_instance_id,
         discovered_contract_instance_id,
         Some(1),
@@ -2701,6 +2701,23 @@ fn rpc_ens_v2_subregistry_updated_log_payload(
                 "0x0000000000000000000000000000000000000dad"
             )),
         ],
+        "data": "0x"
+    })
+}
+
+fn rpc_ens_v2_registry_created_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    log_index: u64,
+) -> Value {
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [keccak256_hex(b"RegistryCreated()")],
         "data": "0x"
     })
 }

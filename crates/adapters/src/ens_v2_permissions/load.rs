@@ -328,7 +328,7 @@ async fn load_registry_discovery_log_boundaries(
           ON cia.contract_instance_id = de.to_contract_instance_id
          AND cia.chain_id = de.chain_id
         WHERE de.chain_id = $1
-          AND de.edge_kind = 'subregistry'
+          AND de.edge_kind = 'registry_announcement'
           AND (de.deactivated_at IS NULL OR de.active_to_block_number IS NOT NULL)
           AND (
               cia.deactivated_at IS NULL

@@ -95,3 +95,15 @@ normalized_events = ["RecordChanged", "PermissionChanged"]
 name = "EACRolesChanged"
 fragment = "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)"
 normalized_events = ["PermissionChanged"]
+
+# ERC-1967 implementation history for registry-discovered PermissionedResolver
+# proxies. The resolver inherits UUPS and its pinned deployment ABI exposes
+# Upgraded(address):
+# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L22 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L89 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/PermissionedResolverImpl.json:L627 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/PermissionedResolverImpl.json:L637 @ ens_v2@ccaeb58).
+[[abi.events]]
+name = "Upgraded"
+fragment = "event Upgraded(address indexed implementation)"
+normalized_events = ["Upgraded"]

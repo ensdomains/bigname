@@ -2833,6 +2833,76 @@ async fn normalized_event_upsert_rejects_identity_mismatch() -> Result<()> {
 }
 
 #[tokio::test]
+async fn normalized_event_upsert_accepts_rehomed_subregistry_event() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let identity = "ens_v1_subregistry_changed:1:0xblock:0xtx:7:0xregistry";
+    let mut old = subregistry_reconcile_event(identity);
+    old.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "ethereum-mainnet",
+        "block_hash": "0xblock",
+        "block_number": 1,
+        "transaction_hash": "0xtx",
+        "transaction_index": 0,
+        "log_index": 7,
+        "emitting_address": "0xregistry",
+        "topic0": "0xtopic0",
+        "topic1": "0xparent",
+        "topic2": "0xlabel",
+        "data_hex": "0xowner",
+    });
+    old.after_state = json!({
+        "source_event": "NewOwner",
+        "discovery_source": "ens_v1_registry_subregistry",
+        "edge_kind": "subregistry",
+        "observation_key": "0xchild",
+        "parent_node": "0xparent",
+        "labelhash": "0xlabel",
+        "child_node": "0xchild",
+        "emitting_address": "0xregistry",
+        "owner": "0xowner",
+        "tombstone": false,
+        "from_contract_instance_id": "00000000-0000-0000-0000-000000000001",
+        "to_contract_instance_id": "00000000-0000-0000-0000-000000000002",
+        "active_edge": true,
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&old)).await?;
+
+    let mut rehomed = old.clone();
+    rehomed.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "ethereum-mainnet",
+        "block_hash": "0xblock",
+        "block_number": 1,
+        "transaction_hash": "0xtx",
+        "transaction_index": 0,
+        "log_index": 7,
+        "emitting_address": "0xregistry",
+    });
+    rehomed.after_state = json!({
+        "source_event": "NewOwner",
+        "parent_node": "0xparent",
+        "labelhash": "0xlabel",
+        "child_node": "0xchild",
+        "owner": "0xowner",
+        "emitting_address": "0xregistry",
+        "tombstone": false,
+        "active_edge": true,
+    });
+
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&rehomed)).await?;
+    let repaired = sqlx::query_as::<_, (serde_json::Value, serde_json::Value)>(
+        "SELECT raw_fact_ref, after_state FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(repaired, (rehomed.raw_fact_ref, rehomed.after_state));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn normalized_event_upsert_repairs_ens_v2_registration_link_time_expiry() -> Result<()> {
     let database = TestDatabase::new().await?;
     let stale = ens_v2_registration_grant_event(2_000_000_000);

@@ -13,7 +13,7 @@ use crate::{
 use super::super::{
     canonical::ChainCoverageFrontiers,
     payload::{
-        SelectedAddressSet, provider_code_observation_to_raw_code_hash,
+        SelectedAddressSet, keccak256_hex, provider_code_observation_to_raw_code_hash,
         raw_code_hash_candidate_hashes, raw_payload_candidate_hashes,
     },
     types::{CanonicalReconciliation, CanonicalReconciliationStatus, HeadChangeSet},
@@ -23,6 +23,9 @@ use super::load_live_generic_resolver_topic0s;
 #[path = "code_hashes/config.rs"]
 mod config;
 use config::*;
+#[path = "code_hashes/candidates.rs"]
+mod candidates;
+use candidates::load_code_observation_candidates_by_block_hashes;
 
 /// Provider-fetch chunk size; successful rounds persist before the sweep advances.
 const RAW_CODE_BASELINE_FETCH_CHUNK_ADDRESSES: usize = 256;
@@ -137,11 +140,12 @@ async fn persist_reconciled_raw_code_hashes_inner(
     let mut loaded_emitters_by_block_hash = BTreeMap::new();
     for block_page in candidate_hashes.chunks(LIVE_CODE_OBSERVATION_PROGRESS_BLOCKS) {
         loaded_emitters_by_block_hash.extend(
-            load_raw_log_emitter_addresses_by_block_hashes(
+            load_code_observation_candidates_by_block_hashes(
                 pool,
                 &task.chain,
                 block_page,
                 &generic_resolver_topic0s,
+                &keccak256_hex(b"NewResolver(bytes32,address)"),
             )
             .await?,
         );
@@ -265,7 +269,6 @@ async fn persist_reconciled_raw_code_hashes_inner(
         upsert_raw_code_hashes(pool, chunk).await?;
         record_progress(pool, progress).await?;
     }
-
     let canonical_baseline_block = canonical.canonical.as_ref().and_then(|canonical_head| {
         raw_blocks
             .iter()
@@ -398,62 +401,6 @@ async fn record_progress(
         progress.record(pool).await?;
     }
     Ok(())
-}
-
-async fn load_raw_log_emitter_addresses_by_block_hashes(
-    pool: &sqlx::PgPool,
-    chain: &str,
-    block_hashes: &[String],
-    generic_resolver_topic0s: &[String],
-) -> Result<BTreeMap<String, BTreeMap<String, bool>>> {
-    if block_hashes.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            block_hash,
-            LOWER(emitting_address) AS emitting_address,
-            BOOL_OR(LOWER(topics[1]) = ANY($3::TEXT[])) AS topic0_selected
-        FROM raw_logs
-        WHERE chain_id = $1
-          AND block_hash = ANY($2::TEXT[])
-        GROUP BY block_hash, LOWER(emitting_address)
-        ORDER BY block_hash, LOWER(emitting_address)
-        "#,
-    )
-    .bind(chain)
-    .bind(block_hashes)
-    .bind(generic_resolver_topic0s)
-    .fetch_all(pool)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to load raw-log code observation emitters for chain {chain} across {} blocks",
-            block_hashes.len()
-        )
-    })?;
-
-    let mut addresses_by_block_hash = BTreeMap::<String, BTreeMap<String, bool>>::new();
-    for row in rows {
-        let block_hash = row
-            .try_get::<String, _>("block_hash")
-            .context("missing block_hash from raw-log emitter row")?;
-        let emitting_address = row
-            .try_get::<String, _>("emitting_address")
-            .context("missing emitting_address from raw-log emitter row")?;
-        let topic0_selected = row
-            .try_get::<Option<bool>, _>("topic0_selected")
-            .context("missing topic0_selected from raw-log emitter row")?
-            .unwrap_or(false);
-        addresses_by_block_hash
-            .entry(block_hash)
-            .or_default()
-            .insert(emitting_address, topic0_selected);
-    }
-
-    Ok(addresses_by_block_hash)
 }
 
 async fn load_raw_code_addresses_by_block_hashes(

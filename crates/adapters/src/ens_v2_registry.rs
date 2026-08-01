@@ -9,6 +9,7 @@ use bigname_storage::{
 use sqlx::PgPool;
 use sqlx::types::Uuid;
 
+mod announcements;
 mod constants;
 mod decode;
 mod discovery;
@@ -28,6 +29,7 @@ use crate::{
     adapter_manifest::load_required_active_manifest_event_topic0s_by_signature,
     normalized_event_support::count_events_by_kind,
 };
+use announcements::load_registry_announcement_observations;
 use constants::*;
 use decode::build_registry_observations;
 use discovery::{latest_discovery_observations, reconcile_discovery_observation_history_for_chain};
@@ -141,12 +143,51 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
             replay_state,
         ));
     }
-    let scoped_emitter_identities = source_scope.as_ref().map(|source_scope| {
-        source_scope
+    let scoped_emitter_identities = source_scope.as_ref().and_then(|source_scope| {
+        (!source_scope
             .iter()
-            .map(|target| (target.source_family.clone(), target.address.clone()))
-            .collect::<HashSet<_>>()
+            .any(emitters::is_generic_registry_scope_target))
+        .then(|| {
+            source_scope
+                .iter()
+                .map(|target| (target.source_family.clone(), target.address.clone()))
+                .collect::<HashSet<_>>()
+        })
     });
+
+    let announcement_observations = load_registry_announcement_observations(
+        pool,
+        chain,
+        restrict_to_block_hashes,
+        block_hashes,
+        source_scope.as_deref(),
+        canonicality_filter,
+        max_block_number,
+    )
+    .await?;
+    let latest_announcement_observations =
+        latest_discovery_observations(announcement_observations.clone())?;
+    let announcement_reconciliation = reconcile_discovery_observation_history_for_chain(
+        pool,
+        chain,
+        &announcement_observations,
+        false,
+        max_block_number,
+        expected_discovery_admission_epoch,
+    )
+    .await
+    .with_context(|| format!("failed to reconcile ENSv2 registry announcements for {chain}"))?;
+    let expected_discovery_admission_epoch = expected_discovery_admission_epoch
+        .map(|epoch| {
+            i64::try_from(announcement_reconciliation.admission_epoch_bump_count)
+                .context("ENSv2 registry-announcement epoch bump count exceeds i64")
+                .and_then(|bumps| {
+                    epoch
+                        .checked_add(bumps)
+                        .context("ENSv2 discovery admission epoch overflow")
+                })
+        })
+        .transpose()?;
 
     let active_emitters = load_active_emitters(
         pool,
@@ -303,13 +344,19 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
         total_normalized_event_inserted_count: normalized_event_inserted_count,
         active_discovery_observation_count: latest_observations
             .iter()
+            .chain(latest_announcement_observations.iter())
             .filter(|observation| normalize_address(&observation.to_address) != ZERO_ADDRESS)
             .count(),
-        active_edge_count: reconciliation.active_edge_count,
-        admitted_edge_count: reconciliation.admitted_edge_count,
-        inserted_edge_count: reconciliation.inserted_edge_count,
-        deactivated_edge_count: reconciliation.deactivated_edge_count,
-        discovery_admission_epoch_bump_count: reconciliation.admission_epoch_bump_count,
+        active_edge_count: reconciliation.active_edge_count
+            + announcement_reconciliation.active_edge_count,
+        admitted_edge_count: reconciliation.admitted_edge_count
+            + announcement_reconciliation.admitted_edge_count,
+        inserted_edge_count: reconciliation.inserted_edge_count
+            + announcement_reconciliation.inserted_edge_count,
+        deactivated_edge_count: reconciliation.deactivated_edge_count
+            + announcement_reconciliation.deactivated_edge_count,
+        discovery_admission_epoch_bump_count: reconciliation.admission_epoch_bump_count
+            + announcement_reconciliation.admission_epoch_bump_count,
         by_kind,
     };
     Ok((summary, replay_state))

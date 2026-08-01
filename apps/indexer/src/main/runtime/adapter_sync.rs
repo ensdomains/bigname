@@ -16,10 +16,9 @@ use crate::{
 };
 
 use super::logging::{
-    log_ens_v1_reverse_claim_sync_summary, log_ens_v1_subregistry_discovery_sync_summary,
-    log_ens_v1_unwrapped_authority_sync_summary, log_ens_v2_permissions_sync_summary,
-    log_ens_v2_registrar_sync_summary, log_ens_v2_registry_resource_surface_sync_summary,
-    log_ens_v2_resolver_sync_summary,
+    log_ens_v1_reverse_claim_sync_summary, log_ens_v1_unwrapped_authority_sync_summary,
+    log_ens_v2_permissions_sync_summary, log_ens_v2_registrar_sync_summary,
+    log_ens_v2_registry_resource_surface_sync_summary, log_ens_v2_resolver_sync_summary,
 };
 
 #[path = "adapter_sync/discovery.rs"]
@@ -101,23 +100,6 @@ async fn sync_adapter_owned_raw_log_state_inner(
             )
         })?;
         log_ens_v1_reverse_claim_sync_summary(&chain.chain, &summary);
-        record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
-
-        let summary = await_full_source_adapter_with_optional_heartbeat(
-            pool,
-            &chain.chain,
-            &mut startup_heartbeat,
-            heartbeat_while_waiting,
-            bigname_adapters::sync_ens_v1_subregistry_discovery(pool, &chain.chain),
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "failed to sync ENSv1 registry discovery from stored raw logs for chain {}",
-                chain.chain
-            )
-        })?;
-        log_ens_v1_subregistry_discovery_sync_summary(&chain.chain, &summary);
         record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
 
         let summary = await_full_source_adapter_with_optional_heartbeat(

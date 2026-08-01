@@ -345,20 +345,16 @@ async fn build_row_from_events(
         .rposition(|event| event.event_kind == EVENT_KIND_RESOLVER_CHANGED);
     let latest_resolver_event = latest_resolver_index.and_then(|index| events.get(index));
     if latest_resolver_event.is_none()
-        && events.iter().any(|event| {
-            resolver_local_source_family(&event.source_family)
-                == Some(SOURCE_FAMILY_ENS_V2_RESOLVER_L1)
-        })
+        && events
+            .iter()
+            .any(|event| resolver_local_source_family(&event.source_family).is_some())
     {
         return Ok(None);
     }
-    let resolver_scope_boundary_event =
-        resolver_scope_boundary_event(events, latest_resolver_index);
     let latest_resolver_record_statuses = latest_resolver_event
         .and_then(|resolver_event| profile_gate.current_record_family_statuses(resolver_event));
 
-    let record_scope_index =
-        record_scope_boundary_index(events, latest_resolver_event, resolver_scope_boundary_event);
+    let record_scope_index = record_scope_boundary_index(events, latest_resolver_event);
     let topology_boundary_index = record_scope_index.or(latest_resolver_index);
     let scoped_events = &events[record_scope_index.unwrap_or(0)..];
     let boundary_anchor = match topology_boundary_index {
@@ -380,11 +376,7 @@ async fn build_row_from_events(
         .iter()
         .filter(|event| {
             event.event_kind == EVENT_KIND_RECORD_CHANGED
-                && resolver_local_event_in_current_scope(
-                    event,
-                    latest_resolver_event,
-                    resolver_scope_boundary_event,
-                )
+                && resolver_local_event_in_current_scope(event, latest_resolver_event)
                 && profile_gate.allows_event_for_current_resolver(event, latest_resolver_event)
         })
         .collect::<Vec<_>>();
@@ -408,12 +400,8 @@ async fn build_row_from_events(
         .filter(|event| {
             event.event_kind == EVENT_KIND_RESOLVER_CHANGED
                 || resolver_local_source_family(&event.source_family).is_none()
-                || (resolver_local_event_in_current_scope(
-                    event,
-                    latest_resolver_event,
-                    resolver_scope_boundary_event,
-                ) && profile_gate
-                    .allows_event_for_current_resolver(event, latest_resolver_event))
+                || (resolver_local_event_in_current_scope(event, latest_resolver_event)
+                    && profile_gate.allows_event_for_current_resolver(event, latest_resolver_event))
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -488,7 +476,6 @@ async fn build_row_from_events(
 fn record_scope_boundary_index(
     events: &[RelevantEvent],
     latest_resolver_event: Option<&RelevantEvent>,
-    resolver_scope_boundary_event: Option<&RelevantEvent>,
 ) -> Option<usize> {
     events.iter().rposition(|event| {
         if event.event_kind != EVENT_KIND_RECORD_VERSION_CHANGED {
@@ -497,14 +484,9 @@ fn record_scope_boundary_index(
 
         match latest_resolver_event {
             Some(current_resolver_event) => {
-                event_sort_key(event) >= event_sort_key(current_resolver_event)
-                    && resolver_local_event_in_current_scope(
-                        event,
-                        Some(current_resolver_event),
-                        resolver_scope_boundary_event,
-                    )
+                resolver_local_event_in_current_scope(event, Some(current_resolver_event))
             }
-            None => true,
+            None => resolver_local_event_in_current_scope(event, None),
         }
     })
 }
@@ -512,13 +494,12 @@ fn record_scope_boundary_index(
 fn resolver_local_event_in_current_scope(
     event: &RelevantEvent,
     latest_resolver_event: Option<&RelevantEvent>,
-    resolver_scope_boundary_event: Option<&RelevantEvent>,
 ) -> bool {
     let Some(event_source_family) = resolver_local_source_family(&event.source_family) else {
         return true;
     };
     let Some(current_resolver_event) = latest_resolver_event else {
-        return true;
+        return false;
     };
     if resolver_source_family_for_resolver_event(&current_resolver_event.source_family)
         != Some(event_source_family)
@@ -527,72 +508,9 @@ fn resolver_local_event_in_current_scope(
         return false;
     }
 
-    if let Some(scope_boundary_event) = resolver_scope_boundary_event
-        && event_sort_key(event) < event_sort_key(scope_boundary_event)
-    {
-        return false;
-    }
-
     let Some(emitting_address) = event.emitting_address.as_deref() else {
-        return event_sort_key(event) >= event_sort_key(current_resolver_event);
+        return false;
     };
     resolver_address_from_event(current_resolver_event)
         .is_some_and(|resolver_address| normalize_evm_address(emitting_address) == resolver_address)
-}
-
-fn resolver_scope_boundary_event(
-    events: &[RelevantEvent],
-    latest_resolver_index: Option<usize>,
-) -> Option<&RelevantEvent> {
-    let latest_resolver_index = latest_resolver_index?;
-    let latest_resolver_event = events.get(latest_resolver_index)?;
-    let latest_source_family =
-        resolver_source_family_for_resolver_event(&latest_resolver_event.source_family)?;
-    let latest_resolver_address = resolver_address_from_event(latest_resolver_event)?;
-    if latest_resolver_address == "0x0000000000000000000000000000000000000000" {
-        return Some(latest_resolver_event);
-    }
-
-    let mut scope_start_index = latest_resolver_index;
-    let mut follows_different_resolver = false;
-    for (event_index, event) in events[..latest_resolver_index].iter().enumerate().rev() {
-        if event.event_kind != EVENT_KIND_RESOLVER_CHANGED {
-            continue;
-        }
-        if resolver_event_targets_current_resolver(
-            event,
-            latest_source_family,
-            &latest_resolver_event.chain_id,
-            &latest_resolver_address,
-        ) {
-            scope_start_index = event_index;
-        } else {
-            follows_different_resolver = true;
-            break;
-        }
-    }
-
-    follows_different_resolver
-        .then(|| events.get(scope_start_index))
-        .flatten()
-}
-
-fn resolver_event_targets_current_resolver(
-    event: &RelevantEvent,
-    current_source_family: &str,
-    current_chain_id: &str,
-    current_resolver_address: &str,
-) -> bool {
-    event.chain_id == current_chain_id
-        && resolver_source_family_for_resolver_event(&event.source_family)
-            == Some(current_source_family)
-        && resolver_address_from_event(event).as_deref() == Some(current_resolver_address)
-}
-
-fn event_sort_key(event: &RelevantEvent) -> (i64, i64, i64) {
-    (
-        event.block_number,
-        event.log_index.unwrap_or(i64::MIN),
-        event.normalized_event_id,
-    )
 }

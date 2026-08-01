@@ -64,7 +64,9 @@ impl ResolverProfileGate {
             })
             .map(|admission| {
                 let normalized_address = normalize_resolver_address(&admission.address);
-                if admission.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1 {
+                if admission.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+                    && admission.status == RESOLVER_PROFILE_STATUS_SUPPORTED
+                {
                     binding_enumeration_skipped_targets
                         .insert((admission.chain.clone(), normalized_address.clone()));
                 }

@@ -51,6 +51,9 @@ pub(super) struct PreimageObservation {
 }
 
 pub(super) enum ResolverObservation {
+    Upgraded {
+        implementation: String,
+    },
     AddressChanged {
         node: String,
         coin_type: String,

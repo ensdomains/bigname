@@ -4681,8 +4681,8 @@ async fn source_scoped_backfill_enforces_selected_target_effective_ranges_during
 }
 
 #[tokio::test]
-async fn source_scoped_backfill_ensv1_registry_syncs_current_and_old_targets_safely() -> Result<()>
-{
+async fn source_scoped_backfill_retains_ensv1_registry_raw_targets_without_owner_discovery()
+-> Result<()> {
     let database = TestDatabase::new().await?;
     create_backfill_job_tables(database.pool()).await?;
     let registry_contract_instance_id = Uuid::from_u128(1_301);
@@ -4874,36 +4874,36 @@ async fn source_scoped_backfill_ensv1_registry_syncs_current_and_old_targets_saf
         ]
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM normalized_events")
+        sqlx::query_scalar::<_, Vec<String>>(
+            r#"
+            SELECT COALESCE(
+                ARRAY_AGG(event_kind ORDER BY block_number, log_index),
+                ARRAY[]::TEXT[]
+            )
+            FROM normalized_events
+            "#,
+        )
+        .fetch_one(database.pool())
+        .await?,
+        vec![
+            "SubregistryChanged".to_owned(),
+            "SubregistryChanged".to_owned(),
+        ],
+        "owner assignments retain child history without becoming registry discovery"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM discovery_edges")
             .fetch_one(database.pool())
             .await?,
-        1
+        0,
+        "NewOwner must not create discovery edges"
     );
     assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            r#"
-            SELECT raw_fact_ref->>'emitting_address'
-            FROM normalized_events
-            WHERE event_kind = 'SubregistryChanged'
-              AND derivation_kind = 'ens_v1_subregistry_changed'
-            "#
-        )
-        .fetch_one(database.pool())
-        .await?,
-        registry_address.to_owned()
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            r#"
-            SELECT after_state->>'owner'
-            FROM normalized_events
-            WHERE event_kind = 'SubregistryChanged'
-              AND derivation_kind = 'ens_v1_subregistry_changed'
-            "#
-        )
-        .fetch_one(database.pool())
-        .await?,
-        "0x0000000000000000000000000000000000000002".to_owned()
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM contract_instances")
+            .fetch_one(database.pool())
+            .await?,
+        2,
+        "NewOwner must not admit owner addresses as contract instances"
     );
 
     server.abort();

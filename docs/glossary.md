@@ -153,11 +153,19 @@ name kept because it is a stored identifier: that pipeline derives ownership
 and control for ENSv1 and Basenames names alike, whether the name is registry-,
 registrar-, or NameWrapper-held.
 
-**Discovery graph / discovery edge** — the time-versioned reachability graph
-(resolver, subregistry, parent, alias, metadata, proxy/implementation,
-migration, transport edges) that extends authority beyond directly declared
-contracts. A discovered contract is authoritative only while reachable from an
-active root.
+**Discovery graph / discovery edge** — the time-versioned indexability and
+relationship graph (resolver, registry announcement, subregistry, parent,
+alias, metadata, proxy/implementation, migration, transport edges) that extends
+the manifest-declared contract graph. An edge's kind decides whether it admits
+an emitter or only records topology. In particular, a registry announcement
+admits an ENSv2 registry independently of parent reachability, while a
+subregistry edge records parent-child reachability without admitting its target.
+
+**Registry announcement edge** (`registry_announcement`) — an ENSv2 discovery
+edge created when a contract emits `RegistryCreated()`. It makes the emitting
+registry indexable from that event position. It does not assert parent-child
+reachability or attach the registry to a name. `SubregistryUpdated` supplies
+that separate relationship. (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@ccaeb58)
 
 **Event-silent** — a contract that changes relevant state without emitting a
 usable event (for example a legacy reverse resolver whose `name` value changes
@@ -356,6 +364,7 @@ proving all layers connect. In this repo it names the first e2e scenario
 
 **Watch plan / watched tuple** — the materialized set of
 (source family, address, active block range) targets derived from manifest
-roots plus active discovery edges. A *watched tuple* is one such entry; its
-*watched window* is the active block range. Addresses are derived watch
-targets, never the durable identity.
+declarations plus indexability-producing discovery edges. Topology-only edges,
+including ENSv2 subregistry edges, do not add targets. A *watched tuple* is one
+such entry; its *watched window* is the active block range. Addresses are
+derived watch targets, never the durable identity.

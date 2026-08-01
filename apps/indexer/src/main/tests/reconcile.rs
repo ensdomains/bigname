@@ -588,6 +588,249 @@ async fn reconcile_fetched_heads_live_tip_retains_unlisted_generic_ensv1_resolve
 }
 
 #[tokio::test]
+async fn live_code_observation_includes_identityless_resolver_pointers() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let registry_address = "0x00000000000000000000000000000000000000a1";
+    let resolver_address = "0x00000000000000000000000000000000000000b1";
+    let basenames_resolver_address = "0x00000000000000000000000000000000000000c1";
+    let registry_contract_instance_id = Uuid::from_u128(41);
+    let canonical_head = provider_block(
+        "0xabababababababababababababababababababababababababababababababab",
+        None,
+        42,
+    );
+    let task = IntakeChainTask {
+        chain: chain.to_owned(),
+        addresses: vec![registry_address.to_owned()],
+        manifest_root_entry_count: 1,
+        manifest_contract_entry_count: 0,
+        discovery_edge_entry_count: 0,
+        checkpoint: ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(canonical_head.block_hash.clone()),
+            canonical_block_number: Some(canonical_head.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_versions (
+            manifest_id,
+            manifest_version,
+            chain,
+            source_family,
+            rollout_status
+        )
+        VALUES
+            (1, 1, $1, 'ens_v1_registry_l1', 'deprecated'),
+            (2, 2, $1, 'ens_v1_registry_l1', 'active')
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        registry_contract_instance_id,
+        chain,
+        "registry",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        registry_contract_instance_id,
+        chain,
+        registry_address,
+        Some(1),
+    )
+    .await?;
+    insert_manifest_root_contract_instance(
+        database.pool(),
+        2,
+        registry_contract_instance_id,
+        registry_address,
+    )
+    .await?;
+    upsert_raw_blocks(
+        database.pool(),
+        &[provider_block_to_raw_block(
+            chain,
+            &canonical_head,
+            CanonicalityState::Canonical,
+        )],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: canonical_head.block_hash.clone(),
+            block_number: canonical_head.block_number,
+            transaction_hash: transaction_hash_for_block(&canonical_head),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: registry_address.to_owned(),
+            topics: vec![
+                keccak256_hex(b"NewResolver(bytes32,address)"),
+                format!("0x{}", "00".repeat(32)),
+            ],
+            data: {
+                let mut encoded_resolver = vec![0_u8; 32];
+                encoded_resolver[31] = 0xb1;
+                encoded_resolver
+            },
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events (
+            event_identity,
+            namespace,
+            event_kind,
+            source_family,
+            manifest_version,
+            chain_id,
+            block_number,
+            block_hash,
+            transaction_hash,
+            log_index,
+            raw_fact_ref,
+            derivation_kind,
+            canonicality_state,
+            before_state,
+            after_state
+        )
+        VALUES
+        (
+            'test:basenames-resolver-pointer',
+            'basenames',
+            'ResolverChanged',
+            'basenames_base_registry',
+            1,
+            $1,
+            $2,
+            $3,
+            $4,
+            1,
+            '{}'::JSONB,
+            'block_derived_normalized_events',
+            'canonical',
+            '{}'::JSONB,
+            jsonb_build_object('resolver', $5::TEXT)
+        )
+        "#,
+    )
+    .bind(chain)
+    .bind(canonical_head.block_number)
+    .bind(&canonical_head.block_hash)
+    .bind(transaction_hash_for_block(&canonical_head))
+    .bind(basenames_resolver_address)
+    .execute(database.pool())
+    .await?;
+
+    let code_requests =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, u64)>::new()));
+    let request_log = std::sync::Arc::clone(&code_requests);
+    let (url, server) = spawn_json_rpc_server(std::sync::Arc::new(move |body| {
+        let method = body
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let params = body
+            .get("params")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let address = params
+            .first()
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        match method {
+            "eth_getCode" => {
+                request_log
+                    .lock()
+                    .expect("code request log must not be poisoned")
+                    .push((
+                        address,
+                        body.get("_test_batch_size")
+                            .and_then(Value::as_u64)
+                            .expect("test server must annotate the batch size"),
+                    ));
+                json!({"jsonrpc": "2.0", "id": 1, "result": "0x6001600155"})
+            }
+            _ => panic!("unexpected reconciliation RPC request: {body}"),
+        }
+    }))
+    .await?;
+    let provider = provider::JsonRpcProvider::new(&url)?;
+
+    persist_reconciled_raw_code_hashes(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head.clone(),
+            safe: None,
+            finalized: None,
+        },
+        &CanonicalReconciliation {
+            status: CanonicalReconciliationStatus::Unchanged,
+            canonical: Some(CheckpointBlockRef {
+                block_hash: canonical_head.block_hash.clone(),
+                block_number: canonical_head.block_number,
+            }),
+            fetched_parent_count: 0,
+            orphaned_block_count: 0,
+            reconciled_blocks: Vec::new(),
+            raw_orphan_stop_before_hash: None,
+        },
+        HeadChangeSet {
+            canonical_head_changed: false,
+            safe_head_changed: false,
+            finalized_head_changed: false,
+        },
+        0,
+        &ChainCoverageFrontiers::default(),
+    )
+    .await?;
+
+    assert_eq!(
+        code_requests
+            .lock()
+            .expect("code request log must not be poisoned")
+            .as_slice(),
+        &[
+            (registry_address.to_owned(), 3),
+            (resolver_address.to_owned(), 3),
+            (basenames_resolver_address.to_owned(), 3),
+        ]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<String>>(
+            "SELECT ARRAY_AGG(contract_address ORDER BY contract_address) FROM raw_code_hashes"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        vec![
+            registry_address.to_owned(),
+            resolver_address.to_owned(),
+            basenames_resolver_address.to_owned(),
+        ]
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn reconcile_fetched_heads_fetches_missing_emitter_code_despite_unrelated_block_code_row()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -9640,7 +9883,7 @@ async fn reconcile_fetched_heads_backfills_unwrapped_ensv1_authority_identity_ro
 }
 
 #[tokio::test]
-async fn reconcile_fetched_heads_gates_discovered_ensv1_resolver_local_facts_by_profile()
+async fn reconcile_fetched_heads_retains_ensv1_resolver_history_independent_of_profile()
 -> Result<()> {
     let database = TestDatabase::new().await?;
     let registrar_contract_instance_id = Uuid::from_u128(0x381);
@@ -9936,7 +10179,7 @@ async fn reconcile_fetched_heads_gates_discovered_ensv1_resolver_local_facts_by_
         },
     )
     .await?
-    .expect("ENSv1 resolver profile gate reconciliation must update task state");
+    .expect("ENSv1 resolver signature reconciliation must update task state");
 
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs")
@@ -9958,7 +10201,11 @@ async fn reconcile_fetched_heads_gates_discovered_ensv1_resolver_local_facts_by_
         )
         .fetch_one(database.pool())
         .await?,
-        vec!["supported.eth".to_owned(), "pending.eth".to_owned()]
+        vec![
+            "supported.eth".to_owned(),
+            "pending.eth".to_owned(),
+            "unsupported.eth".to_owned(),
+        ]
     );
     assert_eq!(
         sqlx::query_scalar::<_, Vec<String>>(
@@ -9966,7 +10213,7 @@ async fn reconcile_fetched_heads_gates_discovered_ensv1_resolver_local_facts_by_
         )
         .fetch_one(database.pool())
         .await?,
-        vec!["7".to_owned(), "8".to_owned()]
+        vec!["7".to_owned(), "8".to_owned(), "9".to_owned()]
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -9975,7 +10222,7 @@ async fn reconcile_fetched_heads_gates_discovered_ensv1_resolver_local_facts_by_
         .bind(vec![8_i64, 9])
         .fetch_one(database.pool())
         .await?,
-        0
+        2
     );
 
     server.abort();
@@ -9990,7 +10237,6 @@ async fn reconcile_fetched_heads_gates_basenames_dynamic_resolver_local_facts_by
     let registrar_contract_instance_id = Uuid::from_u128(0x391);
     let registry_contract_instance_id = Uuid::from_u128(0x392);
     let seed_resolver_contract_instance_id = Uuid::from_u128(0x393);
-    let supported_resolver_contract_instance_id = Uuid::from_u128(0x394);
     let pending_resolver_contract_instance_id = Uuid::from_u128(0x395);
     let unsupported_resolver_contract_instance_id = Uuid::from_u128(0x396);
     let registrar_address = "0x0000000000000000000000000000000000000391";
@@ -10000,7 +10246,7 @@ async fn reconcile_fetched_heads_gates_basenames_dynamic_resolver_local_facts_by
     let pending_resolver_address = "0x0000000000000000000000000000000000000395";
     let unsupported_resolver_address = "0x0000000000000000000000000000000000000396";
     let l2_resolver_code_hash =
-        "0x1111111111111111111111111111111111111111111111111111111111111111";
+        "0xf8b07b083341d3a7667e38718918d301f47d62f82d8186f4ccd7ed7424a64ef3";
 
     sqlx::query(
         r#"
@@ -10068,11 +10314,6 @@ async fn reconcile_fetched_heads_gates_basenames_dynamic_resolver_local_facts_by
             "contract",
         ),
         (
-            supported_resolver_contract_instance_id,
-            "base-mainnet",
-            "contract",
-        ),
-        (
             pending_resolver_contract_instance_id,
             "base-mainnet",
             "contract",
@@ -10091,11 +10332,6 @@ async fn reconcile_fetched_heads_gates_basenames_dynamic_resolver_local_facts_by
         (registrar_contract_instance_id, registrar_address, 1),
         (registry_contract_instance_id, registry_address, 2),
         (seed_resolver_contract_instance_id, seed_resolver_address, 3),
-        (
-            supported_resolver_contract_instance_id,
-            supported_resolver_address,
-            3,
-        ),
         (
             pending_resolver_contract_instance_id,
             pending_resolver_address,
@@ -10147,7 +10383,6 @@ async fn reconcile_fetched_heads_gates_basenames_dynamic_resolver_local_facts_by
     )
     .await?;
     for contract_instance_id in [
-        supported_resolver_contract_instance_id,
         pending_resolver_contract_instance_id,
         unsupported_resolver_contract_instance_id,
     ] {
@@ -10180,16 +10415,6 @@ async fn reconcile_fetched_heads_gates_basenames_dynamic_resolver_local_facts_by
                 block_hash: "0x9999999999999999999999999999999999999999999999999999999999999999"
                     .to_owned(),
                 block_number: 41,
-                contract_address: supported_resolver_address.to_owned(),
-                code_hash: l2_resolver_code_hash.to_owned(),
-                code_byte_length: 5,
-                canonicality_state: CanonicalityState::Canonical,
-            },
-            RawCodeHash {
-                chain_id: "base-mainnet".to_owned(),
-                block_hash: "0x9999999999999999999999999999999999999999999999999999999999999999"
-                    .to_owned(),
-                block_number: 41,
                 contract_address: unsupported_resolver_address.to_owned(),
                 code_hash: "0x2222222222222222222222222222222222222222222222222222222222222222"
                     .to_owned(),
@@ -10208,8 +10433,13 @@ async fn reconcile_fetched_heads_gates_basenames_dynamic_resolver_local_facts_by
         52,
     );
     let alice_namehash = namehash_for_dns_name(&dns_encoded_base_eth_name("alice"));
-    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
-        logs: vec![
+    let seed_code_address = seed_resolver_address.to_owned();
+    let supported_code_address = supported_resolver_address.to_owned();
+    let pending_code_address = pending_resolver_address.to_owned();
+    let unsupported_code_address = unsupported_resolver_address.to_owned();
+    let (provider, server) = bundle_provider_with_fixtures_and_code_hook(
+        vec![ProviderBlockFixture {
+            logs: vec![
             rpc_basenames_name_registered_log_payload(
                 &canonical_head,
                 registrar_address,
@@ -10279,9 +10509,21 @@ async fn reconcile_fetched_heads_gates_basenames_dynamic_resolver_local_facts_by
                 9,
                 9,
             ),
-        ],
-        block: canonical_head.clone(),
-    }])
+            ],
+            block: canonical_head.clone(),
+        }],
+        Arc::new(move |address| {
+            if address == seed_code_address || address == supported_code_address {
+                "0x6001600155".to_owned()
+            } else if address == pending_code_address {
+                "0x6002600255".to_owned()
+            } else if address == unsupported_code_address {
+                "0x6003600355".to_owned()
+            } else {
+                default_provider_code(address)
+            }
+        }),
+    )
     .await?;
 
     reconcile_fetched_heads(
@@ -10302,6 +10544,16 @@ async fn reconcile_fetched_heads_gates_basenames_dynamic_resolver_local_facts_by
             .fetch_one(database.pool())
             .await?,
         10
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM contract_instance_addresses WHERE chain_id = 'base-mainnet' AND address = $1"
+        )
+        .bind(supported_resolver_address)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "the same-poll supported resolver must remain identityless and rely only on match-all selection"
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(

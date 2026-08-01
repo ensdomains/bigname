@@ -16,7 +16,8 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use super::*;
 use super::{
     discovery::{
-        ens_v2_subregistry_discovery_source, reconcile_discovery_observation_history_by_source,
+        ens_v2_registry_announcement_discovery_source, ens_v2_subregistry_discovery_source,
+        reconcile_discovery_observation_history_by_source,
     },
     names::discovery_observation_key,
 };
@@ -1633,6 +1634,165 @@ async fn ens_v2_root_only_scope_loads_the_complete_registry_event_abi() -> Resul
 }
 
 #[tokio::test]
+async fn ens_v2_registry_created_scope_admits_only_same_position_and_later_proxy_history()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let anchor = "0x00000000000000000000000000000000000000aa";
+    let announced_registry = "0x00000000000000000000000000000000000000bb";
+    let manifest_id = insert_test_registry_manifest(database.pool(), chain).await?;
+    insert_test_registry_contract(
+        database.pool(),
+        manifest_id,
+        "registry",
+        Uuid::from_u128(0x1201),
+        anchor,
+        0,
+    )
+    .await?;
+    let block_hash = lifecycle_block_hash(42);
+    upsert_raw_blocks(database.pool(), &[test_raw_block(chain, &block_hash, 42)]).await?;
+    let pre_announcement = upgraded_raw_log(
+        chain,
+        &block_hash,
+        42,
+        announced_registry,
+        0,
+        "0x0000000000000000000000000000000000000011",
+    );
+    let mut registry_created = registry_created_raw_log(chain, &block_hash, 42, announced_registry);
+    registry_created.transaction_hash = pre_announcement.transaction_hash.clone();
+    registry_created.log_index = 1;
+    let mut post_announcement = upgraded_raw_log(
+        chain,
+        &block_hash,
+        42,
+        announced_registry,
+        2,
+        "0x0000000000000000000000000000000000000022",
+    );
+    post_announcement.transaction_hash = pre_announcement.transaction_hash.clone();
+    upsert_raw_logs(
+        database.pool(),
+        &[pre_announcement, registry_created, post_announcement],
+    )
+    .await?;
+
+    let summary =
+        EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope_canonical_only(
+            database.pool(),
+            chain,
+            &[block_hash],
+            &[(
+                SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+                GENERIC_SOURCE_SCOPE_ADDRESS.to_owned(),
+                42,
+                42,
+            )],
+        )
+        .await?;
+
+    assert_eq!(summary.scanned_log_count, 2);
+    assert_eq!(summary.matched_log_count, 2);
+    assert_eq!(summary.by_kind.get(EVENT_KIND_REGISTRY_CREATED), Some(&1));
+    assert_eq!(
+        summary.by_kind.get(EVENT_KIND_UPGRADED),
+        Some(&1),
+        "only the Upgraded log after RegistryCreated may be attributed to the announced registry"
+    );
+    assert_eq!(
+        normalized_event_count_for_emitter(database.pool(), announced_registry).await?,
+        2,
+        "RegistryCreated and the post-announcement upgrade must remain in normalized history"
+    );
+    let upgraded = sqlx::query_as::<_, (i64, Value)>(
+        r#"
+        SELECT log_index, after_state
+        FROM normalized_events
+        WHERE event_kind = 'Upgraded'
+          AND raw_fact_ref ->> 'emitting_address' = $1
+        "#,
+    )
+    .bind(normalize_address(announced_registry))
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        upgraded.0, 2,
+        "the pre-announcement upgrade must stay raw-only"
+    );
+    assert_eq!(
+        upgraded.1["implementation"],
+        json!("0x0000000000000000000000000000000000000022")
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE edge_kind = 'registry_announcement' AND deactivated_at IS NULL"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "RegistryCreated must also admit the announced registry instance"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn ens_v2_registry_created_wildcard_scope_skips_malformed_same_topic_log() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let anchor = "0x00000000000000000000000000000000000000aa";
+    let malformed_emitter = "0x00000000000000000000000000000000000000b1";
+    let announced_registry = "0x00000000000000000000000000000000000000b2";
+    let manifest_id = insert_test_registry_manifest(database.pool(), chain).await?;
+    insert_test_registry_contract(
+        database.pool(),
+        manifest_id,
+        "registry",
+        Uuid::from_u128(0x1202),
+        anchor,
+        0,
+    )
+    .await?;
+    let block_hash = lifecycle_block_hash(43);
+    upsert_raw_blocks(database.pool(), &[test_raw_block(chain, &block_hash, 43)]).await?;
+    let mut malformed = registry_created_raw_log(chain, &block_hash, 43, malformed_emitter);
+    malformed.data = vec![0x01];
+    let mut valid = registry_created_raw_log(chain, &block_hash, 43, announced_registry);
+    valid.log_index = 1;
+    upsert_raw_logs(database.pool(), &[malformed, valid]).await?;
+
+    let summary =
+        EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope_canonical_only(
+            database.pool(),
+            chain,
+            &[block_hash],
+            &[(
+                SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+                GENERIC_SOURCE_SCOPE_ADDRESS.to_owned(),
+                43,
+                43,
+            )],
+        )
+        .await?;
+
+    assert_eq!(summary.matched_log_count, 1);
+    assert_eq!(summary.by_kind.get(EVENT_KIND_REGISTRY_CREATED), Some(&1));
+    assert_eq!(
+        normalized_event_count_for_emitter(database.pool(), malformed_emitter).await?,
+        0,
+        "a malformed same-topic lookalike must remain raw-only"
+    );
+    assert_eq!(
+        normalized_event_count_for_emitter(database.pool(), announced_registry).await?,
+        1,
+        "a malformed lookalike must not block a valid RegistryCreated announcement"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn ens_v2_scoped_backfill_sync_only_normalizes_selected_registry_targets() -> Result<()> {
     let database = TestDatabase::new().await?;
     let chain = "ethereum-sepolia";
@@ -1743,6 +1903,12 @@ async fn ens_v2_incremental_batches_match_full_replay_normalized_events() -> Res
             vec![
                 (
                     SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+                    GENERIC_SOURCE_SCOPE_ADDRESS.to_owned(),
+                    9,
+                    9,
+                ),
+                (
+                    SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
                     registry.to_owned(),
                     9,
                     9,
@@ -1795,8 +1961,8 @@ async fn ens_v2_incremental_batches_match_full_replay_normalized_events() -> Res
 
     let full_summary =
         sync_ens_v2_registry_resource_surface_through_block(full_replay.pool(), chain, 15).await?;
-    assert_eq!(incremental_matched_log_count, 10);
-    assert_eq!(full_summary.matched_log_count, 10);
+    assert_eq!(incremental_matched_log_count, 11);
+    assert_eq!(full_summary.matched_log_count, 11);
 
     let incremental_rows = normalized_event_rows_for_equivalence(incremental.pool()).await?;
     let full_replay_rows = normalized_event_rows_for_equivalence(full_replay.pool()).await?;
@@ -1817,6 +1983,7 @@ async fn ens_v2_incremental_batches_match_full_replay_normalized_events() -> Res
     let expected_corner_sources = BTreeSet::from([
         "ExpiryUpdated".to_owned(),
         "LabelUnregistered".to_owned(),
+        "RegistryCreated".to_owned(),
         "ResolverUpdated".to_owned(),
         "SubregistryUpdated".to_owned(),
         "TokenRegenerated".to_owned(),
@@ -4112,7 +4279,25 @@ async fn ens_v2_live_poll_cache_is_incremental_and_rehydrates_on_unsafe_anchors(
         bigname_manifests::load_watched_contracts(database.pool())
             .await?
             .iter()
-            .any(|contract| contract.address == normalize_address(observed_child))
+            .all(|contract| contract.address != normalize_address(observed_child)),
+        "SubregistryUpdated must retain topology without admitting an event source"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM discovery_edges
+            WHERE discovery_source = $1
+              AND lower(provenance ->> 'to_address') = $2
+              AND deactivated_at IS NULL
+            "#,
+        )
+        .bind(format!("ens_v2_registry_subregistry:{chain}"))
+        .bind(normalize_address(observed_child))
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "the topology edge must remain active"
     );
 
     let unchanged_head = sync_ens_v2_registry_resource_surface_live_poll(
@@ -4140,8 +4325,8 @@ async fn ens_v2_live_poll_cache_is_incremental_and_rehydrates_on_unsafe_anchors(
         bigname_manifests::load_watched_contracts(database.pool())
             .await?
             .iter()
-            .any(|contract| contract.address == normalize_address(observed_child)),
-        "full live fallback must retain discovery admitted from selected observed facts"
+            .all(|contract| contract.address != normalize_address(observed_child)),
+        "full live fallback must not turn topology into indexability"
     );
 
     let revision_before_overlap = sqlx::query_scalar::<_, i64>(
@@ -4201,7 +4386,8 @@ async fn ens_v2_live_poll_cache_is_incremental_and_rehydrates_on_unsafe_anchors(
         bigname_manifests::load_watched_contracts(database.pool())
             .await?
             .iter()
-            .any(|contract| contract.address == normalize_address(child_a))
+            .all(|contract| contract.address != normalize_address(child_a)),
+        "an advancing topology update must not admit its child as an event source"
     );
 
     // A newly admitted log at the cached height cannot be proven absent from
@@ -5150,7 +5336,7 @@ async fn ens_v2_live_poll_hydrates_only_the_selected_target_ancestor_path() -> R
 }
 
 #[tokio::test]
-async fn ens_v2_plain_full_sync_preserves_discovery_after_retention_rotation() -> Result<()> {
+async fn ens_v2_plain_full_sync_preserves_parent_link_after_retention_rotation() -> Result<()> {
     let database = TestDatabase::new().await?;
     let chain = "ethereum-sepolia";
     let registry = "0x00000000000000000000000000000000000000aa";
@@ -5194,11 +5380,9 @@ async fn ens_v2_plain_full_sync_preserves_discovery_after_retention_rotation() -
         )],
     )
     .await?;
-    assert!(
-        bigname_manifests::load_watched_contracts(database.pool())
-            .await?
-            .iter()
-            .any(|contract| contract.address == normalize_address(child))
+    assert_eq!(
+        active_subregistry_edge_count(database.pool(), chain, child).await?,
+        1
     );
 
     sqlx::query("TRUNCATE raw_logs")
@@ -5223,12 +5407,10 @@ async fn ens_v2_plain_full_sync_preserves_discovery_after_retention_rotation() -
     .await?;
 
     sync_ens_v2_registry_resource_surface_through_block(database.pool(), chain, 11).await?;
-    assert!(
-        bigname_manifests::load_watched_contracts(database.pool())
-            .await?
-            .iter()
-            .any(|contract| contract.address == normalize_address(child)),
-        "a retained suffix cannot prove that an omitted historical discovery is absent"
+    assert_eq!(
+        active_subregistry_edge_count(database.pool(), chain, child).await?,
+        1,
+        "a retained suffix cannot prove that an omitted historical parent link is absent"
     );
 
     invalidate_live_registry_replay_state(database.pool(), chain);
@@ -5239,19 +5421,17 @@ async fn ens_v2_plain_full_sync_preserves_discovery_after_retention_rotation() -
         std::slice::from_ref(&block_11_hash),
     )
     .await?;
-    assert!(
-        bigname_manifests::load_watched_contracts(database.pool())
-            .await?
-            .iter()
-            .any(|contract| contract.address == normalize_address(child)),
-        "cold live hydration from a retained suffix cannot prove historical absence"
+    assert_eq!(
+        active_subregistry_edge_count(database.pool(), chain, child).await?,
+        1,
+        "cold live hydration from a retained suffix cannot prove historical parent-link absence"
     );
 
     database.cleanup().await
 }
 
 #[tokio::test]
-async fn ens_v2_full_closure_rebuilds_retired_registry_lifecycle_output() -> Result<()> {
+async fn ens_v2_full_closure_does_not_index_unannounced_subregistry_emitters() -> Result<()> {
     let database = TestDatabase::new().await?;
     let chain = "ethereum-sepolia";
     let registry = "0x00000000000000000000000000000000000000aa";
@@ -5348,7 +5528,8 @@ async fn ens_v2_full_closure_rebuilds_retired_registry_lifecycle_output() -> Res
     refresh_test_raw_log_closure_proof(database.pool(), chain, 13).await?;
     assert_eq!(
         normalized_event_count_for_emitter(database.pool(), retired_registry).await?,
-        1
+        0,
+        "a parent link alone must not make the unannounced child an event source"
     );
     EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope(
         database.pool(),
@@ -5366,7 +5547,7 @@ async fn ens_v2_full_closure_rebuilds_retired_registry_lifecycle_output() -> Res
             .await?
             .iter()
             .all(|contract| contract.address != normalize_address(retired_registry)),
-        "the replaced registry must be retired before closure replay"
+        "the unannounced child must remain outside the watched plan before and after replacement"
     );
 
     delete_normalized_events_for_emitter_for_test(database.pool(), retired_registry).await?;
@@ -5378,8 +5559,8 @@ async fn ens_v2_full_closure_rebuilds_retired_registry_lifecycle_output() -> Res
     sync_ens_v2_registry_resource_surface_through_block(database.pool(), chain, 13).await?;
     assert_eq!(
         normalized_event_count_for_emitter(database.pool(), retired_registry).await?,
-        1,
-        "full closure must replay retained canonical logs from retired discovered registries"
+        0,
+        "full closure must not infer indexability from retained parent-link history"
     );
 
     database.cleanup().await
@@ -6171,35 +6352,67 @@ async fn insert_incremental_equivalence_fixture(
     upsert_raw_logs(
         pool,
         &[
+            registry_created_raw_log(chain, &block_hashes[0], 9, child_registry),
             label_registered_raw_log(
                 chain,
                 &block_hashes[0],
                 9,
                 registry,
-                0,
+                1,
                 "parent",
                 1,
                 "alice",
             ),
-            token_resource_raw_log(chain, &block_hashes[0], 9, registry, 1, 1, 101),
-            subregistry_updated_raw_log(chain, &block_hashes[0], 9, registry, 2, 1, child_registry),
+            token_resource_raw_log(chain, &block_hashes[0], 9, registry, 2, 1, 101),
+            subregistry_updated_raw_log(chain, &block_hashes[0], 9, registry, 3, 1, child_registry),
             label_registered_raw_log(
                 chain,
                 &block_hashes[0],
                 9,
                 child_registry,
-                3,
+                4,
                 "alice",
                 10,
                 "alice",
             ),
-            token_resource_raw_log(chain, &block_hashes[0], 9, child_registry, 4, 10, 110),
+            token_resource_raw_log(chain, &block_hashes[0], 9, child_registry, 5, 10, 110),
             expiry_updated_raw_log(chain, &block_hashes[2], 11, registry, 0, 1, 2_000_000_000),
             resolver_updated_raw_log(chain, &block_hashes[3], 12, registry, 0, 1, resolver),
             subregistry_updated_raw_log(chain, &block_hashes[4], 13, registry, 0, 1, subregistry),
             token_regenerated_raw_log(chain, &block_hashes[5], 14, registry, 0, 1, 2),
             label_unregistered_raw_log(chain, &block_hashes[6], 15, registry, 0, 2),
         ],
+    )
+    .await?;
+    let announcement_source = ens_v2_registry_announcement_discovery_source(chain);
+    bigname_manifests::reconcile_scoped_discovery_observation_transitions(
+        pool,
+        &announcement_source,
+        &[vec![DiscoveryObservation {
+            chain: chain.to_owned(),
+            from_address: normalize_address(registry),
+            to_address: normalize_address(child_registry),
+            edge_kind: REGISTRY_ANNOUNCEMENT_EDGE_KIND.to_owned(),
+            discovery_source: announcement_source.clone(),
+            active_from_block_number: Some(9),
+            active_from_block_hash: Some(block_hashes[0].clone()),
+            active_to_block_number: None,
+            active_to_block_hash: None,
+            provenance: json!({
+                "source": "raw_log",
+                "source_event": "RegistryCreated",
+                "observation_key": format!("registry-announcement:{}", normalize_address(child_registry)),
+                "from_address": normalize_address(registry),
+                "to_address": normalize_address(child_registry),
+                "chain_id": chain,
+                "block_hash": block_hashes[0],
+                "block_number": 9,
+                "transaction_hash": "0xregistrycreated9",
+                "transaction_index": 0,
+                "log_index": 0,
+                "tombstone": false,
+            }),
+        }]],
     )
     .await?;
     let discovery_source = ens_v2_subregistry_discovery_source(chain);
@@ -6232,7 +6445,7 @@ async fn insert_incremental_equivalence_fixture(
                 "block_number": 9,
                 "transaction_hash": "0xsubregistry9",
                 "transaction_index": 0,
-                "log_index": 2,
+                "log_index": 3,
                 "tombstone": false,
             }),
         }]],
@@ -6267,16 +6480,6 @@ async fn insert_incremental_equivalence_fixture(
     .bind(&discovery_source)
     .bind(&block_hashes[4])
     .bind(admitted_child_contract_instance_id)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        r#"
-        UPDATE contract_instance_addresses
-        SET deactivated_at = clock_timestamp()
-        WHERE contract_instance_id = $1
-        "#,
-    )
-    .bind(child_contract_instance_id)
     .execute(pool)
     .await?;
     insert_completed_registry_coverage(
@@ -6346,7 +6549,8 @@ async fn insert_test_registry_manifest(pool: &PgPool, chain: &str) -> Result<i64
             admission
         )
         VALUES ($1, 'subregistry', 'registry', 'reachable_from_root'),
-               ($1, 'resolver', 'registry', 'reachable_from_root')
+               ($1, 'resolver', 'registry', 'reachable_from_root'),
+               ($1, 'registry_announcement', 'registry', 'reachable_from_root')
         "#,
     )
     .bind(manifest_id)
@@ -6536,10 +6740,23 @@ fn test_registry_manifest_payload(chain: &str) -> Value {
                 "edge_kind": "resolver",
                 "from_role": "registry",
                 "admission": "reachable_from_root"
+            },
+            {
+                "edge_kind": "registry_announcement",
+                "from_role": "registry",
+                "admission": "reachable_from_root"
             }
         ],
         "abi": {
             "events": [
+                {
+                    "name": "RegistryCreated",
+                    "fragment": "event RegistryCreated()"
+                },
+                {
+                    "name": "Upgraded",
+                    "fragment": "event Upgraded(address indexed implementation)"
+                },
                 {
                     "name": "LabelRegistered",
                     "fragment": "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)"
@@ -6794,6 +7011,7 @@ fn test_active_emitter(
         source_rank: source_rank(WatchedContractSource::ManifestContract),
         active_from_block_number,
         active_to_block_number,
+        activation_positions: Vec::new(),
     }
 }
 
@@ -6827,6 +7045,51 @@ fn registry_raw_log_row(raw_log: RawLog) -> RegistryRawLogRow {
         source_family: SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
         manifest_version: 1,
         normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
+    }
+}
+
+fn registry_created_raw_log(
+    chain: &str,
+    block_hash: &str,
+    block_number: i64,
+    emitting_address: &str,
+) -> RawLog {
+    RawLog {
+        chain_id: chain.to_owned(),
+        block_hash: block_hash.to_owned(),
+        block_number,
+        transaction_hash: format!("0xregistrycreated{block_number}"),
+        transaction_index: 0,
+        log_index: 0,
+        emitting_address: normalize_address(emitting_address),
+        topics: vec![keccak_signature_hex(ABI_EVENT_REGISTRY_CREATED_SIGNATURE)],
+        data: Vec::new(),
+        canonicality_state: CanonicalityState::Finalized,
+    }
+}
+
+fn upgraded_raw_log(
+    chain: &str,
+    block_hash: &str,
+    block_number: i64,
+    emitting_address: &str,
+    log_index: i64,
+    implementation: &str,
+) -> RawLog {
+    RawLog {
+        chain_id: chain.to_owned(),
+        block_hash: block_hash.to_owned(),
+        block_number,
+        transaction_hash: format!("0xupgraded{block_number}"),
+        transaction_index: 0,
+        log_index,
+        emitting_address: normalize_address(emitting_address),
+        topics: vec![
+            keccak_signature_hex(ABI_EVENT_UPGRADED_SIGNATURE),
+            topic_address(implementation),
+        ],
+        data: Vec::new(),
+        canonicality_state: CanonicalityState::Finalized,
     }
 }
 
@@ -7355,6 +7618,24 @@ async fn delete_normalized_events_for_emitter_for_test(pool: &PgPool, address: &
     .await
     .context("failed to delete retired registry normalized events for replay test")?;
     Ok(())
+}
+
+async fn active_subregistry_edge_count(pool: &PgPool, chain: &str, address: &str) -> Result<i64> {
+    sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM discovery_edges
+        WHERE chain_id = $1
+          AND edge_kind = 'subregistry'
+          AND lower(provenance ->> 'to_address') = $2
+          AND deactivated_at IS NULL
+        "#,
+    )
+    .bind(chain)
+    .bind(normalize_address(address))
+    .fetch_one(pool)
+    .await
+    .context("failed to count active ENSv2 subregistry edges")
 }
 
 async fn normalized_event_count(pool: &PgPool) -> Result<i64> {

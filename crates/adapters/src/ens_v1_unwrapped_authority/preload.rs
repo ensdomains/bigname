@@ -244,6 +244,13 @@ pub(super) async fn preload_restricted_name_histories(
     );
     let record_versions =
         load_latest_record_versions_before_block(pool, &logical_name_ids, boundary_block).await?;
+    let mut record_versions_by_name = HashMap::<String, BTreeMap<String, i64>>::new();
+    for ((logical_name_id, resolver), record_version) in record_versions {
+        record_versions_by_name
+            .entry(logical_name_id)
+            .or_default()
+            .insert(resolver, record_version);
+    }
     let preload_block_index = block_index_with_preloaded_registrar_release_boundaries(
         pool,
         chain,
@@ -297,8 +304,10 @@ pub(super) async fn preload_restricted_name_histories(
         if let Some(resolver) = resolver_state.get(&logical_name_id) {
             history.current_resolver = Some(resolver.clone());
         }
-        if let Some(record_version) = record_versions.get(&logical_name_id) {
-            history.current_record_version = Some(*record_version);
+        if let Some(record_versions) = record_versions_by_name.get(&logical_name_id) {
+            history
+                .record_versions_by_resolver
+                .extend(record_versions.clone());
         }
 
         let authority_kind = resource_provenance

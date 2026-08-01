@@ -77,6 +77,10 @@ pub(crate) fn build_preimage_observed_events(
 fn test_resolver_event_topics() -> ActiveManifestEventTopic0sBySignature {
     ActiveManifestEventTopic0sBySignature::new(HashMap::from([
         (
+            ABI_EVENT_UPGRADED_SIGNATURE.to_owned(),
+            keccak_signature_hex(ABI_EVENT_UPGRADED_SIGNATURE),
+        ),
+        (
             ABI_EVENT_ADDRESS_CHANGED_SIGNATURE.to_owned(),
             keccak_signature_hex(ABI_EVENT_ADDRESS_CHANGED_SIGNATURE),
         ),

@@ -8,7 +8,15 @@ pub(super) const SOURCE_FAMILY_BASENAMES_BASE_RESOLVER: &str = "basenames_base_r
 pub(super) const CONTRACT_ROLE_REGISTRY_OLD: &str = "registry_old";
 pub(super) const GENERIC_SOURCE_SCOPE_ADDRESS: &str = "*";
 
+pub(super) fn is_generic_resolver_source_family(source_family: &str) -> bool {
+    matches!(
+        source_family,
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1 | SOURCE_FAMILY_BASENAMES_BASE_RESOLVER
+    )
+}
+
 pub(super) const DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY: &str = "ens_v1_unwrapped_authority";
+pub(super) const DERIVATION_KIND_ENS_V1_SUBREGISTRY_CHANGED: &str = "ens_v1_subregistry_changed";
 pub(super) const EVENT_KIND_AUTHORITY_EPOCH_CHANGED: &str = "AuthorityEpochChanged";
 pub(super) const EVENT_KIND_AUTHORITY_TRANSFERRED: &str = "AuthorityTransferred";
 pub(super) const EVENT_KIND_EXPIRY_CHANGED: &str = "ExpiryChanged";
@@ -22,6 +30,7 @@ pub(super) const EVENT_KIND_REGISTRATION_RENEWED: &str = "RegistrationRenewed";
 pub(super) const EVENT_KIND_RESOLVER_CHANGED: &str = "ResolverChanged";
 pub(super) const EVENT_KIND_SURFACE_BOUND: &str = "SurfaceBound";
 pub(super) const EVENT_KIND_SURFACE_UNBOUND: &str = "SurfaceUnbound";
+pub(super) const EVENT_KIND_SUBREGISTRY_CHANGED: &str = "SubregistryChanged";
 pub(super) const EVENT_KIND_TOKEN_CONTROL_TRANSFERRED: &str = "TokenControlTransferred";
 
 pub(super) const NAME_REGISTERED_SIGNATURE: &str =

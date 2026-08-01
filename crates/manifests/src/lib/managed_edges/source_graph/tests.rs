@@ -16,7 +16,7 @@ impl ManifestRuntimeProgress for CountingProgress {
 }
 
 #[tokio::test]
-async fn stale_source_cleanup_pages_only_edges_without_an_active_manifest() -> Result<()> {
+async fn stale_source_cleanup_pages_only_edges_without_active_authority() -> Result<()> {
     let database = TestDatabase::create_migrated(
         TestDatabaseConfig::new("stale_source_scoped_pages"),
         &bigname_storage::MIGRATOR,
@@ -67,6 +67,15 @@ async fn stale_source_cleanup_pages_only_edges_without_an_active_manifest() -> R
     .await?;
     sqlx::query(
         r#"
+        INSERT INTO manifest_discovery_rules (manifest_id, edge_kind, from_role, admission)
+        VALUES ($1, 'test', 'registry', 'test')
+        "#,
+    )
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
         INSERT INTO discovery_edges (
             chain_id,
             edge_kind,
@@ -110,18 +119,38 @@ async fn stale_source_cleanup_pages_only_edges_without_an_active_manifest() -> R
     .bind(to_id)
     .fetch_one(pool)
     .await?;
+    let removed_rule_edge_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO discovery_edges (
+            chain_id,
+            edge_kind,
+            from_contract_instance_id,
+            to_contract_instance_id,
+            discovery_source,
+            source_manifest_id,
+            admission
+        )
+        VALUES ('managed-chain', 'removed-rule', $1, $2, 'removed-rule-source', $3, 'test')
+        RETURNING discovery_edge_id
+        "#,
+    )
+    .bind(from_id)
+    .bind(to_id)
+    .bind(manifest_id)
+    .fetch_one(pool)
+    .await?;
 
     let mut connection = pool.acquire().await?;
     let mut progress = CountingProgress::default();
     let mut progress_ref = Some(&mut progress as &mut dyn ManifestRuntimeProgress);
-    let deactivated = deactivate_discovery_edges_without_active_source_manifest(
+    let deactivated = deactivate_discovery_edges_without_active_source_authority(
         &mut connection,
         pool,
         &mut progress_ref,
     )
     .await?;
 
-    assert_eq!(deactivated, 1);
+    assert_eq!(deactivated, 2);
     assert_eq!(
         progress.count, 1,
         "only the one stale-source page must beat"
@@ -131,6 +160,14 @@ async fn stale_source_cleanup_pages_only_edges_without_an_active_manifest() -> R
             "SELECT deactivated_at IS NOT NULL FROM discovery_edges WHERE discovery_edge_id = $1",
         )
         .bind(stale_edge_id)
+        .fetch_one(pool)
+        .await?
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT deactivated_at IS NOT NULL FROM discovery_edges WHERE discovery_edge_id = $1",
+        )
+        .bind(removed_rule_edge_id)
         .fetch_one(pool)
         .await?
     );

@@ -6,14 +6,15 @@ use serde_json::{Value, json};
 mod label_preimages;
 
 use super::constants::{
-    ALIAS_CHANGED_SIGNATURE, DERIVATION_KIND_RAW_LOG_PREIMAGE_OBSERVATION,
-    EVENT_KIND_PREIMAGE_OBSERVED, NAME_WRAPPED_SIGNATURE, NAMED_ADDR_RESOURCE_SIGNATURE,
+    ALIAS_CHANGED_SIGNATURE, DERIVATION_KIND_PROXY_UPGRADE_HISTORY,
+    DERIVATION_KIND_RAW_LOG_PREIMAGE_OBSERVATION, EVENT_KIND_PREIMAGE_OBSERVED,
+    EVENT_KIND_UPGRADED, NAME_WRAPPED_SIGNATURE, NAMED_ADDR_RESOURCE_SIGNATURE,
     NAMED_RESOURCE_SIGNATURE, NAMED_TEXT_RESOURCE_SIGNATURE, SOURCE_EVENT_ALIAS_CHANGED,
     SOURCE_EVENT_NAME_WRAPPED, SOURCE_EVENT_NAMED_ADDR_RESOURCE, SOURCE_EVENT_NAMED_RESOURCE,
     SOURCE_EVENT_NAMED_TEXT_RESOURCE, SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
     SOURCE_FAMILY_ENS_V1_REGISTRAR_L1, SOURCE_FAMILY_ENS_V1_WRAPPER_L1,
     SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
-    SOURCE_FAMILY_ENS_V2_RESOLVER_L1, SOURCE_FAMILY_ENS_V2_ROOT_L1,
+    SOURCE_FAMILY_ENS_V2_RESOLVER_L1, SOURCE_FAMILY_ENS_V2_ROOT_L1, UPGRADED_SIGNATURE,
 };
 use super::decoding::{hex_string, hex_string_without_prefix, keccak256_hex};
 use super::event_topics::PreimageObservedEventTopics;
@@ -61,12 +62,23 @@ sol! {
 
     #[derive(Debug)]
     event NamedAddrResource(uint256 indexed resource, bytes name, uint256 indexed coinType);
+
+    #[derive(Debug)]
+    event Upgraded(address indexed implementation);
 }
 
 pub(super) fn build_preimage_observed_events(
     raw_log: &WatchedRawLogRow,
     event_topics: &PreimageObservedEventTopics,
 ) -> Result<Vec<NormalizedEvent>> {
+    if raw_log.source_family == SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR
+        && raw_log.topics.first().is_some_and(|topic0| {
+            event_topics.matches_optional(raw_log, UPGRADED_SIGNATURE, topic0)
+        })
+    {
+        return Ok(vec![build_upgraded_event(raw_log)?]);
+    }
+
     match raw_log.source_family.as_str() {
         SOURCE_FAMILY_ENS_V1_REGISTRAR_L1 | SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR => {
             build_registrar_preimage_observed_events(raw_log, event_topics)
@@ -82,6 +94,56 @@ pub(super) fn build_preimage_observed_events(
         }
         _ => Ok(Vec::new()),
     }
+}
+
+fn build_upgraded_event(raw_log: &WatchedRawLogRow) -> Result<NormalizedEvent> {
+    let event = decode_event_log::<Upgraded>(raw_log, "Upgraded log is malformed")?;
+    let implementation = crate::evm_abi::address_hex(event.implementation);
+    Ok(NormalizedEvent {
+        event_identity: format!(
+            "proxy_upgraded:{}:{}:{}:{}:{}",
+            raw_log.source_manifest_id,
+            raw_log.block_hash,
+            raw_log.transaction_hash,
+            raw_log.log_index,
+            raw_log.emitting_address,
+        ),
+        namespace: raw_log.namespace.clone(),
+        logical_name_id: None,
+        resource_id: None,
+        event_kind: EVENT_KIND_UPGRADED.to_owned(),
+        source_family: raw_log.source_family.clone(),
+        manifest_version: raw_log.manifest_version,
+        source_manifest_id: Some(raw_log.source_manifest_id),
+        chain_id: Some(raw_log.chain_id.clone()),
+        block_number: Some(raw_log.block_number),
+        block_hash: Some(raw_log.block_hash.clone()),
+        transaction_hash: Some(raw_log.transaction_hash.clone()),
+        log_index: Some(raw_log.log_index),
+        raw_fact_ref: json!({
+            "kind": "raw_log",
+            "chain_id": raw_log.chain_id,
+            "block_hash": raw_log.block_hash,
+            "block_number": raw_log.block_number,
+            "transaction_hash": raw_log.transaction_hash,
+            "transaction_index": raw_log.transaction_index,
+            "log_index": raw_log.log_index,
+            "emitting_address": raw_log.emitting_address,
+            "emitting_contract_instance_id": raw_log.emitting_contract_instance_id.to_string(),
+            "topic0": raw_log.topics.first(),
+            "topic1": raw_log.topics.get(1),
+            "data_hex": hex_string_without_prefix(&raw_log.data),
+        }),
+        derivation_kind: DERIVATION_KIND_PROXY_UPGRADE_HISTORY.to_owned(),
+        canonicality_state: raw_log.canonicality_state,
+        before_state: json!({}),
+        after_state: json!({
+            "source_event": "Upgraded",
+            "proxy_address": raw_log.emitting_address,
+            "contract_instance_id": raw_log.emitting_contract_instance_id.to_string(),
+            "implementation": implementation,
+        }),
+    })
 }
 
 fn build_name_wrapped_preimage_observed_events(

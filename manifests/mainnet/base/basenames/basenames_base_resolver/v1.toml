@@ -25,8 +25,9 @@ address = "0xC6d566A56A1aFf6508b41f6c90ff131615583BCD"
 proxy_kind = "none"
 
 # L2Resolver event ABI fragments consumed by manifest-derived authority topic
-# lookup. The concrete resolver emits profile events through these profile
-# implementations:
+# lookup. These events have no emitter_roles because the complete signature set
+# is matched across every Base emitter. The concrete resolver emits profile
+# events through these profile implementations:
 # (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L61 @ basenames@1809bbc)
 # (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L63 @ basenames@1809bbc)
 # (upstream: .refs/basenames/src/L2/resolver/NameResolver.sol:L30 @ basenames@1809bbc)

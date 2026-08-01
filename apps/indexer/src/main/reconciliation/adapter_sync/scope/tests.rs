@@ -1,7 +1,168 @@
 use anyhow::Result;
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 
-use super::{load_live_adapter_source_scope, load_live_adapter_target_block_number};
+use super::{
+    collapse_live_adapter_source_scope, load_live_adapter_source_scope,
+    load_live_adapter_target_block_number,
+};
+
+#[test]
+fn live_scope_widens_both_resolver_families_and_registry_announcements() {
+    let rows = vec![
+        (
+            "ens_v1_resolver_l1".to_owned(),
+            "0x0000000000000000000000000000000000000001".to_owned(),
+            10,
+            20,
+        ),
+        (
+            "basenames_base_resolver".to_owned(),
+            "0x0000000000000000000000000000000000000002".to_owned(),
+            10,
+            20,
+        ),
+        (
+            "ens_v2_registry_l1".to_owned(),
+            "0x0000000000000000000000000000000000000003".to_owned(),
+            10,
+            20,
+        ),
+    ];
+
+    assert_eq!(
+        collapse_live_adapter_source_scope(
+            rows,
+            12,
+            18,
+            &std::collections::BTreeSet::from([
+                "ens_v1_resolver_l1".to_owned(),
+                "basenames_base_resolver".to_owned(),
+                "ens_v2_registry_l1".to_owned(),
+            ]),
+        ),
+        vec![
+            ("basenames_base_resolver".to_owned(), "*".to_owned(), 12, 18),
+            ("ens_v1_resolver_l1".to_owned(), "*".to_owned(), 12, 18),
+            ("ens_v2_registry_l1".to_owned(), "*".to_owned(), 12, 18),
+            (
+                "ens_v2_registry_l1".to_owned(),
+                "0x0000000000000000000000000000000000000003".to_owned(),
+                10,
+                20,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn live_scope_includes_match_all_source_without_an_emitter_identity() {
+    assert_eq!(
+        collapse_live_adapter_source_scope(
+            Vec::new(),
+            12,
+            18,
+            &std::collections::BTreeSet::from(["ens_v2_registry_l1".to_owned()]),
+        ),
+        vec![("ens_v2_registry_l1".to_owned(), "*".to_owned(), 12, 18,)]
+    );
+}
+
+#[tokio::test]
+async fn live_scope_recognizes_registry_created_from_an_unlisted_emitter() -> Result<()> {
+    let database = TestDatabase::create_migrated(
+        TestDatabaseConfig::new("indexer_live_registry_announcement_scope"),
+        &bigname_storage::MIGRATOR,
+        "failed to migrate registry-announcement scope database",
+    )
+    .await?;
+    let chain = "ethereum-sepolia";
+    let block_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let emitting_address = "0x00000000000000000000000000000000000000bb";
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_versions (
+            manifest_version,
+            namespace,
+            source_family,
+            chain,
+            deployment_epoch,
+            rollout_status,
+            normalizer_version,
+            file_path,
+            manifest_payload
+        )
+        VALUES (
+            1,
+            'ens',
+            'ens_v2_registry_l1',
+            $1,
+            'scope-test',
+            'active',
+            'test',
+            'test/registry-announcement-scope.toml',
+            $2::JSONB
+        )
+        "#,
+    )
+    .bind(chain)
+    .bind(serde_json::to_string(
+        &ens_v2_registry_scope_test_manifest(chain),
+    )?)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO chain_lineage (
+            chain_id,
+            block_hash,
+            block_number,
+            block_timestamp,
+            parent_hash,
+            canonicality_state
+        )
+        VALUES ($1, $2, 42, now(), NULL, 'canonical')
+        "#,
+    )
+    .bind(chain)
+    .bind(block_hash)
+    .execute(database.pool())
+    .await?;
+    let registry_created_topic = format!(
+        "0x{}",
+        alloy_primitives::hex::encode(alloy_primitives::keccak256(b"RegistryCreated()"))
+    );
+    sqlx::query(
+        r#"
+        INSERT INTO raw_logs (
+            chain_id,
+            block_hash,
+            block_number,
+            transaction_hash,
+            transaction_index,
+            log_index,
+            emitting_address,
+            topics,
+            data,
+            canonicality_state
+        )
+        VALUES ($1, $2, 42, '0xtx', 0, 0, $3, $4, '\x'::BYTEA, 'canonical')
+        "#,
+    )
+    .bind(chain)
+    .bind(block_hash)
+    .bind(emitting_address)
+    .bind(vec![registry_created_topic])
+    .execute(database.pool())
+    .await?;
+
+    assert_eq!(
+        load_live_adapter_source_scope(database.pool(), chain, &[block_hash.to_owned()]).await?,
+        vec![("ens_v2_registry_l1".to_owned(), "*".to_owned(), 42, 42,)],
+        "RegistryCreated must reach the registry interpreter before the emitter has an identity row"
+    );
+
+    database.cleanup().await
+}
 
 #[tokio::test]
 async fn live_adapter_target_ignores_orphaned_selected_blocks() -> Result<()> {
@@ -215,11 +376,11 @@ async fn live_adapter_scope_includes_bounded_deactivated_discovery_history() -> 
         )
         VALUES
             (
-                $1, 'subregistry', $2, $3, 'test', $5, 'admitted',
+                $1, 'registry_announcement', $2, $3, 'test', $5, 'admitted',
                 now(), now(), 5, '0xblock5', 10, $6, '{}'::JSONB
             ),
             (
-                $1, 'subregistry', $2, $4, 'test', $5, 'admitted',
+                $1, 'registry_announcement', $2, $4, 'test', $5, 'admitted',
                 now(), now(), 5, '0xblock5', NULL, NULL, '{}'::JSONB
             )
         "#,
@@ -342,7 +503,7 @@ async fn live_adapter_scope_includes_bounded_deactivated_discovery_history() -> 
             10,
             10,
         )],
-        "bounded retired history must remain replayable while unbounded retractions stay excluded"
+        "bounded retired history must remain replayable while unbounded retractions stay excluded; ParentUpdated is address-scoped, not RegistryCreated match-all"
     );
     assert!(
         load_live_adapter_source_scope(database.pool(), chain, &[after_boundary_hash.to_owned()],)
@@ -442,6 +603,14 @@ fn ens_v2_registry_scope_test_manifest(chain: &str) -> serde_json::Value {
                 {
                     "name": "TransferBatch",
                     "fragment": "event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)"
+                },
+                {
+                    "name": "RegistryCreated",
+                    "fragment": "event RegistryCreated()"
+                },
+                {
+                    "name": "Upgraded",
+                    "fragment": "event Upgraded(address indexed implementation)"
                 },
             ]
         }

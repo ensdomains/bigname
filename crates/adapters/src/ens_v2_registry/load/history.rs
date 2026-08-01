@@ -5,7 +5,7 @@ use bigname_storage::sql_row;
 use sqlx::PgPool;
 
 use super::super::{
-    emitters::emitter_for_block_and_scope,
+    emitters::emitter_for_log_and_scope,
     types::{ActiveEmitter, RegistryRawLogRow},
     util::normalize_address,
 };
@@ -190,11 +190,22 @@ pub(in crate::ens_v2_registry) async fn load_registry_raw_log_prefix(
     for row in rows {
         let block_hash = sql_row::get::<String>(&row, "block_hash")?;
         let block_number = sql_row::get(&row, "block_number")?;
+        let transaction_index = sql_row::get(&row, "transaction_index")?;
+        let log_index = sql_row::get(&row, "log_index")?;
         let emitting_address =
             normalize_address(&sql_row::get::<String>(&row, "emitting_address")?);
         let emitter = emitters_by_address
             .get(&emitting_address)
-            .and_then(|emitters| emitter_for_block_and_scope(emitters, block_number, None))
+            .and_then(|emitters| {
+                emitter_for_log_and_scope(
+                    emitters,
+                    block_number,
+                    &block_hash,
+                    transaction_index,
+                    log_index,
+                    None,
+                )
+            })
             .with_context(|| {
                 format!(
                     "retained ENSv2 registry history has no emitter attribution for {emitting_address} at block {block_number}"
@@ -206,8 +217,8 @@ pub(in crate::ens_v2_registry) async fn load_registry_raw_log_prefix(
             block_number,
             block_timestamp: sql_row::get(&row, "block_timestamp")?,
             transaction_hash: sql_row::get(&row, "transaction_hash")?,
-            transaction_index: sql_row::get(&row, "transaction_index")?,
-            log_index: sql_row::get(&row, "log_index")?,
+            transaction_index,
+            log_index,
             emitting_address,
             topics: sql_row::get(&row, "topics")?,
             data: sql_row::get(&row, "data")?,

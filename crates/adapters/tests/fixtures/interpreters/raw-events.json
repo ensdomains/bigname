@@ -883,6 +883,237 @@
           "data": "0x0000000000000000000000000000000000000000000000000000000000002611"
         }
       ]
+    },
+    {
+      "id": "ens_v1_new_owner_without_contract_discovery",
+      "runner": "unwrapped_authority",
+      "upstream_citations": [
+        "(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L82 @ ens_v1@91c966f)"
+      ],
+      "manifests": [
+        {
+          "namespace": "ens",
+          "source_family": "ens_v1_registry_l1",
+          "chain": "ethereum-mainnet",
+          "deployment_epoch": "ens_v1",
+          "file_path": "manifests/mainnet/ethereum/ens/ens_v1_registry_l1/v3.toml",
+          "declaration_name": "registry",
+          "role": "registry",
+          "address": "0x0000000000000000000000000000000000002aaa",
+          "contract_instance_id": "00000000-0000-0000-0000-000000000001"
+        }
+      ],
+      "blocks": [
+        {
+          "chain": "ethereum-mainnet",
+          "hash": "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
+          "parent_hash": null,
+          "number": 180,
+          "timestamp": 1700000180,
+          "finalized": true
+        }
+      ],
+      "logs": [
+        {
+          "chain": "ethereum-mainnet",
+          "block_hash": "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
+          "block_number": 180,
+          "transaction_hash": "0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8",
+          "transaction_index": 0,
+          "log_index": 0,
+          "emitting_address": "0x0000000000000000000000000000000000002aaa",
+          "topics": [
+            "0xce0457fe73731f824cc272376169235128c118b49d344817417c6d108d155e82",
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "0xef5b8fe8789ed448b54018e6e47371bfa696902c135a273e35ad0d4cf6df057e"
+          ],
+          "data": "0x0000000000000000000000000000000000000000000000000000000000002a22"
+        }
+      ]
+    },
+    {
+      "id": "ens_v2_registry_created_unlinked",
+      "runner": "ens_v2_registry",
+      "upstream_citations": [
+        "(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@ccaeb58)",
+        "(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@ccaeb58)"
+      ],
+      "manifests": [
+        {
+          "namespace": "ens",
+          "source_family": "ens_v2_registry_l1",
+          "chain": "ethereum-sepolia",
+          "deployment_epoch": "ens_v2_sepolia_post_audit",
+          "file_path": "manifests/sepolia/ethereum/ens/ens_v2_registry_l1/v2.toml",
+          "declaration_name": "eth_registry",
+          "role": "registry",
+          "address": "0x00000000000000000000000000000000000027aa",
+          "contract_instance_id": "00000000-0000-0000-0000-000000000001"
+        }
+      ],
+      "known_contracts": [
+        {
+          "chain": "ethereum-sepolia",
+          "address": "0x00000000000000000000000000000000000027bb",
+          "contract_instance_id": "00000000-0000-0000-0000-000000000002",
+          "contract_kind": "registry"
+        }
+      ],
+      "blocks": [
+        {
+          "chain": "ethereum-sepolia",
+          "hash": "0xc7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7",
+          "parent_hash": null,
+          "number": 150,
+          "timestamp": 1700000150,
+          "finalized": true
+        }
+      ],
+      "logs": [
+        {
+          "chain": "ethereum-sepolia",
+          "block_hash": "0xc7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7",
+          "block_number": 150,
+          "transaction_hash": "0xc8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8",
+          "transaction_index": 0,
+          "log_index": 0,
+          "emitting_address": "0x00000000000000000000000000000000000027bb",
+          "topics": [
+            "0xce2f8c55f0f6fbc489417a09291281b739419d412c063df417ab075e6f052687"
+          ],
+          "data": "0x"
+        }
+      ]
+    },
+    {
+      "id": "ens_v1_match_all_unpointed_resolver",
+      "runner": "unwrapped_authority",
+      "upstream_citations": [
+        "(upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddrResolver.sol:L6 @ ens_v1@91c966f)"
+      ],
+      "manifests": [
+        {
+          "namespace": "ens",
+          "source_family": "ens_v1_registrar_l1",
+          "chain": "ethereum-mainnet",
+          "deployment_epoch": "ens_v1",
+          "file_path": "manifests/mainnet/ethereum/ens/ens_v1_registrar_l1/v1.toml",
+          "declaration_name": "registrar",
+          "role": "registrar",
+          "address": "0x00000000000000000000000000000000000028aa",
+          "contract_instance_id": "00000000-0000-0000-0000-000000000001"
+        },
+        {
+          "namespace": "ens",
+          "source_family": "ens_v1_registry_l1",
+          "chain": "ethereum-mainnet",
+          "deployment_epoch": "ens_v1",
+          "file_path": "manifests/mainnet/ethereum/ens/ens_v1_registry_l1/v3.toml",
+          "declaration_name": "registry",
+          "role": "registry",
+          "address": "0x00000000000000000000000000000000000028bb",
+          "contract_instance_id": "00000000-0000-0000-0000-000000000002"
+        },
+        {
+          "namespace": "ens",
+          "source_family": "ens_v1_resolver_l1",
+          "chain": "ethereum-mainnet",
+          "deployment_epoch": "ens_v1",
+          "file_path": "manifests/mainnet/ethereum/ens/ens_v1_resolver_l1/v1.toml",
+          "declaration_name": "resolver",
+          "role": "public_resolver",
+          "address": "0x00000000000000000000000000000000000028cc",
+          "contract_instance_id": "00000000-0000-0000-0000-000000000003"
+        }
+      ],
+      "blocks": [
+        {
+          "chain": "ethereum-mainnet",
+          "hash": "0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+          "parent_hash": null,
+          "number": 160,
+          "timestamp": 1700000160,
+          "finalized": true
+        }
+      ],
+      "logs": [
+        {
+          "chain": "ethereum-mainnet",
+          "block_hash": "0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+          "block_number": 160,
+          "transaction_hash": "0xd8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8",
+          "transaction_index": 0,
+          "log_index": 0,
+          "emitting_address": "0x00000000000000000000000000000000000028aa",
+          "topics": [
+            "0xca6abbe9d7f11422cb6ca7629fbf6fe9efb1c621f71ce8f02b9f2a230097404f",
+            "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
+            "0x0000000000000000000000000000000000000000000000000000000000002811"
+          ],
+          "data": "0x00000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000006b49d2000000000000000000000000000000000000000000000000000000000000000005616c696365000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "chain": "ethereum-mainnet",
+          "block_hash": "0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+          "block_number": 160,
+          "transaction_hash": "0xd8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8",
+          "transaction_index": 0,
+          "log_index": 1,
+          "emitting_address": "0x00000000000000000000000000000000000028dd",
+          "topics": [
+            "0x52d7d861f09ab3d26239d492e8968629f95e9e318cf0b73bfddc441522a15fd2",
+            "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec"
+          ],
+          "data": "0x0000000000000000000000000000000000000000000000000000000000002822"
+        }
+      ]
+    },
+    {
+      "id": "proxy_upgraded_history",
+      "runner": "block_derived",
+      "upstream_citations": [
+        "(upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/interfaces/IERC1967.sol:L13 @ basenames@1809bbc)"
+      ],
+      "manifests": [
+        {
+          "namespace": "basenames",
+          "source_family": "basenames_base_registrar",
+          "chain": "base-mainnet",
+          "deployment_epoch": "basenames_v1",
+          "file_path": "manifests/mainnet/base/basenames/basenames_base_registrar/v1.toml",
+          "declaration_name": "upgradeable_registrar_controller",
+          "role": "registrar_controller",
+          "address": "0x00000000000000000000000000000000000029aa",
+          "contract_instance_id": "00000000-0000-0000-0000-000000000001"
+        }
+      ],
+      "blocks": [
+        {
+          "chain": "base-mainnet",
+          "hash": "0xe7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7",
+          "parent_hash": null,
+          "number": 170,
+          "timestamp": 1700000170,
+          "finalized": true
+        }
+      ],
+      "logs": [
+        {
+          "chain": "base-mainnet",
+          "block_hash": "0xe7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7",
+          "block_number": 170,
+          "transaction_hash": "0xe8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8",
+          "transaction_index": 0,
+          "log_index": 0,
+          "emitting_address": "0x00000000000000000000000000000000000029aa",
+          "topics": [
+            "0xbc7cd75a20ee27fd9adebab32041f755214dbc6bffa90cc0225b39da2e5c2d3b",
+            "0x00000000000000000000000000000000000000000000000000000000000029bb"
+          ],
+          "data": "0x"
+        }
+      ]
     }
   ]
 }

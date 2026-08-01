@@ -36,6 +36,43 @@ struct EnsV1ResolverProfileSeed {
     config: &'static EnsV1ResolverProfileConfig,
 }
 
+#[derive(Clone, Debug)]
+struct EnsV1ResolverProfileTarget {
+    chain: String,
+    address: String,
+    contract_instance_id: Option<Uuid>,
+    source: Option<WatchedContractSource>,
+    source_manifest_id: Option<i64>,
+    active_from_block_number: Option<i64>,
+    active_to_block_number: Option<i64>,
+}
+
+impl EnsV1ResolverProfileTarget {
+    fn from_watched_contract(contract: &WatchedContract) -> Self {
+        Self {
+            chain: contract.chain.clone(),
+            address: contract.address.clone(),
+            contract_instance_id: Some(contract.contract_instance_id),
+            source: Some(contract.source),
+            source_manifest_id: contract.source_manifest_id,
+            active_from_block_number: contract.active_from_block_number,
+            active_to_block_number: contract.active_to_block_number,
+        }
+    }
+
+    fn address_only(chain: String, address: String) -> Self {
+        Self {
+            chain,
+            address,
+            contract_instance_id: None,
+            source: None,
+            source_manifest_id: None,
+            active_from_block_number: None,
+            active_to_block_number: None,
+        }
+    }
+}
+
 pub async fn load_ens_v1_public_resolver_profile_admissions(
     pool: &PgPool,
 ) -> Result<Vec<ResolverProfileAdmission>> {
@@ -43,12 +80,31 @@ pub async fn load_ens_v1_public_resolver_profile_admissions(
     let watched_contracts =
         load_watched_contracts_by_source_family(pool, ENS_V1_RESOLVER_SOURCE_FAMILY).await?;
     let code_hash_observations = load_manifest_code_hash_observations(pool).await?;
-
-    Ok(derive_ens_v1_resolver_profile_admissions(
+    let mut admissions = derive_ens_v1_resolver_profile_admissions(
         &watched_contracts,
         &code_hash_observations,
         &seed_contracts,
-    ))
+    );
+    let watched_targets = watched_contracts
+        .iter()
+        .map(|contract| (contract.chain.clone(), normalize_address(&contract.address)))
+        .collect::<BTreeSet<_>>();
+    let address_only_targets =
+        super::address_only::load_resolver_pointer_targets(pool, "ens_v1_registry_l1")
+            .await?
+            .into_iter()
+            .filter(|target| !watched_targets.contains(target))
+            .collect::<Vec<_>>();
+    append_address_only_profile_admissions(
+        pool,
+        &address_only_targets,
+        &code_hash_observations,
+        &seed_contracts,
+        &mut admissions,
+    )
+    .await?;
+    sort_resolver_profile_admissions(&mut admissions);
+    Ok(admissions)
 }
 
 pub async fn load_ens_v1_public_resolver_profile_admissions_for_targets(
@@ -74,12 +130,35 @@ pub async fn load_ens_v1_public_resolver_profile_admissions_for_targets(
     let code_hash_observations =
         load_manifest_code_hash_observations_for_watched_contracts(pool, &code_hash_targets)
             .await?;
-
-    Ok(derive_ens_v1_resolver_profile_admissions(
+    let mut admissions = derive_ens_v1_resolver_profile_admissions(
         &target_contracts,
         &code_hash_observations,
         &seed_contracts,
-    ))
+    );
+    let watched_targets = target_contracts
+        .iter()
+        .map(|contract| (contract.chain.clone(), normalize_address(&contract.address)))
+        .collect::<BTreeSet<_>>();
+    let address_only_targets = targets
+        .iter()
+        .map(|(chain, address)| (chain.clone(), normalize_address(address)))
+        .filter(|target| {
+            target.1 != "0x0000000000000000000000000000000000000000"
+                && !watched_targets.contains(target)
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    append_address_only_profile_admissions(
+        pool,
+        &address_only_targets,
+        &code_hash_observations,
+        &seed_contracts,
+        &mut admissions,
+    )
+    .await?;
+    sort_resolver_profile_admissions(&mut admissions);
+    Ok(admissions)
 }
 
 pub fn derive_ens_v1_public_resolver_profile_admissions(
@@ -195,6 +274,55 @@ async fn load_ens_v1_resolver_profile_seed_watched_contracts(
         .collect()
 }
 
+async fn append_address_only_profile_admissions(
+    pool: &PgPool,
+    targets: &[(String, String)],
+    code_hash_observations: &[ManifestCodeHashObservation],
+    seed_contracts: &[EnsV1ResolverProfileSeed],
+    admissions: &mut Vec<ResolverProfileAdmission>,
+) -> Result<()> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    let observed_code_hashes = latest_resolver_code_hashes_by_contract_id(
+        code_hash_observations,
+        ENS_V1_RESOLVER_SOURCE_FAMILY,
+    );
+    let seed_contracts_by_id = seed_contracts
+        .iter()
+        .map(|seed| (seed.contract.contract_instance_id, seed))
+        .collect::<BTreeMap<_, _>>();
+    let seed_code_hashes = seed_contracts
+        .iter()
+        .filter_map(|seed| {
+            observed_code_hashes
+                .get(&seed.contract.contract_instance_id)
+                .map(|code_hash| SeedCodeHash {
+                    contract_instance_id: seed.contract.contract_instance_id,
+                    code_hash: code_hash.clone(),
+                    config: seed.config,
+                })
+        })
+        .collect::<Vec<_>>();
+    let target_code_hashes =
+        super::address_only::load_latest_code_hashes_for_addresses(pool, targets).await?;
+
+    for (chain, address) in targets {
+        let target =
+            EnsV1ResolverProfileTarget::address_only(chain.clone(), normalize_address(address));
+        let profile_match = classify_ens_v1_resolver_profile_match(
+            None,
+            &seed_contracts_by_id,
+            &seed_code_hashes,
+            target_code_hashes.get(&(target.chain.clone(), target.address.clone())),
+        );
+        push_profile_admissions(&target, profile_match, admissions);
+    }
+
+    Ok(())
+}
+
 fn derive_ens_v1_resolver_profile_admissions(
     watched_contracts: &[WatchedContract],
     code_hash_observations: &[ManifestCodeHashObservation],
@@ -227,12 +355,16 @@ fn derive_ens_v1_resolver_profile_admissions(
         .filter(|contract| contract.source_family == ENS_V1_RESOLVER_SOURCE_FAMILY)
     {
         let profile_match = classify_ens_v1_resolver_profile_match(
-            watched_contract.contract_instance_id,
+            Some(watched_contract.contract_instance_id),
             &seed_contracts_by_id,
             &seed_code_hashes,
             observed_code_hashes.get(&watched_contract.contract_instance_id),
         );
-        push_profile_admissions(watched_contract, profile_match, &mut admissions);
+        push_profile_admissions(
+            &EnsV1ResolverProfileTarget::from_watched_contract(watched_contract),
+            profile_match,
+            &mut admissions,
+        );
     }
 
     sort_resolver_profile_admissions(&mut admissions);
@@ -257,12 +389,14 @@ struct EnsV1ResolverProfileMatch {
 }
 
 fn classify_ens_v1_resolver_profile_match(
-    contract_instance_id: Uuid,
+    contract_instance_id: Option<Uuid>,
     seed_contracts_by_id: &BTreeMap<Uuid, &EnsV1ResolverProfileSeed>,
     seed_code_hashes: &[SeedCodeHash],
     observed_code_hash: Option<&String>,
 ) -> EnsV1ResolverProfileMatch {
-    if let Some(seed) = seed_contracts_by_id.get(&contract_instance_id) {
+    if let Some(contract_instance_id) = contract_instance_id
+        && let Some(seed) = seed_contracts_by_id.get(&contract_instance_id)
+    {
         return EnsV1ResolverProfileMatch {
             config: Some(seed.config),
             status: RESOLVER_PROFILE_STATUS_SUPPORTED.to_owned(),
@@ -309,14 +443,14 @@ fn classify_ens_v1_resolver_profile_match(
 }
 
 fn push_profile_admissions(
-    watched_contract: &WatchedContract,
+    target: &EnsV1ResolverProfileTarget,
     profile_match: EnsV1ResolverProfileMatch,
     admissions: &mut Vec<ResolverProfileAdmission>,
 ) {
     if let Some(config) = profile_match.config {
         for fact in config.fact_families {
             push_admission(
-                watched_contract,
+                target,
                 config.profile,
                 fact.fact_family,
                 fact.status,
@@ -329,7 +463,7 @@ fn push_profile_admissions(
 
     for fact_family in DEFAULT_PENDING_FACT_FAMILIES {
         push_admission(
-            watched_contract,
+            target,
             ENS_V1_PUBLIC_RESOLVER_COMPATIBLE_PROFILE,
             fact_family,
             &profile_match.status,
@@ -340,7 +474,7 @@ fn push_profile_admissions(
 }
 
 fn push_admission(
-    watched_contract: &WatchedContract,
+    target: &EnsV1ResolverProfileTarget,
     profile: &str,
     fact_family: &str,
     status: &str,
@@ -348,14 +482,14 @@ fn push_admission(
     admissions: &mut Vec<ResolverProfileAdmission>,
 ) {
     admissions.push(ResolverProfileAdmission {
-        chain: watched_contract.chain.clone(),
-        source_family: watched_contract.source_family.clone(),
-        contract_instance_id: watched_contract.contract_instance_id,
-        address: watched_contract.address.clone(),
-        source: watched_contract.source,
-        source_manifest_id: watched_contract.source_manifest_id,
-        active_from_block_number: watched_contract.active_from_block_number,
-        active_to_block_number: watched_contract.active_to_block_number,
+        chain: target.chain.clone(),
+        source_family: ENS_V1_RESOLVER_SOURCE_FAMILY.to_owned(),
+        contract_instance_id: target.contract_instance_id,
+        address: target.address.clone(),
+        source: target.source,
+        source_manifest_id: target.source_manifest_id,
+        active_from_block_number: target.active_from_block_number,
+        active_to_block_number: target.active_to_block_number,
         profile: profile.to_owned(),
         fact_family: fact_family.to_owned(),
         status: status.to_owned(),

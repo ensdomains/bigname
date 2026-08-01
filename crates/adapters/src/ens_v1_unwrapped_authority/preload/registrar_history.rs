@@ -20,7 +20,7 @@ pub(in crate::ens_v1_unwrapped_authority) fn empty_preloaded_history(
         wrapper_authorities: BTreeMap::new(),
         current_registry_owner: None,
         current_resolver: None,
-        current_record_version: None,
+        record_versions_by_resolver: BTreeMap::new(),
         open_binding: None,
         bindings: Vec::new(),
         events: Vec::new(),

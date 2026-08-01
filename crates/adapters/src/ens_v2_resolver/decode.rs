@@ -2,7 +2,9 @@ use alloy_sol_types::sol;
 use anyhow::{Context, Result};
 
 use crate::adapter_manifest::ActiveManifestEventTopic0sBySignature;
-use crate::evm_abi::{decode_event_log, hex_string as prefixed_hex_string, u256_decimal};
+use crate::evm_abi::{
+    address_hex, decode_event_log, hex_string as prefixed_hex_string, u256_decimal,
+};
 
 use super::{
     constants::*,
@@ -10,6 +12,9 @@ use super::{
 };
 
 sol! {
+    #[derive(Debug)]
+    event Upgraded(address indexed implementation);
+
     #[derive(Debug)]
     event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress);
 
@@ -45,6 +50,17 @@ pub(super) fn build_resolver_observation(
     let Some(topic0) = raw_log.topics.first() else {
         return Ok(None);
     };
+
+    if event_topics.matches(ABI_EVENT_UPGRADED_SIGNATURE, topic0)? {
+        let event = decode_event_log::<Upgraded>(
+            &raw_log.topics,
+            &raw_log.data,
+            "Upgraded log is malformed",
+        )?;
+        return Ok(Some(ResolverObservation::Upgraded {
+            implementation: address_hex(event.implementation),
+        }));
+    }
 
     if event_topics.matches(ABI_EVENT_ADDRESS_CHANGED_SIGNATURE, topic0)? {
         let event = decode_event_log::<AddressChanged>(

@@ -63,3 +63,11 @@ name = "Transfer"
 fragment = "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)"
 emitter_roles = ["registrar"]
 normalized_events = ["TokenControlTransferred"]
+
+# ERC-1967 proxy implementation history for the declared upgradeable controller:
+# (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/interfaces/IERC1967.sol:L13 @ basenames@1809bbc).
+[[abi.events]]
+name = "Upgraded"
+fragment = "event Upgraded(address indexed implementation)"
+emitter_roles = ["upgradeable_registrar_controller"]
+normalized_events = ["Upgraded"]

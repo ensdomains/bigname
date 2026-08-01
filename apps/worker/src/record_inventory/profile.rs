@@ -167,17 +167,12 @@ impl ResolverProfileGate {
         event: &RelevantEvent,
         current_resolver_event: Option<&RelevantEvent>,
     ) -> bool {
-        if self.allows_event(event) {
-            return true;
-        }
-        if event.event_kind != EVENT_KIND_RECORD_CHANGED {
-            return false;
-        }
-
         let Some(source_family) = resolver_local_source_family(&event.source_family) else {
-            return false;
+            return self.allows_event(event);
         };
-        if ignored_resolver_record_event(source_family, event) {
+        if source_family == SOURCE_FAMILY_ENS_V2_RESOLVER_L1
+            || ignored_resolver_record_event(source_family, event)
+        {
             return false;
         }
         let Some(current_resolver_event) = current_resolver_event else {
@@ -192,11 +187,16 @@ impl ResolverProfileGate {
         let Some(resolver_address) = resolver_address_from_event(current_resolver_event) else {
             return false;
         };
-        if event
-            .emitting_address
-            .as_deref()
-            .is_some_and(|emitting_address| normalize_address(emitting_address) != resolver_address)
-        {
+        let Some(emitting_address) = event.emitting_address.as_deref() else {
+            return false;
+        };
+        if normalize_address(emitting_address) != resolver_address {
+            return false;
+        }
+        if self.allows_event(event) {
+            return true;
+        }
+        if event.event_kind != EVENT_KIND_RECORD_CHANGED {
             return false;
         }
 

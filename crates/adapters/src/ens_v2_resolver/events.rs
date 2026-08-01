@@ -8,6 +8,7 @@ use super::{
     constants::{
         DERIVATION_KIND_RAW_LOG_PREIMAGE_OBSERVATION, EVENT_KIND_ALIAS_CHANGED,
         EVENT_KIND_PREIMAGE_OBSERVED, EVENT_KIND_RECORD_CHANGED, EVENT_KIND_RECORD_VERSION_CHANGED,
+        EVENT_KIND_UPGRADED,
     },
     queries::{load_name_link_by_name, load_name_link_by_namehash},
     types::{NameLink, PreimageObservation, ResolverObservation, ResolverRawLogRow},
@@ -20,6 +21,9 @@ pub(super) async fn build_resolver_events(
     observation: ResolverObservation,
 ) -> Result<Vec<NormalizedEvent>> {
     match observation {
+        ResolverObservation::Upgraded { implementation } => {
+            Ok(vec![proxy_upgraded_event(raw_log, implementation)])
+        }
         ResolverObservation::AddressChanged {
             node,
             coin_type,
@@ -196,6 +200,51 @@ pub(super) async fn build_resolver_events(
         ResolverObservation::NamedAddrResource { name } => {
             named_dns_preimage_events(raw_log, "NamedAddrResource", &name)
         }
+    }
+}
+
+fn proxy_upgraded_event(raw_log: &ResolverRawLogRow, implementation: String) -> NormalizedEvent {
+    NormalizedEvent {
+        event_identity: format!(
+            "proxy_upgraded:{}:{}:{}:{}:{}",
+            raw_log.source_manifest_id,
+            raw_log.block_hash,
+            raw_log.transaction_hash,
+            raw_log.log_index,
+            raw_log.emitting_address,
+        ),
+        namespace: raw_log.namespace.clone(),
+        logical_name_id: None,
+        resource_id: None,
+        event_kind: EVENT_KIND_UPGRADED.to_owned(),
+        source_family: raw_log.source_family.clone(),
+        manifest_version: raw_log.manifest_version,
+        source_manifest_id: Some(raw_log.source_manifest_id),
+        chain_id: Some(raw_log.chain_id.clone()),
+        block_number: Some(raw_log.block_number),
+        block_hash: Some(raw_log.block_hash.clone()),
+        transaction_hash: Some(raw_log.transaction_hash.clone()),
+        log_index: Some(raw_log.log_index),
+        raw_fact_ref: json!({
+            "kind": "raw_log",
+            "chain_id": raw_log.chain_id,
+            "block_hash": raw_log.block_hash,
+            "block_number": raw_log.block_number,
+            "transaction_hash": raw_log.transaction_hash,
+            "transaction_index": raw_log.transaction_index,
+            "log_index": raw_log.log_index,
+            "emitting_address": raw_log.emitting_address,
+            "emitting_contract_instance_id": raw_log.emitting_contract_instance_id.to_string(),
+        }),
+        derivation_kind: "proxy_upgrade_history".to_owned(),
+        canonicality_state: raw_log.canonicality_state,
+        before_state: json!({}),
+        after_state: json!({
+            "source_event": "Upgraded",
+            "proxy_address": raw_log.emitting_address,
+            "contract_instance_id": raw_log.emitting_contract_instance_id.to_string(),
+            "implementation": implementation,
+        }),
     }
 }
 

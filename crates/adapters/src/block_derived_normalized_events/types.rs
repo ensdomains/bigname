@@ -31,6 +31,7 @@ pub(super) struct WatchedRawLogRow {
     pub(super) topics: Vec<String>,
     pub(super) data: Vec<u8>,
     pub(super) canonicality_state: CanonicalityState,
+    pub(super) emitting_contract_instance_id: sqlx::types::Uuid,
     pub(super) source_manifest_id: i64,
     pub(super) namespace: String,
     pub(super) source_family: String,

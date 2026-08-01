@@ -13,6 +13,12 @@ use super::{
 
 sol! {
     #[derive(Debug)]
+    event RegistryCreated();
+
+    #[derive(Debug)]
+    event Upgraded(address indexed implementation);
+
+    #[derive(Debug)]
     event LabelRegistered(
         uint256 indexed tokenId,
         bytes32 indexed labelHash,
@@ -157,6 +163,27 @@ fn build_registry_observation(
         return Ok(None);
     };
     let reference = raw_log.reference();
+
+    if event_topics.matches(ABI_EVENT_REGISTRY_CREATED_SIGNATURE, topic0)? {
+        decode_event_log::<RegistryCreated>(
+            &raw_log.topics,
+            &raw_log.data,
+            "RegistryCreated log is malformed",
+        )?;
+        return Ok(Some(RegistryObservation::RegistryCreated { reference }));
+    }
+
+    if event_topics.matches(ABI_EVENT_UPGRADED_SIGNATURE, topic0)? {
+        let event = decode_event_log::<Upgraded>(
+            &raw_log.topics,
+            &raw_log.data,
+            "Upgraded log is malformed",
+        )?;
+        return Ok(Some(RegistryObservation::Upgraded {
+            implementation: address_hex(event.implementation),
+            reference,
+        }));
+    }
 
     if event_topics.matches(ABI_EVENT_LABEL_REGISTERED_SIGNATURE, topic0)? {
         let event = decode_event_log::<LabelRegistered>(

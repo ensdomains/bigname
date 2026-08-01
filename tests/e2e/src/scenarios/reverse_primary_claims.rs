@@ -277,8 +277,8 @@ async fn unadmitted_reverse_resolver_keeps_candidate_absent() -> Result<()> {
     );
     let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
 
-    let observed_names: Vec<(Option<String>, Option<String>, Value)> = sqlx::query_as(
-        "SELECT ne.logical_name_id, ne.resource_id::TEXT, ne.after_state \
+    let observed_names: Vec<(String, Option<String>, Option<String>, Value)> = sqlx::query_as(
+        "SELECT ne.event_identity, ne.logical_name_id, ne.resource_id::TEXT, ne.after_state \
          FROM normalized_events ne \
          JOIN raw_logs rl \
            ON rl.chain_id = ne.chain_id \
@@ -288,25 +288,33 @@ async fn unadmitted_reverse_resolver_keeps_candidate_absent() -> Result<()> {
          WHERE ne.event_kind = 'RecordChanged' \
            AND ne.after_state->>'raw_name' = 'hidden.eth' \
            AND lower(rl.emitting_address) = $1 \
-           AND ne.canonicality_state = 'canonical'",
+           AND ne.canonicality_state = 'canonical' \
+         ORDER BY ne.event_identity",
     )
     .bind(&unadmitted_path)
     .fetch_all(&run.db.pool)
     .await?;
-    assert_eq!(
-        observed_names.len(),
-        1,
-        "generic topic intake should retain one unanchored NameChanged observation"
-    );
-    let (logical_name_id, resource_id, after_state) = &observed_names[0];
-    assert_eq!(logical_name_id, &None);
-    assert_eq!(resource_id, &None);
-    assert_eq!(after_state["record_key"], "name");
-    assert_eq!(after_state["raw_name"], "hidden.eth");
     assert!(
-        after_state.get("primary_claim_source").is_none(),
-        "an unadmitted resolver observation must not become primary-name identity: {after_state}"
+        (1..=2).contains(&observed_names.len()),
+        "match-all intake must retain the unanchored NameChanged observation, with at most one later unsupported-profile boundary"
     );
+    assert!(
+        observed_names
+            .iter()
+            .all(|(identity, _, _, _)| identity.contains(":record-change:")
+                || identity.contains(":record-change-unsupported:")),
+        "only the pending-profile observation and optional unsupported-profile boundary are allowed"
+    );
+    for (_, logical_name_id, resource_id, after_state) in &observed_names {
+        assert_eq!(logical_name_id, &None);
+        assert_eq!(resource_id, &None);
+        assert_eq!(after_state["record_key"], "name");
+        assert_eq!(after_state["raw_name"], "hidden.eth");
+        assert!(
+            after_state.get("primary_claim_source").is_none(),
+            "an unadmitted resolver observation must not become primary-name identity: {after_state}"
+        );
+    }
 
     assert_persisted_not_found(&run, &claimant_path).await?;
     let body = primary_name(&run.api, "ens", 60, &claimant_path, "declared").await?;

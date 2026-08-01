@@ -954,9 +954,9 @@ fails automatic bootstrap for the chain. Bootstrap does not fall back to the
 canonical tip: the unfinalized tail remains live-intake work and cannot produce
 number-keyed bootstrap coverage. The initial plan is not repeated when
 interpretation admits another ENSv2 target; historical facts for that target
-require an explicit raw-only backfill followed by replay. ENSv1 generic
-resolver and Basenames recursive registry history use their separate scan
-mechanisms. Bootstrap does not cap work to a recent window. This is still
+require an explicit raw-only backfill followed by replay. Match-all ENSv1 and
+Basenames resolver history uses separate topic-scan scopes. Bootstrap does not
+cap work to a recent window. This is still
 operational intake work: completing bootstrap alone is not consumer-replacement
 or route-coverage evidence without the relevant projection, route, conformance,
 and rollout gates.
@@ -1360,13 +1360,11 @@ environment equivalent of the flag. The mode selects only producers classified
 `stateless_raw_fact` by the central normalized-event replay contract: the
 complete block-derived and ENSv1 reverse-claim producers. Selection is derived
 directly from the ordinary replay dependency model; there is no separate
-per-adapter stateless-only flag. ENSv1 subregistry discovery is excluded because
-its event derivation reads manifest contract instances, discovery-derived
-emitter addresses, migration state, the current registry emitter, and the
-reconciled edge at the event block/hash. It never runs ENSv1
-unwrapped-authority or any other closure/stateful lane. Leaving off the flag
-preserves the existing refusal when a block-hash or source-scoped selection
-includes a closure/context-dependent adapter.
+per-adapter stateless-only flag. The owner-based ENSv1 subregistry discovery
+producer no longer exists. Stateless-only replay never runs ENSv1 unwrapped
+authority or any other closure/stateful lane. Leaving off the flag preserves
+the existing refusal when a block-hash or source-scoped selection includes a
+closure/context-dependent adapter.
 
 The command emits the ordinary raw-fact replay timing and synchronized/inserted
 counts; there are no per-identity arbitration outcomes. Treat any payload
@@ -1379,10 +1377,11 @@ The 2026-07-23 Ethereum Mainnet repair is the reference scenario. Four
 `after_state` (the old registry instance and resolver-address-keyed observation
 key), so startup family sync rejected the first mismatch. For each implicated
 canonical block, capture the family-sync error and stored row for review. This
-kind is owned by the `ens_v1_registry_l1` source family and the contextual
-`ens_v1_subregistry_discovery` adapter, so `--stateless-only` intentionally does
-not repair it. Run ordinary normalized-event replay from the proven retained
-closure boundary through the last implicated block instead:
+kind is owned by the `ens_v1_registry_l1` source family and was produced by the
+now-deleted contextual `ens_v1_subregistry_discovery` adapter. The retained
+storage repair remains compatibility-only and `--stateless-only` intentionally
+does not repair it. Run ordinary normalized-event replay from the proven
+retained closure boundary through the last implicated block instead:
 
 ```sh
 bigname-indexer replay normalized-events \

@@ -135,8 +135,24 @@ impl AuthorityEventTopics {
         )?)
     }
 
-    pub(super) fn ens_resolver_event_topic0s(&self) -> Result<Vec<String>> {
-        self.topic0s.topic0s(ENS_RESOLVER_EVENT_SIGNATURES)
+    pub(super) fn resolver_event_topic0s(&self, source_family: &str) -> Result<Vec<String>> {
+        self.topic0s
+            .topic0s(resolver_event_signatures(source_family))
+    }
+
+    pub(super) fn resolver_event_topic0s_for_sources(
+        &self,
+        sources: &[GenericResolverEventSource],
+    ) -> Result<Vec<String>> {
+        let mut topic0s = BTreeSet::new();
+        for source_family in sources
+            .iter()
+            .map(|source| source.source_family.as_str())
+            .collect::<BTreeSet<_>>()
+        {
+            topic0s.extend(self.resolver_event_topic0s(source_family)?);
+        }
+        Ok(topic0s.into_iter().collect())
     }
 
     pub(super) fn authority_replay_event_topic0s(&self) -> Vec<String> {
@@ -249,6 +265,14 @@ fn text_changed_signatures(source_family: &str) -> &'static [&'static str] {
             TEXT_CHANGED_WITH_VALUE_SIGNATURE,
         ],
         SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => &[TEXT_CHANGED_WITH_VALUE_SIGNATURE],
+        _ => &[],
+    }
+}
+
+fn resolver_event_signatures(source_family: &str) -> &'static [&'static str] {
+    match source_family {
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1 => ENS_RESOLVER_EVENT_SIGNATURES,
+        SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => BASENAMES_RESOLVER_EVENT_SIGNATURES,
         _ => &[],
     }
 }

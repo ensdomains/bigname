@@ -748,7 +748,7 @@ async fn unadmitted_resolver_rotation_stays_profile_gated_then_clears() -> Resul
         unadmitted.resolver.address,
     )
     .await?;
-    let unadmitted_record = basenames::set_base_text_record(
+    basenames::set_base_text_record(
         &rpc,
         unadmitted.resolver.address,
         alice,
@@ -758,13 +758,10 @@ async fn unadmitted_resolver_rotation_stays_profile_gated_then_clears() -> Resul
     )
     .await?;
 
-    // Live intake hangs on this rotation-to-discovered-instance chain (the
-    // Base sibling of the reproduced compositional/reveal hang family; the
-    // ENSv1 twin of this scenario ingests live without issue). The first
-    // backfill derives the resolver-discovery edge, then a watched-target
-    // backfill deliberately fetches the unadmitted instance. This preserves
-    // the profile-gate test even though API-layer reads remain unavailable
-    // without a promoted checkpoint.
+    // Base resolver signatures are fetched match-all, so the raw resolver
+    // write is present up front without admitting the address through a
+    // resolver-discovery edge. Profile admission remains the interpretation
+    // gate for this L2Resolver-incompatible instance.
     let unadmitted_address = format!("{:#x}", unadmitted.resolver.address);
     let rotated = support::backfill_basenames_and_replay_projections(
         &base,
@@ -772,6 +769,23 @@ async fn unadmitted_resolver_rotation_stays_profile_gated_then_clears() -> Resul
         "basenames-unadmitted-rotation",
     )
     .await?;
+    support::prefetch_raw_facts(&rotated.db.pool, &rpc, "base-mainnet").await?;
+    support::prefetch_raw_code_hash(
+        &rotated.db.pool,
+        &rpc,
+        "base-mainnet",
+        deployment.l2_resolver.address,
+    )
+    .await?;
+    support::prefetch_raw_code_hash(
+        &rotated.db.pool,
+        &rpc,
+        "base-mainnet",
+        unadmitted.resolver.address,
+    )
+    .await?;
+    bigname_adapters::sync_ens_v1_unwrapped_authority(&rotated.db.pool, "base-mainnet").await?;
+    crate::harness::pipeline::worker_replay_all_current_projections(&root, &rotated.db.url).await?;
     let rotation_derived: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM normalized_events \
          WHERE logical_name_id = 'basenames:rotated.base.eth' \
@@ -783,30 +797,22 @@ async fn unadmitted_resolver_rotation_stays_profile_gated_then_clears() -> Resul
     .fetch_one(&rotated.db.pool)
     .await?;
     assert!(rotation_derived, "the rotation must derive ResolverChanged");
-    let unadmitted_contract_instance_id: Uuid = sqlx::query_scalar(
-        "SELECT edge.to_contract_instance_id FROM discovery_edges edge \
+    let resolver_edge_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM discovery_edges edge \
          JOIN contract_instance_addresses target \
            ON target.contract_instance_id = edge.to_contract_instance_id \
           AND target.chain_id = edge.chain_id \
          WHERE edge.chain_id = 'base-mainnet' \
            AND edge.edge_kind = 'resolver' \
-           AND lower(target.address) = $1 \
-           AND edge.deactivated_at IS NULL \
-           AND target.deactivated_at IS NULL \
-         ORDER BY edge.active_from_block_number DESC NULLS LAST \
-         LIMIT 1",
+           AND lower(target.address) = $1)",
     )
     .bind(&unadmitted_address)
     .fetch_one(&rotated.db.pool)
     .await?;
-    support::backfill_basenames_watched_target_and_replay_projections(
-        &rotated,
-        &base,
-        unadmitted_contract_instance_id,
-        unadmitted_record.block_number..=unadmitted_record.block_number,
-        "basenames-unadmitted-resolver-target",
-    )
-    .await?;
+    assert!(
+        !resolver_edge_exists,
+        "a registry resolver pointer must not admit a discovery edge"
+    );
     let record_events: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
          WHERE logical_name_id = 'basenames:rotated.base.eth' \
@@ -835,7 +841,7 @@ async fn unadmitted_resolver_rotation_stays_profile_gated_then_clears() -> Resul
     .await?;
     assert_eq!(
         raw_text_events, 1,
-        "the watched-target backfill must retain the unadmitted resolver log"
+        "match-all Base resolver intake must retain the unadmitted resolver log"
     );
 
     let summary: Value = sqlx::query_scalar(
@@ -860,7 +866,7 @@ async fn unadmitted_resolver_rotation_stays_profile_gated_then_clears() -> Resul
     let admitted_stored_hash: String = sqlx::query_scalar(
         "SELECT lower(code_hash) FROM raw_code_hashes \
          WHERE lower(contract_address) = $1 \
-           AND canonicality_state = 'canonical' \
+           AND canonicality_state <> 'orphaned' \
          ORDER BY block_number DESC, raw_code_hash_id DESC LIMIT 1",
     )
     .bind(format!("{:#x}", deployment.l2_resolver.address))
@@ -869,7 +875,7 @@ async fn unadmitted_resolver_rotation_stays_profile_gated_then_clears() -> Resul
     let unadmitted_stored_hash: String = sqlx::query_scalar(
         "SELECT lower(code_hash) FROM raw_code_hashes \
          WHERE lower(contract_address) = $1 \
-           AND canonicality_state = 'canonical' \
+           AND canonicality_state <> 'orphaned' \
          ORDER BY block_number DESC, raw_code_hash_id DESC LIMIT 1",
     )
     .bind(&unadmitted_address)
@@ -981,7 +987,10 @@ async fn legacy_reverse_registrar_stays_registry_and_raw_record_only() -> Result
     .bind(&reverse_node)
     .fetch_one(&claimed.db.pool)
     .await?;
-    assert_eq!(claim_registry_edge, 1, "claim must admit on its own");
+    assert_eq!(
+        claim_registry_edge, 1,
+        "claim must derive its child assignment on its own"
+    );
     claimed.db.cleanup().await?;
 
     let named = basenames::set_legacy_base_reverse_name(
@@ -1005,7 +1014,7 @@ async fn legacy_reverse_registrar_stays_registry_and_raw_record_only() -> Result
     );
     let run = support::ingest_basenames_and_serve(&base, &deployment, Some(&ready_sql)).await?;
 
-    for (transaction_hash, expected) in [(&claim.tx_hash, 0_i64), (&named.tx_hash, 1_i64)] {
+    for transaction_hash in [&claim.tx_hash, &named.tx_hash] {
         let registry_edges: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM normalized_events \
              WHERE transaction_hash = $1 \
@@ -1019,8 +1028,8 @@ async fn legacy_reverse_registrar_stays_registry_and_raw_record_only() -> Result
         .fetch_one(&run.db.pool)
         .await?;
         assert_eq!(
-            registry_edges, expected,
-            "one-shot replay must retain only the latest reverse-child assignment"
+            registry_edges, 1,
+            "one-shot replay must retain each canonical reverse-child history event"
         );
     }
 
@@ -1063,8 +1072,8 @@ async fn legacy_reverse_registrar_stays_registry_and_raw_record_only() -> Result
     .fetch_one(&run.db.pool)
     .await?;
     assert_eq!(
-        normalized_resolver_changes, 1,
-        "registry discovery must retain the unknown reverse-node resolver edge"
+        normalized_resolver_changes, 0,
+        "NewResolver for an unknown reverse node must not recreate resolver discovery history"
     );
 
     let name_changed_topic = format!("{:#x}", keccak256("NameChanged(bytes32,string)".as_bytes()));

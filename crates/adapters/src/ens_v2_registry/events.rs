@@ -17,7 +17,7 @@ use super::{
         name_under_registry, observe_name, remember_linked_resource_state, state_for_token_mut,
         take_states_for_name,
     },
-    normalized::normalized_event,
+    normalized::{normalized_event, proxy_upgraded_event},
     types::{ObservationRef, RegistryNameState, RegistryObservation, RegistryResourceLink},
     util::{deterministic_uuid, normalize_address, null_if_zero_address},
 };
@@ -53,6 +53,29 @@ pub(super) fn apply_registry_observation(
     context: &mut RegistryObservationContext<'_>,
 ) -> Result<()> {
     match observation {
+        RegistryObservation::RegistryCreated { reference } => {
+            context.graph_events.push(normalized_event(
+                &reference,
+                None,
+                None,
+                EVENT_KIND_REGISTRY_CREATED,
+                json!({}),
+                json!({
+                    "source_event": "RegistryCreated",
+                    "registry_address": reference.emitting_address,
+                    "registry_contract_instance_id": reference.emitting_contract_instance_id.to_string(),
+                }),
+                format!("registry-created:{}", reference.emitting_address),
+            ));
+        }
+        RegistryObservation::Upgraded {
+            implementation,
+            reference,
+        } => {
+            context
+                .graph_events
+                .push(proxy_upgraded_event(&reference, implementation));
+        }
         RegistryObservation::LabelRegistered {
             token_id,
             labelhash,

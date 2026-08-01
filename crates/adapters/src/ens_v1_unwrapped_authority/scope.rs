@@ -114,7 +114,7 @@ fn source_scope_target_intersects_active_emitter(
 pub(super) fn is_generic_resolver_event_source_scope_target(
     target: &AuthorityRawLogSourceScopeTarget,
 ) -> bool {
-    target.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+    is_generic_resolver_source_family(&target.source_family)
         && target.address == GENERIC_SOURCE_SCOPE_ADDRESS
 }
 

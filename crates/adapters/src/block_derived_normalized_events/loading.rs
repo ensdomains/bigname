@@ -288,6 +288,7 @@ pub(super) async fn load_watched_raw_logs(
                 topics: sql_row::get(&row, "topics")?,
                 data: sql_row::get(&row, "data")?,
                 canonicality_state: sql_row::get(&row, "canonicality_state")?,
+                emitting_contract_instance_id: active_emitter.contract_instance_id,
                 source_manifest_id: active_emitter.source_manifest_id,
                 namespace: active_emitter.namespace.clone(),
                 source_family: active_emitter.source_family.clone(),

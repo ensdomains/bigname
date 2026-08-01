@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use sqlx::PgPool;
 
 use super::{
-    emitters::{emitter_for_block_and_scope, scoped_ranges_for_active_emitters},
+    emitters::{emitter_for_log_and_scope, scoped_ranges_for_active_emitters},
     types::{ActiveEmitter, RegistryRawLogRow, RegistryRawLogSourceScopeTarget},
     util::normalize_address,
 };
@@ -21,7 +21,7 @@ pub(super) enum RawLogCanonicalityFilter {
 }
 
 impl RawLogCanonicalityFilter {
-    const fn canonical_only(self) -> bool {
+    pub(super) const fn canonical_only(self) -> bool {
         matches!(self, Self::CanonicalOnly)
     }
 }
@@ -198,21 +198,33 @@ pub(super) async fn load_registry_raw_logs(
     for row in rows {
         let emitting_address =
             normalize_address(&sql_row::get::<String>(&row, "emitting_address")?);
+        let block_hash = sql_row::get::<String>(&row, "block_hash")?;
         let block_number = sql_row::get(&row, "block_number")?;
+        let transaction_index = sql_row::get(&row, "transaction_index")?;
+        let log_index = sql_row::get(&row, "log_index")?;
         let Some(emitter) = emitters_by_address
             .get(&emitting_address)
-            .and_then(|emitters| emitter_for_block_and_scope(emitters, block_number, source_scope))
+            .and_then(|emitters| {
+                emitter_for_log_and_scope(
+                    emitters,
+                    block_number,
+                    &block_hash,
+                    transaction_index,
+                    log_index,
+                    source_scope,
+                )
+            })
         else {
             continue;
         };
         output.push(RegistryRawLogRow {
             chain_id: sql_row::get(&row, "chain_id")?,
-            block_hash: sql_row::get(&row, "block_hash")?,
+            block_hash,
             block_number,
             block_timestamp: sql_row::get(&row, "block_timestamp")?,
             transaction_hash: sql_row::get(&row, "transaction_hash")?,
-            transaction_index: sql_row::get(&row, "transaction_index")?,
-            log_index: sql_row::get(&row, "log_index")?,
+            transaction_index,
+            log_index,
             emitting_address,
             topics: sql_row::get(&row, "topics")?,
             data: sql_row::get(&row, "data")?,

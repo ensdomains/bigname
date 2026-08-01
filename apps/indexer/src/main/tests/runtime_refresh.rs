@@ -1,8 +1,3 @@
-use bigname_manifests::{
-    WatchedContractSource, WatchedSourceSelector, load_watched_contracts,
-    load_watched_source_selector_plan,
-};
-
 #[tokio::test]
 async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -27,16 +22,16 @@ async fn build_manifest_runtime_state_loads_checked_in_repository_seed() -> Resu
     assert_eq!(runtime_state.sync_summary.root_count, 6);
     assert_eq!(runtime_state.sync_summary.contract_count, 28);
     assert_eq!(runtime_state.sync_summary.capability_count, 10);
-    assert_eq!(runtime_state.sync_summary.discovery_rule_count, 8);
+    assert_eq!(runtime_state.sync_summary.discovery_rule_count, 4);
     assert_eq!(runtime_state.discovery_admission.active_manifest_count, 11);
     assert_eq!(runtime_state.discovery_admission.active_root_count, 3);
     assert_eq!(runtime_state.discovery_admission.active_contract_count, 23);
-    assert_eq!(runtime_state.discovery_admission.active_rule_count, 4);
+    assert_eq!(runtime_state.discovery_admission.active_rule_count, 0);
     assert_eq!(
         runtime_state
             .manifest_normalized_event_summary
             .total_synced_count,
-        18
+        17
     );
     assert_eq!(
         runtime_state.watched_contract_summary.unique_contract_count,
@@ -410,7 +405,7 @@ async fn refresh_watched_chain_plan_detects_storage_changes() -> Result<()> {
     insert_active_discovery_edge(
         database.pool(),
         "ethereum-mainnet",
-        "subregistry",
+        "registry_announcement",
         root_contract_instance_id,
         discovered_contract_instance_id,
         Some(1),
@@ -662,7 +657,7 @@ async fn refresh_watched_chain_plan_reuses_contract_instance_ids_across_inactive
 }
 
 #[tokio::test]
-async fn runtime_refresh_tracks_proxy_implementation_alert_churn() -> Result<()> {
+async fn runtime_refresh_tracks_proxy_implementation_manifest_history() -> Result<()> {
     let database = TestDatabase::new().await?;
     let manifests = TestManifestDir::new()?;
     let manifest_path = manifests.write_manifest(&manifest_contents_with_contract(
@@ -705,7 +700,7 @@ async fn runtime_refresh_tracks_proxy_implementation_alert_churn() -> Result<()>
     assert_eq!(
         manifest_normalized_event_kind_count(
             &initial_state.manifest_normalized_event_summary,
-            "ManifestProxyImplementationAlert",
+            "ProxyImplementationChanged",
         ),
         1
     );
@@ -754,7 +749,7 @@ async fn runtime_refresh_tracks_proxy_implementation_alert_churn() -> Result<()>
     assert_eq!(
         manifest_normalized_event_kind_count(
             &refreshed_state.manifest_normalized_event_summary,
-            "ManifestProxyImplementationAlert",
+            "ProxyImplementationChanged",
         ),
         1
     );
@@ -762,8 +757,8 @@ async fn runtime_refresh_tracks_proxy_implementation_alert_churn() -> Result<()>
         refreshed_state
             .manifest_normalized_event_summary
             .by_kind
-            .get("ManifestProxyImplementationAlert")
-            .expect("proxy implementation alert summary must be present")
+            .get("ProxyImplementationChanged")
+            .expect("proxy implementation history summary must be present")
             .inserted_count,
         1
     );
@@ -805,7 +800,7 @@ async fn runtime_refresh_tracks_proxy_implementation_alert_churn() -> Result<()>
         );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
-            "SELECT after_state->>'implementation_address' FROM normalized_events WHERE event_kind = 'ManifestProxyImplementationAlert' ORDER BY normalized_event_id DESC LIMIT 1"
+            "SELECT after_state->>'implementation' FROM normalized_events WHERE event_kind = 'ProxyImplementationChanged' ORDER BY normalized_event_id DESC LIMIT 1"
         )
         .fetch_one(database.pool())
         .await?,
@@ -817,7 +812,7 @@ async fn runtime_refresh_tracks_proxy_implementation_alert_churn() -> Result<()>
 }
 
 #[tokio::test]
-async fn runtime_refresh_emits_code_hash_drift_alert_without_watch_plan_change() -> Result<()> {
+async fn runtime_refresh_ignores_code_hash_drift_without_manifest_change() -> Result<()> {
     let database = TestDatabase::new().await?;
     let manifests = TestManifestDir::new()?;
     let root_address = "0x0000000000000000000000000000000000000001";
@@ -856,53 +851,26 @@ async fn runtime_refresh_emits_code_hash_drift_alert_without_watch_plan_change()
         refresh_watched_chain_plan(database.pool(), &initial_state.watched_chain_plan).await?,
         None
     );
-    let refreshed_state =
+    assert!(
         refresh_manifest_normalized_events_from_storage(database.pool(), &initial_state)
             .await?
-            .expect("code-hash drift alert must refresh manifest normalized-event summary");
-    assert_eq!(
-        refreshed_state.watched_chain_plan,
-        initial_state.watched_chain_plan
+            .is_none(),
+        "code-hash drift must not synthesize manifest history"
     );
     assert_eq!(
         manifest_normalized_event_kind_count(
-            &refreshed_state.manifest_normalized_event_summary,
+            &initial_state.manifest_normalized_event_summary,
             "ManifestCodeHashDriftAlert",
         ),
-        1
+        0
     );
     assert_eq!(
-        refreshed_state
-            .manifest_normalized_event_summary
-            .by_kind
-            .get("ManifestCodeHashDriftAlert")
-            .expect("code-hash drift alert summary must be present")
-            .inserted_count,
-        1
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT after_state->>'expected_code_hash' FROM normalized_events WHERE event_kind = 'ManifestCodeHashDriftAlert'"
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind = 'ManifestCodeHashDriftAlert'"
         )
         .fetch_one(database.pool())
         .await?,
-        "0xexpected".to_owned()
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT after_state->>'observed_code_hash' FROM normalized_events WHERE event_kind = 'ManifestCodeHashDriftAlert'"
-        )
-        .fetch_one(database.pool())
-        .await?,
-        "0xobserved".to_owned()
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM normalized_events WHERE event_kind = 'ManifestCodeHashDriftAlert'"
-        )
-        .fetch_one(database.pool())
-        .await?,
-        "canonical".to_owned()
+        0
     );
 
     database.cleanup().await?;
@@ -1205,7 +1173,7 @@ async fn reconcile_fetched_heads_backfills_code_hashes_for_new_watched_addresses
     insert_active_discovery_edge(
         database.pool(),
         "ethereum-mainnet",
-        "subregistry",
+        "registry_announcement",
         first_root_contract_instance_id,
         second_contract_instance_id,
         Some(1),
@@ -1250,8 +1218,7 @@ async fn reconcile_fetched_heads_backfills_code_hashes_for_new_watched_addresses
 }
 
 #[tokio::test]
-async fn focused_discovery_sync_before_widen_admits_bootstrap_edges_into_the_live_plan()
--> Result<()> {
+async fn focused_discovery_sync_does_not_widen_from_ensv1_owner_assignments() -> Result<()> {
     let database = TestDatabase::new().await?;
     let manifests = TestManifestDir::new()?;
     manifests.write_manifest_for_source_family("ens_v1_registry_l1", &ens_v1_manifest_contents())?;
@@ -1277,8 +1244,7 @@ async fn focused_discovery_sync_before_widen_admits_bootstrap_edges_into_the_liv
         0
     );
 
-    // Bootstrap's raw-only backfill stored a NewOwner log from the registry; the discovery edge does
-    // not exist until the adapter-owned sync processes it.
+    // Bootstrap's raw-only backfill stored a NewOwner log from the registry.
     let canonical_head = provider_block(
         "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         Some("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
@@ -1294,8 +1260,7 @@ async fn focused_discovery_sync_before_widen_admits_bootstrap_edges_into_the_liv
     )
     .await?;
 
-    // Widening alone only reloads the stored plan, so the still-unmaterialized edge is missed — this
-    // is the dropped-target bug the post-bootstrap sync fixes.
+    // Owner assignments do not admit contract instances.
     let widened_without_sync =
         widen_runtime_state_to_live_watch_scope(database.pool(), &bootstrap_state).await?;
     assert_eq!(
@@ -1307,8 +1272,7 @@ async fn focused_discovery_sync_before_widen_admits_bootstrap_edges_into_the_liv
         0
     );
 
-    // Auto's focused post-bootstrap pass runs only the discovery-materializing families before the
-    // widen, so the live plan admits the target without deriving all seven adapter families.
+    // The transitional focused pass must preserve that rule.
     sync_discovery_adapter_owned_raw_log_state(
         database.pool(),
         &bootstrap_state.watched_chain_plan,
@@ -1316,18 +1280,13 @@ async fn focused_discovery_sync_before_widen_admits_bootstrap_edges_into_the_liv
     .await?;
     let widened_state =
         widen_runtime_state_to_live_watch_scope(database.pool(), &bootstrap_state).await?;
+    assert_eq!(widened_state.watched_chain_plan, bootstrap_state.watched_chain_plan);
+    assert_eq!(widened_state.watched_chain_plan[0].discovery_edge_entry_count, 0);
     assert_eq!(
-        widened_state.watched_chain_plan,
-        vec![WatchedChainPlan {
-            chain: "ethereum-mainnet".to_owned(),
-            addresses: vec![
-                discovered_owner_address.to_owned(),
-                registry_address.to_owned(),
-            ],
-            manifest_root_entry_count: 1,
-            manifest_contract_entry_count: 1,
-            discovery_edge_entry_count: 1,
-        }]
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM discovery_edges")
+            .fetch_one(database.pool())
+            .await?,
+        0
     );
 
     let widened_tasks =
@@ -1342,7 +1301,7 @@ async fn focused_discovery_sync_before_widen_admits_bootstrap_edges_into_the_liv
 }
 
 #[tokio::test]
-async fn stored_discovery_refresh_reloads_only_when_admission_epochs_move() -> Result<()> {
+async fn ensv1_owner_assignment_does_not_move_the_discovery_epoch() -> Result<()> {
     let database = TestDatabase::new().await?;
     let manifests = TestManifestDir::new()?;
     manifests.write_manifest_for_source_family("ens_v1_registry_l1", &ens_v1_manifest_contents())?;
@@ -1354,7 +1313,6 @@ async fn stored_discovery_refresh_reloads_only_when_admission_epochs_move() -> R
     )
     .await?;
     let registry_address = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
-    let discovered_owner_address = "0x0000000000000000000000000000000000000002";
     assert_eq!(
         initial_state.watched_chain_plan[0].addresses,
         vec![registry_address.to_owned()]
@@ -1363,23 +1321,19 @@ async fn stored_discovery_refresh_reloads_only_when_admission_epochs_move() -> R
     // First pass produces a sentinel candidate. Nothing has moved, so the
     // plan itself is equal; the caller commits the candidate only after its
     // convergence/apply work succeeds.
-    let mut admission_epochs = None;
     let seeded = refresh_runtime_state_from_stored_discovery_when_epochs_move(
         database.pool(),
         &initial_state,
-        admission_epochs.as_ref(),
+        None,
     )
     .await?
     .expect("a missing sentinel must check the stored plan");
     assert!(seeded.refreshed_state.is_none());
-    assert!(admission_epochs.is_none(), "the loader must not commit its sentinel");
-    admission_epochs = Some(seeded.admission_epochs);
-    let seeded_epochs = admission_epochs
-        .clone()
-        .expect("first refresh must seed the admission-epoch sentinel");
+    let seeded_epochs = seeded.admission_epochs;
 
-    // A stored NewOwner log whose adapter sync materializes a discovery edge
-    // and, per the ratified invariant, bumps the chain's admission epoch.
+    // ENSv1 NewOwner remains an authority/history fact, but owner-based target
+    // discovery was deleted. Adapter sync must therefore leave both the
+    // watched surface and its admission epoch unchanged.
     let canonical_head = provider_block(
         "0xcafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe",
         Some("0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead"),
@@ -1390,78 +1344,31 @@ async fn stored_discovery_refresh_reloads_only_when_admission_epochs_move() -> R
         "ethereum-mainnet",
         &canonical_head,
         "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
-        discovered_owner_address,
+        "0x0000000000000000000000000000000000000002",
         CanonicalityState::Canonical,
     )
     .await?;
     sync_adapter_owned_raw_log_state(database.pool(), &initial_state.watched_chain_plan).await?;
-    let bumped_epoch = sqlx::query_scalar::<_, i64>(
-        "SELECT epoch FROM discovery_admission_epochs WHERE chain_id = 'ethereum-mainnet'",
-    )
-    .fetch_one(database.pool())
-    .await?;
-    assert!(
-        bumped_epoch > seeded_epochs.get("ethereum-mainnet").copied().unwrap_or(0),
-        "adapter-owned discovery sync must bump the admission epoch"
-    );
-
-    // Roll the epoch row back to the sentinel's value: the plan tables now
-    // hold a new edge, but with an unmoved epoch the refresh must skip the
-    // full plan reload — reloads are keyed to the epoch invariant, never to
-    // per-tick scans of the multi-million-row watched surface.
-    sqlx::query("UPDATE discovery_admission_epochs SET epoch = $1 WHERE chain_id = 'ethereum-mainnet'")
-        .bind(seeded_epochs.get("ethereum-mainnet").copied().unwrap_or(0))
-        .execute(database.pool())
-        .await?;
     let skipped = refresh_runtime_state_from_stored_discovery_when_epochs_move(
         database.pool(),
         &initial_state,
-        admission_epochs.as_ref(),
+        Some(&seeded_epochs),
     )
     .await?;
     assert!(
         skipped.is_none(),
-        "an unmoved admission epoch must skip the stored plan reload"
-    );
-
-    // Restoring the bumped epoch makes the sentinel observe the move and
-    // reload the plan, admitting the discovered target.
-    sqlx::query("UPDATE discovery_admission_epochs SET epoch = $1 WHERE chain_id = 'ethereum-mainnet'")
-        .bind(bumped_epoch)
-        .execute(database.pool())
-        .await?;
-    let refreshed = refresh_runtime_state_from_stored_discovery_when_epochs_move(
-        database.pool(),
-        &initial_state,
-        admission_epochs.as_ref(),
-    )
-    .await?
-    .expect("a moved admission epoch must reload the stored plan");
-    let refreshed_epochs = refreshed.admission_epochs;
-    let (refreshed_state, refreshed_tasks) = refreshed
-        .refreshed_state
-        .expect("a moved discovery edge must change the stored plan");
-    assert_eq!(
-        refreshed_state.watched_chain_plan[0].addresses,
-        vec![
-            discovered_owner_address.to_owned(),
-            registry_address.to_owned(),
-        ]
+        "an ENSv1 owner assignment must not move the discovery admission epoch"
     );
     assert_eq!(
-        refreshed_tasks[0].addresses,
-        refreshed_state.watched_chain_plan[0].addresses
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM discovery_edges")
+            .fetch_one(database.pool())
+            .await?,
+        0
     );
-    admission_epochs = Some(refreshed_epochs);
-
-    // The successful reload re-seeds the sentinel, so the next tick skips.
-    let settled = refresh_runtime_state_from_stored_discovery_when_epochs_move(
-        database.pool(),
-        &refreshed_state,
-        admission_epochs.as_ref(),
-    )
-    .await?;
-    assert!(settled.is_none());
+    assert_eq!(
+        initial_state.watched_chain_plan[0].addresses,
+        vec![registry_address.to_owned()]
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -1552,19 +1459,13 @@ async fn non_broad_repository_refresh_widens_plan_without_manifest_event_writes(
 }
 
 #[tokio::test]
-async fn storage_discovery_refresh_adds_ensv1_address_without_manifest_reload_and_next_poll_backfills_code_hash()
--> Result<()> {
+async fn ensv1_owner_assignment_does_not_widen_storage_discovery() -> Result<()> {
     let database = TestDatabase::new().await?;
     let manifests = TestManifestDir::new()?;
-    let manifest_path = manifests
-        .write_manifest_for_source_family("ens_v1_registry_l1", &ens_v1_manifest_contents())?;
+    manifests.write_manifest_for_source_family("ens_v1_registry_l1", &ens_v1_manifest_contents())?;
 
     let initial_repository = load_manifest_repository(&manifests.path)?;
     let initial_state = build_manifest_runtime_state(database.pool(), &initial_repository).await?;
-    let initial_manifest_summary = initial_state.manifest_summary.clone();
-    let initial_sync_summary = initial_state.sync_summary.clone();
-    let initial_discovery_admission = initial_state.discovery_admission.clone();
-    let initial_manifest_event_summary = initial_state.manifest_normalized_event_summary.clone();
     let initial_tasks =
         sync_intake_chain_tasks(database.pool(), &initial_state.watched_chain_plan).await?;
 
@@ -1612,127 +1513,37 @@ async fn storage_discovery_refresh_adds_ensv1_address_without_manifest_reload_an
     )
     .await?;
 
-    // Startup bootstrap and live polling already own adapter reconciliation;
-    // their follow-up must only reload the stored discovery watch plan.
-    sync_adapter_owned_raw_log_state(database.pool(), &initial_state.watched_chain_plan).await?;
-    let (refreshed_state, refreshed_tasks) =
-        refresh_runtime_state_from_stored_discovery(database.pool(), &initial_state)
+    assert!(
+        refresh_runtime_state_from_storage_discovery(database.pool(), &initial_state)
             .await?
-            .expect("stored ENSv1 discovery must refresh the watched plan without manifest reload");
-
-    assert_eq!(refreshed_state.manifest_summary, initial_manifest_summary);
-    assert_eq!(refreshed_state.sync_summary, initial_sync_summary);
-    assert_eq!(
-        refreshed_state.discovery_admission,
-        initial_discovery_admission
+            .is_none(),
+        "ENSv1 owner assignments must not widen the watched plan"
     );
-    assert_eq!(
-        refreshed_state.manifest_normalized_event_summary,
-        initial_manifest_event_summary
-    );
-    assert_eq!(
-        fs::read_to_string(&manifest_path)
-            .with_context(|| format!("failed to read {}", manifest_path.display()))?,
-        ens_v1_manifest_contents()
-    );
-    assert_eq!(refreshed_state.watched_chain_plan.len(), 1);
-    assert_eq!(refreshed_tasks.len(), 1);
-    assert_eq!(
-        refreshed_state.watched_chain_plan[0].chain,
-        "ethereum-mainnet"
-    );
-    assert_eq!(refreshed_state.watched_chain_plan[0].addresses.len(), 2);
-    assert!(
-        refreshed_state.watched_chain_plan[0]
-            .addresses
-            .contains(&"0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned())
-    );
-    assert!(
-        refreshed_state.watched_chain_plan[0]
-            .addresses
-            .contains(&"0x0000000000000000000000000000000000000002".to_owned())
-    );
-    assert_eq!(
-        refreshed_state.watched_chain_plan[0].manifest_root_entry_count,
-        1
-    );
-    assert_eq!(
-        refreshed_state.watched_chain_plan[0].manifest_contract_entry_count,
-        1
-    );
-    assert_eq!(
-        refreshed_state.watched_chain_plan[0].discovery_edge_entry_count,
-        1
-    );
-    assert_eq!(
-        refreshed_tasks[0].addresses,
-        refreshed_state.watched_chain_plan[0].addresses
-    );
-    assert_eq!(
-        refreshed_tasks[0].checkpoint.canonical_block_number,
-        Some(42)
-    );
-    assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = 'ens_v1_registry_new_owner:ethereum-mainnet' AND deactivated_at IS NULL"
-            )
-            .fetch_one(database.pool())
-            .await?,
-            1
-        );
+    assert_eq!(initial_state.watched_chain_plan[0].addresses.len(), 1);
+    assert_eq!(initial_state.watched_chain_plan[0].discovery_edge_entry_count, 0);
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind = 'SubregistryChanged'"
-        )
-        .fetch_one(database.pool())
-        .await?,
-        1
-    );
-    assert_eq!(
-            sqlx::query_scalar::<_, String>(
-                "SELECT after_state->>'owner' FROM normalized_events WHERE event_kind = 'SubregistryChanged'"
-            )
-            .fetch_one(database.pool())
-            .await?,
-            "0x0000000000000000000000000000000000000002".to_owned()
-        );
-    assert_eq!(
-            sqlx::query_scalar::<_, String>(
-                "SELECT canonicality_state::TEXT FROM normalized_events WHERE event_kind = 'SubregistryChanged'"
-            )
-            .fetch_one(database.pool())
-            .await?,
-            "canonical".to_owned()
-        );
-
-    let unchanged = reconcile_fetched_heads(
-        database.pool(),
-        &refreshed_tasks[0],
-        &provider,
-        &ProviderHeadSnapshot {
-            canonical: canonical_head,
-            safe: None,
-            finalized: None,
-        },
-    )
-    .await?;
-    assert!(
-        unchanged.is_none(),
-        "unchanged heads should still backfill code hashes for newly watched ENSv1 addresses"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_code_hashes")
-            .fetch_one(database.pool())
-            .await?,
-        2
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT code_byte_length FROM raw_code_hashes WHERE contract_address = '0x0000000000000000000000000000000000000002'"
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE deactivated_at IS NULL"
         )
         .fetch_one(database.pool())
         .await?,
         0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind = 'SubregistryChanged'"
+        )
+            .fetch_one(database.pool())
+            .await?,
+        1,
+        "NewOwner keeps child history without admitting the owner as a contract"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_code_hashes")
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "an owner address outside the watched plan must not enter code-hash polling"
     );
     server.abort();
     database.cleanup().await?;
@@ -1740,12 +1551,11 @@ async fn storage_discovery_refresh_adds_ensv1_address_without_manifest_reload_an
 }
 
 #[tokio::test]
-async fn runtime_refresh_adds_ensv1_resolver_watch_target_without_manifest_reload() -> Result<()> {
+async fn ensv1_resolver_pointer_does_not_create_a_watch_target() -> Result<()> {
     let database = TestDatabase::new().await?;
     let manifests = TestManifestDir::new()?;
     let manifest_contents = ens_v1_registry_resolver_discovery_manifest_contents();
-    let manifest_path =
-        manifests.write_manifest_for_source_family("ens_v1_registry_l1", &manifest_contents)?;
+    manifests.write_manifest_for_source_family("ens_v1_registry_l1", &manifest_contents)?;
     manifests.write_manifest_for_source_family(
         "ens_v1_resolver_l1",
         &ens_v1_resolver_manifest_contents(),
@@ -1753,10 +1563,6 @@ async fn runtime_refresh_adds_ensv1_resolver_watch_target_without_manifest_reloa
 
     let initial_repository = load_manifest_repository(&manifests.path)?;
     let initial_state = build_manifest_runtime_state(database.pool(), &initial_repository).await?;
-    let initial_manifest_summary = initial_state.manifest_summary.clone();
-    let initial_sync_summary = initial_state.sync_summary.clone();
-    let initial_discovery_admission = initial_state.discovery_admission.clone();
-    let initial_manifest_event_summary = initial_state.manifest_normalized_event_summary.clone();
     let initial_tasks =
         sync_intake_chain_tasks(database.pool(), &initial_state.watched_chain_plan).await?;
 
@@ -1795,110 +1601,33 @@ async fn runtime_refresh_adds_ensv1_resolver_watch_target_without_manifest_reloa
     )
     .await?;
 
-    let (refreshed_state, refreshed_tasks) = refresh_runtime_state_from_storage_discovery(
-        database.pool(),
-        &initial_state,
-    )
-    .await?
-    .expect(
-        "stored ENSv1 resolver discovery must refresh the watched plan without manifest reload",
-    );
-
-    assert_eq!(refreshed_state.manifest_summary, initial_manifest_summary);
-    assert_eq!(refreshed_state.sync_summary, initial_sync_summary);
-    assert_eq!(
-        refreshed_state.discovery_admission,
-        initial_discovery_admission
+    assert!(
+        refresh_runtime_state_from_storage_discovery(database.pool(), &initial_state)
+            .await?
+            .is_none(),
+        "a resolver pointer must not create a per-address resolver watch target"
     );
     assert_eq!(
-        refreshed_state.manifest_normalized_event_summary,
-        initial_manifest_event_summary
+        initial_state.watched_chain_plan[0].addresses,
+        vec!["0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned()]
     );
-    assert_eq!(
-        fs::read_to_string(&manifest_path)
-            .with_context(|| format!("failed to read {}", manifest_path.display()))?,
-        manifest_contents
-    );
-    assert_eq!(refreshed_state.watched_chain_plan.len(), 1);
-    assert_eq!(refreshed_tasks.len(), 1);
-    assert_eq!(
-        refreshed_state.watched_chain_plan[0].addresses,
-        vec![
-            "0x0000000000000000000000000000000000000003".to_owned(),
-            "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
-        ]
-    );
-    assert_eq!(
-        refreshed_state.watched_chain_plan[0].discovery_edge_entry_count,
-        1
-    );
-    assert_eq!(
-        refreshed_tasks[0].addresses,
-        refreshed_state.watched_chain_plan[0].addresses
-    );
-    let resolver_source_plan = load_watched_source_selector_plan(
-        database.pool(),
-        "ethereum-mainnet",
-        WatchedSourceSelector::SourceFamily("ens_v1_resolver_l1".to_owned()),
-        43,
-        43,
-    )
-    .await?;
-    assert_eq!(resolver_source_plan.selected_targets.len(), 1);
-    assert_eq!(
-        resolver_source_plan.selected_targets[0].source_family,
-        "ens_v1_resolver_l1"
-    );
-    assert_eq!(
-        resolver_source_plan.selected_targets[0].address,
-        "0x0000000000000000000000000000000000000003"
-    );
-    let resolver_manifest_id = sqlx::query_scalar::<_, i64>(
-        "SELECT manifest_id FROM manifest_versions WHERE source_family = 'ens_v1_resolver_l1' AND rollout_status = 'active'",
-    )
-    .fetch_one(database.pool())
-    .await?;
-    let watched_contracts = load_watched_contracts(database.pool()).await?;
-    assert!(watched_contracts.iter().any(|contract| {
-        contract.chain == "ethereum-mainnet"
-            && contract.address == "0x0000000000000000000000000000000000000003"
-            && contract.source == WatchedContractSource::DiscoveryEdge
-            && contract.source_family == "ens_v1_resolver_l1"
-            && contract.source_manifest_id == Some(resolver_manifest_id)
-    }));
+    assert_eq!(initial_state.watched_chain_plan[0].discovery_edge_entry_count, 0);
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = 'ens_v1_registry_resolver:ethereum-mainnet' AND edge_kind = 'resolver' AND deactivated_at IS NULL"
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE edge_kind = 'resolver' AND deactivated_at IS NULL"
         )
         .fetch_one(database.pool())
         .await?,
-        1
+        0
     );
-    assert!(
-        !sqlx::query_scalar::<_, bool>(
-            "SELECT (after_state->>'resolver_profile_supported')::BOOLEAN FROM normalized_events WHERE event_kind = 'ResolverChanged' AND derivation_kind = 'ens_v1_registry_resolver_changed'"
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE derivation_kind = 'ens_v1_registry_resolver_changed'"
         )
         .fetch_one(database.pool())
-        .await?
-    );
-
-    // The live tailer refreshes without re-deriving edges from the whole raw-log corpus. An edge
-    // already in storage must still widen the plan.
-    let (light_state, light_tasks) =
-        refresh_runtime_state_from_stored_discovery(database.pool(), &initial_state)
-            .await?
-    .expect("a stored discovery edge must widen the watch plan without adapter-owned resync");
-    assert_eq!(
-        light_state.watched_chain_plan[0].addresses,
-        refreshed_state.watched_chain_plan[0].addresses
-    );
-    assert_eq!(
-        light_state.watched_chain_plan[0].discovery_edge_entry_count,
-        1
-    );
-    assert_eq!(
-        light_tasks[0].addresses,
-        light_state.watched_chain_plan[0].addresses
+        .await?,
+        0,
+        "the deleted resolver-discovery derivation must not return"
     );
 
     server.abort();
@@ -1907,7 +1636,7 @@ async fn runtime_refresh_adds_ensv1_resolver_watch_target_without_manifest_reloa
 }
 
 #[tokio::test]
-async fn widen_runtime_state_to_live_watch_scope_admits_discovered_targets_without_manifest_resync()
+async fn widen_runtime_state_to_live_watch_scope_does_not_admit_resolver_pointers()
 -> Result<()> {
     let database = TestDatabase::new().await?;
     let manifests = TestManifestDir::new()?;
@@ -1970,12 +1699,17 @@ async fn widen_runtime_state_to_live_watch_scope_admits_discovered_targets_witho
 
     assert_eq!(
         live_state.watched_chain_plan[0].addresses,
-        vec![
-            "0x0000000000000000000000000000000000000003".to_owned(),
-            "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
-        ]
+        vec!["0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned()]
     );
-    assert_eq!(live_state.watched_chain_plan[0].discovery_edge_entry_count, 1);
+    assert_eq!(live_state.watched_chain_plan[0].discovery_edge_entry_count, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE edge_kind = 'resolver' AND deactivated_at IS NULL"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
     // Widening reloads the stored plan; it must not re-run manifest sync.
     assert_eq!(live_state.manifest_summary, narrow_state.manifest_summary);
     assert_eq!(live_state.sync_summary, narrow_state.sync_summary);
@@ -2056,11 +1790,10 @@ async fn live_watch_scope_refresh_does_not_rederive_discovery_edges_from_raw_log
 }
 
 #[tokio::test]
-async fn storage_discovery_refresh_adds_basenames_address_without_manifest_reload_and_next_poll_backfills_code_hash()
--> Result<()> {
+async fn basenames_owner_assignment_does_not_widen_storage_discovery() -> Result<()> {
     let database = TestDatabase::new().await?;
     let manifests = TestManifestDir::new()?;
-    let manifest_path = manifests.write_manifest_for_namespace_source_family(
+    manifests.write_manifest_for_namespace_source_family(
         "basenames",
         "basenames_base_registry",
         &basenames_base_registry_manifest_contents(),
@@ -2068,10 +1801,6 @@ async fn storage_discovery_refresh_adds_basenames_address_without_manifest_reloa
 
     let initial_repository = load_manifest_repository(&manifests.path)?;
     let initial_state = build_manifest_runtime_state(database.pool(), &initial_repository).await?;
-    let initial_manifest_summary = initial_state.manifest_summary.clone();
-    let initial_sync_summary = initial_state.sync_summary.clone();
-    let initial_discovery_admission = initial_state.discovery_admission.clone();
-    let initial_manifest_event_summary = initial_state.manifest_normalized_event_summary.clone();
     let initial_tasks =
         sync_intake_chain_tasks(database.pool(), &initial_state.watched_chain_plan).await?;
 
@@ -2121,69 +1850,22 @@ async fn storage_discovery_refresh_adds_basenames_address_without_manifest_reloa
     )
     .await?;
 
-    let (refreshed_state, refreshed_tasks) =
+    assert!(
         refresh_runtime_state_from_storage_discovery(database.pool(), &initial_state)
             .await?
-            .expect(
-                "stored Basenames discovery must refresh the watched plan without manifest reload",
-            );
-
-    assert_eq!(refreshed_state.manifest_summary, initial_manifest_summary);
-    assert_eq!(refreshed_state.sync_summary, initial_sync_summary);
-    assert_eq!(
-        refreshed_state.discovery_admission,
-        initial_discovery_admission
+            .is_none(),
+        "Basenames owner assignments must not widen the watched plan"
     );
-    assert_eq!(
-        refreshed_state.manifest_normalized_event_summary,
-        initial_manifest_event_summary
-    );
-    assert_eq!(
-        fs::read_to_string(&manifest_path)
-            .with_context(|| format!("failed to read {}", manifest_path.display()))?,
-        basenames_base_registry_manifest_contents()
-    );
-    assert_eq!(refreshed_state.watched_chain_plan.len(), 1);
-    assert_eq!(refreshed_tasks.len(), 1);
-    assert_eq!(refreshed_state.watched_chain_plan[0].chain, "base-mainnet");
-    assert_eq!(refreshed_state.watched_chain_plan[0].addresses.len(), 2);
-    assert!(
-        refreshed_state.watched_chain_plan[0]
-            .addresses
-            .contains(&"0xb94704422c2a1e396835a571837aa5ae53285a95".to_owned())
-    );
-    assert!(
-        refreshed_state.watched_chain_plan[0]
-            .addresses
-            .contains(&"0x0000000000000000000000000000000000000002".to_owned())
-    );
-    assert_eq!(
-        refreshed_state.watched_chain_plan[0].manifest_root_entry_count,
-        1
-    );
-    assert_eq!(
-        refreshed_state.watched_chain_plan[0].manifest_contract_entry_count,
-        1
-    );
-    assert_eq!(
-        refreshed_state.watched_chain_plan[0].discovery_edge_entry_count,
-        1
-    );
-    assert_eq!(
-        refreshed_tasks[0].addresses,
-        refreshed_state.watched_chain_plan[0].addresses
-    );
-    assert_eq!(
-        refreshed_tasks[0].checkpoint.canonical_block_number,
-        Some(42)
-    );
+    assert_eq!(initial_state.watched_chain_plan[0].chain, "base-mainnet");
+    assert_eq!(initial_state.watched_chain_plan[0].addresses.len(), 1);
+    assert_eq!(initial_state.watched_chain_plan[0].discovery_edge_entry_count, 0);
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = 'ens_v1_registry_new_owner:base-mainnet' AND deactivated_at IS NULL"
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE deactivated_at IS NULL"
         )
         .fetch_one(database.pool())
         .await?,
-        1
+        0
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -2191,53 +1873,15 @@ async fn storage_discovery_refresh_adds_basenames_address_without_manifest_reloa
         )
         .fetch_one(database.pool())
         .await?,
-        1
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT after_state->>'owner' FROM normalized_events WHERE event_kind = 'SubregistryChanged'"
-        )
-        .fetch_one(database.pool())
-        .await?,
-        "0x0000000000000000000000000000000000000002".to_owned()
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM normalized_events WHERE event_kind = 'SubregistryChanged'"
-        )
-        .fetch_one(database.pool())
-        .await?,
-        "canonical".to_owned()
-    );
-
-    let unchanged = reconcile_fetched_heads(
-        database.pool(),
-        &refreshed_tasks[0],
-        &provider,
-        &ProviderHeadSnapshot {
-            canonical: canonical_head,
-            safe: None,
-            finalized: None,
-        },
-    )
-    .await?;
-    assert!(
-        unchanged.is_none(),
-        "unchanged heads should still backfill code hashes for newly watched Basenames addresses"
+        1,
+        "NewOwner keeps child history without admitting the owner as a contract"
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_code_hashes")
             .fetch_one(database.pool())
             .await?,
-        2
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT code_byte_length FROM raw_code_hashes WHERE contract_address = '0x0000000000000000000000000000000000000002'"
-        )
-        .fetch_one(database.pool())
-        .await?,
-        0
+        1,
+        "an owner address outside the watched plan must not enter code-hash polling"
     );
 
     server.abort();

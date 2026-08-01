@@ -27,9 +27,8 @@ use super::{
 };
 use classification::classify_raw_fact_replay_contract;
 pub(crate) use paging::select_log_bounded_replay_to_block;
-use profile_scope::{
-    ensure_replay_matches_deployment_profile_scope, load_replay_adapter_source_scopes,
-};
+use profile_scope::ensure_replay_matches_deployment_profile_scope;
+pub(crate) use profile_scope::load_replay_adapter_source_scopes;
 use scoped::load_replay_raw_log_selection_for_scoped_range;
 
 pub(crate) use classification::{

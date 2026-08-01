@@ -318,22 +318,33 @@ pub(super) async fn load_latest_record_versions_before_block(
     pool: &PgPool,
     logical_name_ids: &[String],
     boundary_block: i64,
-) -> Result<HashMap<String, i64>> {
+) -> Result<HashMap<(String, String), i64>> {
     if logical_name_ids.is_empty() {
         return Ok(HashMap::new());
     }
 
     let rows = sqlx::query(&format!(
         r#"
-        SELECT DISTINCT ON (logical_name_id)
-            logical_name_id,
-            after_state->>'record_version' AS record_version
-        FROM normalized_events
-        WHERE logical_name_id = ANY($1::TEXT[])
-          AND block_number < $2
-          AND event_kind = $3
-          AND canonicality_state {CANONICALITY_STATE_FILTER}
-        ORDER BY logical_name_id, block_number DESC, log_index DESC NULLS LAST, normalized_event_id DESC
+        SELECT DISTINCT ON (event.logical_name_id, LOWER(raw_log.emitting_address))
+            event.logical_name_id,
+            LOWER(raw_log.emitting_address) AS resolver,
+            event.after_state->>'record_version' AS record_version
+        FROM normalized_events event
+        JOIN raw_logs raw_log
+          ON raw_log.chain_id = event.chain_id
+         AND raw_log.block_hash = event.block_hash
+         AND raw_log.transaction_hash = event.transaction_hash
+         AND raw_log.log_index = event.log_index
+        WHERE event.logical_name_id = ANY($1::TEXT[])
+          AND event.block_number < $2
+          AND event.event_kind = $3
+          AND event.canonicality_state {CANONICALITY_STATE_FILTER}
+        ORDER BY
+            event.logical_name_id,
+            LOWER(raw_log.emitting_address),
+            event.block_number DESC,
+            event.log_index DESC NULLS LAST,
+            event.normalized_event_id DESC
         "#
     ))
     .bind(logical_name_ids)
@@ -349,7 +360,10 @@ pub(super) async fn load_latest_record_versions_before_block(
             continue;
         };
         if let Ok(record_version) = record_version.parse::<i64>() {
-            state.insert(row.try_get("logical_name_id")?, record_version);
+            state.insert(
+                (row.try_get("logical_name_id")?, row.try_get("resolver")?),
+                record_version,
+            );
         }
     }
     Ok(state)

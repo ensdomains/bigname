@@ -374,7 +374,7 @@ async fn watched_frontier_pages_only_rows_in_the_requested_coverage_scope() -> R
             admission,
             active_from_block_number
         )
-        VALUES ($1, 'subregistry', $2, $3, 'target-source', $4, 'reachable_from_root', 20)
+        VALUES ($1, 'registry_announcement', $2, $3, 'target-source', $4, 'reachable_from_root', 20)
         "#,
     )
     .bind(CHAIN)

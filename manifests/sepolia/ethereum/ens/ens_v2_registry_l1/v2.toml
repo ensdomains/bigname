@@ -42,9 +42,24 @@ edge_kind = "resolver"
 from_role = "registry"
 admission = "reachable_from_root"
 
+# A RegistryCreated match-all observation is anchored at this manifest contract.
+# The resulting edge admits an indexable registry but does not propagate the
+# registry role or represent a parent-child relationship.
+[[discovery_rules]]
+edge_kind = "registry_announcement"
+from_role = "registry"
+admission = "reachable_from_root"
+
 # Registry event ABI fragments consumed by ENSv2 registry adapters.
-# Current intake excludes RegistryCreated and URIUpdated. The
-# replacement admits RegistryCreated only after its mandatory historical fetch;
+# RegistryCreated has no emitter_roles because it is matched across every
+# emitter. It is emitted first in the PermissionedRegistry constructor:
+# (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@ccaeb58).
+[[abi.events]]
+name = "RegistryCreated"
+fragment = "event RegistryCreated()"
+normalized_events = ["RegistryCreated"]
+
 # URIUpdated remains excluded.
 # LabelRegistered: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L18 @ ens_v2@48b3e2d).
 [[abi.events]]
@@ -135,3 +150,15 @@ name = "ParentUpdated"
 fragment = "event ParentUpdated(address indexed parent, string label, address indexed sender)"
 emitter_roles = ["registry"]
 normalized_events = ["ParentChanged"]
+
+# ERC-1967 implementation history for announced UserRegistry proxies. The
+# registry inherits UUPS and its pinned deployment ABI exposes Upgraded(address):
+# (upstream: .refs/ens_v2/contracts/src/registry/UserRegistry.sol:L6 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/src/registry/UserRegistry.sol:L20 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L807 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L817 @ ens_v2@ccaeb58).
+[[abi.events]]
+name = "Upgraded"
+fragment = "event Upgraded(address indexed implementation)"
+emitter_roles = ["registry"]
+normalized_events = ["Upgraded"]

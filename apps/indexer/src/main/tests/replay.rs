@@ -670,6 +670,292 @@ async fn replay_normalized_events_scoped_generic_resolver_scope_fails_closed_for
 }
 
 #[tokio::test]
+async fn scoped_raw_fact_replay_selects_basenames_match_all_resolver_log() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "base-mainnet";
+    let emitter = "0x00000000000000000000000000000000000000b1";
+    let block = provider_block(
+        "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+        None,
+        95,
+    );
+    insert_active_replay_match_all_manifest(
+        database.pool(),
+        15,
+        "basenames",
+        "basenames_base_resolver",
+        chain,
+        "basenames_v1",
+        "TextChanged",
+        "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+        "RecordChanged",
+    )
+    .await?;
+    insert_chain_lineage_for_block(database.pool(), chain, &block, CanonicalityState::Canonical)
+        .await?;
+    insert_raw_resolver_log(
+        database.pool(),
+        chain,
+        &block,
+        emitter,
+        vec![
+            resolver_text_changed_with_value_topic0(),
+            namehash_for_dns_name(&dns_encoded_base_eth_name("alice")),
+            keccak256_hex(b"description"),
+        ],
+        decode_hex_string(&encode_two_dynamic_string_log_data(
+            "description",
+            "base match-all",
+        )),
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let selection =
+        crate::reconciliation::load_replay_raw_log_selection_for_scoped_range(
+            database.pool(),
+            chain,
+            block.block_number,
+            block.block_number,
+            &[RawFactNormalizedEventReplaySourceScope {
+                source_family: "basenames_base_resolver".to_owned(),
+                address: "*".to_owned(),
+                from_block: block.block_number,
+                to_block: block.block_number,
+            }],
+        )
+        .await?;
+
+    assert_eq!(selection.canonical_raw_log_count, 1);
+    assert_eq!(selection.block_hashes, vec![block.block_hash]);
+    assert_eq!(
+        selection.address_targets,
+        vec![(chain.to_owned(), emitter.to_owned())]
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn scoped_raw_fact_replay_selects_unlisted_registry_created_log() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let emitter = "0x00000000000000000000000000000000000000c1";
+    let block = provider_block(
+        "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+        None,
+        96,
+    );
+    insert_active_replay_match_all_manifest(
+        database.pool(),
+        16,
+        "ens",
+        "ens_v2_registry_l1",
+        chain,
+        "ens_v2",
+        "RegistryCreated",
+        "event RegistryCreated()",
+        "RegistryCreated",
+    )
+    .await?;
+    insert_chain_lineage_for_block(database.pool(), chain, &block, CanonicalityState::Canonical)
+        .await?;
+    insert_raw_resolver_log(
+        database.pool(),
+        chain,
+        &block,
+        emitter,
+        vec![keccak256_hex(b"RegistryCreated()")],
+        Vec::new(),
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let selection =
+        crate::reconciliation::load_replay_raw_log_selection_for_scoped_range(
+            database.pool(),
+            chain,
+            block.block_number,
+            block.block_number,
+            &[RawFactNormalizedEventReplaySourceScope {
+                source_family: "ens_v2_registry_l1".to_owned(),
+                address: "*".to_owned(),
+                from_block: block.block_number,
+                to_block: block.block_number,
+            }],
+        )
+        .await?;
+
+    assert_eq!(selection.canonical_raw_log_count, 1);
+    assert_eq!(selection.block_hashes, vec![block.block_hash]);
+    assert_eq!(
+        selection.address_targets,
+        vec![(chain.to_owned(), emitter.to_owned())]
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn ordinary_replay_scope_uses_active_base_resolver_and_registry_created_match_all_topics()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let base_chain = "base-mainnet";
+    let base_block = provider_block(
+        "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        None,
+        97,
+    );
+    insert_active_replay_match_all_manifest(
+        database.pool(),
+        17,
+        "basenames",
+        "basenames_base_resolver",
+        base_chain,
+        "basenames_v1",
+        "TextChanged",
+        "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+        "RecordChanged",
+    )
+    .await?;
+    insert_chain_lineage_for_block(
+        database.pool(),
+        base_chain,
+        &base_block,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_resolver_log(
+        database.pool(),
+        base_chain,
+        &base_block,
+        "0x00000000000000000000000000000000000000b2",
+        vec![
+            resolver_text_changed_with_value_topic0(),
+            namehash_for_dns_name(&dns_encoded_base_eth_name("ordinary")),
+            keccak256_hex(b"description"),
+        ],
+        decode_hex_string(&encode_two_dynamic_string_log_data(
+            "description",
+            "ordinary replay",
+        )),
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let base_request = RawFactNormalizedEventReplayRequest {
+        deployment_profile: "mainnet".to_owned(),
+        chain: base_chain.to_owned(),
+        selection: RawFactNormalizedEventReplaySelection::BlockRange {
+            from_block: base_block.block_number,
+            to_block: base_block.block_number,
+        },
+    };
+    let base_scope = load_replay_adapter_source_scopes(
+        database.pool(),
+        &base_request,
+        Some((base_block.block_number, base_block.block_number)),
+        &[],
+    )
+    .await?;
+    assert_eq!(
+        base_scope.execution,
+        vec![(
+            "basenames_base_resolver".to_owned(),
+            "*".to_owned(),
+            base_block.block_number,
+            base_block.block_number,
+        )]
+    );
+    assert_eq!(
+        base_scope.closure_validation,
+        vec![(
+            "basenames_base_resolver".to_owned(),
+            "*".to_owned(),
+            0,
+            base_block.block_number,
+        )]
+    );
+
+    let ens_v2_chain = "ethereum-sepolia";
+    let registry_created_block = provider_block(
+        "0xc2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+        None,
+        98,
+    );
+    insert_active_replay_match_all_manifest(
+        database.pool(),
+        18,
+        "ens",
+        "ens_v2_registry_l1",
+        ens_v2_chain,
+        "ens_v2",
+        "RegistryCreated",
+        "event RegistryCreated()",
+        "RegistryCreated",
+    )
+    .await?;
+    insert_chain_lineage_for_block(
+        database.pool(),
+        ens_v2_chain,
+        &registry_created_block,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_resolver_log(
+        database.pool(),
+        ens_v2_chain,
+        &registry_created_block,
+        "0x00000000000000000000000000000000000000c2",
+        vec![keccak256_hex(b"RegistryCreated()")],
+        Vec::new(),
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let ens_v2_request = RawFactNormalizedEventReplayRequest {
+        deployment_profile: "sepolia".to_owned(),
+        chain: ens_v2_chain.to_owned(),
+        selection: RawFactNormalizedEventReplaySelection::BlockRange {
+            from_block: registry_created_block.block_number,
+            to_block: registry_created_block.block_number,
+        },
+    };
+    let ens_v2_scope = load_replay_adapter_source_scopes(
+        database.pool(),
+        &ens_v2_request,
+        Some((
+            registry_created_block.block_number,
+            registry_created_block.block_number,
+        )),
+        &[],
+    )
+    .await?;
+    assert_eq!(
+        ens_v2_scope.execution,
+        vec![(
+            "ens_v2_registry_l1".to_owned(),
+            "*".to_owned(),
+            registry_created_block.block_number,
+            registry_created_block.block_number,
+        )]
+    );
+    assert_eq!(
+        ens_v2_scope.closure_validation,
+        vec![(
+            "ens_v2_registry_l1".to_owned(),
+            "*".to_owned(),
+            0,
+            registry_created_block.block_number,
+        )]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn replay_normalized_events_fails_closed_for_stale_selected_payloads() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_projection_normalized_event_change_tables(database.pool()).await?;
@@ -1712,7 +1998,7 @@ async fn replay_normalized_events_retired_emitter_sets_full_closure_boundary() -
         )
         VALUES (
             $1,
-            'subregistry',
+            'test_discovery',
             $2,
             $3,
             $4,
@@ -1783,7 +2069,8 @@ async fn replay_normalized_events_retired_emitter_sets_full_closure_boundary() -
 }
 
 #[tokio::test]
-async fn replay_normalized_events_full_closure_mutates_selected_discovery_only() -> Result<()> {
+async fn replay_normalized_events_full_closure_does_not_restore_resolver_discovery()
+-> Result<()> {
     let database = TestDatabase::new().await?;
     create_normalized_replay_adapter_checkpoint_tables(database.pool()).await?;
     let chain = "ethereum-mainnet";
@@ -1883,28 +2170,14 @@ async fn replay_normalized_events_full_closure_mutates_selected_discovery_only()
 
     assert_eq!(outcome.selected_block_count, 1);
     assert_eq!(outcome.canonical_raw_log_count, 1);
-    assert_eq!(outcome.matched_raw_log_count, 2);
-    assert_eq!(outcome.normalized_event_inserted_count, 1);
+    assert_eq!(outcome.matched_raw_log_count, 1);
+    assert_eq!(outcome.normalized_event_inserted_count, 0);
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM discovery_edges")
             .fetch_one(database.pool())
             .await?,
-        1
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            r#"
-            SELECT lower(cia.address)
-            FROM discovery_edges de
-            JOIN contract_instance_addresses cia
-              ON cia.contract_instance_id = de.to_contract_instance_id
-             AND cia.deactivated_at IS NULL
-            WHERE de.deactivated_at IS NULL
-            "#
-        )
-        .fetch_one(database.pool())
-        .await?,
-        selected_resolver
+        0,
+        "NewResolver must not recreate the deleted per-resolver discovery edge"
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -1925,7 +2198,7 @@ async fn replay_normalized_events_full_closure_mutates_selected_discovery_only()
         )
         .fetch_one(database.pool())
         .await?,
-        1
+        0
     );
 
     database.cleanup().await
@@ -2008,7 +2281,8 @@ async fn replay_normalized_events_full_closure_fails_closed_after_raw_log_compac
         )
         .fetch_one(database.pool())
         .await?,
-        1
+        0,
+        "NewResolver must not create a discovery edge"
     );
 
     sqlx::query("TRUNCATE raw_logs")
@@ -2081,8 +2355,8 @@ async fn replay_normalized_events_full_closure_fails_closed_after_raw_log_compac
         )
         .fetch_one(database.pool())
         .await?,
-        1,
-        "failed replay must not deactivate retained discovery"
+        0,
+        "NewResolver must not create discovery before the failed closure replay"
     );
 
     database.cleanup().await
@@ -2851,5 +3125,67 @@ async fn insert_active_replay_manifest(
     .await
     .context("failed to insert manifest_versions for dynamic resolver replay test")?;
 
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_active_replay_match_all_manifest(
+    pool: &PgPool,
+    manifest_id: i64,
+    namespace: &str,
+    source_family: &str,
+    chain: &str,
+    deployment_epoch: &str,
+    event_name: &str,
+    event_fragment: &str,
+    normalized_event: &str,
+) -> Result<()> {
+    let payload = json!({
+        "manifest_version": 1,
+        "namespace": namespace,
+        "source_family": source_family,
+        "chain": chain,
+        "deployment_epoch": deployment_epoch,
+        "rollout_status": "active",
+        "normalizer_version": "ensip15@ens-normalize-0.1.1",
+        "capability_flags": {},
+        "roots": [],
+        "contracts": [],
+        "discovery_rules": [],
+        "abi": {
+            "events": [{
+                "name": event_name,
+                "fragment": event_fragment,
+                "normalized_events": [normalized_event],
+            }],
+        },
+    });
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_versions (
+            manifest_id,
+            manifest_version,
+            namespace,
+            source_family,
+            chain,
+            deployment_epoch,
+            rollout_status,
+            normalizer_version,
+            file_path,
+            manifest_payload
+        )
+        VALUES ($1, 1, $2, $3, $4, $5, 'active', 'ensip15@ens-normalize-0.1.1', $6, $7)
+        "#,
+    )
+    .bind(manifest_id)
+    .bind(namespace)
+    .bind(source_family)
+    .bind(chain)
+    .bind(deployment_epoch)
+    .bind(format!("manifests/{namespace}/{source_family}/v1.toml"))
+    .bind(payload)
+    .execute(pool)
+    .await
+    .context("failed to insert match-all replay manifest")?;
     Ok(())
 }

@@ -4164,6 +4164,479 @@
           "token_lineage_id": "1fc69df6-e291-5ea9-821a-bd9d8aee9da8"
         }
       ]
+    },
+    {
+      "id": "ens_v1_new_owner_without_contract_discovery",
+      "normalized_events": [
+        {
+          "event_identity": "ens_v1_subregistry_changed:1:0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7:0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8:0:0x0000000000000000000000000000000000002aaa",
+          "namespace": "ens",
+          "logical_name_id": null,
+          "resource_id": null,
+          "event_kind": "SubregistryChanged",
+          "source_family": "ens_v1_registry_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 180,
+          "block_hash": "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
+          "transaction_hash": "0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8",
+          "log_index": 0,
+          "raw_fact_ref": {
+            "block_hash": "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
+            "block_number": 180,
+            "chain_id": "ethereum-mainnet",
+            "emitting_address": "0x0000000000000000000000000000000000002aaa",
+            "kind": "raw_log",
+            "log_index": 0,
+            "transaction_hash": "0xf8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v1_subregistry_changed",
+          "canonicality_state": "Canonical",
+          "before_state": {},
+          "after_state": {
+            "active_edge": true,
+            "child_node": "0xf35965a58218134ff7588d3ed7e025a7a7c3fe5749228efdb4db811f1963c38f",
+            "emitting_address": "0x0000000000000000000000000000000000002aaa",
+            "labelhash": "0xef5b8fe8789ed448b54018e6e47371bfa696902c135a273e35ad0d4cf6df057e",
+            "owner": "0x0000000000000000000000000000000000002a22",
+            "parent_node": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "source_event": "NewOwner",
+            "tombstone": false
+          }
+        }
+      ],
+      "name_surfaces": [],
+      "surface_bindings": [],
+      "resources": [],
+      "token_lineages": []
+    },
+    {
+      "id": "ens_v2_registry_created_unlinked",
+      "normalized_events": [
+        {
+          "event_identity": "ens_v2_registry_resource_surface:1:0xc7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7:0xc8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8:0:RegistryCreated:registry-created:0x00000000000000000000000000000000000027bb",
+          "namespace": "ens",
+          "logical_name_id": null,
+          "resource_id": null,
+          "event_kind": "RegistryCreated",
+          "source_family": "ens_v2_registry_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-sepolia",
+          "block_number": 150,
+          "block_hash": "0xc7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7",
+          "transaction_hash": "0xc8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8",
+          "log_index": 0,
+          "raw_fact_ref": {
+            "block_hash": "0xc7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7",
+            "block_number": 150,
+            "chain_id": "ethereum-sepolia",
+            "emitting_address": "0x00000000000000000000000000000000000027bb",
+            "kind": "raw_log",
+            "log_index": 0,
+            "transaction_hash": "0xc8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v2_registry_resource_surface",
+          "canonicality_state": "Canonical",
+          "before_state": {},
+          "after_state": {
+            "registry_address": "0x00000000000000000000000000000000000027bb",
+            "registry_contract_instance_id": "00000000-0000-0000-0000-000000000002",
+            "source_event": "RegistryCreated"
+          }
+        }
+      ],
+      "name_surfaces": [],
+      "surface_bindings": [],
+      "resources": [],
+      "token_lineages": [],
+      "discovery_edges": [
+        {
+          "active_from_block_hash": "0xc7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7",
+          "active_from_block_number": 150,
+          "active_to_block_hash": null,
+          "active_to_block_number": null,
+          "admission": "reachable_from_root",
+          "chain_id": "ethereum-sepolia",
+          "discovery_edge_id": 1,
+          "discovery_source": "ens_v2_registry_announcement:ethereum-sepolia",
+          "edge_kind": "registry_announcement",
+          "from_contract_instance_id": "00000000-0000-0000-0000-000000000001",
+          "provenance": {
+            "block_hash": "0xc7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7",
+            "block_number": 150,
+            "chain_id": "ethereum-sepolia",
+            "from_address": "0x00000000000000000000000000000000000027aa",
+            "log_index": 0,
+            "observation_key": "registry-announcement:0x00000000000000000000000000000000000027bb",
+            "source": "raw_log",
+            "source_event": "RegistryCreated",
+            "to_address": "0x00000000000000000000000000000000000027bb",
+            "tombstone": false,
+            "transaction_hash": "0xc8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8",
+            "transaction_index": 0
+          },
+          "source_manifest_id": 1,
+          "to_contract_instance_id": "00000000-0000-0000-0000-000000000002"
+        }
+      ]
+    },
+    {
+      "id": "ens_v1_match_all_unpointed_resolver",
+      "normalized_events": [
+        {
+          "event_identity": "ens_v1_unwrapped_authority:RegistrationGranted:grant:0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7:0xd8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8:0",
+          "namespace": "ens",
+          "logical_name_id": "ens:alice.eth",
+          "resource_id": "45f11c76-b288-5cbf-a8b7-14e32590f4ed",
+          "event_kind": "RegistrationGranted",
+          "source_family": "ens_v1_registrar_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 160,
+          "block_hash": "0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+          "transaction_hash": "0xd8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8",
+          "log_index": 0,
+          "raw_fact_ref": {
+            "block_hash": "0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+            "block_number": 160,
+            "chain_id": "ethereum-mainnet",
+            "kind": "raw_log",
+            "log_index": 0,
+            "transaction_hash": "0xd8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": {
+            "authority_kind": null,
+            "registrant": null
+          },
+          "after_state": {
+            "authority_key": "registrar:ethereum-mainnet:1:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7:0",
+            "authority_kind": "registrar",
+            "expiry": 1800000000,
+            "labelhash": "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
+            "registrant": "0x0000000000000000000000000000000000002811"
+          }
+        },
+        {
+          "event_identity": "ens_v1_unwrapped_authority:ExpiryChanged:expiry:0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7:0xd8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8:0",
+          "namespace": "ens",
+          "logical_name_id": "ens:alice.eth",
+          "resource_id": "45f11c76-b288-5cbf-a8b7-14e32590f4ed",
+          "event_kind": "ExpiryChanged",
+          "source_family": "ens_v1_registrar_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 160,
+          "block_hash": "0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+          "transaction_hash": "0xd8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8",
+          "log_index": 0,
+          "raw_fact_ref": {
+            "block_hash": "0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+            "block_number": 160,
+            "chain_id": "ethereum-mainnet",
+            "kind": "raw_log",
+            "log_index": 0,
+            "transaction_hash": "0xd8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": {
+            "expiry": null
+          },
+          "after_state": {
+            "expiry": 1800000000
+          }
+        },
+        {
+          "event_identity": "ens_v1_unwrapped_authority:PermissionChanged:permission:grant:resource:0x0000000000000000000000000000000000002811:0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7:0xd8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8:0",
+          "namespace": "ens",
+          "logical_name_id": "ens:alice.eth",
+          "resource_id": "45f11c76-b288-5cbf-a8b7-14e32590f4ed",
+          "event_kind": "PermissionChanged",
+          "source_family": "ens_v1_registrar_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 160,
+          "block_hash": "0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+          "transaction_hash": "0xd8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8",
+          "log_index": 0,
+          "raw_fact_ref": {
+            "block_hash": "0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+            "block_number": 160,
+            "chain_id": "ethereum-mainnet",
+            "kind": "raw_log",
+            "log_index": 0,
+            "transaction_hash": "0xd8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": {
+            "effective_powers": [],
+            "grant_source": null,
+            "inheritance_path": [],
+            "revocation_source": null,
+            "scope": {
+              "kind": "resource"
+            },
+            "subject": "0x0000000000000000000000000000000000002811",
+            "transfer_behavior": "replace_on_authority_change"
+          },
+          "after_state": {
+            "effective_powers": [
+              "resource_control"
+            ],
+            "grant_source": {
+              "authority_key": "registrar:ethereum-mainnet:1:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7:0",
+              "authority_kind": "registrar",
+              "kind": "ens_v1_authority",
+              "source_event_kind": "RegistrationGranted"
+            },
+            "inheritance_path": [],
+            "revocation_source": null,
+            "scope": {
+              "kind": "resource"
+            },
+            "subject": "0x0000000000000000000000000000000000002811",
+            "transfer_behavior": "replace_on_authority_change"
+          }
+        },
+        {
+          "event_identity": "ens_v1_unwrapped_authority:SurfaceBound:surface-bound:0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7:ens:alice.eth:4da76ca8-1d27-510c-9a3c-747366a2a187",
+          "namespace": "ens",
+          "logical_name_id": "ens:alice.eth",
+          "resource_id": "45f11c76-b288-5cbf-a8b7-14e32590f4ed",
+          "event_kind": "SurfaceBound",
+          "source_family": "ens_v1_registrar_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 160,
+          "block_hash": "0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+          "transaction_hash": null,
+          "log_index": null,
+          "raw_fact_ref": {
+            "block_hash": "0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+            "block_number": 160,
+            "block_timestamp": 1700000160,
+            "chain_id": "ethereum-mainnet",
+            "kind": "raw_block"
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": {},
+          "after_state": {
+            "active_from": 1700000160,
+            "authority_key": "registrar:ethereum-mainnet:1:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7:0",
+            "authority_kind": "registrar",
+            "binding_kind": "declared_registry_path"
+          }
+        },
+        {
+          "event_identity": "ens_v1_unwrapped_authority:AuthorityEpochChanged:authority-epoch:0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7:ens:alice.eth:1700000160:none:registrar:ethereum-mainnet:1:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7:0",
+          "namespace": "ens",
+          "logical_name_id": "ens:alice.eth",
+          "resource_id": "45f11c76-b288-5cbf-a8b7-14e32590f4ed",
+          "event_kind": "AuthorityEpochChanged",
+          "source_family": "ens_v1_registrar_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 160,
+          "block_hash": "0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+          "transaction_hash": null,
+          "log_index": null,
+          "raw_fact_ref": {
+            "block_hash": "0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+            "block_number": 160,
+            "block_timestamp": 1700000160,
+            "chain_id": "ethereum-mainnet",
+            "kind": "raw_block"
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": {
+            "authority_key": null,
+            "authority_kind": null
+          },
+          "after_state": {
+            "authority_key": "registrar:ethereum-mainnet:1:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7:0",
+            "authority_kind": "registrar"
+          }
+        },
+        {
+          "event_identity": "ens_v1_unwrapped_authority:RecordChanged:record-change:0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7:0xd8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8:1",
+          "namespace": "ens",
+          "logical_name_id": "ens:alice.eth",
+          "resource_id": "45f11c76-b288-5cbf-a8b7-14e32590f4ed",
+          "event_kind": "RecordChanged",
+          "source_family": "ens_v1_resolver_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 3,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 160,
+          "block_hash": "0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+          "transaction_hash": "0xd8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8",
+          "log_index": 1,
+          "raw_fact_ref": {
+            "block_hash": "0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+            "block_number": 160,
+            "chain_id": "ethereum-mainnet",
+            "kind": "raw_log",
+            "log_index": 1,
+            "transaction_hash": "0xd8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": {},
+          "after_state": {
+            "record_family": "addr",
+            "record_key": "addr:60",
+            "selector_key": "60",
+            "value": "0x0000000000000000000000000000000000002822"
+          }
+        }
+      ],
+      "name_surfaces": [
+        {
+          "block_hash": "0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+          "block_number": 160,
+          "canonical_display_name": "alice.eth",
+          "canonicality_state": "canonical",
+          "chain_id": "ethereum-mainnet",
+          "dns_encoded_name": "\\x05616c6963650365746800",
+          "input_name": "alice.eth",
+          "labelhashes": [
+            "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
+            "0x4f5b812789fc606be1b3b16908db13fc7a9adf7ca72641f84d75b47069d3d7f0"
+          ],
+          "logical_name_id": "ens:alice.eth",
+          "namehash": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
+          "namespace": "ens",
+          "normalization_errors": [],
+          "normalization_warnings": [],
+          "normalized_name": "alice.eth",
+          "normalizer_version": "ensip15@ens-normalize-0.1.1",
+          "provenance": {
+            "adapter": "ens_v1_unwrapped_authority",
+            "logical_name_id": "ens:alice.eth",
+            "source_event": "registrar_name_observation"
+          }
+        }
+      ],
+      "surface_bindings": [
+        {
+          "active_from": "2023-11-14T22:16:00+00:00",
+          "active_to": null,
+          "binding_kind": "declared_registry_path",
+          "block_hash": "0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+          "block_number": 160,
+          "canonicality_state": "canonical",
+          "chain_id": "ethereum-mainnet",
+          "logical_name_id": "ens:alice.eth",
+          "provenance": {
+            "adapter": "ens_v1_unwrapped_authority",
+            "authority_key": "registrar:ethereum-mainnet:1:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7:0",
+            "authority_kind": "registrar"
+          },
+          "resource_id": "45f11c76-b288-5cbf-a8b7-14e32590f4ed",
+          "surface_binding_id": "4da76ca8-1d27-510c-9a3c-747366a2a187"
+        }
+      ],
+      "resources": [
+        {
+          "block_hash": "0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+          "block_number": 160,
+          "canonicality_state": "canonical",
+          "chain_id": "ethereum-mainnet",
+          "provenance": {
+            "adapter": "ens_v1_unwrapped_authority",
+            "authority_key": "registrar:ethereum-mainnet:1:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7:0",
+            "authority_kind": "registrar",
+            "expiry": 1800000000,
+            "labelhash": "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
+            "logical_name_id": "ens:alice.eth",
+            "registrant": "0x0000000000000000000000000000000000002811",
+            "released_at": null
+          },
+          "resource_id": "45f11c76-b288-5cbf-a8b7-14e32590f4ed",
+          "token_lineage_id": "ab0ea62c-430f-567d-a00f-52659410d35f"
+        }
+      ],
+      "token_lineages": [
+        {
+          "block_hash": "0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+          "block_number": 160,
+          "canonicality_state": "canonical",
+          "chain_id": "ethereum-mainnet",
+          "provenance": {
+            "adapter": "ens_v1_unwrapped_authority",
+            "authority_key": "registrar:ethereum-mainnet:1:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xd7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7:0",
+            "authority_kind": "registrar",
+            "labelhash": "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
+            "logical_name_id": "ens:alice.eth"
+          },
+          "token_lineage_id": "ab0ea62c-430f-567d-a00f-52659410d35f"
+        }
+      ]
+    },
+    {
+      "id": "proxy_upgraded_history",
+      "normalized_events": [
+        {
+          "event_identity": "proxy_upgraded:1:0xe7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7:0xe8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8:0:0x00000000000000000000000000000000000029aa",
+          "namespace": "basenames",
+          "logical_name_id": null,
+          "resource_id": null,
+          "event_kind": "Upgraded",
+          "source_family": "basenames_base_registrar",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "base-mainnet",
+          "block_number": 170,
+          "block_hash": "0xe7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7",
+          "transaction_hash": "0xe8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8",
+          "log_index": 0,
+          "raw_fact_ref": {
+            "block_hash": "0xe7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7",
+            "block_number": 170,
+            "chain_id": "base-mainnet",
+            "data_hex": "",
+            "emitting_address": "0x00000000000000000000000000000000000029aa",
+            "emitting_contract_instance_id": "00000000-0000-0000-0000-000000000001",
+            "kind": "raw_log",
+            "log_index": 0,
+            "topic0": "0xbc7cd75a20ee27fd9adebab32041f755214dbc6bffa90cc0225b39da2e5c2d3b",
+            "topic1": "0x00000000000000000000000000000000000000000000000000000000000029bb",
+            "transaction_hash": "0xe8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8",
+            "transaction_index": 0
+          },
+          "derivation_kind": "proxy_upgrade_history",
+          "canonicality_state": "Canonical",
+          "before_state": {},
+          "after_state": {
+            "contract_instance_id": "00000000-0000-0000-0000-000000000001",
+            "implementation": "0x00000000000000000000000000000000000029bb",
+            "proxy_address": "0x00000000000000000000000000000000000029aa",
+            "source_event": "Upgraded"
+          }
+        }
+      ],
+      "name_surfaces": [],
+      "surface_bindings": [],
+      "resources": [],
+      "token_lineages": []
     }
   ]
 }

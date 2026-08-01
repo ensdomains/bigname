@@ -8,6 +8,9 @@ fn normalized_event_producer_inventory_is_classified() {
     let expected = NORMALIZED_EVENT_REPLAY_CONTRACTS
         .iter()
         .map(|contract| contract.adapter)
+        // The identifier remains in the transitional replay contract until
+        // the old runtime is removed in PR 3, but PR 2a deletes its producer.
+        .filter(|adapter| *adapter != NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery)
         .collect::<BTreeSet<_>>();
     assert_eq!(actual, expected);
 }

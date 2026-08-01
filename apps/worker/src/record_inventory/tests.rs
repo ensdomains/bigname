@@ -1576,6 +1576,7 @@ async fn rebuild_projects_basenames_base_authority_record_inventory() -> Result<
     seed_raw_blocks(
         database.pool(),
         &[
+            raw_block("base-mainnet", "0xbase-rec1049", 1049, 1_776_200_049),
             raw_block("base-mainnet", "0xbase-rec1050", 1050, 1_776_200_050),
             raw_block("base-mainnet", "0xbase-rec1051", 1051, 1_776_200_051),
             raw_block("base-mainnet", "0xbase-rec1052", 1052, 1_776_200_052),
@@ -1615,6 +1616,14 @@ async fn rebuild_projects_basenames_base_authority_record_inventory() -> Result<
     seed_events(
         database.pool(),
         &[
+            basenames_resolver_changed_event(
+                "base-current-resolver",
+                "basenames:alice.base.eth",
+                resource_id,
+                resolver_address,
+                1049,
+                0,
+            ),
             basenames_record_version_changed_event(
                 "base-boundary",
                 "basenames:alice.base.eth",
@@ -1659,7 +1668,7 @@ async fn rebuild_projects_basenames_base_authority_record_inventory() -> Result<
         &record_version_boundary(
             "basenames:alice.base.eth",
             resource_id,
-            Some(1),
+            Some(2),
             Some(EVENT_KIND_RECORD_VERSION_CHANGED),
             1050,
             "0xbase-rec1050",
@@ -1692,7 +1701,7 @@ async fn rebuild_projects_basenames_base_authority_record_inventory() -> Result<
         record_version_boundary(
             "basenames:alice.base.eth",
             resource_id,
-            Some(1),
+            Some(2),
             Some(EVENT_KIND_RECORD_VERSION_CHANGED),
             1050,
             "0xbase-rec1050",
@@ -1737,6 +1746,7 @@ async fn rebuild_adds_basenames_transport_position_from_lineage() -> Result<()> 
     seed_raw_blocks(
         database.pool(),
         &[
+            raw_block(BASE_MAINNET_CHAIN_ID, "0xbase-rec1054", 1054, 1_776_200_054),
             raw_block(BASE_MAINNET_CHAIN_ID, "0xbase-rec1055", 1055, 1_776_200_055),
             raw_block(BASE_MAINNET_CHAIN_ID, "0xbase-rec1057", 1057, 1_776_200_057),
         ],
@@ -1791,6 +1801,14 @@ async fn rebuild_adds_basenames_transport_position_from_lineage() -> Result<()> 
     seed_events(
         database.pool(),
         &[
+            basenames_resolver_changed_event(
+                "base-current-resolver-with-transport",
+                "basenames:alice.base.eth",
+                resource_id,
+                resolver_address,
+                1054,
+                0,
+            ),
             basenames_record_version_changed_event(
                 "base-boundary-with-transport",
                 "basenames:alice.base.eth",
@@ -1821,7 +1839,7 @@ async fn rebuild_adds_basenames_transport_position_from_lineage() -> Result<()> 
         &record_version_boundary(
             "basenames:alice.base.eth",
             resource_id,
-            Some(1),
+            Some(2),
             Some(EVENT_KIND_RECORD_VERSION_CHANGED),
             1055,
             "0xbase-rec1055",
@@ -1870,6 +1888,7 @@ async fn rebuild_omits_basenames_transport_position_without_execution_manifest()
     seed_raw_blocks(
         database.pool(),
         &[
+            raw_block(BASE_MAINNET_CHAIN_ID, "0xbase-rec1064", 1064, 1_776_200_064),
             raw_block(BASE_MAINNET_CHAIN_ID, "0xbase-rec1065", 1065, 1_776_200_065),
             raw_block(BASE_MAINNET_CHAIN_ID, "0xbase-rec1067", 1067, 1_776_200_067),
         ],
@@ -1918,6 +1937,14 @@ async fn rebuild_omits_basenames_transport_position_without_execution_manifest()
     seed_events(
         database.pool(),
         &[
+            basenames_resolver_changed_event(
+                "base-current-resolver-without-transport",
+                "basenames:bob.base.eth",
+                resource_id,
+                resolver_address,
+                1064,
+                0,
+            ),
             basenames_record_version_changed_event(
                 "base-boundary-without-transport",
                 "basenames:bob.base.eth",
@@ -1948,7 +1975,7 @@ async fn rebuild_omits_basenames_transport_position_without_execution_manifest()
         &record_version_boundary(
             "basenames:bob.base.eth",
             resource_id,
-            Some(1),
+            Some(2),
             Some(EVENT_KIND_RECORD_VERSION_CHANGED),
             1065,
             "0xbase-rec1065",
@@ -2069,6 +2096,18 @@ async fn rebuild_keeps_newer_record_version_boundary_for_pending_resolver() -> R
             raw_block("base-mainnet", "0xbase-rec1070", 1070, 1_776_200_070),
             raw_block("base-mainnet", "0xbase-rec1071", 1071, 1_776_200_071),
         ],
+    )
+    .await?;
+    seed_raw_logs(
+        database.pool(),
+        &[raw_log(
+            "base-mainnet",
+            "0xbase-rec1071",
+            1071,
+            "0xbase-tx1071",
+            0,
+            resolver_address,
+        )],
     )
     .await?;
     seed_events(
@@ -2501,6 +2540,502 @@ async fn rebuild_keeps_pending_ensv1_dynamic_resolver_inventory_explicit() -> Re
             .as_ref()
             .and_then(|value| value.get("event_kind")),
         Some(&json!(EVENT_KIND_RESOLVER_CHANGED))
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuild_hides_supported_match_all_records_without_current_resolver_pointer() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let fixture = seed_supported_match_all_visibility_fixture(database.pool()).await?;
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE resource_id = $1 AND event_kind = 'RecordChanged'"
+        )
+        .bind(fixture.resource_id)
+        .fetch_one(database.pool())
+        .await?,
+        2,
+        "match-all interpretation must retain both resolver histories before projection"
+    );
+
+    rebuild_record_inventory_current(database.pool(), Some(&fixture.resource_id.to_string()))
+        .await?;
+    assert!(
+        load_current_inventory_json(database.pool(), fixture.resource_id)
+            .await?
+            .is_none(),
+        "a supported resolver with no current name pointer must not publish record inventory"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuild_reveals_preinterpreted_match_all_records_after_pointer_selection() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let fixture = seed_supported_match_all_visibility_fixture(database.pool()).await?;
+    let raw_log_count_before =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM raw_logs")
+            .fetch_one(database.pool())
+            .await?;
+    let record_event_count_before = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind = 'RecordChanged'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+
+    rebuild_record_inventory_current(database.pool(), Some(&fixture.resource_id.to_string()))
+        .await?;
+    assert!(
+        load_current_inventory_json(database.pool(), fixture.resource_id)
+            .await?
+            .is_none()
+    );
+
+    seed_events(
+        database.pool(),
+        &[resolver_changed_event(
+            "match-all-pointer-a",
+            fixture.logical_name_id,
+            fixture.resource_id,
+            fixture.resolver_a,
+            fixture.registry_manifest_id,
+            1201,
+            0,
+        )],
+    )
+    .await?;
+    rebuild_record_inventory_current(database.pool(), Some(&fixture.resource_id.to_string()))
+        .await?;
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM raw_logs")
+            .fetch_one(database.pool())
+            .await?,
+        raw_log_count_before,
+        "pointer selection must project already-retained history without fetching another raw fact"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind = 'RecordChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        record_event_count_before,
+        "pointer selection must not reinterpret or duplicate resolver history"
+    );
+    let (entries, boundary) = load_current_inventory_json(database.pool(), fixture.resource_id)
+        .await?
+        .context("selecting resolver A must publish its retained record")?;
+    assert_eq!(entries, match_all_resolver_a_entries());
+    assert_eq!(boundary["event_kind"], Value::Null);
+    assert_eq!(boundary["chain_position"]["block_number"], json!(1201));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuild_applies_pre_pointer_version_boundary_from_selected_match_all_resolver()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let fixture = seed_supported_match_all_visibility_fixture(database.pool()).await?;
+
+    seed_raw_logs(
+        database.pool(),
+        &[raw_log(
+            "ethereum-mainnet",
+            "0xrec1201",
+            1201,
+            "0xtx1201",
+            0,
+            fixture.resolver_a,
+        )],
+    )
+    .await?;
+    seed_events(
+        database.pool(),
+        &[
+            supported_resolver_version_event(
+                "match-all-pre-pointer-version-a",
+                &fixture,
+                2,
+                1201,
+                0,
+            ),
+            resolver_changed_event(
+                "match-all-pointer-after-version-a",
+                fixture.logical_name_id,
+                fixture.resource_id,
+                fixture.resolver_a,
+                fixture.registry_manifest_id,
+                1202,
+                0,
+            ),
+        ],
+    )
+    .await?;
+    rebuild_record_inventory_current(database.pool(), Some(&fixture.resource_id.to_string()))
+        .await?;
+
+    let version_event_id = sqlx::query_scalar::<_, i64>(
+        "SELECT normalized_event_id FROM normalized_events WHERE event_identity = 'match-all-pre-pointer-version-a'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    let (entries, boundary) = load_current_inventory_json(database.pool(), fixture.resource_id)
+        .await?
+        .context("the selected resolver must publish its pre-pointer version boundary")?;
+    assert_eq!(
+        entries,
+        json!([]),
+        "the pre-pointer clear must hide version-zero records"
+    );
+    assert_eq!(boundary["normalized_event_id"], json!(version_event_id));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuild_restores_pointed_emitter_state_after_pointer_returns() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let fixture = seed_supported_match_all_visibility_fixture(database.pool()).await?;
+
+    seed_raw_logs(
+        database.pool(),
+        &[
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1201",
+                1201,
+                "0xtx1201",
+                0,
+                fixture.resolver_a,
+            ),
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1201",
+                1201,
+                "0xtx1201",
+                1,
+                fixture.resolver_a,
+            ),
+        ],
+    )
+    .await?;
+    seed_events(
+        database.pool(),
+        &[
+            supported_resolver_version_event("match-all-return-version-a", &fixture, 2, 1201, 0),
+            supported_resolver_record_event(
+                "match-all-return-record-a",
+                &fixture,
+                "text:email",
+                "restored-a",
+                1201,
+                1,
+            ),
+            resolver_changed_event(
+                "match-all-return-initial-pointer-a",
+                fixture.logical_name_id,
+                fixture.resource_id,
+                fixture.resolver_a,
+                fixture.registry_manifest_id,
+                1201,
+                2,
+            ),
+            resolver_changed_event(
+                "match-all-return-pointer-b",
+                fixture.logical_name_id,
+                fixture.resource_id,
+                fixture.resolver_b,
+                fixture.registry_manifest_id,
+                1202,
+                0,
+            ),
+        ],
+    )
+    .await?;
+    rebuild_record_inventory_current(database.pool(), Some(&fixture.resource_id.to_string()))
+        .await?;
+    let (entries_b, _) = load_current_inventory_json(database.pool(), fixture.resource_id)
+        .await?
+        .context("resolver B must be visible while selected")?;
+    assert_eq!(
+        entries_b,
+        json!([{
+            "record_key": "text:org.telegram",
+            "record_family": "text",
+            "selector_key": "org.telegram",
+            "status": "success",
+            "value": "from-b",
+        }])
+    );
+
+    seed_events(
+        database.pool(),
+        &[resolver_changed_event(
+            "match-all-return-pointer-a",
+            fixture.logical_name_id,
+            fixture.resource_id,
+            fixture.resolver_a,
+            fixture.registry_manifest_id,
+            1203,
+            0,
+        )],
+    )
+    .await?;
+    rebuild_record_inventory_current(database.pool(), Some(&fixture.resource_id.to_string()))
+        .await?;
+
+    let version_event_id = sqlx::query_scalar::<_, i64>(
+        "SELECT normalized_event_id FROM normalized_events WHERE event_identity = 'match-all-return-version-a'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    let (entries_a, boundary_a) = load_current_inventory_json(database.pool(), fixture.resource_id)
+        .await?
+        .context("resolver A's retained state must return when the pointer returns")?;
+    assert_eq!(
+        entries_a,
+        json!([{
+            "record_key": "text:email",
+            "record_family": "text",
+            "selector_key": "email",
+            "status": "success",
+            "value": "restored-a",
+        }])
+    );
+    assert_eq!(boundary_a["normalized_event_id"], json!(version_event_id));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuild_reveals_preinterpreted_match_all_records_after_pointer_moves() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let fixture = seed_supported_match_all_visibility_fixture(database.pool()).await?;
+
+    seed_events(
+        database.pool(),
+        &[
+            resolver_changed_event(
+                "match-all-move-current-a",
+                fixture.logical_name_id,
+                fixture.resource_id,
+                fixture.resolver_a,
+                fixture.registry_manifest_id,
+                1201,
+                0,
+            ),
+            resolver_changed_event(
+                "match-all-move-current-b",
+                fixture.logical_name_id,
+                fixture.resource_id,
+                fixture.resolver_b,
+                fixture.registry_manifest_id,
+                1202,
+                0,
+            ),
+        ],
+    )
+    .await?;
+    rebuild_record_inventory_current(database.pool(), Some(&fixture.resource_id.to_string()))
+        .await?;
+
+    let (entries, boundary) = load_current_inventory_json(database.pool(), fixture.resource_id)
+        .await?
+        .context("selecting resolver B must publish its retained record")?;
+    assert_eq!(
+        entries,
+        json!([{
+            "record_key": "text:org.telegram",
+            "record_family": "text",
+            "selector_key": "org.telegram",
+            "status": "success",
+            "value": "from-b",
+        }])
+    );
+    assert_eq!(boundary["event_kind"], Value::Null);
+    assert_eq!(boundary["chain_position"]["block_number"], json!(1202));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuild_moves_match_all_visibility_and_version_boundary_with_pointer() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let fixture = seed_supported_match_all_visibility_fixture(database.pool()).await?;
+
+    seed_raw_logs(
+        database.pool(),
+        &[
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1202",
+                1202,
+                "0xtx1202",
+                0,
+                fixture.resolver_a,
+            ),
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1202",
+                1202,
+                "0xtx1202",
+                1,
+                fixture.resolver_a,
+            ),
+        ],
+    )
+    .await?;
+    seed_events(
+        database.pool(),
+        &[
+            resolver_changed_event(
+                "match-all-current-a",
+                fixture.logical_name_id,
+                fixture.resource_id,
+                fixture.resolver_a,
+                fixture.registry_manifest_id,
+                1201,
+                0,
+            ),
+            supported_resolver_version_event("match-all-version-a-2", &fixture, 2, 1202, 0),
+            supported_resolver_record_event(
+                "match-all-current-a-record",
+                &fixture,
+                "text:current-a",
+                "current-a",
+                1202,
+                1,
+            ),
+        ],
+    )
+    .await?;
+    rebuild_record_inventory_current(database.pool(), Some(&fixture.resource_id.to_string()))
+        .await?;
+
+    let version_a_id = sqlx::query_scalar::<_, i64>(
+        "SELECT normalized_event_id FROM normalized_events WHERE event_identity = 'match-all-version-a-2'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    let (entries_a, boundary_a) = load_current_inventory_json(database.pool(), fixture.resource_id)
+        .await?
+        .context("resolver A inventory must exist")?;
+    assert_eq!(
+        entries_a,
+        json!([{
+            "record_key": "text:current-a",
+            "record_family": "text",
+            "selector_key": "current-a",
+            "status": "success",
+            "value": "current-a",
+        }])
+    );
+    assert_eq!(boundary_a["normalized_event_id"], json!(version_a_id));
+
+    seed_raw_logs(
+        database.pool(),
+        &[
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1204",
+                1204,
+                "0xtx1204",
+                0,
+                fixture.resolver_b,
+            ),
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1204",
+                1204,
+                "0xtx1204",
+                1,
+                fixture.resolver_b,
+            ),
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1205",
+                1205,
+                "0xtx1205",
+                0,
+                fixture.resolver_a,
+            ),
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1205",
+                1205,
+                "0xtx1205",
+                1,
+                fixture.resolver_a,
+            ),
+        ],
+    )
+    .await?;
+    seed_events(
+        database.pool(),
+        &[
+            resolver_changed_event(
+                "match-all-current-b",
+                fixture.logical_name_id,
+                fixture.resource_id,
+                fixture.resolver_b,
+                fixture.registry_manifest_id,
+                1203,
+                0,
+            ),
+            supported_resolver_version_event("match-all-version-b-3", &fixture, 3, 1204, 0),
+            supported_resolver_record_event(
+                "match-all-current-b-record",
+                &fixture,
+                "text:current-b",
+                "current-b",
+                1204,
+                1,
+            ),
+            supported_resolver_version_event("match-all-later-version-a-4", &fixture, 4, 1205, 0),
+            supported_resolver_record_event(
+                "match-all-later-a-record",
+                &fixture,
+                "text:later-a",
+                "later-a",
+                1205,
+                1,
+            ),
+        ],
+    )
+    .await?;
+    rebuild_record_inventory_current(database.pool(), Some(&fixture.resource_id.to_string()))
+        .await?;
+
+    let version_b_id = sqlx::query_scalar::<_, i64>(
+        "SELECT normalized_event_id FROM normalized_events WHERE event_identity = 'match-all-version-b-3'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    let (entries_b, boundary_b) = load_current_inventory_json(database.pool(), fixture.resource_id)
+        .await?
+        .context("resolver B inventory must replace resolver A inventory")?;
+    assert_eq!(
+        entries_b,
+        json!([{
+            "record_key": "text:current-b",
+            "record_family": "text",
+            "selector_key": "current-b",
+            "status": "success",
+            "value": "current-b",
+        }]),
+        "records from the previously pointed resolver must not remain visible"
+    );
+    assert_eq!(
+        boundary_b["normalized_event_id"],
+        json!(version_b_id),
+        "a later VersionChanged from resolver A must not replace resolver B's current boundary"
     );
 
     database.cleanup().await
@@ -2971,6 +3506,36 @@ async fn rebuild_supports_known_legacy_ensv1_resolver_without_latest_capabilitie
         ],
     )
     .await?;
+    seed_raw_logs(
+        database.pool(),
+        &[
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1071",
+                1071,
+                "0xtx1071",
+                0,
+                legacy_resolver_address,
+            ),
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1072",
+                1072,
+                "0xtx1072",
+                0,
+                legacy_resolver_address,
+            ),
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1073",
+                1073,
+                "0xtx1073",
+                0,
+                legacy_resolver_address,
+            ),
+        ],
+    )
+    .await?;
     seed_events(
         database.pool(),
         &[
@@ -3068,7 +3633,8 @@ async fn rebuild_supports_known_legacy_ensv1_resolver_without_latest_capabilitie
 }
 
 #[tokio::test]
-async fn rebuild_uses_ensv1_registrar_resolver_binding_without_raw_logs() -> Result<()> {
+async fn rebuild_uses_ensv1_registrar_resolver_binding_with_prefetched_resolver_log() -> Result<()>
+{
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0x9915);
     let resolver_contract_instance_id = Uuid::from_u128(0x9916);
@@ -3135,6 +3701,18 @@ async fn rebuild_uses_ensv1_registrar_resolver_binding_without_raw_logs() -> Res
         ],
     )
     .await?;
+    seed_raw_logs(
+        database.pool(),
+        &[raw_log(
+            "ethereum-mainnet",
+            "0xrec1076",
+            1076,
+            "0xtx1076",
+            0,
+            resolver_address,
+        )],
+    )
+    .await?;
     seed_events(database.pool(), &[resolver_event, text_record]).await?;
 
     rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string())).await?;
@@ -3179,7 +3757,7 @@ async fn rebuild_uses_ensv1_registrar_resolver_binding_without_raw_logs() -> Res
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs")
             .fetch_one(database.pool())
             .await?,
-        0
+        1
     );
 
     database.cleanup().await
@@ -3368,7 +3946,7 @@ async fn rebuild_keeps_records_across_same_resolver_refresh() -> Result<()> {
 }
 
 #[tokio::test]
-async fn rebuild_drops_records_from_prior_same_address_resolver_tenure() -> Result<()> {
+async fn rebuild_restores_records_when_pointer_returns_to_same_resolver() -> Result<()> {
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0x9928);
     let resolver_a_contract_instance_id = Uuid::from_u128(0x9929);
@@ -3574,6 +4152,12 @@ async fn rebuild_drops_records_from_prior_same_address_resolver_tenure() -> Resu
                 "record_family": "text",
                 "selector_key": "com.twitter",
                 "cacheable": true,
+            },
+            {
+                "record_key": "text:email",
+                "record_family": "text",
+                "selector_key": "email",
+                "cacheable": true,
             }
         ])
     );
@@ -3593,6 +4177,13 @@ async fn rebuild_drops_records_from_prior_same_address_resolver_tenure() -> Resu
                 "selector_key": "com.twitter",
                 "status": "success",
                 "value": "taytems",
+            },
+            {
+                "record_key": "text:email",
+                "record_family": "text",
+                "selector_key": "email",
+                "status": "success",
+                "value": "old@taytems.xyz",
             }
         ])
     );
@@ -3762,7 +4353,7 @@ async fn rebuild_does_not_pull_future_resolver_records_from_successor_resource()
 }
 
 #[tokio::test]
-async fn rebuild_uses_cross_resource_resolver_boundaries_for_predecessor_records() -> Result<()> {
+async fn rebuild_restores_cross_resource_records_when_pointer_returns() -> Result<()> {
     let database = TestDatabase::new().await?;
     let predecessor_resource_id = Uuid::from_u128(0x992d);
     let current_resource_id = Uuid::from_u128(0x992e);
@@ -3929,21 +4520,29 @@ async fn rebuild_uses_cross_resource_resolver_boundaries_for_predecessor_records
 
     assert_eq!(
         row.entries,
-        json!([{
-            "record_key": "text:com.twitter",
-            "record_family": "text",
-            "selector_key": "com.twitter",
-            "status": "success",
-            "value": "taytems",
-        }])
+        json!([
+            {
+                "record_key": "text:com.twitter",
+                "record_family": "text",
+                "selector_key": "com.twitter",
+                "status": "success",
+                "value": "taytems",
+            },
+            {
+                "record_key": "text:email",
+                "record_family": "text",
+                "selector_key": "email",
+                "status": "success",
+                "value": "old@taytems.xyz",
+            }
+        ])
     );
 
     database.cleanup().await
 }
 
 #[tokio::test]
-async fn rebuild_ignores_predecessor_record_version_boundary_before_current_resolver() -> Result<()>
-{
+async fn rebuild_applies_predecessor_record_version_boundary_for_current_resolver() -> Result<()> {
     let database = TestDatabase::new().await?;
     let predecessor_resource_id = Uuid::from_u128(0x9932);
     let current_resource_id = Uuid::from_u128(0x9933);
@@ -4091,22 +4690,27 @@ async fn rebuild_ignores_predecessor_record_version_boundary_before_current_reso
     rebuild_record_inventory_current(database.pool(), Some(&current_resource_id.to_string()))
         .await?;
 
+    let predecessor_version_id = sqlx::query_scalar::<_, i64>(
+        "SELECT normalized_event_id FROM normalized_events WHERE event_identity = 'predecessor-version-before-current-resolver'",
+    )
+    .fetch_one(database.pool())
+    .await?;
     let row = load_record_inventory_current(
         database.pool(),
         current_resource_id,
         &record_version_boundary(
             "ens:taytems.eth",
             current_resource_id,
-            None,
-            None,
-            1112,
-            "0xrec1112",
-            1_776_200_112,
+            Some(predecessor_version_id),
+            Some(EVENT_KIND_RECORD_VERSION_CHANGED),
+            1111,
+            "0xrec1111",
+            1_776_200_111,
             "ethereum-mainnet",
         ),
     )
     .await?
-    .context("current resource row must use its own resolver boundary")?;
+    .context("current resource row must retain the pointed emitter's version boundary")?;
 
     assert_eq!(
         row.entries,
@@ -4349,6 +4953,18 @@ async fn hydrate_text_values_fills_selectorized_ensv1_public_resolver_cache() ->
     )
     .await?;
     seed_chain_checkpoint(database.pool(), "ethereum-mainnet", "0xrec1077", 1077).await?;
+    seed_raw_logs(
+        database.pool(),
+        &[raw_log(
+            "ethereum-mainnet",
+            "0xrec1077",
+            1077,
+            "0xtx1077",
+            0,
+            resolver_address,
+        )],
+    )
+    .await?;
     seed_events(
         database.pool(),
         &[
@@ -4491,6 +5107,18 @@ async fn hydrate_text_values_skips_malformed_resolver_text_strings() -> Result<(
     )
     .await?;
     seed_chain_checkpoint(database.pool(), "ethereum-mainnet", "0xrec2077", 2077).await?;
+    seed_raw_logs(
+        database.pool(),
+        &[raw_log(
+            "ethereum-mainnet",
+            "0xrec2077",
+            2077,
+            "0xtx2077",
+            0,
+            resolver_address,
+        )],
+    )
+    .await?;
     seed_events(
         database.pool(),
         &[
@@ -4831,6 +5459,214 @@ async fn rebuild_keeps_unsupported_legacy_ensv1_resolver_family_explicit() -> Re
     );
 
     database.cleanup().await
+}
+
+struct SupportedMatchAllVisibilityFixture {
+    resource_id: Uuid,
+    registry_manifest_id: i64,
+    resolver_manifest_id: i64,
+    logical_name_id: &'static str,
+    resolver_a: &'static str,
+    resolver_b: &'static str,
+}
+
+async fn seed_supported_match_all_visibility_fixture(
+    database: &PgPool,
+) -> Result<SupportedMatchAllVisibilityFixture> {
+    const LOGICAL_NAME_ID: &str = "ens:match-all.eth";
+    const RESOLVER_A: &str = "0x000000000000000000000000000000000000a120";
+    const RESOLVER_B: &str = "0x000000000000000000000000000000000000b120";
+
+    let resource_id = Uuid::from_u128(0x9920);
+    let registry_manifest_id = insert_manifest_version(
+        database,
+        SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+        "manifests/ens/ens_v1_registry_l1/v3.toml",
+    )
+    .await?;
+    let resolver_manifest_id = insert_manifest_version(
+        database,
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        "manifests/ens/ens_v1_resolver_l1/v1.toml",
+    )
+    .await?;
+    let resolver_a_instance_id = Uuid::from_u128(0x9921);
+    let resolver_b_instance_id = Uuid::from_u128(0x9922);
+    insert_contract_instance(
+        database,
+        resolver_a_instance_id,
+        RESOLVER_A,
+        resolver_manifest_id,
+    )
+    .await?;
+    insert_contract_instance(
+        database,
+        resolver_b_instance_id,
+        RESOLVER_B,
+        resolver_manifest_id,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database,
+        resolver_manifest_id,
+        "public_resolver",
+        resolver_a_instance_id,
+        RESOLVER_A,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database,
+        resolver_manifest_id,
+        "public_resolver_231b0ee",
+        resolver_b_instance_id,
+        RESOLVER_B,
+    )
+    .await?;
+
+    seed_resources(database, &[resource_id]).await?;
+    seed_raw_blocks(
+        database,
+        &[
+            raw_block("ethereum-mainnet", "0xrec1200", 1200, 1_776_200_200),
+            raw_block("ethereum-mainnet", "0xrec1201", 1201, 1_776_200_201),
+            raw_block("ethereum-mainnet", "0xrec1202", 1202, 1_776_200_202),
+            raw_block("ethereum-mainnet", "0xrec1203", 1203, 1_776_200_203),
+            raw_block("ethereum-mainnet", "0xrec1204", 1204, 1_776_200_204),
+            raw_block("ethereum-mainnet", "0xrec1205", 1205, 1_776_200_205),
+        ],
+    )
+    .await?;
+    seed_raw_logs(
+        database,
+        &[
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1200",
+                1200,
+                "0xtx1200",
+                0,
+                RESOLVER_A,
+            ),
+            raw_log(
+                "ethereum-mainnet",
+                "0xrec1200",
+                1200,
+                "0xtx1200",
+                1,
+                RESOLVER_B,
+            ),
+        ],
+    )
+    .await?;
+
+    let fixture = SupportedMatchAllVisibilityFixture {
+        resource_id,
+        registry_manifest_id,
+        resolver_manifest_id,
+        logical_name_id: LOGICAL_NAME_ID,
+        resolver_a: RESOLVER_A,
+        resolver_b: RESOLVER_B,
+    };
+    seed_events(
+        database,
+        &[
+            supported_resolver_record_event(
+                "match-all-preinterpreted-a",
+                &fixture,
+                "text:com.twitter",
+                "from-a",
+                1200,
+                0,
+            ),
+            supported_resolver_record_event(
+                "match-all-preinterpreted-b",
+                &fixture,
+                "text:org.telegram",
+                "from-b",
+                1200,
+                1,
+            ),
+        ],
+    )
+    .await?;
+
+    Ok(fixture)
+}
+
+async fn load_current_inventory_json(
+    database: &PgPool,
+    resource_id: Uuid,
+) -> Result<Option<(Value, Value)>> {
+    sqlx::query_as::<_, (Value, Value)>(
+        r#"
+        SELECT entries, record_version_boundary
+        FROM record_inventory_current
+        WHERE resource_id = $1
+        "#,
+    )
+    .bind(resource_id)
+    .fetch_optional(database)
+    .await
+    .context("failed to load current match-all resolver inventory")
+}
+
+fn match_all_resolver_a_entries() -> Value {
+    json!([{
+        "record_key": "text:com.twitter",
+        "record_family": "text",
+        "selector_key": "com.twitter",
+        "status": "success",
+        "value": "from-a",
+    }])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn supported_resolver_record_event(
+    event_identity: &str,
+    fixture: &SupportedMatchAllVisibilityFixture,
+    record_key: &str,
+    value: &str,
+    block_number: i64,
+    log_index: i64,
+) -> NormalizedEvent {
+    let selector_key = record_key
+        .strip_prefix("text:")
+        .expect("match-all fixture record key must be a text selector");
+    let mut event = record_changed_event_with_value(
+        event_identity,
+        fixture.logical_name_id,
+        fixture.resource_id,
+        record_key,
+        SUPPORTED_TEXT_RECORD_FAMILY,
+        Some(selector_key),
+        json!(value),
+        block_number,
+        log_index,
+    );
+    event.source_family = SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned();
+    event.source_manifest_id = Some(fixture.resolver_manifest_id);
+    event
+}
+
+#[allow(clippy::too_many_arguments)]
+fn supported_resolver_version_event(
+    event_identity: &str,
+    fixture: &SupportedMatchAllVisibilityFixture,
+    record_version: i64,
+    block_number: i64,
+    log_index: i64,
+) -> NormalizedEvent {
+    let mut event = record_version_changed_event(
+        event_identity,
+        fixture.logical_name_id,
+        fixture.resource_id,
+        record_version,
+        block_number,
+        log_index,
+    );
+    event.source_family = SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned();
+    event.source_manifest_id = Some(fixture.resolver_manifest_id);
+    event
 }
 
 async fn seed_resources(database: &PgPool, resource_ids: &[Uuid]) -> Result<()> {

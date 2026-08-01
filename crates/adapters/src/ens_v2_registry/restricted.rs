@@ -20,14 +20,17 @@ use crate::adapter_manifest::load_required_active_manifest_event_topic0s_by_sign
 pub(super) fn requires_prior_registry_state(
     observations_by_log: &[Vec<RegistryObservation>],
 ) -> bool {
-    // Every registry observation except a transfer can depend on an earlier
-    // token or registry-suffix transition. Restricted calls have no reusable
-    // cache, so correctness requires replaying the retained prefix on demand.
-    // Transfers use their separate verified-history hydration path.
+    // RegistryCreated and Upgraded are contract-scoped history. They do not
+    // depend on token or registry-suffix state. Transfers use their separate
+    // verified-history hydration path. Every other registry observation can
+    // depend on an earlier transition, so restricted calls reconstruct the
+    // retained prefix on demand.
     observations_by_log.iter().flatten().any(|observation| {
         !matches!(
             observation,
-            RegistryObservation::TokenControlTransferred { .. }
+            RegistryObservation::RegistryCreated { .. }
+                | RegistryObservation::Upgraded { .. }
+                | RegistryObservation::TokenControlTransferred { .. }
         )
     })
 }

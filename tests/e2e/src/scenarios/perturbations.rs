@@ -79,15 +79,9 @@ async fn build_rich_chain(anvil: &Anvil) -> Result<PerturbationChain> {
     Ok(chain)
 }
 
-fn rich_ready_sql(
-    resolver: Address,
-    profile_seed_resolver: Address,
-    child_owner: Address,
-) -> String {
+fn rich_ready_sql(resolver: Address, child_owner: Address) -> String {
     let parent_node = format!("{:#x}", ens_v1::namehash(NAME));
     let sub_labelhash = format!("{:#x}", ens_v1::labelhash(SUB_LABEL));
-    let resolver_profile_ready =
-        support::resolver_code_hash_comparison_sql(resolver, profile_seed_resolver, true);
     format!(
         "SELECT \
            EXISTS (SELECT 1 FROM normalized_events \
@@ -104,8 +98,7 @@ fn rich_ready_sql(
             WHERE event_kind = 'SubregistryChanged' AND canonicality_state = 'canonical' \
             AND lower(after_state->>'parent_node') = '{parent_node}' \
             AND lower(after_state->>'labelhash') = '{sub_labelhash}' \
-            AND lower(after_state->>'owner') = '{child_owner:#x}') \
-         AND {resolver_profile_ready}"
+            AND lower(after_state->>'owner') = '{child_owner:#x}')"
     )
 }
 
@@ -133,7 +126,7 @@ async fn assert_exact_resolver(run: &support::PipelineRun, resolver: Address) ->
 async fn rich_chain_projection_and_normalized_event_replay_are_route_stable() -> Result<()> {
     let anvil = Anvil::spawn().await?;
     let chain = build_rich_chain(&anvil).await?;
-    let ready_sql = rich_ready_sql(chain.resolver, chain.resolver, chain.child_owner);
+    let ready_sql = rich_ready_sql(chain.resolver, chain.child_owner);
     let run = support::ingest_and_serve(&anvil, &chain.deployment, Some(&ready_sql)).await?;
 
     let before = chain_snapshots(&run, &chain).await?;
@@ -155,7 +148,7 @@ async fn rich_chain_projection_and_normalized_event_replay_are_route_stable() ->
 async fn rich_chain_indexer_restart_mid_scenario_matches_control() -> Result<()> {
     let anvil = Anvil::spawn().await?;
     let chain = deploy_registered_name(&anvil).await?;
-    let ready_sql = rich_ready_sql(chain.resolver, chain.resolver, chain.child_owner);
+    let ready_sql = rich_ready_sql(chain.resolver, chain.child_owner);
 
     let restarted = support::ingest_with_restart_and_serve(&anvil, &chain.deployment, || async {
         add_records_and_subname(&anvil, &chain).await?;
@@ -183,7 +176,7 @@ async fn rich_chain_indexer_restart_mid_scenario_matches_control() -> Result<()>
 async fn rich_chain_backfill_normalized_events_match_live_ingest() -> Result<()> {
     let anvil = Anvil::spawn().await?;
     let chain = build_rich_chain(&anvil).await?;
-    let ready_sql = rich_ready_sql(chain.resolver, chain.resolver, chain.child_owner);
+    let ready_sql = rich_ready_sql(chain.resolver, chain.child_owner);
     let live = support::ingest_and_serve(&anvil, &chain.deployment, Some(&ready_sql)).await?;
     let _live_route_snapshots = chain_snapshots(&live, &chain).await?;
 
@@ -228,11 +221,7 @@ async fn rich_chain_live_reorg_converges_to_winning_branch() -> Result<()> {
         .wait_for_checkpoint(
             &db.pool,
             pre_reorg_head,
-            Some(&rich_ready_sql(
-                chain.resolver,
-                chain.resolver,
-                chain.child_owner,
-            )),
+            Some(&rich_ready_sql(chain.resolver, chain.child_owner)),
         )
         .await?;
 
@@ -259,11 +248,7 @@ async fn rich_chain_live_reorg_converges_to_winning_branch() -> Result<()> {
     .await?;
     rpc.mine(3).await?;
     let post_reorg_head = rpc.block_number().await?;
-    let winning_ready_sql = rich_ready_sql(
-        replacement_resolver.address,
-        chain.resolver,
-        chain.child_owner,
-    );
+    let winning_ready_sql = rich_ready_sql(replacement_resolver.address, chain.child_owner);
     session
         .wait_for_checkpoint(&db.pool, post_reorg_head, Some(&winning_ready_sql))
         .await?;

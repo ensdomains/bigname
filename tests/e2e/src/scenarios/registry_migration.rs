@@ -35,7 +35,7 @@ fn account(accounts: &[Address], index: usize) -> Result<Address> {
 }
 
 #[tokio::test]
-async fn registry_migration_legacy_to_current_admission() -> Result<()> {
+async fn registry_migration_legacy_to_current_semantics() -> Result<()> {
     let anvil = Anvil::spawn().await?;
     let rpc = anvil.client();
 
@@ -99,10 +99,9 @@ async fn registry_migration_legacy_to_current_admission() -> Result<()> {
     )
     .await?;
 
-    // Phase 1: ingest the purely-legacy chain state. The migrate.eth
-    // subregistry observation is one-per-node current-edge state, so the
-    // prior legacy owner is only observable before the current-registry
-    // write supersedes it.
+    // Phase 1: ingest the purely-legacy chain state. The prior legacy owner
+    // is observable before the current-registry write supersedes it, without
+    // admitting that owner address as a registry contract.
     let legacy_registry = format!("{:#x}", deployment.legacy_registry.address);
     let eth_node = format!("{:#x}", ens_v1::namehash("eth"));
     let migrate_labelhash = format!("{:#x}", ens_v1::labelhash("migrate"));
@@ -205,10 +204,16 @@ async fn registry_migration_legacy_to_current_admission() -> Result<()> {
     );
     let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
 
-    assert_legacy_subregistry_admitted(&run, &deployment, "eth", "legacyonly", legacy_2ld_owner)
-        .await?;
+    assert_legacy_subregistry_observed_without_owner_admission(
+        &run,
+        &deployment,
+        "eth",
+        "legacyonly",
+        legacy_2ld_owner,
+    )
+    .await?;
     assert_legacy_2ld_public_state(&run, "legacyonly.eth").await?;
-    assert_legacy_subregistry_admitted(
+    assert_legacy_subregistry_observed_without_owner_admission(
         &run,
         &deployment,
         "legacyparent.eth",
@@ -216,7 +221,7 @@ async fn registry_migration_legacy_to_current_admission() -> Result<()> {
         legacy_only_owner,
     )
     .await?;
-    assert_legacy_subregistry_admitted(
+    assert_legacy_subregistry_observed_without_owner_admission(
         &run,
         &deployment,
         "legacyparent.eth",
@@ -276,7 +281,7 @@ async fn registry_migration_legacy_to_current_admission() -> Result<()> {
     Ok(())
 }
 
-async fn assert_legacy_subregistry_admitted(
+async fn assert_legacy_subregistry_observed_without_owner_admission(
     run: &support::PipelineRun,
     deployment: &ens_v1::EnsV1Deployment,
     parent: &str,
@@ -287,12 +292,11 @@ async fn assert_legacy_subregistry_admitted(
     let labelhash = format!("{:#x}", ens_v1::labelhash(label));
     let child_node = format!("{:#x}", ens_v1::namehash(&format!("{label}.{parent}")));
     let owner_hex = format!("{owner:#x}");
-    let current_registry = format!("{:#x}", deployment.registry.address);
     let legacy_registry = format!("{:#x}", deployment.legacy_registry.address);
 
     let events = subregistry_events_for_child(run, &child_node).await?;
     let event_rows = events.as_array().cloned().unwrap_or_default();
-    let admitted = event_rows.iter().any(|event| {
+    let observed = event_rows.iter().any(|event| {
         event.pointer("/source_family").and_then(Value::as_str) == Some("ens_v1_registry_l1")
             && event
                 .pointer("/after_state/parent_node")
@@ -314,70 +318,24 @@ async fn assert_legacy_subregistry_admitted(
                 == Some(true)
     });
     assert!(
-        admitted,
+        observed,
         "expected legacy-registry SubregistryChanged for {label}.{parent}; saw {events}"
     );
 
-    let edge = sqlx::query_scalar::<_, Value>(
-        "SELECT jsonb_build_object( \
-             'discovery_source', de.discovery_source, \
-             'edge_kind', de.edge_kind, \
-             'from_address', lower(from_addr.address), \
-             'to_address', lower(to_addr.address), \
-             'deactivated_at', de.deactivated_at, \
-             'provenance', de.provenance) \
-         FROM discovery_edges de \
-         JOIN contract_instance_addresses from_addr \
-           ON from_addr.contract_instance_id = de.from_contract_instance_id \
-         JOIN contract_instance_addresses to_addr \
-           ON to_addr.contract_instance_id = de.to_contract_instance_id \
-         WHERE de.edge_kind = 'subregistry' \
-           AND de.provenance->>'observation_key' = $1 \
-         ORDER BY de.active_from_block_number DESC, de.active_from_block_hash DESC \
-         LIMIT 1",
+    let owner_edge_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM discovery_edges edge \
+         JOIN contract_instance_addresses target \
+           ON target.contract_instance_id = edge.to_contract_instance_id \
+          AND target.chain_id = edge.chain_id \
+         WHERE edge.edge_kind = 'subregistry' \
+           AND lower(target.address) = $1",
     )
-    .bind(&child_node)
+    .bind(&owner_hex)
     .fetch_one(&run.db.pool)
-    .await
-    .with_context(|| format!("missing discovery edge for legacy child {label}.{parent}"))?;
-
+    .await?;
     assert_eq!(
-        edge.pointer("/discovery_source").and_then(Value::as_str),
-        Some("ens_v1_registry_new_owner:ethereum-mainnet"),
-        "legacy child discovery source mismatch for {label}.{parent}: {edge}"
-    );
-    assert_eq!(
-        edge.pointer("/from_address").and_then(Value::as_str),
-        Some(current_registry.as_str()),
-        "legacy child edge should be rewritten through the current registry authority: {edge}"
-    );
-    assert_eq!(
-        edge.pointer("/to_address").and_then(Value::as_str),
-        Some(owner_hex.as_str()),
-        "legacy child edge owner mismatch: {edge}"
-    );
-    assert_eq!(
-        edge.pointer("/deactivated_at"),
-        Some(&Value::Null),
-        "legacy-only child edge should remain active: {edge}"
-    );
-    assert_eq!(
-        edge.pointer("/provenance/emitting_address")
-            .and_then(Value::as_str),
-        Some(legacy_registry.as_str()),
-        "legacy child provenance should retain the old-registry emitter: {edge}"
-    );
-    assert_eq!(
-        edge.pointer("/provenance/authority_from_address")
-            .and_then(Value::as_str),
-        Some(current_registry.as_str()),
-        "legacy child provenance should record current-registry authority rewrite: {edge}"
-    );
-    assert_eq!(
-        edge.pointer("/provenance/ens_registry_old_migration_epoch_input")
-            .and_then(Value::as_bool),
-        Some(true),
-        "legacy child provenance should mark migration-epoch input: {edge}"
+        owner_edge_count, 0,
+        "legacy owner {owner_hex} must remain a leaf rather than a discovered registry"
     );
 
     Ok(())
@@ -403,7 +361,7 @@ async fn assert_prior_legacy_migrate_state(
     });
     assert!(
         found,
-        "expected migrate.eth to have prior admitted legacy owner state before current migration; saw {events}"
+        "expected migrate.eth to have prior observed legacy owner state before current migration; saw {events}"
     );
     Ok(())
 }

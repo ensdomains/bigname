@@ -13,7 +13,7 @@ use super::constants::{
     PREIMAGE_EVENT_SIGNATURES, SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
     SOURCE_FAMILY_ENS_V1_REGISTRAR_L1, SOURCE_FAMILY_ENS_V1_WRAPPER_L1,
     SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
-    SOURCE_FAMILY_ENS_V2_RESOLVER_L1, SOURCE_FAMILY_ENS_V2_ROOT_L1,
+    SOURCE_FAMILY_ENS_V2_RESOLVER_L1, SOURCE_FAMILY_ENS_V2_ROOT_L1, UPGRADED_SIGNATURE,
 };
 use super::types::{ActiveEmitter, WatchedRawLogRow};
 
@@ -48,7 +48,9 @@ impl PreimageObservedEventTopics {
             .await
             .context("failed to load active manifest ABI events for block-derived preimages")?
         {
-            if !PREIMAGE_EVENT_SIGNATURES.contains(&event.canonical_signature.as_str()) {
+            if !PREIMAGE_EVENT_SIGNATURES.contains(&event.canonical_signature.as_str())
+                && event.canonical_signature != UPGRADED_SIGNATURE
+            {
                 continue;
             }
             let topic0 = event.topic0.with_context(|| {
@@ -117,6 +119,9 @@ impl PreimageObservedEventTopics {
                     topic0s.push(topic0.to_owned());
                 }
             }
+            if let Some(topic0) = manifest_topics.optional_topic0(UPGRADED_SIGNATURE) {
+                topic0s.push(topic0.to_owned());
+            }
         }
         topic0s.sort();
         topic0s.dedup();
@@ -139,6 +144,18 @@ impl PreimageObservedEventTopics {
                 )
             })?;
         topics.matches(canonical_signature, topic0)
+    }
+
+    pub(super) fn matches_optional(
+        &self,
+        raw_log: &WatchedRawLogRow,
+        canonical_signature: &str,
+        topic0: &str,
+    ) -> bool {
+        self.by_manifest_id
+            .get(&raw_log.source_manifest_id)
+            .and_then(|topics| topics.optional_topic0(canonical_signature))
+            .is_some_and(|expected| topic0.eq_ignore_ascii_case(expected))
     }
 }
 

@@ -37,6 +37,7 @@ pub(super) fn apply_authority_raw_log(
     raw_log: &AuthorityRawLogRow,
     histories: &mut BTreeMap<String, NameHistory>,
     reverse_histories: &mut BTreeMap<String, ReverseClaimSourceHistory>,
+    registry_child_events: &mut Vec<NormalizedEvent>,
     known_names_by_namehash: &mut HashMap<String, NameMetadata>,
     known_name_refs_by_namehash: &mut HashMap<String, ObservationRef>,
     namehash_to_labelhash: &mut HashMap<String, String>,
@@ -74,6 +75,11 @@ pub(super) fn apply_authority_raw_log(
     }
 
     for observation in observations {
+        if let AuthorityObservation::RegistryOwnerChanged(event) = &observation
+            && event.parent_node.is_some()
+        {
+            registry_child_events.push(build_registry_child_changed_event(event)?);
+        }
         apply_authority_observation(
             observation,
             histories,
