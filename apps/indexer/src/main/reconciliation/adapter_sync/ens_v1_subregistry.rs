@@ -1,10 +1,15 @@
 use anyhow::Result;
-use bigname_adapters::StartupAdapterProgress;
 use bigname_storage::acquire_raw_log_staging_read_guard;
 
-use crate::reconciliation::guard_release::prioritize_operation_error;
-use crate::reconciliation::replay::{
-    NormalizedEventReplayAdapter, ensure_legacy_registry_closure_retention_authority_for_adapters,
+use crate::{
+    StartupAdapterProgress,
+    reconciliation::{
+        guard_release::prioritize_operation_error,
+        replay::{
+            NormalizedEventReplayAdapter,
+            ensure_legacy_registry_closure_retention_authority_for_adapters,
+        },
+    },
 };
 
 use super::{
@@ -27,38 +32,26 @@ pub(super) async fn sync_ens_v1_subregistry_for_mode(
         let target_block_number =
             load_live_adapter_target_block_number(pool, chain, block_hashes).await?;
         record_progress(pool, progress).await?;
-        // The same-chain raw-log mutation fence spans coverage proof, complete
-        // loading, absence-aware discovery persistence, and normalized-event
-        // persistence. Releasing it earlier would let a late raw fact land
-        // between the proof and the winning checkpoint's adapter repair.
         let raw_log_guard = acquire_raw_log_staging_read_guard(pool, chain).await?;
         let sync_result = async {
             let expected_admission_epoch =
                 ensure_legacy_registry_closure_retention_authority_for_adapters(
+                    pool,
+                    chain,
+                    &[NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery],
+                    target_block_number,
+                )
+                .await?;
+            record_progress(pool, progress).await?;
+            let summary = bigname_adapters::sync_ens_v1_subregistry_discovery_through_block_with_expected_admission_epoch(
                 pool,
                 chain,
-                &[NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery],
                 target_block_number,
+                expected_admission_epoch,
             )
             .await?;
             record_progress(pool, progress).await?;
-            match progress.as_deref_mut() {
-                Some(progress) => bigname_adapters::sync_ens_v1_subregistry_discovery_through_block_with_expected_admission_epoch_and_progress(
-                    pool,
-                    chain,
-                    target_block_number,
-                    expected_admission_epoch,
-                    progress,
-                )
-                .await,
-                None => bigname_adapters::sync_ens_v1_subregistry_discovery_through_block_with_expected_admission_epoch(
-                    pool,
-                    chain,
-                    target_block_number,
-                    expected_admission_epoch,
-                )
-                .await,
-            }
+            Ok(summary)
         }
         .await;
         let release_result = raw_log_guard.release().await;
@@ -70,101 +63,55 @@ pub(super) async fn sync_ens_v1_subregistry_for_mode(
         });
     }
 
-    match mode {
-        PersistedRawPayloadAdapterSyncMode::LivePoll
-        | PersistedRawPayloadAdapterSyncMode::LiveOrBackfill => {
-            match (source_scope, progress.as_deref_mut()) {
-                (Some(source_scope), Some(progress)) => {
-                    bigname_adapters::EnsV1SubregistryDiscoverySyncSummary::sync_for_block_hashes_with_source_scope_and_progress(
-                        pool,
-                        chain,
-                        block_hashes,
-                        source_scope,
-                        progress,
-                    )
-                    .await
-                }
-                (Some(source_scope), None) => {
-                    bigname_adapters::EnsV1SubregistryDiscoverySyncSummary::sync_for_block_hashes_with_source_scope(
-                        pool,
-                        chain,
-                        block_hashes,
-                        source_scope,
-                    )
-                    .await
-                }
-                (None, Some(progress)) => {
-                    bigname_adapters::EnsV1SubregistryDiscoverySyncSummary::sync_for_block_hashes_without_discovery_reconciliation_and_progress(
-                        pool,
-                        chain,
-                        block_hashes,
-                        progress,
-                    )
-                    .await
-                }
-                (None, None) => {
-                    bigname_adapters::EnsV1SubregistryDiscoverySyncSummary::sync_for_block_hashes_without_discovery_reconciliation(
-                        pool,
-                        chain,
-                        block_hashes,
-                    )
-                    .await
-                }
-            }
-            .map(|summary| {
-                (
-                    summary,
-                    bigname_storage::NormalizedEventReplayAuthoritySummary::default(),
-                )
-            })
+    let summary = match (mode, source_scope) {
+        (
+            PersistedRawPayloadAdapterSyncMode::LivePoll
+            | PersistedRawPayloadAdapterSyncMode::LiveOrBackfill,
+            Some(source_scope),
+        ) => {
+            bigname_adapters::EnsV1SubregistryDiscoverySyncSummary::sync_for_block_hashes_with_source_scope(
+                pool,
+                chain,
+                block_hashes,
+                source_scope,
+            )
+            .await?
         }
-        PersistedRawPayloadAdapterSyncMode::RawFactReplay { .. } => {
-            match (source_scope, progress.as_deref_mut()) {
-                (Some(source_scope), Some(progress)) => {
-                    bigname_adapters::EnsV1SubregistryDiscoverySyncSummary::sync_for_block_hashes_with_source_scope_without_discovery_reconciliation_and_progress(
-                        pool,
-                        chain,
-                        block_hashes,
-                        source_scope,
-                        progress,
-                    )
-                    .await
-                }
-                (Some(source_scope), None) => {
-                    bigname_adapters::EnsV1SubregistryDiscoverySyncSummary::sync_for_block_hashes_with_source_scope_without_discovery_reconciliation(
-                        pool,
-                        chain,
-                        block_hashes,
-                        source_scope,
-                    )
-                    .await
-                }
-                (None, Some(progress)) => {
-                    bigname_adapters::EnsV1SubregistryDiscoverySyncSummary::sync_for_block_hashes_without_discovery_reconciliation_and_progress(
-                        pool,
-                        chain,
-                        block_hashes,
-                        progress,
-                    )
-                    .await
-                }
-                (None, None) => {
-                    bigname_adapters::EnsV1SubregistryDiscoverySyncSummary::sync_for_block_hashes_without_discovery_reconciliation(
-                        pool,
-                        chain,
-                        block_hashes,
-                    )
-                    .await
-                }
-            }
-            .map(|summary| {
-                (
-                    summary,
-                    bigname_storage::NormalizedEventReplayAuthoritySummary::default(),
-                )
-            })
+        (
+            PersistedRawPayloadAdapterSyncMode::LivePoll
+            | PersistedRawPayloadAdapterSyncMode::LiveOrBackfill,
+            None,
+        ) => {
+            bigname_adapters::EnsV1SubregistryDiscoverySyncSummary::sync_for_block_hashes_without_discovery_reconciliation(
+                pool,
+                chain,
+                block_hashes,
+            )
+            .await?
         }
-    }
+        (PersistedRawPayloadAdapterSyncMode::RawFactReplay { .. }, Some(source_scope)) => {
+            bigname_adapters::EnsV1SubregistryDiscoverySyncSummary::sync_for_block_hashes_with_source_scope_without_discovery_reconciliation(
+                pool,
+                chain,
+                block_hashes,
+                source_scope,
+            )
+            .await?
+        }
+        (PersistedRawPayloadAdapterSyncMode::RawFactReplay { .. }, None) => {
+            bigname_adapters::EnsV1SubregistryDiscoverySyncSummary::sync_for_block_hashes_without_discovery_reconciliation(
+                pool,
+                chain,
+                block_hashes,
+            )
+            .await?
+        }
+    };
+    record_progress(pool, progress).await?;
+    Ok((
+        summary,
+        bigname_storage::NormalizedEventReplayAuthoritySummary::default(),
+    ))
 }
 
 async fn record_progress(

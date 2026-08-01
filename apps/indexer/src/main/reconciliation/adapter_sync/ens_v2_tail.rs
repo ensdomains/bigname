@@ -1,7 +1,7 @@
 use std::time::Instant;
 
+use crate::StartupAdapterProgress;
 use anyhow::Result;
-use bigname_adapters::StartupAdapterProgress;
 use tracing::info;
 
 use crate::runtime::{log_ens_v2_permissions_sync_summary, log_ens_v2_resolver_sync_summary};
@@ -38,18 +38,8 @@ pub(super) async fn sync_ens_v2_tail_adapters(
             adapter_sync_mode = ?mode,
             "adapter sync call started"
         );
-        let summary = match (source_scope, progress.as_deref_mut()) {
-            (Some(source_scope), Some(progress)) => {
-                bigname_adapters::EnsV2ResolverSyncSummary::sync_for_block_hashes_with_source_scope_and_progress(
-                    pool,
-                    chain,
-                    block_hashes,
-                    source_scope,
-                    progress,
-                )
-                .await?
-            }
-            (Some(source_scope), None) => {
+        let summary = match source_scope {
+            Some(source_scope) => {
                 bigname_adapters::EnsV2ResolverSyncSummary::sync_for_block_hashes_with_source_scope(
                     pool,
                     chain,
@@ -58,16 +48,7 @@ pub(super) async fn sync_ens_v2_tail_adapters(
                 )
                 .await?
             }
-            (None, Some(progress)) => {
-                bigname_adapters::EnsV2ResolverSyncSummary::sync_for_block_hashes_with_progress(
-                    pool,
-                    chain,
-                    block_hashes,
-                    progress,
-                )
-                .await?
-            }
-            (None, None) => {
+            None => {
                 bigname_adapters::EnsV2ResolverSyncSummary::sync_for_block_hashes(
                     pool,
                     chain,
@@ -110,18 +91,8 @@ pub(super) async fn sync_ens_v2_tail_adapters(
             adapter_sync_mode = ?mode,
             "adapter sync call started"
         );
-        let summary = match (source_scope, progress.as_deref_mut()) {
-            (Some(source_scope), Some(progress)) => {
-                bigname_adapters::EnsV2PermissionsSyncSummary::sync_for_block_hashes_with_source_scope_and_progress(
-                    pool,
-                    chain,
-                    block_hashes,
-                    source_scope,
-                    progress,
-                )
-                .await?
-            }
-            (Some(source_scope), None) => {
+        let summary = match source_scope {
+            Some(source_scope) => {
                 bigname_adapters::EnsV2PermissionsSyncSummary::sync_for_block_hashes_with_source_scope(
                     pool,
                     chain,
@@ -130,16 +101,7 @@ pub(super) async fn sync_ens_v2_tail_adapters(
                 )
                 .await?
             }
-            (None, Some(progress)) => {
-                bigname_adapters::EnsV2PermissionsSyncSummary::sync_for_block_hashes_with_progress(
-                    pool,
-                    chain,
-                    block_hashes,
-                    progress,
-                )
-                .await?
-            }
-            (None, None) => {
+            None => {
                 bigname_adapters::EnsV2PermissionsSyncSummary::sync_for_block_hashes(
                     pool,
                     chain,

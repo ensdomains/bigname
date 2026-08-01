@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::StartupAdapterProgress;
 use anyhow::{Context, Result, bail};
-use bigname_adapters::StartupAdapterProgress;
 use bigname_storage::{
     CanonicalityState, RawBlock, RawLog, RawPayloadCacheMetadataUpsert, RawReceipt, RawTransaction,
     load_chain_lineage_block, load_raw_block, load_raw_blocks_by_hashes, upsert_raw_blocks,
@@ -321,31 +321,6 @@ async fn persist_reconciled_raw_payloads_inner(
     }
     upsert_event_silent_resolver_call_observations(pool, &event_silent_resolver_calls, progress)
         .await?;
-    match progress.as_deref_mut() {
-        Some(progress) => {
-            bigname_adapters::record_ens_v2_live_selected_raw_log_coverage_with_progress(
-                pool,
-                chain,
-                selected_addresses,
-                &block_hashes,
-                progress,
-            )
-            .await
-        }
-        None => {
-            bigname_adapters::record_ens_v2_live_selected_raw_log_coverage(
-                pool,
-                chain,
-                selected_addresses,
-                &block_hashes,
-            )
-            .await
-        }
-    }
-    .with_context(|| {
-        format!("failed to record exact live selected-log coverage for ENSv2 on chain {chain}")
-    })?;
-    record_progress(pool, progress).await?;
     if adapter_sync_enabled {
         let ordered_block_hashes = raw_blocks
             .iter()

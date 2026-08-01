@@ -31,7 +31,7 @@ async fn partial_startup_checkpoint_resets_after_below_head_lineage_insert() -> 
     .execute(database.pool())
     .await?;
 
-    let startup = crate::StartupAdapterCheckpointContext::new("test-lineage-reset", 10)?;
+    let startup = StartupAdapterCheckpointContext::new("test-lineage-reset", 10)?;
     let initial_context = startup.adapter_context(database.pool(), chain, 1).await?;
     SubregistryReplayCheckpoint::load_or_start(database.pool(), chain, &initial_context).await?;
     sqlx::query(

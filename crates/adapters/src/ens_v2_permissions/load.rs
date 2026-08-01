@@ -2,9 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use bigname_manifests::{
-    WatchedContractSource, load_historical_watched_contracts_by_chain,
-    load_historical_watched_contracts_scoped_with_progress, load_watched_contracts,
-    load_watched_contracts_scoped_with_progress,
+    WatchedContractSource, load_historical_watched_contracts_by_chain, load_watched_contracts,
 };
 use bigname_storage::sql_row;
 use futures_util::TryStreamExt;
@@ -18,13 +16,6 @@ use crate::adapter_manifest::{
 use crate::ens_v2_common::active_emitter_for_block;
 use crate::ens_v2_common::{
     ActiveEmitter, LogPosition, active_emitter_for_log, emitters_by_address, normalize_address,
-};
-use crate::{
-    checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress},
-    startup_progress::{
-        RawLogPagePosition, STARTUP_ADAPTER_PROGRESS_PAGE_ROWS,
-        STARTUP_ADAPTER_PROGRESS_PAGE_ROWS_I64, StartupManifestProgress,
-    },
 };
 
 use super::constants::{
@@ -41,7 +32,6 @@ pub(super) async fn load_permissions_raw_logs(
     block_hashes: &[String],
     source_scope: Option<&[(String, String, i64, i64)]>,
     max_block_number: Option<i64>,
-    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Vec<PermissionsRawLogRow>> {
     if emitters.is_empty() {
         return Ok(Vec::new());
@@ -58,17 +48,8 @@ pub(super) async fn load_permissions_raw_logs(
     }
     let has_max_block_number = max_block_number.is_some();
     let max_block_number = max_block_number.unwrap_or(i64::MAX);
-    let paged = progress.is_some();
-    let page_limit = if paged {
-        STARTUP_ADAPTER_PROGRESS_PAGE_ROWS_I64
-    } else {
-        i64::MAX
-    };
-    let mut start_after = None::<RawLogPagePosition>;
-    let mut output = Vec::new();
-    loop {
-        let rows = sqlx::query(
-            r#"
+    let rows = sqlx::query(
+        r#"
             SELECT
                 rl.chain_id,
                 rl.block_hash,
@@ -119,84 +100,59 @@ pub(super) async fn load_permissions_raw_logs(
                 rl.block_hash
             LIMIT $16
             "#,
-        )
-        .bind(chain)
-        .bind(&watched_addresses)
-        .bind(restrict_to_block_hashes)
-        .bind(block_hashes)
-        .bind(source_scope.is_some())
-        .bind(&scope_addresses)
-        .bind(&scope_from_blocks)
-        .bind(&scope_to_blocks)
-        .bind(has_max_block_number)
-        .bind(max_block_number)
-        .bind(start_after.as_ref().map(|position| position.block_number))
-        .bind(
-            start_after
-                .as_ref()
-                .map(|position| position.transaction_index),
-        )
-        .bind(start_after.as_ref().map(|position| position.log_index))
-        .bind(
-            start_after
-                .as_ref()
-                .map(|position| position.emitting_address.as_str()),
-        )
-        .bind(
-            start_after
-                .as_ref()
-                .map(|position| position.block_hash.as_str()),
-        )
-        .bind(page_limit)
-        .fetch_all(pool)
-        .await
-        .with_context(|| format!("failed to load ENSv2 permission raw logs for chain {chain}"))?;
-        if rows.is_empty() {
-            break;
-        }
-        let page_len = rows.len();
-        let last_position =
-            RawLogPagePosition::from_row(rows.last().expect("non-empty permissions raw-log page"))?;
-        for row in rows {
-            let emitting_address =
-                normalize_address(&sql_row::get::<String>(&row, "emitting_address")?);
-            let block_number = sql_row::get(&row, "block_number")?;
-            let transaction_index = sql_row::get(&row, "transaction_index")?;
-            let log_index = sql_row::get(&row, "log_index")?;
-            let Some(emitter) =
-                active_emitters_by_address
-                    .get(&emitting_address)
-                    .and_then(|emitters| {
-                        active_emitter_for_log(emitters, block_number, transaction_index, log_index)
-                    })
-            else {
-                continue;
-            };
-            output.push(PermissionsRawLogRow {
-                chain_id: sql_row::get(&row, "chain_id")?,
-                block_hash: sql_row::get(&row, "block_hash")?,
-                block_number,
-                transaction_hash: sql_row::get(&row, "transaction_hash")?,
-                transaction_index,
-                log_index,
-                emitting_address,
-                emitting_contract_instance_id: emitter.contract_instance_id,
-                topics: sql_row::get(&row, "topics")?,
-                data: sql_row::get(&row, "data")?,
-                canonicality_state: sql_row::get(&row, "canonicality_state")?,
-                source_manifest_id: emitter.source_manifest_id,
-                namespace: emitter.namespace.clone(),
-                source_family: emitter.source_family.clone(),
-                manifest_version: emitter.manifest_version,
-            });
-        }
-        if paged {
-            record_startup_adapter_progress(pool, progress).await?;
-        }
-        if !paged || page_len < STARTUP_ADAPTER_PROGRESS_PAGE_ROWS {
-            break;
-        }
-        start_after = Some(last_position);
+    )
+    .bind(chain)
+    .bind(&watched_addresses)
+    .bind(restrict_to_block_hashes)
+    .bind(block_hashes)
+    .bind(source_scope.is_some())
+    .bind(&scope_addresses)
+    .bind(&scope_from_blocks)
+    .bind(&scope_to_blocks)
+    .bind(has_max_block_number)
+    .bind(max_block_number)
+    .bind(None::<i64>)
+    .bind(None::<i64>)
+    .bind(None::<i64>)
+    .bind(None::<String>)
+    .bind(None::<String>)
+    .bind(i64::MAX)
+    .fetch_all(pool)
+    .await
+    .with_context(|| format!("failed to load ENSv2 permission raw logs for chain {chain}"))?;
+    let mut output = Vec::with_capacity(rows.len());
+    for row in rows {
+        let emitting_address =
+            normalize_address(&sql_row::get::<String>(&row, "emitting_address")?);
+        let block_number = sql_row::get(&row, "block_number")?;
+        let transaction_index = sql_row::get(&row, "transaction_index")?;
+        let log_index = sql_row::get(&row, "log_index")?;
+        let Some(emitter) =
+            active_emitters_by_address
+                .get(&emitting_address)
+                .and_then(|emitters| {
+                    active_emitter_for_log(emitters, block_number, transaction_index, log_index)
+                })
+        else {
+            continue;
+        };
+        output.push(PermissionsRawLogRow {
+            chain_id: sql_row::get(&row, "chain_id")?,
+            block_hash: sql_row::get(&row, "block_hash")?,
+            block_number,
+            transaction_hash: sql_row::get(&row, "transaction_hash")?,
+            transaction_index,
+            log_index,
+            emitting_address,
+            emitting_contract_instance_id: emitter.contract_instance_id,
+            topics: sql_row::get(&row, "topics")?,
+            data: sql_row::get(&row, "data")?,
+            canonicality_state: sql_row::get(&row, "canonicality_state")?,
+            source_manifest_id: emitter.source_manifest_id,
+            namespace: emitter.namespace.clone(),
+            source_family: emitter.source_family.clone(),
+            manifest_version: emitter.manifest_version,
+        });
     }
     Ok(output)
 }
@@ -205,7 +161,6 @@ pub(super) async fn load_active_emitters(
     pool: &PgPool,
     chain: &str,
     include_historical_registry_emitters: bool,
-    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Vec<ActiveEmitter>> {
     let mut emitters = crate::ens_v2_common::load_active_emitters(
         pool,
@@ -213,12 +168,10 @@ pub(super) async fn load_active_emitters(
         SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
         RESOLVER_EDGE_KIND,
         "ENSv2 permissions",
-        progress,
     )
     .await?;
     emitters.extend(
-        load_registry_active_emitters(pool, chain, include_historical_registry_emitters, progress)
-            .await?,
+        load_registry_active_emitters(pool, chain, include_historical_registry_emitters).await?,
     );
     // Order intervals by activation within each (address, source_family) group, then by identity.
     // Including active_from/active_to keeps this sort TOTAL: one address can now carry several
@@ -226,11 +179,7 @@ pub(super) async fn load_active_emitters(
     // interval bounds in the key, their order would fall back to HashMap-iteration order and make
     // `active_emitter_for_block`'s first-match selection nondeterministic for overlapping windows.
     // This matches the resolver path's earliest-activation-first ordering (ens_v2_common).
-    let emitter_count = emitters.len();
     emitters.sort();
-    for index in 0..emitter_count {
-        record_emitter_progress(pool, progress, index + 1, emitter_count).await?;
-    }
     Ok(emitters)
 }
 
@@ -238,34 +187,12 @@ async fn load_registry_active_emitters(
     pool: &PgPool,
     chain: &str,
     include_historical_emitters: bool,
-    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Vec<ActiveEmitter>> {
-    let source_families = vec![
+    let source_families = [
         SOURCE_FAMILY_ENS_V2_ROOT_L1.to_owned(),
         SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
     ];
-    let watched_contracts = if let Some(progress) = progress.as_deref_mut() {
-        let mut manifest_progress = StartupManifestProgress::new(progress);
-        if include_historical_emitters {
-            load_historical_watched_contracts_scoped_with_progress(
-                pool,
-                chain,
-                &source_families,
-                &mut manifest_progress,
-            )
-            .await
-            .context("failed to load historical watched contracts for ENSv2 registry permissions")?
-        } else {
-            load_watched_contracts_scoped_with_progress(
-                pool,
-                Some(chain),
-                &source_families,
-                &mut manifest_progress,
-            )
-            .await
-            .context("failed to load watched contracts for ENSv2 registry permissions")?
-        }
-    } else if include_historical_emitters {
+    let watched_contracts = if include_historical_emitters {
         load_historical_watched_contracts_by_chain(pool, chain)
             .await
             .context("failed to load historical watched contracts for ENSv2 registry permissions")?
@@ -283,21 +210,17 @@ async fn load_registry_active_emitters(
     if watched_contracts.is_empty() {
         return Ok(Vec::new());
     }
-    let discovery_boundaries =
-        load_registry_discovery_log_boundaries(pool, chain, progress).await?;
+    let discovery_boundaries = load_registry_discovery_log_boundaries(pool, chain).await?;
 
     let mut manifest_ids = HashSet::new();
-    for (index, contract) in watched_contracts.iter().enumerate() {
+    for contract in &watched_contracts {
         manifest_ids.insert(required_source_manifest_id(contract)?);
-        record_emitter_progress(pool, progress, index + 1, watched_contracts.len()).await?;
     }
     let manifest_ids = manifest_ids.into_iter().collect::<Vec<_>>();
     let active_manifests =
         load_active_manifest_metadata(pool, &manifest_ids, "ENSv2 registry permissions").await?;
     let mut emitters = Vec::new();
-    record_startup_adapter_progress(pool, progress).await?;
-    let watched_contract_count = watched_contracts.len();
-    for (index, watched_contract) in watched_contracts.into_iter().enumerate() {
+    for watched_contract in watched_contracts {
         let (source_manifest_id, manifest) =
             active_manifest_for_watched_contract(&active_manifests, &watched_contract)?;
         if manifest.source_family != SOURCE_FAMILY_ENS_V2_ROOT_L1
@@ -337,7 +260,6 @@ async fn load_registry_active_emitters(
         } else {
             emitters.push(emitter);
         }
-        record_emitter_progress(pool, progress, index + 1, watched_contract_count).await?;
     }
     Ok(emitters)
 }
@@ -349,7 +271,6 @@ type RegistryDiscoveryLogBoundaries =
 async fn load_registry_discovery_log_boundaries(
     pool: &PgPool,
     chain: &str,
-    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<RegistryDiscoveryLogBoundaries> {
     let mut rows = sqlx::query(
         r#"
@@ -429,7 +350,6 @@ async fn load_registry_discovery_log_boundaries(
     .bind(chain)
     .fetch(pool);
     let mut boundaries = RegistryDiscoveryLogBoundaries::new();
-    let mut row_count = 0usize;
     while let Some(row) = rows
         .try_next()
         .await
@@ -453,31 +373,12 @@ async fn load_registry_discovery_log_boundaries(
                 sql_row::get(&row, "active_to_log_index")?,
             )?,
         ));
-        row_count += 1;
-        if row_count.is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS) {
-            record_startup_adapter_progress(pool, progress).await?;
-        }
-    }
-    if row_count > 0 && !row_count.is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS) {
-        record_startup_adapter_progress(pool, progress).await?;
     }
     for variants in boundaries.values_mut() {
         variants.sort_unstable();
         variants.dedup();
     }
     Ok(boundaries)
-}
-
-async fn record_emitter_progress(
-    pool: &PgPool,
-    progress: &mut Option<&mut dyn StartupAdapterProgress>,
-    completed: usize,
-    total: usize,
-) -> Result<()> {
-    if completed == total || completed.is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS) {
-        record_startup_adapter_progress(pool, progress).await?;
-    }
-    Ok(())
 }
 
 fn source_scope_bindings(

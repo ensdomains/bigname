@@ -18,11 +18,7 @@ pub(super) fn apply_authority_observation_for_history_key(
     pending_namehash_observations: &mut HashMap<String, Vec<AuthorityObservation>>,
     same_tx_name_intro_positions: &HashMap<String, Vec<RawLogPosition>>,
     block_index: &CanonicalBlockIndex,
-    mut checkpoint_delta: Option<&mut UnwrappedAuthorityReplayCheckpointDelta>,
 ) -> Result<()> {
-    if let Some(delta) = checkpoint_delta.as_deref_mut() {
-        delta.mark_history(history_key);
-    }
     let introduces_name = is_name_intro_observation(&observation);
     {
         let history = histories
@@ -69,7 +65,6 @@ pub(super) fn apply_authority_observation_for_history_key(
             known_names_by_namehash,
             known_name_refs_by_namehash,
             namehash_to_labelhash,
-            checkpoint_delta.as_deref_mut(),
         );
         flush_pending_namehash_observations(
             &name,
@@ -82,7 +77,6 @@ pub(super) fn apply_authority_observation_for_history_key(
             pending_namehash_observations,
             same_tx_name_intro_positions,
             block_index,
-            checkpoint_delta.as_deref_mut(),
         )?;
     }
 
@@ -115,7 +109,6 @@ pub(super) fn apply_authority_observation_for_history_key(
             known_names_by_namehash,
             known_name_refs_by_namehash,
             namehash_to_labelhash,
-            checkpoint_delta.as_deref_mut(),
         );
         flush_pending_namehash_observations(
             &name,
@@ -128,7 +121,6 @@ pub(super) fn apply_authority_observation_for_history_key(
             pending_namehash_observations,
             same_tx_name_intro_positions,
             block_index,
-            checkpoint_delta.as_deref_mut(),
         )?;
     }
     Ok(())
@@ -145,14 +137,9 @@ fn flush_pending_namehash_observations(
     pending_namehash_observations: &mut HashMap<String, Vec<AuthorityObservation>>,
     same_tx_name_intro_positions: &HashMap<String, Vec<RawLogPosition>>,
     block_index: &CanonicalBlockIndex,
-    mut checkpoint_delta: Option<&mut UnwrappedAuthorityReplayCheckpointDelta>,
 ) -> Result<()> {
-    let selected = drain_pending_namehash_observations(
-        &name.namehash,
-        mode,
-        pending_namehash_observations,
-        checkpoint_delta.as_deref_mut(),
-    );
+    let selected =
+        drain_pending_namehash_observations(&name.namehash, mode, pending_namehash_observations);
 
     let name_ref = known_name_refs_by_namehash.get(&name.namehash).cloned();
     for pending_observation in selected {
@@ -169,7 +156,6 @@ fn flush_pending_namehash_observations(
             pending_namehash_observations,
             same_tx_name_intro_positions,
             block_index,
-            checkpoint_delta.as_deref_mut(),
         )?;
     }
     Ok(())
@@ -181,7 +167,6 @@ pub(super) fn learn_record_raw_name_preimage(
     known_names_by_namehash: &mut HashMap<String, NameMetadata>,
     known_name_refs_by_namehash: &mut HashMap<String, ObservationRef>,
     namehash_to_labelhash: &mut HashMap<String, String>,
-    mut checkpoint_delta: Option<&mut UnwrappedAuthorityReplayCheckpointDelta>,
 ) -> Option<NameMetadata> {
     let AuthorityObservation::RecordChanged(event) = observation else {
         return None;
@@ -205,11 +190,6 @@ pub(super) fn learn_record_raw_name_preimage(
     known_names_by_namehash
         .entry(name.namehash.clone())
         .or_insert_with(|| name.clone());
-    if let Some(delta) = checkpoint_delta.as_deref_mut() {
-        delta.mark_namehash_labelhash(name.namehash.clone());
-        delta.mark_known_name_ref(name.namehash.clone());
-        delta.mark_known_name(name.namehash.clone());
-    }
     Some(name)
 }
 

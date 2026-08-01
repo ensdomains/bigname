@@ -1,5 +1,5 @@
+use crate::StartupAdapterProgress;
 use anyhow::{Result, bail};
-use bigname_adapters::StartupAdapterProgress;
 use bigname_storage::{
     CanonicalityState, ChainCheckpoint, chain_lineage_contains_ancestor, load_chain_lineage_block,
     upsert_chain_lineage_blocks_recanonicalizing_orphaned as upsert_recanonicalized_lineage_blocks,
@@ -11,9 +11,6 @@ use tracing::info;
 use crate::{
     backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
     provider::{ChainProviderOps, ProviderBlock, ProviderHeadSnapshot},
-    resolver_profile_convergence::{
-        drain_resolver_profile_input_changes, drain_resolver_profile_input_changes_with_progress,
-    },
     runtime::IntakeChainTask,
 };
 
@@ -35,8 +32,6 @@ mod checkpoints;
 mod cold_start;
 #[path = "canonical/contiguous_gap.rs"]
 mod contiguous_gap;
-#[path = "canonical/ens_v2_coverage_recovery.rs"]
-mod ens_v2_coverage_recovery;
 #[path = "canonical/orphaning.rs"]
 mod orphaning;
 #[path = "canonical/poll.rs"]
@@ -49,10 +44,6 @@ pub(crate) mod stored_lineage;
 use checkpoints::{checkpoint_update_for_head, fill_checkpoint_ancestor_path};
 use cold_start::ColdStartCheckpoint;
 use contiguous_gap::reconcile_contiguous_checkpoint_gap;
-pub(crate) use ens_v2_coverage_recovery::{
-    EnsV2LiveCoverageRecoveryStatus, recover_ens_v2_live_coverage_requirement,
-    recover_ens_v2_live_coverage_requirement_with_progress,
-};
 pub(crate) use orphaning::{orphan_canonical_branch, orphan_reorg_losing_branch_payloads};
 use orphaning::{
     orphan_canonical_branch_with_progress, orphan_reorg_losing_branch_payloads_with_progress,
@@ -289,16 +280,6 @@ async fn reconcile_fetched_heads_with_gap_policy(
         progress,
     )
     .await?;
-    if adapter_sync_enabled {
-        let profile_convergence = match progress.as_deref_mut() {
-            Some(progress) => {
-                drain_resolver_profile_input_changes_with_progress(pool, progress).await?
-            }
-            None => drain_resolver_profile_input_changes(pool).await?,
-        };
-        profile_convergence
-            .ensure_chain_completion_allowed(&task.chain, "chain checkpoint advancement")?;
-    }
     let next_checkpoint = ChainCoverageFrontiers::advance_checkpoint_with_promotion_epoch(
         pool,
         &task.chain,

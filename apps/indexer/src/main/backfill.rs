@@ -58,18 +58,20 @@ pub(crate) use reservation_execution::COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_TH
 pub(crate) use reservation_execution::coinbase_sql_backfill_job_source_identity_payload;
 #[cfg(test)]
 pub(crate) use reservation_execution::create_coinbase_sql_backfill_job;
+#[cfg(test)]
 pub(crate) use reservation_execution::effective_hash_pinned_adapter_sync_mode;
+#[cfg(test)]
+pub(crate) use reservation_execution::run_resumable_hash_pinned_backfill_job_with_progress;
 pub(crate) use reservation_execution::{
     DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS, backfill_job_source_identity_payload,
     backfill_job_source_identity_payload_with_progress, create_hash_pinned_backfill_job,
     create_verified_coinbase_sql_backfill_job, create_verified_hash_pinned_backfill_job,
-    effective_coinbase_sql_adapter_sync_mode, hash_pinned_backfill_range_specs,
-    run_precreated_hash_pinned_backfill_job, run_precreated_verified_coinbase_sql_backfill_job,
+    hash_pinned_backfill_range_specs, run_precreated_hash_pinned_backfill_job,
+    run_precreated_verified_coinbase_sql_backfill_job,
     run_precreated_verified_coinbase_sql_backfill_job_with_progress,
     run_precreated_verified_hash_pinned_backfill_job,
     run_precreated_verified_hash_pinned_backfill_job_with_progress,
     run_resumable_coinbase_sql_backfill_job, run_resumable_hash_pinned_backfill_job,
-    run_resumable_hash_pinned_backfill_job_with_progress,
     verified_backfill_job_source_identity_payload,
 };
 #[cfg(test)]
@@ -78,9 +80,7 @@ pub(crate) use source::{
     BackfillTopicPlan, CoinbaseSqlFetchStats, HistoricalBackfillSourceOps, HistoricalLogPayload,
     HistoricalLogPayloadRequest, HistoricalLogValidationFilter,
 };
-pub(crate) use source_selection::{
-    is_base_chain, selected_backfill_source, standalone_backfill_profile_convergence_enabled,
-};
+pub(crate) use source_selection::{is_base_chain, selected_backfill_source};
 #[cfg(test)]
 pub(crate) use stored_verification::{
     StoredLogIdentityBucket, StoredLogIdentityEvidence, StoredLogIdentityEvidenceRequest,
@@ -308,10 +308,6 @@ pub(crate) enum BackfillAdapterSyncMode {
     #[default]
     Auto,
     Inline,
-    /// Run ordinary inline adapter work while an ENSv2 retained-history
-    /// recovery pass defers all dependency-ordered ENSv2 adapter derivation
-    /// until registry full-source reconciliation establishes stable outputs.
-    InlineWithoutEnsV2Adapters,
     RawOnly,
 }
 
@@ -331,7 +327,6 @@ impl BackfillAdapterSyncMode {
         match self {
             Self::Auto => "auto",
             Self::Inline => "inline",
-            Self::InlineWithoutEnsV2Adapters => "inline-without-ens-v2-adapters",
             Self::RawOnly => "raw-only",
         }
     }
@@ -339,23 +334,19 @@ impl BackfillAdapterSyncMode {
     pub(crate) fn hash_pinned_backfill_mode(self) -> Self {
         match self {
             Self::Auto => Self::Inline,
-            Self::Inline | Self::InlineWithoutEnsV2Adapters | Self::RawOnly => self,
+            Self::Inline | Self::RawOnly => self,
         }
     }
 
     pub(crate) fn startup_hash_pinned_backfill_mode(self) -> Self {
         match self {
             Self::Auto => Self::RawOnly,
-            Self::Inline | Self::InlineWithoutEnsV2Adapters | Self::RawOnly => self,
+            Self::Inline | Self::RawOnly => self,
         }
     }
 
     pub(crate) const fn runs_inline_adapters(self) -> bool {
-        matches!(self, Self::Inline | Self::InlineWithoutEnsV2Adapters)
-    }
-
-    pub(crate) const fn defers_ens_v2_adapters(self) -> bool {
-        matches!(self, Self::InlineWithoutEnsV2Adapters)
+        matches!(self, Self::Inline)
     }
 }
 

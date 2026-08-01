@@ -12,7 +12,6 @@ pub(in crate::ens_v1_unwrapped_authority) struct AuthorityRawLogStreamSourceRout
     generic_resolver_event_sources: &'a [GenericResolverEventSource],
     generic_topic0s: HashSet<String>,
     generic_resolver_emitter_addresses: Option<HashSet<String>>,
-    profile_context_emitter_addresses: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -93,18 +92,6 @@ impl<'a> AuthorityRawLogStreamSourceRouter<'a> {
             generic_topic0s,
             generic_resolver_emitter_addresses: generic_resolver_emitter_addresses
                 .map(|addresses| addresses.iter().cloned().collect::<HashSet<_>>()),
-            profile_context_emitter_addresses: active_emitters
-                .iter()
-                .filter(|emitter| {
-                    !matches!(
-                        emitter.source_family.as_str(),
-                        SOURCE_FAMILY_ENS_V1_RESOLVER_L1 | SOURCE_FAMILY_BASENAMES_BASE_RESOLVER
-                    )
-                })
-                .map(|emitter| emitter.address.clone())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect(),
         })
     }
 
@@ -161,10 +148,6 @@ impl<'a> AuthorityRawLogStreamSourceRouter<'a> {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()
-    }
-
-    pub(super) fn profile_context_emitter_addresses(&self) -> &[String] {
-        &self.profile_context_emitter_addresses
     }
 }
 

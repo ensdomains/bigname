@@ -232,10 +232,9 @@ mod tests {
     fn retry_plan_materializes_only_chunks_intersecting_changed_ranges() -> Result<()> {
         let previous_targets = vec![target(1, 1, None)];
         let targets = vec![target(1, 1, None), target(2, 40, Some(70))];
-        let previous = super::super::CompletedCatchupPass::new(3, false, previous_targets);
-        let required =
-            super::super::retry_required_ranges(Some(&previous), 3, false, &targets, 100)?
-                .expect("unchanged retention authority permits selective retry");
+        let previous = super::super::CompletedCatchupPass::new(3, previous_targets);
+        let required = super::super::retry_required_ranges(Some(&previous), 3, &targets, 100)?
+            .expect("unchanged retention authority permits selective retry");
 
         let plan = plan_catchup_chunks_reusing_completed(&targets, 100, 10, Some(&required))?;
         let full_plan = plan_catchup_chunks_reusing_completed(&targets, 100, 10, None)?;

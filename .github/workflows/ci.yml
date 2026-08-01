@@ -66,24 +66,6 @@ jobs:
       - name: Migration version guard
         run: ./scripts/check-migration-versions
 
-      - name: Startup adapter semantic version guard
-        env:
-          BASE_REF: ${{ github.base_ref }}
-          PUSH_BEFORE: ${{ github.event.before }}
-        run: |
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "$BASE_REF" ]; then
-            git fetch --no-tags --depth=1 origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
-            ./scripts/check-startup-adapter-versions --base-ref "refs/remotes/origin/${BASE_REF}"
-          elif [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ]; then
-            git fetch --no-tags --depth=1 origin "$PUSH_BEFORE"
-            ./scripts/check-startup-adapter-versions --base-ref "$PUSH_BEFORE"
-          else
-            # A branch-creation push has no event range base. Deepen enough for
-            # HEAD^ and retain that one-commit residual only for this case.
-            git fetch --no-tags --deepen=2 origin
-            ./scripts/check-startup-adapter-versions --base-ref HEAD^
-          fi
-
       - name: Install native build dependencies
         run: |
           sudo apt-get update

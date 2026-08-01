@@ -346,7 +346,7 @@ async fn normalized_replay_progress_does_not_mask_a_parent_wedge() -> Result<()>
             Duration::ZERO,
             vec!["ethereum-mainnet".to_owned()],
         );
-        bigname_adapters::StartupAdapterProgress::record(&mut child_heartbeat, &child_pool).await
+        crate::StartupAdapterProgress::record(&mut child_heartbeat, &child_pool).await
     });
     sleep(Duration::from_millis(100)).await;
     assert!(

@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, time::Instant};
 
+use crate::StartupAdapterProgress;
 use anyhow::{Context, Result, bail};
-use bigname_adapters::StartupAdapterProgress;
 use bigname_storage::list_canonical_raw_log_replay_inputs_for_block_hashes;
 use sqlx::Row;
 use tracing::info;
@@ -32,12 +32,10 @@ use profile_scope::{
 };
 use scoped::load_replay_raw_log_selection_for_scoped_range;
 
-const MANUAL_FULL_CLOSURE_CHECKPOINT_CURSOR_PREFIX: &str = "manual_raw_fact_normalized_events";
-
 pub(crate) use classification::{
-    LegacyRegistryNewlyRequiredCoverage, MAX_REPORTED_LEGACY_CLOSURE_COVERAGE_GAPS,
-    NormalizedEventReplayAdapter, RawFactReplayContractPlan,
-    active_closure_or_dependency_replay_adapters, chain_has_closure_or_dependency_replay_adapter,
+    MAX_REPORTED_LEGACY_CLOSURE_COVERAGE_GAPS, NormalizedEventReplayAdapter,
+    RawFactReplayContractPlan, active_closure_or_dependency_replay_adapters,
+    chain_has_closure_or_dependency_replay_adapter,
     ensure_full_closure_retention_authority_for_adapters,
     ensure_legacy_registry_closure_retention_authority_for_adapters, replay_contract,
     source_scope_includes_adapter, unsupported_closure_replay_adapters,
@@ -224,8 +222,6 @@ async fn replay_raw_fact_normalized_events_with_execution(
             total_inserted_count: 0,
             stateless_replay_authority:
                 bigname_storage::NormalizedEventReplayAuthoritySummary::default(),
-            resolver_profile_authority_epoch_guard_count: 0,
-            resolver_profile_authority_scan_count: 0,
         }
     } else {
         sync_replay_normalized_events_from_persisted_raw_payloads_with_progress(
@@ -252,14 +248,11 @@ async fn replay_raw_fact_normalized_events_with_execution(
             .into_iter()
             .filter(|adapter| source_scope_includes_adapter(source_scope, *adapter))
             .collect::<Vec<_>>();
-        let checkpoint_cursor_kind =
-            manual_full_closure_checkpoint_cursor_kind(from_block, to_block);
         let closure_summary =
             sync_manual_full_closure_normalized_events_from_persisted_raw_payloads(
                 pool,
                 &request.deployment_profile,
                 &request.chain,
-                &checkpoint_cursor_kind,
                 from_block,
                 to_block,
                 &closure_adapters,
@@ -329,10 +322,6 @@ async fn replay_raw_fact_normalized_events_with_execution(
         normalized_event_inserted_count: normalized_event_summary.total_inserted_count,
         stateless_replay_authority: normalized_event_summary.stateless_replay_authority,
     })
-}
-
-fn manual_full_closure_checkpoint_cursor_kind(from_block: i64, to_block: i64) -> String {
-    format!("{MANUAL_FULL_CLOSURE_CHECKPOINT_CURSOR_PREFIX}:{from_block}:{to_block}")
 }
 
 #[derive(Debug, Eq, PartialEq)]

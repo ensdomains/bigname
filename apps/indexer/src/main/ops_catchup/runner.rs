@@ -1,18 +1,11 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use bigname_manifests::{
-    load_ens_v2_authoritative_discovery_bootstrap_targets,
-    load_ens_v2_retained_history_recovery_targets, load_watched_contracts_by_chain,
-};
+use bigname_manifests::load_watched_contracts_by_chain;
 use tokio::time::sleep;
 use tracing::{info, warn};
 
 use crate::{
-    bootstrap_backfill::{
-        automatic_backfill_retention_snapshot_is_stable,
-        converge_ens_v2_retained_history_through_block, load_bootstrap_retention_snapshot,
-    },
     provider::{ChainProviderOps, ProviderRegistry},
     runtime::{IntakeChainTask, validate_provider_registry_for_intake_tasks},
 };
@@ -20,21 +13,15 @@ use crate::{
 use super::{
     config::{OpsCatchupConfig, OpsCatchupOutcome, OpsCatchupPlanSnapshotOutcome},
     planning::{
-        CompletedCatchupPass, catchup_targets_for_chain, merge_retained_history_recovery_targets,
-        plan_catchup_chunks_reusing_completed, retry_required_ranges,
+        CompletedCatchupPass, catchup_targets_for_chain, plan_catchup_chunks_reusing_completed,
+        retry_required_ranges,
     },
 };
 
 #[path = "runner/jobs.rs"]
 mod jobs;
-#[cfg(test)]
-pub(crate) use jobs::install_after_ens_v2_proof_publication_failure;
 pub(crate) use jobs::ops_catchup_idempotency_key;
-use jobs::{
-    OpsCatchupAdapterPhase, has_pending_ens_v2_finalization_jobs,
-    maybe_fail_after_ens_v2_proof_publication, precreate_ens_v2_finalization_jobs,
-    resume_pending_ens_v2_finalization_jobs, run_ops_finalized_catchup_chunk,
-};
+use jobs::run_ops_finalized_catchup_chunk;
 
 const MAX_OPS_CATCHUP_RETENTION_AUTHORITY_RETRIES: usize = 4;
 const MAX_OPS_CATCHUP_DISCOVERY_EXPANSION_PASSES: usize = 1_024;
@@ -58,6 +45,24 @@ impl OpsCatchupRetryReason {
 struct OpsCatchupConvergenceTracker {
     consecutive_retention_authority_retries: usize,
     discovery_expansion_passes: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OpsCatchupAuthoritySnapshot {
+    retention_generation: i64,
+    discovery_admission_epoch: i64,
+}
+
+async fn load_ops_catchup_authority_snapshot(
+    pool: &sqlx::PgPool,
+    chain: &str,
+) -> Result<OpsCatchupAuthoritySnapshot> {
+    let raw_log_input = bigname_storage::load_raw_log_staging_input_version(pool, chain).await?;
+    Ok(OpsCatchupAuthoritySnapshot {
+        retention_generation: raw_log_input.retention_generation,
+        discovery_admission_epoch: bigname_manifests::load_discovery_admission_epoch(pool, chain)
+            .await?,
+    })
 }
 
 impl OpsCatchupConvergenceTracker {
@@ -179,47 +184,7 @@ async fn run_ops_finalized_catchup_iteration(
         let mut convergence_tracker = OpsCatchupConvergenceTracker::default();
         let mut completed_pass = None::<CompletedCatchupPass>;
         loop {
-            let retention_snapshot =
-                load_bootstrap_retention_snapshot(pool, &task.chain, finalized_head.block_number)
-                    .await?;
-            if !retention_snapshot.requires_ens_v2_history_recovery
-                && has_pending_ens_v2_finalization_jobs(
-                    pool,
-                    &config.deployment_profile,
-                    &task.chain,
-                    retention_snapshot.generation,
-                )
-                .await?
-            {
-                // A proof can commit before the full-source registry call
-                // returns. Re-run that idempotent reconciliation before
-                // consuming durable finalization work so a process death
-                // anywhere after proof publication cannot skip absence-aware
-                // discovery cleanup.
-                if converge_ens_v2_retained_history_through_block(
-                    pool,
-                    &task.chain,
-                    finalized_head.block_number,
-                    retention_snapshot.has_ens_v2_history_requirements,
-                )
-                .await?
-                {
-                    convergence_tracker
-                        .record_retry(&task.chain, OpsCatchupRetryReason::DiscoveryExpanded)?;
-                    continue;
-                }
-                resume_pending_ens_v2_finalization_jobs(
-                    pool,
-                    &task.chain,
-                    provider,
-                    config,
-                    retention_snapshot.generation,
-                    finalized_head.block_number,
-                    &finalized_head.block_hash,
-                    outcome,
-                )
-                .await?;
-            }
+            let retention_snapshot = load_ops_catchup_authority_snapshot(pool, &task.chain).await?;
             // Load the watched set after capturing the authority snapshot on
             // every pass. If adapter sync admits a target while a pass is
             // running, the epoch check below forces a retry whose plan now
@@ -239,32 +204,10 @@ async fn run_ops_finalized_catchup_iteration(
                     "watched targets skipped because they have no admitted start block"
                 );
             }
-            let mut planned_targets = targets.clone();
-            if retention_snapshot.requires_ens_v2_history_recovery {
-                let recovery_targets = load_ens_v2_retained_history_recovery_targets(
-                    pool,
-                    &task.chain,
-                    finalized_head.block_number,
-                )
-                .await?;
-                merge_retained_history_recovery_targets(&mut planned_targets, &recovery_targets);
-                // Resolver intervals are an admission fence rather than part of the root/registry
-                // proof tuple. Their known-start bootstrap targets still need provider coverage
-                // before closure; the loader clamps every target to its historical active interval
-                // and this finalized head.
-                let mut discovery_targets = load_ens_v2_authoritative_discovery_bootstrap_targets(
-                    pool,
-                    &task.chain,
-                    finalized_head.block_number,
-                )
-                .await?;
-                discovery_targets.retain(|target| target.source_family == "ens_v2_resolver_l1");
-                merge_retained_history_recovery_targets(&mut planned_targets, &discovery_targets);
-            }
+            let planned_targets = targets;
             let required_ranges = retry_required_ranges(
                 completed_pass.as_ref(),
-                retention_snapshot.generation,
-                retention_snapshot.requires_ens_v2_history_recovery,
+                retention_snapshot.retention_generation,
                 &planned_targets,
                 finalized_head.block_number,
             )?;
@@ -280,11 +223,6 @@ async fn run_ops_finalized_catchup_iteration(
                 planned_chunk_count: chunk_plan.planned_chunk_count,
                 reused_completed_chunk_count: chunk_plan.reused_completed_chunk_count,
             };
-            let adapter_phase = if retention_snapshot.requires_ens_v2_history_recovery {
-                OpsCatchupAdapterPhase::EnsV2HistoryCollection
-            } else {
-                OpsCatchupAdapterPhase::Ordinary
-            };
             for chunk in chunk_plan.chunks_to_run {
                 if run_ops_finalized_catchup_chunk(
                     pool,
@@ -294,7 +232,6 @@ async fn run_ops_finalized_catchup_iteration(
                     &chunk,
                     finalized_head.block_number,
                     &finalized_head.block_hash,
-                    adapter_phase,
                     outcome,
                 )
                 .await?
@@ -302,87 +239,20 @@ async fn run_ops_finalized_catchup_iteration(
                     plan_snapshot.reused_completed_chunk_count += 1;
                 }
             }
-            if retention_snapshot.requires_ens_v2_history_recovery
-                && retention_snapshot.has_ens_v2_history_requirements
-            {
-                // Persist the complete finalization job set before the
-                // full-source registry pass can make the retained-history
-                // proof current. A later process can therefore resume the
-                // exact deferred scopes after any crash or error.
-                let finalization_plan = plan_catchup_chunks_reusing_completed(
-                    &planned_targets,
-                    finalized_head.block_number,
-                    config.chunk_blocks,
-                    None,
-                )?;
-                precreate_ens_v2_finalization_jobs(
-                    pool,
-                    &task.chain,
-                    config,
-                    &finalization_plan.chunks_to_run,
-                )
-                .await?;
-            }
-            let newly_required_coverage = if retention_snapshot.requires_ens_v2_history_recovery {
-                converge_ens_v2_retained_history_through_block(
-                    pool,
-                    &task.chain,
-                    finalized_head.block_number,
-                    retention_snapshot.has_ens_v2_history_requirements,
-                )
-                .await?
-            } else {
-                false
-            };
-            if retention_snapshot.requires_ens_v2_history_recovery
-                && retention_snapshot.has_ens_v2_history_requirements
-                && !newly_required_coverage
-            {
-                maybe_fail_after_ens_v2_proof_publication(pool, &task.chain).await?;
-            }
-            let mut retention_snapshot_is_stable = !newly_required_coverage
-                && automatic_backfill_retention_snapshot_is_stable(
-                    pool,
-                    &task.chain,
-                    finalized_head.block_number,
-                    retention_snapshot,
-                )
-                .await?;
-            if retention_snapshot_is_stable
-                && retention_snapshot.requires_ens_v2_history_recovery
-                && retention_snapshot.has_ens_v2_history_requirements
-            {
-                resume_pending_ens_v2_finalization_jobs(
-                    pool,
-                    &task.chain,
-                    provider,
-                    config,
-                    retention_snapshot.generation,
-                    finalized_head.block_number,
-                    &finalized_head.block_hash,
-                    outcome,
-                )
-                .await?;
-                retention_snapshot_is_stable = automatic_backfill_retention_snapshot_is_stable(
-                    pool,
-                    &task.chain,
-                    finalized_head.block_number,
-                    retention_snapshot,
-                )
-                .await?;
-            }
-            if retention_snapshot_is_stable {
+            let current_snapshot = load_ops_catchup_authority_snapshot(pool, &task.chain).await?;
+            if current_snapshot == retention_snapshot {
                 outcome.add_plan_snapshot(plan_snapshot);
                 break;
             }
-            let retry_reason = if newly_required_coverage {
-                OpsCatchupRetryReason::DiscoveryExpanded
-            } else {
+            let retry_reason = if current_snapshot.retention_generation
+                != retention_snapshot.retention_generation
+            {
                 OpsCatchupRetryReason::RetentionAuthorityChanged
+            } else {
+                OpsCatchupRetryReason::DiscoveryExpanded
             };
             completed_pass = Some(CompletedCatchupPass::new(
-                retention_snapshot.generation,
-                retention_snapshot.requires_ens_v2_history_recovery,
+                retention_snapshot.retention_generation,
                 planned_targets,
             ));
             convergence_tracker.record_retry(&task.chain, retry_reason)?;
@@ -391,7 +261,7 @@ async fn run_ops_finalized_catchup_iteration(
                 command = "ops-catchup",
                 catchup_status = retry_reason.as_str(),
                 chain = %task.chain,
-                planned_raw_log_retention_generation = retention_snapshot.generation,
+                planned_raw_log_retention_generation = retention_snapshot.retention_generation,
                 planned_discovery_admission_epoch = retention_snapshot.discovery_admission_epoch,
                 consecutive_retention_authority_retries =
                     convergence_tracker.consecutive_retention_authority_retries,
@@ -401,12 +271,6 @@ async fn run_ops_finalized_catchup_iteration(
         }
     }
 
-    let profile_convergence =
-        crate::resolver_profile_convergence::drain_resolver_profile_input_changes(pool).await?;
-    for task in intake_chain_tasks {
-        profile_convergence
-            .ensure_chain_completion_allowed(&task.chain, "ops catch-up completion")?;
-    }
     Ok(())
 }
 

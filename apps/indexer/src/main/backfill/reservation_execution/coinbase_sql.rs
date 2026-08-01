@@ -5,6 +5,7 @@ use super::{
     create_coinbase_sql_backfill_job, finalize_reserved_stored_verification,
     refreshed_backfill_lease_expires_at, run_with_backfill_lease_heartbeat,
 };
+use crate::StartupAdapterProgress;
 use crate::backfill::{
     BackfillBlockRange, BackfillJobRunConfig, BackfillJobRunOutcome, BackfillTopicPlan,
     CoinbaseSqlBackfillConfig, HistoricalBackfillSourceOps,
@@ -20,7 +21,6 @@ use crate::backfill::{
 };
 use crate::provider::ChainProviderOps;
 use anyhow::{Context, Result, bail, ensure};
-use bigname_adapters::StartupAdapterProgress;
 use bigname_manifests::WatchedSourceSelectorPlan;
 use bigname_storage::{
     BackfillJob, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange, advance_backfill_range,

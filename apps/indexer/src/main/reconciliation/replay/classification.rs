@@ -13,9 +13,7 @@ mod closure_boundary;
 #[path = "classification/contracts.rs"]
 mod contracts;
 
-pub(crate) use closure_boundary::{
-    LegacyRegistryNewlyRequiredCoverage, MAX_REPORTED_LEGACY_CLOSURE_COVERAGE_GAPS,
-};
+pub(crate) use closure_boundary::MAX_REPORTED_LEGACY_CLOSURE_COVERAGE_GAPS;
 use closure_boundary::{
     earliest_required_raw_fact_block, ensure_full_closure_retention_authority,
     ensure_legacy_registry_closure_retention_authority,
@@ -23,10 +21,7 @@ use closure_boundary::{
 pub(crate) use contracts::NORMALIZED_EVENT_REPLAY_CONTRACTS;
 #[cfg(test)]
 pub(crate) use contracts::SOURCE_FAMILY_ENS_V2_REGISTRY_L1;
-use contracts::{
-    SOURCE_FAMILY_BASENAMES_BASE_REGISTRY, SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
-    SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
-};
+use contracts::{SOURCE_FAMILY_BASENAMES_BASE_REGISTRY, SOURCE_FAMILY_ENS_V1_REGISTRY_L1};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReplayDependencyModel {
@@ -342,10 +337,6 @@ pub(crate) async fn ensure_full_closure_retention_authority_for_adapters(
     adapters: &[NormalizedEventReplayAdapter],
     through_block: i64,
 ) -> Result<()> {
-    if adapters.contains(&NormalizedEventReplayAdapter::EnsV2RegistryResourceSurface) {
-        bigname_adapters::ensure_ens_v2_retained_history_proof_through(pool, chain, through_block)
-            .await?;
-    }
     let contracts = adapters
         .iter()
         .copied()

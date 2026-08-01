@@ -7,24 +7,15 @@ use anyhow::{Context, Result};
 use futures_util::TryStreamExt;
 use sqlx::PgPool;
 
-use crate::{
-    checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress},
-    startup_progress::STARTUP_ADAPTER_PROGRESS_PAGE_ROWS,
-};
-
 mod rows;
 
-use rows::{
-    active_emitters_from_rows, active_emitters_from_rows_with_progress, sort_active_emitters,
-    source_scope_covered_by_emitters,
-};
+use rows::{active_emitters_from_rows, sort_active_emitters, source_scope_covered_by_emitters};
 
 pub(in crate::ens_v1_subregistry_discovery) async fn load_active_emitters(
     pool: &PgPool,
     chain: &str,
     source_scope: Option<&[RegistryRawLogSourceScopeTarget]>,
     include_historical: bool,
-    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Vec<ActiveEmitter>> {
     let has_source_scope = source_scope.is_some();
     let source_scope = source_scope.unwrap_or(&[]);
@@ -39,13 +30,12 @@ pub(in crate::ens_v1_subregistry_discovery) async fn load_active_emitters(
 
     if has_source_scope {
         let mut manifest_emitters =
-            load_manifest_declared_active_emitters(pool, chain, source_scope, progress).await?;
+            load_manifest_declared_active_emitters(pool, chain, source_scope).await?;
         if source_scope_covered_by_emitters(source_scope, &manifest_emitters) {
             return Ok(manifest_emitters);
         }
-        manifest_emitters.extend(
-            load_scoped_discovery_active_emitters(pool, chain, source_scope, progress).await?,
-        );
+        manifest_emitters
+            .extend(load_scoped_discovery_active_emitters(pool, chain, source_scope).await?);
         sort_active_emitters(&mut manifest_emitters);
         return Ok(manifest_emitters);
     }
@@ -206,33 +196,14 @@ pub(in crate::ens_v1_subregistry_discovery) async fn load_active_emitters(
         .with_context(|| format!("failed to stream active ENSv1 registry emitters for {chain}"))?
     {
         loaded_rows.push(row);
-        if loaded_rows
-            .len()
-            .is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS)
-        {
-            record_startup_adapter_progress(pool, progress).await?;
-        }
     }
-    if !loaded_rows.is_empty()
-        && !loaded_rows
-            .len()
-            .is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS)
-    {
-        record_startup_adapter_progress(pool, progress).await?;
-    }
-    match progress.as_deref_mut() {
-        Some(progress) => {
-            active_emitters_from_rows_with_progress(pool, loaded_rows, progress).await
-        }
-        None => active_emitters_from_rows(loaded_rows),
-    }
+    active_emitters_from_rows(loaded_rows)
 }
 
 async fn load_scoped_discovery_active_emitters(
     pool: &PgPool,
     chain: &str,
     source_scope: &[RegistryRawLogSourceScopeTarget],
-    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Vec<ActiveEmitter>> {
     let scoped_targets = source_scope
         .iter()
@@ -473,17 +444,13 @@ async fn load_scoped_discovery_active_emitters(
         format!("failed to load scoped discovery ENSv1 registry emitters for {chain}")
     })?;
 
-    match progress.as_deref_mut() {
-        Some(progress) => active_emitters_from_rows_with_progress(pool, rows, progress).await,
-        None => active_emitters_from_rows(rows),
-    }
+    active_emitters_from_rows(rows)
 }
 
 async fn load_manifest_declared_active_emitters(
     pool: &PgPool,
     chain: &str,
     source_scope: &[RegistryRawLogSourceScopeTarget],
-    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Vec<ActiveEmitter>> {
     let scoped_source_families = source_scope
         .iter()
@@ -577,8 +544,5 @@ async fn load_manifest_declared_active_emitters(
         format!("failed to load manifest-declared ENSv1 registry emitters for {chain}")
     })?;
 
-    match progress.as_deref_mut() {
-        Some(progress) => active_emitters_from_rows_with_progress(pool, rows, progress).await,
-        None => active_emitters_from_rows(rows),
-    }
+    active_emitters_from_rows(rows)
 }

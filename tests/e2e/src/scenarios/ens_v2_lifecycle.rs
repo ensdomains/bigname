@@ -196,11 +196,9 @@ async fn renewal_preserves_promoted_coverage_and_registry_edges_follow() -> Resu
 
 /// Rows 3 and 9: the declared resolver edge follows set/change/zero,
 /// subregistry detach-to-zero removes the edge, and admin-half role bits
-/// render distinctly. This composed chain previously wedged automatic intake
-/// when full-closure replay admitted finite-start resolver and subregistry
-/// intervals without recovering their exact generation-bound coverage. Keep
-/// it on the standard live helper to prove catch-up closes those intervals
-/// before adapter ownership is handed back to live polling.
+/// render distinctly. The composed chain uses standard automatic intake and
+/// asserts the parent registry's edge events and registration permission; it
+/// does not assert historical coverage for the discovered target contracts.
 #[tokio::test]
 async fn resolver_and_subregistry_edges_follow_set_change_zero() -> Result<()> {
     let anvil = Anvil::spawn_ethereum_sepolia().await?;
@@ -1124,129 +1122,6 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
             .iter()
             .any(|name| name.starts_with("admin_") || name.contains("admin")),
         "admin-half bits must render distinctly; saw {power_names:?}"
-    );
-
-    run.db.cleanup().await?;
-    Ok(())
-}
-
-/// Row 4: record writes on a discovered v2 resolver. Automatic ENSv2
-/// bootstrap admits the resolver edge, fetches its finite-known-start history
-/// in the same startup invocation, and derives the configured record events.
-/// Resolver-profile admission still gates public selector publication.
-#[tokio::test]
-async fn discovered_v2_resolver_records_are_backfilled_in_session() -> Result<()> {
-    let anvil = Anvil::spawn_ethereum_sepolia().await?;
-    let rpc = anvil.client();
-    let deployment = ens_v2::deploy_ens_v2(&rpc, &repo_root()).await?;
-    let accounts = rpc.accounts().await?;
-    let alice = accounts[1];
-
-    ens_v2::register_eth_name(
-        &rpc,
-        &deployment,
-        ens_v2::RegisterEthName {
-            from: alice,
-            label: "records",
-            owner: alice,
-            duration_secs: YEAR,
-            subregistry: Address::ZERO,
-            resolver: Address::ZERO,
-        },
-    )
-    .await?;
-    let resolver =
-        ens_v2::deploy_permissioned_resolver(&rpc, &repo_root(), &deployment, alice).await?;
-    ens_v2::set_resolver_in_registry(
-        &rpc,
-        deployment.eth_registry.address,
-        alice,
-        ens_v2::label_id("records"),
-        resolver.address,
-    )
-    .await?;
-    let node = crate::harness::ens_v1::namehash("records.eth");
-    ens_v2::set_resolver_text(&rpc, resolver.address, alice, node, "probe", "x").await?;
-    ens_v2::set_resolver_addr(&rpc, resolver.address, alice, node, alice).await?;
-    ens_v2::clear_resolver_records(&rpc, resolver.address, alice, node).await?;
-
-    let ready_sql = "SELECT EXISTS (SELECT 1 FROM normalized_events \
-         WHERE event_kind = 'ResolverChanged' AND canonicality_state = 'canonical') \
-         AND (SELECT count(*) = 3 FROM normalized_events \
-              WHERE logical_name_id = 'ens:records.eth' \
-                AND event_kind IN ('RecordChanged', 'RecordVersionChanged') \
-                AND canonicality_state = 'canonical')";
-    let run =
-        support::ingest_ens_v2_sepolia_and_serve(&anvil, &deployment, Some(ready_sql)).await?;
-
-    let resolver_hex = format!("{:#x}", resolver.address);
-    let edge_admitted: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM discovery_edges edge \
-         JOIN contract_instance_addresses target \
-           ON target.contract_instance_id = edge.to_contract_instance_id \
-         WHERE lower(target.address) = $1 AND edge.deactivated_at IS NULL)",
-    )
-    .bind(&resolver_hex)
-    .fetch_one(&run.db.pool)
-    .await?;
-    assert!(edge_admitted, "discovery must admit the resolver edge");
-
-    let resolver_raw_logs: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM raw_logs WHERE lower(emitting_address) = $1")
-            .bind(&resolver_hex)
-            .fetch_one(&run.db.pool)
-            .await?;
-    // The address write emits both AddressChanged and the legacy AddrChanged
-    // compatibility event. (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L679 @ ens_v2@48b3e2d)
-    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L681 @ ens_v2@48b3e2d)
-    assert_eq!(
-        resolver_raw_logs, 4,
-        "automatic ENSv2 bootstrap must fetch all four discovered-resolver logs"
-    );
-    let record_events: Vec<(String, String)> = sqlx::query_as(
-        "SELECT event_kind, after_state->>'source_event' FROM normalized_events \
-         WHERE event_kind IN ('RecordChanged', 'RecordVersionChanged') \
-           AND logical_name_id = 'ens:records.eth' \
-           AND canonicality_state = 'canonical' \
-         ORDER BY block_number, log_index, event_kind",
-    )
-    .fetch_all(&run.db.pool)
-    .await?;
-    assert_eq!(
-        record_events,
-        vec![
-            ("RecordChanged".to_owned(), "TextChanged".to_owned()),
-            ("RecordChanged".to_owned(), "AddressChanged".to_owned()),
-            (
-                "RecordVersionChanged".to_owned(),
-                "VersionChanged".to_owned(),
-            ),
-        ],
-        "discovered resolver history must derive text, address, and version observations"
-    );
-
-    let (status, exact) = run
-        .api
-        .get_json("/v1/names/ens/records.eth?chain=ethereum-sepolia")
-        .await?;
-    assert_eq!(status, 200, "records.eth exact-name lookup failed: {exact}");
-    assert_eq!(
-        pointer(&exact, "/declared_state/resolver/address"),
-        resolver_hex,
-        "the discovered resolver must remain the declared registry binding: {exact}"
-    );
-    assert_eq!(
-        pointer(&exact, "/declared_state/record_inventory/status"),
-        "unsupported",
-        "unadmitted ENSv2 resolver observations must not publish an inventory: {exact}"
-    );
-    assert_eq!(
-        pointer(
-            &exact,
-            "/declared_state/record_inventory/unsupported_reason"
-        ),
-        "declared record inventory summary is not yet projected",
-        "the exact-name route must expose its current record-inventory boundary: {exact}"
     );
 
     run.db.cleanup().await?;

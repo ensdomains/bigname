@@ -1,9 +1,11 @@
 use std::collections::BTreeSet;
 
 use anyhow::Result;
+use bigname_storage::acquire_raw_log_staging_read_guard;
 use tracing::info;
 
 use crate::reconciliation::{
+    guard_release::prioritize_operation_error,
     replay::{
         NormalizedEventReplayAdapter, RawFactReplayContractPlan,
         active_closure_or_dependency_replay_adapters,
@@ -48,25 +50,6 @@ pub(crate) async fn sync_adapter_state_from_persisted_raw_payloads(
     chain: &str,
     block_hashes: &[String],
 ) -> Result<PersistedRawPayloadAdapterSyncSummary> {
-    sync_adapter_state_from_persisted_raw_payloads_for_backfill(pool, chain, block_hashes, false)
-        .await
-}
-
-pub(crate) async fn sync_adapter_state_from_persisted_raw_payloads_without_ens_v2_adapters(
-    pool: &sqlx::PgPool,
-    chain: &str,
-    block_hashes: &[String],
-) -> Result<PersistedRawPayloadAdapterSyncSummary> {
-    sync_adapter_state_from_persisted_raw_payloads_for_backfill(pool, chain, block_hashes, true)
-        .await
-}
-
-async fn sync_adapter_state_from_persisted_raw_payloads_for_backfill(
-    pool: &sqlx::PgPool,
-    chain: &str,
-    block_hashes: &[String],
-    defer_ens_v2_adapters: bool,
-) -> Result<PersistedRawPayloadAdapterSyncSummary> {
     info!(
         service = "indexer",
         command = "adapter-sync",
@@ -92,7 +75,6 @@ async fn sync_adapter_state_from_persisted_raw_payloads_for_backfill(
         block_hashes,
         Some(&source_scope),
         PersistedRawPayloadAdapterSyncMode::LiveOrBackfill,
-        defer_ens_v2_adapters,
         true,
         FullSourceReconciliationScope::default(),
         &mut None,
@@ -140,7 +122,7 @@ pub(crate) async fn sync_live_adapter_state_from_persisted_raw_payloads_with_pro
     deployment_profile: &str,
     chain: &str,
     block_hashes: &[String],
-    progress: &mut Option<&mut dyn bigname_adapters::StartupAdapterProgress>,
+    progress: &mut Option<&mut dyn crate::StartupAdapterProgress>,
 ) -> Result<PersistedRawPayloadAdapterSyncSummary> {
     sync_live_adapter_state_from_persisted_raw_payloads_with_reorg_repair(
         pool,
@@ -158,7 +140,7 @@ pub(crate) async fn sync_live_adapter_state_from_persisted_raw_payloads_after_re
     deployment_profile: &str,
     chain: &str,
     block_hashes: &[String],
-    progress: &mut Option<&mut dyn bigname_adapters::StartupAdapterProgress>,
+    progress: &mut Option<&mut dyn crate::StartupAdapterProgress>,
 ) -> Result<PersistedRawPayloadAdapterSyncSummary> {
     sync_live_adapter_state_from_persisted_raw_payloads_with_reorg_repair(
         pool,
@@ -177,46 +159,58 @@ async fn sync_live_adapter_state_from_persisted_raw_payloads_with_reorg_repair(
     chain: &str,
     block_hashes: &[String],
     reconcile_discovery_full_sources: bool,
-    progress: &mut Option<&mut dyn bigname_adapters::StartupAdapterProgress>,
+    progress: &mut Option<&mut dyn crate::StartupAdapterProgress>,
 ) -> Result<PersistedRawPayloadAdapterSyncSummary> {
-    info!(
-        service = "indexer",
-        command = "adapter-sync",
-        chain,
-        block_hash_count = block_hashes.len(),
-        adapter_sync_mode = "live_poll",
-        "loading live adapter source scope"
-    );
-    let source_scope = load_live_adapter_source_scope(pool, chain, block_hashes).await?;
-    let full_source_reconciliation = if reconcile_discovery_full_sources {
-        FullSourceReconciliationScope::from_active_adapters(
-            active_closure_or_dependency_replay_adapters(pool, chain).await?,
-        )
+    let raw_log_guard = if reconcile_discovery_full_sources {
+        None
     } else {
-        FullSourceReconciliationScope::default()
+        Some(acquire_raw_log_staging_read_guard(pool, chain).await?)
     };
-    info!(
-        service = "indexer",
-        command = "adapter-sync",
-        chain,
-        block_hash_count = block_hashes.len(),
-        source_scope_target_count = source_scope.len(),
-        adapter_sync_mode = "live_poll",
-        "loaded live adapter source scope"
-    );
-    sync_adapter_state_from_persisted_raw_payloads_with_mode(
-        pool,
-        Some(deployment_profile),
-        chain,
-        block_hashes,
-        Some(&source_scope),
-        PersistedRawPayloadAdapterSyncMode::LivePoll,
-        false,
-        true,
-        full_source_reconciliation,
-        progress,
-    )
-    .await
+    let operation = async {
+        info!(
+            service = "indexer",
+            command = "adapter-sync",
+            chain,
+            block_hash_count = block_hashes.len(),
+            adapter_sync_mode = "live_poll",
+            "loading live adapter source scope"
+        );
+        let source_scope = load_live_adapter_source_scope(pool, chain, block_hashes).await?;
+        let full_source_reconciliation = if reconcile_discovery_full_sources {
+            FullSourceReconciliationScope::from_active_adapters(
+                active_closure_or_dependency_replay_adapters(pool, chain).await?,
+            )
+        } else {
+            FullSourceReconciliationScope::default()
+        };
+        info!(
+            service = "indexer",
+            command = "adapter-sync",
+            chain,
+            block_hash_count = block_hashes.len(),
+            source_scope_target_count = source_scope.len(),
+            adapter_sync_mode = "live_poll",
+            "loaded live adapter source scope"
+        );
+        sync_adapter_state_from_persisted_raw_payloads_with_mode(
+            pool,
+            Some(deployment_profile),
+            chain,
+            block_hashes,
+            Some(&source_scope),
+            PersistedRawPayloadAdapterSyncMode::LivePoll,
+            true,
+            full_source_reconciliation,
+            progress,
+        )
+        .await
+    }
+    .await;
+    let release = match raw_log_guard {
+        Some(guard) => guard.release().await,
+        None => Ok(()),
+    };
+    prioritize_operation_error(operation, release)
 }
 
 pub(crate) async fn sync_replay_normalized_events_from_persisted_raw_payloads_with_progress(
@@ -226,7 +220,7 @@ pub(crate) async fn sync_replay_normalized_events_from_persisted_raw_payloads_wi
     source_scope: Option<&[(String, String, i64, i64)]>,
     canonical_raw_log_count: usize,
     replay_contract_plan: RawFactReplayContractPlan,
-    progress: &mut Option<&mut dyn bigname_adapters::StartupAdapterProgress>,
+    progress: &mut Option<&mut dyn crate::StartupAdapterProgress>,
 ) -> Result<PersistedRawPayloadAdapterSyncSummary> {
     sync_adapter_state_from_persisted_raw_payloads_with_mode(
         pool,
@@ -238,7 +232,6 @@ pub(crate) async fn sync_replay_normalized_events_from_persisted_raw_payloads_wi
             canonical_raw_log_count,
             replay_contract_plan,
         },
-        false,
         false,
         FullSourceReconciliationScope::default(),
         progress,
@@ -252,39 +245,6 @@ pub(crate) async fn sync_adapter_state_from_scoped_persisted_raw_payloads(
     block_hashes: &[String],
     source_scope: &[(String, String, i64, i64)],
 ) -> Result<()> {
-    sync_adapter_state_from_scoped_persisted_raw_payloads_for_backfill(
-        pool,
-        chain,
-        block_hashes,
-        source_scope,
-        false,
-    )
-    .await
-}
-
-pub(crate) async fn sync_adapter_state_from_scoped_persisted_raw_payloads_without_ens_v2_adapters(
-    pool: &sqlx::PgPool,
-    chain: &str,
-    block_hashes: &[String],
-    source_scope: &[(String, String, i64, i64)],
-) -> Result<()> {
-    sync_adapter_state_from_scoped_persisted_raw_payloads_for_backfill(
-        pool,
-        chain,
-        block_hashes,
-        source_scope,
-        true,
-    )
-    .await
-}
-
-async fn sync_adapter_state_from_scoped_persisted_raw_payloads_for_backfill(
-    pool: &sqlx::PgPool,
-    chain: &str,
-    block_hashes: &[String],
-    source_scope: &[(String, String, i64, i64)],
-    defer_ens_v2_adapters: bool,
-) -> Result<()> {
     sync_adapter_state_from_persisted_raw_payloads_with_mode(
         pool,
         None,
@@ -292,7 +252,6 @@ async fn sync_adapter_state_from_scoped_persisted_raw_payloads_for_backfill(
         block_hashes,
         Some(source_scope),
         PersistedRawPayloadAdapterSyncMode::LiveOrBackfill,
-        defer_ens_v2_adapters,
         false,
         FullSourceReconciliationScope::default(),
         &mut None,

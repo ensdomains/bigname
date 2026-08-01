@@ -101,11 +101,8 @@ impl BlockingHeartbeatHandle {
     }
 }
 
-impl bigname_adapters::StartupAdapterProgress for BlockingHeartbeatProgress {
-    fn record<'a>(
-        &'a mut self,
-        pool: &'a PgPool,
-    ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
+impl crate::StartupAdapterProgress for BlockingHeartbeatProgress {
+    fn record<'a>(&'a mut self, pool: &'a PgPool) -> crate::StartupAdapterProgressFuture<'a> {
         Box::pin(BlockingHeartbeatProgress::record(self, pool))
     }
 }
@@ -1245,8 +1242,6 @@ impl TestDatabase {
         ensure_normalized_replay_adapter_checkpoint_tables(&pool).await?;
         create_raw_log_staging_input_revisions_table(&pool).await?;
         create_chain_lineage_mutation_revision_fixture(&pool).await?;
-        ensure_resolver_profile_convergence_tables(&pool).await?;
-
         Ok(Self {
             admin_pool,
             pool,
@@ -1708,92 +1703,6 @@ async fn ensure_normalized_replay_adapter_checkpoint_tables(pool: &PgPool) -> Re
     Ok(())
 }
 
-async fn ensure_resolver_profile_convergence_tables(pool: &PgPool) -> Result<()> {
-    if !sqlx::query_scalar::<_, bool>(
-        "SELECT to_regclass('public.resolver_profile_input_changes') IS NOT NULL",
-    )
-    .fetch_one(pool)
-    .await
-    .context("failed to inspect resolver-profile input queue test fixture")?
-    {
-        sqlx::raw_sql(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../migrations/20260715121000_resolver_profile_input_changes.sql"
-        )))
-        .execute(pool)
-        .await
-        .context("failed to create resolver-profile input queue for indexer tests")?;
-    }
-
-    if !sqlx::query_scalar::<_, bool>(
-        "SELECT to_regclass('public.resolver_profile_reconciliation_runs') IS NOT NULL",
-    )
-    .fetch_one(pool)
-    .await
-    .context("failed to inspect resolver-profile reconciliation test fixture")?
-    {
-        sqlx::raw_sql(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../migrations/20260715123000_resolver_profile_reconciliation_staging.sql"
-        )))
-        .execute(pool)
-        .await
-        .context("failed to create resolver-profile reconciliation state for indexer tests")?;
-    }
-
-    if !sqlx::query_scalar::<_, bool>(
-        "SELECT to_regclass('public.resolver_profile_authority_journal') IS NOT NULL",
-    )
-    .fetch_one(pool)
-    .await
-    .context("failed to inspect resolver-profile authority journal test fixture")?
-    {
-        sqlx::raw_sql(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../migrations/20260715130000_resolver_profile_authority_journal.sql"
-        )))
-        .execute(pool)
-        .await
-        .context("failed to create resolver-profile authority journal for indexer tests")?;
-    }
-
-    if !sqlx::query_scalar::<_, bool>(
-        "SELECT to_regclass('public.resolver_profile_authority_journal_entries') IS NOT NULL",
-    )
-    .fetch_one(pool)
-    .await
-    .context("failed to inspect resolver-profile authority journal entries test fixture")?
-    {
-        sqlx::raw_sql(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../migrations/20260720122000_normalize_resolver_profile_authority_journal.sql"
-        )))
-        .execute(pool)
-        .await
-        .context("failed to normalize resolver-profile authority journal for indexer tests")?;
-    }
-
-    if !sqlx::query_scalar::<_, bool>(
-        "SELECT to_regclass(\
-             'public.resolver_profile_reconciliation_invalidation_keys'\
-         ) IS NOT NULL",
-    )
-    .fetch_one(pool)
-    .await
-    .context("failed to inspect resolver-profile invalidation staging test fixture")?
-    {
-        sqlx::raw_sql(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../migrations/20260720121000_resolver_profile_invalidation_staging.sql"
-        )))
-        .execute(pool)
-        .await
-        .context("failed to create resolver-profile invalidation staging for indexer tests")?;
-    }
-
-    Ok(())
-}
-
 async fn create_complete_raw_log_staging_input_fixture(
     pool: &PgPool,
     chain: &str,
@@ -1830,12 +1739,10 @@ async fn create_complete_raw_log_staging_input_fixture(
 
 #[allow(dead_code)]
 async fn create_ops_catchup_backfill_job_tables(pool: &PgPool) -> Result<()> {
-    if sqlx::query_scalar::<_, bool>(
-        "SELECT to_regclass('public.backfill_jobs') IS NOT NULL",
-    )
-    .fetch_one(pool)
-    .await
-    .context("failed to inspect the backfill test schema")?
+    if sqlx::query_scalar::<_, bool>("SELECT to_regclass('public.backfill_jobs') IS NOT NULL")
+        .fetch_one(pool)
+        .await
+        .context("failed to inspect the backfill test schema")?
     {
         create_coverage_recovery_failures_table(pool).await?;
         return Ok(());
@@ -2782,8 +2689,7 @@ struct ProviderBlockFixture {
     logs: Vec<Value>,
 }
 
-type ProviderLogHook =
-    dyn Fn(&serde_json::Map<String, Value>, Value) -> Value + Send + Sync;
+type ProviderLogHook = dyn Fn(&serde_json::Map<String, Value>, Value) -> Value + Send + Sync;
 
 async fn bundle_provider(
     blocks: Vec<ProviderBlock>,
@@ -3155,28 +3061,20 @@ fn registry_new_resolver_topic0() -> String {
     keccak256_hex(b"NewResolver(bytes32,address)")
 }
 
+// This shared support file is included by multiple test harnesses; only the
+// backfill harness needs these two ENSv2 topic helpers after the driver cuts.
+#[allow(dead_code)]
 fn ens_v2_label_registered_topic0() -> String {
     keccak256_hex(b"LabelRegistered(uint256,bytes32,string,address,uint64,address)")
 }
 
-fn ens_v2_resolver_updated_topic0() -> String {
-    keccak256_hex(b"ResolverUpdated(uint256,address,address)")
-}
-
+#[allow(dead_code)]
 fn ens_v2_token_resource_topic0() -> String {
     keccak256_hex(b"TokenResource(uint256,uint256)")
 }
 
 fn resolver_addr_changed_topic0() -> String {
     keccak256_hex(b"AddrChanged(bytes32,address)")
-}
-
-fn ens_v2_resolver_address_changed_topic0() -> String {
-    keccak256_hex(b"AddressChanged(bytes32,uint256,bytes)")
-}
-
-fn ens_v2_alias_changed_topic0() -> String {
-    keccak256_hex(b"AliasChanged(bytes,bytes,bytes,bytes)")
 }
 
 fn resolver_text_changed_topic0() -> String {
@@ -3572,19 +3470,6 @@ fn encode_two_dynamic_string_log_data(left: &str, right: &str) -> String {
 
 fn encode_resolver_addr_changed_log_data(address: &str) -> String {
     hex_string(&abi_word_address(address))
-}
-
-fn encode_ens_v2_resolver_address_changed_log_data(coin_type: u64, address_bytes: &[u8]) -> String {
-    let mut data = Vec::new();
-    data.extend_from_slice(&abi_word_u64(coin_type));
-    data.extend_from_slice(&abi_word_u64(64));
-    data.extend_from_slice(&abi_word_u64(
-        u64::try_from(address_bytes.len()).expect("address bytes test payload must fit in u64"),
-    ));
-    data.extend_from_slice(address_bytes);
-    let padded_length = address_bytes.len().div_ceil(32) * 32;
-    data.resize(96 + padded_length, 0);
-    hex_string(&data)
 }
 
 fn encode_resolver_version_changed_log_data(version: u64) -> String {

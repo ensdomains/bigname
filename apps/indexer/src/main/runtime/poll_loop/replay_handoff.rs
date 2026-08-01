@@ -18,10 +18,6 @@ use super::super::intake::{IntakeChainTask, clone_intake_chain_task_with_progres
 use super::super::manifest::ManifestRuntimeState;
 use super::discovery_refresh::refresh_discovery_watch_state_with_heartbeat;
 
-fn resolver_profile_convergence_before_handoff() -> bool {
-    false
-}
-
 #[cfg(test)]
 #[path = "replay_handoff/test_hook.rs"]
 mod test_hook;
@@ -124,7 +120,6 @@ pub(super) async fn poll_replay_ready_chains_raw_only(
     event_silent_reverse_resolver_addresses: &[String],
     coverage_frontiers: &ChainCoverageFrontiers,
     latched_bootstrap_finalized_heads: &BTreeMap<String, ProviderBlock>,
-    adapter_sync_page_logs: usize,
     heartbeat: &mut StartupHeartbeat,
     heartbeat_chain_ids: &[String],
 ) -> Result<()> {
@@ -138,10 +133,7 @@ pub(super) async fn poll_replay_ready_chains_raw_only(
         manifest_runtime_state,
         intake_chain_tasks,
         false,
-        resolver_profile_convergence_before_handoff(),
         watched_plan_admission_epochs,
-        deployment_profile,
-        adapter_sync_page_logs,
         heartbeat,
         heartbeat_chain_ids,
     )
@@ -209,7 +201,6 @@ pub(super) async fn renew_live_poll_adapter_sync_permit(
     event_silent_reverse_resolver_addresses: &[String],
     coverage_frontiers: &ChainCoverageFrontiers,
     latched_bootstrap_finalized_heads: &BTreeMap<String, ProviderBlock>,
-    adapter_sync_page_logs: usize,
     heartbeat: &mut StartupHeartbeat,
     heartbeat_chain_ids: &[String],
 ) -> Result<bool> {
@@ -230,7 +221,6 @@ pub(super) async fn renew_live_poll_adapter_sync_permit(
             event_silent_reverse_resolver_addresses,
             coverage_frontiers,
             latched_bootstrap_finalized_heads,
-            adapter_sync_page_logs,
             heartbeat,
             heartbeat_chain_ids,
         )
@@ -284,10 +274,7 @@ pub(super) async fn renew_live_poll_adapter_sync_permit(
         manifest_runtime_state,
         intake_chain_tasks,
         false,
-        resolver_profile_convergence_before_handoff(),
         watched_plan_admission_epochs,
-        deployment_profile,
-        adapter_sync_page_logs,
         heartbeat,
         heartbeat_chain_ids,
     )
@@ -427,14 +414,6 @@ pub(super) fn live_poll_adapter_sync_after_handoff_attempt(
     adapter_sync_enabled && !backlog_sync_failed && !discovery_refresh_failed
 }
 
-pub(super) fn manifest_refresh_adapter_sync_before_handoff_readiness(
-    adapter_sync_on_live_poll: bool,
-    adapter_sync_on_manifest_refresh: bool,
-    _previous_replay_handoff_permit: bool,
-) -> bool {
-    adapter_sync_on_live_poll || adapter_sync_on_manifest_refresh
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -444,8 +423,7 @@ mod tests {
     use super::{
         ReplayHandoffLatchStatus, ReplayHandoffReadiness, classify_replay_handoff_readiness,
         finish_replay_handoff_latch, live_poll_adapter_sync_after_handoff_attempt,
-        manifest_refresh_adapter_sync_before_handoff_readiness, prepare_handoff_plan_reload,
-        resolver_profile_convergence_before_handoff,
+        prepare_handoff_plan_reload,
     };
 
     #[test]
@@ -489,21 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn prior_handoff_permit_cannot_authorize_manifest_refresh_adapter_work() {
-        assert!(!manifest_refresh_adapter_sync_before_handoff_readiness(
-            false, false, true,
-        ));
-        assert!(manifest_refresh_adapter_sync_before_handoff_readiness(
-            true, false, false,
-        ));
-        assert!(manifest_refresh_adapter_sync_before_handoff_readiness(
-            false, true, false,
-        ));
-    }
-
-    #[test]
-    fn handoff_forces_one_plan_reload_preserves_epoch_gate_and_defers_convergence() {
-        assert!(!resolver_profile_convergence_before_handoff());
+    fn handoff_forces_one_plan_reload_and_preserves_epoch_gate() {
         let epochs = BTreeMap::from([("base-mainnet".to_owned(), 7)]);
         let mut sentinel = Some(epochs.clone());
         prepare_handoff_plan_reload(false, &mut sentinel);

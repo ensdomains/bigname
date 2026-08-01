@@ -6,13 +6,6 @@ use bigname_storage::CanonicalityState;
 use sqlx::PgPool;
 
 use super::active_emitters::ActiveEmitter;
-use crate::{
-    checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress},
-    startup_progress::{
-        RawLogPagePosition, STARTUP_ADAPTER_PROGRESS_PAGE_ROWS,
-        STARTUP_ADAPTER_PROGRESS_PAGE_ROWS_I64,
-    },
-};
 
 #[derive(Clone, Debug)]
 pub(super) struct ReverseRawLogRow {
@@ -40,7 +33,6 @@ pub(super) async fn load_reverse_raw_logs(
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
     source_scope: Option<&[(String, String, i64, i64)]>,
-    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Vec<ReverseRawLogRow>> {
     let emitters_by_address = active_emitters
         .iter()
@@ -54,17 +46,8 @@ pub(super) async fn load_reverse_raw_logs(
         return Ok(Vec::new());
     }
 
-    let paged = progress.is_some();
-    let page_limit = if paged {
-        STARTUP_ADAPTER_PROGRESS_PAGE_ROWS_I64
-    } else {
-        i64::MAX
-    };
-    let mut start_after = None::<RawLogPagePosition>;
-    let mut output = Vec::new();
-    loop {
-        let rows = sqlx::query(
-            r#"
+    let rows = sqlx::query(
+        r#"
             SELECT
                 rl.chain_id AS chain_id,
                 rl.block_hash AS block_hash,
@@ -114,73 +97,48 @@ pub(super) async fn load_reverse_raw_logs(
                 rl.block_hash
             LIMIT $14
             "#,
-        )
-        .bind(chain)
-        .bind(&watched_addresses)
-        .bind(restrict_to_block_hashes)
-        .bind(block_hashes)
-        .bind(source_scope.is_some())
-        .bind(&scope_addresses)
-        .bind(&scope_from_blocks)
-        .bind(&scope_to_blocks)
-        .bind(start_after.as_ref().map(|position| position.block_number))
-        .bind(
-            start_after
-                .as_ref()
-                .map(|position| position.transaction_index),
-        )
-        .bind(start_after.as_ref().map(|position| position.log_index))
-        .bind(
-            start_after
-                .as_ref()
-                .map(|position| position.emitting_address.as_str()),
-        )
-        .bind(
-            start_after
-                .as_ref()
-                .map(|position| position.block_hash.as_str()),
-        )
-        .bind(page_limit)
-        .fetch_all(pool)
-        .await
-        .with_context(|| format!("failed to load ENSv1 reverse raw logs for chain {chain}"))?;
-        if rows.is_empty() {
-            break;
-        }
-        let page_len = rows.len();
-        let last_position =
-            RawLogPagePosition::from_row(rows.last().expect("non-empty reverse raw-log page"))?;
-        for row in rows {
-            let address = sql_row::get::<String>(&row, "emitting_address")?.to_ascii_lowercase();
-            let emitter = emitters_by_address.get(&address).with_context(|| {
-                format!("missing active emitter metadata for chain {chain} address {address}")
-            })?;
+    )
+    .bind(chain)
+    .bind(&watched_addresses)
+    .bind(restrict_to_block_hashes)
+    .bind(block_hashes)
+    .bind(source_scope.is_some())
+    .bind(&scope_addresses)
+    .bind(&scope_from_blocks)
+    .bind(&scope_to_blocks)
+    .bind(None::<i64>)
+    .bind(None::<i64>)
+    .bind(None::<i64>)
+    .bind(None::<String>)
+    .bind(None::<String>)
+    .bind(i64::MAX)
+    .fetch_all(pool)
+    .await
+    .with_context(|| format!("failed to load ENSv1 reverse raw logs for chain {chain}"))?;
+    let mut output = Vec::with_capacity(rows.len());
+    for row in rows {
+        let address = sql_row::get::<String>(&row, "emitting_address")?.to_ascii_lowercase();
+        let emitter = emitters_by_address.get(&address).with_context(|| {
+            format!("missing active emitter metadata for chain {chain} address {address}")
+        })?;
 
-            output.push(ReverseRawLogRow {
-                chain_id: sql_row::get(&row, "chain_id")?,
-                block_hash: sql_row::get(&row, "block_hash")?,
-                block_number: sql_row::get(&row, "block_number")?,
-                transaction_hash: sql_row::get(&row, "transaction_hash")?,
-                transaction_index: sql_row::get(&row, "transaction_index")?,
-                log_index: sql_row::get(&row, "log_index")?,
-                emitting_address: address,
-                emitting_contract_instance_id: emitter.contract_instance_id,
-                topics: sql_row::get(&row, "topics")?,
-                data: sql_row::get(&row, "data")?,
-                canonicality_state: sql_row::get(&row, "canonicality_state")?,
-                source_manifest_id: emitter.source_manifest_id,
-                namespace: emitter.namespace.clone(),
-                source_family: emitter.source_family.clone(),
-                manifest_version: emitter.manifest_version,
-            });
-        }
-        if paged {
-            record_startup_adapter_progress(pool, progress).await?;
-        }
-        if !paged || page_len < STARTUP_ADAPTER_PROGRESS_PAGE_ROWS {
-            break;
-        }
-        start_after = Some(last_position);
+        output.push(ReverseRawLogRow {
+            chain_id: sql_row::get(&row, "chain_id")?,
+            block_hash: sql_row::get(&row, "block_hash")?,
+            block_number: sql_row::get(&row, "block_number")?,
+            transaction_hash: sql_row::get(&row, "transaction_hash")?,
+            transaction_index: sql_row::get(&row, "transaction_index")?,
+            log_index: sql_row::get(&row, "log_index")?,
+            emitting_address: address,
+            emitting_contract_instance_id: emitter.contract_instance_id,
+            topics: sql_row::get(&row, "topics")?,
+            data: sql_row::get(&row, "data")?,
+            canonicality_state: sql_row::get(&row, "canonicality_state")?,
+            source_manifest_id: emitter.source_manifest_id,
+            namespace: emitter.namespace.clone(),
+            source_family: emitter.source_family.clone(),
+            manifest_version: emitter.manifest_version,
+        });
     }
     Ok(output)
 }

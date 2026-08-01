@@ -7,6 +7,8 @@ watched tuple, companion checks, retention generation, admission epoch,
 [glossary](glossary.md); "promotion" in this document always means checkpoint
 promotion, the chain-safety sense.
 
+Stage B transition constraint: the old-indexer commands below describe the last pre-cut production release. A build containing the Stage B adapter/indexer cuts is for CI and end-to-end testing only and must not be deployed; production stays on that pre-cut release until the `ingest`, `interpret`, `project`, and `live` phase pipeline replaces it, and the old runtime is deleted before the next deployment.
+
 The production container image contains the three runnable bigname binaries:
 
 - `bigname-api`
@@ -94,22 +96,6 @@ The indexer exports:
   persistence.
   `normalized_events_upserted_total` counts newly inserted normalized-event
   identities and excludes idempotent replays of unchanged identities.
-- `startup_adapter_reconcile_normalized_events_processed_total{adapter,chain}`
-  counts normalized events in batches successfully committed by
-  `upsert_normalized_events_with_summary` while the matching startup checkpoint
-  row is `stream_complete`. It includes newly inserted and unchanged event
-  identities and is a process-lifetime counter, so a retry in the same process
-  continues increasing it.
-  `startup_adapter_reconcile_staged_items{adapter,chain}` copies the checkpoint
-  row's `staged_item_count` while that window is active and returns to zero
-  after it closes. The currently observed adapter value is
-  `ens_v1_subregistry_discovery`.
-  For that adapter, a staged item is one latest registry or resolver
-  assignment. The counter measures only the later normalized-event upsert
-  pass: one staged assignment can emit no event, and the earlier
-  [discovery-edge](glossary.md#discovery-graph--discovery-edge) diff also scans
-  stored edges. The two values therefore expose event-emission progress
-  against staged assignment work, not an exact reconciled-item fraction.
 - `admission_retries_total` and `fence_wait_seconds`, labeled only by `chain`.
 - `coverage_recovery_jobs_total{chain,outcome}`,
   `coverage_provider_queries_total{chain}`, and
@@ -145,7 +131,7 @@ Every service also exports
 
 Label cardinality is bounded by configuration and compiled behavior: chain
 IDs, registered route templates, a fixed HTTP method set, status classes,
-provider kinds, startup adapter values, projection names, operations, and
+provider kinds, projection names, operations, and
 outcomes. Metrics never use addresses, names, query strings, or raw request
 paths as labels. Build and storage-version labels contribute one active series
 per running process.
@@ -282,22 +268,13 @@ triggers manually or add the code change or drop migration to this rollout.
 
 ### Resolver-profile replay after an upgrade or compaction
 
-The raw-log retention migration marks every pre-existing chain as generation
-one because the database cannot prove that its staged ENSv1 resolver history was
-never compacted. The resolver-profile queue migration does not schedule
-historical repair for those chains, and the first authority-journal capture is a
-baseline rather than a change. A later resolver code-hash or manifest/discovery
-authority change is still recorded as pending work, but the indexer fails that
-repair closed before publishing projection invalidations or acknowledging the
-queue generation.
-
-The current release has no in-place ENSv1 resolver-profile coverage proof and
-no versioned adapter-snapshot import. Running an ordinary ranged backfill does
-not make a generation-one or later corpus acceptable to this repair path. The
-current recovery is a full database rebootstrap from the checked-in migrations
-and configured historical bootstrap into a new generation-zero corpus. Do not
-delete the pending queue row or manually advance `processed_generation`; that
-would discard an unperformed absence-aware repair.
+The legacy resolver-profile queue, authority journal, and reconciliation tables
+remain in the transitional schema, but the old indexer neither advances nor
+drains them. Rebootstrap and ranged backfill do not reactivate that removed
+convergence path. Treat any retained queue rows as audit-only transitional data;
+do not delete them or manually advance `processed_generation`. A resolver-profile
+or code-hash change that needs projection refresh requires a separately reviewed
+explicit replay or restage.
 
 ### Projection replay version upgrades
 
@@ -975,14 +952,14 @@ provider finalized head latched for that chain's startup run. A configured
 provider that omits that finalized head, or reports it above the canonical head,
 fails automatic bootstrap for the chain. Bootstrap does not fall back to the
 canonical tip: the unfinalized tail remains live-intake work and cannot produce
-number-keyed bootstrap coverage. Automatic ENSv2 startup may repeat this plan as
-newly admitted ENSv2 targets expand the authoritative set, but every pass keeps
-the same finalized upper bound; it does not generically enumerate discovery
-targets for other families. ENSv1 generic resolver and Basenames recursive
-registry history use their separate scan mechanisms. Bootstrap does not cap
-work to a recent window. This is still operational intake work: completing
-bootstrap alone is not consumer-replacement or route-coverage evidence without
-the relevant projection, route, conformance, and rollout gates.
+number-keyed bootstrap coverage. The initial plan is not repeated when
+interpretation admits another ENSv2 target; historical facts for that target
+require an explicit raw-only backfill followed by replay. ENSv1 generic
+resolver and Basenames recursive registry history use their separate scan
+mechanisms. Bootstrap does not cap work to a recent window. This is still
+operational intake work: completing bootstrap alone is not consumer-replacement
+or route-coverage evidence without the relevant projection, route, conformance,
+and rollout gates.
 
 Bootstrap backfill identity is tied to the selected deployment profile, chain,
 finite range, and source identity, not the manifest root path used by a given
@@ -1010,14 +987,11 @@ round trips during long historical bootstrap, while also increasing the amount
 of range work retried after a failed chunk. During automatic startup only, each
 configured chunk is executed as progress units of at most 32 blocks and the
 indexer heartbeat advances after each completed unit; manual backfills retain
-the configured chunk as their execution unit. The startup adapter pass then
-advances that same heartbeat after checkpoint stream pages and bounded
-discovery, identity, binding, and normalized-event finalization batches, so a
-large materialization stays live without a free-running timer masking a stuck
-operation. Live manifest and discovery refresh passes do not write boot
-checkpoints; they use adapter progress callbacks where available, periodic
-in-flight beats around uncheckpointed ENSv1 whole-corpus work, and
-family-boundary beats. Raw-only sparse backfill also caps each materialized push with
+the configured chunk as their execution unit. The startup adapter pass invokes
+the plain full-family entry points and advances liveness only after completed
+family boundaries, not while a family call is pending. It does not publish
+adapter checkpoint progress or dispatch by adapter derivation version. Raw-only
+sparse backfill also caps each materialized push with
 `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_MAX_LOGS_PER_PUSH` so dense log spans are
 split before transaction and receipt fetch/persist work. The older
 `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_MAX_LOGS_PER_RANGE` name is still accepted
@@ -1350,15 +1324,14 @@ connection is outside the SQLx primary pool limit, so include up to one
 additional server connection per simultaneously active full-closure lane in
 PostgreSQL capacity planning.
 
-### Targeted stateless normalized-event repair
+### Targeted stateless normalized-event replay
 
-Use `replay normalized-events --stateless-only` when a retained canonical raw
-fact re-derives a stateless normalized event differently from a stale stored
-row and the ordinary family sync correctly fails closed on that stable event
-identity. This is a write-authoritative repair, not a dry run: stop the indexer
-so live adapter or startup family sync cannot race the selected rows. Projection
-workers may remain running because the repair publishes the ordinary durable
-normalized-event change journal they consume.
+Use `replay normalized-events --stateless-only` to re-derive only the producers
+classified `stateless_raw_fact` over a bounded canonical selection. Stop the
+indexer so live adapter or startup family sync cannot race the selected rows.
+Missing identities are inserted and matching identities are idempotent; a
+differing payload for an existing identity is a hard failure. This mode is not
+stale-content repair and does not gain semantic replacement authority.
 
 For an exact block, run:
 
@@ -1370,8 +1343,8 @@ bigname-indexer replay normalized-events \
   --block-hash <canonical-block-hash>
 ```
 
-Repeat `--block-hash` to select more than one exact block. A contiguous repair
-window uses the same authority without invoking full closure:
+Repeat `--block-hash` to select more than one exact block. A contiguous replay
+window uses the same producer selection without invoking full closure:
 
 ```sh
 bigname-indexer replay normalized-events \
@@ -1395,28 +1368,11 @@ unwrapped-authority or any other closure/stateful lane. Leaving off the flag
 preserves the existing refusal when a block-hash or source-scoped selection
 includes a closure/context-dependent adapter.
 
-For every derived identity, the storage log message
-`stateless-only normalized-event replay identity examined` carries
-`event_identity`, `derivation_kind`,
-`identity_outcome=inserted|unchanged|superseded|skipped_non_canonical_source`,
-and `differing_fields`. An `observed` or `orphaned` input receives the skip
-outcome and cannot overwrite a canonical row. The
-storage message `stateless-only normalized-event replay authority completed`
-reports those counts for one persistence transaction and can appear more than
-once for a chunked range. Use the command-wide `raw-fact normalized-event replay
-completed` message for aggregate `identities_examined`, `identities_inserted`,
-`identities_unchanged`, `identities_superseded`, and
-`identities_skipped_non_canonical_source`. Treat an unexpected identity or
-differing field as a hard stop before widening the selection. A superseded row
-keeps its `normalized_event_id`, receives the current derivation, and the
-normalized-event storage trigger appends a `content_update` record so the
-worker invalidates and re-derives dependent projections. If the same update
-also changes canonicality, the trigger additionally appends the ordinary
-`canonicality_update`. An unchanged rerun appends no additional change record.
-Replay fails closed with `would change downstream projection identity` if old
-and current content would address different projection keys; the retained-row
-journal cannot reconstruct the old key, so that case needs a separately
-reviewed key-aware repair rather than this flag.
+The command emits the ordinary raw-fact replay timing and synchronized/inserted
+counts; there are no per-identity arbitration outcomes. Treat any payload
+mismatch as a hard stop before widening the selection. Correcting retained
+semantic content requires a separately ratified field-level or key-aware repair,
+not this flag.
 
 The 2026-07-23 Ethereum Mainnet repair is the reference scenario. Four
 `ens_v1_registry_resolver_changed` rows retained pre-#208 attribution in
@@ -1517,10 +1473,9 @@ the image change determines the upgrade procedure:
   pending without restoring its raw facts.
 - A cursor still in progress at upgrade has
   `next_block_number <= target_block_number`. The two-phase image runs one full
-  phase-1 pass over the saved range and latched target, then resumes phase 2 from
-  the existing closure checkpoints. Those checkpoints carry over because both
-  images use the same deployment profile, chain, cursor kind, range, and target
-  as their replay checkpoint context.
+  phase-1 pass over the saved range and latched target, then reruns phase 2 from
+  the retained closure boundary. The global cursor remains the completion
+  fence; current adapters do not resume private closure checkpoints.
 
 Where feasible, deploy the two-phase image before in-flight cursors complete.
 This converts the omission into the expected one-time full phase-1 cost and

@@ -60,7 +60,7 @@ pub(crate) async fn run_normalized_replay_catchup_chain(
         let progressed = match status {
             Ok(status) => {
                 if let Err(error) =
-                    bigname_adapters::StartupAdapterProgress::record(&mut progress, &pool).await
+                    crate::StartupAdapterProgress::record(&mut progress, &pool).await
                 {
                     warn!(
                         service = "indexer",

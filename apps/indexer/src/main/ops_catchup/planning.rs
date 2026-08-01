@@ -8,9 +8,6 @@ use sqlx::types::Uuid;
 
 use crate::backfill::BackfillBlockRange;
 
-#[path = "planning/recovery.rs"]
-mod recovery;
-pub(super) use recovery::merge_retained_history_recovery_targets;
 #[path = "planning/chunks.rs"]
 mod chunks;
 #[cfg(test)]

@@ -8,9 +8,7 @@ use bigname_storage::{
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 
-use crate::{
-    checkpoint_context::AdapterCheckpointContext, registry_migration_cache::MigratedRegistryNodes,
-};
+use crate::registry_migration_cache::MigratedRegistryNodes;
 
 use super::{
     EnsV1SubregistryDiscoverySyncSummary, assignment::ObservedRegistryAssignment,
@@ -18,14 +16,20 @@ use super::{
 };
 
 mod cleanup;
+mod context;
 mod items;
 mod payload;
 mod persistence;
 #[cfg(test)]
 mod tests;
 
-pub use cleanup::clear_replay_adapter_checkpoints;
 pub(super) use cleanup::delete_checkpoint;
+#[cfg(test)]
+pub(super) use context::clear_startup_adapter_checkpoints;
+pub(super) use context::{
+    AdapterCheckpointContext, FULL_CLOSURE_CHECKPOINT_SCOPE, ReplayAdapterCheckpointContext,
+    StartupAdapterCheckpointContext,
+};
 use items::insert_checkpoint_items;
 use payload::{assignment_from_payload, assignment_payload, summary_from_payload, summary_payload};
 use persistence::{load_checkpoint_row, update_checkpoint_progress};

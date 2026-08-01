@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::StartupAdapterProgress;
 use anyhow::{Context, Result, bail};
-use bigname_adapters::StartupAdapterProgress;
 use bigname_storage::{RawBlock, RawCodeHash, load_raw_blocks_by_hashes, upsert_raw_code_hashes};
 use sqlx::Row;
 

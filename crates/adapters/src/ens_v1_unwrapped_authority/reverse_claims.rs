@@ -2,102 +2,11 @@ use super::*;
 use bigname_storage::sql_row;
 use sqlx::postgres::PgRow;
 
-use crate::checkpoint_context::StartupAdapterProgress;
-
-const REVERSE_CLAIM_PROGRESS_ROWS: i64 = 1_000;
-
 pub(super) async fn load_reverse_claim_sources(
     pool: &PgPool,
     chain: &str,
 ) -> Result<HashMap<String, ReverseClaimSource>> {
     load_reverse_claim_sources_internal(pool, chain, None).await
-}
-
-pub(super) async fn load_reverse_claim_sources_with_progress(
-    pool: &PgPool,
-    chain: &str,
-    progress: &mut dyn StartupAdapterProgress,
-) -> Result<HashMap<String, ReverseClaimSource>> {
-    let mut sources = HashMap::new();
-    let mut after_reverse_node = None::<String>;
-    loop {
-        let rows = sqlx::query(
-            r#"
-            SELECT DISTINCT ON (LOWER(ne.after_state->>'reverse_node'))
-                LOWER(ne.after_state->>'reverse_node') AS reverse_node,
-                LOWER(ne.after_state->>'address') AS address,
-                COALESCE(ne.after_state->>'namespace', ne.namespace) AS namespace,
-                ne.after_state->>'coin_type' AS coin_type,
-                ne.after_state->>'reverse_name' AS reverse_name,
-                COALESCE(
-                    ne.after_state->'claim_provenance'->>'source_family',
-                    ne.source_family
-                ) AS claim_source_family,
-                COALESCE(
-                    ne.after_state->'claim_provenance'->>'contract_role',
-                    $4
-                ) AS claim_contract_role,
-                ne.after_state->'claim_provenance'->>'contract_instance_id' AS claim_contract_instance_id,
-                COALESCE(
-                    ne.after_state->'claim_provenance'->>'emitting_address',
-                    ne.raw_fact_ref->>'emitting_address'
-                ) AS claim_emitting_address
-            FROM normalized_events ne
-            WHERE ne.chain_id = $1
-              AND COALESCE(ne.after_state->>'namespace', ne.namespace) IN ($2, $3)
-              AND ne.event_kind = $5
-              AND ne.derivation_kind = $6
-              AND ne.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
-              AND ne.after_state->>'reverse_node' IS NOT NULL
-              AND ne.after_state->>'reverse_node' <> ''
-              AND ne.after_state->>'address' IS NOT NULL
-              AND ne.after_state->>'address' <> ''
-              AND ne.after_state->>'coin_type' IS NOT NULL
-              AND ne.after_state->>'coin_type' <> ''
-              AND ne.after_state->>'reverse_name' IS NOT NULL
-              AND ne.after_state->>'reverse_name' <> ''
-              AND (
-                  $7::TEXT IS NULL
-                  OR LOWER(ne.after_state->>'reverse_node') > $7::TEXT
-              )
-            ORDER BY
-                LOWER(ne.after_state->>'reverse_node'),
-                ne.block_number DESC NULLS LAST,
-                ne.log_index DESC NULLS LAST,
-                ne.normalized_event_id DESC
-            LIMIT $8
-            "#,
-        )
-        .bind(chain)
-        .bind("ens")
-        .bind("basenames")
-        .bind(CONTRACT_ROLE_REVERSE_REGISTRAR)
-        .bind(EVENT_KIND_REVERSE_CHANGED)
-        .bind(DERIVATION_KIND_ENS_V1_REVERSE_CLAIM)
-        .bind(after_reverse_node.as_deref())
-        .bind(REVERSE_CLAIM_PROGRESS_ROWS)
-        .fetch_all(pool)
-        .await
-        .with_context(|| format!("failed to page reverse claim sources for chain {chain}"))?;
-        if rows.is_empty() {
-            break;
-        }
-        let page_len = rows.len();
-        for row in rows {
-            let (reverse_node, source) = reverse_claim_source_from_row(&row)?;
-            after_reverse_node = Some(reverse_node.clone());
-            sources.insert(reverse_node, source);
-        }
-        progress.record(pool).await?;
-        if page_len < usize::try_from(REVERSE_CLAIM_PROGRESS_ROWS).expect("page limit fits usize") {
-            break;
-        }
-    }
-    Ok(sources)
 }
 
 pub(super) async fn load_reverse_claim_sources_for_nodes(

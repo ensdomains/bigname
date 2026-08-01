@@ -1,19 +1,9 @@
 use std::collections::{BTreeMap, HashSet};
 
 use anyhow::Result;
-use bigname_storage::NormalizedEventReplayAuthoritySummary;
 use sqlx::PgPool;
 
-use crate::{
-    checkpoint_context::StartupAdapterProgress,
-    normalized_event_support::{
-        upsert_normalized_events_in_chunks_with_counts,
-        upsert_normalized_events_in_chunks_with_counts_and_progress,
-        upsert_normalized_events_in_chunks_with_stateless_replay_authority_counts,
-        upsert_normalized_events_in_chunks_with_stateless_replay_authority_counts_and_progress,
-    },
-    startup_progress::{STARTUP_ADAPTER_PROGRESS_PAGE_ROWS, record_processed_row_progress},
-};
+use crate::normalized_event_support::upsert_normalized_events_in_chunks_with_counts;
 
 mod active_emitters;
 mod events;
@@ -66,9 +56,7 @@ impl EnsV1ReverseClaimSyncSummary {
         chain: &str,
         block_hashes: &[String],
     ) -> Result<Self> {
-        sync_ens_v1_reverse_claim_with_scope(pool, chain, true, block_hashes, None, false, None)
-            .await
-            .map(|(summary, _)| summary)
+        sync_ens_v1_reverse_claim_with_scope(pool, chain, true, block_hashes, None).await
     }
 
     pub async fn sync_for_block_hashes_with_source_scope(
@@ -77,120 +65,8 @@ impl EnsV1ReverseClaimSyncSummary {
         block_hashes: &[String],
         source_scope: &[(String, String, i64, i64)],
     ) -> Result<Self> {
-        sync_ens_v1_reverse_claim_with_scope(
-            pool,
-            chain,
-            true,
-            block_hashes,
-            Some(source_scope),
-            false,
-            None,
-        )
-        .await
-        .map(|(summary, _)| summary)
-    }
-
-    pub async fn sync_for_block_hashes_with_stateless_replay_authority(
-        pool: &PgPool,
-        chain: &str,
-        block_hashes: &[String],
-    ) -> Result<(Self, NormalizedEventReplayAuthoritySummary)> {
-        sync_ens_v1_reverse_claim_with_scope(pool, chain, true, block_hashes, None, true, None)
+        sync_ens_v1_reverse_claim_with_scope(pool, chain, true, block_hashes, Some(source_scope))
             .await
-    }
-
-    pub async fn sync_for_block_hashes_with_source_scope_and_stateless_replay_authority(
-        pool: &PgPool,
-        chain: &str,
-        block_hashes: &[String],
-        source_scope: &[(String, String, i64, i64)],
-    ) -> Result<(Self, NormalizedEventReplayAuthoritySummary)> {
-        sync_ens_v1_reverse_claim_with_scope(
-            pool,
-            chain,
-            true,
-            block_hashes,
-            Some(source_scope),
-            true,
-            None,
-        )
-        .await
-    }
-
-    pub async fn sync_for_block_hashes_with_stateless_replay_authority_and_progress(
-        pool: &PgPool,
-        chain: &str,
-        block_hashes: &[String],
-        progress: &mut dyn StartupAdapterProgress,
-    ) -> Result<(Self, NormalizedEventReplayAuthoritySummary)> {
-        sync_ens_v1_reverse_claim_with_scope(
-            pool,
-            chain,
-            true,
-            block_hashes,
-            None,
-            true,
-            Some(progress),
-        )
-        .await
-    }
-
-    pub async fn sync_for_block_hashes_with_source_scope_and_stateless_replay_authority_and_progress(
-        pool: &PgPool,
-        chain: &str,
-        block_hashes: &[String],
-        source_scope: &[(String, String, i64, i64)],
-        progress: &mut dyn StartupAdapterProgress,
-    ) -> Result<(Self, NormalizedEventReplayAuthoritySummary)> {
-        sync_ens_v1_reverse_claim_with_scope(
-            pool,
-            chain,
-            true,
-            block_hashes,
-            Some(source_scope),
-            true,
-            Some(progress),
-        )
-        .await
-    }
-
-    pub async fn sync_for_block_hashes_with_progress(
-        pool: &PgPool,
-        chain: &str,
-        block_hashes: &[String],
-        progress: &mut dyn StartupAdapterProgress,
-    ) -> Result<Self> {
-        sync_ens_v1_reverse_claim_with_scope(
-            pool,
-            chain,
-            true,
-            block_hashes,
-            None,
-            false,
-            Some(progress),
-        )
-        .await
-        .map(|(summary, _)| summary)
-    }
-
-    pub async fn sync_for_block_hashes_with_source_scope_and_progress(
-        pool: &PgPool,
-        chain: &str,
-        block_hashes: &[String],
-        source_scope: &[(String, String, i64, i64)],
-        progress: &mut dyn StartupAdapterProgress,
-    ) -> Result<Self> {
-        sync_ens_v1_reverse_claim_with_scope(
-            pool,
-            chain,
-            true,
-            block_hashes,
-            Some(source_scope),
-            false,
-            Some(progress),
-        )
-        .await
-        .map(|(summary, _)| summary)
     }
 }
 
@@ -198,19 +74,7 @@ pub async fn sync_ens_v1_reverse_claim(
     pool: &PgPool,
     chain: &str,
 ) -> Result<EnsV1ReverseClaimSyncSummary> {
-    sync_ens_v1_reverse_claim_with_scope(pool, chain, false, &[], None, false, None)
-        .await
-        .map(|(summary, _)| summary)
-}
-
-pub async fn sync_ens_v1_reverse_claim_with_progress(
-    pool: &PgPool,
-    chain: &str,
-    progress: &mut dyn StartupAdapterProgress,
-) -> Result<EnsV1ReverseClaimSyncSummary> {
-    sync_ens_v1_reverse_claim_with_scope(pool, chain, false, &[], None, false, Some(progress))
-        .await
-        .map(|(summary, _)| summary)
+    sync_ens_v1_reverse_claim_with_scope(pool, chain, false, &[], None).await
 }
 
 pub async fn sync_ens_v1_reverse_claim_range(
@@ -224,9 +88,7 @@ pub async fn sync_ens_v1_reverse_claim_range(
         .into_iter()
         .map(|emitter| (emitter.source_family, emitter.address, from_block, to_block))
         .collect::<Vec<_>>();
-    sync_ens_v1_reverse_claim_with_scope(pool, chain, false, &[], Some(&source_scope), false, None)
-        .await
-        .map(|(summary, _)| summary)
+    sync_ens_v1_reverse_claim_with_scope(pool, chain, false, &[], Some(&source_scope)).await
 }
 
 async fn sync_ens_v1_reverse_claim_with_scope(
@@ -235,21 +97,13 @@ async fn sync_ens_v1_reverse_claim_with_scope(
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
     source_scope: Option<&[(String, String, i64, i64)]>,
-    stateless_replay_authority: bool,
-    mut progress: Option<&mut dyn StartupAdapterProgress>,
-) -> Result<(
-    EnsV1ReverseClaimSyncSummary,
-    NormalizedEventReplayAuthoritySummary,
-)> {
+) -> Result<EnsV1ReverseClaimSyncSummary> {
     let mut active_emitters = load_active_emitters(pool, chain).await?;
     if let Some(source_scope) = source_scope {
         active_emitters.retain(|emitter| reverse_scope_includes_emitter(source_scope, emitter));
     }
     if active_emitters.is_empty() {
-        return Ok((
-            empty_summary(0),
-            NormalizedEventReplayAuthoritySummary::default(),
-        ));
+        return Ok(empty_summary(0));
     }
 
     let raw_logs = load_reverse_raw_logs(
@@ -259,20 +113,16 @@ async fn sync_ens_v1_reverse_claim_with_scope(
         restrict_to_block_hashes,
         block_hashes,
         source_scope,
-        &mut progress,
     )
     .await?;
     let scanned_log_count = raw_logs.len();
     if raw_logs.is_empty() {
-        return Ok((
-            empty_summary(scanned_log_count),
-            NormalizedEventReplayAuthoritySummary::default(),
-        ));
+        return Ok(empty_summary(scanned_log_count));
     }
 
     let mut matched_log_refs = HashSet::new();
     let mut events = Vec::new();
-    for (index, raw_log) in raw_logs.iter().enumerate() {
+    for raw_log in &raw_logs {
         let built_events = build_reverse_changed_events(raw_log)?;
         if !built_events.is_empty() {
             matched_log_refs.insert((
@@ -283,62 +133,19 @@ async fn sync_ens_v1_reverse_claim_with_scope(
             ));
             events.extend(built_events);
         }
-        record_processed_row_progress(pool, &mut progress, index + 1, raw_logs.len()).await?;
     }
 
     if events.is_empty() {
-        return Ok((
-            empty_summary(scanned_log_count),
-            NormalizedEventReplayAuthoritySummary::default(),
-        ));
+        return Ok(empty_summary(scanned_log_count));
     }
 
-    let (counts, authority) = if stateless_replay_authority {
-        match progress {
-            Some(progress) => {
-                upsert_normalized_events_in_chunks_with_stateless_replay_authority_counts_and_progress(
-                    pool,
-                    &events,
-                    "ENSv1 reverse normalized-event",
-                    STARTUP_ADAPTER_PROGRESS_PAGE_ROWS,
-                    Some(progress),
-                )
-                .await?
-            }
-            None => {
-                upsert_normalized_events_in_chunks_with_stateless_replay_authority_counts(
-                    pool,
-                    &events,
-                    "ENSv1 reverse normalized-event",
-                    10_000,
-                )
-                .await?
-            }
-        }
-    } else {
-        let counts = match progress {
-            Some(progress) => {
-                upsert_normalized_events_in_chunks_with_counts_and_progress(
-                    pool,
-                    &events,
-                    "ENSv1 reverse normalized-event",
-                    STARTUP_ADAPTER_PROGRESS_PAGE_ROWS,
-                    Some(progress),
-                )
-                .await?
-            }
-            None => {
-                upsert_normalized_events_in_chunks_with_counts(
-                    pool,
-                    &events,
-                    "ENSv1 reverse normalized-event",
-                    10_000,
-                )
-                .await?
-            }
-        };
-        (counts, NormalizedEventReplayAuthoritySummary::default())
-    };
+    let counts = upsert_normalized_events_in_chunks_with_counts(
+        pool,
+        &events,
+        "ENSv1 reverse normalized-event",
+        10_000,
+    )
+    .await?;
     let (total_synced_count, total_inserted_count, by_kind) =
         counts.into_parts_by_kind(|synced_count, inserted_count| {
             EnsV1ReverseClaimKindSyncSummary {
@@ -347,16 +154,13 @@ async fn sync_ens_v1_reverse_claim_with_scope(
             }
         });
 
-    Ok((
-        EnsV1ReverseClaimSyncSummary {
-            scanned_log_count,
-            matched_log_count: matched_log_refs.len(),
-            total_synced_count,
-            total_inserted_count,
-            by_kind,
-        },
-        authority,
-    ))
+    Ok(EnsV1ReverseClaimSyncSummary {
+        scanned_log_count,
+        matched_log_count: matched_log_refs.len(),
+        total_synced_count,
+        total_inserted_count,
+        by_kind,
+    })
 }
 
 fn empty_summary(scanned_log_count: usize) -> EnsV1ReverseClaimSyncSummary {

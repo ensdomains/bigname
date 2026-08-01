@@ -33,44 +33,6 @@ pub(super) fn resolver_profile_fact_nodes(
     Ok(nodes.into_iter().collect())
 }
 
-pub(super) fn authority_state_keys_for_raw_logs(
-    raw_logs: &[AuthorityRawLogRow],
-    event_topics: &AuthorityEventTopics,
-) -> Result<BTreeSet<String>> {
-    let mut keys = BTreeSet::new();
-    let empty_known_names = HashMap::new();
-    for raw_log in raw_logs {
-        match registry_migration_guard_action(raw_log, event_topics)? {
-            RegistryMigrationGuardAction::MarkMigrated(node)
-            | RegistryMigrationGuardAction::SuppressIfMigrated(node) => {
-                keys.insert(node);
-            }
-            RegistryMigrationGuardAction::None => {}
-        }
-        for observation in build_authority_observations(raw_log, event_topics)? {
-            if let Some(namehash) = observation_namehash(&observation) {
-                keys.insert(namehash.to_ascii_lowercase());
-            } else {
-                keys.insert(
-                    labelhash_observation_target(&observation, &empty_known_names)?.history_key,
-                );
-            }
-            if let AuthorityObservation::RecordChanged(event) = &observation
-                && event.selector.record_key == "name"
-                && let Some(raw_name) = event.raw_name.as_deref()
-                && let Ok(name) = observe_text_name_with_reference(
-                    raw_name,
-                    &event.reference,
-                    ENS_NORMALIZER_VERSION,
-                )
-            {
-                keys.insert(name.namehash);
-            }
-        }
-    }
-    Ok(keys)
-}
-
 pub(super) fn apply_authority_raw_log(
     raw_log: &AuthorityRawLogRow,
     histories: &mut BTreeMap<String, NameHistory>,
@@ -85,7 +47,6 @@ pub(super) fn apply_authority_raw_log(
     resolver_profile_gate: &ResolverProfileGate,
     block_index: &CanonicalBlockIndex,
     event_topics: &AuthorityEventTopics,
-    mut checkpoint_delta: Option<&mut UnwrappedAuthorityReplayCheckpointDelta>,
 ) -> Result<bool> {
     let migration_guard = registry_migration_guard_action(raw_log, event_topics)?;
     if migration_guard.suppressed_by(migrated_registry_nodes) {
@@ -98,11 +59,7 @@ pub(super) fn apply_authority_raw_log(
         && is_ens_v1_reverse_name_observation(raw_log, reverse_claim_sources, event_topics)?;
     if resolver_fact_rejected && !retain_reverse_name_observation {
         if let Some(node) = migration_guard.mark_migrated_node() {
-            if migrated_registry_nodes.insert(node.to_owned())
-                && let Some(delta) = checkpoint_delta.as_deref_mut()
-            {
-                delta.mark_migrated_node(node);
-            }
+            migrated_registry_nodes.insert(node.to_owned());
         }
         return Ok(false);
     }
@@ -110,11 +67,7 @@ pub(super) fn apply_authority_raw_log(
         resolver_profile_gate.resolver_local_fact_profile_status(raw_log, event_topics)?;
     let observations = build_authority_observations(raw_log, event_topics)?;
     if let Some(node) = migration_guard.mark_migrated_node() {
-        if migrated_registry_nodes.insert(node.to_owned())
-            && let Some(delta) = checkpoint_delta.as_deref_mut()
-        {
-            delta.mark_migrated_node(node);
-        }
+        migrated_registry_nodes.insert(node.to_owned());
     }
     if observations.is_empty() {
         return Ok(false);
@@ -133,7 +86,6 @@ pub(super) fn apply_authority_raw_log(
             reverse_claim_sources,
             resolver_fact_profile_status,
             block_index,
-            checkpoint_delta.as_deref_mut(),
         )?;
     }
     Ok(true)
@@ -171,7 +123,6 @@ fn apply_authority_observation(
     reverse_claim_sources: &HashMap<String, ReverseClaimSource>,
     resolver_fact_profile_status: Option<ResolverFactProfileStatus>,
     block_index: &CanonicalBlockIndex,
-    mut checkpoint_delta: Option<&mut UnwrappedAuthorityReplayCheckpointDelta>,
 ) -> Result<()> {
     if let Some(name) = learn_record_raw_name_preimage(
         &observation,
@@ -179,12 +130,8 @@ fn apply_authority_observation(
         known_names_by_namehash,
         known_name_refs_by_namehash,
         namehash_to_labelhash,
-        checkpoint_delta.as_deref_mut(),
     ) && let Some(pending) = pending_namehash_observations.remove(&name.namehash)
     {
-        if let Some(delta) = checkpoint_delta.as_deref_mut() {
-            delta.mark_pending_observations(name.namehash.clone());
-        }
         let labelhash = name
             .labelhashes
             .first()
@@ -205,7 +152,6 @@ fn apply_authority_observation(
                 pending_namehash_observations,
                 same_tx_name_intro_positions,
                 block_index,
-                checkpoint_delta.as_deref_mut(),
             )?;
         }
     }
@@ -238,7 +184,6 @@ fn apply_authority_observation(
                 pending_namehash_observations,
                 same_tx_name_intro_positions,
                 block_index,
-                checkpoint_delta.as_deref_mut(),
             );
         } else if !defer_to_same_tx_intro
             && let Some(claim_source) = reverse_claim_sources.get(&normalized_namehash).cloned()
@@ -256,18 +201,12 @@ fn apply_authority_observation(
                 observation,
                 resolver_fact_profile_status,
             )?;
-            if let Some(delta) = checkpoint_delta.as_deref_mut() {
-                delta.mark_reverse_history(normalized_namehash);
-            }
             return Ok(());
         } else {
             pending_namehash_observations
                 .entry(normalized_namehash.clone())
                 .or_default()
                 .push(observation);
-            if let Some(delta) = checkpoint_delta.as_deref_mut() {
-                delta.mark_pending_observations(normalized_namehash);
-            }
             return Ok(());
         }
     } else {
@@ -290,7 +229,6 @@ fn apply_authority_observation(
             pending_namehash_observations,
             same_tx_name_intro_positions,
             block_index,
-            checkpoint_delta.as_deref_mut(),
         );
     }
 }

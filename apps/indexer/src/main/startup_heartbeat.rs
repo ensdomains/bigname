@@ -22,8 +22,6 @@ pub(crate) struct StartupHeartbeat {
     interval: Duration,
     last_recorded_at: Instant,
     full_closure_replay_lock_waits: BTreeSet<(String, String)>,
-    #[cfg(test)]
-    adapter_progress_count: usize,
 }
 
 pub(crate) struct StartupAdapterHeartbeat<'a> {
@@ -62,11 +60,6 @@ impl NormalizedReplayHeartbeat {
             last_recorded_at: Arc::new(Mutex::new(Instant::now())),
         })
     }
-
-    #[cfg(test)]
-    pub(crate) async fn adapter_progress_count(&self) -> usize {
-        self.heartbeat.lock().await.adapter_progress_count()
-    }
 }
 
 impl<'a> StartupAdapterHeartbeat<'a> {
@@ -78,18 +71,9 @@ impl<'a> StartupAdapterHeartbeat<'a> {
     }
 }
 
-impl bigname_adapters::StartupAdapterProgress for StartupAdapterHeartbeat<'_> {
-    fn record<'a>(
-        &'a mut self,
-        pool: &'a PgPool,
-    ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
-        Box::pin(async move {
-            #[cfg(test)]
-            {
-                self.heartbeat.adapter_progress_count += 1;
-            }
-            self.heartbeat.record_if_due(pool, self.chain_ids).await
-        })
+impl crate::StartupAdapterProgress for StartupAdapterHeartbeat<'_> {
+    fn record<'a>(&'a mut self, pool: &'a PgPool) -> crate::StartupAdapterProgressFuture<'a> {
+        Box::pin(async move { self.heartbeat.record_if_due(pool, self.chain_ids).await })
     }
 }
 
@@ -98,28 +82,15 @@ impl bigname_manifests::ManifestRuntimeProgress for StartupAdapterHeartbeat<'_> 
         &'a mut self,
         pool: &'a PgPool,
     ) -> bigname_manifests::ManifestRuntimeProgressFuture<'a> {
-        Box::pin(async move {
-            #[cfg(test)]
-            {
-                self.heartbeat.adapter_progress_count += 1;
-            }
-            self.heartbeat.record_if_due(pool, self.chain_ids).await
-        })
+        Box::pin(async move { self.heartbeat.record_if_due(pool, self.chain_ids).await })
     }
 }
 
-impl bigname_adapters::StartupAdapterProgress for NormalizedReplayHeartbeat {
-    fn record<'a>(
-        &'a mut self,
-        pool: &'a PgPool,
-    ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
+impl crate::StartupAdapterProgress for NormalizedReplayHeartbeat {
+    fn record<'a>(&'a mut self, pool: &'a PgPool) -> crate::StartupAdapterProgressFuture<'a> {
         Box::pin(async move {
             let mut last_recorded_at = self.last_recorded_at.lock().await;
             let mut heartbeat = self.heartbeat.lock().await;
-            #[cfg(test)]
-            {
-                heartbeat.adapter_progress_count += 1;
-            }
             if last_recorded_at.elapsed() < self.interval {
                 return Ok(());
             }
@@ -141,7 +112,7 @@ impl FullClosureReplayLockWaitHeartbeat for StartupAdapterHeartbeat<'_> {
         pool: &'a PgPool,
         deployment_profile: &'a str,
         chain: &'a str,
-    ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
+    ) -> crate::StartupAdapterProgressFuture<'a> {
         Box::pin(self.heartbeat.begin_full_closure_replay_lock_wait(
             pool,
             deployment_profile,
@@ -154,7 +125,7 @@ impl FullClosureReplayLockWaitHeartbeat for StartupAdapterHeartbeat<'_> {
         pool: &'a PgPool,
         deployment_profile: &'a str,
         chain: &'a str,
-    ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
+    ) -> crate::StartupAdapterProgressFuture<'a> {
         Box::pin(self.heartbeat.finish_full_closure_replay_lock_wait(
             pool,
             deployment_profile,
@@ -169,7 +140,7 @@ impl FullClosureReplayLockWaitHeartbeat for NormalizedReplayHeartbeat {
         pool: &'a PgPool,
         deployment_profile: &'a str,
         chain: &'a str,
-    ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
+    ) -> crate::StartupAdapterProgressFuture<'a> {
         Box::pin(async move {
             self.heartbeat
                 .lock()
@@ -184,7 +155,7 @@ impl FullClosureReplayLockWaitHeartbeat for NormalizedReplayHeartbeat {
         pool: &'a PgPool,
         deployment_profile: &'a str,
         chain: &'a str,
-    ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
+    ) -> crate::StartupAdapterProgressFuture<'a> {
         Box::pin(async move {
             self.heartbeat
                 .lock()
@@ -202,14 +173,7 @@ impl StartupHeartbeat {
             interval: interval.min(MAX_PROGRESS_HEARTBEAT_INTERVAL),
             last_recorded_at: Instant::now(),
             full_closure_replay_lock_waits: BTreeSet::new(),
-            #[cfg(test)]
-            adapter_progress_count: 0,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn adapter_progress_count(&self) -> usize {
-        self.adapter_progress_count
     }
 
     pub(crate) async fn record_if_due(
@@ -332,7 +296,7 @@ mod tests {
             StartupHeartbeat::new("bootstrap-test".to_owned(), Duration::from_secs(0));
         let chain_ids = vec!["ethereum-mainnet".to_owned(), "ethereum-mainnet".to_owned()];
         let mut progress = StartupAdapterHeartbeat::new(&mut heartbeat, &chain_ids);
-        bigname_adapters::StartupAdapterProgress::record(&mut progress, database.pool()).await?;
+        crate::StartupAdapterProgress::record(&mut progress, database.pool()).await?;
 
         let observed = bigname_storage::load_service_loop_heartbeat(
             database.pool(),

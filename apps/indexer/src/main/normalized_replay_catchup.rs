@@ -40,15 +40,12 @@ pub(crate) mod test_hook;
 
 #[cfg(test)]
 pub(crate) use test_hook::{
-    install_after_coverage_recovery as install_after_coverage_recovery_test_hook,
     install_after_progress as install_after_progress_test_hook,
     install_after_rewind as install_after_rewind_test_hook,
     install_before_coverage_attempt as install_before_coverage_attempt_test_hook,
     install_before_cursor_failure_record as install_before_cursor_failure_record_test_hook,
 };
 
-#[cfg(test)]
-pub(crate) use coverage_recovery::recover_ens_v2_live_coverage_requirement_for_replay;
 use coverage_recovery::replay_full_closure_with_coverage_recovery;
 use cursors::{advance_cursor, ensure_cursor, rewind_cursor_for_newly_observed_older_logs};
 use execution::{
@@ -533,16 +530,6 @@ pub(super) async fn run_normalized_replay_catchup_iteration_with_provider(
     )
     .await?;
     record_normalized_replay_progress(pool, progress).await?;
-    if closure_or_dependency_replay {
-        bigname_adapters::clear_replay_adapter_checkpoints(
-            pool,
-            &config.deployment_profile,
-            chain,
-            CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS,
-        )
-        .await?;
-        record_normalized_replay_progress(pool, progress).await?;
-    }
     if config.defer_projection_indexes && !closure_or_dependency_replay {
         ensure_projection_indexes_after_catchup(
             pool,

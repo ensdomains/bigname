@@ -1,7 +1,12 @@
 use std::collections::BTreeSet;
 
 use anyhow::Result;
-use bigname_manifests::ManifestBootstrapTarget;
+use bigname_manifests::{
+    ManifestBootstrapTarget, WatchedSourceSelector, WatchedTargetIdentity,
+    load_historical_watched_source_selector_plan,
+    load_historical_watched_source_selector_plan_with_progress,
+    load_manifest_declared_watched_source_selector_plan,
+};
 
 use crate::{
     backfill::{
@@ -11,13 +16,10 @@ use crate::{
     run::startup_heartbeat::{StartupAdapterHeartbeat, StartupHeartbeat},
 };
 
-use super::{
-    planning::{
-        BootstrapBackfillSegment, BootstrapBackfillTargetRange,
-        narrow_manifest_bootstrap_source_plan, narrow_manifest_bootstrap_source_plan_with_progress,
-        plan_bootstrap_backfill_segments, plan_bootstrap_backfill_segments_with_progress,
-    },
-    recovery::{load_bootstrap_source_plan, load_bootstrap_source_plan_with_progress},
+use super::planning::{
+    BootstrapBackfillSegment, BootstrapBackfillTargetRange, narrow_manifest_bootstrap_source_plan,
+    narrow_manifest_bootstrap_source_plan_with_progress, plan_bootstrap_backfill_segments,
+    plan_bootstrap_backfill_segments_with_progress,
 };
 
 const TARGET_ACCUMULATION_PROGRESS_ROWS: usize = 1_000;
@@ -114,64 +116,66 @@ pub(super) async fn narrow_bootstrap_source_plan_with_optional_progress(
     }
 }
 
-pub(super) async fn load_retained_recovery_targets_with_optional_progress(
-    pool: &sqlx::PgPool,
-    chain: &str,
-    through_block: i64,
-    heartbeat: &mut Option<&mut StartupHeartbeat>,
-    chain_ids: &[String],
-) -> Result<Vec<ManifestBootstrapTarget>> {
-    match heartbeat.as_deref_mut() {
-        Some(heartbeat) => {
-            let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
-            bigname_manifests::load_ens_v2_retained_history_recovery_targets_with_progress(
-                pool,
-                chain,
-                through_block,
-                &mut progress,
-            )
-            .await
-        }
-        None => {
-            bigname_manifests::load_ens_v2_retained_history_recovery_targets(
-                pool,
-                chain,
-                through_block,
-            )
-            .await
-        }
-    }
-}
-
 pub(super) async fn load_bootstrap_source_plan_with_optional_progress(
     pool: &sqlx::PgPool,
     chain: &str,
     targets: &[ManifestBootstrapTarget],
     range: BackfillBlockRange,
-    include_historical_recovery_targets: bool,
+    include_historical_targets: bool,
     heartbeat: &mut Option<&mut StartupHeartbeat>,
     chain_ids: &[String],
 ) -> Result<bigname_manifests::WatchedSourceSelectorPlan> {
+    let selector = WatchedSourceSelector::WatchedTargetSet(
+        targets
+            .iter()
+            .map(|target| WatchedTargetIdentity {
+                contract_instance_id: target.contract_instance_id,
+            })
+            .collect(),
+    );
     match heartbeat.as_deref_mut() {
         Some(heartbeat) => {
             let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
-            load_bootstrap_source_plan_with_progress(
+            if include_historical_targets {
+                load_historical_watched_source_selector_plan_with_progress(
+                    pool,
+                    chain,
+                    selector,
+                    range.from_block,
+                    range.to_block,
+                    &mut progress,
+                )
+                .await
+            } else {
+                let plan = load_manifest_declared_watched_source_selector_plan(
+                    pool,
+                    chain,
+                    selector,
+                    range.from_block,
+                    range.to_block,
+                )
+                .await?;
+                bigname_manifests::ManifestRuntimeProgress::record(&mut progress, pool).await?;
+                Ok(plan)
+            }
+        }
+        None if include_historical_targets => {
+            load_historical_watched_source_selector_plan(
                 pool,
                 chain,
-                targets,
-                range,
-                include_historical_recovery_targets,
-                &mut progress,
+                selector,
+                range.from_block,
+                range.to_block,
             )
             .await
         }
         None => {
-            load_bootstrap_source_plan(
+            load_manifest_declared_watched_source_selector_plan(
                 pool,
                 chain,
-                targets,
-                range,
-                include_historical_recovery_targets,
+                selector,
+                range.from_block,
+                range.to_block,
             )
             .await
         }

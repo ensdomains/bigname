@@ -1,5 +1,5 @@
+use crate::StartupAdapterProgress;
 use anyhow::{Context, Result};
-use bigname_adapters::StartupAdapterProgress;
 use bigname_manifests::{
     WatchedBackfillTarget, WatchedSourceSelectorKind, WatchedSourceSelectorPlan,
 };

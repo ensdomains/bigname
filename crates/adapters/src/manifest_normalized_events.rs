@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use bigname_manifests::{
-    ManifestRuntimeProgress, load_manifest_drift_inputs, load_manifest_drift_inputs_with_progress,
-};
+use bigname_manifests::load_manifest_drift_inputs;
 use bigname_storage::upsert_normalized_events_with_summary;
 use sqlx::PgPool;
 
@@ -26,24 +24,7 @@ const MANIFEST_EVENT_UPSERT_PROGRESS_ROWS: usize = 1_000;
 pub async fn sync_manifest_normalized_events(
     pool: &PgPool,
 ) -> Result<ManifestNormalizedEventSyncSummary> {
-    sync_manifest_normalized_events_inner(pool, None).await
-}
-
-pub async fn sync_manifest_normalized_events_with_progress(
-    pool: &PgPool,
-    progress: &mut dyn ManifestRuntimeProgress,
-) -> Result<ManifestNormalizedEventSyncSummary> {
-    sync_manifest_normalized_events_inner(pool, Some(progress)).await
-}
-
-async fn sync_manifest_normalized_events_inner(
-    pool: &PgPool,
-    mut progress: Option<&mut dyn ManifestRuntimeProgress>,
-) -> Result<ManifestNormalizedEventSyncSummary> {
-    let drift_inputs = match progress.as_deref_mut() {
-        Some(progress) => load_manifest_drift_inputs_with_progress(pool, progress).await?,
-        None => load_manifest_drift_inputs(pool).await?,
-    };
+    let drift_inputs = load_manifest_drift_inputs(pool).await?;
     if drift_inputs.active_manifests.is_empty() {
         return Ok(ManifestNormalizedEventSyncSummary {
             total_synced_count: 0,
@@ -53,18 +34,8 @@ async fn sync_manifest_normalized_events_inner(
     }
 
     let capabilities = load_active_capabilities(pool).await?;
-    if let Some(progress) = progress.as_deref_mut() {
-        progress.record(pool).await?;
-    }
     let contracts = active_proxy_contracts_by_manifest(&drift_inputs);
-    let events = build_normalized_events(
-        pool,
-        &drift_inputs,
-        &capabilities,
-        &contracts,
-        &mut progress,
-    )
-    .await?;
+    let events = build_normalized_events(&drift_inputs, &capabilities, &contracts)?;
 
     if events.is_empty() {
         return Ok(ManifestNormalizedEventSyncSummary {
@@ -107,9 +78,6 @@ async fn sync_manifest_normalized_events_inner(
             .get_mut(&kind)
             .expect("synced event kind must have a summary")
             .inserted_count += inserted_count;
-        if let Some(progress) = progress.as_deref_mut() {
-            progress.record(pool).await?;
-        }
         chunk_start = chunk_end;
     }
 

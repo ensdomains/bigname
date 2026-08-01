@@ -261,14 +261,6 @@ route inventory or a claim that every protocol transition is covered.
   and selector, explicit addr/contenthash absence gaps, and supported
   known-text enumeration. This scenario does not claim that an unsupported
   resolver remains pending.
-- `resolver_records::live_code_hash_profile_transition_orphans_and_reactivates_records`
-  — keeps the production indexer, continuous projection worker, and API live
-  while a copied PublicResolver's retained effective code hash moves from a
-  seed match to a mismatch and back. It proves durable queue acknowledgement,
-  absence-aware orphaning and same-identity reactivation of the exact resolver
-  record, and removal/restoration of the selector, declared value, and support
-  state; neither tested profile transition invokes normalized-event or
-  projection full replay.
 - `resolver_records::shared_resolver_keeps_per_name_records_and_overview_fan_in_unsupported`
   — two names share one resolver while per-node records stay distinct; the
   resolver overview keeps binding fan-in explicitly unsupported.
@@ -448,28 +440,6 @@ route inventory or a claim that every protocol transition is covered.
   `registerOnly` retains only the raw token mint and creates no registry node
   (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L237 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L248 @ basenames@1809bbc).
-- `ens_v2::ens_v2_sepolia_post_audit_declared_matrix_end_to_end` — deploys the
-  admitted post-audit Sepolia ENSv2 root registry, ETH registry, registrar, rent
-  oracle, and payment-token artifacts from `.refs/ens_v2`, mirrors
-  `manifests/sepolia/ethereum/ens`, registers `.eth` names through the
-  commit/reveal ETHRegistrar, and asserts identity/registration/control
-  under `ethereum-sepolia`, role-driven token regeneration and current
-  permission rows, and subregistry attach/swap behavior across two
-  ingests. Fresh registration confirms the promoted exact-name profile end
-  to end (`full`, `authoritative`, and `exact_name_profile`). Automatic ENSv2
-  bootstrap fetches each finite-known-start discovered child registry within
-  the same startup invocation, so the active child's registration projects
-  while the replaced child's name leaves the current listing. The
-  unregister→re-register cycle also reaches the live checkpoint and serves the
-  successor owner/resource. The on-chain cycle rotates both resource and token
-  lineage: `unregister` burns the token and increments
-  both `eacVersionId` and `tokenVersionId`, from which the registry
-  reconstructs later resource and token IDs
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201 @ ens_v2@48b3e2d)
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L205 @ ens_v2@48b3e2d)
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L206 @ ens_v2@48b3e2d)
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L637 @ ens_v2@48b3e2d)
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L647 @ ens_v2@48b3e2d).
 - `ens_v2_lifecycle::renewal_preserves_promoted_coverage_and_registry_edges_follow` —
   registrar renewal after registry expiry but within the post-audit grace period
   derives both fragments and preserves the promoted
@@ -480,12 +450,12 @@ route inventory or a claim that every protocol transition is covered.
   (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L84 @ ens_v2@48b3e2d).
 - `ens_v2_lifecycle::resolver_and_subregistry_edges_follow_set_change_zero` —
   resolver set/change/zero and subregistry attach/detach derive NULL-edge
-  detaches. The composed chain runs through normal automatic intake, proving
-  normalized replay recovers exact generation-bound coverage for the
-  dynamically admitted resolver and subregistry intervals before live
-  handoff. Automatic startup + replay also derives exactly one registry-scoped
-  `PermissionChanged` from the registration owner's `EACRolesChanged`,
-  attributed to the registered resource and owner. The registrar defines the
+  detaches, and the current declared resolver facet clears after the zero set.
+  The composed chain runs through normal automatic intake and also derives
+  exactly one registry-scoped `PermissionChanged` from the registration
+  owner's `EACRolesChanged`, attributed to the registered resource and owner.
+  It does not assert historical coverage for the discovered resolver or
+  subregistry contracts. The registrar defines the
   registration role bitmap and calls the registry
   (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L17 @ ens_v2@48b3e2d)
   (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L151 @ ens_v2@48b3e2d),
@@ -522,16 +492,6 @@ route inventory or a claim that every protocol transition is covered.
   with gated coverage; an ERC1155 sale migrates roles (admin-half rendered
   as `admin_*` powers) with no token regeneration while the declared
   registrant and registrant collection move from seller to buyer.
-- `ens_v2_lifecycle::discovered_v2_resolver_records_are_backfilled_in_session` — a
-  VerifiableFactory-proxied writable resolver
-  (upstream: .refs/ens_v2/contracts/script/setup.ts:L719 @ ens_v2@48b3e2d)
-  (upstream: .refs/ens_v2/contracts/script/setup.ts:L721 @ ens_v2@48b3e2d)
-  (upstream: .refs/ens_v2/contracts/script/setup.ts:L722 @ ens_v2@48b3e2d)
-  is discovery-admitted from the registry's `ResolverUpdated`; automatic
-  ENSv2 bootstrap fetches its three finite-known-start writes in-session,
-  derives the text/address/version observations, and keeps the public record
-  inventory explicitly `unsupported` because that summary is not yet
-  projected for ENSv2.
 - `verified_resolution::direct_path_verified_query_via_local_universal_resolver_persists_trace`
   — deploys the pinned ENSv1 UniversalResolver with local constructor
   dependencies (upstream: .refs/ens_v1/contracts/universalResolver/UniversalResolver.sol:L11 @ ens_v1@91c966f)

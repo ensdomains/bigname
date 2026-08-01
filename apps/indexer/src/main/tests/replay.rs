@@ -209,7 +209,6 @@ async fn full_closure_reverse_claim_replay_covers_multiple_pages() -> Result<()>
         database.pool(),
         "mainnet",
         chain,
-        "test_full_closure_reverse_claim_multiple_pages",
         100,
         102,
         &[NormalizedEventReplayAdapter::EnsV1ReverseClaim],
@@ -267,6 +266,99 @@ async fn full_closure_reverse_claim_replay_covers_multiple_pages() -> Result<()>
     );
 
     database.cleanup().await
+}
+
+#[tokio::test]
+async fn full_closure_fences_raw_log_mutation_before_adapter_writes() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_raw_log_staging_input_revisions_table(database.pool()).await?;
+    let chain = "base-mainnet";
+    let reverse_address = "0x00000000000000000000000000000000000000ad";
+    let reverse_contract_instance_id = Uuid::from_u128(0x903);
+    let block = provider_block(
+        "0x1616161616161616161616161616161616161616161616161616161616161616",
+        Some("0x1515151515151515151515151515151515151515151515151515151515151515"),
+        103,
+    );
+
+    insert_active_replay_manifest_contract(
+        database.pool(),
+        903,
+        "basenames",
+        "basenames_base_primary",
+        chain,
+        "basenames_v1",
+        reverse_contract_instance_id,
+        reverse_address,
+        "reverse_registrar",
+    )
+    .await?;
+    insert_raw_reverse_claimed_log(
+        database.pool(),
+        chain,
+        &block,
+        reverse_address,
+        "0x7777777777777777777777777777777777777777",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let mut raw_mutation = database.pool().begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("raw_log_staging:{chain}"))
+        .execute(raw_mutation.as_mut())
+        .await?;
+
+    let pool = database.pool().clone();
+    let replay = tokio::spawn(async move {
+        sync_full_closure_normalized_events_from_persisted_raw_payloads(
+            &pool,
+            "mainnet",
+            chain,
+            block.block_number,
+            block.block_number,
+            &[NormalizedEventReplayAdapter::EnsV1ReverseClaim],
+            100_000,
+        )
+        .await
+    });
+    let adapter_wrote_while_mutation_fence_was_held =
+        tokio::time::timeout(std::time::Duration::from_millis(500), async {
+            loop {
+                let count = sqlx::query_scalar::<_, i64>(
+                    r#"
+                    SELECT COUNT(*)::BIGINT
+                    FROM normalized_events
+                    WHERE chain_id = $1
+                      AND derivation_kind = 'ens_v1_reverse_claim'
+                    "#,
+                )
+                .bind(chain)
+                .fetch_one(database.pool())
+                .await?;
+                if count > 0 {
+                    return Ok::<_, anyhow::Error>(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+
+    raw_mutation.rollback().await?;
+    let summary = tokio::time::timeout(std::time::Duration::from_secs(10), replay)
+        .await
+        .context("full-closure replay did not resume after the raw-log fence released")??
+        .context("full-closure replay task failed")?
+        .summary;
+    assert_eq!(summary.total_inserted_count, 2);
+    database.cleanup().await?;
+    if adapter_wrote_while_mutation_fence_was_held {
+        anyhow::bail!(
+            "full-closure replay committed adapter output before acquiring the raw-log mutation fence"
+        );
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -333,7 +425,6 @@ async fn full_closure_reverse_claim_replay_respects_manifest_active_from() -> Re
         database.pool(),
         "mainnet",
         chain,
-        "test_full_closure_reverse_claim_manifest_start",
         before_active_block.block_number,
         active_block.block_number,
         &[NormalizedEventReplayAdapter::EnsV1ReverseClaim],
@@ -579,7 +670,7 @@ async fn replay_normalized_events_scoped_generic_resolver_scope_fails_closed_for
 }
 
 #[tokio::test]
-async fn replay_normalized_events_is_upsert_only_for_stale_selected_payloads() -> Result<()> {
+async fn replay_normalized_events_fails_closed_for_stale_selected_payloads() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_projection_normalized_event_change_tables(database.pool()).await?;
     let chain = "ethereum-mainnet";
@@ -587,7 +678,7 @@ async fn replay_normalized_events_is_upsert_only_for_stale_selected_payloads() -
     let reverse_address = "0x00000000000000000000000000000000000000a5";
     let claimed_address = "0x5555555555555555555555555555555555555555";
     let block = provider_block(
-        "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
+        "0xf5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
         Some("0x8585858585858585858585858585858585858585858585858585858585858585"),
         106,
     );
@@ -656,34 +747,11 @@ async fn replay_normalized_events_is_upsert_only_for_stale_selected_payloads() -
         1
     );
 
-    let repaired = replay_stateless_only_raw_fact_normalized_events(
-        database.pool(),
-        RawFactNormalizedEventReplayRequest {
-            deployment_profile: "mainnet".to_owned(),
-            chain: chain.to_owned(),
-            selection: RawFactNormalizedEventReplaySelection::BlockRange {
-                from_block: block.block_number,
-                to_block: block.block_number,
-            },
-        },
-    )
-    .await?;
-    assert_eq!(repaired.stateless_replay_authority.identities_examined, 1);
-    assert_eq!(repaired.stateless_replay_authority.identities_superseded, 1);
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT after_state->>'reverse_name' FROM normalized_events"
-        )
-        .fetch_one(database.pool())
-        .await?,
-        reverse_name_for_address(claimed_address)
-    );
-
     database.cleanup().await
 }
 
 #[tokio::test]
-async fn replay_normalized_events_is_idempotent_without_checkpoint_mutation() -> Result<()> {
+async fn replay_normalized_events_is_idempotent_without_chain_checkpoint_mutation() -> Result<()> {
     let database = TestDatabase::new().await?;
     let chain = "ethereum-mainnet";
     let contract_instance_id = Uuid::from_u128(0x901);
@@ -735,8 +803,7 @@ async fn replay_normalized_events_is_idempotent_without_checkpoint_mutation() ->
     .bind(block.block_number)
     .execute(database.pool())
     .await
-    .context("failed to insert checkpoint guard row for replay test")?;
-
+    .context("failed to insert chain checkpoint guard row for replay test")?;
     let request = RawFactNormalizedEventReplayRequest {
         deployment_profile: "mainnet".to_owned(),
         chain: chain.to_owned(),
@@ -1371,418 +1438,7 @@ async fn replay_normalized_events_block_hash_replay_fails_closed_for_ens_v2_regi
 }
 
 #[tokio::test]
-async fn replay_normalized_events_block_range_rebuilds_ens_v2_proof_for_closed_emitter()
--> Result<()> {
-    let database = TestDatabase::new().await?;
-    let chain = "ethereum-mainnet";
-    create_ops_catchup_backfill_job_tables(database.pool()).await?;
-    create_complete_raw_log_staging_input_fixture(database.pool(), chain, 121).await?;
-    let manifest_id = 121;
-    let current_registry_id = Uuid::from_u128(0x1210);
-    let retired_registry_id = Uuid::from_u128(0x1211);
-    let resolver_id = Uuid::from_u128(0x1212);
-    let current_registry = "0x00000000000000000000000000000000000002a1";
-    let retired_registry = "0x00000000000000000000000000000000000002a2";
-    let resolver = "0x00000000000000000000000000000000000002a3";
-    let block = provider_block(
-        "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a121",
-        Some("0x1111111111111111111111111111111111111111111111111111111111111111"),
-        121,
-    );
-
-    insert_active_replay_manifest_contract(
-        database.pool(),
-        manifest_id,
-        "ens",
-        "ens_v2_registry_l1",
-        chain,
-        "ens_v2",
-        current_registry_id,
-        current_registry,
-        "registry",
-    )
-    .await?;
-    sqlx::query("UPDATE manifest_versions SET manifest_payload = $2 WHERE manifest_id = $1")
-        .bind(manifest_id)
-        .bind(test_manifest_payload())
-        .execute(database.pool())
-        .await?;
-    insert_normalized_replay_ens_v2_resolver_manifest(
-        database.pool(),
-        chain,
-        manifest_id + 1,
-        resolver_id,
-        resolver,
-    )
-    .await?;
-    insert_contract_instance(database.pool(), retired_registry_id, chain, "contract").await?;
-    insert_active_contract_instance_address(
-        database.pool(),
-        retired_registry_id,
-        chain,
-        retired_registry,
-        Some(manifest_id),
-    )
-    .await?;
-    sqlx::query(
-        r#"
-        UPDATE contract_instance_addresses
-        SET active_from_block_number = 100,
-            active_to_block_number = 121,
-            deactivated_at = now()
-        WHERE contract_instance_id = $1
-        "#,
-    )
-    .bind(retired_registry_id)
-    .execute(database.pool())
-    .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO discovery_edges (
-            chain_id,
-            edge_kind,
-            from_contract_instance_id,
-            to_contract_instance_id,
-            discovery_source,
-            source_manifest_id,
-            admission,
-            active_from_block_number,
-            active_to_block_number,
-            deactivated_at,
-            provenance
-        )
-        VALUES ($1, 'subregistry', $2, $3, $4, $5, 'reachable_from_root', 100, 121, now(), $6)
-        "#,
-    )
-    .bind(chain)
-    .bind(current_registry_id)
-    .bind(retired_registry_id)
-    .bind(format!("ens_v2_registry_subregistry:{chain}"))
-    .bind(manifest_id)
-    .bind(json!({
-        "observation_key": "closed-emitter",
-        "to_address": retired_registry,
-    }))
-    .execute(database.pool())
-    .await?;
-    insert_chain_lineage_for_block(database.pool(), chain, &block, CanonicalityState::Canonical)
-        .await?;
-    insert_raw_resolver_log(
-        database.pool(),
-        chain,
-        &block,
-        retired_registry,
-        vec![format!("0x{:064x}", 0xdead_u64)],
-        Vec::new(),
-        0,
-        CanonicalityState::Canonical,
-    )
-    .await?;
-    sqlx::query(
-        r#"
-        UPDATE raw_log_staging_input_revisions
-        SET retention_generation = 1,
-            retained_history_complete = false,
-            incomplete_since = clock_timestamp(),
-            proven_retention_generation = NULL,
-            proven_discovery_admission_epoch = NULL,
-            proven_through_block = NULL
-        WHERE chain_id = $1
-        "#,
-    )
-    .bind(chain)
-    .execute(database.pool())
-    .await?;
-    insert_completed_backfill_range_coverage_for_source_family(
-        database.pool(),
-        chain,
-        0,
-        block.block_number,
-        "ens_v2_registry_l1",
-        &[current_registry, retired_registry],
-    )
-    .await?;
-    insert_completed_backfill_range_coverage_for_source_family(
-        database.pool(),
-        chain,
-        0,
-        block.block_number,
-        "ens_v2_resolver_l1",
-        &[resolver],
-    )
-    .await?;
-
-    let outcome = replay_raw_fact_normalized_events(
-        database.pool(),
-        RawFactNormalizedEventReplayRequest {
-            deployment_profile: "mainnet".to_owned(),
-            chain: chain.to_owned(),
-            selection: RawFactNormalizedEventReplaySelection::BlockRange {
-                from_block: 121,
-                to_block: 121,
-            },
-        },
-    )
-    .await?;
-
-    assert_eq!(outcome.canonical_raw_log_count, 1);
-    assert_eq!(
-        outcome.scanned_raw_log_count, 3,
-        "the stateless boundary plus the ENSv2 registry and permissions full-closure passes must each see the retained closed-emitter fact"
-    );
-    assert_eq!(
-        sqlx::query_as::<_, (bool, Option<i64>, Option<i64>)>(
-            r#"
-            SELECT
-                retained_history_complete,
-                proven_retention_generation,
-                proven_through_block
-            FROM raw_log_staging_input_revisions
-            WHERE chain_id = $1
-            "#,
-        )
-        .bind(chain)
-        .fetch_one(database.pool())
-        .await?,
-        (true, Some(1), Some(block.block_number)),
-        "manual full-closure replay must rebuild its stale proof from current-generation coverage"
-    );
-
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn manual_full_closure_replay_preserves_automatic_checkpoint_and_cleans_its_own() -> Result<()>
-{
-    let database = TestDatabase::new().await?;
-    create_normalized_replay_adapter_checkpoint_tables(database.pool()).await?;
-    let chain = "ethereum-mainnet";
-    let block_number = 170;
-    let registry_address = "0x0000000000000000000000000000000000000170";
-    let block = provider_block(
-        "0x1701701701701701701701701701701701701701701701701701701701700170",
-        Some("0x1691691691691691691691691691691691691691691691691691691691690169"),
-        block_number,
-    );
-    insert_active_replay_manifest_contract(
-        database.pool(),
-        170,
-        "ens",
-        "ens_v1_registry_l1",
-        chain,
-        "ens_v1",
-        Uuid::from_u128(0x170),
-        registry_address,
-        "registry",
-    )
-    .await?;
-    insert_chain_lineage_for_block(database.pool(), chain, &block, CanonicalityState::Canonical)
-        .await?;
-    insert_raw_new_resolver_log_for_node_at_index(
-        database.pool(),
-        chain,
-        &block,
-        registry_address,
-        "0x0000000000000000000000000000000000000171",
-        &namehash_for_dns_name(&dns_encoded_eth_name("checkpoint")),
-        0,
-        CanonicalityState::Canonical,
-    )
-    .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO normalized_replay_adapter_checkpoints (
-            deployment_profile,
-            chain_id,
-            cursor_kind,
-            adapter,
-            checkpoint_scope,
-            replay_start_block_number,
-            replay_target_block_number,
-            status,
-            state_payload
-        )
-        VALUES (
-            'mainnet',
-            $1,
-            'raw_fact_normalized_events',
-            'ens_v1_subregistry_discovery',
-            'full_closure',
-            $2,
-            $2,
-            'running',
-            '{"sentinel":"automatic"}'::JSONB
-        )
-        "#,
-    )
-    .bind(chain)
-    .bind(block_number)
-    .execute(database.pool())
-    .await?;
-
-    replay_raw_fact_normalized_events(
-        database.pool(),
-        RawFactNormalizedEventReplayRequest {
-            deployment_profile: "mainnet".to_owned(),
-            chain: chain.to_owned(),
-            selection: RawFactNormalizedEventReplaySelection::BlockRange {
-                from_block: block_number,
-                to_block: block_number,
-            },
-        },
-    )
-    .await?;
-
-    let automatic_checkpoint = sqlx::query_as::<_, (String, Value)>(
-        r#"
-        SELECT status, state_payload
-        FROM normalized_replay_adapter_checkpoints
-        WHERE deployment_profile = 'mainnet'
-          AND chain_id = $1
-          AND cursor_kind = 'raw_fact_normalized_events'
-          AND adapter = 'ens_v1_subregistry_discovery'
-          AND checkpoint_scope = 'full_closure'
-        "#,
-    )
-    .bind(chain)
-    .fetch_one(database.pool())
-    .await?;
-    assert_eq!(
-        automatic_checkpoint,
-        ("running".to_owned(), json!({"sentinel": "automatic"})),
-        "manual replay must neither resume nor mutate the automatic catch-up checkpoint"
-    );
-    let manual_cursor_kind =
-        format!("manual_raw_fact_normalized_events:{block_number}:{block_number}");
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            r#"
-            SELECT COUNT(*)::BIGINT
-            FROM normalized_replay_adapter_checkpoints
-            WHERE deployment_profile = 'mainnet'
-              AND chain_id = $1
-              AND cursor_kind = $2
-            "#,
-        )
-        .bind(chain)
-        .bind(&manual_cursor_kind)
-        .fetch_one(database.pool())
-        .await?,
-        0,
-        "a successful manual replay must clear its resumable checkpoint namespace"
-    );
-
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn manual_full_closure_cleans_checkpoint_before_releasing_ownership() -> Result<()> {
-    let database = TestDatabase::new().await?;
-    create_normalized_replay_adapter_checkpoint_tables(database.pool()).await?;
-    let deployment_profile = "manual-cleanup-lock-profile";
-    let chain = "manual-cleanup-lock-testnet";
-    let cursor_kind = "manual_raw_fact_normalized_events:171:171";
-    sqlx::query(
-        r#"
-        INSERT INTO normalized_replay_adapter_checkpoints (
-            deployment_profile,
-            chain_id,
-            cursor_kind,
-            adapter,
-            checkpoint_scope,
-            replay_start_block_number,
-            replay_target_block_number,
-            status,
-            state_payload
-        )
-        VALUES
-            ($1, $2, $3, 'ens_v1_subregistry_discovery', 'full_closure', 171, 171, 'running', '{}'::JSONB),
-            ($1, $2, $3, 'ens_v1_unwrapped_authority', 'full_closure', 171, 171, 'running', '{}'::JSONB)
-        "#,
-    )
-    .bind(deployment_profile)
-    .bind(chain)
-    .bind(cursor_kind)
-    .execute(database.pool())
-    .await?;
-
-    let release_hook =
-        install_ownership_release_test_hook(database.pool(), deployment_profile, chain).await;
-    let pool = database.pool().clone();
-    let manual_replay = tokio::spawn(async move {
-        sync_manual_full_closure_normalized_events_from_persisted_raw_payloads(
-            &pool,
-            deployment_profile,
-            chain,
-            cursor_kind,
-            171,
-            171,
-            &[],
-            100_000,
-        )
-        .await
-    });
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        release_hook.wait_until_before_release(),
-    )
-    .await
-    .context("manual full-closure replay did not reach the ownership-release barrier")?;
-
-    let observation = async {
-        let remaining_checkpoints = sqlx::query_scalar::<_, i64>(
-            r#"
-            SELECT COUNT(*)::BIGINT
-            FROM normalized_replay_adapter_checkpoints
-            WHERE deployment_profile = $1
-              AND chain_id = $2
-              AND cursor_kind = $3
-            "#,
-        )
-        .bind(deployment_profile)
-        .bind(chain)
-        .bind(cursor_kind)
-        .fetch_one(database.pool())
-        .await?;
-
-        let ownership = sqlx::postgres::PgAdvisoryLock::new(format!(
-            "bigname:indexer:full-closure-replay:{deployment_profile}:{chain}"
-        ));
-        let ownership_available = match ownership
-            .try_acquire(database.pool().acquire().await?)
-            .await?
-        {
-            sqlx::Either::Left(guard) => {
-                guard.release_now().await?;
-                true
-            }
-            sqlx::Either::Right(_) => false,
-        };
-        Ok::<_, anyhow::Error>((remaining_checkpoints, ownership_available))
-    }
-    .await;
-
-    release_hook.resume();
-    tokio::time::timeout(std::time::Duration::from_secs(5), manual_replay)
-        .await
-        .context("manual full-closure replay did not release ownership after the barrier")?
-        .context("manual full-closure replay task panicked")??;
-    let (remaining_checkpoints, ownership_available) = observation?;
-    assert_eq!(
-        remaining_checkpoints, 0,
-        "manual checkpoints must be cleared before the ownership guard is released"
-    );
-    assert!(
-        !ownership_available,
-        "profile/chain ownership must remain held while successful manual checkpoints are cleared"
-    );
-
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn full_closure_replay_waits_for_chain_ownership_across_checkpoint_namespaces() -> Result<()>
-{
+async fn manual_full_closure_replay_waits_for_chain_ownership() -> Result<()> {
     let database = TestDatabase::new().await?;
     let deployment_profile = "mainnet";
     let chain = "ethereum-mainnet";
@@ -1801,7 +1457,6 @@ async fn full_closure_replay_waits_for_chain_ownership_across_checkpoint_namespa
             &pool,
             deployment_profile,
             chain,
-            "manual_raw_fact_normalized_events:170:170",
             170,
             170,
             &[],
@@ -2271,321 +1926,6 @@ async fn replay_normalized_events_full_closure_mutates_selected_discovery_only()
         .fetch_one(database.pool())
         .await?,
         1
-    );
-
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn replay_normalized_events_full_closure_repairs_stale_registry_row_after_stateless_exclusion()
--> Result<()> {
-    let database = TestDatabase::new().await?;
-    create_normalized_replay_adapter_checkpoint_tables(database.pool()).await?;
-    create_projection_normalized_event_change_tables(database.pool()).await?;
-    let chain = "ethereum-mainnet";
-    let registry_manifest_id = 34;
-    let resolver_manifest_id = 35;
-    let registry_contract_instance_id = Uuid::from_u128(0x934);
-    let old_registry_contract_instance_id = Uuid::from_u128(0x935);
-    let registry_address = "0x00000000000000000000000000000000000000e1";
-    let old_registry_address = "0x00000000000000000000000000000000000000e0";
-    let resolver_address = "0x00000000000000000000000000000000000000e2";
-    let node = "0x0000000000000000000000000000000000000000000000000000000000000000";
-    let block = provider_block(
-        "0x7474747474747474747474747474747474747474747474747474747474747474",
-        Some("0x6363636363636363636363636363636363636363636363636363636363636363"),
-        74,
-    );
-
-    insert_active_replay_manifest_contract(
-        database.pool(),
-        registry_manifest_id,
-        "ens",
-        "ens_v1_registry_l1",
-        chain,
-        "mainnet",
-        registry_contract_instance_id,
-        registry_address,
-        "registry",
-    )
-    .await?;
-    insert_manifest_root_contract_instance(
-        database.pool(),
-        registry_manifest_id,
-        registry_contract_instance_id,
-        registry_address,
-    )
-    .await?;
-    insert_contract_instance(
-        database.pool(),
-        old_registry_contract_instance_id,
-        chain,
-        "contract",
-    )
-    .await?;
-    insert_active_contract_instance_address(
-        database.pool(),
-        old_registry_contract_instance_id,
-        chain,
-        old_registry_address,
-        Some(registry_manifest_id),
-    )
-    .await?;
-    insert_manifest_contract_instance(
-        database.pool(),
-        registry_manifest_id,
-        "registry_old",
-        old_registry_contract_instance_id,
-        old_registry_address,
-        "none",
-        None,
-        None,
-    )
-    .await?;
-    insert_manifest_discovery_rule(
-        database.pool(),
-        registry_manifest_id,
-        "resolver",
-        "registry",
-        "reachable_from_root",
-    )
-    .await?;
-    insert_active_replay_manifest(
-        database.pool(),
-        resolver_manifest_id,
-        "ens",
-        "ens_v1_resolver_l1",
-        chain,
-        "mainnet",
-    )
-    .await?;
-    insert_chain_lineage_for_block(database.pool(), chain, &block, CanonicalityState::Canonical)
-        .await?;
-    insert_raw_new_resolver_log_for_node_at_index(
-        database.pool(),
-        chain,
-        &block,
-        old_registry_address,
-        resolver_address,
-        node,
-        0,
-        CanonicalityState::Canonical,
-    )
-    .await?;
-
-    replay_raw_fact_normalized_events(
-        database.pool(),
-        RawFactNormalizedEventReplayRequest {
-            deployment_profile: "mainnet".to_owned(),
-            chain: chain.to_owned(),
-            selection: RawFactNormalizedEventReplaySelection::BlockRange {
-                from_block: block.block_number,
-                to_block: block.block_number,
-            },
-        },
-    )
-    .await?;
-    let registry_event = sqlx::query_as::<_, (i64, String, serde_json::Value)>(
-        r#"
-        SELECT normalized_event_id, event_identity, after_state
-        FROM normalized_events
-        WHERE derivation_kind = 'ens_v1_registry_resolver_changed'
-        "#,
-    )
-    .fetch_one(database.pool())
-    .await?;
-    let current_after_state = registry_event.2.clone();
-    let mut stale_after_state = current_after_state.clone();
-    stale_after_state["observation_key"] =
-        json!(format!("resolver:{resolver_address}:{node}"));
-    stale_after_state["from_contract_instance_id"] =
-        json!(old_registry_contract_instance_id.to_string());
-    assert_ne!(stale_after_state, current_after_state);
-    sqlx::query("UPDATE normalized_events SET after_state = $2 WHERE event_identity = $1")
-        .bind(&registry_event.1)
-        .bind(&stale_after_state)
-        .execute(database.pool())
-        .await
-        .context("failed to seed stale-vintage registry resolver row")?;
-
-    let closure_identity = "ens-v1-unwrapped-authority:closure-row-in-selected-block";
-    sqlx::query(
-        r#"
-        INSERT INTO normalized_events (
-            event_identity,
-            namespace,
-            event_kind,
-            source_family,
-            manifest_version,
-            source_manifest_id,
-            chain_id,
-            block_number,
-            block_hash,
-            transaction_hash,
-            log_index,
-            raw_fact_ref,
-            derivation_kind,
-            canonicality_state,
-            before_state,
-            after_state
-        )
-        VALUES (
-            $1,
-            'ens',
-            'AuthorityTransferred',
-            'ens_v1_registry_l1',
-            1,
-            $2,
-            $3,
-            $4,
-            $5,
-            $6,
-            0,
-            jsonb_build_object('kind', 'raw_log', 'block_hash', $5::TEXT),
-            'ens_v1_unwrapped_authority',
-            'canonical',
-            '{}'::JSONB,
-            '{"vintage":"closure-row-must-stay-unchanged"}'::JSONB
-        )
-        "#,
-    )
-    .bind(closure_identity)
-    .bind(registry_manifest_id)
-    .bind(chain)
-    .bind(block.block_number)
-    .bind(&block.block_hash)
-    .bind(transaction_hash_for_block(&block))
-    .execute(database.pool())
-    .await
-    .context("failed to seed closure-kind row in selected replay block")?;
-    let registry_change_count_before = normalized_event_change_count(database.pool(), &registry_event.1).await?;
-    let closure_change_count_before = normalized_event_change_count(database.pool(), closure_identity).await?;
-    let discovery_edge_count_before =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM discovery_edges")
-            .fetch_one(database.pool())
-            .await?;
-
-    let stateless_outcome = replay_stateless_only_raw_fact_normalized_events(
-        database.pool(),
-        RawFactNormalizedEventReplayRequest {
-            deployment_profile: "mainnet".to_owned(),
-            chain: chain.to_owned(),
-            selection: RawFactNormalizedEventReplaySelection::BlockHashes(vec![
-                block.block_hash.clone(),
-            ]),
-        },
-    )
-    .await?;
-
-    assert_eq!(
-        stateless_outcome
-            .stateless_replay_authority
-            .identities_examined,
-        0,
-        "the contextual subregistry adapter must not run in stateless-only replay"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, serde_json::Value>(
-            "SELECT after_state FROM normalized_events WHERE event_identity = $1"
-        )
-        .bind(&registry_event.1)
-        .fetch_one(database.pool())
-        .await?,
-        stale_after_state,
-        "stateless-only replay must not use closure-derived registry context"
-    );
-    assert_eq!(
-        normalized_event_change_count(database.pool(), &registry_event.1).await?,
-        registry_change_count_before
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM discovery_edges")
-            .fetch_one(database.pool())
-            .await?,
-        discovery_edge_count_before,
-        "stateless-only replay must not reconcile discovery"
-    );
-
-    let full_closure_outcome = replay_raw_fact_normalized_events(
-        database.pool(),
-        RawFactNormalizedEventReplayRequest {
-            deployment_profile: "mainnet".to_owned(),
-            chain: chain.to_owned(),
-            selection: RawFactNormalizedEventReplaySelection::BlockRange {
-                from_block: block.block_number,
-                to_block: block.block_number,
-            },
-        },
-    )
-    .await?;
-    assert_eq!(
-        full_closure_outcome
-            .stateless_replay_authority
-            .identities_examined,
-        0
-    );
-    let repaired = sqlx::query_as::<_, (i64, serde_json::Value)>(
-        "SELECT normalized_event_id, after_state FROM normalized_events WHERE event_identity = $1",
-    )
-    .bind(&registry_event.1)
-    .fetch_one(database.pool())
-    .await?;
-    assert_eq!(repaired.0, registry_event.0);
-    assert_eq!(repaired.1, current_after_state);
-    assert_eq!(
-        normalized_event_change_count(database.pool(), &registry_event.1).await?,
-        registry_change_count_before + 1
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            r#"
-            SELECT COUNT(*)::BIGINT
-            FROM projection_normalized_event_changes change
-            JOIN normalized_events event
-              ON event.normalized_event_id = change.normalized_event_id
-            WHERE event.event_identity = $1
-              AND change.change_kind = 'content_update'
-            "#,
-        )
-        .bind(&registry_event.1)
-        .fetch_one(database.pool())
-        .await?,
-        1
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, serde_json::Value>(
-            "SELECT after_state FROM normalized_events WHERE event_identity = $1"
-        )
-        .bind(closure_identity)
-        .fetch_one(database.pool())
-        .await?,
-        json!({"vintage": "closure-row-must-stay-unchanged"})
-    );
-    assert_eq!(
-        normalized_event_change_count(database.pool(), closure_identity).await?,
-        closure_change_count_before
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM discovery_edges")
-            .fetch_one(database.pool())
-            .await?,
-        discovery_edge_count_before,
-        "idempotent full-closure replay must preserve the reconciled edge set"
-    );
-
-    let error = replay_raw_fact_normalized_events(
-        database.pool(),
-        RawFactNormalizedEventReplayRequest {
-            deployment_profile: "mainnet".to_owned(),
-            chain: chain.to_owned(),
-            selection: RawFactNormalizedEventReplaySelection::BlockHashes(vec![block.block_hash]),
-        },
-    )
-    .await
-    .expect_err("ordinary block-hash replay must retain its closure-adapter refusal");
-    assert!(
-        format!("{error:?}").contains("block-hash and source-scoped replay are disabled"),
-        "unexpected error: {error:?}"
     );
 
     database.cleanup().await
@@ -3354,22 +2694,6 @@ async fn insert_stale_reverse_changed_event(
     .context("failed to insert stale reverse normalized event for replay test")?;
 
     Ok(())
-}
-
-async fn normalized_event_change_count(pool: &PgPool, event_identity: &str) -> Result<i64> {
-    sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT COUNT(*)::BIGINT
-        FROM projection_normalized_event_changes change
-        JOIN normalized_events event
-          ON event.normalized_event_id = change.normalized_event_id
-        WHERE event.event_identity = $1
-        "#,
-    )
-    .bind(event_identity)
-    .fetch_one(pool)
-    .await
-    .with_context(|| format!("failed to count normalized-event changes for {event_identity}"))
 }
 
 async fn insert_active_replay_watched_contract_with_source_family(

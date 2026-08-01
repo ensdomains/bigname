@@ -1,5 +1,5 @@
+use crate::StartupAdapterProgress;
 use anyhow::Result;
-use bigname_adapters::StartupAdapterProgress;
 use bigname_storage::{
     CanonicalityState,
     upsert_chain_lineage_blocks_without_snapshots_recanonicalizing_orphaned as upsert_recanonicalized_lineage_blocks_without_snapshots,

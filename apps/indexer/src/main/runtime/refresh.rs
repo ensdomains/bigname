@@ -40,8 +40,7 @@ pub(crate) async fn refresh_manifest_normalized_events_from_storage_with_progres
     manifest_runtime_state: &ManifestRuntimeState,
     progress: &mut dyn ManifestRuntimeProgress,
 ) -> Result<Option<ManifestRuntimeState>> {
-    let next_summary =
-        bigname_adapters::sync_manifest_normalized_events_with_progress(pool, progress).await?;
+    let next_summary = bigname_adapters::sync_manifest_normalized_events(pool).await?;
     if next_summary.total_inserted_count == 0 {
         return Ok(None);
     }

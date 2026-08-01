@@ -1,15 +1,16 @@
+use std::{future::Future, time::Duration};
+
 use anyhow::{Context, Result, bail};
-use bigname_adapters::{
-    ENS_V1_REVERSE_CLAIM_STARTUP_VERSION, ENS_V1_SUBREGISTRY_DISCOVERY_STARTUP_VERSION,
-    ENS_V1_UNWRAPPED_AUTHORITY_STARTUP_VERSION, ENS_V2_PERMISSIONS_STARTUP_VERSION,
-    ENS_V2_REGISTRAR_STARTUP_VERSION, ENS_V2_REGISTRY_RESOURCE_SURFACE_STARTUP_VERSION,
-    ENS_V2_RESOLVER_STARTUP_VERSION, StartupAdapterVersion,
-};
 use bigname_manifests::WatchedChainPlan;
+use bigname_storage::acquire_raw_log_staging_read_guard;
+use tracing::info;
 
 use crate::{
-    resolver_profile_convergence::{
-        journal_resolver_profile_authority, journal_resolver_profile_authority_with_progress,
+    reconciliation::{
+        RawFactNormalizedEventReplayRequest, RawFactNormalizedEventReplaySelection,
+        replay_startup_stateless_only_raw_fact_normalized_events,
+        replay_startup_stateless_only_raw_fact_normalized_events_with_progress,
+        select_log_bounded_replay_to_block,
     },
     run::startup_heartbeat::{StartupAdapterHeartbeat, StartupHeartbeat},
 };
@@ -20,38 +21,27 @@ use super::logging::{
     log_ens_v2_registrar_sync_summary, log_ens_v2_registry_resource_surface_sync_summary,
     log_ens_v2_resolver_sync_summary,
 };
-#[path = "adapter_sync/bounded.rs"]
-mod bounded;
-#[path = "adapter_sync/checkpoint.rs"]
-pub(crate) mod checkpoint;
-use bounded::load_startup_adapter_checkpoint_context;
-#[cfg(test)]
-pub(crate) use bounded::sync_startup_ens_v2_permissions;
-use checkpoint::{
-    StartupFamilySyncAttempt, StartupFamilySyncCompletion, prepare_startup_family_sync,
-};
-pub(crate) use checkpoint::{
-    await_live_adapter_sync_with_heartbeat, await_live_full_source_adapter_with_heartbeat,
-};
+
 #[path = "adapter_sync/discovery.rs"]
 mod discovery;
 #[cfg(test)]
 pub(crate) use discovery::sync_discovery_adapter_owned_raw_log_state;
 pub(crate) use discovery::sync_discovery_adapter_owned_raw_log_state_with_heartbeat;
 
-// Startup heartbeat replay uses small pages so long ownership/control scans
-// report liveness between pages. These pages preserve whole blocks, so an
-// unusually dense block can exceed this target.
+// This existing startup page limit now applies only to the permissions producer replay. Adapter
+// interpretation itself uses the plain full-source entry points.
 pub(crate) const DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS: usize = 1_000;
-const MAX_ENS_V2_STARTUP_DISCOVERY_EXPANSION_PASSES: usize = 1_024;
-const MAX_NON_LOOPING_STARTUP_FAMILY_PASSES: usize = 2;
+
+#[cfg(not(test))]
+const LIVE_ADAPTER_HEARTBEAT_TICK: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const LIVE_ADAPTER_HEARTBEAT_TICK: Duration = Duration::from_millis(10);
 
 pub(crate) async fn sync_adapter_owned_raw_log_state(
     pool: &sqlx::PgPool,
     watched_chain_plan: &[WatchedChainPlan],
 ) -> Result<()> {
-    sync_adapter_owned_raw_log_state_with_startup_context(pool, watched_chain_plan, None, None)
-        .await
+    sync_adapter_owned_raw_log_state_inner(pool, watched_chain_plan, None, None).await
 }
 
 pub(crate) async fn sync_adapter_owned_raw_log_state_with_heartbeat(
@@ -63,7 +53,7 @@ pub(crate) async fn sync_adapter_owned_raw_log_state_with_heartbeat(
     heartbeat_chain_ids: &[String],
 ) -> Result<()> {
     heartbeat.record(pool, heartbeat_chain_ids).await?;
-    sync_adapter_owned_raw_log_state_with_startup_context(
+    sync_adapter_owned_raw_log_state_inner(
         pool,
         watched_chain_plan,
         Some((deployment_profile, startup_discovery_page_logs)),
@@ -79,10 +69,7 @@ pub(crate) async fn sync_adapter_owned_raw_log_state_live_with_heartbeat(
     heartbeat_chain_ids: &[String],
 ) -> Result<()> {
     heartbeat.record(pool, heartbeat_chain_ids).await?;
-    // Intake stays live during timer and discovery refreshes. These passes are
-    // intentionally tolerant of concurrent input and never verify or publish a
-    // boot-only startup checkpoint.
-    sync_adapter_owned_raw_log_state_with_startup_context(
+    sync_adapter_owned_raw_log_state_inner(
         pool,
         watched_chain_plan,
         None,
@@ -91,452 +78,259 @@ pub(crate) async fn sync_adapter_owned_raw_log_state_live_with_heartbeat(
     .await
 }
 
-async fn sync_adapter_owned_raw_log_state_with_startup_context(
+async fn sync_adapter_owned_raw_log_state_inner(
     pool: &sqlx::PgPool,
     watched_chain_plan: &[WatchedChainPlan],
     startup_context: Option<(&str, usize)>,
     mut startup_heartbeat: Option<(&mut StartupHeartbeat, &[String])>,
 ) -> Result<()> {
     record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
-    // Broad startup/timer passes also recover any prior discovery transaction
-    // that committed before its caller could journal the epoch change.
-    journal_authority_with_startup_progress(pool, &mut startup_heartbeat).await?;
-    let startup_deployment_profile = startup_context.map(|(profile, _)| profile);
+    let heartbeat_while_waiting = startup_context.is_none();
     for chain in watched_chain_plan {
-        for pass in 1..=MAX_NON_LOOPING_STARTUP_FAMILY_PASSES {
-            let Some(attempt) = prepare_startup_family_sync(
-                pool,
-                startup_deployment_profile,
-                &chain.chain,
-                ENS_V1_REVERSE_CLAIM_STARTUP_VERSION,
-            )
-            .await?
-            else {
-                break;
-            };
-            let scanned_through_block = attempt.scanned_lineage_extent_block_number();
-            let summary = bounded::sync_ens_v1_reverse_claim(
-                pool,
-                &chain.chain,
-                scanned_through_block,
-                &mut startup_heartbeat,
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to sync ENSv1 reverse claim from stored raw logs for chain {}",
-                    chain.chain
-                )
-            })?;
-            log_ens_v1_reverse_claim_sync_summary(&chain.chain, &summary);
-            if complete_non_looping_startup_family(
-                attempt,
-                pool,
-                &chain.chain,
-                ENS_V1_REVERSE_CLAIM_STARTUP_VERSION,
-                pass,
-            )
-            .await?
-            {
-                break;
-            }
-        }
-        record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
-
-        for pass in 1..=MAX_NON_LOOPING_STARTUP_FAMILY_PASSES {
-            let Some(attempt) = prepare_startup_family_sync(
-                pool,
-                startup_deployment_profile,
-                &chain.chain,
-                ENS_V1_SUBREGISTRY_DISCOVERY_STARTUP_VERSION,
-            )
-            .await?
-            else {
-                break;
-            };
-            let scanned_through_block = attempt.scanned_lineage_extent_block_number();
-            let startup_checkpoint = match startup_context {
-                Some((deployment_profile, page_logs)) => Some((
-                    load_startup_adapter_checkpoint_context(
-                        pool,
-                        deployment_profile,
-                        &chain.chain,
-                        scanned_through_block,
-                    )
-                    .await?,
-                    page_logs,
-                )),
-                None => None,
-            };
-            let summary = match startup_checkpoint.as_ref() {
-                Some((checkpoint, page_logs)) => match startup_heartbeat.as_mut() {
-                    Some((heartbeat, chain_ids)) => {
-                        let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
-                        bigname_adapters::sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit_and_progress(
-                            pool,
-                            &chain.chain,
-                            checkpoint,
-                            *page_logs,
-                            &mut progress,
-                        )
-                        .await
-                    }
-                    None => {
-                        bigname_adapters::sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit(
-                            pool,
-                            &chain.chain,
-                            checkpoint,
-                            *page_logs,
-                        )
-                        .await
-                    }
-                },
-                None => match startup_heartbeat.as_mut() {
-                    Some((heartbeat, chain_ids)) => {
-                        await_live_full_source_adapter_with_heartbeat(
-                            pool,
-                            &chain.chain,
-                            heartbeat,
-                            chain_ids,
-                            bigname_adapters::sync_ens_v1_subregistry_discovery(
-                                pool,
-                                &chain.chain,
-                            ),
-                        )
-                        .await
-                    }
-                    None => {
-                        bigname_adapters::sync_ens_v1_subregistry_discovery(pool, &chain.chain).await
-                    }
-                },
-            }
-            .with_context(|| {
-                format!(
-                    "failed to sync ENSv1 registry discovery from stored raw logs for chain {}",
-                    chain.chain
-                )
-            })?;
-            log_ens_v1_subregistry_discovery_sync_summary(&chain.chain, &summary);
-            if complete_non_looping_startup_family(
-                attempt,
-                pool,
-                &chain.chain,
-                ENS_V1_SUBREGISTRY_DISCOVERY_STARTUP_VERSION,
-                pass,
-            )
-            .await?
-            {
-                break;
-            }
-        }
-        record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
-
-        for pass in 1..=MAX_NON_LOOPING_STARTUP_FAMILY_PASSES {
-            let Some(attempt) = prepare_startup_family_sync(
-                pool,
-                startup_deployment_profile,
-                &chain.chain,
-                ENS_V1_UNWRAPPED_AUTHORITY_STARTUP_VERSION,
-            )
-            .await?
-            else {
-                break;
-            };
-            let scanned_through_block = attempt.scanned_lineage_extent_block_number();
-            let startup_checkpoint = match startup_context {
-                Some((deployment_profile, page_logs)) => Some((
-                    load_startup_adapter_checkpoint_context(
-                        pool,
-                        deployment_profile,
-                        &chain.chain,
-                        scanned_through_block,
-                    )
-                    .await?,
-                    page_logs,
-                )),
-                None => None,
-            };
-            let summary = match startup_checkpoint.as_ref() {
-                Some((checkpoint, page_logs)) => match startup_heartbeat.as_mut() {
-                    Some((heartbeat, chain_ids)) => {
-                        let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
-                        bigname_adapters::sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit_and_progress(
-                            pool,
-                            &chain.chain,
-                            checkpoint,
-                            *page_logs,
-                            &mut progress,
-                        )
-                        .await
-                    }
-                    None => {
-                        bigname_adapters::sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
-                            pool,
-                            &chain.chain,
-                            checkpoint,
-                            *page_logs,
-                        )
-                        .await
-                    }
-                },
-                None => match startup_heartbeat.as_mut() {
-                    Some((heartbeat, chain_ids)) => {
-                        await_live_adapter_sync_with_heartbeat(
-                            pool,
-                            heartbeat,
-                            chain_ids,
-                            bigname_adapters::sync_ens_v1_unwrapped_authority(pool, &chain.chain),
-                        )
-                        .await
-                    }
-                    None => {
-                        bigname_adapters::sync_ens_v1_unwrapped_authority(pool, &chain.chain).await
-                    }
-                },
-            }
-            .with_context(|| {
-                format!(
-                    "failed to sync ENSv1 unwrapped authority from stored raw logs for chain {}",
-                    chain.chain
-                )
-            })?;
-            log_ens_v1_unwrapped_authority_sync_summary(&chain.chain, &summary);
-            if complete_non_looping_startup_family(
-                attempt,
-                pool,
-                &chain.chain,
-                ENS_V1_UNWRAPPED_AUTHORITY_STARTUP_VERSION,
-                pass,
-            )
-            .await?
-            {
-                break;
-            }
-        }
-        record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
-
-        sync_ens_v2_registry_to_startup_fixed_point(
+        let summary = await_adapter_with_optional_heartbeat(
             pool,
-            startup_deployment_profile,
-            &chain.chain,
             &mut startup_heartbeat,
-        )
-        .await?;
-        record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
-
-        for pass in 1..=MAX_NON_LOOPING_STARTUP_FAMILY_PASSES {
-            let Some(attempt) = prepare_startup_family_sync(
-                pool,
-                startup_deployment_profile,
-                &chain.chain,
-                ENS_V2_REGISTRAR_STARTUP_VERSION,
-            )
-            .await?
-            else {
-                break;
-            };
-            let scanned_through_block = attempt.scanned_lineage_extent_block_number();
-            let summary = bounded::sync_ens_v2_registrar(
-                pool,
-                &chain.chain,
-                scanned_through_block,
-                &mut startup_heartbeat,
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to sync ENSv2 registrar state from stored raw logs for chain {}",
-                    chain.chain
-                )
-            })?;
-            log_ens_v2_registrar_sync_summary(&chain.chain, &summary);
-            if complete_non_looping_startup_family(
-                attempt,
-                pool,
-                &chain.chain,
-                ENS_V2_REGISTRAR_STARTUP_VERSION,
-                pass,
-            )
-            .await?
-            {
-                break;
-            }
-        }
-        record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
-
-        for pass in 1..=MAX_NON_LOOPING_STARTUP_FAMILY_PASSES {
-            let Some(attempt) = prepare_startup_family_sync(
-                pool,
-                startup_deployment_profile,
-                &chain.chain,
-                ENS_V2_RESOLVER_STARTUP_VERSION,
-            )
-            .await?
-            else {
-                break;
-            };
-            let scanned_through_block = attempt.scanned_lineage_extent_block_number();
-            let summary = bounded::sync_ens_v2_resolver(
-                pool,
-                &chain.chain,
-                scanned_through_block,
-                &mut startup_heartbeat,
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to sync ENSv2 resolver state from stored raw logs for chain {}",
-                    chain.chain
-                )
-            })?;
-            log_ens_v2_resolver_sync_summary(&chain.chain, &summary);
-            if complete_non_looping_startup_family(
-                attempt,
-                pool,
-                &chain.chain,
-                ENS_V2_RESOLVER_STARTUP_VERSION,
-                pass,
-            )
-            .await?
-            {
-                break;
-            }
-        }
-        record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
-
-        for pass in 1..=MAX_NON_LOOPING_STARTUP_FAMILY_PASSES {
-            let Some(attempt) = prepare_startup_family_sync(
-                pool,
-                startup_deployment_profile,
-                &chain.chain,
-                ENS_V2_PERMISSIONS_STARTUP_VERSION,
-            )
-            .await?
-            else {
-                break;
-            };
-            let scanned_through_block = attempt.scanned_lineage_extent_block_number();
-            let summary = match (startup_context, scanned_through_block) {
-                (Some((deployment_profile, page_logs)), Some(through_block)) => {
-                    bounded::sync_startup_ens_v2_permissions(
-                        pool,
-                        deployment_profile,
-                        &chain.chain,
-                        through_block,
-                        page_logs,
-                        &mut startup_heartbeat,
-                    )
-                    .await
-                }
-                _ => {
-                    bounded::sync_ens_v2_permissions(
-                        pool,
-                        &chain.chain,
-                        scanned_through_block,
-                        &mut startup_heartbeat,
-                    )
-                    .await
-                }
-            }
-            .with_context(|| {
-                format!(
-                    "failed to sync ENSv2 permissions state from stored raw logs for chain {}",
-                    chain.chain
-                )
-            })?;
-            log_ens_v2_permissions_sync_summary(&chain.chain, &summary);
-            if complete_non_looping_startup_family(
-                attempt,
-                pool,
-                &chain.chain,
-                ENS_V2_PERMISSIONS_STARTUP_VERSION,
-                pass,
-            )
-            .await?
-            {
-                break;
-            }
-        }
-        record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
-    }
-
-    journal_authority_with_startup_progress(pool, &mut startup_heartbeat).await?;
-    record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
-    Ok(())
-}
-
-pub(crate) async fn complete_non_looping_startup_family(
-    attempt: StartupFamilySyncAttempt,
-    pool: &sqlx::PgPool,
-    chain: &str,
-    adapter: StartupAdapterVersion,
-    pass: usize,
-) -> Result<bool> {
-    if attempt.complete_or_retry(pool, chain, adapter).await? == StartupFamilySyncCompletion::Stable
-    {
-        return Ok(true);
-    }
-    if pass == MAX_NON_LOOPING_STARTUP_FAMILY_PASSES {
-        bail!(
-            "startup adapter input changed while syncing {adapter_name} for {chain} on both \
-             bounded passes; refusing to publish completion",
-            adapter_name = adapter.adapter,
-        );
-    }
-    Ok(false)
-}
-
-pub(super) async fn sync_ens_v2_registry_to_startup_fixed_point(
-    pool: &sqlx::PgPool,
-    deployment_profile: Option<&str>,
-    chain: &str,
-    startup_heartbeat: &mut Option<(&mut StartupHeartbeat, &[String])>,
-) -> Result<()> {
-    for pass in 1..=MAX_ENS_V2_STARTUP_DISCOVERY_EXPANSION_PASSES {
-        let Some(attempt) = prepare_startup_family_sync(
-            pool,
-            deployment_profile,
-            chain,
-            ENS_V2_REGISTRY_RESOURCE_SURFACE_STARTUP_VERSION,
-        )
-        .await?
-        else {
-            return Ok(());
-        };
-        let scanned_through_block = attempt.scanned_lineage_extent_block_number();
-        let summary = bounded::sync_ens_v2_registry_resource_surface(
-            pool,
-            chain,
-            scanned_through_block,
-            startup_heartbeat,
+            heartbeat_while_waiting,
+            bigname_adapters::sync_ens_v1_reverse_claim(pool, &chain.chain),
         )
         .await
         .with_context(|| {
             format!(
-                "failed to sync ENSv2 registry resource/surface state and discovery from stored \
-                 raw logs for chain {chain}"
+                "failed to sync ENSv1 reverse claim from stored raw logs for chain {}",
+                chain.chain
             )
         })?;
-        log_ens_v2_registry_resource_surface_sync_summary(chain, &summary);
-        if attempt
-            .complete_or_retry(
-                pool,
-                chain,
-                ENS_V2_REGISTRY_RESOURCE_SURFACE_STARTUP_VERSION,
+        log_ens_v1_reverse_claim_sync_summary(&chain.chain, &summary);
+        record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
+
+        let summary = await_full_source_adapter_with_optional_heartbeat(
+            pool,
+            &chain.chain,
+            &mut startup_heartbeat,
+            heartbeat_while_waiting,
+            bigname_adapters::sync_ens_v1_subregistry_discovery(pool, &chain.chain),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to sync ENSv1 registry discovery from stored raw logs for chain {}",
+                chain.chain
             )
-            .await?
-            == StartupFamilySyncCompletion::Stable
-        {
-            return Ok(());
+        })?;
+        log_ens_v1_subregistry_discovery_sync_summary(&chain.chain, &summary);
+        record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
+
+        let summary = await_full_source_adapter_with_optional_heartbeat(
+            pool,
+            &chain.chain,
+            &mut startup_heartbeat,
+            heartbeat_while_waiting,
+            bigname_adapters::sync_ens_v1_unwrapped_authority(pool, &chain.chain),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to sync ENSv1 unwrapped authority from stored raw logs for chain {}",
+                chain.chain
+            )
+        })?;
+        log_ens_v1_unwrapped_authority_sync_summary(&chain.chain, &summary);
+        record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
+
+        let summary = await_full_source_adapter_with_optional_heartbeat(
+            pool,
+            &chain.chain,
+            &mut startup_heartbeat,
+            heartbeat_while_waiting,
+            bigname_adapters::sync_ens_v2_registry_resource_surface(pool, &chain.chain),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to sync ENSv2 registry resource/surface state and discovery from stored raw logs for chain {}",
+                chain.chain
+            )
+        })?;
+        log_ens_v2_registry_resource_surface_sync_summary(&chain.chain, &summary);
+        record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
+
+        let summary = await_adapter_with_optional_heartbeat(
+            pool,
+            &mut startup_heartbeat,
+            heartbeat_while_waiting,
+            bigname_adapters::sync_ens_v2_registrar(pool, &chain.chain),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to sync ENSv2 registrar state from stored raw logs for chain {}",
+                chain.chain
+            )
+        })?;
+        log_ens_v2_registrar_sync_summary(&chain.chain, &summary);
+        record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
+
+        let summary = await_adapter_with_optional_heartbeat(
+            pool,
+            &mut startup_heartbeat,
+            heartbeat_while_waiting,
+            bigname_adapters::sync_ens_v2_resolver(pool, &chain.chain),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to sync ENSv2 resolver state from stored raw logs for chain {}",
+                chain.chain
+            )
+        })?;
+        log_ens_v2_resolver_sync_summary(&chain.chain, &summary);
+        record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
+
+        let summary = if let Some((deployment_profile, max_raw_logs_per_page)) = startup_context {
+            let target_block_number = load_current_adapter_input_extent(pool, &chain.chain).await?;
+            sync_startup_ens_v2_permissions(
+                pool,
+                deployment_profile,
+                &chain.chain,
+                target_block_number,
+                max_raw_logs_per_page,
+                &mut startup_heartbeat,
+            )
+            .await
+        } else {
+            await_adapter_with_optional_heartbeat(
+                pool,
+                &mut startup_heartbeat,
+                heartbeat_while_waiting,
+                bigname_adapters::sync_ens_v2_permissions(pool, &chain.chain),
+            )
+            .await
         }
-        if pass == MAX_ENS_V2_STARTUP_DISCOVERY_EXPANSION_PASSES {
-            bail!(
-                "ENSv2 registry discovery on chain {chain} did not reach a stable startup \
-                 checkpoint within {MAX_ENS_V2_STARTUP_DISCOVERY_EXPANSION_PASSES} passes"
-            );
+        .with_context(|| {
+            format!(
+                "failed to sync ENSv2 permissions state from stored raw logs for chain {}",
+                chain.chain
+            )
+        })?;
+        log_ens_v2_permissions_sync_summary(&chain.chain, &summary);
+        record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn sync_startup_ens_v2_permissions(
+    pool: &sqlx::PgPool,
+    deployment_profile: &str,
+    chain: &str,
+    target_block_number: i64,
+    max_raw_logs_per_page: usize,
+    startup_heartbeat: &mut Option<(&mut StartupHeartbeat, &[String])>,
+) -> Result<bigname_adapters::EnsV2PermissionsSyncSummary> {
+    replay_startup_permissions_producers(
+        pool,
+        deployment_profile,
+        chain,
+        target_block_number,
+        max_raw_logs_per_page,
+        startup_heartbeat,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to rederive normalized-event producer inputs before ENSv2 permissions startup sync for chain {chain}"
+        )
+    })?;
+    await_adapter_with_optional_heartbeat(
+        pool,
+        startup_heartbeat,
+        false,
+        bigname_adapters::sync_ens_v2_permissions(pool, chain),
+    )
+    .await
+}
+
+pub(crate) async fn await_live_adapter_sync_with_heartbeat<T, F>(
+    pool: &sqlx::PgPool,
+    heartbeat: &mut StartupHeartbeat,
+    heartbeat_chain_ids: &[String],
+    sync: F,
+) -> Result<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    tokio::pin!(sync);
+    let first_tick = tokio::time::Instant::now() + LIVE_ADAPTER_HEARTBEAT_TICK;
+    let mut interval = tokio::time::interval_at(first_tick, LIVE_ADAPTER_HEARTBEAT_TICK);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            result = &mut sync => return result,
+            _ = interval.tick() => heartbeat.record_if_due(pool, heartbeat_chain_ids).await?,
         }
     }
-    unreachable!("the bounded ENSv2 startup discovery loop returns on its final pass")
+}
+
+#[cfg(test)]
+pub(crate) async fn await_live_full_source_adapter_with_heartbeat<T, F>(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    heartbeat: &mut StartupHeartbeat,
+    heartbeat_chain_ids: &[String],
+    sync: F,
+) -> Result<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    let guard = acquire_raw_log_staging_read_guard(pool, chain).await?;
+    let sync_result =
+        await_live_adapter_sync_with_heartbeat(pool, heartbeat, heartbeat_chain_ids, sync).await;
+    let release_result = guard.release().await;
+    match (sync_result, release_result) {
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        (Ok(value), Ok(())) => Ok(value),
+    }
+}
+
+pub(crate) async fn await_adapter_with_optional_heartbeat<T, F>(
+    pool: &sqlx::PgPool,
+    startup_heartbeat: &mut Option<(&mut StartupHeartbeat, &[String])>,
+    heartbeat_while_waiting: bool,
+    sync: F,
+) -> Result<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    match (heartbeat_while_waiting, startup_heartbeat.as_mut()) {
+        (true, Some((heartbeat, chain_ids))) => {
+            await_live_adapter_sync_with_heartbeat(pool, heartbeat, chain_ids, sync).await
+        }
+        _ => sync.await,
+    }
+}
+
+pub(crate) async fn await_full_source_adapter_with_optional_heartbeat<T, F>(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    startup_heartbeat: &mut Option<(&mut StartupHeartbeat, &[String])>,
+    heartbeat_while_waiting: bool,
+    sync: F,
+) -> Result<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    let guard = acquire_raw_log_staging_read_guard(pool, chain).await?;
+    let sync_result = await_adapter_with_optional_heartbeat(
+        pool,
+        startup_heartbeat,
+        heartbeat_while_waiting,
+        sync,
+    )
+    .await;
+    let release_result = guard.release().await;
+    match (sync_result, release_result) {
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        (Ok(value), Ok(())) => Ok(value),
+    }
 }
 
 pub(super) async fn record_startup_sync_progress(
@@ -549,18 +343,95 @@ pub(super) async fn record_startup_sync_progress(
     Ok(())
 }
 
-pub(super) async fn journal_authority_with_startup_progress(
+async fn replay_startup_permissions_producers(
     pool: &sqlx::PgPool,
+    deployment_profile: &str,
+    chain: &str,
+    target_block_number: i64,
+    max_raw_logs_per_page: usize,
     startup_heartbeat: &mut Option<(&mut StartupHeartbeat, &[String])>,
 ) -> Result<()> {
-    match startup_heartbeat.as_mut() {
-        Some((heartbeat, chain_ids)) => {
-            let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
-            journal_resolver_profile_authority_with_progress(pool, &mut progress).await?;
-        }
-        None => {
-            journal_resolver_profile_authority(pool).await?;
-        }
+    if max_raw_logs_per_page == 0 {
+        bail!("startup permissions producer replay max logs per page must be positive");
     }
-    Ok(())
+    info!(
+        service = "indexer",
+        command = "startup-adapter-sync",
+        deployment_profile,
+        chain,
+        target_block_number,
+        "ENSv2 permissions startup rerun requires stateless producer replay first"
+    );
+
+    let mut from_block = 0;
+    loop {
+        let to_block = select_log_bounded_replay_to_block(
+            pool,
+            chain,
+            from_block,
+            target_block_number,
+            max_raw_logs_per_page,
+        )
+        .await?;
+        let request = RawFactNormalizedEventReplayRequest {
+            deployment_profile: deployment_profile.to_owned(),
+            chain: chain.to_owned(),
+            selection: RawFactNormalizedEventReplaySelection::BlockRange {
+                from_block,
+                to_block,
+            },
+        };
+        match startup_heartbeat.as_mut() {
+            Some((heartbeat, chain_ids)) => {
+                let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
+                replay_startup_stateless_only_raw_fact_normalized_events_with_progress(
+                    pool,
+                    request,
+                    &mut progress,
+                )
+                .await?;
+            }
+            None => {
+                replay_startup_stateless_only_raw_fact_normalized_events(pool, request).await?;
+            }
+        }
+        if to_block == target_block_number {
+            return Ok(());
+        }
+        from_block = to_block
+            .checked_add(1)
+            .context("startup permissions producer replay page boundary overflowed")?;
+    }
+}
+
+async fn load_current_adapter_input_extent(pool: &sqlx::PgPool, chain: &str) -> Result<i64> {
+    sqlx::query_scalar::<_, Option<i64>>(
+        r#"
+        SELECT MAX(block_number)::BIGINT
+        FROM (
+            SELECT block_number
+            FROM chain_lineage
+            WHERE chain_id = $1
+              AND canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+            UNION ALL
+            SELECT block_number
+            FROM raw_logs
+            WHERE chain_id = $1
+              AND canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+        ) AS startup_adapter_inputs
+        "#,
+    )
+    .bind(chain)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("failed to load startup adapter input extent for {chain}"))
+    .map(|extent| extent.unwrap_or(0))
 }

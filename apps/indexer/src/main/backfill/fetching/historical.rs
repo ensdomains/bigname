@@ -455,7 +455,7 @@ async fn maybe_sync_adapters(
         let source_scope = (source_plan.selector_kind
             != WatchedSourceSelectorKind::WholeActiveWatchedChain)
             .then_some(adapter_sync_scope);
-        sync_inline_adapters(pool, chain, block_hashes, source_scope, adapter_sync_mode).await?;
+        sync_inline_adapters(pool, chain, block_hashes, source_scope).await?;
     } else if !logs.is_empty() {
         info!(
             service = "indexer",

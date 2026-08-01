@@ -35,12 +35,10 @@ pub(super) async fn load_active_manifest_metadata(
 pub(super) async fn load_manifest_contract_roles(
     pool: &PgPool,
     watched_contracts: &[WatchedContract],
-    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<HashMap<(i64, Uuid), String>> {
     let mut manifest_ids = HashSet::new();
-    for (index, contract) in watched_contracts.iter().enumerate() {
+    for contract in watched_contracts {
         manifest_ids.extend(contract.source_manifest_id);
-        record_emitter_progress(pool, progress, index + 1, watched_contracts.len()).await?;
     }
     let manifest_ids = manifest_ids.into_iter().collect::<Vec<_>>();
     if manifest_ids.is_empty() {
@@ -71,33 +69,6 @@ pub(super) async fn load_manifest_contract_roles(
             ))
         })
         .collect()
-}
-
-pub(super) fn unwrapped_authority_source_families() -> Vec<String> {
-    [
-        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
-        SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
-        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
-        SOURCE_FAMILY_ENS_V1_WRAPPER_L1,
-        SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
-        SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
-        SOURCE_FAMILY_BASENAMES_BASE_RESOLVER,
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect()
-}
-
-pub(super) async fn record_emitter_progress(
-    pool: &PgPool,
-    progress: &mut Option<&mut dyn StartupAdapterProgress>,
-    completed: usize,
-    total: usize,
-) -> Result<()> {
-    if completed == total || completed.is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS) {
-        record_startup_adapter_progress(pool, progress).await?;
-    }
-    Ok(())
 }
 
 pub(super) fn source_rank(source: WatchedContractSource) -> i32 {

@@ -8,7 +8,8 @@ use std::{
 
 use anyhow::{Context, Result};
 use bigname_manifests::{
-    load_active_manifest_abi_events_by_chain_and_source_families, load_repository, sync_repository,
+    load_active_manifest_abi_events_by_chain_and_source_families, load_repository,
+    load_watched_contracts, sync_repository,
 };
 use bigname_storage::{
     CanonicalityState, RawBlock, RawLog, default_database_url, load_normalized_events_by_namespace,
@@ -37,17 +38,6 @@ use super::types::{PermissionsObservation, PermissionsRawLogRow};
 use super::util::hex_string;
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
-
-struct NoopStartupAdapterProgress;
-
-impl crate::checkpoint_context::StartupAdapterProgress for NoopStartupAdapterProgress {
-    fn record<'a>(
-        &'a mut self,
-        _pool: &'a PgPool,
-    ) -> crate::checkpoint_context::StartupAdapterProgressFuture<'a> {
-        Box::pin(async { Ok(()) })
-    }
-}
 
 struct TestDatabase {
     admin_pool: PgPool,
@@ -1235,16 +1225,13 @@ async fn resolver_closure_replays_when_every_discovery_edge_is_closed() -> Resul
     .execute(database.pool())
     .await?;
 
-    let mut progress = NoopStartupAdapterProgress;
-    let mut manifest_progress =
-        crate::startup_progress::StartupManifestProgress::new(&mut progress);
-    let current_resolver_watches = bigname_manifests::load_watched_contracts_scoped_with_progress(
-        database.pool(),
-        Some(chain),
-        &[SOURCE_FAMILY_ENS_V2_RESOLVER_L1.to_owned()],
-        &mut manifest_progress,
-    )
-    .await?;
+    let current_resolver_watches = load_watched_contracts(database.pool())
+        .await?
+        .into_iter()
+        .filter(|watched| {
+            watched.chain == chain && watched.source_family == SOURCE_FAMILY_ENS_V2_RESOLVER_L1
+        })
+        .collect::<Vec<_>>();
     assert!(
         current_resolver_watches.is_empty(),
         "the scenario must have no resolver in the current watch plan"
@@ -1280,12 +1267,10 @@ async fn resolver_closure_replays_when_every_discovery_edge_is_closed() -> Resul
     )
     .await?;
 
-    let mut progress = NoopStartupAdapterProgress;
-    let summary = crate::ens_v2_resolver::sync_ens_v2_resolver_through_block_with_progress(
+    let summary = crate::ens_v2_resolver::sync_ens_v2_resolver_through_block(
         database.pool(),
         chain,
         close_block,
-        &mut progress,
     )
     .await?;
     assert_eq!(summary.scanned_log_count, 1);

@@ -48,9 +48,6 @@ pub(super) fn log_live_poll_adapter_sync_completion(
         matched_log_count = summary.matched_log_count,
         normalized_event_sync_total_count = summary.total_synced_count,
         normalized_event_inserted_total_count = summary.total_inserted_count,
-        resolver_profile_authority_epoch_guard_count =
-            summary.resolver_profile_authority_epoch_guard_count,
-        resolver_profile_authority_scan_count = summary.resolver_profile_authority_scan_count,
         "live poll adapter sync completed"
     );
 }

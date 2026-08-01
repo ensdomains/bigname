@@ -217,17 +217,10 @@ usage). Context disambiguates; both senses are intentional.
 
 **Lineage mutation revision** — a per-chain counter advanced once per affected
 chain by statement triggers for every insert, update, or delete of stored block
-lineage. Startup adapter checkpoints record this revision with per-revision
-evidence for the lowest affected block. Completed reuse may accept later
-revisions only when gap-free evidence places every change strictly above the
-recorded scan extent and the current head still covers that extent. Partial
-resume still requires the exact recorded revision, so any unclassified lineage
-change resets it. The one completed-to-partial transition is
-`ens_v1_unwrapped_authority`: after the same gap-free proof accepts a higher
-canonical head, storage refreshes the partial row's lineage key and resumes
-from the recorded extent because that adapter's finalization depends on
-canonical block timestamps. Missing or ambiguous revision evidence fails
-closed.
+lineage. Per-revision evidence records the lowest affected block. The current
+old-runtime startup adapter pass does not use this revision for adapter
+checkpoint reuse; the retained revision and evidence still support other
+lineage and replay validation until their transitional storage is removed.
 
 **Normalized event** — the append-only, adapter-produced record of one semantic
 protocol transition, carrying identity, provenance, chain position, and

@@ -87,117 +87,77 @@ pub(super) async fn run_startup_bootstrap_backfills_inner(
                 .clone()
                 .expect("validated bootstrap heads must include finalized"),
         );
-        let mut convergence_tracker = BootstrapConvergenceTracker::default();
-        loop {
-            let retention_snapshot = match heartbeat.as_deref_mut() {
-                Some(heartbeat) => {
-                    let mut progress =
-                        StartupAdapterHeartbeat::new(heartbeat, &heartbeat_chain_ids);
-                    load_bootstrap_retention_snapshot_with_progress(
-                        pool,
-                        &task.chain,
-                        provider_finalized_head_block,
-                        &mut progress,
-                    )
-                    .await?
-                }
-                None => {
-                    load_bootstrap_retention_snapshot(
-                        pool,
-                        &task.chain,
-                        provider_finalized_head_block,
-                    )
-                    .await?
-                }
-            };
-            record_bootstrap_progress(pool, &mut heartbeat, &heartbeat_chain_ids).await?;
-            let mut bootstrap_targets = load_manifest_declared_bootstrap_targets(pool, &task.chain)
+        let retention_generation =
+            bigname_storage::load_raw_log_staging_input_version(pool, &task.chain)
                 .await?
-                .into_iter()
-                .collect::<BTreeSet<_>>();
-            let discovery_targets = load_discovery_bootstrap_targets_with_optional_progress(
-                pool,
-                &task.chain,
-                provider_finalized_head_block,
-                &mut heartbeat,
-                &heartbeat_chain_ids,
-            )
-            .await?;
-            let include_historical_bootstrap_targets = !discovery_targets.is_empty()
-                || retention_snapshot.requires_ens_v2_history_recovery;
-            extend_bootstrap_targets_with_progress(
-                pool,
-                &mut bootstrap_targets,
-                discovery_targets,
-                &mut heartbeat,
-                &heartbeat_chain_ids,
-            )
-            .await?;
-            if retention_snapshot.requires_ens_v2_history_recovery {
-                let recovery_targets = load_retained_recovery_targets_with_optional_progress(
-                    pool,
-                    &task.chain,
+                .retention_generation;
+        record_bootstrap_progress(pool, &mut heartbeat, &heartbeat_chain_ids).await?;
+        let mut bootstrap_targets = load_manifest_declared_bootstrap_targets(pool, &task.chain)
+            .await?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let discovery_targets = load_discovery_bootstrap_targets_with_optional_progress(
+            pool,
+            &task.chain,
+            provider_finalized_head_block,
+            &mut heartbeat,
+            &heartbeat_chain_ids,
+        )
+        .await?;
+        let include_historical_bootstrap_targets = !discovery_targets.is_empty();
+        extend_bootstrap_targets_with_progress(
+            pool,
+            &mut bootstrap_targets,
+            discovery_targets,
+            &mut heartbeat,
+            &heartbeat_chain_ids,
+        )
+        .await?;
+        let eligible_target_count = bootstrap_targets.len();
+        let mut skipped_future_target_count = 0_usize;
+
+        info!(
+            service = "indexer",
+            command = "run",
+            bootstrap_backfill_status = "planning",
+            chain = %task.chain,
+            provider_finalized_head_block,
+            bootstrap_backfill_range_policy = "authoritative_known_start_to_provider_finalized_head",
+            hash_pinned_chunk_blocks,
+            bootstrap_backfill_workers = requested_worker_count,
+            effective_bootstrap_backfill_workers = effective_worker_count,
+            bootstrap_backfill_range_blocks,
+            eligible_bootstrap_target_count = eligible_target_count,
+            raw_log_retention_generation = retention_generation,
+            skipped_unknown_start_target_count = outcome.skipped_unknown_start_target_count,
+            "automatic bootstrap targets loaded"
+        );
+
+        let mut target_ranges = Vec::new();
+        for target in bootstrap_targets {
+            let Some(range) = bootstrap_target_range(&target, provider_finalized_head_block)?
+            else {
+                skipped_future_target_count += 1;
+                info!(
+                    service = "indexer",
+                    command = "run",
+                    bootstrap_backfill_status = "skipped_future_target",
+                    chain = %task.chain,
+                    source_family = %target.source_family,
+                    contract_instance_id = %target.contract_instance_id,
+                    address = %target.address,
+                    effective_from_block = target.effective_from_block,
+                    effective_to_block = target.effective_to_block,
                     provider_finalized_head_block,
-                    &mut heartbeat,
-                    &heartbeat_chain_ids,
-                )
-                .await?;
-                extend_bootstrap_targets_with_progress(
-                    pool,
-                    &mut bootstrap_targets,
-                    recovery_targets,
-                    &mut heartbeat,
-                    &heartbeat_chain_ids,
-                )
-                .await?;
-            }
-            let eligible_target_count = bootstrap_targets.len();
-            let mut skipped_future_target_count = 0_usize;
+                    bootstrap_backfill_range_policy = "authoritative_known_start_to_provider_finalized_head",
+                    "automatic bootstrap target starts after the provider finalized bootstrap head"
+                );
+                record_bootstrap_progress(pool, &mut heartbeat, &heartbeat_chain_ids).await?;
+                continue;
+            };
 
-            info!(
-                service = "indexer",
-                command = "run",
-                bootstrap_backfill_status = "planning",
-                chain = %task.chain,
-                provider_finalized_head_block,
-                bootstrap_backfill_range_policy = "authoritative_known_start_to_provider_finalized_head",
-                hash_pinned_chunk_blocks,
-                bootstrap_backfill_workers = requested_worker_count,
-                effective_bootstrap_backfill_workers = effective_worker_count,
-                bootstrap_backfill_range_blocks,
-                eligible_bootstrap_target_count = eligible_target_count,
-                raw_log_retention_generation = retention_snapshot.generation,
-                ens_v2_retained_history_recovery = retention_snapshot
-                    .requires_ens_v2_history_recovery,
-                skipped_unknown_start_target_count = outcome.skipped_unknown_start_target_count,
-                "automatic bootstrap targets loaded"
-            );
-
-            let mut target_ranges = Vec::new();
-            for target in bootstrap_targets {
-                let Some(range) = bootstrap_target_range(&target, provider_finalized_head_block)?
-                else {
-                    skipped_future_target_count += 1;
-                    info!(
-                        service = "indexer",
-                        command = "run",
-                        bootstrap_backfill_status = "skipped_future_target",
-                        chain = %task.chain,
-                        source_family = %target.source_family,
-                        contract_instance_id = %target.contract_instance_id,
-                        address = %target.address,
-                        effective_from_block = target.effective_from_block,
-                        effective_to_block = target.effective_to_block,
-                        provider_finalized_head_block,
-                        bootstrap_backfill_range_policy = "authoritative_known_start_to_provider_finalized_head",
-                        "automatic bootstrap target starts after the provider finalized bootstrap head"
-                    );
-                    record_bootstrap_progress(pool, &mut heartbeat, &heartbeat_chain_ids).await?;
-                    continue;
-                };
-
-                let mut range = range;
-                let mut checkpoint_source_plan = load_bootstrap_source_plan_with_optional_progress(
+            let mut range = range;
+            let mut checkpoint_source_plan = load_bootstrap_source_plan_with_optional_progress(
                 pool,
                 &task.chain,
                 std::slice::from_ref(&target),
@@ -216,95 +176,94 @@ pub(super) async fn run_startup_bootstrap_backfills_inner(
                     range.to_block
                 )
             })?;
-                narrow_bootstrap_source_plan_with_optional_progress(
-                    pool,
-                    &mut checkpoint_source_plan,
-                    std::slice::from_ref(&target),
-                    range,
-                    &mut heartbeat,
-                    &heartbeat_chain_ids,
-                )
-                .await?;
-                let checkpoint_source_identity = bootstrap_source_identity_with_optional_progress(
-                    pool,
-                    &checkpoint_source_plan,
-                    &mut heartbeat,
-                    &heartbeat_chain_ids,
-                )
-                .await?;
-                if let Some(stored_checkpoint) = load_bootstrap_target_checkpoint(
-                    pool,
-                    &deployment_profile,
-                    &task.chain,
-                    &checkpoint_source_identity,
-                    range,
-                    &target.contract_instance_id.to_string(),
-                    retention_snapshot.generation,
-                )
-                .await?
-                {
-                    if stored_checkpoint >= range.to_block {
-                        info!(
-                            service = "indexer",
-                            command = "run",
-                            bootstrap_backfill_status = "skipped_target_stored_checkpoint",
-                            chain = %task.chain,
-                            source_family = %target.source_family,
-                            contract_instance_id = %target.contract_instance_id,
-                            address = %target.address,
-                            from_block = range.from_block,
-                            to_block = range.to_block,
-                            stored_checkpoint_block = stored_checkpoint,
-                            "automatic bootstrap target already has stored backfill checkpoint coverage"
-                        );
-                        record_bootstrap_progress(pool, &mut heartbeat, &heartbeat_chain_ids)
-                            .await?;
-                        continue;
-                    }
-                    if stored_checkpoint >= range.from_block {
-                        let resumed_from_block = stored_checkpoint.checked_add(1).with_context(|| {
-                        format!(
-                            "stored bootstrap checkpoint {stored_checkpoint} overflowed while resuming target"
-                        )
-                    })?;
-                        info!(
-                            service = "indexer",
-                            command = "run",
-                            bootstrap_backfill_status = "resuming_target_after_stored_checkpoint",
-                            chain = %task.chain,
-                            source_family = %target.source_family,
-                            contract_instance_id = %target.contract_instance_id,
-                            address = %target.address,
-                            from_block = range.from_block,
-                            resumed_from_block,
-                            to_block = range.to_block,
-                            stored_checkpoint_block = stored_checkpoint,
-                            "automatic bootstrap target resumes after stored backfill checkpoint"
-                        );
-                        range = BackfillBlockRange::new(resumed_from_block, range.to_block)?;
-                    }
-                }
-
-                target_ranges.push(BootstrapBackfillTargetRange { target, range });
-                record_bootstrap_progress(pool, &mut heartbeat, &heartbeat_chain_ids).await?;
-            }
-
-            let segments = plan_bootstrap_segments_with_optional_progress(
+            narrow_bootstrap_source_plan_with_optional_progress(
                 pool,
-                target_ranges,
+                &mut checkpoint_source_plan,
+                std::slice::from_ref(&target),
+                range,
                 &mut heartbeat,
                 &heartbeat_chain_ids,
             )
             .await?;
-            for segment in segments {
-                let segment_target_ids = bootstrap_segment_target_ids_with_optional_progress(
-                    pool,
-                    &segment.targets,
-                    &mut heartbeat,
-                    &heartbeat_chain_ids,
-                )
-                .await?;
-                let mut checkpoint_source_plan = load_bootstrap_source_plan_with_optional_progress(
+            let checkpoint_source_identity = bootstrap_source_identity_with_optional_progress(
+                pool,
+                &checkpoint_source_plan,
+                &mut heartbeat,
+                &heartbeat_chain_ids,
+            )
+            .await?;
+            if let Some(stored_checkpoint) = load_bootstrap_target_checkpoint(
+                pool,
+                &deployment_profile,
+                &task.chain,
+                &checkpoint_source_identity,
+                range,
+                &target.contract_instance_id.to_string(),
+                retention_generation,
+            )
+            .await?
+            {
+                if stored_checkpoint >= range.to_block {
+                    info!(
+                        service = "indexer",
+                        command = "run",
+                        bootstrap_backfill_status = "skipped_target_stored_checkpoint",
+                        chain = %task.chain,
+                        source_family = %target.source_family,
+                        contract_instance_id = %target.contract_instance_id,
+                        address = %target.address,
+                        from_block = range.from_block,
+                        to_block = range.to_block,
+                        stored_checkpoint_block = stored_checkpoint,
+                        "automatic bootstrap target already has stored backfill checkpoint coverage"
+                    );
+                    record_bootstrap_progress(pool, &mut heartbeat, &heartbeat_chain_ids).await?;
+                    continue;
+                }
+                if stored_checkpoint >= range.from_block {
+                    let resumed_from_block = stored_checkpoint.checked_add(1).with_context(|| {
+                        format!(
+                            "stored bootstrap checkpoint {stored_checkpoint} overflowed while resuming target"
+                        )
+                    })?;
+                    info!(
+                        service = "indexer",
+                        command = "run",
+                        bootstrap_backfill_status = "resuming_target_after_stored_checkpoint",
+                        chain = %task.chain,
+                        source_family = %target.source_family,
+                        contract_instance_id = %target.contract_instance_id,
+                        address = %target.address,
+                        from_block = range.from_block,
+                        resumed_from_block,
+                        to_block = range.to_block,
+                        stored_checkpoint_block = stored_checkpoint,
+                        "automatic bootstrap target resumes after stored backfill checkpoint"
+                    );
+                    range = BackfillBlockRange::new(resumed_from_block, range.to_block)?;
+                }
+            }
+
+            target_ranges.push(BootstrapBackfillTargetRange { target, range });
+            record_bootstrap_progress(pool, &mut heartbeat, &heartbeat_chain_ids).await?;
+        }
+
+        let segments = plan_bootstrap_segments_with_optional_progress(
+            pool,
+            target_ranges,
+            &mut heartbeat,
+            &heartbeat_chain_ids,
+        )
+        .await?;
+        for segment in segments {
+            let segment_target_ids = bootstrap_segment_target_ids_with_optional_progress(
+                pool,
+                &segment.targets,
+                &mut heartbeat,
+                &heartbeat_chain_ids,
+            )
+            .await?;
+            let mut checkpoint_source_plan = load_bootstrap_source_plan_with_optional_progress(
                 pool,
                 &task.chain,
                 &segment.targets,
@@ -320,72 +279,72 @@ pub(super) async fn run_startup_bootstrap_backfills_inner(
                     task.chain, segment.range.from_block, segment.range.to_block
                 )
             })?;
-                narrow_bootstrap_source_plan_with_optional_progress(
-                    pool,
-                    &mut checkpoint_source_plan,
-                    &segment.targets,
-                    segment.range,
-                    &mut heartbeat,
-                    &heartbeat_chain_ids,
-                )
-                .await?;
-                let checkpoint_source_identity = bootstrap_source_identity_with_optional_progress(
-                    pool,
-                    &checkpoint_source_plan,
-                    &mut heartbeat,
-                    &heartbeat_chain_ids,
-                )
-                .await?;
-                let mut segment_range = segment.range;
-                if let Some(stored_checkpoint) = load_bootstrap_segment_checkpoint(
-                    pool,
-                    &deployment_profile,
-                    &task.chain,
-                    &checkpoint_source_identity,
-                    segment.range,
-                    &segment_target_ids,
-                    retention_snapshot.generation,
-                )
-                .await?
-                {
-                    if stored_checkpoint >= segment_range.to_block {
-                        info!(
-                            service = "indexer",
-                            command = "run",
-                            bootstrap_backfill_status = "skipped_stored_checkpoint",
-                            chain = %task.chain,
-                            from_block = segment.range.from_block,
-                            to_block = segment.range.to_block,
-                            stored_checkpoint_block = stored_checkpoint,
-                            selected_target_count = segment.targets.len(),
-                            "automatic bootstrap segment already has stored backfill checkpoint coverage"
-                        );
-                        continue;
-                    }
-                    if stored_checkpoint >= segment_range.from_block {
-                        let resumed_from_block = stored_checkpoint.checked_add(1).with_context(|| {
+            narrow_bootstrap_source_plan_with_optional_progress(
+                pool,
+                &mut checkpoint_source_plan,
+                &segment.targets,
+                segment.range,
+                &mut heartbeat,
+                &heartbeat_chain_ids,
+            )
+            .await?;
+            let checkpoint_source_identity = bootstrap_source_identity_with_optional_progress(
+                pool,
+                &checkpoint_source_plan,
+                &mut heartbeat,
+                &heartbeat_chain_ids,
+            )
+            .await?;
+            let mut segment_range = segment.range;
+            if let Some(stored_checkpoint) = load_bootstrap_segment_checkpoint(
+                pool,
+                &deployment_profile,
+                &task.chain,
+                &checkpoint_source_identity,
+                segment.range,
+                &segment_target_ids,
+                retention_generation,
+            )
+            .await?
+            {
+                if stored_checkpoint >= segment_range.to_block {
+                    info!(
+                        service = "indexer",
+                        command = "run",
+                        bootstrap_backfill_status = "skipped_stored_checkpoint",
+                        chain = %task.chain,
+                        from_block = segment.range.from_block,
+                        to_block = segment.range.to_block,
+                        stored_checkpoint_block = stored_checkpoint,
+                        selected_target_count = segment.targets.len(),
+                        "automatic bootstrap segment already has stored backfill checkpoint coverage"
+                    );
+                    continue;
+                }
+                if stored_checkpoint >= segment_range.from_block {
+                    let resumed_from_block = stored_checkpoint.checked_add(1).with_context(|| {
                         format!(
                             "stored bootstrap checkpoint {stored_checkpoint} overflowed while resuming"
                         )
                     })?;
-                        info!(
-                            service = "indexer",
-                            command = "run",
-                            bootstrap_backfill_status = "resuming_after_stored_checkpoint",
-                            chain = %task.chain,
-                            from_block = segment.range.from_block,
-                            resumed_from_block,
-                            to_block = segment.range.to_block,
-                            stored_checkpoint_block = stored_checkpoint,
-                            selected_target_count = segment.targets.len(),
-                            "automatic bootstrap segment resumes after stored backfill checkpoint"
-                        );
-                        segment_range =
-                            BackfillBlockRange::new(resumed_from_block, segment_range.to_block)?;
-                    }
+                    info!(
+                        service = "indexer",
+                        command = "run",
+                        bootstrap_backfill_status = "resuming_after_stored_checkpoint",
+                        chain = %task.chain,
+                        from_block = segment.range.from_block,
+                        resumed_from_block,
+                        to_block = segment.range.to_block,
+                        stored_checkpoint_block = stored_checkpoint,
+                        selected_target_count = segment.targets.len(),
+                        "automatic bootstrap segment resumes after stored backfill checkpoint"
+                    );
+                    segment_range =
+                        BackfillBlockRange::new(resumed_from_block, segment_range.to_block)?;
                 }
+            }
 
-                let mut source_plan = load_bootstrap_source_plan_with_optional_progress(
+            let mut source_plan = load_bootstrap_source_plan_with_optional_progress(
                 pool,
                 &task.chain,
                 &segment.targets,
@@ -401,106 +360,104 @@ pub(super) async fn run_startup_bootstrap_backfills_inner(
                     task.chain, segment_range.from_block, segment_range.to_block
                 )
             })?;
-                narrow_bootstrap_source_plan_with_optional_progress(
-                    pool,
-                    &mut source_plan,
-                    &segment.targets,
-                    segment_range,
-                    &mut heartbeat,
-                    &heartbeat_chain_ids,
-                )
-                .await?;
+            narrow_bootstrap_source_plan_with_optional_progress(
+                pool,
+                &mut source_plan,
+                &segment.targets,
+                segment_range,
+                &mut heartbeat,
+                &heartbeat_chain_ids,
+            )
+            .await?;
 
-                let source_identity = bootstrap_source_identity_with_optional_progress(
-                    pool,
-                    &source_plan,
-                    &mut heartbeat,
-                    &heartbeat_chain_ids,
+            let source_identity = bootstrap_source_identity_with_optional_progress(
+                pool,
+                &source_plan,
+                &mut heartbeat,
+                &heartbeat_chain_ids,
+            )
+            .await?;
+            let source_identity_hash = source_identity
+                .get("source_identity_hash")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .context("backfill source identity payload is missing source_identity_hash")?;
+            let range_specs =
+                hash_pinned_backfill_range_specs(segment_range, bootstrap_backfill_range_blocks)?;
+            let idempotency_key = if range_specs.len() == 1 {
+                bootstrap_backfill_idempotency_key(
+                    &deployment_profile,
+                    &task.chain,
+                    &source_identity_hash,
+                    segment_range,
                 )
-                .await?;
-                let source_identity_hash = source_identity
-                    .get("source_identity_hash")
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToOwned::to_owned)
-                    .context("backfill source identity payload is missing source_identity_hash")?;
-                let range_specs = hash_pinned_backfill_range_specs(
+            } else {
+                partitioned_bootstrap_backfill_idempotency_key(
+                    &deployment_profile,
+                    &task.chain,
+                    &source_identity_hash,
                     segment_range,
                     bootstrap_backfill_range_blocks,
-                )?;
-                let idempotency_key = if range_specs.len() == 1 {
-                    bootstrap_backfill_idempotency_key(
-                        &deployment_profile,
-                        &task.chain,
-                        &source_identity_hash,
-                        segment_range,
-                    )
-                } else {
-                    partitioned_bootstrap_backfill_idempotency_key(
-                        &deployment_profile,
-                        &task.chain,
-                        &source_identity_hash,
-                        segment_range,
-                        bootstrap_backfill_range_blocks,
-                    )
-                };
-                let config = crate::backfill::BackfillJobRunConfig {
-                    deployment_profile: deployment_profile.clone(),
-                    idempotency_key,
-                    scope_idempotency_to_raw_log_retention_generation: true,
-                    coverage_recovery_reservation_fence: None,
-                    range: segment_range,
-                    lease_owner: lease_owner.clone(),
-                    lease_token: generated_backfill_lease_token()?,
-                    lease_expires_at: backfill_lease_expires_at(
-                        BOOTSTRAP_BACKFILL_LEASE_DURATION_SECS,
-                    )?,
-                    hash_pinned_chunk_blocks,
-                    adapter_sync_mode: backfill_adapter_sync_mode,
-                    header_audit_mode,
-                };
+                )
+            };
+            let config = crate::backfill::BackfillJobRunConfig {
+                deployment_profile: deployment_profile.clone(),
+                idempotency_key,
+                scope_idempotency_to_raw_log_retention_generation: true,
+                coverage_recovery_reservation_fence: None,
+                range: segment_range,
+                lease_owner: lease_owner.clone(),
+                lease_token: generated_backfill_lease_token()?,
+                lease_expires_at: backfill_lease_expires_at(
+                    BOOTSTRAP_BACKFILL_LEASE_DURATION_SECS,
+                )?,
+                hash_pinned_chunk_blocks,
+                adapter_sync_mode: backfill_adapter_sync_mode,
+                header_audit_mode,
+            };
 
-                let job_outcome = if let Some(heartbeat) = heartbeat.as_deref_mut() {
-                    run_resumable_hash_pinned_backfill_job_concurrently_with_heartbeat(
-                        pool,
-                        &source_plan,
-                        provider,
-                        config,
-                        range_specs,
-                        effective_worker_count,
-                        heartbeat,
-                        &heartbeat_chain_ids,
-                    )
-                    .await?
-                } else {
-                    run_resumable_hash_pinned_backfill_job_concurrently(
-                        pool,
-                        &source_plan,
-                        provider,
-                        config,
-                        range_specs,
-                        effective_worker_count,
-                    )
-                    .await?
+            let job_outcome = if let Some(heartbeat) = heartbeat.as_deref_mut() {
+                run_resumable_hash_pinned_backfill_job_concurrently_with_heartbeat(
+                    pool,
+                    &source_plan,
+                    provider,
+                    config,
+                    range_specs,
+                    effective_worker_count,
+                    heartbeat,
+                    &heartbeat_chain_ids,
+                )
+                .await?
+            } else {
+                run_resumable_hash_pinned_backfill_job_concurrently(
+                    pool,
+                    &source_plan,
+                    provider,
+                    config,
+                    range_specs,
+                    effective_worker_count,
+                )
+                .await?
+            };
+            outcome.add_job(&job_outcome);
+            if replay_completed_raw_ranges && job_outcome.raw_log_count > 0 {
+                let replay_request = RawFactNormalizedEventReplayRequest {
+                    deployment_profile: deployment_profile.clone(),
+                    chain: task.chain.clone(),
+                    selection: RawFactNormalizedEventReplaySelection::ScopedBlockRange {
+                        from_block: job_outcome.from_block,
+                        to_block: job_outcome.to_block,
+                        source_scope: replay_source_scope_from_source_plan(
+                            &source_plan,
+                            job_outcome.from_block,
+                            job_outcome.to_block,
+                        ),
+                    },
                 };
-                outcome.add_job(&job_outcome);
-                if replay_completed_raw_ranges && job_outcome.raw_log_count > 0 {
-                    let replay_request = RawFactNormalizedEventReplayRequest {
-                        deployment_profile: deployment_profile.clone(),
-                        chain: task.chain.clone(),
-                        selection: RawFactNormalizedEventReplaySelection::ScopedBlockRange {
-                            from_block: job_outcome.from_block,
-                            to_block: job_outcome.to_block,
-                            source_scope: replay_source_scope_from_source_plan(
-                                &source_plan,
-                                job_outcome.from_block,
-                                job_outcome.to_block,
-                            ),
-                        },
-                    };
-                    let replay_heartbeat = heartbeat
-                        .as_deref_mut()
-                        .map(|heartbeat| (heartbeat, heartbeat_chain_ids.as_slice()));
-                    let replay_outcome = replay_completed_bootstrap_raw_range(
+                let replay_heartbeat = heartbeat
+                    .as_deref_mut()
+                    .map(|heartbeat| (heartbeat, heartbeat_chain_ids.as_slice()));
+                let replay_outcome = replay_completed_bootstrap_raw_range(
                         pool,
                         replay_request,
                         replay_heartbeat,
@@ -512,83 +469,18 @@ pub(super) async fn run_startup_bootstrap_backfills_inner(
                             task.chain, job_outcome.from_block, job_outcome.to_block
                         )
                     })?;
-                    log_raw_fact_normalized_event_replay_outcome(&replay_outcome);
-                    outcome.normalized_replay_job_count += 1;
-                    outcome.normalized_replay_synced_count +=
-                        replay_outcome.normalized_event_synced_count;
-                    outcome.normalized_replay_inserted_count +=
-                        replay_outcome.normalized_event_inserted_count;
-                }
-                record_bootstrap_progress(pool, &mut heartbeat, &heartbeat_chain_ids).await?;
+                log_raw_fact_normalized_event_replay_outcome(&replay_outcome);
+                outcome.normalized_replay_job_count += 1;
+                outcome.normalized_replay_synced_count +=
+                    replay_outcome.normalized_event_synced_count;
+                outcome.normalized_replay_inserted_count +=
+                    replay_outcome.normalized_event_inserted_count;
             }
-
-            let pass_status = match heartbeat.as_deref_mut() {
-                Some(heartbeat) => {
-                    let mut progress =
-                        StartupAdapterHeartbeat::new(heartbeat, &heartbeat_chain_ids);
-                    finish_bootstrap_convergence_pass_with_progress(
-                        pool,
-                        &task.chain,
-                        provider_finalized_head_block,
-                        retention_snapshot,
-                        adapter_sync_mode,
-                        &mut progress,
-                    )
-                    .await?
-                }
-                None => {
-                    finish_bootstrap_convergence_pass(
-                        pool,
-                        &task.chain,
-                        provider_finalized_head_block,
-                        retention_snapshot,
-                        adapter_sync_mode,
-                    )
-                    .await?
-                }
-            };
-            if pass_status == BootstrapPassStatus::Stable {
-                outcome.eligible_target_count += eligible_target_count;
-                outcome.skipped_future_target_count += skipped_future_target_count;
-                break;
-            }
-            match heartbeat.as_deref_mut() {
-                Some(heartbeat) => {
-                    let mut progress =
-                        StartupAdapterHeartbeat::new(heartbeat, &heartbeat_chain_ids);
-                    convergence_tracker
-                        .record_retry(
-                            pool,
-                            &task.chain,
-                            provider_finalized_head_block,
-                            pass_status,
-                            Some(&mut progress),
-                        )
-                        .await?;
-                }
-                None => {
-                    convergence_tracker
-                        .record_retry(
-                            pool,
-                            &task.chain,
-                            provider_finalized_head_block,
-                            pass_status,
-                            None,
-                        )
-                        .await?;
-                }
-            }
-            warn!(
-                service = "indexer",
-                command = "run",
-                bootstrap_backfill_status = "retry_retention_authority_changed",
-                chain = %task.chain,
-                planned_raw_log_retention_generation = retention_snapshot.generation,
-                planned_discovery_admission_epoch = retention_snapshot.discovery_admission_epoch,
-                pass_status = ?pass_status,
-                "raw-log retention or ENSv2 discovery authority changed during automatic bootstrap; retrying the complete chain planning pass"
-            );
+            record_bootstrap_progress(pool, &mut heartbeat, &heartbeat_chain_ids).await?;
         }
+
+        outcome.eligible_target_count += eligible_target_count;
+        outcome.skipped_future_target_count += skipped_future_target_count;
     }
 
     super::logging::log_bootstrap_backfill_outcome(&outcome, hash_pinned_chunk_blocks);

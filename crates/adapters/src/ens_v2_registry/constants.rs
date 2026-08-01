@@ -1,5 +1,6 @@
 pub(super) const SOURCE_FAMILY_ENS_V2_ROOT_L1: &str = "ens_v2_root_l1";
 pub(super) const SOURCE_FAMILY_ENS_V2_REGISTRY_L1: &str = "ens_v2_registry_l1";
+#[cfg(test)]
 pub(super) const SOURCE_FAMILY_ENS_V2_RESOLVER_L1: &str = "ens_v2_resolver_l1";
 pub(super) const DERIVATION_KIND_ENS_V2_REGISTRY_RESOURCE_SURFACE: &str =
     "ens_v2_registry_resource_surface";

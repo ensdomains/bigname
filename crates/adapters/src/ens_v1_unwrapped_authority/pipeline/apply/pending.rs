@@ -21,7 +21,6 @@ pub(super) fn remember_known_name(
     known_names_by_namehash: &mut HashMap<String, NameMetadata>,
     known_name_refs_by_namehash: &mut HashMap<String, ObservationRef>,
     namehash_to_labelhash: &mut HashMap<String, String>,
-    mut checkpoint_delta: Option<&mut UnwrappedAuthorityReplayCheckpointDelta>,
 ) {
     namehash_to_labelhash.insert(name.namehash.clone(), labelhash.to_owned());
     known_names_by_namehash
@@ -32,28 +31,16 @@ pub(super) fn remember_known_name(
             .entry(name.namehash.clone())
             .or_insert_with(|| reference.clone());
     }
-    if let Some(delta) = checkpoint_delta.as_deref_mut() {
-        delta.mark_namehash_labelhash(name.namehash.clone());
-        delta.mark_known_name(name.namehash.clone());
-        if known_name_ref.is_some() {
-            delta.mark_known_name_ref(name.namehash.clone());
-        }
-    }
 }
 
 pub(super) fn drain_pending_namehash_observations(
     namehash: &str,
     mode: PendingObservationFlush<'_>,
     pending_namehash_observations: &mut HashMap<String, Vec<AuthorityObservation>>,
-    mut checkpoint_delta: Option<&mut UnwrappedAuthorityReplayCheckpointDelta>,
 ) -> Vec<AuthorityObservation> {
     let Some(pending) = pending_namehash_observations.remove(namehash) else {
         return Vec::new();
     };
-    if let Some(delta) = checkpoint_delta.as_deref_mut() {
-        delta.mark_pending_observations(namehash.to_owned());
-    }
-
     let last_same_tx_registry_owner_index = last_same_tx_registry_owner_index(&pending, &mode);
     let mut selected = Vec::new();
     let mut remaining = Vec::new();

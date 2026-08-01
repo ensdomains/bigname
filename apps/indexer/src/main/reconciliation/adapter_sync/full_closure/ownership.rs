@@ -27,14 +27,14 @@ pub(crate) trait FullClosureReplayLockWaitHeartbeat: Send {
         pool: &'a PgPool,
         deployment_profile: &'a str,
         chain: &'a str,
-    ) -> bigname_adapters::StartupAdapterProgressFuture<'a>;
+    ) -> crate::StartupAdapterProgressFuture<'a>;
 
     fn finish_wait<'a>(
         &'a mut self,
         pool: &'a PgPool,
         deployment_profile: &'a str,
         chain: &'a str,
-    ) -> bigname_adapters::StartupAdapterProgressFuture<'a>;
+    ) -> crate::StartupAdapterProgressFuture<'a>;
 }
 
 #[derive(Clone, Copy, Debug)]
