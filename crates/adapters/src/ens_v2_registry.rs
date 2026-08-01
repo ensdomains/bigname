@@ -39,8 +39,8 @@ use events::{
 };
 use identity::{
     build_name_surface, build_resource, build_resource_events, build_surface_binding,
-    build_token_lineage, coalesce_name_surfaces_for_upsert, normalize_surface_bindings_for_upsert,
-    upsert_surface_bindings_close_before_open,
+    build_token_lineage, build_token_resource_linked_event, coalesce_name_surfaces_for_upsert,
+    normalize_surface_bindings_for_upsert, upsert_surface_bindings_close_before_open,
 };
 use live::{RegistryReplayState, invalidate_live_registry_replay_state};
 use load::{RawLogCanonicalityFilter, load_registry_raw_logs};
@@ -244,6 +244,7 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
         && reconstruct_restricted_prior_state
         && requires_prior_registry_state(&observations_by_log);
     let mut linked_resource_states = BTreeMap::<Uuid, RegistryNameState>::new();
+    let mut retired_binding_states = BTreeMap::<Uuid, RegistryNameState>::new();
     let mut closed_bindings = BTreeMap::<Uuid, SurfaceBinding>::new();
     let mut observations = Vec::<DiscoveryObservation>::new();
     let mut graph_events = Vec::<NormalizedEvent>::new();
@@ -255,10 +256,18 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
         if !observations_for_log.is_empty() {
             let mut context = RegistryObservationContext {
                 registry_suffix_by_address: &mut replay_state.registry_suffix_by_address,
+                root_registry_addresses: &replay_state.root_registry_addresses,
                 registry_contract_by_address: &mut replay_state.registry_contract_by_address,
+                current_subregistry_by_parent_label: &mut replay_state
+                    .current_subregistry_by_parent_label,
+                current_parent_claim_by_registry: &mut replay_state
+                    .current_parent_claim_by_registry,
+                entry_topology_by_registry_token: &mut replay_state
+                    .entry_topology_by_registry_token,
                 states_by_registry_token: &mut replay_state.states_by_registry_token,
                 state_keys_by_registry_namehash: &mut replay_state.state_keys_by_registry_namehash,
                 linked_resource_states: &mut linked_resource_states,
+                retired_binding_states: &mut retired_binding_states,
                 closed_bindings: &mut closed_bindings,
                 token_aliases: &mut replay_state.token_aliases,
                 current_token_alias_by_canonical_key: &mut replay_state
@@ -298,13 +307,38 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
     let mut bindings = Vec::<SurfaceBinding>::new();
     let mut events = graph_events;
 
-    for state in linked_resource_states.values() {
+    let mut binding_states = retired_binding_states;
+    for state in linked_resource_states
+        .values()
+        .filter(|state| state.name_reachable)
+    {
+        if let Some(link) = state.resource.as_ref() {
+            binding_states.insert(link.surface_binding_id, state.clone());
+        }
+    }
+    let mut resource_states = linked_resource_states;
+    for state in binding_states.values() {
+        if let Some(link) = state.resource.as_ref() {
+            resource_states
+                .entry(link.resource_id)
+                .or_insert_with(|| state.clone());
+        }
+    }
+    for state in resource_states.values() {
         let Some(link) = state.resource.as_ref() else {
             continue;
         };
         token_lineages.push(build_token_lineage(pool, state, link).await?);
         resources.push(build_resource(pool, state, link).await?);
-        surfaces.push(build_name_surface(pool, &state.name, &state.first_ref).await?);
+        if link.linked_logical_name_id.is_none() {
+            events.push(build_token_resource_linked_event(state, link));
+        }
+    }
+    for state in binding_states.values() {
+        let Some(link) = state.resource.as_ref() else {
+            continue;
+        };
+        surfaces.push(build_name_surface(pool, &state.name, &link.binding_ref).await?);
         if let Some(closed_binding) = closed_bindings.get(&link.surface_binding_id) {
             bindings.push(closed_binding.clone());
         } else {
@@ -368,7 +402,9 @@ fn initialize_registry_suffixes(
     is_resumed_replay: bool,
 ) {
     if !is_resumed_replay {
-        replay_state.registry_suffix_by_address = initial_registry_suffixes(active_emitters);
+        let suffixes = initial_registry_suffixes(active_emitters);
+        replay_state.root_registry_addresses = suffixes.keys().cloned().collect();
+        replay_state.registry_suffix_by_address = suffixes;
     }
 }
 

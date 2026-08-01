@@ -1,12 +1,14 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{Context, Result, ensure};
 use sqlx::{PgPool, types::Uuid};
 
 use super::{
-    EnsV2RegistryResourceSurfaceSyncSummary, emitters::load_active_emitters,
-    load::RawLogCanonicalityFilter, sync_ens_v2_registry_resource_surface_with_scope_and_state,
-    types::RegistryNameState,
+    EnsV2RegistryResourceSurfaceSyncSummary,
+    emitters::load_active_emitters,
+    load::RawLogCanonicalityFilter,
+    sync_ens_v2_registry_resource_surface_with_scope_and_state,
+    types::{CurrentParentClaim, CurrentSubregistryLink, RegistryEntryTopology, RegistryNameState},
 };
 
 mod cache;
@@ -26,7 +28,12 @@ use reuse::reusable_process_cache_path;
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(super) struct RegistryReplayState {
     pub(super) registry_suffix_by_address: HashMap<String, String>,
+    pub(super) root_registry_addresses: HashSet<String>,
     pub(super) registry_contract_by_address: HashMap<String, Uuid>,
+    pub(super) current_subregistry_by_parent_label:
+        HashMap<(String, String), CurrentSubregistryLink>,
+    pub(super) current_parent_claim_by_registry: HashMap<String, CurrentParentClaim>,
+    pub(super) entry_topology_by_registry_token: HashMap<(String, String), RegistryEntryTopology>,
     pub(super) states_by_registry_token: BTreeMap<(String, String), RegistryNameState>,
     pub(super) state_keys_by_registry_namehash:
         HashMap<(String, String), BTreeSet<(String, String)>>,

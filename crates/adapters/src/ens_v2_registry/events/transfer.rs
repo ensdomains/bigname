@@ -25,10 +25,14 @@ pub(super) fn apply_token_control_transferred(
         &token_id,
     )
     .and_then(|state| {
-        state
-            .resource
-            .clone()
-            .map(|resource| (state.name.logical_name_id.clone(), resource))
+        state.resource.clone().map(|resource| {
+            (
+                state
+                    .name_reachable
+                    .then(|| state.name.logical_name_id.clone()),
+                resource,
+            )
+        })
     });
     let identity_suffix = match transfer_index {
         Some(index) => format!("token-control-transferred:{token_id}:batch:{index}"),
@@ -37,7 +41,7 @@ pub(super) fn apply_token_control_transferred(
     let (logical_name_id, resource_id, upstream_resource, token_lineage_id, pending) =
         match linked_state {
             Some((logical_name_id, resource)) => (
-                Some(logical_name_id),
+                logical_name_id,
                 Some(resource.resource_id),
                 Some(resource.upstream_resource),
                 Some(resource.token_lineage_id.to_string()),

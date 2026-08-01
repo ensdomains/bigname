@@ -2,7 +2,7 @@ use alloy_primitives::Address;
 use anyhow::{Context, Result, ensure};
 use bigname_adapters::{
     sync_block_derived_normalized_events, sync_ens_v1_unwrapped_authority, sync_ens_v2_permissions,
-    sync_ens_v2_registrar, sync_ens_v2_registry_resource_surface, sync_ens_v2_resolver,
+    sync_ens_v2_registrar, sync_ens_v2_registry_resource_surface_live_poll, sync_ens_v2_resolver,
 };
 use serde_json::Value;
 use sqlx::PgPool;
@@ -22,12 +22,52 @@ async fn sync_profile(pool: &PgPool, root: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-async fn interpret_ens_v2(pool: &PgPool) -> Result<()> {
-    sync_ens_v2_registry_resource_surface(pool, "ethereum-sepolia").await?;
+async fn interpret_ens_v2_live_poll(
+    pool: &PgPool,
+    target_block_number: i64,
+    block_hashes: &[String],
+) -> Result<usize> {
+    let registry = sync_ens_v2_registry_resource_surface_live_poll(
+        pool,
+        "e2e-discovery-semantics",
+        "ethereum-sepolia",
+        target_block_number,
+        block_hashes,
+    )
+    .await?;
     sync_ens_v2_registrar(pool, "ethereum-sepolia").await?;
     sync_ens_v2_resolver(pool, "ethereum-sepolia").await?;
     sync_ens_v2_permissions(pool, "ethereum-sepolia").await?;
-    Ok(())
+    Ok(registry.scanned_log_count)
+}
+
+async fn registry_log_count_between(
+    pool: &PgPool,
+    first_block_number: i64,
+    last_block_number: i64,
+) -> Result<i64> {
+    let source_families = vec!["ens_v2_registry_l1".to_owned()];
+    let topic0s = bigname_manifests::load_active_manifest_abi_events_by_chain_and_source_families(
+        pool,
+        "ethereum-sepolia",
+        &source_families,
+    )
+    .await?
+    .into_iter()
+    .filter_map(|event| event.topic0.map(|topic0| topic0.to_ascii_lowercase()))
+    .collect::<Vec<_>>();
+    sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM raw_logs \
+         WHERE chain_id = 'ethereum-sepolia' \
+           AND block_number > $1 AND block_number <= $2 \
+           AND lower(topics[1]) = ANY($3::TEXT[])",
+    )
+    .bind(first_block_number)
+    .bind(last_block_number)
+    .bind(topic0s)
+    .fetch_one(pool)
+    .await
+    .context("count incremental ENSv2 registry logs")
 }
 
 async fn active_edge_to(pool: &PgPool, edge_kind: &str, address: Address) -> Result<bool> {
@@ -189,8 +229,11 @@ async fn ens_v2_prefetched_discovery_and_lifecycle_semantics() -> Result<()> {
         &deployment.manifest_targets(),
     )?;
     sync_profile(&database.pool, &profile.root).await?;
-    support::prefetch_raw_facts(&database.pool, &rpc, "ethereum-sepolia").await?;
-    interpret_ens_v2(&database.pool).await?;
+    let first_block_number = i64::try_from(rpc.block_number().await?)
+        .context("first discovery-semantics block exceeds i64")?;
+    let first_block_hashes =
+        support::prefetch_raw_facts(&database.pool, &rpc, "ethereum-sepolia").await?;
+    interpret_ens_v2_live_poll(&database.pool, first_block_number, &first_block_hashes).await?;
 
     let bob_permissions: Vec<(String, String)> = sqlx::query_as(
         "SELECT after_state->>'old_role_bitmap', after_state->>'role_bitmap' \
@@ -267,6 +310,23 @@ async fn ens_v2_prefetched_discovery_and_lifecycle_semantics() -> Result<()> {
     .await?;
 
     let child_b = ens_v2::deploy_child_registry(&rpc, &root, &deployment).await?;
+    ens_v2::set_parent(
+        &rpc,
+        child_b.address,
+        deployment.deployer,
+        deployment.eth_registry.address,
+        "victim",
+    )
+    .await?;
+    ens_v2::register_in_registry(
+        &rpc,
+        child_b.address,
+        deployment.deployer,
+        "latespoof",
+        alice,
+        anvil::GENESIS_TIMESTAMP + 5 * YEAR,
+    )
+    .await?;
     ens_v2::attach_subregistry(
         &rpc,
         deployment.eth_registry.address,
@@ -336,8 +396,19 @@ async fn ens_v2_prefetched_discovery_and_lifecycle_semantics() -> Result<()> {
         "unregister then re-register must advance the registry token"
     );
 
-    support::prefetch_raw_facts(&database.pool, &rpc, "ethereum-sepolia").await?;
-    interpret_ens_v2(&database.pool).await?;
+    let second_block_number = i64::try_from(rpc.block_number().await?)
+        .context("second discovery-semantics block exceeds i64")?;
+    let second_block_hashes =
+        support::prefetch_raw_facts(&database.pool, &rpc, "ethereum-sepolia").await?;
+    let second_scanned_log_count =
+        interpret_ens_v2_live_poll(&database.pool, second_block_number, &second_block_hashes)
+            .await?;
+    let expected_incremental_log_count =
+        registry_log_count_between(&database.pool, first_block_number, second_block_number).await?;
+    ensure!(
+        i64::try_from(second_scanned_log_count).ok() == Some(expected_incremental_log_count),
+        "the second interpretation round must reuse the live replay cache and scan only new registry logs: scanned {second_scanned_log_count}, expected {expected_incremental_log_count}"
+    );
 
     ensure!(
         !active_edge_to(&database.pool, "subregistry", child_a.address).await?,
@@ -368,6 +439,15 @@ async fn ens_v2_prefetched_discovery_and_lifecycle_semantics() -> Result<()> {
         )
         .await?,
         "the pre-link spoof registration must remain outside reachable name history"
+    );
+    ensure!(
+        !normalized_name_event_exists(
+            &database.pool,
+            "ens:latespoof.victim.eth",
+            "RegistrationGranted",
+        )
+        .await?,
+        "a later child claim must not borrow another registry's current parent-side link"
     );
     ensure!(
         normalized_name_event_exists(

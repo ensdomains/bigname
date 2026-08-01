@@ -87,6 +87,26 @@ pub(super) struct RegistryNameState {
     pub(super) resolver: Option<String>,
     pub(super) subregistry: Option<String>,
     pub(super) binding_kind: SurfaceBindingKind,
+    pub(super) name_reachable: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct CurrentSubregistryLink {
+    pub(super) subregistry: String,
+    pub(super) expiry: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct CurrentParentClaim {
+    pub(super) parent: String,
+    pub(super) label: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RegistryEntryTopology {
+    pub(super) label: String,
+    pub(super) expiry: Option<u64>,
+    pub(super) subregistry: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -98,6 +118,9 @@ pub(super) struct RegistryResourceLink {
     pub(super) token_lineage_id: Uuid,
     pub(super) surface_binding_id: Uuid,
     pub(super) linked_ref: ObservationRef,
+    pub(super) linked_logical_name_id: Option<String>,
+    pub(super) binding_ref: ObservationRef,
+    pub(super) binding_source_event: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

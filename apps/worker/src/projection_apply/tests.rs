@@ -920,6 +920,49 @@ async fn ensv2_parent_changed_invalidates_linked_children_parent() -> Result<()>
         json!({"parent_logical_name_id": "ens:old.eth"})
     );
 
+    sqlx::query("DELETE FROM projection_invalidations")
+        .execute(database.pool())
+        .await
+        .context("failed to clear accepted parent invalidation")?;
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:ensv2-parent-change-rejected",
+            namespace: "ens",
+            logical_name_id: None,
+            resource_id: None,
+            event_kind: "ParentChanged",
+            source_family: "ens_v2_registry_l1",
+            derivation_kind: "ens_v2_registry_resource_surface",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(44),
+            block_hash: Some("0xensv2parent44"),
+            before_state: json!({
+                "registry_name": "alice.eth"
+            }),
+            after_state: json!({
+                "source_event": "ParentUpdated",
+                "registry_name": null,
+                "registry_contract_instance_id": child_registry_contract_instance_id,
+                "parent_contract_instance_id": null
+            }),
+            observed_at: timestamp(1_800_000_014),
+        },
+    )
+    .await?;
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 1);
+    let invalidations = load_invalidations(&database).await?;
+    assert!(
+        has_key(&invalidations, "children_current", "ens:alice.eth"),
+        "the prior registry name must invalidate its own child collection when the claim is rejected"
+    );
+    assert!(
+        has_key(&invalidations, "children_current", "ens:old.eth"),
+        "the prior registry name must invalidate the parent collection that contained it"
+    );
+
     database.cleanup().await
 }
 

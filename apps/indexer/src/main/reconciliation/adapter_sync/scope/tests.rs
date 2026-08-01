@@ -234,6 +234,7 @@ async fn live_adapter_scope_includes_bounded_deactivated_discovery_history() -> 
     )
     .await?;
     let chain = "testnet";
+    let prior_hash = "0xblock9";
     let boundary_hash = "0xblock10";
     let after_boundary_hash = "0xblock11";
     let root_address = "0x00000000000000000000000000000000000000a1";
@@ -404,11 +405,13 @@ async fn live_adapter_scope_includes_bounded_deactivated_discovery_history() -> 
             canonicality_state
         )
         VALUES
-            ($1, $2, 10, now(), NULL, 'safe'),
-            ($1, $3, 11, now(), $2, 'canonical')
+            ($1, $2, 9, to_timestamp(1717172709), NULL, 'safe'),
+            ($1, $3, 10, to_timestamp(1717172710), $2, 'safe'),
+            ($1, $4, 11, to_timestamp(1717172711), $3, 'canonical')
         "#,
     )
     .bind(chain)
+    .bind(prior_hash)
     .bind(boundary_hash)
     .bind(after_boundary_hash)
     .execute(database.pool())
@@ -426,8 +429,10 @@ async fn live_adapter_scope_includes_bounded_deactivated_discovery_history() -> 
             canonicality_state
         )
         VALUES
-            ($1, $2, 10, '0xbounded', 0, 0, $3, 'canonical'),
-            ($1, $2, 10, '0xretracted', 0, 1, $4, 'canonical'),
+            ($1, $7, 9, '0xparent-registration', 0, 0, $6, 'canonical'),
+            ($1, $7, 9, '0xparent-link', 0, 1, $6, 'canonical'),
+            ($1, $2, 10, '0xbounded', 1, 2, $3, 'canonical'),
+            ($1, $2, 10, '0xretracted', 1, 3, $4, 'canonical'),
             ($1, $5, 11, '0xafter-boundary', 0, 0, $3, 'canonical')
         "#,
     )
@@ -436,14 +441,85 @@ async fn live_adapter_scope_includes_bounded_deactivated_discovery_history() -> 
     .bind(bounded_address)
     .bind(retracted_address)
     .bind(after_boundary_hash)
+    .bind(root_address)
+    .bind(prior_hash)
     .execute(database.pool())
     .await?;
-    let upgraded_topic = format!(
+    let label_registered_topic = format!(
         "0x{}",
-        alloy_primitives::hex::encode(alloy_primitives::keccak256(b"Upgraded(address)"))
+        alloy_primitives::hex::encode(alloy_primitives::keccak256(
+            b"LabelRegistered(uint256,bytes32,string,address,uint64,address)"
+        ))
     );
-    let implementation = "0x0000000000000000000000000000000000000fed";
-    let implementation_topic = format!("0x{:0>64}", implementation.trim_start_matches("0x"));
+    let subregistry_updated_topic = format!(
+        "0x{}",
+        alloy_primitives::hex::encode(alloy_primitives::keccak256(
+            b"SubregistryUpdated(uint256,address,address)"
+        ))
+    );
+    let parent_token_topic = format!("0x{:064x}", 1);
+    let child_labelhash_topic = format!(
+        "0x{}",
+        alloy_primitives::hex::encode(alloy_primitives::keccak256(b"child"))
+    );
+    let sender_topic = format!("0x{:0>64}", "0000000000000000000000000000000000000dad");
+    let child_registry_topic = format!("0x{:0>64}", bounded_address.trim_start_matches("0x"));
+    let mut label_registered_data = vec![0_u8; 160];
+    label_registered_data[31] = 96;
+    label_registered_data[44..64].copy_from_slice(&alloy_primitives::hex::decode(
+        "0000000000000000000000000000000000000a11",
+    )?);
+    label_registered_data[88..96].copy_from_slice(&1_900_000_000_u64.to_be_bytes());
+    label_registered_data[127] = 5;
+    label_registered_data[128..133].copy_from_slice(b"child");
+    sqlx::query(
+        r#"
+        UPDATE raw_logs
+        SET topics = $1,
+            data = $2
+        WHERE chain_id = $3
+          AND transaction_hash = '0xparent-registration'
+        "#,
+    )
+    .bind(vec![
+        label_registered_topic,
+        parent_token_topic.clone(),
+        child_labelhash_topic,
+        sender_topic.clone(),
+    ])
+    .bind(label_registered_data)
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE raw_logs
+        SET topics = $1,
+            data = '\x'::BYTEA
+        WHERE chain_id = $2
+          AND transaction_hash = '0xparent-link'
+        "#,
+    )
+    .bind(vec![
+        subregistry_updated_topic,
+        parent_token_topic,
+        child_registry_topic,
+        sender_topic.clone(),
+    ])
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    let parent_updated_topic = format!(
+        "0x{}",
+        alloy_primitives::hex::encode(alloy_primitives::keccak256(
+            b"ParentUpdated(address,string,address)"
+        ))
+    );
+    let parent_topic = format!("0x{:0>64}", root_address.trim_start_matches("0x"));
+    let mut parent_updated_data = vec![0_u8; 96];
+    parent_updated_data[31] = 32;
+    parent_updated_data[63] = 5;
+    parent_updated_data[64..69].copy_from_slice(b"child");
     sqlx::query(
         r#"
         UPDATE raw_logs
@@ -453,8 +529,8 @@ async fn live_adapter_scope_includes_bounded_deactivated_discovery_history() -> 
           AND transaction_hash = '0xbounded'
         "#,
     )
-    .bind(vec![upgraded_topic, implementation_topic])
-    .bind(Vec::<u8>::new())
+    .bind(vec![parent_updated_topic, parent_topic, sender_topic])
+    .bind(parent_updated_data)
     .bind(chain)
     .execute(database.pool())
     .await?;
@@ -497,7 +573,7 @@ async fn live_adapter_scope_includes_bounded_deactivated_discovery_history() -> 
             10,
             10,
         )],
-        "bounded retired history must remain replayable while unbounded retractions stay excluded; Upgraded is address-scoped, not RegistryCreated match-all"
+        "bounded retired history must remain replayable while unbounded retractions stay excluded; ParentUpdated is address-scoped, not RegistryCreated match-all"
     );
     assert!(
         load_live_adapter_source_scope(database.pool(), chain, &[after_boundary_hash.to_owned()],)
@@ -519,16 +595,16 @@ async fn live_adapter_scope_includes_bounded_deactivated_discovery_history() -> 
     assert_eq!(
         sqlx::query_scalar::<_, Option<String>>(
             r#"
-            SELECT after_state ->> 'implementation'
+            SELECT after_state ->> 'registry_name'
             FROM normalized_events
-            WHERE event_kind = 'Upgraded'
+            WHERE event_kind = 'ParentChanged'
               AND block_hash = $1
             "#,
         )
         .bind(boundary_hash)
         .fetch_one(database.pool())
         .await?,
-        Some(implementation.to_owned()),
+        Some("child.eth".to_owned()),
         "rewind derivation must process the retired discovered emitter at its boundary"
     );
 

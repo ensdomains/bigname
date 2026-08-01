@@ -706,6 +706,204 @@ async fn rebuilds_ensv2_declared_children_from_linked_subregistry_graph() -> Res
         Some(3)
     );
 
+    seed_raw_blocks(
+        database.pool(),
+        &[raw_block(
+            "ethereum-sepolia",
+            "0xblock12f",
+            303,
+            1_717_172_303,
+        )],
+    )
+    .await?;
+    let mut rejected_claim = ensv2_parent_event(
+        "ensv2-parent-rejected",
+        "alice.eth",
+        parent_registry,
+        child_registry,
+        child_registry_address,
+        303,
+        0,
+    );
+    rejected_claim.before_state = json!({"registry_name": "alice.eth"});
+    rejected_claim.after_state["registry_name"] = Value::Null;
+    rejected_claim.after_state["parent_contract_instance_id"] = Value::Null;
+    seed_subregistry_events(database.pool(), &[rejected_claim]).await?;
+
+    let summary = rebuild_children_current(database.pool(), Some(parent)).await?;
+    assert_eq!(summary.upserted_row_count, 0);
+    assert_eq!(summary.deleted_row_count, 1);
+    assert!(
+        load_children_current(database.pool(), parent)
+            .await?
+            .is_empty(),
+        "a rejected or cleared current claim must retract the linked registry's child surface"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuilds_ensv2_children_under_only_the_current_canonical_registry_alias() -> Result<()> {
+    let database = test_database().await?;
+    let old_parent = "ens:branch.alpha.eth";
+    let new_parent = "ens:branch.beta.alt";
+    let old_child = "ens:leaf.branch.alpha.eth";
+    let new_child = "ens:leaf.branch.beta.alt";
+    let rebound_parent_registry = "00000000-0000-0000-0000-0000000000bb";
+    let child_registry = "00000000-0000-0000-0000-0000000000cc";
+    let child_registry_address = "0x00000000000000000000000000000000000000cc";
+
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-sepolia", "0xblock140", 320, 1_717_172_320),
+            raw_block("ethereum-sepolia", "0xblock141", 321, 1_717_172_321),
+            raw_block("ethereum-sepolia", "0xblock142", 322, 1_717_172_322),
+            raw_block("ethereum-sepolia", "0xblock143", 323, 1_717_172_323),
+            raw_block("ethereum-sepolia", "0xblock144", 324, 1_717_172_324),
+            raw_block("ethereum-sepolia", "0xblock145", 325, 1_717_172_325),
+            raw_block("ethereum-sepolia", "0xblock146", 326, 1_717_172_326),
+        ],
+    )
+    .await?;
+    seed_name_surfaces(
+        database.pool(),
+        &[
+            name_surface_on_chain(
+                old_parent,
+                "branch.alpha.eth",
+                "node:branch.alpha.eth",
+                "ethereum-sepolia",
+                60,
+            ),
+            name_surface_on_chain(
+                new_parent,
+                "branch.beta.alt",
+                "node:branch.beta.alt",
+                "ethereum-sepolia",
+                61,
+            ),
+            name_surface_on_chain(
+                old_child,
+                "leaf.branch.alpha.eth",
+                "node:leaf.branch.alpha.eth",
+                "ethereum-sepolia",
+                62,
+            ),
+            name_surface_on_chain(
+                new_child,
+                "leaf.branch.beta.alt",
+                "node:leaf.branch.beta.alt",
+                "ethereum-sepolia",
+                63,
+            ),
+        ],
+    )
+    .await?;
+    seed_subregistry_events(
+        database.pool(),
+        &[
+            ensv2_subregistry_event(
+                "ensv2-alias-old-subregistry",
+                old_parent,
+                rebound_parent_registry,
+                child_registry,
+                320,
+                0,
+            ),
+            ensv2_parent_event(
+                "ensv2-alias-old-child-claim",
+                "branch.alpha.eth",
+                rebound_parent_registry,
+                child_registry,
+                child_registry_address,
+                321,
+                0,
+            ),
+            ensv2_registration_event(
+                "ensv2-alias-old-child",
+                old_child,
+                "RegistrationGranted",
+                child_registry,
+                child_registry_address,
+                322,
+                0,
+            ),
+        ],
+    )
+    .await?;
+
+    rebuild_children_current(database.pool(), Some(old_parent)).await?;
+    assert_eq!(
+        load_children_current(database.pool(), old_parent)
+            .await?
+            .len(),
+        1
+    );
+    assert!(
+        load_children_current(database.pool(), new_parent)
+            .await?
+            .is_empty()
+    );
+
+    let mut moved_claim = ensv2_parent_event(
+        "ensv2-alias-new-child-claim",
+        "branch.beta.alt",
+        rebound_parent_registry,
+        child_registry,
+        child_registry_address,
+        323,
+        0,
+    );
+    moved_claim.before_state = json!({"registry_name": "branch.alpha.eth"});
+    let mut released = ensv2_registration_event(
+        "ensv2-alias-old-child-released",
+        old_child,
+        "RegistrationReleased",
+        child_registry,
+        child_registry_address,
+        324,
+        0,
+    );
+    released.after_state["status"] = json!("released");
+    seed_subregistry_events(
+        database.pool(),
+        &[
+            moved_claim,
+            released,
+            ensv2_subregistry_event(
+                "ensv2-alias-new-subregistry",
+                new_parent,
+                rebound_parent_registry,
+                child_registry,
+                325,
+                0,
+            ),
+            ensv2_registration_event(
+                "ensv2-alias-new-child",
+                new_child,
+                "RegistrationGranted",
+                child_registry,
+                child_registry_address,
+                326,
+                0,
+            ),
+        ],
+    )
+    .await?;
+
+    rebuild_children_current(database.pool(), Some(old_parent)).await?;
+    rebuild_children_current(database.pool(), Some(new_parent)).await?;
+    assert!(
+        load_children_current(database.pool(), old_parent)
+            .await?
+            .is_empty()
+    );
+    let current = load_children_current(database.pool(), new_parent).await?;
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].child_logical_name_id, new_child);
+
     database.cleanup().await
 }
 

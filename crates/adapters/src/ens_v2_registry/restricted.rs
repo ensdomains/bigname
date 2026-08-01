@@ -55,8 +55,10 @@ pub(super) async fn reconstruct_prior_registry_state(
     )
     .await?;
     let raw_logs = load_registry_raw_log_prefix(pool, chain, &emitters, before).await?;
+    let initial_suffixes = initial_registry_suffixes(&emitters);
     let mut replay_state = RegistryReplayState {
-        registry_suffix_by_address: initial_registry_suffixes(&emitters),
+        root_registry_addresses: initial_suffixes.keys().cloned().collect(),
+        registry_suffix_by_address: initial_suffixes,
         registry_contract_by_address: emitters
             .iter()
             .map(|emitter| (emitter.address.clone(), emitter.contract_instance_id))
@@ -65,13 +67,18 @@ pub(super) async fn reconstruct_prior_registry_state(
     };
     let RegistryReplayState {
         registry_suffix_by_address,
+        root_registry_addresses,
         registry_contract_by_address,
+        current_subregistry_by_parent_label,
+        current_parent_claim_by_registry,
+        entry_topology_by_registry_token,
         states_by_registry_token,
         state_keys_by_registry_namehash,
         token_aliases,
         current_token_alias_by_canonical_key,
     } = &mut replay_state;
     let mut linked_resource_states = BTreeMap::<Uuid, RegistryNameState>::new();
+    let mut retired_binding_states = BTreeMap::<Uuid, RegistryNameState>::new();
     let mut closed_bindings = BTreeMap::<Uuid, SurfaceBinding>::new();
     let mut observations = Vec::<DiscoveryObservation>::new();
     let mut graph_events = Vec::<NormalizedEvent>::new();
@@ -85,10 +92,15 @@ pub(super) async fn reconstruct_prior_registry_state(
         })?;
         let mut context = RegistryObservationContext {
             registry_suffix_by_address,
+            root_registry_addresses,
             registry_contract_by_address,
+            current_subregistry_by_parent_label,
+            current_parent_claim_by_registry,
+            entry_topology_by_registry_token,
             states_by_registry_token,
             state_keys_by_registry_namehash,
             linked_resource_states: &mut linked_resource_states,
+            retired_binding_states: &mut retired_binding_states,
             closed_bindings: &mut closed_bindings,
             token_aliases,
             current_token_alias_by_canonical_key,
@@ -99,6 +111,7 @@ pub(super) async fn reconstruct_prior_registry_state(
             apply_registry_observation(observation, &mut context)?;
         }
         linked_resource_states.clear();
+        retired_binding_states.clear();
         closed_bindings.clear();
         observations.clear();
         graph_events.clear();

@@ -77,10 +77,19 @@ candidate_keys AS (
         ne.change_id,
         ne.changed_at
     FROM changed_events ne
+    CROSS JOIN LATERAL (
+        SELECT DISTINCT registry_name
+        FROM (
+            VALUES
+                (ne.before_state ->> 'registry_name'),
+                (ne.after_state ->> 'registry_name')
+        ) AS names(registry_name)
+        WHERE registry_name IS NOT NULL
+    ) affected_name
     JOIN name_surfaces affected_surface
       ON affected_surface.namespace = ne.namespace
      AND affected_surface.chain_id = ne.chain_id
-     AND affected_surface.normalized_name = ne.after_state ->> 'registry_name'
+     AND affected_surface.normalized_name = affected_name.registry_name
     JOIN children_current current_child
       ON current_child.child_logical_name_id = affected_surface.logical_name_id
       OR current_child.parent_logical_name_id = affected_surface.logical_name_id
@@ -88,7 +97,6 @@ candidate_keys AS (
       AND ne.derivation_kind = 'ens_v2_registry_resource_surface'
       AND ne.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
       AND ne.after_state ->> 'registry_contract_instance_id' IS NOT NULL
-      AND ne.after_state ->> 'registry_name' IS NOT NULL
 
     UNION ALL
 
