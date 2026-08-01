@@ -1738,6 +1738,98 @@ async fn ens_v2_registry_created_scope_admits_only_same_position_and_later_proxy
 }
 
 #[tokio::test]
+async fn ens_v2_restricted_reconstruction_skips_retained_pre_announcement_logs() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let anchor = "0x00000000000000000000000000000000000000aa";
+    let announced_registry = "0x00000000000000000000000000000000000000bb";
+    let manifest_id = insert_test_registry_manifest(database.pool(), chain).await?;
+    insert_test_registry_contract(
+        database.pool(),
+        manifest_id,
+        "registry",
+        Uuid::from_u128(0x1203),
+        anchor,
+        0,
+    )
+    .await?;
+
+    let announcement_hash = lifecycle_block_hash(42);
+    let later_hash = lifecycle_block_hash(43);
+    let mut later_block = test_raw_block(chain, &later_hash, 43);
+    later_block.parent_hash = Some(announcement_hash.clone());
+    upsert_raw_blocks(
+        database.pool(),
+        &[test_raw_block(chain, &announcement_hash, 42), later_block],
+    )
+    .await?;
+
+    let pre_announcement = upgraded_raw_log(
+        chain,
+        &announcement_hash,
+        42,
+        announced_registry,
+        0,
+        "0x0000000000000000000000000000000000000011",
+    );
+    let mut registry_created =
+        registry_created_raw_log(chain, &announcement_hash, 42, announced_registry);
+    registry_created.transaction_hash = pre_announcement.transaction_hash.clone();
+    registry_created.log_index = 1;
+    let later_registration = label_registered_raw_log(
+        chain,
+        &later_hash,
+        43,
+        announced_registry,
+        0,
+        "child",
+        1,
+        "alice",
+    );
+    upsert_raw_logs(
+        database.pool(),
+        &[pre_announcement, registry_created, later_registration],
+    )
+    .await?;
+
+    EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope_canonical_only(
+        database.pool(),
+        chain,
+        std::slice::from_ref(&announcement_hash),
+        &[(
+            SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+            GENERIC_SOURCE_SCOPE_ADDRESS.to_owned(),
+            42,
+            42,
+        )],
+    )
+    .await?;
+    refresh_test_raw_log_closure_proof(database.pool(), chain, 43).await?;
+
+    let summary =
+        EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope_canonical_only(
+            database.pool(),
+            chain,
+            &[later_hash],
+            &[(
+                SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+                announced_registry.to_owned(),
+                43,
+                43,
+            )],
+        )
+        .await?;
+
+    assert_eq!(summary.matched_log_count, 1);
+    assert_eq!(
+        summary.total_normalized_event_count, 0,
+        "the unlinked registry has no suffix, but its later scoped sync must reconstruct safely"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn ens_v2_registry_created_wildcard_scope_skips_malformed_same_topic_log() -> Result<()> {
     let database = TestDatabase::new().await?;
     let chain = "ethereum-sepolia";
@@ -5859,6 +5951,91 @@ fn ens_v2_subregistry_zero_and_swap_deactivate_stale_child_suffixes() -> Result<
         harness
             .states_by_registry_token
             .contains_key(&(child_two, child_token))
+    );
+
+    Ok(())
+}
+
+#[test]
+fn ens_v2_announced_registry_parent_claim_cannot_spoof_name_surface() -> Result<()> {
+    let parent = "0x00000000000000000000000000000000000000aa";
+    let child = "0x00000000000000000000000000000000000000bb";
+    let parent_instance_id = Uuid::from_u128(0x1781);
+    let child_instance_id = Uuid::from_u128(0x1782);
+    let mut harness = RegistryHarness::new(parent, parent_instance_id, "eth");
+
+    harness.apply(RegistryObservation::RegistryCreated {
+        reference: reference(child, child_instance_id, 1, 0),
+    })?;
+    harness.apply(RegistryObservation::ParentUpdated {
+        parent: parent.to_owned(),
+        label: "victim".to_owned(),
+        sender: "0x0000000000000000000000000000000000000dad".to_owned(),
+        reference: reference(child, child_instance_id, 2, 0),
+    })?;
+    let child_token = format!("0x{:064x}", 1);
+    harness.apply(RegistryObservation::LabelRegistered {
+        token_id: child_token.clone(),
+        labelhash: labelhash("spoof"),
+        label: "spoof".to_owned(),
+        owner: "0x0000000000000000000000000000000000000a11".to_owned(),
+        expiry: 1_900_000_000,
+        sender: "0x0000000000000000000000000000000000000dad".to_owned(),
+        reference: reference(child, child_instance_id, 3, 0),
+    })?;
+
+    assert!(!harness.registry_suffix_by_address.contains_key(child));
+    assert!(
+        !harness
+            .states_by_registry_token
+            .contains_key(&(child.to_owned(), child_token))
+    );
+    assert!(
+        harness
+            .graph_events
+            .iter()
+            .all(|event| event.logical_name_id.is_none()),
+        "an announced child's parent claim must not surface names without a parent-side link"
+    );
+    assert_eq!(
+        harness
+            .graph_events
+            .iter()
+            .filter(|event| event.event_kind == EVENT_KIND_PARENT_CHANGED)
+            .count(),
+        1,
+        "the child-side claim must remain in contract history even though it grants no reachability"
+    );
+
+    let parent_token = format!("0x{:064x}", 2);
+    harness.apply(RegistryObservation::LabelRegistered {
+        token_id: parent_token.clone(),
+        labelhash: labelhash("victim"),
+        label: "victim".to_owned(),
+        owner: "0x0000000000000000000000000000000000000a11".to_owned(),
+        expiry: 1_900_000_000,
+        sender: "0x0000000000000000000000000000000000000dad".to_owned(),
+        reference: reference(parent, parent_instance_id, 4, 0),
+    })?;
+    harness.apply(RegistryObservation::SubregistryUpdated {
+        token_id: parent_token,
+        subregistry: child.to_owned(),
+        sender: "0x0000000000000000000000000000000000000dad".to_owned(),
+        reference: reference(parent, parent_instance_id, 5, 0),
+    })?;
+    harness
+        .registry_suffix_by_address
+        .insert(child.to_owned(), "stale.eth".to_owned());
+    harness.apply(RegistryObservation::ParentUpdated {
+        parent: parent.to_owned(),
+        label: "victim".to_owned(),
+        sender: "0x0000000000000000000000000000000000000dad".to_owned(),
+        reference: reference(child, child_instance_id, 6, 0),
+    })?;
+    assert_eq!(
+        harness.registry_suffix_by_address.get(child),
+        Some(&"victim.eth".to_owned()),
+        "a child ParentUpdated event must still correct its suffix once the parent links it"
     );
 
     Ok(())

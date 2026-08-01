@@ -194,7 +194,7 @@ pub(in crate::ens_v2_registry) async fn load_registry_raw_log_prefix(
         let log_index = sql_row::get(&row, "log_index")?;
         let emitting_address =
             normalize_address(&sql_row::get::<String>(&row, "emitting_address")?);
-        let emitter = emitters_by_address
+        let Some(emitter) = emitters_by_address
             .get(&emitting_address)
             .and_then(|emitters| {
                 emitter_for_log_and_scope(
@@ -206,11 +206,9 @@ pub(in crate::ens_v2_registry) async fn load_registry_raw_log_prefix(
                     None,
                 )
             })
-            .with_context(|| {
-                format!(
-                    "retained ENSv2 registry history has no emitter attribution for {emitting_address} at block {block_number}"
-                )
-            })?;
+        else {
+            continue;
+        };
         output.push(RegistryRawLogRow {
             chain_id: sql_row::get(&row, "chain_id")?,
             block_hash,

@@ -74,6 +74,37 @@ async fn ens_v2_prefetched_discovery_and_lifecycle_semantics() -> Result<()> {
     let bob = accounts[2];
 
     let unlinked = ens_v2::deploy_child_registry(&rpc, &root, &deployment).await?;
+    ens_v2::register_eth_name(
+        &rpc,
+        &deployment,
+        ens_v2::RegisterEthName {
+            from: alice,
+            label: "victim",
+            owner: alice,
+            duration_secs: YEAR,
+            subregistry: Address::ZERO,
+            resolver: Address::ZERO,
+        },
+    )
+    .await?;
+    let victim_label = ens_v2::label_id("victim");
+    ens_v2::set_parent(
+        &rpc,
+        unlinked.address,
+        deployment.deployer,
+        deployment.eth_registry.address,
+        "victim",
+    )
+    .await?;
+    ens_v2::register_in_registry(
+        &rpc,
+        unlinked.address,
+        deployment.deployer,
+        "spoof",
+        alice,
+        anvil::GENESIS_TIMESTAMP + 5 * YEAR,
+    )
+    .await?;
 
     ens_v2::register_eth_name(
         &rpc,
@@ -191,6 +222,15 @@ async fn ens_v2_prefetched_discovery_and_lifecycle_semantics() -> Result<()> {
         "RegistryCreated must not manufacture a parent-child link"
     );
     ensure!(
+        !normalized_name_event_exists(
+            &database.pool,
+            "ens:spoof.victim.eth",
+            "RegistrationGranted",
+        )
+        .await?,
+        "a child-side setParent claim must not surface a name before the parent links the registry"
+    );
+    ensure!(
         active_edge_to(&database.pool, "subregistry", child_a.address).await?,
         "the first attached registry child must be present before the swap"
     );
@@ -199,6 +239,32 @@ async fn ens_v2_prefetched_discovery_and_lifecycle_semantics() -> Result<()> {
             .await?,
         "the first attached registry's child must be interpreted before the swap"
     );
+
+    ens_v2::attach_subregistry(
+        &rpc,
+        deployment.eth_registry.address,
+        alice,
+        victim_label,
+        unlinked.address,
+    )
+    .await?;
+    ens_v2::set_parent(
+        &rpc,
+        unlinked.address,
+        deployment.deployer,
+        deployment.eth_registry.address,
+        "victim",
+    )
+    .await?;
+    ens_v2::register_in_registry(
+        &rpc,
+        unlinked.address,
+        deployment.deployer,
+        "linked",
+        alice,
+        anvil::GENESIS_TIMESTAMP + 5 * YEAR,
+    )
+    .await?;
 
     let child_b = ens_v2::deploy_child_registry(&rpc, &root, &deployment).await?;
     ens_v2::attach_subregistry(
@@ -280,6 +346,28 @@ async fn ens_v2_prefetched_discovery_and_lifecycle_semantics() -> Result<()> {
     ensure!(
         active_edge_to(&database.pool, "subregistry", child_b.address).await?,
         "the replacement registry child must be present after the swap"
+    );
+    ensure!(
+        active_edge_to(&database.pool, "subregistry", unlinked.address).await?,
+        "the formerly unlinked registry must become reachable after the parent-side link"
+    );
+    ensure!(
+        normalized_name_event_exists(
+            &database.pool,
+            "ens:linked.victim.eth",
+            "RegistrationGranted",
+        )
+        .await?,
+        "a child registration after the parent-side link must surface under the linked suffix"
+    );
+    ensure!(
+        !normalized_name_event_exists(
+            &database.pool,
+            "ens:spoof.victim.eth",
+            "RegistrationGranted",
+        )
+        .await?,
+        "the pre-link spoof registration must remain outside reachable name history"
     );
     ensure!(
         normalized_name_event_exists(

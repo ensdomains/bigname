@@ -489,12 +489,20 @@ pub(super) fn apply_registry_observation(
             sender,
             reference,
         } => {
+            let parent_links_emitter_at_label =
+                context.states_by_registry_token.values().any(|state| {
+                    state.registry_address == parent
+                        && state.label == label
+                        && state.subregistry.as_deref() == Some(reference.emitting_address.as_str())
+                });
             if let Some(full_name) =
                 name_under_registry(&parent, &label, context.registry_suffix_by_address)
             {
-                context
-                    .registry_suffix_by_address
-                    .insert(reference.emitting_address.clone(), full_name.clone());
+                if parent_links_emitter_at_label {
+                    context
+                        .registry_suffix_by_address
+                        .insert(reference.emitting_address.clone(), full_name.clone());
+                }
                 context.graph_events.push(normalized_event(
                     &reference,
                     None,

@@ -438,18 +438,12 @@ async fn live_adapter_scope_includes_bounded_deactivated_discovery_history() -> 
     .bind(after_boundary_hash)
     .execute(database.pool())
     .await?;
-    let parent_updated_topic = format!(
+    let upgraded_topic = format!(
         "0x{}",
-        alloy_primitives::hex::encode(alloy_primitives::keccak256(
-            b"ParentUpdated(address,string,address)"
-        ))
+        alloy_primitives::hex::encode(alloy_primitives::keccak256(b"Upgraded(address)"))
     );
-    let parent_topic = format!("0x{:0>64}", root_address.trim_start_matches("0x"));
-    let sender_topic = format!("0x{:0>64}", "0000000000000000000000000000000000000dad");
-    let mut parent_updated_data = vec![0_u8; 96];
-    parent_updated_data[31] = 32;
-    parent_updated_data[63] = 5;
-    parent_updated_data[64..69].copy_from_slice(b"child");
+    let implementation = "0x0000000000000000000000000000000000000fed";
+    let implementation_topic = format!("0x{:0>64}", implementation.trim_start_matches("0x"));
     sqlx::query(
         r#"
         UPDATE raw_logs
@@ -459,8 +453,8 @@ async fn live_adapter_scope_includes_bounded_deactivated_discovery_history() -> 
           AND transaction_hash = '0xbounded'
         "#,
     )
-    .bind(vec![parent_updated_topic, parent_topic, sender_topic])
-    .bind(parent_updated_data)
+    .bind(vec![upgraded_topic, implementation_topic])
+    .bind(Vec::<u8>::new())
     .bind(chain)
     .execute(database.pool())
     .await?;
@@ -503,7 +497,7 @@ async fn live_adapter_scope_includes_bounded_deactivated_discovery_history() -> 
             10,
             10,
         )],
-        "bounded retired history must remain replayable while unbounded retractions stay excluded; ParentUpdated is address-scoped, not RegistryCreated match-all"
+        "bounded retired history must remain replayable while unbounded retractions stay excluded; Upgraded is address-scoped, not RegistryCreated match-all"
     );
     assert!(
         load_live_adapter_source_scope(database.pool(), chain, &[after_boundary_hash.to_owned()],)
@@ -525,16 +519,16 @@ async fn live_adapter_scope_includes_bounded_deactivated_discovery_history() -> 
     assert_eq!(
         sqlx::query_scalar::<_, Option<String>>(
             r#"
-            SELECT after_state ->> 'registry_name'
+            SELECT after_state ->> 'implementation'
             FROM normalized_events
-            WHERE event_kind = 'ParentChanged'
+            WHERE event_kind = 'Upgraded'
               AND block_hash = $1
             "#,
         )
         .bind(boundary_hash)
         .fetch_one(database.pool())
         .await?,
-        Some("child.eth".to_owned()),
+        Some(implementation.to_owned()),
         "rewind derivation must process the retired discovered emitter at its boundary"
     );
 
