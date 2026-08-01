@@ -1931,7 +1931,11 @@ impl TestDatabase {
                     block_hash: Some("0xbase-resolver".to_owned()),
                     transaction_hash: Some("0xtxbaseresolver".to_owned()),
                     log_index: Some(1),
-                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:basenames:record-version"}),
+                    raw_fact_ref: json!({
+                        "kind": "raw_log",
+                        "event_identity": "api-test:basenames:record-version",
+                        "emitting_address": "0x0000000000000000000000000000000000000abc",
+                    }),
                     derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
                     canonicality_state: CanonicalityState::Canonical,
                     before_state: json!({
@@ -1955,7 +1959,11 @@ impl TestDatabase {
                     block_hash: Some("0xbase-resolver".to_owned()),
                     transaction_hash: Some("0xtxbaseresolver".to_owned()),
                     log_index: Some(2),
-                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:basenames:addr"}),
+                    raw_fact_ref: json!({
+                        "kind": "raw_log",
+                        "event_identity": "api-test:basenames:addr",
+                        "emitting_address": "0x0000000000000000000000000000000000000abc",
+                    }),
                     derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
                     canonicality_state: CanonicalityState::Canonical,
                     before_state: json!({}),
@@ -1979,7 +1987,11 @@ impl TestDatabase {
                     block_hash: Some("0xbase-resolver".to_owned()),
                     transaction_hash: Some("0xtxbaseresolver".to_owned()),
                     log_index: Some(3),
-                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:basenames:text"}),
+                    raw_fact_ref: json!({
+                        "kind": "raw_log",
+                        "event_identity": "api-test:basenames:text",
+                        "emitting_address": "0x0000000000000000000000000000000000000abc",
+                    }),
                     derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
                     canonicality_state: CanonicalityState::Canonical,
                     before_state: json!({}),

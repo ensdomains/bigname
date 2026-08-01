@@ -11141,6 +11141,59 @@ async fn sync_ens_v1_unwrapped_authority_retains_signature_matched_history_indep
             "unlisted resolver text".to_owned()
         )
     );
+    upsert_normalized_events(
+        database.pool(),
+        &[NormalizedEvent {
+            event_identity: "test:ens-v2-sepolia-record-version".to_owned(),
+            namespace: "ens".to_owned(),
+            logical_name_id: Some(alice.logical_name_id.clone()),
+            resource_id: None,
+            event_kind: EVENT_KIND_RECORD_VERSION_CHANGED.to_owned(),
+            source_family: "ens_v2_resolver_l1".to_owned(),
+            manifest_version: 1,
+            source_manifest_id: None,
+            chain_id: Some("ethereum-sepolia".to_owned()),
+            block_number: Some(42),
+            block_hash: Some(
+                "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                    .to_owned(),
+            ),
+            transaction_hash: Some(
+                "0xtxeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                    .to_owned(),
+            ),
+            log_index: Some(99),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "chain_id": "ethereum-sepolia",
+                "block_hash": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "block_number": 42,
+                "transaction_hash": "0xtxeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "transaction_index": 0,
+                "log_index": 99,
+                "emitting_address": supported_resolver_address,
+            }),
+            derivation_kind: "ens_v2_resolver".to_owned(),
+            canonicality_state: CanonicalityState::Canonical,
+            before_state: json!({"record_version": null}),
+            after_state: json!({"record_version": 99}),
+        }],
+    )
+    .await?;
+    sqlx::query("DELETE FROM raw_logs WHERE block_hash = $1")
+        .bind(block_hash)
+        .execute(database.pool())
+        .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM raw_logs WHERE block_hash = $1",
+        )
+        .bind(block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "restricted replay must preload resolver-local state after prior raw-log compaction"
+    );
 
     let later_block_hash = "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
     let later_transaction_hash = "0xtxcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
@@ -11245,7 +11298,7 @@ async fn sync_ens_v1_unwrapped_authority_retains_signature_matched_history_indep
                 "12".to_owned(),
             ),
         ],
-        "restricted replay must preload and advance record versions independently per resolver emitter"
+        "restricted replay must preload compacted versions for this chain and resolver source only, then advance them independently per emitter"
     );
 
     database.cleanup().await
@@ -11442,6 +11495,15 @@ async fn sync_ens_v1_unwrapped_authority_emits_supported_record_change_events_id
             .await?,
             3
         );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<String>>(
+            "SELECT ARRAY_AGG(DISTINCT raw_fact_ref->>'emitting_address') FROM normalized_events WHERE source_family = $1 AND event_kind IN ('RecordChanged', 'RecordVersionChanged')",
+        )
+        .bind(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+        .fetch_one(database.pool())
+        .await?,
+        vec!["0x00000000000000000000000000000000000000cc".to_owned()]
+    );
 
     let second = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
     assert_eq!(second.scanned_log_count, 5);
@@ -11715,6 +11777,15 @@ async fn sync_ens_v1_unwrapped_authority_emits_basenames_base_authority_events_i
                 EVENT_KIND_RECORD_VERSION_CHANGED.to_owned(),
             ]
         );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<String>>(
+            "SELECT ARRAY_AGG(DISTINCT raw_fact_ref->>'emitting_address') FROM normalized_events WHERE source_family = $1 AND event_kind IN ('RecordChanged', 'RecordVersionChanged')",
+        )
+        .bind(SOURCE_FAMILY_BASENAMES_BASE_RESOLVER)
+        .fetch_one(database.pool())
+        .await?,
+        vec!["0x00000000000000000000000000000000000000cc".to_owned()]
+    );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
             "SELECT logical_name_id FROM normalized_events WHERE event_kind = 'ResolverChanged'"

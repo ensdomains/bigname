@@ -106,23 +106,26 @@ pub(super) fn apply_record_changed(
     let Some(authority) = active_anchor_for_observation(history, &event.reference) else {
         return Ok(());
     };
-    history.events.push(build_normalized_event(
-        &event.reference,
-        Some(name.logical_name_id.clone()),
-        Some(authority.resource_id),
-        EVENT_KIND_RECORD_CHANGED,
-        json!({}),
-        record_changed_after_state(&event, None),
-        format!(
-            "record-change:{}:{}:{}",
-            event.reference.block_hash,
-            event
-                .reference
-                .transaction_hash
-                .as_deref()
-                .unwrap_or_default(),
-            event.reference.log_index.unwrap_or_default()
+    history.events.push(with_raw_log_emitter(
+        build_normalized_event(
+            &event.reference,
+            Some(name.logical_name_id.clone()),
+            Some(authority.resource_id),
+            EVENT_KIND_RECORD_CHANGED,
+            json!({}),
+            record_changed_after_state(&event, None),
+            format!(
+                "record-change:{}:{}:{}",
+                event.reference.block_hash,
+                event
+                    .reference
+                    .transaction_hash
+                    .as_deref()
+                    .unwrap_or_default(),
+                event.reference.log_index.unwrap_or_default()
+            ),
         ),
+        &event.resolver,
     ));
     Ok(())
 }
@@ -141,25 +144,28 @@ pub(super) fn apply_record_version_changed(
     let before_version = history
         .record_versions_by_resolver
         .insert(resolver, event.record_version);
-    history.events.push(build_normalized_event(
-        &event.reference,
-        Some(name.logical_name_id.clone()),
-        Some(authority.resource_id),
-        EVENT_KIND_RECORD_VERSION_CHANGED,
-        json!({
-            "record_version": before_version,
-        }),
-        record_version_changed_after_state(&event, None),
-        format!(
-            "record-version:{}:{}:{}",
-            event.reference.block_hash,
-            event
-                .reference
-                .transaction_hash
-                .as_deref()
-                .unwrap_or_default(),
-            event.reference.log_index.unwrap_or_default()
+    history.events.push(with_raw_log_emitter(
+        build_normalized_event(
+            &event.reference,
+            Some(name.logical_name_id.clone()),
+            Some(authority.resource_id),
+            EVENT_KIND_RECORD_VERSION_CHANGED,
+            json!({
+                "record_version": before_version,
+            }),
+            record_version_changed_after_state(&event, None),
+            format!(
+                "record-version:{}:{}:{}",
+                event.reference.block_hash,
+                event
+                    .reference
+                    .transaction_hash
+                    .as_deref()
+                    .unwrap_or_default(),
+                event.reference.log_index.unwrap_or_default()
+            ),
         ),
+        &event.resolver,
     ));
     Ok(())
 }

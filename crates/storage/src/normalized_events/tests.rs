@@ -2833,6 +2833,65 @@ async fn normalized_event_upsert_rejects_identity_mismatch() -> Result<()> {
 }
 
 #[tokio::test]
+async fn normalized_event_upsert_enriches_ens_v1_resolver_emitter_provenance() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut existing = normalized_event(
+        "ens-v1-resolver-emitter-provenance",
+        "RecordChanged",
+        CanonicalityState::Canonical,
+    );
+    existing.source_family = "ens_v1_resolver_l1".to_owned();
+    existing.derivation_kind = "ens_v1_unwrapped_authority".to_owned();
+    existing.block_number = Some(42);
+    existing.block_hash = Some("0xresolver-emitter-block".to_owned());
+    existing.transaction_hash = Some("0xresolver-emitter-transaction".to_owned());
+    existing.log_index = Some(7);
+    existing.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "ethereum-mainnet",
+        "block_hash": "0xresolver-emitter-block",
+        "block_number": 42,
+        "transaction_hash": "0xresolver-emitter-transaction",
+        "transaction_index": 3,
+        "log_index": 7,
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&existing)).await?;
+
+    let mut enriched = existing.clone();
+    enriched.raw_fact_ref["emitting_address"] = json!("0x00000000000000000000000000000000000000cc");
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&enriched)).await?;
+
+    assert_eq!(
+        sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT raw_fact_ref FROM normalized_events WHERE event_identity = $1",
+        )
+        .bind(&enriched.event_identity)
+        .fetch_one(database.pool())
+        .await?,
+        enriched.raw_fact_ref
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM projection_normalized_event_changes change
+            JOIN normalized_events event
+              ON event.normalized_event_id = change.normalized_event_id
+            WHERE event.event_identity = $1
+              AND change.change_kind = 'content_update'
+            "#,
+        )
+        .bind(&enriched.event_identity)
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "resolver emitter provenance enrichment must invalidate downstream projections"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn normalized_event_upsert_accepts_rehomed_subregistry_event() -> Result<()> {
     let database = TestDatabase::new().await?;
     let identity = "ens_v1_subregistry_changed:1:0xblock:0xtx:7:0xregistry";

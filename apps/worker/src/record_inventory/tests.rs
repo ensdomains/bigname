@@ -2639,6 +2639,75 @@ async fn rebuild_reveals_preinterpreted_match_all_records_after_pointer_selectio
 }
 
 #[tokio::test]
+async fn rebuild_uses_durable_resolver_emitter_after_raw_log_compaction() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let fixture = seed_supported_match_all_visibility_fixture(database.pool()).await?;
+
+    let mut version_event =
+        supported_resolver_version_event("match-all-compacted-version-a", &fixture, 2, 1201, 0);
+    version_event.raw_fact_ref["emitting_address"] = json!(fixture.resolver_a);
+    let mut record_event = supported_resolver_record_event(
+        "match-all-compacted-record-a",
+        &fixture,
+        "text:email",
+        "compacted-a",
+        1201,
+        1,
+    );
+    record_event.raw_fact_ref["emitting_address"] = json!(fixture.resolver_a);
+    seed_events(
+        database.pool(),
+        &[
+            version_event,
+            record_event,
+            resolver_changed_event(
+                "match-all-compacted-pointer-a",
+                fixture.logical_name_id,
+                fixture.resource_id,
+                fixture.resolver_a,
+                fixture.registry_manifest_id,
+                1202,
+                0,
+            ),
+        ],
+    )
+    .await?;
+
+    sqlx::query("DELETE FROM raw_logs")
+        .execute(database.pool())
+        .await?;
+    rebuild_record_inventory_current(database.pool(), Some(&fixture.resource_id.to_string()))
+        .await?;
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM raw_logs")
+            .fetch_one(database.pool())
+            .await?,
+        0,
+        "the projection rebuild must not require compactable raw-log staging"
+    );
+    let (entries, boundary) = load_current_inventory_json(database.pool(), fixture.resource_id)
+        .await?
+        .context("durable normalized provenance must retain pointed resolver history")?;
+    assert_eq!(
+        entries,
+        json!([{
+            "record_key": "text:email",
+            "record_family": "text",
+            "selector_key": "email",
+            "status": "success",
+            "value": "compacted-a",
+        }])
+    );
+    assert_eq!(
+        boundary["event_kind"],
+        json!(EVENT_KIND_RECORD_VERSION_CHANGED)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rebuild_applies_pre_pointer_version_boundary_from_selected_match_all_resolver()
 -> Result<()> {
     let database = TestDatabase::new().await?;

@@ -316,6 +316,8 @@ pub(super) async fn load_selected_registry_resolver_state_before_replay(
 
 pub(super) async fn load_latest_record_versions_before_block(
     pool: &PgPool,
+    chain: &str,
+    resolver_source_family: &str,
     logical_name_ids: &[String],
     boundary_block: i64,
 ) -> Result<HashMap<(String, String), i64>> {
@@ -325,29 +327,51 @@ pub(super) async fn load_latest_record_versions_before_block(
 
     let rows = sqlx::query(&format!(
         r#"
-        SELECT DISTINCT ON (event.logical_name_id, LOWER(raw_log.emitting_address))
+        SELECT DISTINCT ON (
             event.logical_name_id,
-            LOWER(raw_log.emitting_address) AS resolver,
+            LOWER(COALESCE(
+                NULLIF(BTRIM(event.raw_fact_ref->>'emitting_address'), ''),
+                raw_log.emitting_address
+            ))
+        )
+            event.logical_name_id,
+            LOWER(COALESCE(
+                NULLIF(BTRIM(event.raw_fact_ref->>'emitting_address'), ''),
+                raw_log.emitting_address
+            )) AS resolver,
             event.after_state->>'record_version' AS record_version
         FROM normalized_events event
-        JOIN raw_logs raw_log
+        LEFT JOIN raw_logs raw_log
           ON raw_log.chain_id = event.chain_id
          AND raw_log.block_hash = event.block_hash
          AND raw_log.transaction_hash = event.transaction_hash
          AND raw_log.log_index = event.log_index
         WHERE event.logical_name_id = ANY($1::TEXT[])
-          AND event.block_number < $2
-          AND event.event_kind = $3
+          AND event.chain_id = $2
+          AND event.source_family = $3
+          AND event.derivation_kind = $4
+          AND event.block_number < $5
+          AND event.event_kind = $6
           AND event.canonicality_state {CANONICALITY_STATE_FILTER}
+          AND COALESCE(
+                NULLIF(BTRIM(event.raw_fact_ref->>'emitting_address'), ''),
+                raw_log.emitting_address
+              ) IS NOT NULL
         ORDER BY
             event.logical_name_id,
-            LOWER(raw_log.emitting_address),
+            LOWER(COALESCE(
+                NULLIF(BTRIM(event.raw_fact_ref->>'emitting_address'), ''),
+                raw_log.emitting_address
+            )),
             event.block_number DESC,
             event.log_index DESC NULLS LAST,
             event.normalized_event_id DESC
         "#
     ))
     .bind(logical_name_ids)
+    .bind(chain)
+    .bind(resolver_source_family)
+    .bind(DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY)
     .bind(boundary_block)
     .bind(EVENT_KIND_RECORD_VERSION_CHANGED)
     .fetch_all(pool)

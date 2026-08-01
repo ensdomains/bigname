@@ -78,6 +78,14 @@ pub(super) async fn preload_restricted_name_histories(
     let Some(first_log) = raw_logs.first() else {
         return Ok(());
     };
+    let resolver_source_family = authority_profile_for_source_family(&first_log.source_family)
+        .with_context(|| {
+            format!(
+                "restricted authority replay received unsupported source family {}",
+                first_log.source_family
+            )
+        })?
+        .resolver_source_family();
     let boundary_block = first_log.block_number;
     let boundary_timestamp = first_log.block_timestamp;
     let labelhashes = restricted_replay_labelhashes(
@@ -242,8 +250,14 @@ pub(super) async fn preload_restricted_name_histories(
         known_names_by_namehash,
         namehash_to_labelhash,
     );
-    let record_versions =
-        load_latest_record_versions_before_block(pool, &logical_name_ids, boundary_block).await?;
+    let record_versions = load_latest_record_versions_before_block(
+        pool,
+        chain,
+        resolver_source_family,
+        &logical_name_ids,
+        boundary_block,
+    )
+    .await?;
     let mut record_versions_by_name = HashMap::<String, BTreeMap<String, i64>>::new();
     for ((logical_name_id, resolver), record_version) in record_versions {
         record_versions_by_name

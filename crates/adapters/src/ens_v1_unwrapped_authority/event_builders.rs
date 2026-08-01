@@ -58,6 +58,14 @@ pub(super) fn build_normalized_event(
     }
 }
 
+pub(super) fn with_raw_log_emitter(
+    mut event: NormalizedEvent,
+    emitting_address: &str,
+) -> NormalizedEvent {
+    event.raw_fact_ref["emitting_address"] = Value::String(emitting_address.to_ascii_lowercase());
+    event
+}
+
 pub(super) fn build_boundary_event(
     reference: &BoundaryRef,
     payload: BoundaryEventPayload<'_>,
