@@ -94,6 +94,11 @@ the normal phase cursor, and the pre-redo lifecycle state remains durable
 across retries; an unfinished redo remains marked and blocks normal resume
 until the named redo command is run again.
 
+Because interpretation is stateful, an interpret redo treats the requested
+lower bound as its rewind point and replays through the recorded interpret
+head. The requested upper bound is still validated as part of the recorded
+extent, but cannot truncate the dependent replay suffix.
+
 There is no redo abort. A partially applied redo cannot be safely un-applied,
 so the only path back to normal operation is a redo that covers the unfinished
 range and completes. If a redo fails deterministically, fix the code and run

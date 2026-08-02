@@ -5,7 +5,10 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use super::{INTERPRETER_CONTENT_HASH, interpreter_content_hash};
+use super::{
+    HASHED_MANIFEST_PROFILES, INTERPRETER_CONTENT_HASH, interpreter_content_hash,
+    manifest_profile_hash,
+};
 use crate::compute::{cfg_test_source_exclusions, excluded_source_reason, hashed_source_paths};
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -16,6 +19,51 @@ fn build_time_hash_matches_checked_in_sources() {
     assert_eq!(
         interpreter_content_hash(workspace_root).expect("source hash must compute"),
         INTERPRETER_CONTENT_HASH
+    );
+}
+
+#[test]
+fn build_time_manifest_profiles_match_checked_in_profiles() {
+    let manifests_root = workspace_root().join("manifests");
+    assert!(!HASHED_MANIFEST_PROFILES.is_empty());
+    for (profile, expected_hash) in HASHED_MANIFEST_PROFILES {
+        assert_eq!(
+            manifest_profile_hash(manifests_root.join(profile))
+                .expect("checked-in manifest profile must hash"),
+            *expected_hash,
+            "compiled manifest profile fingerprint drifted for {profile}"
+        );
+    }
+}
+
+#[test]
+fn manifest_profile_fingerprint_excludes_only_normalizer_version() {
+    let tree = SampleTree::empty();
+    let profile_root = tree.path().join("manifests/mainnet");
+    tree.write(
+        "manifests/mainnet/example.toml",
+        "source_family = \"ens_v1_registry_l1\"\nnormalizer_version = \"ensip15@old\"\n",
+    );
+    let initial = manifest_profile_hash(&profile_root).expect("manifest profile must hash");
+
+    tree.write(
+        "manifests/mainnet/example.toml",
+        "source_family = \"ens_v1_registry_l1\"\nnormalizer_version = \"ensip15@new\"\n",
+    );
+    assert_eq!(
+        manifest_profile_hash(&profile_root).expect("manifest profile must hash"),
+        initial,
+        "normalizer-version changes belong to recompute-flags"
+    );
+
+    tree.write(
+        "manifests/mainnet/example.toml",
+        "source_family = \"ens_v2_registry_l1\"\nnormalizer_version = \"ensip15@new\"\n",
+    );
+    assert_ne!(
+        manifest_profile_hash(&profile_root).expect("manifest profile must hash"),
+        initial,
+        "other runtime manifest changes must not pass the compiled manifest-profile gate"
     );
 }
 
@@ -112,6 +160,27 @@ fn normalizer_version_and_test_only_sources_do_not_change_hash() {
     tree.write_example_manifest_with_normalizer("ensip15@new", "[\"RecordChanged\"]");
     let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
     assert_eq!(first, changed);
+}
+
+#[test]
+fn interpret_runtime_and_schema_writers_do_not_change_hash() {
+    let tree = SampleTree::new();
+    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+
+    tree.write(
+        "crates/interpret/src/write.rs",
+        "fn persist_plain_schema_rows() {}\n",
+    );
+    tree.write(
+        "apps/phase-runner/src/interpret_phase.rs",
+        "fn run_interpret_phase() {}\n",
+    );
+
+    let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
+    assert_eq!(
+        first, changed,
+        "phase orchestration and schema-v2 writers must remain outside the interpreter hash"
+    );
 }
 
 #[test]

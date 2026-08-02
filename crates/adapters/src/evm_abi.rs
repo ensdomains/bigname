@@ -1,10 +1,19 @@
-use std::str::FromStr;
+use std::{fmt, str::FromStr};
 
 use alloy_primitives::{Address, B256, LogData, U256, hex, keccak256};
 use alloy_sol_types::SolEvent;
 use anyhow::{Context, Result, bail};
 
 const ABI_WORD_BYTES: usize = 32;
+
+#[derive(Debug)]
+struct MalformedEventLog(&'static str);
+
+impl fmt::Display for MalformedEventLog {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
 
 pub(crate) fn decode_event_log<E>(
     topics: &[String],
@@ -14,8 +23,12 @@ pub(crate) fn decode_event_log<E>(
 where
     E: SolEvent,
 {
-    let log_data = alloy_log_data(topics, data)?;
-    E::decode_log_data_validate(&log_data).context(context)
+    let log_data = alloy_log_data(topics, data).context(MalformedEventLog(context))?;
+    E::decode_log_data_validate(&log_data).context(MalformedEventLog(context))
+}
+
+pub(crate) fn is_malformed_event_log(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<MalformedEventLog>().is_some()
 }
 
 pub(crate) fn address_hex(address: Address) -> String {

@@ -132,6 +132,8 @@ async fn second_runner_fails_loudly_when_phase_lock_is_held() -> Result<()> {
         Some(phase_runner::INTERPRETER_CONTENT_HASH),
     )
     .await?;
+    set_phase_extent(scratch.pool(), "lock-chain", PhaseName::Interpret, 0).await?;
+    seed_interpret_redo_presence(scratch.pool(), "lock-chain", 0).await?;
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let blocking = Arc::new(BlockingPhase {
@@ -764,6 +766,7 @@ async fn redo_after_an_interrupted_phase_requires_normal_resume() -> Result<()> 
         Some("keccak256:older-binary"),
     )
     .await?;
+    seed_interpret_redo_presence(scratch.pool(), chain_id, 4).await?;
 
     runner(
         scratch.runner(),
@@ -817,6 +820,7 @@ async fn redo_interpret_can_start_a_new_content_hash_epoch() -> Result<()> {
         Some("keccak256:older-binary"),
     )
     .await?;
+    set_phase_extent(scratch.pool(), chain_id, PhaseName::Interpret, 9).await?;
     sqlx::query(
         "
         UPDATE chain_phase_state
@@ -848,6 +852,7 @@ async fn redo_interpret_can_start_a_new_content_hash_epoch() -> Result<()> {
     .bind(chain_id)
     .execute(scratch.pool())
     .await?;
+    seed_interpret_redo_presence(scratch.pool(), chain_id, 9).await?;
     let runner = runner(
         scratch.runner(),
         PhaseSet::loopback(),
@@ -932,6 +937,8 @@ async fn partial_redo_cannot_adopt_hash_after_failed_interpret() -> Result<()> {
         SET phase_status = 'failed',
             current_block_number = 4,
             current_block_hash = 'failed-hash-redo-block-4',
+            target_block_number = 9,
+            target_block_hash = 'failed-hash-redo-block-9',
             last_error = 'interrupted old interpreter'
         WHERE chain_id = $1
           AND phase_name = 'interpret'
@@ -974,6 +981,7 @@ async fn partial_redo_cannot_adopt_hash_after_failed_interpret() -> Result<()> {
     .bind(chain_id)
     .execute(scratch.pool())
     .await?;
+    seed_interpret_redo_presence(scratch.pool(), chain_id, 9).await?;
 
     let error = runner(
         scratch.runner(),
@@ -1011,9 +1019,28 @@ async fn partial_redo_cannot_adopt_hash_after_failed_interpret() -> Result<()> {
         )
     );
 
+    let replay_head = Arc::new(AtomicUsize::new(usize::MAX));
+    let phase_replay_head = Arc::clone(&replay_head);
+    let recovery_phase = Arc::new(FunctionPhase {
+        name: PhaseName::Interpret,
+        handler: Arc::new(move |context| {
+            phase_replay_head.store(
+                usize::try_from(
+                    context
+                        .available_heads
+                        .expect("hash redo needs the processed interpret head")
+                        .latest
+                        .number,
+                )
+                .expect("test block number is nonnegative"),
+                Ordering::SeqCst,
+            );
+            Ok(PhaseBatchOutcome::Complete(PhaseProgress::default()))
+        }),
+    });
     runner(
         scratch.runner(),
-        PhaseSet::loopback(),
+        phase_set_replacing(PhaseName::Interpret, recovery_phase)?,
         available_capacity(),
         "failed-hash-full-redo-runner",
     )?
@@ -1024,6 +1051,7 @@ async fn partial_redo_cannot_adopt_hash_after_failed_interpret() -> Result<()> {
         CancellationToken::new(),
     )
     .await?;
+    assert_eq!(replay_head.load(Ordering::SeqCst), 4);
     let recovered_hash: Option<String> = sqlx::query_scalar(
         "
         SELECT input_content_hash
@@ -1177,6 +1205,8 @@ async fn different_writer_phases_cannot_overlap_on_one_chain() -> Result<()> {
         Some(phase_runner::INTERPRETER_CONTENT_HASH),
     )
     .await?;
+    set_phase_extent(scratch.pool(), chain_id, PhaseName::Interpret, 1).await?;
+    seed_interpret_redo_presence(scratch.pool(), chain_id, 1).await?;
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let blocking = Arc::new(BlockingPhase {
@@ -1812,6 +1842,68 @@ async fn mark_completed(
     .bind(chain_id)
     .bind(phase.as_str())
     .bind(content_hash)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn set_phase_extent(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+    phase: PhaseName,
+    through: i64,
+) -> Result<()> {
+    sqlx::query(
+        "
+        UPDATE chain_phase_state
+        SET current_block_number = $3,
+            current_block_hash = $4,
+            target_block_number = $3,
+            target_block_hash = $4
+        WHERE chain_id = $1
+          AND phase_name = $2
+        ",
+    )
+    .bind(chain_id)
+    .bind(phase.as_str())
+    .bind(through)
+    .bind(format!("{chain_id}-block-{through}"))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn seed_interpret_redo_presence(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+    through: i64,
+) -> Result<()> {
+    seed_lineage(pool, chain_id, through).await?;
+    sqlx::query("UPDATE chain_lineage SET canonicality_state = 'canonical' WHERE chain_id = $1")
+        .bind(chain_id)
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "
+        INSERT INTO ingest_cursors (
+            chain_id, source_key, source_kind, seed_basis,
+            start_block_number, next_block_number, target_block_number,
+            last_processed_block_number, last_processed_block_hash
+        )
+        VALUES ($1, 'source', 'test', 'ethereum_head', 0, $2 + 1, $2, $2, $3)
+        ON CONFLICT (chain_id, source_key) DO UPDATE
+        SET source_kind = EXCLUDED.source_kind,
+            seed_basis = EXCLUDED.seed_basis,
+            start_block_number = EXCLUDED.start_block_number,
+            next_block_number = EXCLUDED.next_block_number,
+            target_block_number = EXCLUDED.target_block_number,
+            last_processed_block_number = EXCLUDED.last_processed_block_number,
+            last_processed_block_hash = EXCLUDED.last_processed_block_hash
+        ",
+    )
+    .bind(chain_id)
+    .bind(through)
+    .bind(format!("{chain_id}-block-{through}"))
     .execute(pool)
     .await?;
     Ok(())

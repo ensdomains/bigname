@@ -70,7 +70,7 @@ start_block = 22764821
 name = "Transfer"
 fragment = "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)"
 emitter_roles = ["registrar"]
-normalized_events = ["TokenControlTransferred"]
+normalized_events = ["TokenControlTransferred", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged"]
 
 # NameRegistered legacy-controller admission follows the pinned ENS subgraph:
 # (upstream: .refs/ens_subgraph/subgraph.yaml:L162 @ ens_subgraph@723f1b6)
@@ -80,7 +80,7 @@ normalized_events = ["TokenControlTransferred"]
 name = "NameRegistered"
 fragment = "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 cost, uint256 expires)"
 emitter_roles = ["legacy_registrar_controller"]
-normalized_events = ["RegistrationGranted", "PreimageObserved"]
+normalized_events = ["RegistrationGranted", "ExpiryChanged", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PreimageObserved"]
 
 # NameRegistered wrapped-controller admission follows the pinned ENS subgraph:
 # (upstream: .refs/ens_subgraph/subgraph.yaml:L187 @ ens_subgraph@723f1b6)
@@ -90,7 +90,7 @@ normalized_events = ["RegistrationGranted", "PreimageObserved"]
 name = "NameRegistered"
 fragment = "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 baseCost, uint256 premium, uint256 expires)"
 emitter_roles = ["wrapped_registrar_controller"]
-normalized_events = ["RegistrationGranted"]
+normalized_events = ["RegistrationGranted", "ExpiryChanged", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PreimageObserved"]
 
 # NameRegistered unwrapped-controller admission follows the pinned ENSv1
 # controller event declaration:
@@ -106,7 +106,7 @@ normalized_events = ["RegistrationGranted"]
 name = "NameRegistered"
 fragment = "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 baseCost, uint256 premium, uint256 expires, bytes32 referrer)"
 emitter_roles = ["unwrapped_registrar_controller"]
-normalized_events = ["RegistrationGranted"]
+normalized_events = ["RegistrationGranted", "ExpiryChanged", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PreimageObserved"]
 
 # NameRenewed legacy-controller admission follows the pinned ENS subgraph:
 # (upstream: .refs/ens_subgraph/subgraph.yaml:L166 @ ens_subgraph@723f1b6).
@@ -114,7 +114,7 @@ normalized_events = ["RegistrationGranted"]
 name = "NameRenewed"
 fragment = "event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires)"
 emitter_roles = ["legacy_registrar_controller", "wrapped_registrar_controller"]
-normalized_events = ["RegistrationRenewed", "PreimageObserved"]
+normalized_events = ["RegistrationGranted", "RegistrationRenewed", "ExpiryChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PreimageObserved"]
 
 # NameRenewed unwrapped-controller admission follows the pinned ENSv1
 # controller event declaration:
@@ -128,4 +128,4 @@ normalized_events = ["RegistrationRenewed", "PreimageObserved"]
 name = "NameRenewed"
 fragment = "event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires, bytes32 referrer)"
 emitter_roles = ["unwrapped_registrar_controller"]
-normalized_events = ["RegistrationRenewed"]
+normalized_events = ["RegistrationGranted", "RegistrationRenewed", "ExpiryChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PreimageObserved"]

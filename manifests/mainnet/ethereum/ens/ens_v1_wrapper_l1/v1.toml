@@ -42,7 +42,7 @@ start_block = 16925608
 name = "NameWrapped"
 fragment = "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)"
 emitter_roles = ["name_wrapper"]
-normalized_events = ["WrapperNameWrapped", "PreimageObserved"]
+normalized_events = ["TokenControlTransferred", "ExpiryChanged", "PermissionScopeChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PreimageObserved"]
 
 # Wrapper authority events consumed by manifest-derived authority topic lookup:
 # (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L35 @ ens_v1@91c966f)
@@ -52,7 +52,7 @@ normalized_events = ["WrapperNameWrapped", "PreimageObserved"]
 name = "NameUnwrapped"
 fragment = "event NameUnwrapped(bytes32 indexed node, address owner)"
 emitter_roles = ["name_wrapper"]
-normalized_events = ["WrapperNameUnwrapped"]
+normalized_events = ["SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged"]
 
 [[abi.events]]
 name = "FusesSet"
@@ -74,7 +74,7 @@ normalized_events = ["ExpiryChanged"]
 name = "TransferSingle"
 fragment = "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)"
 emitter_roles = ["name_wrapper"]
-normalized_events = ["TokenControlTransferred"]
+normalized_events = ["TokenControlTransferred", "PermissionChanged"]
 
 # ERC1155 TransferBatch is emitted by the wrapper's ERC1155Fuse base and
 # reference indexers fan it out per id:
@@ -87,4 +87,4 @@ normalized_events = ["TokenControlTransferred"]
 name = "TransferBatch"
 fragment = "event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)"
 emitter_roles = ["name_wrapper"]
-normalized_events = ["TokenControlTransferred"]
+normalized_events = ["TokenControlTransferred", "PermissionChanged"]

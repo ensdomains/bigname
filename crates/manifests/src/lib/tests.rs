@@ -3019,7 +3019,17 @@ async fn active_manifest_abi_events_derive_topics_from_payload() -> Result<()> {
             .is_some_and(|topic0| topic0.starts_with("0x") && topic0.len() == 66)
     );
     assert_eq!(label_registered.emitter_roles, ["registry"]);
-    assert_eq!(label_registered.normalized_events, ["RegistrationGranted"]);
+    assert_eq!(
+        label_registered.normalized_events,
+        [
+            "SurfaceUnbound",
+            "RegistrationReleased",
+            "RegistrationGranted",
+            "PreimageObserved",
+            "ResolverChanged",
+            "SubregistryChanged",
+        ]
+    );
 
     let registry_created = events
         .iter()
@@ -3027,7 +3037,10 @@ async fn active_manifest_abi_events_derive_topics_from_payload() -> Result<()> {
         .expect("registry manifest must declare RegistryCreated ABI");
     assert_eq!(registry_created.canonical_signature, "RegistryCreated()");
     assert!(registry_created.emitter_roles.is_empty());
-    assert_eq!(registry_created.normalized_events, ["RegistryCreated"]);
+    assert_eq!(
+        registry_created.normalized_events,
+        ["SurfaceUnbound", "RegistrationReleased", "RegistryCreated"]
+    );
 
     let upgraded = events
         .iter()
@@ -3035,7 +3048,10 @@ async fn active_manifest_abi_events_derive_topics_from_payload() -> Result<()> {
         .expect("registry manifest must declare Upgraded ABI");
     assert_eq!(upgraded.canonical_signature, "Upgraded(address)");
     assert_eq!(upgraded.emitter_roles, ["registry"]);
-    assert_eq!(upgraded.normalized_events, ["Upgraded"]);
+    assert_eq!(
+        upgraded.normalized_events,
+        ["SurfaceUnbound", "RegistrationReleased", "Upgraded"]
+    );
 
     for (name, signature) in [
         (
@@ -3053,7 +3069,14 @@ async fn active_manifest_abi_events_derive_topics_from_payload() -> Result<()> {
             .unwrap_or_else(|| panic!("registry manifest must declare {name} ABI"));
         assert_eq!(transfer.canonical_signature, signature);
         assert_eq!(transfer.emitter_roles, ["registry"]);
-        assert_eq!(transfer.normalized_events, ["TokenControlTransferred"]);
+        assert_eq!(
+            transfer.normalized_events,
+            [
+                "SurfaceUnbound",
+                "RegistrationReleased",
+                "TokenControlTransferred",
+            ]
+        );
     }
 
     database.cleanup().await?;
@@ -3435,7 +3458,15 @@ async fn checked_in_v1_registry_manifests_use_binding_only_resolver_semantics() 
             .expect("v1 registry manifest must declare NewOwner");
         assert_eq!(
             new_owner.normalized_events,
-            ["SubregistryChanged", "AuthorityTransferred"]
+            [
+                "SubregistryChanged",
+                "AuthorityTransferred",
+                "PermissionChanged",
+                "SurfaceUnbound",
+                "SurfaceBound",
+                "AuthorityEpochChanged",
+                "ResolverChanged",
+            ]
         );
         let loaded_resolver_manifest = &repository
             .manifests()

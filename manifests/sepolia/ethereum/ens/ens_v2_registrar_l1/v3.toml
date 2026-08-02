@@ -44,11 +44,11 @@ start_block = 11163403
 name = "NameRegistered"
 fragment = "event NameRegistered(uint256 indexed tokenId, string label, address owner, address subregistry, address resolver, uint64 duration, address paymentToken, bytes32 indexed referrer, uint256 base, uint256 premium)"
 emitter_roles = ["registrar"]
-normalized_events = ["RegistrarNameRegistered"]
+normalized_events = ["RegistrarNameRegistered", "PreimageObserved"]
 
 # NameRenewed: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRenewer.sol:L21 @ ens_v2@48b3e2d).
 [[abi.events]]
 name = "NameRenewed"
 fragment = "event NameRenewed(uint256 indexed tokenId, string label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 indexed referrer, uint256 amount)"
 emitter_roles = ["registrar"]
-normalized_events = ["RegistrationRenewed"]
+normalized_events = ["RegistrationRenewed", "PreimageObserved"]

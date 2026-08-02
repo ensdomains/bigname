@@ -335,6 +335,19 @@ impl PhaseSet {
         ])
     }
 
+    pub fn with_ingest_and_interpret(
+        ingest: Arc<dyn Phase>,
+        interpret: Arc<dyn Phase>,
+    ) -> RunnerResult<Self> {
+        Self::new([
+            ingest,
+            interpret,
+            Arc::new(UnavailablePhase::new(PhaseName::Project)),
+            Arc::new(UnavailablePhase::new(PhaseName::Verify)),
+            Arc::new(UnavailablePhase::new(PhaseName::Live)),
+        ])
+    }
+
     pub fn get(&self, name: PhaseName) -> Arc<dyn Phase> {
         Arc::clone(&self.phases[name as usize])
     }
@@ -366,5 +379,20 @@ mod tests {
 
         assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
         assert!(error.to_string().contains("interpret"));
+    }
+
+    #[test]
+    fn production_phase_set_accepts_interpret_implementation() {
+        let phases = PhaseSet::with_ingest_and_interpret(
+            Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+            Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
+        )
+        .unwrap();
+
+        assert_eq!(
+            phases.get(PhaseName::Interpret).name(),
+            PhaseName::Interpret
+        );
+        assert_eq!(phases.get(PhaseName::Project).name(), PhaseName::Project);
     }
 }

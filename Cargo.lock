@@ -1661,6 +1661,7 @@ checksum = "d86b93f97252c47b41663388e6d155714a9d0c398b99f1005cbc5f978b29f445"
 name = "bigname-adapters"
 version = "0.1.0"
 dependencies = [
+ "alloy-json-abi",
  "alloy-primitives",
  "alloy-sol-types",
  "anyhow",
@@ -1794,6 +1795,16 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "bigname-interpret"
+version = "0.1.0"
+dependencies = [
+ "bigname-adapters",
+ "serde_json",
+ "sqlx",
+ "time",
 ]
 
 [[package]]
@@ -5714,10 +5725,14 @@ dependencies = [
 name = "phase-runner"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
+ "alloy-sol-types",
  "anyhow",
  "axum",
  "bigname-content-hash",
  "bigname-ingest",
+ "bigname-interpret",
+ "bigname-manifests",
  "bigname-test-support",
  "clap",
  "serde_json",

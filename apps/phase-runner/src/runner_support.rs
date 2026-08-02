@@ -4,7 +4,7 @@ use crate::{
     config::TimingConfig,
     database::RunnerDatabase,
     error::{ErrorKind, RunnerError, RunnerResult},
-    phase::{BlockRange, PhaseName, PhaseProgress, RunMode},
+    phase::{BlockRange, PhaseName, PhaseProgress},
     phase_lock::PhaseLock,
     redo_state::{RedoOutcome, RedoSession},
     state::PhaseStore,
@@ -17,26 +17,6 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) enum PhaseLoopResult {
     Completed(Box<PhaseProgress>),
     Cancelled,
-}
-
-pub(crate) fn incomplete_redo_error(
-    chain_id: &str,
-    phase: PhaseName,
-    mode: &RunMode,
-) -> RunnerError {
-    let redo_mode = match mode {
-        RunMode::Redo(_) => Some("redo"),
-        RunMode::RecomputeFlags(_) => Some("recompute_flags"),
-        RunMode::Normal => None,
-    };
-    let instruction = redo_rerun_instruction(chain_id, phase, redo_mode, mode.range());
-    RunnerError::new(
-        ErrorKind::InvalidTransition,
-        format!(
-            "redo for chain {chain_id} phase {phase} is incomplete; the phase remains blocked \
-             from normal restart; {instruction}"
-        ),
-    )
 }
 
 pub(crate) async fn cancelled_redo_error(

@@ -18,3 +18,11 @@ proxy_kind = "none"
 # Start block follows the mainnet deployment transaction.
 # (upstream: .refs/ens_v1/deployments/mainnet/ReverseRegistrar.json:L379 @ ens_v1@91c966f).
 start_block = 16925606
+
+# The reverse registrar emits the claimed address and reverse node together:
+# (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L23 @ ens_v1@91c966f).
+[[abi.events]]
+name = "ReverseClaimed"
+fragment = "event ReverseClaimed(address indexed addr, bytes32 indexed node)"
+emitter_roles = ["reverse_registrar"]
+normalized_events = ["ReverseChanged"]

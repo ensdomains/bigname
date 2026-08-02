@@ -39,22 +39,22 @@ proxy_kind = "none"
 name = "NewOwner"
 fragment = "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)"
 emitter_roles = ["registry"]
-normalized_events = ["SubregistryChanged", "AuthorityTransferred"]
+normalized_events = ["SubregistryChanged", "AuthorityTransferred", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged"]
 
 [[abi.events]]
 name = "Transfer"
 fragment = "event Transfer(bytes32 indexed node, address owner)"
 emitter_roles = ["registry"]
-normalized_events = ["AuthorityTransferred"]
+normalized_events = ["AuthorityTransferred", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged"]
 
 [[abi.events]]
 name = "NewResolver"
 fragment = "event NewResolver(bytes32 indexed node, address resolver)"
 emitter_roles = ["registry"]
-normalized_events = ["ResolverChanged"]
+normalized_events = ["ResolverChanged", "PermissionChanged"]
 
 [[abi.events]]
 name = "NewTTL"
 fragment = "event NewTTL(bytes32 indexed node, uint64 ttl)"
 emitter_roles = ["registry"]
-normalized_events = ["AuthorityEpochChanged"]
+normalized_events = []

@@ -1277,6 +1277,47 @@ BEGIN
             END IF;
     END;
 
+    INSERT INTO discovery_edges (
+        chain_id,
+        edge_kind,
+        from_contract_instance_id,
+        to_contract_instance_id,
+        discovery_source,
+        admission_basis
+    )
+    VALUES (
+        'schema-v2-check',
+        'registry_announcement',
+        '00000000-0000-0000-0000-000000000001',
+        '00000000-0000-0000-0000-000000000001',
+        'RegistryCreated',
+        'schema-v2-check'
+    );
+
+    BEGIN
+        INSERT INTO discovery_edges (
+            chain_id,
+            edge_kind,
+            from_contract_instance_id,
+            to_contract_instance_id,
+            discovery_source,
+            admission_basis
+        )
+        VALUES (
+            'schema-v2-check',
+            'resolver',
+            '00000000-0000-0000-0000-000000000001',
+            '00000000-0000-0000-0000-000000000001',
+            'schema-v2-check',
+            'schema-v2-check'
+        );
+        RAISE EXCEPTION
+            'a non-announcement discovery edge accepted equal endpoints';
+    EXCEPTION
+        WHEN check_violation THEN
+            NULL;
+    END;
+
     INSERT INTO contract_instance_addresses (
         contract_instance_id,
         chain_id,
