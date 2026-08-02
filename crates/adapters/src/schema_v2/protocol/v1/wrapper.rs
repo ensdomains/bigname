@@ -4,7 +4,7 @@ use anyhow::bail;
 use serde_json::json;
 
 use super::super::{
-    EventDraft, Interpreted, NameDraft, ensure_declared,
+    EventDraft, Interpreted, NameDraft, ResourceDraft, ShadowNameDraft, ensure_declared,
     permissions::{v1_grant_states, v1_revoke_states},
 };
 use super::registry::append_authority_transition;
@@ -12,7 +12,7 @@ use super::support::{events_linked, single_event};
 use crate::evm_abi::{address_hex, decode_event_log, hex_string, u256_word_hex};
 use crate::schema_v2::{
     catalog::Selected,
-    common::{decode_dns_name, namehash, stable_uuid},
+    common::{decode_dns_labels, namehash_raw, stable_uuid, surface_labels},
     model::RawLogInput,
     state::State,
 };
@@ -247,11 +247,13 @@ fn name_wrapped(
 ) -> anyhow::Result<Interpreted> {
     let event =
         decode_event_log::<NameWrapped>(&raw.topics, &raw.data, "NameWrapped log is malformed")?;
-    let labels = decode_dns_name(&event.name)?;
-    let raw_namehash = namehash(&labels);
+    let raw_labels = decode_dns_labels(&event.name)?;
+    let raw_namehash = namehash_raw(raw_labels.iter().map(Vec::as_slice));
     if raw_namehash != hex_string(event.node) {
         bail!("NameWrapped DNS name does not match its node");
     }
+    let labels = surface_labels(&raw_labels);
+    let surface_known = labels.is_some();
     let authority_key = format!(
         "wrapper:{}:{}:{}:{}:{}",
         raw.chain_id, selected.source.manifest_id, raw_namehash, raw.block_hash, raw.log_index,
@@ -264,6 +266,7 @@ fn name_wrapped(
         &selected.source.namespace,
         &raw_namehash,
         logical_name_id.clone(),
+        surface_known,
         resource_id,
         Some(token_lineage_id),
         selected.source.source_family.clone(),
@@ -277,7 +280,7 @@ fn name_wrapped(
         "PermissionScopeChanged",
     ];
     ensure_declared(selected, &["TokenControlTransferred"])?;
-    let after = json!({"source_event":"NameWrapped","node":raw_namehash,"owner":address_hex(event.owner),"fuses":event.fuses,"expiry":event.expiry,"token_lineage_id":token_lineage_id.to_string(),"authority_kind":"wrapper","authority_key":authority_key.clone()});
+    let after = json!({"source_event":"NameWrapped","node":raw_namehash,"owner":address_hex(event.owner),"fuses":event.fuses,"expiry":event.expiry,"token_lineage_id":token_lineage_id.to_string(),"authority_kind":"wrapper","authority_key":authority_key.clone(),"surface_known":surface_known});
     let mut output = events_linked(kinds, logical_name_id, resource_id, after.clone());
     if let Some(transfer) = output
         .events
@@ -320,20 +323,32 @@ fn name_wrapped(
         &after,
         state.v1_resolver(&selected.source.namespace, &raw_namehash),
     );
-    output.names.push(NameDraft {
-        labels,
-        namehash: raw_namehash,
-        resource_id: Some(resource_id),
-        token_lineage_id: Some(token_lineage_id),
-        surface_binding_id: Some(stable_uuid(&format!(
-            "binding:{authority_key}:{}",
-            raw.block_timestamp.unix_timestamp()
-        ))),
-        bind: false,
-        binding_kind: "observed_only".to_owned(),
-        source_kind: "NameWrapped_name".to_owned(),
-        preimage_metadata: None,
-    });
+    if let Some(labels) = labels {
+        output.names.push(NameDraft {
+            labels,
+            namehash: raw_namehash,
+            resource_id: Some(resource_id),
+            token_lineage_id: Some(token_lineage_id),
+            surface_binding_id: Some(stable_uuid(&format!(
+                "binding:{authority_key}:{}",
+                raw.block_timestamp.unix_timestamp()
+            ))),
+            bind: false,
+            binding_kind: "observed_only".to_owned(),
+            source_kind: "NameWrapped_name".to_owned(),
+            preimage_metadata: None,
+        });
+    } else {
+        output.shadow_names.push(ShadowNameDraft {
+            raw_labels,
+            namehash: raw_namehash,
+            source_kind: "NameWrapped_name".to_owned(),
+        });
+        output.resources.push(ResourceDraft {
+            resource_id,
+            token_lineage_id: Some(token_lineage_id),
+        });
+    }
     Ok(output)
 }
 

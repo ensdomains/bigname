@@ -11,7 +11,7 @@ pub(super) fn name_labels(name: &str, source_kind: &str) -> anyhow::Result<Vec<L
         .map(|label| {
             require_label(label)?;
             Ok(LabelDraft {
-                raw_label: label.to_owned(),
+                raw_label: label.as_bytes().to_vec(),
                 source_kind: source_kind.to_owned(),
             })
         })

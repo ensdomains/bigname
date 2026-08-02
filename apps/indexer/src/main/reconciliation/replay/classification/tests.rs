@@ -205,6 +205,10 @@ fn scan_dir(path: impl AsRef<Path>, adapters: &mut BTreeSet<NormalizedEventRepla
 fn adapter_for_producer_path(path: &str) -> NormalizedEventReplayAdapter {
     if path.contains("block_derived_normalized_events") {
         NormalizedEventReplayAdapter::BlockDerivedNormalizedEvents
+    } else if path.contains("/schema_v2/") {
+        // Transitional inventory only: the phase-runner seam replaces this entire legacy replay
+        // classifier in PR 3, and its raw-fact derivations occupy the existing catch-all slot.
+        NormalizedEventReplayAdapter::BlockDerivedNormalizedEvents
     } else if path.contains("ens_v1_reverse_claim") {
         NormalizedEventReplayAdapter::EnsV1ReverseClaim
     } else if path.contains("ens_v1_subregistry_discovery") {

@@ -44,18 +44,7 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
     match event.event_kind.as_str() {
         "RegistrationGranted" | "RegistrationReserved" => {
             let Some(token) = token else { return };
-            let raw_label = event
-                .after_state
-                .get("label")
-                .and_then(Value::as_str)
-                .or_else(|| {
-                    event
-                        .after_state
-                        .get("raw_labels")
-                        .and_then(Value::as_array)
-                        .and_then(|labels| labels.first())
-                        .and_then(Value::as_str)
-                });
+            let raw_label = raw_label(&event.after_state);
             let expiry = event.after_state.get("expiry").and_then(parse_u64);
             let (Some(raw_label), Some(expiry)) = (raw_label, expiry) else {
                 return;
@@ -69,7 +58,7 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
                     .and_then(Value::as_str)
                     .and_then(|value| Uuid::parse_str(value).ok()),
                 &event.namespace,
-                raw_label,
+                &raw_label,
                 expiry,
                 (event.event_kind == "RegistrationGranted").then(|| event.after_state.clone()),
             );
@@ -152,7 +141,7 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
             state.set_v2_expiry(emitter, token, expiry);
         }
         "ParentChanged" => {
-            let Some(label) = event.after_state.get("label").and_then(Value::as_str) else {
+            let Some(raw_label) = raw_label(&event.after_state) else {
                 return;
             };
             let parent = event
@@ -160,10 +149,31 @@ pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
                 .get("parent")
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            state.set_v2_parent_claim(emitter, parent, label.to_owned());
+            state.set_v2_parent_claim(emitter, parent, &raw_label);
         }
         _ => {}
     }
+}
+
+fn raw_label(after_state: &Value) -> Option<Vec<u8>> {
+    after_state
+        .get("raw_label_hex")
+        .and_then(Value::as_str)
+        .and_then(|value| alloy_primitives::hex::decode(value).ok())
+        .or_else(|| {
+            after_state
+                .get("label")
+                .and_then(Value::as_str)
+                .map(|label| label.as_bytes().to_vec())
+        })
+        .or_else(|| {
+            after_state
+                .get("raw_labels")
+                .and_then(Value::as_array)
+                .and_then(|labels| labels.first())
+                .and_then(Value::as_str)
+                .map(|label| label.as_bytes().to_vec())
+        })
 }
 
 pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
@@ -353,6 +363,11 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
                 &event.namespace,
                 namehash,
                 logical_name_id.clone(),
+                event
+                    .after_state
+                    .get("surface_known")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
                 resource_id,
                 lineage,
                 event.source_family.clone(),
@@ -392,6 +407,12 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
                 &event.namespace,
                 namehash,
                 logical_name_id.clone(),
+                event
+                    .after_state
+                    .get("surface_known")
+                    .and_then(Value::as_bool)
+                    .or_else(|| retained.as_ref().map(|state| state.surface_known))
+                    .unwrap_or(true),
                 resource_id,
                 lineage,
                 event.source_family.clone(),
@@ -430,6 +451,11 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
                 &event.namespace,
                 namehash,
                 logical_name_id.clone(),
+                event
+                    .after_state
+                    .get("surface_known")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
                 resource_id,
                 lineage,
                 event.source_family.clone(),

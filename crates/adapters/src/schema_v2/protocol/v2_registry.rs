@@ -2,17 +2,17 @@ mod registrar;
 mod topology;
 mod transfer;
 
-use alloy_primitives::{Address, U256, keccak256};
+use alloy_primitives::{Address, U256, hex, keccak256};
 use alloy_sol_types::sol;
 use anyhow::{Context, bail};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
-    evm_abi::{address_hex, decode_event_log, hex_string, u256_word_hex},
+    evm_abi::{address_hex, decode_event_log, decode_event_log_data_as, hex_string, u256_word_hex},
     schema_v2::{
         catalog::Selected,
-        common::require_label,
+        common::{admitted_label, decoded_label},
         model::RawLogInput,
         state::{State, V2TokenState},
     },
@@ -20,7 +20,7 @@ use crate::{
 
 use super::{
     BindingClosureDraft, DiscoveryDraft, EventDraft, Interpreted, LabelDraft, NameDraft,
-    ResourceDraft, ensure_declared,
+    ResourceDraft, ShadowNameDraft, ensure_declared,
 };
 use topology::{append_terminal_boundaries, append_v2_name_transitions};
 
@@ -32,8 +32,8 @@ pub(super) fn boundary_expiration(
 
 sol! {
     event RegistryCreated();
-    event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender);
-    event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender);
+    event RawLabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, bytes label, address owner, uint64 expiry, address indexed sender);
+    event RawLabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, bytes label, uint64 expiry, address indexed sender);
     event LabelUnregistered(uint256 indexed tokenId, address indexed sender);
     event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender);
     event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender);
@@ -43,7 +43,7 @@ sol! {
     event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values);
     event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap);
     event TokenRegenerated(uint256 indexed oldTokenId, uint256 indexed newTokenId);
-    event ParentUpdated(address indexed parent, string label, address indexed sender);
+    event RawParentUpdated(address indexed parent, bytes label, address indexed sender);
     event Upgraded(address indexed implementation);
 }
 
@@ -200,30 +200,51 @@ fn registry(
         "EACRolesChanged" => transfer::permission(selected, raw, state),
         "TokenRegenerated" => transfer::token_regenerated(selected, raw, state),
         "ParentUpdated" => {
-            let e = decode_event_log::<ParentUpdated>(
+            let e = decode_event_log_data_as::<RawParentUpdated>(
                 &raw.topics,
                 &raw.data,
+                &selected.event.topic0,
                 "ParentUpdated log is malformed",
             )?;
-            require_label(&e.label)?;
+            let raw_label = e.label.to_vec();
             ensure_declared(selected, &["ParentChanged"])?;
-            let parent = address_hex(e.parent);
-            state.set_v2_parent_claim(
-                &raw.emitting_address,
-                (e.parent != Address::ZERO).then(|| parent.clone()),
-                e.label.clone(),
-            );
+            let decoded_label = decoded_label(&raw_label);
+            let label = admitted_label(&raw_label);
+            let parent = (e.parent != Address::ZERO).then(|| address_hex(e.parent));
+            state.set_v2_parent_claim(&raw.emitting_address, parent.clone(), &raw_label);
             let transitions = state.refresh_v2_names(raw.block_timestamp.unix_timestamp());
             let mut output = single_event(
                 "ParentChanged",
                 None,
                 None,
-                json!({"source_event":"ParentUpdated","parent":nullable_address(e.parent),"label":e.label,"sender":address_hex(e.sender)}),
+                json!({
+                    "source_event":"ParentUpdated",
+                    "parent":nullable_address(e.parent),
+                    "label":label,
+                    "decoded_label":decoded_label,
+                    "raw_label_hex":hex::encode(&raw_label),
+                    "sender":address_hex(e.sender),
+                }),
             );
             output.labels.push(LabelDraft {
-                raw_label: e.label,
+                raw_label: raw_label.clone(),
                 source_kind: "ParentUpdated_label".to_owned(),
             });
+            if label.is_none()
+                && let Some(parent) = parent.as_deref()
+                && let Some((raw_labels, namehash)) = state.v2_shadow_name_for_parent_claim(
+                    parent,
+                    &selected.source.namespace,
+                    &raw_label,
+                    raw.block_timestamp.unix_timestamp(),
+                )
+            {
+                output.shadow_names.push(ShadowNameDraft {
+                    raw_labels,
+                    namehash,
+                    source_kind: "ParentUpdated_label".to_owned(),
+                });
+            }
             append_v2_name_transitions(&mut output, transitions, raw, "ParentUpdated", None);
             Ok(output)
         }
@@ -241,53 +262,62 @@ fn label_event(
     registered: bool,
 ) -> anyhow::Result<Interpreted> {
     let (token_id, label_hash, label, after) = if registered {
-        let e = decode_event_log::<LabelRegistered>(
+        let e = decode_event_log_data_as::<RawLabelRegistered>(
             &raw.topics,
             &raw.data,
+            &selected.event.topic0,
             "LabelRegistered log is malformed",
         )?;
         (
             e.tokenId,
             e.labelHash,
-            e.label,
+            e.label.to_vec(),
             json!({"source_event":"LabelRegistered","registrant":address_hex(e.owner),"expiry":e.expiry,"sender":address_hex(e.sender)}),
         )
     } else {
-        let e = decode_event_log::<LabelReserved>(
+        let e = decode_event_log_data_as::<RawLabelReserved>(
             &raw.topics,
             &raw.data,
+            &selected.event.topic0,
             "LabelReserved log is malformed",
         )?;
         (
             e.tokenId,
             e.labelHash,
-            e.label,
+            e.label.to_vec(),
             json!({"source_event":"LabelReserved","expiry":e.expiry,"sender":address_hex(e.sender)}),
         )
     };
-    require_label(&label)?;
-    if keccak256(label.as_bytes()) != label_hash {
+    if keccak256(&label) != label_hash {
         bail!("{} label does not hash to labelHash", selected.event.name);
     }
+    let decoded_label = decoded_label(&label);
+    let surface_label = admitted_label(&label);
     let kind = if registered {
         "RegistrationGranted"
     } else {
         "RegistrationReserved"
     };
     ensure_declared(selected, &[kind])?;
-    let name = state.v2_name_for_registration(
-        &raw.emitting_address,
-        &selected.source.namespace,
-        &label,
-        raw.block_timestamp.unix_timestamp(),
-    );
+    let name = surface_label.as_deref().and_then(|label| {
+        state.v2_name_for_registration(
+            &raw.emitting_address,
+            &selected.source.namespace,
+            label,
+            raw.block_timestamp.unix_timestamp(),
+        )
+    });
+    let direct_name = name.is_some();
     let logical_name_id = name.as_ref().map(|name| name.logical_name_id.clone());
+    let token_id = u256_word_hex(token_id);
     let event_state = merge(
         after,
         json!({
-            "label": label,
+            "label": surface_label,
+            "decoded_label": decoded_label,
+            "raw_label_hex": hex::encode(&label),
             "labelhash": hex_string(label_hash),
-            "token_id": u256_word_hex(token_id),
+            "token_id": token_id,
             "namehash": name.as_ref().map(|name| &name.namehash),
             "raw_labels": name.as_ref().map(|name| &name.labels),
             "resource_pending": registered,
@@ -297,7 +327,7 @@ fn label_event(
     );
     let replaced = state.replace_v2_registration(
         &raw.emitting_address,
-        &u256_word_hex(token_id),
+        &token_id,
         selected.contract_instance_id,
         &selected.source.namespace,
         &label,
@@ -310,7 +340,7 @@ fn label_event(
     let transitions = state.refresh_v2_names(raw.block_timestamp.unix_timestamp());
     let mut output = single_event(kind, logical_name_id, None, event_state);
     output.labels.push(LabelDraft {
-        raw_label: label.clone(),
+        raw_label: label,
         source_kind: format!("{}_label", selected.event.name),
     });
     if let Some(name) = name {
@@ -351,12 +381,18 @@ fn label_event(
         transitions,
         raw,
         &selected.event.name,
-        Some((&raw.emitting_address, &u256_word_hex(token_id))),
+        direct_name.then_some((&raw.emitting_address, token_id.as_str())),
     );
     for (edge_kind, resolver) in [("subregistry", false), ("resolver", true)] {
         output.discovery.push(DiscoveryDraft::Close {
             edge_kind: edge_kind.to_owned(),
-            observation_key: discovery_observation_key(raw, token_id, resolver),
+            observation_key: discovery_observation_key(
+                raw,
+                token_id
+                    .parse::<U256>()
+                    .with_context(|| format!("stored ENSv2 token ID {token_id} is malformed"))?,
+                resolver,
+            ),
         });
     }
     Ok(output)

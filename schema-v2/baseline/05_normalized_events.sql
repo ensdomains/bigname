@@ -137,6 +137,21 @@ CREATE INDEX IF NOT EXISTS normalized_events_resource_history_idx
     WHERE resource_id IS NOT NULL
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
+CREATE INDEX IF NOT EXISTS normalized_events_interpreter_state_history_idx
+    ON normalized_events (
+        chain_id,
+        (raw_fact_ref ? 'interpreter_state_key'),
+        (COALESCE(
+            raw_fact_ref ->> 'interpreter_state_key',
+            event_identity
+        )),
+        block_number DESC,
+        transaction_index DESC,
+        log_index DESC,
+        normalized_event_id DESC
+    )
+    WHERE canonicality_state IN ('canonical', 'safe', 'finalized');
+
 CREATE INDEX IF NOT EXISTS normalized_events_block_idx
     ON normalized_events (
         chain_id,

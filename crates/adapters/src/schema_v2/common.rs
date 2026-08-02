@@ -1,7 +1,8 @@
 use alloy_primitives::{B256, keccak256};
 use anyhow::{Context, bail};
+use bigname_domain::normalization::normalize_label_under_suffix;
 use serde_json::{Value, json};
-use time::{Duration, OffsetDateTime};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::model::RawLogInput;
@@ -47,10 +48,14 @@ pub(super) fn hash_hex(bytes: &[u8]) -> String {
 }
 
 pub(super) fn namehash(labels: &[String]) -> String {
-    let node = labels.iter().rev().fold(B256::ZERO, |node, label| {
+    namehash_raw(labels.iter().map(String::as_bytes))
+}
+
+pub(super) fn namehash_raw<'a>(labels: impl DoubleEndedIterator<Item = &'a [u8]>) -> String {
+    let node = labels.rev().fold(B256::ZERO, |node, label| {
         let mut input = [0u8; 64];
         input[..32].copy_from_slice(node.as_slice());
-        input[32..].copy_from_slice(keccak256(label.as_bytes()).as_slice());
+        input[32..].copy_from_slice(keccak256(label).as_slice());
         keccak256(input)
     });
     format!("{node:#x}")
@@ -67,7 +72,7 @@ pub(super) fn dns_encode(labels: &[String]) -> anyhow::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub(super) fn decode_dns_name(bytes: &[u8]) -> anyhow::Result<Vec<String>> {
+pub(super) fn decode_dns_labels(bytes: &[u8]) -> anyhow::Result<Vec<Vec<u8>>> {
     let mut labels = Vec::new();
     let mut cursor = 0usize;
     loop {
@@ -87,15 +92,60 @@ pub(super) fn decode_dns_name(bytes: &[u8]) -> anyhow::Result<Vec<String>> {
             .checked_add(length)
             .context("DNS label length overflow")?;
         let raw = bytes.get(cursor..end).context("DNS label is truncated")?;
-        let label = std::str::from_utf8(raw).context("DNS label is not UTF-8")?;
-        require_label(label)?;
-        labels.push(label.to_owned());
+        labels.push(raw.to_vec());
         cursor = end;
     }
     if labels.is_empty() {
         bail!("root-only DNS names do not identify a name surface");
     }
     Ok(labels)
+}
+
+pub(super) fn surface_labels(raw_labels: &[Vec<u8>]) -> Option<Vec<String>> {
+    raw_labels.iter().map(|raw| admitted_label(raw)).collect()
+}
+
+pub(super) fn decoded_label(raw_label: &[u8]) -> Option<String> {
+    std::str::from_utf8(raw_label)
+        .ok()
+        .filter(|label| !label.contains('\0'))
+        .map(str::to_owned)
+}
+
+pub(super) fn admitted_label(raw_label: &[u8]) -> Option<String> {
+    let label = decoded_label(raw_label)?;
+    require_label(&label).ok()?;
+    normalization_flag(Some(&label)).normalized.then_some(label)
+}
+
+pub(super) struct NormalizationFlag {
+    pub normalized: bool,
+    pub error: Option<String>,
+}
+
+pub(super) fn normalization_flag(raw_label: Option<&str>) -> NormalizationFlag {
+    let Some(raw_label) = raw_label else {
+        return NormalizationFlag {
+            normalized: false,
+            error: Some("raw label has no PostgreSQL-safe UTF-8 decoding".to_owned()),
+        };
+    };
+    match normalize_label_under_suffix(raw_label, &[]) {
+        Ok(normalized) if normalized.normalized_name.as_bytes() == raw_label.as_bytes() => {
+            NormalizationFlag {
+                normalized: true,
+                error: None,
+            }
+        }
+        Ok(_) => NormalizationFlag {
+            normalized: false,
+            error: Some("raw label is not byte-identical to its normalized form".to_owned()),
+        },
+        Err(error) => NormalizationFlag {
+            normalized: false,
+            error: Some(error.to_string()),
+        },
+    }
 }
 
 pub(super) fn require_label(label: &str) -> anyhow::Result<()> {
@@ -145,7 +195,7 @@ pub(super) fn provenance(raw: &RawLogInput, source_event: &str, manifest_id: i64
 }
 
 pub(super) fn event_time(raw: &RawLogInput) -> OffsetDateTime {
-    raw.block_timestamp + Duration::microseconds(raw.log_index.max(0))
+    super::seam::event_time(raw.block_timestamp, raw.log_index)
 }
 
 pub(super) fn derivation_kind(source_family: &str, event_kind: &str) -> &'static str {

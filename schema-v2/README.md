@@ -24,6 +24,7 @@ A [`registry_announcement` discovery edge](../docs/glossary.md#registry-announce
 The logical identity of an on-chain name is `<namespace>:<namehash>`. On chain, a name is its namehash: ENSv1 registry records are keyed by `bytes32` node `(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L13 @ ens_v1@91c966f)`, ENSv2 resolver permissions and records use the namehash/node `(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L68 @ ens_v2@ccaeb58)` `(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L133 @ ens_v2@ccaeb58)`, and Basenames defines the resolver node as the namehash of the name `(upstream: .refs/basenames/src/L2/L2Resolver.sol:L88 @ basenames@1809bbc)`. Identity is therefore chain-native and independent of normalization rules. Normalization is only a per-label visibility flag; it never participates in identity. The current [surface and resource identity ADR](../docs/adrs/0002-surface-resource-identity.md) records this rule, following the audit's [Normalization as a gate, not stored identity](../simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity) decision.
 
 Every `name_surfaces` write sets `visibility_state` explicitly. The column has no default: omitting the normalization decision fails the write instead of making an incompletely interpreted name visible.
+An attacker-controlled label that cannot decode as PostgreSQL-safe UTF-8 still has a deactivated identity row keyed by `<namespace>:<namehash>`; its unavailable text display fields are empty, and `label_preimages.raw_label` retains the authoritative bytes.
 
 ## Manifest declarations
 
@@ -79,7 +80,7 @@ A full rebuild publishes every table that belongs to one [projection](../docs/gl
 
 ## Label data
 
-`label_preimages` stores verified raw labels and the `normalized_under_version` flag. `ens_names` stores the imported rainbow rows. Storage and the interpreter write verified preimages. The import tool writes rainbow rows. Identity and child projection code read both tables. The [normalization decision](../simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity) and the [label-preimage storage census](../simplification-audit-20260730.md#cratesstorage-fable) authorize both tables.
+`label_preimages` stores verbatim chain label bytes as identity truth, an optional exact PostgreSQL-safe UTF-8 decoding as display-name input, and the `normalized_under_version` flag computed from that decoding. Valid UTF-8 containing an embedded NUL is not representable as PostgreSQL `text`, so `decoded_label` is NULL while `raw_label` retains the exact bytes. The decoded text is derived input, never stored normalized identity. `ens_names` stores the imported rainbow rows. Storage and the interpreter write verified preimages. The import tool writes rainbow rows. Identity and child projection code read both tables. The audit's [Normalization as a gate, not stored identity](../simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity) decision (§ 85) and the [label-preimage storage census](../simplification-audit-20260730.md#cratesstorage-fable) authorize both tables.
 
 ## Service heartbeats
 

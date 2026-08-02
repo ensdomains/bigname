@@ -1,3 +1,4 @@
+use bigname_adapters::schema_v2::seam::{LOG_INDEX_KEY, OBSERVATION_KEY, TRANSACTION_INDEX_KEY};
 use bigname_adapters::schema_v2::{BatchOutput, DiscoveryEdge, DiscoveryEdgeClosure};
 use sqlx::{Postgres, Transaction, types::Uuid};
 
@@ -186,11 +187,11 @@ impl Operation<'_> {
             Self::Open(edge) => (
                 edge.active_from_block_number,
                 edge.provenance
-                    .get("transaction_index")
+                    .get(TRANSACTION_INDEX_KEY)
                     .and_then(serde_json::Value::as_i64)
                     .unwrap_or(0),
                 edge.provenance
-                    .get("log_index")
+                    .get(LOG_INDEX_KEY)
                     .and_then(serde_json::Value::as_i64)
                     .unwrap_or(0),
                 1,
@@ -203,7 +204,7 @@ async fn close(
     transaction: &mut Transaction<'_, Postgres>,
     closure: &DiscoveryEdgeClosure,
 ) -> Result<()> {
-    sqlx::query(
+    let statement = format!(
         "
         UPDATE discovery_edges
         SET active_to_block_number = $5,
@@ -212,7 +213,7 @@ async fn close(
         WHERE chain_id = $1
           AND from_contract_instance_id = $2
           AND edge_kind = $3
-          AND provenance ->> 'observation_key' = $4
+          AND provenance ->> '{OBSERVATION_KEY}' = $4
           AND canonicality_state <> 'orphaned'
           AND ($7::uuid IS NULL OR to_contract_instance_id <> $7)
           AND (
@@ -223,18 +224,19 @@ async fn close(
               active_to_block_number IS NULL
               OR active_to_block_number > $5
           )
-        ",
-    )
-    .bind(&closure.chain_id)
-    .bind(closure.from_contract_instance_id)
-    .bind(&closure.edge_kind)
-    .bind(&closure.observation_key)
-    .bind(closure.active_to_block_number)
-    .bind(&closure.active_to_block_hash)
-    .bind(closure.except_to_contract_instance_id)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| InterpretError::database("failed to close discovery edge", error))?;
+        "
+    );
+    sqlx::query(&statement)
+        .bind(&closure.chain_id)
+        .bind(closure.from_contract_instance_id)
+        .bind(&closure.edge_kind)
+        .bind(&closure.observation_key)
+        .bind(closure.active_to_block_number)
+        .bind(&closure.active_to_block_hash)
+        .bind(closure.except_to_contract_instance_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| InterpretError::database("failed to close discovery edge", error))?;
     Ok(())
 }
 
@@ -245,7 +247,7 @@ async fn open(
 ) -> Result<()> {
     let (transaction_index, log_index) = edge_position(edge)?;
 
-    let existing_active: bool = sqlx::query_scalar(
+    let existing_active_statement = format!(
         "
         SELECT EXISTS (
             SELECT 1
@@ -254,7 +256,7 @@ async fn open(
               AND existing.edge_kind = $2
               AND existing.from_contract_instance_id = $3
               AND existing.to_contract_instance_id = $4
-              AND existing.provenance ->> 'observation_key' = $5
+              AND existing.provenance ->> '{OBSERVATION_KEY}' = $5
               AND existing.canonicality_state <> 'orphaned'
               AND existing.deactivated_at IS NULL
               AND (
@@ -263,35 +265,36 @@ async fn open(
                       existing.active_from_block_number = $6
                       AND (
                           COALESCE(
-                              (existing.provenance ->> 'transaction_index')::bigint, -1
+                              (existing.provenance ->> '{TRANSACTION_INDEX_KEY}')::bigint, -1
                           ),
                           COALESCE(
-                              (existing.provenance ->> 'log_index')::bigint, -1
+                              (existing.provenance ->> '{LOG_INDEX_KEY}')::bigint, -1
                           )
                       ) <= ($7, $8)
                   )
               )
         )
-        ",
-    )
-    .bind(&edge.chain_id)
-    .bind(&edge.edge_kind)
-    .bind(edge.from_contract_instance_id)
-    .bind(edge.to_contract_instance_id)
-    .bind(&edge.observation_key)
-    .bind(edge.active_from_block_number)
-    .bind(transaction_index)
-    .bind(log_index)
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(|error| {
-        InterpretError::database("failed to find existing discovery edge epoch", error)
-    })?;
+        "
+    );
+    let existing_active: bool = sqlx::query_scalar(&existing_active_statement)
+        .bind(&edge.chain_id)
+        .bind(&edge.edge_kind)
+        .bind(edge.from_contract_instance_id)
+        .bind(edge.to_contract_instance_id)
+        .bind(&edge.observation_key)
+        .bind(edge.active_from_block_number)
+        .bind(transaction_index)
+        .bind(log_index)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|error| {
+            InterpretError::database("failed to find existing discovery edge epoch", error)
+        })?;
     if existing_active {
         return Ok(());
     }
 
-    let successor: Option<(i64, String, i64, Uuid)> = sqlx::query_as(
+    let successor_statement = format!(
         "
         SELECT existing.active_from_block_number,
                existing.active_from_block_hash,
@@ -301,7 +304,7 @@ async fn open(
         WHERE existing.chain_id = $1
           AND existing.edge_kind = $2
           AND existing.from_contract_instance_id = $3
-          AND existing.provenance ->> 'observation_key' = $4
+          AND existing.provenance ->> '{OBSERVATION_KEY}' = $4
           AND existing.canonicality_state <> 'orphaned'
           AND existing.active_from_block_number IS NOT NULL
           AND (
@@ -310,36 +313,39 @@ async fn open(
                   existing.active_from_block_number = $5
                   AND (
                       COALESCE(
-                          (existing.provenance ->> 'transaction_index')::bigint, -1
+                          (existing.provenance ->> '{TRANSACTION_INDEX_KEY}')::bigint, -1
                       ),
                       COALESCE(
-                          (existing.provenance ->> 'log_index')::bigint, -1
+                          (existing.provenance ->> '{LOG_INDEX_KEY}')::bigint, -1
                       )
                   ) > ($6, $7)
               )
           )
         ORDER BY existing.active_from_block_number,
                  COALESCE(
-                     (existing.provenance ->> 'transaction_index')::bigint, -1
+                     (existing.provenance ->> '{TRANSACTION_INDEX_KEY}')::bigint, -1
                  ),
-                 COALESCE((existing.provenance ->> 'log_index')::bigint, -1),
+                 COALESCE((existing.provenance ->> '{LOG_INDEX_KEY}')::bigint, -1),
                  existing.discovery_edge_id
         LIMIT 1
         FOR UPDATE
-        ",
-    )
-    .bind(&edge.chain_id)
-    .bind(&edge.edge_kind)
-    .bind(edge.from_contract_instance_id)
-    .bind(&edge.observation_key)
-    .bind(edge.active_from_block_number)
-    .bind(transaction_index)
-    .bind(log_index)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(|error| InterpretError::database("failed to find successor discovery edge", error))?;
+        "
+    );
+    let successor: Option<(i64, String, i64, Uuid)> = sqlx::query_as(&successor_statement)
+        .bind(&edge.chain_id)
+        .bind(&edge.edge_kind)
+        .bind(edge.from_contract_instance_id)
+        .bind(&edge.observation_key)
+        .bind(edge.active_from_block_number)
+        .bind(transaction_index)
+        .bind(log_index)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(|error| {
+            InterpretError::database("failed to find successor discovery edge", error)
+        })?;
 
-    sqlx::query(
+    let cap_predecessor_statement = format!(
         "
         UPDATE discovery_edges existing
         SET active_to_block_number = $5,
@@ -348,7 +354,7 @@ async fn open(
         WHERE existing.chain_id = $1
           AND existing.edge_kind = $2
           AND existing.from_contract_instance_id = $3
-          AND existing.provenance ->> 'observation_key' = $4
+          AND existing.provenance ->> '{OBSERVATION_KEY}' = $4
           AND existing.to_contract_instance_id <> $9
           AND existing.canonicality_state <> 'orphaned'
           AND (
@@ -357,10 +363,10 @@ async fn open(
                   existing.active_from_block_number = $5
                   AND (
                       COALESCE(
-                          (existing.provenance ->> 'transaction_index')::bigint, -1
+                          (existing.provenance ->> '{TRANSACTION_INDEX_KEY}')::bigint, -1
                       ),
                       COALESCE(
-                          (existing.provenance ->> 'log_index')::bigint, -1
+                          (existing.provenance ->> '{LOG_INDEX_KEY}')::bigint, -1
                       )
                   ) < ($7, $8)
               )
@@ -369,20 +375,23 @@ async fn open(
               existing.active_to_block_number IS NULL
               OR existing.active_to_block_number > $5
           )
-        ",
-    )
-    .bind(&edge.chain_id)
-    .bind(&edge.edge_kind)
-    .bind(edge.from_contract_instance_id)
-    .bind(&edge.observation_key)
-    .bind(edge.active_from_block_number)
-    .bind(&edge.active_from_block_hash)
-    .bind(transaction_index)
-    .bind(log_index)
-    .bind(edge.to_contract_instance_id)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| InterpretError::database("failed to cap predecessor discovery edge", error))?;
+        "
+    );
+    sqlx::query(&cap_predecessor_statement)
+        .bind(&edge.chain_id)
+        .bind(&edge.edge_kind)
+        .bind(edge.from_contract_instance_id)
+        .bind(&edge.observation_key)
+        .bind(edge.active_from_block_number)
+        .bind(&edge.active_from_block_hash)
+        .bind(transaction_index)
+        .bind(log_index)
+        .bind(edge.to_contract_instance_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            InterpretError::database("failed to cap predecessor discovery edge", error)
+        })?;
 
     if let Some((_, _, successor_id, successor_target)) = successor.as_ref()
         && *successor_target == edge.to_contract_instance_id
@@ -418,7 +427,7 @@ async fn open(
 
     let successor_block = successor.as_ref().map(|value| value.0);
     let successor_hash = successor.as_ref().map(|value| value.1.as_str());
-    let reopened = sqlx::query(
+    let reopen_statement = format!(
         "
         UPDATE discovery_edges existing
         SET discovery_source = $5,
@@ -462,27 +471,28 @@ async fn open(
           AND existing.source_manifest_id IS NOT DISTINCT FROM $7
           AND existing.active_from_block_number = $8
           AND existing.active_from_block_hash = $9
-          AND existing.provenance ->> 'observation_key' = $12
-        ",
-    )
-    .bind(&edge.chain_id)
-    .bind(&edge.edge_kind)
-    .bind(edge.from_contract_instance_id)
-    .bind(edge.to_contract_instance_id)
-    .bind(&edge.discovery_source)
-    .bind(&edge.admission_basis)
-    .bind(edge.source_manifest_id)
-    .bind(edge.active_from_block_number)
-    .bind(&edge.active_from_block_hash)
-    .bind(&edge.canonicality_state)
-    .bind(&edge.provenance)
-    .bind(&edge.observation_key)
-    .bind(successor_block)
-    .bind(successor_hash)
-    .bind(preserve_outside_range_closes)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| InterpretError::database("failed to reopen discovery edge", error))?;
+          AND existing.provenance ->> '{OBSERVATION_KEY}' = $12
+        "
+    );
+    let reopened = sqlx::query(&reopen_statement)
+        .bind(&edge.chain_id)
+        .bind(&edge.edge_kind)
+        .bind(edge.from_contract_instance_id)
+        .bind(edge.to_contract_instance_id)
+        .bind(&edge.discovery_source)
+        .bind(&edge.admission_basis)
+        .bind(edge.source_manifest_id)
+        .bind(edge.active_from_block_number)
+        .bind(&edge.active_from_block_hash)
+        .bind(&edge.canonicality_state)
+        .bind(&edge.provenance)
+        .bind(&edge.observation_key)
+        .bind(successor_block)
+        .bind(successor_hash)
+        .bind(preserve_outside_range_closes)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| InterpretError::database("failed to reopen discovery edge", error))?;
     if reopened.rows_affected() > 0 {
         return Ok(());
     }
@@ -525,18 +535,18 @@ async fn open(
 fn edge_position(edge: &DiscoveryEdge) -> Result<(i64, i64)> {
     let transaction_index = edge
         .provenance
-        .get("transaction_index")
+        .get(TRANSACTION_INDEX_KEY)
         .and_then(serde_json::Value::as_i64);
     let log_index = edge
         .provenance
-        .get("log_index")
+        .get(LOG_INDEX_KEY)
         .and_then(serde_json::Value::as_i64);
     match (transaction_index, log_index) {
         (Some(transaction_index), Some(log_index)) if transaction_index >= 0 && log_index >= 0 => {
             Ok((transaction_index, log_index))
         }
         _ => Err(InterpretError::data_integrity(
-            "raw-log discovery edge requires non-negative transaction_index and log_index",
+            "raw-log discovery edge requires non-negative transaction and log positions",
         )),
     }
 }

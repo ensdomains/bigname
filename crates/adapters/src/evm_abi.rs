@@ -27,6 +27,31 @@ where
     E::decode_log_data_validate(&log_data).context(MalformedEventLog(context))
 }
 
+pub(crate) fn decode_event_log_data_as<E>(
+    topics: &[String],
+    data: &[u8],
+    expected_topic0: &str,
+    context: &'static str,
+) -> Result<E>
+where
+    E: SolEvent,
+{
+    let log_data = alloy_log_data(topics, data).context(MalformedEventLog(context))?;
+    let actual_topic0 = log_data
+        .topics()
+        .first()
+        .context(MalformedEventLog(context))?;
+    let expected_topic0 =
+        B256::from_str(&normalize_hex_32(expected_topic0)?).context(MalformedEventLog(context))?;
+    if *actual_topic0 != expected_topic0 {
+        return Err(anyhow::anyhow!(MalformedEventLog(context)));
+    }
+    let decoded_topics = E::decode_topics(log_data.topics()).context(MalformedEventLog(context))?;
+    let decoded_data =
+        E::abi_decode_data_validate(&log_data.data).context(MalformedEventLog(context))?;
+    Ok(E::new(decoded_topics, decoded_data))
+}
+
 pub(crate) fn is_malformed_event_log(error: &anyhow::Error) -> bool {
     error.downcast_ref::<MalformedEventLog>().is_some()
 }

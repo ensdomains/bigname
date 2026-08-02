@@ -4,6 +4,11 @@ mod identity_names;
 mod normalized;
 
 use bigname_adapters::schema_v2::BatchOutput;
+use bigname_adapters::schema_v2::seam::{
+    EVENT_CLOSE_TIME_SQL, LOG_INDEX_KEY, REDO_BINDING_CLOSE_CLAMP_SQL, SURFACE_BINDING_ID_KEY,
+    SURFACE_BOUND_EVENT_KIND, SURFACE_UNBOUND_EVENT_KIND, TOKEN_LINEAGE_ID_KEY,
+    TRANSACTION_INDEX_KEY,
+};
 use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::Result;
@@ -12,22 +17,67 @@ pub(crate) async fn batch(
     pool: &PgPool,
     chain_id: &str,
     redo_range: Option<(i64, i64)>,
+    prepare_redo: bool,
+    complete: bool,
+    expected_lineage: &[(i64, String)],
     output: &BatchOutput,
 ) -> Result<u64> {
     let preserve_outside_range_closes = redo_range.is_some();
     let mut transaction = pool.begin().await.map_err(|error| {
         crate::InterpretError::database("failed to begin interpret write transaction", error)
     })?;
-    if let Some((from_block, to_block)) = redo_range {
+    revalidate_canonical_lineage(&mut transaction, chain_id, expected_lineage).await?;
+    if let Some((from_block, to_block)) = redo_range.filter(|_| prepare_redo) {
         prepare_redo_range(&mut transaction, chain_id, from_block, to_block).await?;
     }
     identity::write(&mut transaction, output, preserve_outside_range_closes).await?;
     discovery::write(&mut transaction, output, preserve_outside_range_closes).await?;
     normalized::events(&mut transaction, &output.normalized_events).await?;
+    if let Some((from_block, to_block)) = redo_range.filter(|_| complete) {
+        reanchor_stable_identities(&mut transaction, chain_id, from_block, to_block).await?;
+    }
     transaction.commit().await.map_err(|error| {
         crate::InterpretError::database("failed to commit interpret write transaction", error)
     })?;
     Ok(estimate(output))
+}
+
+async fn revalidate_canonical_lineage(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    expected: &[(i64, String)],
+) -> Result<()> {
+    let block_numbers = expected
+        .iter()
+        .map(|(number, _)| *number)
+        .collect::<Vec<_>>();
+    let live: Vec<(i64, String)> = sqlx::query_as(
+        "
+        SELECT block_number, block_hash
+        FROM chain_lineage
+        WHERE chain_id = $1
+          AND block_number = ANY($2::bigint[])
+          AND canonicality_state IN ('canonical', 'safe', 'finalized')
+        ORDER BY block_number, block_hash
+        FOR SHARE
+        ",
+    )
+    .bind(chain_id)
+    .bind(&block_numbers)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|error| {
+        crate::InterpretError::database(
+            "failed to revalidate interpret batch canonical lineage",
+            error,
+        )
+    })?;
+    if live != expected {
+        return Err(crate::InterpretError::transient(format!(
+            "interpret batch lineage changed before write for chain {chain_id}; retry with reloaded raw facts"
+        )));
+    }
+    Ok(())
 }
 
 async fn prepare_redo_range(
@@ -36,7 +86,7 @@ async fn prepare_redo_range(
     from_block: i64,
     to_block: i64,
 ) -> Result<()> {
-    reanchor_stable_identities(transaction, chain_id, from_block, to_block).await?;
+    stage_referenced_stable_identities(transaction, chain_id, from_block, to_block).await?;
     orphan_bindings_started_in_range(transaction, chain_id, from_block, to_block).await?;
     reopen_bindings_closed_in_range(transaction, chain_id, from_block, to_block).await?;
     sqlx::query(
@@ -148,6 +198,83 @@ async fn prepare_redo_range(
     Ok(())
 }
 
+async fn stage_referenced_stable_identities(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    from_block: i64,
+    to_block: i64,
+) -> Result<()> {
+    let token_lineage_join =
+        format!("event.after_state ->> '{TOKEN_LINEAGE_ID_KEY}' = identity.token_lineage_id::text");
+    for (table, identity_column, identity_join) in [
+        (
+            "name_surfaces",
+            "logical_name_id",
+            "event.logical_name_id = identity.logical_name_id",
+        ),
+        (
+            "resources",
+            "resource_id",
+            "event.resource_id = identity.resource_id",
+        ),
+        (
+            "token_lineages",
+            TOKEN_LINEAGE_ID_KEY,
+            token_lineage_join.as_str(),
+        ),
+    ] {
+        let statement = format!(
+            "
+            WITH range_anchors AS (
+                SELECT DISTINCT ON (identity.{identity_column})
+                       identity.{identity_column} AS identity_id,
+                       event.block_hash,
+                       event.block_number,
+                       event.raw_fact_ref AS provenance
+                FROM {table} identity
+                JOIN normalized_events event
+                  ON event.chain_id = identity.chain_id
+                 AND {identity_join}
+                JOIN chain_lineage lineage
+                  ON lineage.chain_id = event.chain_id
+                 AND lineage.block_hash = event.block_hash
+                 AND lineage.block_number = event.block_number
+                WHERE identity.chain_id = $1
+                  AND event.block_number BETWEEN $2 AND $3
+                  AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+                  AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+                ORDER BY identity.{identity_column},
+                         event.block_number,
+                         event.transaction_index NULLS FIRST,
+                         event.log_index NULLS FIRST,
+                         event.normalized_event_id
+            )
+            UPDATE {table} identity
+            SET block_hash = anchor.block_hash,
+                block_number = anchor.block_number,
+                provenance = anchor.provenance,
+                canonicality_state = 'orphaned'::canonicality_state,
+                observed_at = now()
+            FROM range_anchors anchor
+            WHERE identity.{identity_column} = anchor.identity_id
+            "
+        );
+        sqlx::query(&statement)
+            .bind(chain_id)
+            .bind(from_block)
+            .bind(to_block)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                crate::InterpretError::database(
+                    format!("failed to stage {table} identities for redo"),
+                    error,
+                )
+            })?;
+    }
+    Ok(())
+}
+
 async fn orphan_bindings_started_in_range(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -180,7 +307,7 @@ async fn reopen_bindings_closed_in_range(
     from_block: i64,
     to_block: i64,
 ) -> Result<()> {
-    sqlx::query(
+    let statement = format!(
         "
         WITH closing_events AS (
             SELECT event.logical_name_id,
@@ -189,10 +316,8 @@ async fn reopen_bindings_closed_in_range(
                    event.block_number,
                    COALESCE(event.transaction_index, -1) AS transaction_index,
                    COALESCE(event.log_index, -1) AS log_index,
-                   lineage.block_timestamp + make_interval(
-                       secs => COALESCE(event.log_index, 0)::double precision / 1000000.0
-                   ) AS closed_at,
-                   event.after_state ->> 'surface_binding_id' AS opened_binding_id
+                   {EVENT_CLOSE_TIME_SQL} AS closed_at,
+                   event.after_state ->> '{SURFACE_BINDING_ID_KEY}' AS opened_binding_id
             FROM normalized_events event
             JOIN chain_lineage lineage
               ON lineage.chain_id = event.chain_id
@@ -201,7 +326,7 @@ async fn reopen_bindings_closed_in_range(
             WHERE event.chain_id = $1
               AND event.block_number BETWEEN $2 AND $3
               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-              AND event.event_kind IN ('SurfaceBound', 'SurfaceUnbound')
+              AND event.event_kind IN ('{SURFACE_BOUND_EVENT_KIND}', '{SURFACE_UNBOUND_EVENT_KIND}')
               AND event.logical_name_id IS NOT NULL
         ),
         targets AS (
@@ -211,17 +336,14 @@ async fn reopen_bindings_closed_in_range(
             FROM surface_bindings binding
             JOIN closing_events event
               ON event.logical_name_id = binding.logical_name_id
-             AND binding.active_to = GREATEST(
-                    event.closed_at,
-                    binding.active_from + interval '1 microsecond'
-                 )
+             AND binding.active_to = {REDO_BINDING_CLOSE_CLAMP_SQL}
              AND (
                     (
-                        event.event_kind = 'SurfaceUnbound'
+                        event.event_kind = '{SURFACE_UNBOUND_EVENT_KIND}'
                         AND event.resource_id = binding.resource_id
                     )
                     OR (
-                        event.event_kind = 'SurfaceBound'
+                        event.event_kind = '{SURFACE_BOUND_EVENT_KIND}'
                         AND (
                             event.opened_binding_id IS NULL
                             OR event.opened_binding_id <> binding.surface_binding_id::text
@@ -241,11 +363,11 @@ async fn reopen_bindings_closed_in_range(
                           candidate.block_number = event.block_number
                           AND (
                               COALESCE(
-                                  (candidate.provenance ->> 'transaction_index')::bigint,
+                                  (candidate.provenance ->> '{TRANSACTION_INDEX_KEY}')::bigint,
                                   -1
                               ),
                               COALESCE(
-                                  (candidate.provenance ->> 'log_index')::bigint,
+                                  (candidate.provenance ->> '{LOG_INDEX_KEY}')::bigint,
                                   -1
                               )
                           ) > (event.transaction_index, event.log_index)
@@ -253,11 +375,11 @@ async fn reopen_bindings_closed_in_range(
                   )
                 ORDER BY candidate.block_number,
                          COALESCE(
-                             (candidate.provenance ->> 'transaction_index')::bigint,
+                             (candidate.provenance ->> '{TRANSACTION_INDEX_KEY}')::bigint,
                              -1
                          ),
                          COALESCE(
-                             (candidate.provenance ->> 'log_index')::bigint,
+                             (candidate.provenance ->> '{LOG_INDEX_KEY}')::bigint,
                              -1
                          ),
                          candidate.surface_binding_id
@@ -278,16 +400,17 @@ async fn reopen_bindings_closed_in_range(
             observed_at = now()
         FROM targets target
         WHERE binding.surface_binding_id = target.surface_binding_id
-        ",
-    )
-    .bind(chain_id)
-    .bind(from_block)
-    .bind(to_block)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| {
-        crate::InterpretError::database("failed to reopen identity bindings before redo", error)
-    })?;
+        "
+    );
+    sqlx::query(&statement)
+        .bind(chain_id)
+        .bind(from_block)
+        .bind(to_block)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            crate::InterpretError::database("failed to reopen identity bindings before redo", error)
+        })?;
     Ok(())
 }
 
@@ -297,21 +420,20 @@ async fn reanchor_stable_identities(
     from_block: i64,
     to_block: i64,
 ) -> Result<()> {
+    let token_lineage_join =
+        format!("event.after_state ->> '{TOKEN_LINEAGE_ID_KEY}' = identity.token_lineage_id::text");
     for (table, identity_join) in [
         (
             "name_surfaces",
             "event.logical_name_id = identity.logical_name_id",
         ),
         ("resources", "event.resource_id = identity.resource_id"),
-        (
-            "token_lineages",
-            "event.after_state ->> 'token_lineage_id' = identity.token_lineage_id::text",
-        ),
+        ("token_lineages", token_lineage_join.as_str()),
     ] {
         let identity_column = match table {
             "name_surfaces" => "logical_name_id",
             "resources" => "resource_id",
-            "token_lineages" => "token_lineage_id",
+            "token_lineages" => TOKEN_LINEAGE_ID_KEY,
             _ => unreachable!("fixed stable identity table"),
         };
         let statement = format!(

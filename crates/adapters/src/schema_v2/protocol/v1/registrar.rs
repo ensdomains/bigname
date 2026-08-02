@@ -1,57 +1,60 @@
-use alloy_primitives::{B256, keccak256};
+use alloy_primitives::{B256, hex, keccak256};
 use alloy_sol_types::sol;
 use anyhow::bail;
 use serde_json::{Value, json};
 
 use super::super::{
-    EventDraft, Interpreted, NameDraft, ResourceDraft, ensure_declared,
+    EventDraft, Interpreted, NameDraft, ResourceDraft, ShadowNameDraft, ensure_declared,
     permissions::{v1_grant_states, v1_revoke_states},
 };
 use super::registry::append_authority_transition;
 use super::support::{events_linked, single_event};
-use crate::evm_abi::{address_hex, decode_event_log, hex_string, u256_word_hex};
+use crate::evm_abi::{
+    address_hex, decode_event_log, decode_event_log_data_as, hex_string, u256_word_hex,
+};
 use crate::schema_v2::{
     catalog::Selected,
-    common::{namehash, require_label, stable_uuid},
+    common::{admitted_label, decoded_label, stable_uuid},
     model::RawLogInput,
     state::{State, V1NameState},
 };
 
+mod identity;
+use identity::{new_registrar_identity, registrar_namehash};
+
 mod simple {
     use super::*;
     sol! {
-        event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires);
-        event NameRenewed(string name, bytes32 indexed label, uint256 expires);
+        event RawNameRegistered(bytes name, bytes32 indexed label, address indexed owner, uint256 expires);
+        event RawNameRenewed(bytes name, bytes32 indexed label, uint256 expires);
     }
 }
 
 mod cost {
     use super::*;
     sol! {
-        event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 cost, uint256 expires);
-        event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires);
+        event RawNameRegistered(bytes name, bytes32 indexed label, address indexed owner, uint256 cost, uint256 expires);
+        event RawNameRenewed(bytes name, bytes32 indexed label, uint256 cost, uint256 expires);
     }
 }
 
 mod premium {
     use super::*;
     sol! {
-        event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 baseCost, uint256 premium, uint256 expires);
+        event RawNameRegistered(bytes name, bytes32 indexed label, address indexed owner, uint256 baseCost, uint256 premium, uint256 expires);
     }
 }
 
 mod premium_referrer {
     use super::*;
     sol! {
-        event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 baseCost, uint256 premium, uint256 expires, bytes32 referrer);
+        event RawNameRegistered(bytes name, bytes32 indexed label, address indexed owner, uint256 baseCost, uint256 premium, uint256 expires, bytes32 referrer);
     }
 }
 
 mod renew_referrer {
     use super::*;
-    sol! {
-        event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires, bytes32 referrer);
-    }
+    sol! { event RawNameRenewed(bytes name, bytes32 indexed label, uint256 cost, uint256 expires, bytes32 referrer); }
 }
 
 mod transfer {
@@ -244,9 +247,8 @@ fn name_event(
     state: &mut State,
     registration: bool,
 ) -> anyhow::Result<Interpreted> {
-    let (label, explicit_labelhash, mut after) = decode_name(selected, raw)?;
-    require_label(&label)?;
-    if keccak256(label.as_bytes()) != explicit_labelhash {
+    let (raw_label, explicit_labelhash, mut after) = decode_name(selected, raw)?;
+    if keccak256(&raw_label) != explicit_labelhash {
         bail!(
             "{} label does not hash to its indexed label",
             selected.event.name
@@ -257,10 +259,17 @@ fn name_event(
     } else {
         vec!["eth".to_owned()]
     };
-    let labels = std::iter::once(label.clone())
-        .chain(suffix)
-        .collect::<Vec<_>>();
     let raw_namehash = registrar_namehash(selected, explicit_labelhash);
+    let decoded_label = decoded_label(&raw_label);
+    let label = admitted_label(&raw_label);
+    let labels = label.map(|label| {
+        std::iter::once(label)
+            .chain(suffix.iter().cloned())
+            .collect::<Vec<_>>()
+    });
+    let surface_known = labels.is_some();
+    let mut raw_labels = vec![raw_label.clone()];
+    raw_labels.extend(suffix.iter().map(|label| label.as_bytes().to_vec()));
     let logical_name_id = format!("{}:{raw_namehash}", selected.source.namespace);
     let previous_active = state.v1_name(&selected.source.namespace, &raw_namehash);
     let prior_registrar = state.v1_registrar(&selected.source.namespace, &raw_namehash);
@@ -300,6 +309,7 @@ fn name_event(
         &selected.source.namespace,
         &raw_namehash,
         logical_name_id.clone(),
+        surface_known,
         resource_id,
         token_lineage_id,
         selected.source.source_family.clone(),
@@ -312,6 +322,15 @@ fn name_event(
     );
     let after_object = after.as_object_mut().expect("registrar state is an object");
     after_object.insert("namehash".to_owned(), Value::String(raw_namehash.clone()));
+    after_object.insert("surface_known".to_owned(), Value::Bool(surface_known));
+    after_object.insert(
+        "raw_label_hex".to_owned(),
+        Value::String(hex::encode(&raw_label)),
+    );
+    after_object.insert(
+        "decoded_label".to_owned(),
+        decoded_label.map(Value::String).unwrap_or(Value::Null),
+    );
     after_object.insert(
         "labelhash".to_owned(),
         Value::String(format!("{explicit_labelhash:#x}")),
@@ -440,136 +459,126 @@ fn name_event(
             state.v1_resolver(&selected.source.namespace, &raw_namehash),
         );
     }
-    output.names.push(NameDraft {
-        labels,
-        namehash: raw_namehash,
-        resource_id: Some(resource_id),
-        token_lineage_id: Some(token_lineage_id),
-        surface_binding_id: authority_key.as_ref().map(|authority_key| {
-            stable_uuid(&format!(
-                "binding:{authority_key}:{}",
-                raw.block_timestamp.unix_timestamp()
-            ))
-        }),
-        bind: false,
-        binding_kind: "declared_registry_path".to_owned(),
-        source_kind: format!("{}_name", selected.event.name),
-        preimage_metadata: None,
-    });
+    if let Some(labels) = labels {
+        output.names.push(NameDraft {
+            labels,
+            namehash: raw_namehash,
+            resource_id: Some(resource_id),
+            token_lineage_id: Some(token_lineage_id),
+            surface_binding_id: authority_key.as_ref().map(|authority_key| {
+                stable_uuid(&format!(
+                    "binding:{authority_key}:{}",
+                    raw.block_timestamp.unix_timestamp()
+                ))
+            }),
+            bind: false,
+            binding_kind: "declared_registry_path".to_owned(),
+            source_kind: format!("{}_name", selected.event.name),
+            preimage_metadata: None,
+        });
+    } else {
+        output.shadow_names.push(ShadowNameDraft {
+            raw_labels,
+            namehash: raw_namehash,
+            source_kind: format!("{}_name", selected.event.name),
+        });
+        output.resources.push(ResourceDraft {
+            resource_id,
+            token_lineage_id: Some(token_lineage_id),
+        });
+    }
     Ok(output)
 }
 
-fn registrar_namehash(selected: &Selected, labelhash: B256) -> String {
-    let suffix = if selected.source.source_family == "basenames_base_registrar" {
-        vec!["base".to_owned(), "eth".to_owned()]
-    } else {
-        vec!["eth".to_owned()]
-    };
-    let parent = namehash(&suffix)
-        .parse::<B256>()
-        .expect("namehash helper returns a bytes32 value");
-    let mut input = [0u8; 64];
-    input[..32].copy_from_slice(parent.as_slice());
-    input[32..].copy_from_slice(labelhash.as_slice());
-    format!("{:#x}", keccak256(input))
-}
-
-fn new_registrar_identity(
-    selected: &Selected,
-    raw: &RawLogInput,
-    labelhash: &str,
-) -> (uuid::Uuid, uuid::Uuid, Option<String>) {
-    let authority_key = format!(
-        "registrar:{}:{}:{}:{}:{}",
-        raw.chain_id, selected.source.manifest_id, labelhash, raw.block_hash, raw.log_index,
-    );
-    let token_lineage_id = stable_uuid(&format!("token-lineage:{authority_key}"));
-    let resource_id = stable_uuid(&format!("resource:{authority_key}"));
-    (token_lineage_id, resource_id, Some(authority_key))
-}
-
-fn decode_name(selected: &Selected, raw: &RawLogInput) -> anyhow::Result<(String, B256, Value)> {
+fn decode_name(selected: &Selected, raw: &RawLogInput) -> anyhow::Result<(Vec<u8>, B256, Value)> {
     match selected.event.signature.as_str() {
         "NameRegistered(string,bytes32,address,uint256)" => {
-            let event = decode_event_log::<simple::NameRegistered>(
+            let event = decode_event_log_data_as::<simple::RawNameRegistered>(
                 &raw.topics,
                 &raw.data,
+                &selected.event.topic0,
                 "NameRegistered log is malformed",
             )?;
             Ok((
-                event.name,
+                event.name.to_vec(),
                 event.label,
                 json!({"source_event":"NameRegistered","registrant":address_hex(event.owner),"expiry":crate::evm_abi::u256_i64(event.expires, "NameRegistered expiry")?}),
             ))
         }
         "NameRegistered(string,bytes32,address,uint256,uint256)" => {
-            let event = decode_event_log::<cost::NameRegistered>(
+            let event = decode_event_log_data_as::<cost::RawNameRegistered>(
                 &raw.topics,
                 &raw.data,
+                &selected.event.topic0,
                 "NameRegistered log is malformed",
             )?;
             Ok((
-                event.name,
+                event.name.to_vec(),
                 event.label,
                 json!({"source_event":"NameRegistered","registrant":address_hex(event.owner),"cost":event.cost.to_string(),"expiry":crate::evm_abi::u256_i64(event.expires, "NameRegistered expiry")?}),
             ))
         }
         "NameRegistered(string,bytes32,address,uint256,uint256,uint256)" => {
-            let event = decode_event_log::<premium::NameRegistered>(
+            let event = decode_event_log_data_as::<premium::RawNameRegistered>(
                 &raw.topics,
                 &raw.data,
+                &selected.event.topic0,
                 "NameRegistered log is malformed",
             )?;
             Ok((
-                event.name,
+                event.name.to_vec(),
                 event.label,
                 json!({"source_event":"NameRegistered","registrant":address_hex(event.owner),"base_cost":event.baseCost.to_string(),"premium":event.premium.to_string(),"expiry":crate::evm_abi::u256_i64(event.expires, "NameRegistered expiry")?}),
             ))
         }
         "NameRegistered(string,bytes32,address,uint256,uint256,uint256,bytes32)" => {
-            let event = decode_event_log::<premium_referrer::NameRegistered>(
+            let event = decode_event_log_data_as::<premium_referrer::RawNameRegistered>(
                 &raw.topics,
                 &raw.data,
+                &selected.event.topic0,
                 "NameRegistered log is malformed",
             )?;
             Ok((
-                event.name,
+                event.name.to_vec(),
                 event.label,
                 json!({"source_event":"NameRegistered","registrant":address_hex(event.owner),"base_cost":event.baseCost.to_string(),"premium":event.premium.to_string(),"expiry":crate::evm_abi::u256_i64(event.expires, "NameRegistered expiry")?,"referrer":hex_string(event.referrer)}),
             ))
         }
         "NameRenewed(string,bytes32,uint256)" => {
-            let event = decode_event_log::<simple::NameRenewed>(
+            let event = decode_event_log_data_as::<simple::RawNameRenewed>(
                 &raw.topics,
                 &raw.data,
+                &selected.event.topic0,
                 "NameRenewed log is malformed",
             )?;
             Ok((
-                event.name,
+                event.name.to_vec(),
                 event.label,
                 json!({"source_event":"NameRenewed","expiry":crate::evm_abi::u256_i64(event.expires, "NameRenewed expiry")?}),
             ))
         }
         "NameRenewed(string,bytes32,uint256,uint256)" => {
-            let event = decode_event_log::<cost::NameRenewed>(
+            let event = decode_event_log_data_as::<cost::RawNameRenewed>(
                 &raw.topics,
                 &raw.data,
+                &selected.event.topic0,
                 "NameRenewed log is malformed",
             )?;
             Ok((
-                event.name,
+                event.name.to_vec(),
                 event.label,
                 json!({"source_event":"NameRenewed","cost":event.cost.to_string(),"expiry":crate::evm_abi::u256_i64(event.expires, "NameRenewed expiry")?}),
             ))
         }
         "NameRenewed(string,bytes32,uint256,uint256,bytes32)" => {
-            let event = decode_event_log::<renew_referrer::NameRenewed>(
+            let event = decode_event_log_data_as::<renew_referrer::RawNameRenewed>(
                 &raw.topics,
                 &raw.data,
+                &selected.event.topic0,
                 "NameRenewed log is malformed",
             )?;
             Ok((
-                event.name,
+                event.name.to_vec(),
                 event.label,
                 json!({"source_event":"NameRenewed","cost":event.cost.to_string(),"expiry":crate::evm_abi::u256_i64(event.expires, "NameRenewed expiry")?,"referrer":hex_string(event.referrer)}),
             ))

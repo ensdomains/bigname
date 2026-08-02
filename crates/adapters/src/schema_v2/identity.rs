@@ -1,44 +1,58 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use bigname_domain::normalization::{ENS_NORMALIZER_VERSION, normalize_label_under_suffix};
+use alloy_primitives::hex;
+use bigname_domain::normalization::ENS_NORMALIZER_VERSION;
 use serde_json::{Value, json};
 
 use super::{
     catalog::Selected,
-    common::{dns_encode, event_time, hash_hex, provenance, stable_uuid},
+    common::{
+        decoded_label, dns_encode, event_time, hash_hex, normalization_flag, provenance,
+        stable_uuid,
+    },
     model::{
         BatchOutput, BindingClosure, LabelPreimage, NameSurface, RawLogInput, Resource,
         SurfaceBinding, TokenLineage,
     },
     normalized::preimage_event,
     protocol::Interpreted,
+    state::State,
 };
 
 pub(super) fn materialize(
     selected: &Selected,
     raw: &RawLogInput,
     interpreted: &Interpreted,
+    state: &mut State,
     output: &mut BatchOutput,
 ) -> anyhow::Result<()> {
     let raw_provenance = provenance(raw, &selected.event.name, selected.source.manifest_id);
     let transition_time = event_time(raw);
-    let shadow_names = interpreted
+    let mut shadow_names = interpreted
         .names
         .iter()
         .filter(|name| {
             name.labels
                 .iter()
-                .any(|label| !normalization_flag(label).normalized)
+                .any(|label| !normalization_flag(Some(label)).normalized)
         })
         .map(|name| format!("{}:{}", selected.source.namespace, name.namehash))
         .collect::<BTreeSet<_>>();
+    shadow_names.extend(
+        interpreted
+            .shadow_names
+            .iter()
+            .map(|name| format!("{}:{}", selected.source.namespace, name.namehash)),
+    );
     let mut labels = BTreeMap::new();
     for label in &interpreted.labels {
-        let flag = normalization_flag(&label.raw_label);
-        let labelhash = hash_hex(label.raw_label.as_bytes());
+        let decoded_label = decoded_label(&label.raw_label);
+        let flag = normalization_flag(decoded_label.as_deref());
+        let labelhash = hash_hex(&label.raw_label);
         labels.entry(labelhash.clone()).or_insert(LabelPreimage {
             labelhash,
             raw_label: label.raw_label.clone(),
+            decoded_label,
             normalizer_version: ENS_NORMALIZER_VERSION.to_owned(),
             normalized_under_version: flag.normalized,
             normalization_error: flag.error,
@@ -49,11 +63,30 @@ pub(super) fn materialize(
     }
     for name in &interpreted.names {
         for raw_label in &name.labels {
-            let flag = normalization_flag(raw_label);
+            let flag = normalization_flag(Some(raw_label));
             let labelhash = hash_hex(raw_label.as_bytes());
             labels.entry(labelhash.clone()).or_insert(LabelPreimage {
                 labelhash,
+                raw_label: raw_label.as_bytes().to_vec(),
+                decoded_label: Some(raw_label.clone()),
+                normalizer_version: ENS_NORMALIZER_VERSION.to_owned(),
+                normalized_under_version: flag.normalized,
+                normalization_error: flag.error,
+                source_kind: name.source_kind.clone(),
+                source_priority: 100,
+                provenance: raw_provenance.clone(),
+            });
+        }
+    }
+    for name in &interpreted.shadow_names {
+        for raw_label in &name.raw_labels {
+            let decoded_label = decoded_label(raw_label);
+            let flag = normalization_flag(decoded_label.as_deref());
+            let labelhash = hash_hex(raw_label);
+            labels.entry(labelhash.clone()).or_insert(LabelPreimage {
+                labelhash,
                 raw_label: raw_label.clone(),
+                decoded_label,
                 normalizer_version: ENS_NORMALIZER_VERSION.to_owned(),
                 normalized_under_version: flag.normalized,
                 normalization_error: flag.error,
@@ -80,7 +113,9 @@ pub(super) fn materialize(
     }
 
     for resource in &interpreted.resources {
-        if let Some(token_lineage_id) = resource.token_lineage_id {
+        if let Some(token_lineage_id) = resource.token_lineage_id
+            && state.materialize_token_lineage(token_lineage_id)
+        {
             output.token_lineages.push(TokenLineage {
                 token_lineage_id,
                 chain_id: raw.chain_id.clone(),
@@ -130,13 +165,13 @@ pub(super) fn materialize(
         });
     }
 
-    let mut represented = BTreeSet::new();
+    let mut represented = BTreeSet::<Vec<u8>>::new();
     for name in &interpreted.names {
         let logical_name_id = format!("{}:{}", selected.source.namespace, name.namehash);
         let flags = name
             .labels
             .iter()
-            .map(|label| (label, normalization_flag(label)))
+            .map(|label| (label, normalization_flag(Some(label))))
             .collect::<Vec<_>>();
         let errors = flags
             .iter()
@@ -152,7 +187,7 @@ pub(super) fn materialize(
             .iter()
             .map(|label| hash_hex(label.as_bytes()))
             .collect::<Vec<_>>();
-        represented.extend(name.labels.iter().cloned());
+        represented.extend(name.labels.iter().map(|label| label.as_bytes().to_vec()));
         output.name_surfaces.push(NameSurface {
             logical_name_id: logical_name_id.clone(),
             namespace: selected.source.namespace.clone(),
@@ -182,7 +217,9 @@ pub(super) fn materialize(
                 provenance: raw_provenance.clone(),
                 canonicality_state: raw.canonicality_state.clone(),
             });
-            if let Some(token_lineage_id) = name.token_lineage_id {
+            if let Some(token_lineage_id) = name.token_lineage_id
+                && state.materialize_token_lineage(token_lineage_id)
+            {
                 output.token_lineages.push(TokenLineage {
                     token_lineage_id,
                     chain_id: raw.chain_id.clone(),
@@ -238,11 +275,82 @@ pub(super) fn materialize(
             after_state,
         ));
     }
+    for name in &interpreted.shadow_names {
+        represented.extend(name.raw_labels.iter().cloned());
+        let logical_name_id = format!("{}:{}", selected.source.namespace, name.namehash);
+        let decoded_labels = name
+            .raw_labels
+            .iter()
+            .map(|label| decoded_label(label))
+            .collect::<Option<Vec<_>>>();
+        let postgres_text_labels =
+            decoded_labels.filter(|labels| labels.iter().all(|label| !label.contains('\0')));
+        let (raw_name, raw_labels, labelhashes) = postgres_text_labels
+            .map(|labels| {
+                let raw_name = labels.join(".");
+                let labelhashes = name
+                    .raw_labels
+                    .iter()
+                    .map(|label| hash_hex(label))
+                    .collect();
+                (raw_name, labels, labelhashes)
+            })
+            .unwrap_or_default();
+        let normalization_errors = name
+            .raw_labels
+            .iter()
+            .filter_map(|label| {
+                let decoded_label = decoded_label(label);
+                let flag = normalization_flag(decoded_label.as_deref());
+                flag.error.map(|error| {
+                    json!({
+                        "raw_label_hex": hex::encode(label),
+                        "decoded_label": decoded_label,
+                        "error": error,
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        output.name_surfaces.push(NameSurface {
+            logical_name_id: logical_name_id.clone(),
+            namespace: selected.source.namespace.clone(),
+            raw_name,
+            raw_labels,
+            dns_encoded_name: dns_encode_raw(&name.raw_labels).unwrap_or_default(),
+            namehash: name.namehash.clone(),
+            labelhashes,
+            normalizer_version: ENS_NORMALIZER_VERSION.to_owned(),
+            visibility_state: "shadow".to_owned(),
+            normalization_errors: Value::Array(normalization_errors),
+            deactivation_reason: Some("normalization_gate".to_owned()),
+            deactivated_at: Some(raw.block_timestamp),
+            chain_id: raw.chain_id.clone(),
+            block_hash: raw.block_hash.clone(),
+            block_number: raw.block_number,
+            provenance: raw_provenance.clone(),
+            canonicality_state: raw.canonicality_state.clone(),
+        });
+        output.normalized_events.push(preimage_event(
+            selected,
+            raw,
+            Some(logical_name_id.clone()),
+            &name.namehash,
+            json!({
+                "source_event": selected.event.name,
+                "logical_name_id": logical_name_id,
+                "namehash": name.namehash,
+                "visibility_state": "shadow",
+                "deactivation_reason": "normalization_gate",
+                "raw_labels_hex": name.raw_labels.iter().map(hex::encode).collect::<Vec<_>>(),
+                "decoded_labels": name.raw_labels.iter().map(|label| decoded_label(label)).collect::<Vec<_>>(),
+            }),
+        ));
+    }
     for label in &interpreted.labels {
         if represented.contains(&label.raw_label) {
             continue;
         }
-        let labelhash = hash_hex(label.raw_label.as_bytes());
+        let labelhash = hash_hex(&label.raw_label);
         output.normalized_events.push(preimage_event(
             selected,
             raw,
@@ -250,7 +358,8 @@ pub(super) fn materialize(
             &labelhash,
             json!({
                 "source_event": selected.event.name,
-                "raw_label": label.raw_label,
+                "raw_label_hex": hex::encode(&label.raw_label),
+                "decoded_label": decoded_label(&label.raw_label),
                 "labelhash": labelhash,
             }),
         ));
@@ -265,26 +374,12 @@ fn binding_id(logical_name_id: &str, resource_id: uuid::Uuid, raw: &RawLogInput)
     ))
 }
 
-struct NormalizationFlag {
-    normalized: bool,
-    error: Option<String>,
-}
-
-fn normalization_flag(raw_label: &str) -> NormalizationFlag {
-    match normalize_label_under_suffix(raw_label, &[]) {
-        Ok(normalized) if normalized.normalized_name.as_bytes() == raw_label.as_bytes() => {
-            NormalizationFlag {
-                normalized: true,
-                error: None,
-            }
-        }
-        Ok(_) => NormalizationFlag {
-            normalized: false,
-            error: Some("raw label is not byte-identical to its normalized form".to_owned()),
-        },
-        Err(error) => NormalizationFlag {
-            normalized: false,
-            error: Some(error.to_string()),
-        },
+fn dns_encode_raw(labels: &[Vec<u8>]) -> Option<Vec<u8>> {
+    let mut encoded = Vec::new();
+    for label in labels {
+        encoded.push(u8::try_from(label.len()).ok()?);
+        encoded.extend_from_slice(label);
     }
+    encoded.push(0);
+    Some(encoded)
 }

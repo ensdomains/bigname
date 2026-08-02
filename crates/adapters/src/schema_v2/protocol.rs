@@ -14,6 +14,7 @@ pub(super) struct Interpreted {
     pub events: Vec<EventDraft>,
     pub labels: Vec<LabelDraft>,
     pub names: Vec<NameDraft>,
+    pub shadow_names: Vec<ShadowNameDraft>,
     pub resources: Vec<ResourceDraft>,
     pub binding_closures: Vec<BindingClosureDraft>,
     pub bindings: Vec<BindingDraft>,
@@ -26,6 +27,7 @@ impl Interpreted {
             events: Vec::new(),
             labels: Vec::new(),
             names: Vec::new(),
+            shadow_names: Vec::new(),
             resources: Vec::new(),
             binding_closures: Vec::new(),
             bindings: Vec::new(),
@@ -37,6 +39,7 @@ impl Interpreted {
         self.events.append(&mut other.events);
         self.labels.append(&mut other.labels);
         self.names.append(&mut other.names);
+        self.shadow_names.append(&mut other.shadow_names);
         self.resources.append(&mut other.resources);
         self.binding_closures.append(&mut other.binding_closures);
         self.bindings.append(&mut other.bindings);
@@ -63,7 +66,14 @@ pub(super) struct EventDraft {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct LabelDraft {
-    pub raw_label: String,
+    pub raw_label: Vec<u8>,
+    pub source_kind: String,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ShadowNameDraft {
+    pub raw_labels: Vec<Vec<u8>>,
+    pub namehash: String,
     pub source_kind: String,
 }
 

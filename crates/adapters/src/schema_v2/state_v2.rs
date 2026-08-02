@@ -2,6 +2,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::State;
+use crate::schema_v2::common::surface_labels;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::schema_v2) struct V2NameState {
@@ -10,13 +11,21 @@ pub(in crate::schema_v2) struct V2NameState {
     pub logical_name_id: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(in crate::schema_v2) struct V2RawNameState {
+    pub raw_labels: Vec<Vec<u8>>,
+    pub namehash: String,
+    pub logical_name_id: String,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(in crate::schema_v2) struct V2TokenState {
     pub registry_contract_instance_id: Option<Uuid>,
     pub namespace: Option<String>,
-    pub raw_label: Option<String>,
+    pub raw_label: Option<Vec<u8>>,
     pub expiry: Option<u64>,
     pub name: Option<V2NameState>,
+    pub shadow_name: Option<V2RawNameState>,
     pub registration: Option<Value>,
     pub upstream_resource: Option<String>,
     pub resource_id: Option<Uuid>,
@@ -31,7 +40,9 @@ pub(in crate::schema_v2) struct V2NameTransition {
     pub registry_contract_instance_id: Option<Uuid>,
     pub token_id: String,
     pub previous: Option<V2NameState>,
+    pub previous_shadow: Option<V2RawNameState>,
     pub current: Option<V2NameState>,
+    pub current_shadow: Option<V2RawNameState>,
     pub resource_id: Option<Uuid>,
     pub token_lineage_id: Option<Uuid>,
     pub upstream_resource: Option<String>,
@@ -47,7 +58,7 @@ impl State {
         token_id: &str,
         registry_contract_instance_id: Uuid,
         namespace: &str,
-        raw_label: &str,
+        raw_label: &[u8],
         expiry: u64,
         registration: Option<Value>,
     ) -> Vec<(String, V2TokenState)> {
@@ -69,7 +80,7 @@ impl State {
         token_id: &str,
         registry_contract_instance_id: Option<Uuid>,
         namespace: &str,
-        raw_label: &str,
+        raw_label: &[u8],
         expiry: u64,
         registration: Option<Value>,
     ) -> Vec<(String, V2TokenState)> {
@@ -88,7 +99,7 @@ impl State {
         }
         if let Some(replaced_key) = self
             .v2_entry_by_parent_label
-            .insert((emitter.clone(), raw_label.to_owned()), token_key.clone())
+            .insert((emitter.clone(), raw_label.to_vec()), token_key.clone())
             && replaced_key != token_key
             && let Some(displaced) = self.v2_tokens.remove(&replaced_key)
         {
@@ -103,7 +114,7 @@ impl State {
             V2TokenState {
                 registry_contract_instance_id,
                 namespace: Some(namespace.to_owned()),
-                raw_label: Some(raw_label.to_owned()),
+                raw_label: Some(raw_label.to_vec()),
                 expiry: Some(expiry),
                 registration,
                 ..V2TokenState::default()
@@ -118,7 +129,7 @@ impl State {
         token_id: &str,
         registry_contract_instance_id: Option<Uuid>,
         namespace: &str,
-        raw_label: &str,
+        raw_label: &[u8],
         expiry: u64,
         registration: Option<Value>,
     ) {
@@ -132,7 +143,7 @@ impl State {
         }) {
             if let Some(displaced_key) = self
                 .v2_entry_by_parent_label
-                .insert((emitter.clone(), raw_label.to_owned()), token_key.clone())
+                .insert((emitter.clone(), raw_label.to_vec()), token_key.clone())
                 && displaced_key != token_key
             {
                 self.v2_tokens.remove(&displaced_key);
@@ -144,7 +155,7 @@ impl State {
             existing.registry_contract_instance_id =
                 registry_contract_instance_id.or(existing.registry_contract_instance_id);
             existing.namespace = Some(namespace.to_owned());
-            existing.raw_label = Some(raw_label.to_owned());
+            existing.raw_label = Some(raw_label.to_vec());
             existing.expiry = Some(expiry);
             if registration.is_some() {
                 existing.registration = registration;
@@ -180,19 +191,35 @@ impl State {
             else {
                 continue;
             };
-            let name = self
-                .v2_registry_suffix(emitter, namespace, at_unix_timestamp)
+            let raw_name = self
+                .v2_registry_raw_suffix(emitter, namespace, at_unix_timestamp)
                 .map(|mut suffix| {
                     suffix.insert(0, raw_label.clone());
-                    let namehash = crate::schema_v2::common::namehash(&suffix);
+                    suffix
+                });
+            let name = raw_name
+                .as_ref()
+                .and_then(|raw_labels| surface_labels(raw_labels))
+                .map(|labels| {
+                    let namehash = crate::schema_v2::common::namehash(&labels);
                     V2NameState {
                         logical_name_id: format!("{namespace}:{namehash}"),
-                        labels: suffix,
+                        labels,
                         namehash,
                     }
                 });
+            let shadow_name = raw_name.filter(|_| name.is_none()).map(|raw_labels| {
+                let namehash =
+                    crate::schema_v2::common::namehash_raw(raw_labels.iter().map(Vec::as_slice));
+                V2RawNameState {
+                    logical_name_id: format!("{namespace}:{namehash}"),
+                    raw_labels,
+                    namehash,
+                }
+            });
             let previous = token.name.clone();
-            if previous != name {
+            let previous_shadow = token.shadow_name.clone();
+            if previous != name || previous_shadow != shadow_name {
                 if let Some(previous) = previous.as_ref()
                     && token.resource_id.is_some_and(|resource_id| {
                         self.active_resources.get(&previous.logical_name_id) == Some(&resource_id)
@@ -212,7 +239,9 @@ impl State {
                     registry_contract_instance_id: token.registry_contract_instance_id,
                     token_id: token_id.to_owned(),
                     previous,
+                    previous_shadow,
                     current: name.clone(),
+                    current_shadow: shadow_name.clone(),
                     resource_id: token.resource_id,
                     token_lineage_id: token.token_lineage_id,
                     upstream_resource: token.upstream_resource.clone(),
@@ -223,6 +252,7 @@ impl State {
             }
             if let Some(token) = self.v2_tokens.get_mut(&key) {
                 token.name = name;
+                token.shadow_name = shadow_name;
             }
         }
         transitions
@@ -245,17 +275,30 @@ impl State {
         })
     }
 
+    pub(in crate::schema_v2) fn v2_shadow_name_for_parent_claim(
+        &self,
+        parent: &str,
+        namespace: &str,
+        raw_label: &[u8],
+        at_unix_timestamp: i64,
+    ) -> Option<(Vec<Vec<u8>>, String)> {
+        let mut labels = self.v2_registry_raw_suffix(parent, namespace, at_unix_timestamp)?;
+        labels.insert(0, raw_label.to_vec());
+        let namehash = crate::schema_v2::common::namehash_raw(labels.iter().map(Vec::as_slice));
+        Some((labels, namehash))
+    }
+
     pub(in crate::schema_v2) fn set_v2_parent_claim(
         &mut self,
         registry: &str,
         parent: Option<String>,
-        label: String,
+        raw_label: &[u8],
     ) {
         let registry = registry.to_ascii_lowercase();
         match parent {
             Some(parent) => {
                 self.v2_parent_claims
-                    .insert(registry, (parent.to_ascii_lowercase(), label));
+                    .insert(registry, (parent.to_ascii_lowercase(), raw_label.to_vec()));
             }
             None => {
                 self.v2_parent_claims.remove(&registry);
@@ -416,9 +459,11 @@ impl State {
             .iter()
             .filter(|(key, state)| {
                 key.ends_with(&suffix)
-                    && state.name.as_ref().is_some_and(|name| {
+                    && (state.name.as_ref().is_some_and(|name| {
                         name.logical_name_id.eq_ignore_ascii_case(logical_name_id)
-                    })
+                    }) || state.shadow_name.as_ref().is_some_and(|name| {
+                        name.logical_name_id.eq_ignore_ascii_case(logical_name_id)
+                    }))
             })
             .map(|(_, state)| state.clone());
         let first = matches.next();

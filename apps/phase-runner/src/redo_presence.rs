@@ -15,9 +15,9 @@ pub(crate) async fn require_interpret_raw_data(
         .checked_sub(range.from)
         .and_then(|distance| distance.checked_add(1))
         .ok_or_else(|| RunnerError::data_integrity("interpret redo range length overflowed"))?;
-    let canonical_blocks: i64 = sqlx::query_scalar(
+    let (canonical_rows, canonical_blocks): (i64, i64) = sqlx::query_as(
         "
-        SELECT count(DISTINCT block_number)
+        SELECT count(*), count(DISTINCT block_number)
         FROM chain_lineage
         WHERE chain_id = $1
           AND block_number BETWEEN $2 AND $3
@@ -35,6 +35,12 @@ pub(crate) async fn require_interpret_raw_data(
             error,
         )
     })?;
+    if canonical_rows != canonical_blocks {
+        return Err(RunnerError::data_integrity(format!(
+            "raw-data presence check failed for interpret redo on chain {chain_id}: live lineage has multiple hashes at one height in range {}..={}",
+            range.from, range.to
+        )));
+    }
     if canonical_blocks != expected_blocks {
         return Err(RunnerError::data_integrity(format!(
             "raw-data presence check failed for interpret redo on chain {chain_id}: range {}..={} \

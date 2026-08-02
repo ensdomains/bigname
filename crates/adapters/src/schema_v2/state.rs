@@ -48,10 +48,11 @@ pub(super) struct State {
     known_surfaces: BTreeSet<String>,
     active_resources: BTreeMap<String, Uuid>,
     v2_tokens: BTreeMap<String, V2TokenState>,
-    v2_entry_by_parent_label: BTreeMap<(String, String), String>,
-    v2_parent_claims: BTreeMap<String, (String, String)>,
+    v2_entry_by_parent_label: BTreeMap<(String, Vec<u8>), String>,
+    v2_parent_claims: BTreeMap<String, (String, Vec<u8>)>,
     v2_suffix_anchors: BTreeMap<String, (String, Vec<String>)>,
     v2_resolver_hints: BTreeMap<(String, String), (String, Value)>,
+    materialized_token_lineages: BTreeSet<Uuid>,
 }
 
 impl State {
@@ -59,6 +60,16 @@ impl State {
         prior: Vec<PriorEventInput>,
         v2_suffix_anchors: Vec<(String, String, Vec<String>)>,
     ) -> Self {
+        let materialized_token_lineages = prior
+            .iter()
+            .filter_map(|event| {
+                event
+                    .after_state
+                    .get(super::seam::TOKEN_LINEAGE_ID_KEY)
+                    .and_then(Value::as_str)
+                    .and_then(|value| Uuid::parse_str(value).ok())
+            })
+            .collect();
         let mut state = Self {
             values: BTreeMap::new(),
             v1_names: BTreeMap::new(),
@@ -73,6 +84,7 @@ impl State {
             v2_entry_by_parent_label: BTreeMap::new(),
             v2_parent_claims: BTreeMap::new(),
             v2_resolver_hints: BTreeMap::new(),
+            materialized_token_lineages,
             v2_suffix_anchors: v2_suffix_anchors
                 .into_iter()
                 .map(|(address, namespace, suffix)| {
@@ -110,12 +122,17 @@ impl State {
         state
     }
 
+    pub(super) fn materialize_token_lineage(&mut self, token_lineage_id: Uuid) -> bool {
+        self.materialized_token_lineages.insert(token_lineage_id)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn observe_v1_name(
         &mut self,
         namespace: &str,
         namehash: &str,
         logical_name_id: String,
+        surface_known: bool,
         resource_id: Uuid,
         token_lineage_id: Option<Uuid>,
         authority_source_family: String,
@@ -124,18 +141,20 @@ impl State {
         authority_key: Option<String>,
     ) {
         let key = v1_key(namespace, namehash);
-        self.known_surfaces.insert(logical_name_id.clone());
-        self.active_resources
-            .insert(logical_name_id.clone(), resource_id);
+        if surface_known {
+            self.known_surfaces.insert(logical_name_id.clone());
+            self.active_resources
+                .insert(logical_name_id.clone(), resource_id);
+        }
         if let Some(registry) = self.v1_registry_authorities.get_mut(&key) {
             registry.logical_name_id = logical_name_id.clone();
-            registry.surface_known = true;
+            registry.surface_known = surface_known;
         }
         self.v1_names.insert(
             key,
             V1NameState {
                 logical_name_id,
-                surface_known: true,
+                surface_known,
                 resource_id,
                 token_lineage_id,
                 authority_source_family,
@@ -154,6 +173,7 @@ impl State {
         namespace: &str,
         namehash: &str,
         logical_name_id: String,
+        surface_known: bool,
         resource_id: Uuid,
         token_lineage_id: Uuid,
         authority_source_family: String,
@@ -164,14 +184,16 @@ impl State {
         authority_key: Option<String>,
         make_current: bool,
     ) {
-        self.known_surfaces.insert(logical_name_id.clone());
-        if make_current {
+        if surface_known {
+            self.known_surfaces.insert(logical_name_id.clone());
+        }
+        if make_current && surface_known {
             self.active_resources
                 .insert(logical_name_id.clone(), resource_id);
         }
         let value = V1NameState {
             logical_name_id,
-            surface_known: true,
+            surface_known,
             resource_id,
             token_lineage_id: Some(token_lineage_id),
             authority_source_family,
@@ -185,7 +207,7 @@ impl State {
         self.v1_registrars.insert(key.clone(), value.clone());
         if let Some(registry) = self.v1_registry_authorities.get_mut(&key) {
             registry.logical_name_id = value.logical_name_id.clone();
-            registry.surface_known = true;
+            registry.surface_known = surface_known;
             registry.labelhash = value.labelhash.clone();
         }
         if make_current {
@@ -396,10 +418,12 @@ impl State {
             .filter(|state| v1_registration_is_live(state.expiry, at_unix_timestamp))?
             .clone();
         self.v1_names.insert(key, registrar.clone());
-        self.known_surfaces
-            .insert(registrar.logical_name_id.clone());
-        self.active_resources
-            .insert(registrar.logical_name_id.clone(), registrar.resource_id);
+        if registrar.surface_known {
+            self.known_surfaces
+                .insert(registrar.logical_name_id.clone());
+            self.active_resources
+                .insert(registrar.logical_name_id.clone(), registrar.resource_id);
+        }
         Some(registrar)
     }
 
@@ -421,10 +445,12 @@ impl State {
         }
         self.v1_names
             .insert(v1_key(namespace, namehash), registrar.clone());
-        self.known_surfaces
-            .insert(registrar.logical_name_id.clone());
-        self.active_resources
-            .insert(registrar.logical_name_id.clone(), registrar.resource_id);
+        if registrar.surface_known {
+            self.known_surfaces
+                .insert(registrar.logical_name_id.clone());
+            self.active_resources
+                .insert(registrar.logical_name_id.clone(), registrar.resource_id);
+        }
         Some(registrar)
     }
 

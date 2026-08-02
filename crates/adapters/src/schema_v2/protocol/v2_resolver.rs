@@ -8,14 +8,15 @@ use crate::{
     evm_abi::{address_hex, decode_event_log, hex_string, u256_word_hex},
     schema_v2::{
         catalog::Selected,
-        common::{decode_dns_name, namehash},
+        common::{decode_dns_labels, namehash, namehash_raw, surface_labels},
         model::RawLogInput,
         state::State,
     },
 };
 
 use super::{
-    DiscoveryDraft, EventDraft, Interpreted, NameDraft, ResourceDraft, ensure_declared,
+    DiscoveryDraft, EventDraft, Interpreted, NameDraft, ResourceDraft, ShadowNameDraft,
+    ensure_declared,
     permissions::{V2PermissionState, V2Vocabulary, v2_states},
 };
 
@@ -207,27 +208,34 @@ fn alias(selected: &Selected, raw: &RawLogInput, state: &mut State) -> anyhow::R
     let event =
         decode_event_log::<AliasChanged>(&raw.topics, &raw.data, "AliasChanged log is malformed")?;
     ensure_declared(selected, &["AliasChanged", "PreimageObserved"])?;
-    let Ok(from_labels) = decode_dns_name(&event.fromName) else {
+    let Ok(from_raw_labels) = decode_dns_labels(&event.fromName) else {
         return Ok(Interpreted::new());
     };
-    let to_labels = if event.toName.is_empty() {
+    let to_raw_labels = if event.toName.is_empty() {
         None
     } else {
-        decode_dns_name(&event.toName).ok()
+        decode_dns_labels(&event.toName).ok()
     };
-    let from_namehash = namehash(&from_labels);
+    let from_labels = surface_labels(&from_raw_labels);
+    let to_labels = to_raw_labels
+        .as_ref()
+        .and_then(|labels| surface_labels(labels));
+    let from_namehash = namehash_raw(from_raw_labels.iter().map(Vec::as_slice));
     let from_logical_name_id = format!("{}:{from_namehash}", selected.source.namespace);
-    let to_namehash = to_labels.as_ref().map(|labels| namehash(labels));
+    let to_namehash = to_raw_labels
+        .as_ref()
+        .map(|labels| namehash_raw(labels.iter().map(Vec::as_slice)));
     let same_endpoint = to_namehash.as_ref() == Some(&from_namehash);
     let to_logical_name_id = to_namehash
         .as_ref()
         .map(|namehash| format!("{}:{namehash}", selected.source.namespace));
     let to_resource_id = to_namehash
         .as_deref()
+        .filter(|_| to_labels.is_some())
         .and_then(|namehash| state.name_link_by_namehash(&selected.source.namespace, namehash))
         .and_then(|(_, resource_id)| resource_id);
     let alias_removed = event.toName.is_empty();
-    let alias_unknown = !alias_removed && to_labels.is_none();
+    let alias_unknown = !alias_removed && to_raw_labels.is_none();
     let mut output = single_event(
         "AliasChanged",
         Some(from_logical_name_id.clone()),
@@ -240,7 +248,7 @@ fn alias(selected: &Selected, raw: &RawLogInput, state: &mut State) -> anyhow::R
             "to_dns_encoded_name": hex_string(&event.toName),
             "alias_state": if alias_removed { "removed" } else if alias_unknown { "unknown" } else { "active" },
             "active": !alias_removed && !alias_unknown,
-            "from_name": from_labels.join("."),
+            "from_name": from_labels.as_ref().map(|labels| labels.join(".")),
             "to_name": to_labels.as_ref().map(|labels| labels.join(".")),
             "to_logical_name_id": to_logical_name_id,
             "to_resource_id": to_resource_id.map(|value| value.to_string()),
@@ -248,15 +256,17 @@ fn alias(selected: &Selected, raw: &RawLogInput, state: &mut State) -> anyhow::R
             "to_namehash": to_namehash,
         }),
     );
-    output
-        .names
-        .push(name_draft(from_labels, None, false, None));
-    state.observe_name_surface(from_logical_name_id);
-    if let Some(to_labels) = to_labels {
-        let logical_name_id = format!("{}:{}", selected.source.namespace, namehash(&to_labels));
+    observe_resolver_name(
+        selected,
+        state,
+        &mut output,
+        from_raw_labels,
+        from_labels,
+        None,
+    );
+    if let Some(to_raw_labels) = to_raw_labels {
         if !same_endpoint {
-            state.observe_name_surface(logical_name_id);
-            output.names.push(name_draft(to_labels, None, false, None));
+            observe_resolver_name(selected, state, &mut output, to_raw_labels, to_labels, None);
         }
     }
     Ok(output)
@@ -315,32 +325,34 @@ fn named_resource(
     if encoded_name.is_empty() {
         return Ok(Interpreted::new());
     }
-    let Ok(labels) = decode_dns_name(&encoded_name) else {
+    let Ok(raw_labels) = decode_dns_labels(&encoded_name) else {
         return Ok(Interpreted::new());
     };
     ensure_declared(selected, &["PreimageObserved"])?;
-    let raw_namehash = namehash(&labels);
-    let logical_name_id = format!("{}:{raw_namehash}", selected.source.namespace);
     let upstream_resource = u256_word_hex(resource);
     let mut output = Interpreted::new();
-    output.names.push(name_draft(
+    let labels = surface_labels(&raw_labels);
+    let (_, logical_name_id, admitted) = observe_resolver_name(
+        selected,
+        state,
+        &mut output,
+        raw_labels,
         labels,
-        None,
-        false,
         Some(json!({
             "resolver":raw.emitting_address,
             "resolver_contract_instance_id":selected.contract_instance_id.to_string(),
             "upstream_resource":upstream_resource,
             "selector":selector,
         })),
-    ));
-    state.observe_name_surface(logical_name_id.clone());
-    state.observe_v2_resolver_hint(
-        &raw.emitting_address,
-        &upstream_resource,
-        logical_name_id,
-        selector,
     );
+    if admitted {
+        state.observe_v2_resolver_hint(
+            &raw.emitting_address,
+            &upstream_resource,
+            logical_name_id,
+            selector,
+        );
+    }
     Ok(output)
 }
 
@@ -442,6 +454,32 @@ fn name_draft(
         source_kind: "resolver_dns_name".to_owned(),
         preimage_metadata,
     }
+}
+
+fn observe_resolver_name(
+    selected: &Selected,
+    state: &mut State,
+    output: &mut Interpreted,
+    raw_labels: Vec<Vec<u8>>,
+    labels: Option<Vec<String>>,
+    preimage_metadata: Option<Value>,
+) -> (String, String, bool) {
+    let raw_namehash = namehash_raw(raw_labels.iter().map(Vec::as_slice));
+    let logical_name_id = format!("{}:{raw_namehash}", selected.source.namespace);
+    let admitted = labels.is_some();
+    if let Some(labels) = labels {
+        output
+            .names
+            .push(name_draft(labels, None, false, preimage_metadata));
+        state.observe_name_surface(logical_name_id.clone());
+    } else {
+        output.shadow_names.push(ShadowNameDraft {
+            raw_labels,
+            namehash: raw_namehash.clone(),
+            source_kind: "resolver_dns_name".to_owned(),
+        });
+    }
+    (raw_namehash, logical_name_id, admitted)
 }
 
 fn resource_id(raw: &RawLogInput, selected: &Selected, resource: U256) -> Uuid {

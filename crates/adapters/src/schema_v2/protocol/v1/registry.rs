@@ -319,11 +319,11 @@ pub(super) fn append_authority_transition(
         });
     }
     let logical_name_id = linked
-        .filter(|authority| authority.surface_known)
+        .filter(|authority| authority.surface_known || authority.token_lineage_id.is_some())
         .map(|authority| authority.logical_name_id.clone())
         .or_else(|| {
             previous
-                .filter(|authority| authority.surface_known)
+                .filter(|authority| authority.surface_known || authority.token_lineage_id.is_some())
                 .map(|authority| authority.logical_name_id.clone())
         });
     let Some(logical_name_id) = logical_name_id else {
@@ -333,7 +333,7 @@ pub(super) fn append_authority_transition(
         .get("source_event")
         .and_then(Value::as_str)
         .unwrap_or("AuthorityTransferred");
-    if let Some(previous) = previous {
+    if let Some(previous) = previous.filter(|authority| authority.surface_known) {
         output.events.push(EventDraft {
             event_kind: "SurfaceUnbound".to_owned(),
             logical_name_id: Some(logical_name_id.clone()),
@@ -355,7 +355,7 @@ pub(super) fn append_authority_transition(
             state_scope: String::new(),
         });
     }
-    if let Some(linked) = linked {
+    if let Some(linked) = linked.filter(|authority| authority.surface_known) {
         output.events.push(EventDraft {
             event_kind: "SurfaceBound".to_owned(),
             logical_name_id: Some(logical_name_id.clone()),

@@ -89,6 +89,17 @@ impl Catalog {
         let Some(topic0) = raw.topics.first() else {
             return Ok(None);
         };
+        let announcement_namespaces = self
+            .admissions
+            .iter()
+            .filter(|admission| {
+                applies(admission, raw)
+                    && admission.discovery_edge_kind.as_deref() == Some("registry_announcement")
+            })
+            .filter_map(|admission| admission.source_manifest_id)
+            .filter_map(|manifest_id| self.source(manifest_id))
+            .map(|source| source.namespace.as_str())
+            .collect::<BTreeSet<_>>();
         let mut candidates = Vec::new();
         for admission in self
             .admissions
@@ -101,6 +112,12 @@ impl Catalog {
             let source = self
                 .source(manifest_id)
                 .with_context(|| format!("admission references inactive manifest {manifest_id}"))?;
+            let rank = match admission.discovery_edge_kind.as_deref() {
+                Some("registry_announcement") => 1,
+                None if announcement_namespaces.contains(source.namespace.as_str()) => 0,
+                None if !announcement_namespaces.is_empty() => 2,
+                _ => 0,
+            };
             let target_family = inferred_family(
                 &source.source_family,
                 admission.discovery_edge_kind.as_deref(),
@@ -116,7 +133,7 @@ impl Catalog {
                 }) {
                     push_candidates(
                         &mut candidates,
-                        0,
+                        rank,
                         inferred,
                         topic0,
                         None,
@@ -127,7 +144,7 @@ impl Catalog {
             } else {
                 push_candidates(
                     &mut candidates,
-                    0,
+                    rank,
                     source,
                     topic0,
                     admission.role.as_deref(),

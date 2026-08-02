@@ -1,12 +1,21 @@
+use bigname_adapters::schema_v2::seam::{ADMISSION_DISCOVERY_EDGE_KINDS, OBSERVATION_KEY};
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, DiscoveryRuleInput, ManifestInput, RawBlockInput,
     RawLogInput,
 };
-use sqlx::{PgPool, types::Uuid};
+use sqlx::{PgConnection, PgPool, types::Uuid};
 
 use crate::{InterpretError, Result};
 
+mod cache;
 mod prior;
+
+pub(crate) use cache::{PriorSnapshot, fold as fold_prior_snapshot};
+
+pub(crate) struct LoadedBatch {
+    pub input: BatchInput,
+    pub prior_snapshot: PriorSnapshot,
+}
 
 type ManifestRow = (i64, i64, String, String, String, String, String, String);
 type RawLogRow = (
@@ -28,26 +37,93 @@ pub(crate) async fn batch_input(
     chain_id: &str,
     from_block: i64,
     to_block: i64,
-) -> Result<BatchInput> {
-    let manifests = load_manifests(pool, chain_id).await?;
+    resume_marker: Option<(i64, &str)>,
+    prior_snapshot: Option<PriorSnapshot>,
+) -> Result<LoadedBatch> {
+    let mut transaction = pool.begin().await.map_err(|error| {
+        InterpretError::database("failed to begin interpret input snapshot", error)
+    })?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| {
+            InterpretError::database("failed to configure interpret input snapshot", error)
+        })?;
+    validate_snapshot_resume_marker(&mut transaction, chain_id, resume_marker).await?;
+    let prior_snapshot = match prior_snapshot {
+        Some(snapshot)
+            if cache::dependencies_are_live(&mut transaction, chain_id, &snapshot).await? =>
+        {
+            snapshot
+        }
+        _ => prior::events(&mut transaction, chain_id, from_block).await?,
+    };
+    let manifests = load_manifests(&mut transaction, chain_id).await?;
     if manifests.is_empty() {
         return Err(InterpretError::configuration(format!(
             "chain {chain_id} has no active manifests for interpretation"
         )));
     }
-    Ok(BatchInput {
-        chain_id: chain_id.to_owned(),
-        discovery_rules: load_discovery_rules(pool, chain_id).await?,
-        admissions: load_admissions(pool, chain_id, from_block).await?,
-        prior_events: prior::events(pool, chain_id, from_block).await?,
-        blocks: load_blocks(pool, chain_id, from_block, to_block).await?,
-        raw_logs: load_raw_logs(pool, chain_id, from_block, to_block).await?,
-        manifests,
+    let discovery_rules = load_discovery_rules(&mut transaction, chain_id).await?;
+    let admissions = load_admissions(&mut transaction, chain_id, from_block).await?;
+    let blocks = load_blocks(&mut transaction, chain_id, from_block, to_block).await?;
+    let raw_logs = load_raw_logs(&mut transaction, chain_id, from_block, to_block).await?;
+    transaction.commit().await.map_err(|error| {
+        InterpretError::database("failed to commit interpret input snapshot", error)
+    })?;
+    Ok(LoadedBatch {
+        input: BatchInput {
+            chain_id: chain_id.to_owned(),
+            discovery_rules,
+            admissions,
+            prior_events: prior_snapshot.events.clone(),
+            blocks,
+            raw_logs,
+            manifests,
+        },
+        prior_snapshot,
     })
 }
 
+async fn validate_snapshot_resume_marker(
+    connection: &mut PgConnection,
+    chain_id: &str,
+    expected: Option<(i64, &str)>,
+) -> Result<()> {
+    let Some((block_number, block_hash)) = expected else {
+        return Ok(());
+    };
+    let live: Vec<(i64, String)> = sqlx::query_as(
+        "
+        SELECT block_number, block_hash
+        FROM chain_lineage
+        WHERE chain_id = $1
+          AND block_number = $2
+          AND canonicality_state IN ('canonical', 'safe', 'finalized')
+        ORDER BY block_hash
+        ",
+    )
+    .bind(chain_id)
+    .bind(block_number)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(|error| {
+        InterpretError::database("failed to validate resume marker in input snapshot", error)
+    })?;
+    require_unique_live_heights(
+        chain_id,
+        live.iter().map(|(number, hash)| (*number, hash.as_str())),
+    )?;
+    if live.as_slice() != [(block_number, block_hash.to_owned())] {
+        return Err(InterpretError::transient(format!(
+            "interpret resume marker {block_number} {block_hash} changed before the input snapshot for chain {chain_id}"
+        )));
+    }
+    Ok(())
+}
+
 async fn load_blocks(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     chain_id: &str,
     from_block: i64,
     to_block: i64,
@@ -66,9 +142,14 @@ async fn load_blocks(
     .bind(chain_id)
     .bind(from_block)
     .bind(to_block)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await
     .map_err(|error| InterpretError::database("failed to load canonical block facts", error))?;
+    require_unique_live_heights(
+        chain_id,
+        rows.iter()
+            .map(|(_, hash, number, _, _)| (*number, hash.as_str())),
+    )?;
     Ok(rows
         .into_iter()
         .map(
@@ -92,7 +173,7 @@ pub(crate) async fn canonical_markers(
     to_block: i64,
     limit: i64,
 ) -> Result<Vec<(i64, String)>> {
-    sqlx::query_as(
+    let rows: Vec<(i64, String)> = sqlx::query_as(
         "
         SELECT block_number, block_hash
         FROM chain_lineage
@@ -109,7 +190,12 @@ pub(crate) async fn canonical_markers(
     .bind(limit)
     .fetch_all(pool)
     .await
-    .map_err(|error| InterpretError::database("failed to load canonical batch markers", error))
+    .map_err(|error| InterpretError::database("failed to load canonical batch markers", error))?;
+    require_unique_live_heights(
+        chain_id,
+        rows.iter().map(|(number, hash)| (*number, hash.as_str())),
+    )?;
+    Ok(rows)
 }
 
 pub(crate) async fn marker(
@@ -117,7 +203,7 @@ pub(crate) async fn marker(
     chain_id: &str,
     block_number: i64,
 ) -> Result<Option<(i64, String)>> {
-    sqlx::query_as(
+    let rows: Vec<(i64, String)> = sqlx::query_as(
         "
         SELECT block_number, block_hash
         FROM chain_lineage
@@ -128,12 +214,37 @@ pub(crate) async fn marker(
     )
     .bind(chain_id)
     .bind(block_number)
-    .fetch_optional(pool)
+    .fetch_all(pool)
     .await
-    .map_err(|error| InterpretError::database("failed to load canonical target marker", error))
+    .map_err(|error| InterpretError::database("failed to load canonical target marker", error))?;
+    require_unique_live_heights(
+        chain_id,
+        rows.iter().map(|(number, hash)| (*number, hash.as_str())),
+    )?;
+    Ok(rows.into_iter().next())
 }
 
-async fn load_manifests(pool: &PgPool, chain_id: &str) -> Result<Vec<ManifestInput>> {
+fn require_unique_live_heights<'a>(
+    chain_id: &str,
+    rows: impl IntoIterator<Item = (i64, &'a str)>,
+) -> Result<()> {
+    let mut hashes = std::collections::BTreeMap::new();
+    for (number, hash) in rows {
+        if let Some(existing) = hashes.insert(number, hash)
+            && existing != hash
+        {
+            return Err(InterpretError::data_integrity(format!(
+                "chain {chain_id} has multiple live-lineage hashes at block {number}: {existing} and {hash}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn load_manifests(
+    connection: &mut PgConnection,
+    chain_id: &str,
+) -> Result<Vec<ManifestInput>> {
     let rows: Vec<ManifestRow> = sqlx::query_as(
         "
         SELECT manifest_id,
@@ -151,7 +262,7 @@ async fn load_manifests(pool: &PgPool, chain_id: &str) -> Result<Vec<ManifestInp
         ",
     )
     .bind(chain_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await
     .map_err(|error| InterpretError::database("failed to load active manifests", error))?;
     Ok(rows
@@ -180,7 +291,10 @@ async fn load_manifests(pool: &PgPool, chain_id: &str) -> Result<Vec<ManifestInp
         .collect())
 }
 
-async fn load_discovery_rules(pool: &PgPool, chain_id: &str) -> Result<Vec<DiscoveryRuleInput>> {
+async fn load_discovery_rules(
+    connection: &mut PgConnection,
+    chain_id: &str,
+) -> Result<Vec<DiscoveryRuleInput>> {
     let rows: Vec<(i64, String, Option<String>, String)> = sqlx::query_as(
         "
         SELECT rule.manifest_id, rule.edge_kind, rule.from_role, rule.admission
@@ -193,7 +307,7 @@ async fn load_discovery_rules(pool: &PgPool, chain_id: &str) -> Result<Vec<Disco
         ",
     )
     .bind(chain_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await
     .map_err(|error| InterpretError::database("failed to load manifest discovery rules", error))?;
     Ok(rows
@@ -211,21 +325,11 @@ async fn load_discovery_rules(pool: &PgPool, chain_id: &str) -> Result<Vec<Disco
 
 #[allow(clippy::type_complexity)]
 async fn load_admissions(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     chain_id: &str,
     before_block: i64,
 ) -> Result<Vec<AddressAdmissionInput>> {
-    let rows: Vec<(
-        String,
-        Uuid,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<Uuid>,
-        Option<String>,
-        Option<i64>,
-        Option<i64>,
-    )> = sqlx::query_as(
+    let statement = format!(
         "
         WITH declared AS (
             SELECT lower(address.address) AS address,
@@ -261,7 +365,7 @@ async fn load_admissions(
                    NULL::text AS role,
                    edge.edge_kind,
                    edge.from_contract_instance_id,
-                   edge.provenance ->> 'observation_key' AS observation_key,
+                   edge.provenance ->> '{OBSERVATION_KEY}' AS observation_key,
                    GREATEST(
                        COALESCE(edge.active_from_block_number, 0),
                        COALESCE(address.active_from_block_number, 0)
@@ -285,7 +389,7 @@ async fn load_admissions(
              AND address.chain_id = edge.chain_id
             WHERE edge.chain_id = $1
               AND manifest.rollout_status = 'active'
-              AND edge.edge_kind IN ('resolver', 'registry_announcement')
+              AND edge.edge_kind = ANY($3::text[])
               AND edge.canonicality_state IN ('canonical', 'safe', 'finalized')
               AND COALESCE(edge.active_from_block_number, 0) < $2
               AND (
@@ -315,13 +419,32 @@ async fn load_admissions(
                active_to
         FROM discovered
         ORDER BY address, contract_instance_id, edge_kind NULLS FIRST
-        ",
-    )
-    .bind(chain_id)
-    .bind(before_block)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| InterpretError::database("failed to load admitted contract ranges", error))?;
+        "
+    );
+    let rows: Vec<(
+        String,
+        Uuid,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<Uuid>,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+    )> = sqlx::query_as(&statement)
+        .bind(chain_id)
+        .bind(before_block)
+        .bind(
+            ADMISSION_DISCOVERY_EDGE_KINDS
+                .iter()
+                .map(|kind| (*kind).to_owned())
+                .collect::<Vec<_>>(),
+        )
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(|error| {
+            InterpretError::database("failed to load admitted contract ranges", error)
+        })?;
     Ok(rows
         .into_iter()
         .map(
@@ -351,7 +474,7 @@ async fn load_admissions(
 }
 
 async fn load_raw_logs(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     chain_id: &str,
     from_block: i64,
     to_block: i64,
@@ -386,7 +509,7 @@ async fn load_raw_logs(
     .bind(chain_id)
     .bind(from_block)
     .bind(to_block)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await
     .map_err(|error| InterpretError::database("failed to load canonical raw logs", error))?;
     Ok(rows

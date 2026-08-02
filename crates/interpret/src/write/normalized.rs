@@ -8,7 +8,7 @@ pub(super) async fn events(
     events: &[NormalizedEvent],
 ) -> Result<()> {
     for event in events {
-        sqlx::query(
+        let written: Option<String> = sqlx::query_scalar(
             "
             INSERT INTO normalized_events (
                 event_identity,
@@ -36,25 +36,46 @@ pub(super) async fn events(
                 $11, $12, $13, $14, $15, $16, $17::canonicality_state, $18, $19
             )
             ON CONFLICT (event_identity) DO UPDATE
-            SET namespace = EXCLUDED.namespace,
-                logical_name_id = EXCLUDED.logical_name_id,
-                resource_id = EXCLUDED.resource_id,
-                event_kind = EXCLUDED.event_kind,
-                source_family = EXCLUDED.source_family,
-                manifest_version = EXCLUDED.manifest_version,
-                source_manifest_id = EXCLUDED.source_manifest_id,
-                chain_id = EXCLUDED.chain_id,
-                block_number = EXCLUDED.block_number,
-                block_hash = EXCLUDED.block_hash,
-                transaction_hash = EXCLUDED.transaction_hash,
-                transaction_index = EXCLUDED.transaction_index,
-                log_index = EXCLUDED.log_index,
-                raw_fact_ref = EXCLUDED.raw_fact_ref,
-                derivation_kind = EXCLUDED.derivation_kind,
-                canonicality_state = EXCLUDED.canonicality_state,
-                before_state = EXCLUDED.before_state,
-                after_state = EXCLUDED.after_state,
+            SET canonicality_state = EXCLUDED.canonicality_state,
                 observed_at = now()
+            WHERE ROW(
+                normalized_events.namespace,
+                normalized_events.logical_name_id,
+                normalized_events.resource_id,
+                normalized_events.event_kind,
+                normalized_events.source_family,
+                normalized_events.manifest_version,
+                normalized_events.source_manifest_id,
+                normalized_events.chain_id,
+                normalized_events.block_number,
+                normalized_events.block_hash,
+                normalized_events.transaction_hash,
+                normalized_events.transaction_index,
+                normalized_events.log_index,
+                normalized_events.raw_fact_ref,
+                normalized_events.derivation_kind,
+                normalized_events.before_state,
+                normalized_events.after_state
+            ) IS NOT DISTINCT FROM ROW(
+                EXCLUDED.namespace,
+                EXCLUDED.logical_name_id,
+                EXCLUDED.resource_id,
+                EXCLUDED.event_kind,
+                EXCLUDED.source_family,
+                EXCLUDED.manifest_version,
+                EXCLUDED.source_manifest_id,
+                EXCLUDED.chain_id,
+                EXCLUDED.block_number,
+                EXCLUDED.block_hash,
+                EXCLUDED.transaction_hash,
+                EXCLUDED.transaction_index,
+                EXCLUDED.log_index,
+                EXCLUDED.raw_fact_ref,
+                EXCLUDED.derivation_kind,
+                EXCLUDED.before_state,
+                EXCLUDED.after_state
+            )
+            RETURNING event_identity
             ",
         )
         .bind(&event.event_identity)
@@ -76,9 +97,15 @@ pub(super) async fn events(
         .bind(&event.canonicality_state)
         .bind(&event.before_state)
         .bind(&event.after_state)
-        .execute(&mut **transaction)
+        .fetch_optional(&mut **transaction)
         .await
         .map_err(|error| InterpretError::database("failed to write normalized event", error))?;
+        if written.is_none() {
+            return Err(InterpretError::data_integrity(format!(
+                "normalized event identity {} is already bound to different event data",
+                event.event_identity
+            )));
+        }
     }
     Ok(())
 }

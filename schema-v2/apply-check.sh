@@ -557,6 +557,18 @@ BEGIN
         ) AS required(index_name)
         UNION ALL
         SELECT
+            'normalized event state compaction has its expression index',
+            EXISTS (
+                SELECT 1
+                FROM pg_indexes
+                WHERE schemaname = current_schema()
+                  AND indexname =
+                      'normalized_events_interpreter_state_history_idx'
+                  AND indexdef LIKE '%raw_fact_ref%interpreter_state_key%'
+                  AND indexdef LIKE '%canonicality_state%'
+            )
+        UNION ALL
+        SELECT
             'name surface visibility requires an explicit decision',
             NOT EXISTS (
                 SELECT 1
@@ -2825,6 +2837,7 @@ BEGIN
     INSERT INTO label_preimages (
         labelhash,
         raw_label,
+        decoded_label,
         normalizer_version,
         normalized_under_version,
         normalization_error,
@@ -2834,6 +2847,7 @@ BEGIN
     VALUES
         (
             'labelhash-normalized',
+            convert_to('normalized', 'UTF8'),
             'normalized',
             'check',
             true,
@@ -2843,7 +2857,8 @@ BEGIN
         ),
         (
             'labelhash-rejected',
-            'rejected',
+            decode('ff00', 'hex'),
+            NULL,
             'check',
             false,
             'normalization failed',
@@ -2871,6 +2886,7 @@ BEGIN
             INSERT INTO label_preimages (
                 labelhash,
                 raw_label,
+                decoded_label,
                 normalizer_version,
                 normalized_under_version,
                 normalization_error,
@@ -2879,6 +2895,7 @@ BEGIN
             )
             VALUES (
                 transition_case.labelhash,
+                convert_to('invalid', 'UTF8'),
                 'invalid',
                 'check',
                 transition_case.normalized,
@@ -2897,6 +2914,38 @@ BEGIN
                 END IF;
         END;
     END LOOP;
+
+    BEGIN
+        INSERT INTO label_preimages (
+            labelhash,
+            raw_label,
+            decoded_label,
+            normalizer_version,
+            normalized_under_version,
+            normalization_error,
+            source_kind,
+            source_priority
+        )
+        VALUES (
+            'labelhash-decoding-drift',
+            convert_to('raw', 'UTF8'),
+            'different',
+            'check',
+            false,
+            'normalization failed',
+            'schema-check',
+            0
+        );
+        RAISE EXCEPTION
+            'label_preimages accepted decoded text that differs from raw bytes';
+    EXCEPTION
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "label_preimages_decoded_label_matches_raw_check"%'
+            THEN
+                RAISE;
+            END IF;
+    END;
 
     INSERT INTO primary_names_current (
         address,

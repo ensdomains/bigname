@@ -1,13 +1,21 @@
 #[allow(dead_code)]
 mod support;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use anyhow::Result;
 use bigname_ingest::load_watch_filter;
-use bigname_interpret::{BatchRequest, Engine, RunMode as InterpretRunMode};
+use bigname_interpret::{
+    BatchRequest, Engine, ErrorKind as InterpretErrorKind, Marker, RunMode as InterpretRunMode,
+};
 use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     capacity::CapacityGuard,
@@ -21,8 +29,10 @@ use phase_runner::{
 use serde_json::json;
 use sqlx::{
     PgPool,
+    postgres::PgPoolOptions,
     types::{Uuid, time},
 };
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use support::ScratchDatabase;
@@ -53,6 +63,13 @@ sol! {
         string value
     );
     event RegistryCreated();
+    event NameWrapped(
+        bytes32 indexed node,
+        bytes name,
+        address owner,
+        uint32 fuses,
+        uint64 expiry
+    );
 }
 
 mod v2_registry_events {
@@ -111,9 +128,9 @@ async fn production_interpret_writes_plain_events_identity_preimages_and_flags()
     assert!(!surface.3.contains("alice"));
     let preimages: Vec<(String, bool, Option<String>)> = sqlx::query_as(
         "
-        SELECT raw_label, normalized_under_version, normalization_error
+        SELECT decoded_label, normalized_under_version, normalization_error
         FROM label_preimages
-        ORDER BY raw_label
+        ORDER BY decoded_label
         ",
     )
     .fetch_all(scratch.pool())
@@ -126,6 +143,238 @@ async fn production_interpret_writes_plain_events_identity_preimages_and_flags()
         .fetch_one(scratch.pool())
         .await?;
     assert_eq!(binding_count, 1);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn divergent_normalized_event_identity_errors_loudly() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_event_conflict").await?;
+    let chain = "interpret-event-conflict";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice")]).await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+    sqlx::query(
+        "UPDATE normalized_events SET after_state = '{\"tampered\":true}'::jsonb WHERE chain_id = $1 AND event_kind = 'RegistrationGranted'",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+
+    let error = Engine::new(scratch.pool().clone())
+        .run_batch(BatchRequest {
+            chain_id: chain.to_owned(),
+            from_block: 0,
+            to_block: 1,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await
+        .expect_err("a stable event identity must not overwrite divergent data");
+    assert_eq!(error.kind(), InterpretErrorKind::DataIntegrity);
+    assert!(error.to_string().contains("different event data"));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_replay_accepts_only_canonicality_lifecycle_changes() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_event_canonicality").await?;
+    let chain = "interpret-event-canonicality";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice")]).await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+
+    sqlx::query(
+        "UPDATE chain_lineage SET canonicality_state = 'safe' WHERE chain_id = $1 AND block_number = 1",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+    let advanced: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT canonicality_state::text FROM normalized_events WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(advanced, ["safe"]);
+
+    let recanonicalized_chain = "interpret-event-recanonicalized";
+    seed_fixture(scratch.pool(), recanonicalized_chain, &[(1, "bob")]).await?;
+    run_engine(
+        scratch.pool(),
+        recanonicalized_chain,
+        0,
+        1,
+        InterpretRunMode::Normal,
+    )
+    .await?;
+    sqlx::query("UPDATE normalized_events SET canonicality_state = 'orphaned' WHERE chain_id = $1")
+        .bind(recanonicalized_chain)
+        .execute(scratch.pool())
+        .await?;
+    run_engine(
+        scratch.pool(),
+        recanonicalized_chain,
+        0,
+        1,
+        InterpretRunMode::Normal,
+    )
+    .await?;
+    let recanonicalized: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT canonicality_state::text FROM normalized_events WHERE chain_id = $1",
+    )
+    .bind(recanonicalized_chain)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(recanonicalized, ["canonical"]);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn divergent_token_lineage_chain_errors_loudly() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_lineage_conflict").await?;
+    let chain = "interpret-lineage-conflict";
+    let other_chain = "interpret-lineage-conflict-other";
+    seed_v2_lifecycle_fixture(scratch.pool(), chain).await?;
+    run_engine(scratch.pool(), chain, 0, 2, InterpretRunMode::Normal).await?;
+    sqlx::query("DELETE FROM normalized_events WHERE chain_id = $1")
+        .bind(chain)
+        .execute(scratch.pool())
+        .await?;
+    sqlx::query("DELETE FROM surface_bindings WHERE chain_id = $1")
+        .bind(chain)
+        .execute(scratch.pool())
+        .await?;
+    sqlx::query("DELETE FROM resources WHERE chain_id = $1")
+        .bind(chain)
+        .execute(scratch.pool())
+        .await?;
+    sqlx::query(
+        "
+        INSERT INTO chain_lineage (
+            chain_id, block_hash, block_number, block_timestamp, canonicality_state
+        )
+        VALUES ($1, $2, 1, to_timestamp(1), 'canonical')
+        ",
+    )
+    .bind(other_chain)
+    .bind(block_hash(other_chain, 1))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query("UPDATE token_lineages SET chain_id = $2, block_hash = $3 WHERE chain_id = $1")
+        .bind(chain)
+        .bind(other_chain)
+        .bind(block_hash(other_chain, 1))
+        .execute(scratch.pool())
+        .await?;
+
+    let error = Engine::new(scratch.pool().clone())
+        .run_batch(BatchRequest {
+            chain_id: chain.to_owned(),
+            from_block: 0,
+            to_block: 2,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await
+        .expect_err("a token lineage ID must not move across chains");
+    assert_eq!(error.kind(), InterpretErrorKind::DataIntegrity);
+    assert!(error.to_string().contains("different chain"));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn divergent_token_lineage_provenance_errors_loudly() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_lineage_data_conflict").await?;
+    let chain = "interpret-lineage-data-conflict";
+    seed_v2_lifecycle_fixture(scratch.pool(), chain).await?;
+    run_engine(scratch.pool(), chain, 0, 2, InterpretRunMode::Normal).await?;
+    sqlx::query(
+        "
+        UPDATE token_lineages
+        SET provenance = jsonb_set(provenance, '{log_index}', '-1'::jsonb)
+        WHERE chain_id = $1
+        ",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+
+    let error = Engine::new(scratch.pool().clone())
+        .run_batch(BatchRequest {
+            chain_id: chain.to_owned(),
+            from_block: 0,
+            to_block: 2,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await
+        .expect_err("a token lineage ID must not overwrite divergent same-chain data");
+    assert_eq!(error.kind(), InterpretErrorKind::DataIntegrity);
+    assert!(error.to_string().contains("different lineage data"));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn nonzero_full_replay_rejects_a_forged_prior_token_lineage_anchor() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_lineage_coverage_conflict").await?;
+    let chain = "interpret-lineage-coverage-conflict";
+    seed_fixture(scratch.pool(), chain, &[(100, "alice")]).await?;
+    run_engine(scratch.pool(), chain, 100, 100, InterpretRunMode::Normal).await?;
+    sqlx::query(
+        "
+        UPDATE token_lineages
+        SET block_hash = $2,
+            block_number = 99,
+            provenance = $3
+        WHERE chain_id = $1
+        ",
+    )
+    .bind(chain)
+    .bind(block_hash(chain, 99))
+    .bind(json!({
+        "source": "raw_log",
+        "chain_id": chain,
+        "block_hash": block_hash(chain, 99),
+        "block_number": 99,
+        "transaction_index": 0,
+        "log_index": 0,
+    }))
+    .execute(scratch.pool())
+    .await?;
+
+    let error = Engine::new(scratch.pool().clone())
+        .run_batch(BatchRequest {
+            chain_id: chain.to_owned(),
+            from_block: 100,
+            to_block: 100,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await
+        .expect_err("full replay must reject a forged pre-coverage lineage anchor");
+    assert_eq!(error.kind(), InterpretErrorKind::DataIntegrity);
+    assert!(error.to_string().contains("different lineage data"));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn later_batch_token_lineage_observation_preserves_the_first_anchor() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_lineage_later_batch").await?;
+    let chain = "interpret-lineage-later-batch";
+    seed_v2_lifecycle_fixture(scratch.pool(), chain).await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+    let before: (i64, serde_json::Value) =
+        sqlx::query_as("SELECT block_number, provenance FROM token_lineages WHERE chain_id = $1")
+            .bind(chain)
+            .fetch_one(scratch.pool())
+            .await?;
+
+    run_engine(scratch.pool(), chain, 2, 2, InterpretRunMode::Normal).await?;
+    let after: (i64, serde_json::Value) =
+        sqlx::query_as("SELECT block_number, provenance FROM token_lineages WHERE chain_id = $1")
+            .bind(chain)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(after, before);
     scratch.cleanup().await
 }
 
@@ -156,6 +405,113 @@ async fn cross_batch_prior_state_uses_hash_covered_compaction_keys() -> Result<(
         counts.1, counts.0,
         "every adapter event must carry its hash-covered prior-state compaction key"
     );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn prior_state_is_loaded_once_and_folded_forward_across_500_block_batches() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_prior_state_session").await?;
+    let chain = "interpret-prior-state-session";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice"), (501, "alice")]).await?;
+    let engine = Engine::new(scratch.pool().clone());
+    let first = engine
+        .run_batch(BatchRequest {
+            chain_id: chain.to_owned(),
+            from_block: 0,
+            to_block: 501,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    assert!(!first.complete);
+    assert_eq!(first.current.number, 499);
+    sqlx::query("DELETE FROM normalized_events WHERE chain_id = $1")
+        .bind(chain)
+        .execute(scratch.pool())
+        .await?;
+
+    let second = engine
+        .run_batch(BatchRequest {
+            chain_id: chain.to_owned(),
+            from_block: 0,
+            to_block: 501,
+            resume_current: Some(first.current),
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    assert!(second.complete);
+    let prior_registrant: Option<String> = sqlx::query_scalar(
+        "
+        SELECT before_state ->> 'registrant'
+        FROM normalized_events
+        WHERE chain_id = $1
+          AND block_number = 501
+          AND event_kind = 'RegistrationGranted'
+        ",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(prior_registrant.as_deref(), Some(CONTRACT));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn cached_prior_state_reloads_when_an_earlier_dependency_is_repaired() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_prior_dependency_repair").await?;
+    let chain = "interpret-prior-dependency-repair";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice"), (501, "alice")]).await?;
+    insert_orphaned_registration(scratch.pool(), chain, 1, "alice").await?;
+    let engine = Engine::new(scratch.pool().clone());
+    let first = engine
+        .run_batch(BatchRequest {
+            chain_id: chain.to_owned(),
+            from_block: 0,
+            to_block: 501,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    assert_eq!(first.current.number, 499);
+
+    sqlx::query(
+        "
+        UPDATE chain_lineage
+        SET canonicality_state = CASE
+            WHEN block_hash = $2 THEN 'canonical'::canonicality_state
+            ELSE 'orphaned'::canonicality_state
+        END
+        WHERE chain_id = $1 AND block_number = 1
+        ",
+    )
+    .bind(chain)
+    .bind(format!("{chain}-orphan-1"))
+    .execute(scratch.pool())
+    .await?;
+
+    let second = engine
+        .run_batch(BatchRequest {
+            chain_id: chain.to_owned(),
+            from_block: 0,
+            to_block: 501,
+            resume_current: Some(first.current),
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    assert!(second.complete);
+    let prior_registrant: Option<String> = sqlx::query_scalar(
+        "
+        SELECT before_state ->> 'registrant'
+        FROM normalized_events
+        WHERE chain_id = $1
+          AND block_number = 501
+          AND event_kind = 'RegistrationGranted'
+        ",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(prior_registrant, None);
     scratch.cleanup().await
 }
 
@@ -335,6 +691,66 @@ async fn interpret_redo_rejects_a_range_without_ingest_cursor_coverage() -> Resu
 }
 
 #[tokio::test]
+async fn interpret_loader_rejects_two_live_hashes_at_one_height() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_duplicate_live_loader").await?;
+    let chain = "interpret-duplicate-live-loader";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice")]).await?;
+    permit_duplicate_live_heights_for_corruption_test(scratch.pool()).await?;
+    insert_competing_live_block(scratch.pool(), chain, 1).await?;
+
+    let error = Engine::new(scratch.pool().clone())
+        .run_batch(BatchRequest {
+            chain_id: chain.to_owned(),
+            from_block: 0,
+            to_block: 1,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await
+        .expect_err("the loader must reject ambiguous live lineage");
+    assert_eq!(error.kind(), InterpretErrorKind::DataIntegrity);
+    assert!(error.to_string().contains("multiple live-lineage hashes"));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn interpret_redo_presence_rejects_two_live_hashes_at_one_height() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_duplicate_live_redo").await?;
+    let chain = "interpret-duplicate-live-redo";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice")]).await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain).await?;
+    seed_completed_phase_extent_at(scratch.pool(), chain, 1, INTERPRETER_CONTENT_HASH).await?;
+    permit_duplicate_live_heights_for_corruption_test(scratch.pool()).await?;
+    insert_competing_live_block(scratch.pool(), chain, 1).await?;
+    let phases = PhaseSet::with_ingest_and_interpret(
+        Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+        Arc::new(InterpretPhase::new(scratch.runner().pool().clone())),
+    )?;
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "interpret-duplicate-live-redo-runner",
+        test_timing(),
+    )?;
+
+    let error = runner
+        .redo(
+            &chain_config(chain)?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("redo presence must reject ambiguous live lineage");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(error.to_string().contains("multiple hashes at one height"));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn interpret_redo_requires_every_applicable_source_cursor_to_cover_the_suffix() -> Result<()>
 {
     let scratch = ScratchDatabase::create("production_interpret_redo_source_presence").await?;
@@ -476,7 +892,7 @@ async fn unnormalizable_raw_label_creates_a_deactivated_shadow_identity() -> Res
         "
         SELECT normalized_under_version, normalization_error IS NOT NULL
         FROM label_preimages
-        WHERE raw_label = $1
+        WHERE decoded_label = $1
         ",
     )
     .bind("bad\u{1}")
@@ -491,6 +907,125 @@ async fn unnormalizable_raw_label_creates_a_deactivated_shadow_identity() -> Res
 }
 
 #[tokio::test]
+async fn non_utf8_label_persists_raw_bytes_and_completes_as_shadow() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_non_utf8_shadow").await?;
+    let chain = "interpret-non-utf8-shadow";
+    let raw_label = vec![0xff];
+    seed_hostile_wrapper_fixture(scratch.pool(), chain, &raw_label).await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+
+    assert_hostile_label(scratch.pool(), &raw_label, None).await?;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn embedded_dot_label_persists_bytes_and_completes_as_shadow() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_dot_shadow").await?;
+    let chain = "interpret-dot-shadow";
+    seed_fixture(scratch.pool(), chain, &[(1, "a.b")]).await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+
+    assert_hostile_label(scratch.pool(), b"a.b", Some("a.b")).await?;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn embedded_nul_label_persists_bytes_and_completes_as_shadow() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_nul_shadow").await?;
+    let chain = "interpret-nul-shadow";
+    let label = "a\0b";
+    seed_fixture(scratch.pool(), chain, &[(1, label), (2, "alice")]).await?;
+    run_engine(scratch.pool(), chain, 0, 2, InterpretRunMode::Normal).await?;
+
+    let stored: (Vec<u8>, Option<String>, bool) = sqlx::query_as(
+        "
+        SELECT raw_label, decoded_label, normalized_under_version
+        FROM label_preimages
+        WHERE raw_label = $1
+        ",
+    )
+    .bind(label.as_bytes())
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(stored, (label.as_bytes().to_vec(), None, false));
+
+    let identities: Vec<(String, String)> = sqlx::query_as(
+        "
+        SELECT raw_name, visibility_state
+        FROM name_surfaces
+        ORDER BY raw_name
+        ",
+    )
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        identities,
+        [
+            (String::new(), "shadow".into()),
+            ("alice.eth".into(), "active".into())
+        ]
+    );
+    let binding_count: i64 = sqlx::query_scalar("SELECT count(*) FROM surface_bindings")
+        .fetch_one(scratch.pool())
+        .await?;
+    assert_eq!(binding_count, 1);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn two_hundred_fifty_six_byte_label_completes_as_shadow() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_256_byte_shadow").await?;
+    let chain = "interpret-256-byte-shadow";
+    let label = "a".repeat(256);
+    seed_fixture(scratch.pool(), chain, &[(1, &label)]).await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+
+    assert_hostile_label(scratch.pool(), label.as_bytes(), Some(&label)).await?;
+    scratch.cleanup().await
+}
+
+async fn assert_hostile_label(
+    pool: &PgPool,
+    raw_label: &[u8],
+    decoded_label: Option<&str>,
+) -> Result<()> {
+    let stored: (Vec<u8>, Option<String>, bool, bool) = sqlx::query_as(
+        "
+        SELECT raw_label, decoded_label, normalized_under_version,
+               normalization_error IS NOT NULL
+        FROM label_preimages
+        WHERE raw_label = $1
+        ",
+    )
+    .bind(raw_label)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(stored.0, raw_label);
+    assert_eq!(stored.1.as_deref(), decoded_label);
+    assert_eq!((stored.2, stored.3), (false, true));
+    let (surfaces, shadow_surfaces, bindings): (i64, i64, i64) = sqlx::query_as(
+        "
+        SELECT (SELECT count(*) FROM name_surfaces),
+               (SELECT count(*) FROM name_surfaces
+                WHERE visibility_state = 'shadow'
+                  AND deactivation_reason = 'normalization_gate'
+                  AND deactivated_at IS NOT NULL),
+               (SELECT count(*) FROM surface_bindings)
+        ",
+    )
+    .fetch_one(pool)
+    .await?;
+    assert_eq!((surfaces, shadow_surfaces, bindings), (1, 1, 0));
+    let shadow_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events WHERE after_state ->> 'visibility_state' = 'shadow'",
+    )
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(shadow_events, 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn normalization_collision_keeps_raw_preimages_distinct_and_binds_only_visible_identity()
 -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_collision").await?;
@@ -500,10 +1035,10 @@ async fn normalization_collision_keeps_raw_preimages_distinct_and_binds_only_vis
 
     let raw_labels: Vec<(String, String, bool)> = sqlx::query_as(
         "
-        SELECT raw_label, labelhash, normalized_under_version
+        SELECT decoded_label, labelhash, normalized_under_version
         FROM label_preimages
-        WHERE raw_label IN ('Alice', 'alice')
-        ORDER BY raw_label
+        WHERE decoded_label IN ('Alice', 'alice')
+        ORDER BY decoded_label
         ",
     )
     .fetch_all(scratch.pool())
@@ -544,7 +1079,7 @@ async fn recompute_flags_is_unavailable_until_binding_reconciliation_exists() ->
         SET normalized_under_version = false,
             normalization_error = 'stale flag',
             normalizer_version = 'stale-version'
-        WHERE raw_label = 'alice'
+        WHERE decoded_label = 'alice'
         ",
     )
     .execute(scratch.pool())
@@ -570,7 +1105,7 @@ async fn recompute_flags_is_unavailable_until_binding_reconciliation_exists() ->
         "
         SELECT normalizer_version, normalized_under_version, normalization_error
         FROM label_preimages
-        WHERE raw_label = 'alice'
+        WHERE decoded_label = 'alice'
         ",
     )
     .fetch_one(scratch.pool())
@@ -580,6 +1115,114 @@ async fn recompute_flags_is_unavailable_until_binding_reconciliation_exists() ->
         .fetch_one(scratch.pool())
         .await?;
     assert_eq!(event_count, after_count);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn normal_mode_rejects_stored_normalizer_state_drift() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_normalizer_drift").await?;
+    let chain = "interpret-normalizer-drift";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice")]).await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+
+    sqlx::query(
+        "
+        UPDATE label_preimages
+        SET normalizer_version = 'stale-version',
+            normalized_under_version = false,
+            normalization_error = 'stale flag'
+        WHERE decoded_label = 'alice'
+        ",
+    )
+    .execute(scratch.pool())
+    .await?;
+    let preimage_error = Engine::new(scratch.pool().clone())
+        .run_batch(BatchRequest {
+            chain_id: chain.to_owned(),
+            from_block: 0,
+            to_block: 1,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await
+        .expect_err("normal mode must not publish over stale preimage normalization state");
+    assert_eq!(preimage_error.kind(), InterpretErrorKind::DataIntegrity);
+    assert!(preimage_error.to_string().contains("recompute-flags"));
+    let preimage: (String, bool, Option<String>) = sqlx::query_as(
+        "
+        SELECT normalizer_version, normalized_under_version, normalization_error
+        FROM label_preimages
+        WHERE decoded_label = 'alice'
+        ",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        preimage,
+        ("stale-version".into(), false, Some("stale flag".into()))
+    );
+
+    sqlx::query(
+        "
+        UPDATE label_preimages
+        SET normalizer_version = $1,
+            normalized_under_version = true,
+            normalization_error = NULL
+        WHERE decoded_label = 'alice'
+        ",
+    )
+    .bind(NORMALIZER)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE name_surfaces
+        SET normalizer_version = 'stale-version',
+            visibility_state = 'shadow',
+            normalization_errors = '[{"error":"stale flag"}]'::jsonb,
+            deactivation_reason = 'normalization_gate',
+            deactivated_at = now()
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    let surface_error = Engine::new(scratch.pool().clone())
+        .run_batch(BatchRequest {
+            chain_id: chain.to_owned(),
+            from_block: 0,
+            to_block: 1,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await
+        .expect_err("normal mode must not publish over stale surface normalization state");
+    assert_eq!(surface_error.kind(), InterpretErrorKind::DataIntegrity);
+    assert!(surface_error.to_string().contains("recompute-flags"));
+    let surface: (String, String, serde_json::Value, Option<String>, bool) = sqlx::query_as(
+        "
+        SELECT normalizer_version, visibility_state, normalization_errors,
+               deactivation_reason, deactivated_at IS NOT NULL
+        FROM name_surfaces
+        WHERE chain_id = $1
+        ",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(surface.0, "stale-version");
+    assert_eq!(surface.1, "shadow");
+    assert_eq!(surface.2, json!([{"error":"stale flag"}]));
+    assert_eq!(surface.3.as_deref(), Some("normalization_gate"));
+    assert!(surface.4);
+    let active_bindings: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM surface_bindings WHERE chain_id = $1 AND active_to IS NULL",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(active_bindings, 1);
     scratch.cleanup().await
 }
 
@@ -1353,6 +1996,165 @@ async fn compatible_later_name_observation_preserves_the_finalized_first_anchor(
 }
 
 #[tokio::test]
+async fn partial_redo_restores_resource_and_token_anchors_from_150_to_250() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_anchor_150_250").await?;
+    let chain = "interpret-anchor-150-250";
+    seed_v2_lifecycle_fixture(scratch.pool(), chain).await?;
+    run_engine(scratch.pool(), chain, 0, 2, InterpretRunMode::Normal).await?;
+    sqlx::query(
+        "
+        INSERT INTO chain_lineage (
+            chain_id, block_hash, parent_hash, block_number, block_timestamp,
+            canonicality_state
+        )
+        SELECT $1,
+               $1 || '-block-' || height::text,
+               $1 || '-block-' || (height - 1)::text,
+               height,
+               to_timestamp(height),
+               'canonical'::canonicality_state
+        FROM generate_series(3, 250) AS height
+        ",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    let (resource_id, token_lineage_id): (Uuid, Uuid) =
+        sqlx::query_as("SELECT resource_id, token_lineage_id FROM resources WHERE chain_id = $1")
+            .bind(chain)
+            .fetch_one(scratch.pool())
+            .await?;
+    sqlx::query(
+        "
+        INSERT INTO normalized_events (
+            event_identity, namespace, logical_name_id, resource_id, event_kind,
+            source_family, manifest_version, source_manifest_id, chain_id,
+            block_number, block_hash, raw_fact_ref, derivation_kind,
+            canonicality_state, before_state, after_state
+        )
+        SELECT 'anchor-observation-250', namespace, logical_name_id, $2,
+               event_kind, source_family, manifest_version, source_manifest_id,
+               chain_id, 250, $3, jsonb_build_object('kind', 'raw_block'),
+               derivation_kind, 'canonical', '{}'::jsonb,
+               jsonb_build_object('token_lineage_id', $4::text)
+        FROM normalized_events
+        WHERE chain_id = $1 AND resource_id = $2
+        ORDER BY normalized_event_id
+        LIMIT 1
+        ",
+    )
+    .bind(chain)
+    .bind(resource_id)
+    .bind(block_hash(chain, 250))
+    .bind(token_lineage_id)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "DELETE FROM normalized_events WHERE chain_id = $1 AND event_identity <> 'anchor-observation-250'",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    for table in ["name_surfaces", "resources", "token_lineages"] {
+        sqlx::query(&format!(
+            "UPDATE {table} SET block_number = 150, block_hash = $2, canonicality_state = 'canonical' WHERE chain_id = $1"
+        ))
+        .bind(chain)
+        .bind(block_hash(chain, 150))
+        .execute(scratch.pool())
+        .await?;
+    }
+    sqlx::query(
+        "
+        UPDATE surface_bindings
+        SET block_number = 150,
+            block_hash = $2,
+            active_to = NULL,
+            canonicality_state = 'canonical'
+        WHERE chain_id = $1
+        ",
+    )
+    .bind(chain)
+    .bind(block_hash(chain, 150))
+    .execute(scratch.pool())
+    .await?;
+    let transaction_hash = format!("{chain}-transaction-150");
+    sqlx::query(
+        "
+        INSERT INTO raw_transactions (
+            chain_id, block_hash, block_number, transaction_hash,
+            transaction_index, from_address, to_address
+        )
+        VALUES ($1, $2, 150, $3, 0, $4, $5)
+        ",
+    )
+    .bind(chain)
+    .bind(block_hash(chain, 150))
+    .bind(&transaction_hash)
+    .bind(SENDER)
+    .bind(CONTRACT)
+    .execute(scratch.pool())
+    .await?;
+    let token_id = versioned_token("alice", 1);
+    let owner: Address = "0x0000000000000000000000000000000000000061".parse()?;
+    let registration = v2_registry_events::LabelRegistered {
+        tokenId: token_id,
+        labelHash: keccak256(b"alice"),
+        label: "alice".to_owned(),
+        owner,
+        expiry: 1_000,
+        sender: SENDER.parse()?,
+    }
+    .encode_log_data();
+    insert_log_at(
+        scratch.pool(),
+        chain,
+        150,
+        &transaction_hash,
+        0,
+        CONTRACT,
+        registration.topics(),
+        registration.data.as_ref(),
+    )
+    .await?;
+    let resource = v2_registry_events::TokenResource {
+        tokenId: token_id,
+        resource: U256::from(5001),
+    }
+    .encode_log_data();
+    insert_log_at(
+        scratch.pool(),
+        chain,
+        150,
+        &transaction_hash,
+        1,
+        CONTRACT,
+        resource.topics(),
+        resource.data.as_ref(),
+    )
+    .await?;
+
+    for redo_attempt in 1..=2 {
+        run_engine(scratch.pool(), chain, 100, 200, InterpretRunMode::Redo).await?;
+
+        for table in ["name_surfaces", "resources", "token_lineages"] {
+            let anchor: (i64, String) = sqlx::query_as(&format!(
+                "SELECT block_number, block_hash FROM {table} WHERE chain_id = $1"
+            ))
+            .bind(chain)
+            .fetch_one(scratch.pool())
+            .await?;
+            assert_eq!(
+                anchor,
+                (250, block_hash(chain, 250)),
+                "{table} after redo attempt {redo_attempt}"
+            );
+        }
+    }
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn redo_without_the_orphaned_terminal_fact_reopens_the_prior_binding() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_terminal_redo").await?;
     let chain = "interpret-terminal-redo";
@@ -1460,10 +2262,343 @@ async fn interpret_ignores_raw_facts_on_orphaned_lineage() -> Result<()> {
     .await?;
     assert_eq!(registrations, 1);
     let orphan_preimage: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM label_preimages WHERE raw_label = 'bob'")
+        sqlx::query_scalar("SELECT count(*) FROM label_preimages WHERE decoded_label = 'bob'")
             .fetch_one(scratch.pool())
             .await?;
     assert_eq!(orphan_preimage, 0);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn mid_batch_orphaning_aborts_the_write_as_transient() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_mid_batch_orphan").await?;
+    let chain = "interpret-mid-batch-orphan";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice")]).await?;
+    let mut reorg = scratch.pool().begin().await?;
+    sqlx::query(
+        "
+        SELECT block_hash
+        FROM chain_lineage
+        WHERE chain_id = $1 AND block_number = 1
+        FOR UPDATE
+        ",
+    )
+    .bind(chain)
+    .fetch_one(&mut *reorg)
+    .await?;
+
+    let pool = scratch.pool().clone();
+    let chain_for_task = chain.to_owned();
+    let running = tokio::spawn(async move {
+        Engine::new(pool)
+            .run_batch(BatchRequest {
+                chain_id: chain_for_task,
+                from_block: 0,
+                to_block: 1,
+                resume_current: None,
+                mode: InterpretRunMode::Normal,
+            })
+            .await
+    });
+    let mut reached_write_revalidation = false;
+    for _ in 0..200 {
+        reached_write_revalidation = sqlx::query_scalar(
+            "
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_stat_activity
+                WHERE datname = current_database()
+                  AND wait_event_type = 'Lock'
+                  AND query LIKE '%FOR SHARE%'
+            )
+            ",
+        )
+        .fetch_one(scratch.pool())
+        .await?;
+        if reached_write_revalidation {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        reached_write_revalidation,
+        "interpretation must reach write-time lineage revalidation"
+    );
+    sqlx::query(
+        "UPDATE chain_lineage SET canonicality_state = 'orphaned' WHERE chain_id = $1 AND block_number = 1",
+    )
+    .bind(chain)
+    .execute(&mut *reorg)
+    .await?;
+    reorg.commit().await?;
+
+    let error = running
+        .await?
+        .expect_err("an orphaned loaded batch must be retried");
+    assert_eq!(error.kind(), InterpretErrorKind::Transient);
+    assert!(error.to_string().contains("lineage changed before write"));
+    let written: i64 = sqlx::query_scalar("SELECT count(*) FROM normalized_events")
+        .fetch_one(scratch.pool())
+        .await?;
+    assert_eq!(written, 0);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn reorg_between_block_and_log_loads_is_transient_and_retries() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_load_snapshot_reorg").await?;
+    let chain = "interpret-load-snapshot-reorg";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice")]).await?;
+    insert_orphaned_registration(scratch.pool(), chain, 1, "bob").await?;
+
+    let mut raw_log_lock = scratch.pool().begin().await?;
+    sqlx::query("LOCK TABLE raw_logs IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *raw_log_lock)
+        .await?;
+    let pool = scratch.pool().clone();
+    let chain_for_task = chain.to_owned();
+    let running = tokio::spawn(async move {
+        Engine::new(pool)
+            .run_batch(BatchRequest {
+                chain_id: chain_for_task,
+                from_block: 0,
+                to_block: 1,
+                resume_current: None,
+                mode: InterpretRunMode::Normal,
+            })
+            .await
+    });
+
+    let mut waiting_for_raw_logs = false;
+    for _ in 0..200 {
+        waiting_for_raw_logs = sqlx::query_scalar(
+            "
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_stat_activity
+                WHERE datname = current_database()
+                  AND pid <> pg_backend_pid()
+                  AND wait_event_type = 'Lock'
+                  AND query LIKE '%FROM raw_logs raw%'
+            )
+            ",
+        )
+        .fetch_one(scratch.pool())
+        .await?;
+        if waiting_for_raw_logs {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        waiting_for_raw_logs,
+        "interpretation must reach the raw-log load"
+    );
+
+    sqlx::query(
+        "
+        UPDATE chain_lineage
+        SET canonicality_state = CASE
+            WHEN block_hash = $2 THEN 'canonical'::canonicality_state
+            ELSE 'orphaned'::canonicality_state
+        END
+        WHERE chain_id = $1 AND block_number = 1
+        ",
+    )
+    .bind(chain)
+    .bind(format!("{chain}-orphan-1"))
+    .execute(scratch.pool())
+    .await?;
+    raw_log_lock.commit().await?;
+
+    let error = running
+        .await?
+        .expect_err("lineage churn during load must retry");
+    assert_eq!(error.kind(), InterpretErrorKind::Transient);
+    let written: i64 = sqlx::query_scalar("SELECT count(*) FROM normalized_events")
+        .fetch_one(scratch.pool())
+        .await?;
+    assert_eq!(written, 0);
+
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+    let labels: Vec<String> = sqlx::query_scalar(
+        "SELECT decoded_label FROM label_preimages WHERE decoded_label IS NOT NULL ORDER BY decoded_label",
+    )
+    .fetch_all(scratch.pool())
+    .await?;
+    assert!(labels.iter().any(|label| label == "bob"));
+    assert!(!labels.iter().any(|label| label == "alice"));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn aba_reorg_between_marker_selection_and_snapshot_load_is_transient() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_load_snapshot_aba").await?;
+    let chain = "interpret-load-snapshot-aba";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice")]).await?;
+    insert_orphaned_registration(scratch.pool(), chain, 1, "bob").await?;
+
+    let (engine_pool, batch_acquire_reached, release_batch_acquire) =
+        pool_with_acquire_gate(scratch.pool(), 3).await?;
+
+    let mut raw_log_gate = scratch.pool().begin().await?;
+    sqlx::query("LOCK TABLE raw_logs IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *raw_log_gate)
+        .await?;
+    let pool = engine_pool.clone();
+    let chain_for_task = chain.to_owned();
+    let running = tokio::spawn(async move {
+        Engine::new(pool)
+            .run_batch(BatchRequest {
+                chain_id: chain_for_task,
+                from_block: 0,
+                to_block: 1,
+                resume_current: None,
+                mode: InterpretRunMode::Normal,
+            })
+            .await
+    });
+
+    batch_acquire_reached.notified().await;
+    switch_live_lineage(scratch.pool(), chain, &format!("{chain}-orphan-1")).await?;
+    release_batch_acquire.notify_one();
+
+    wait_for_locked_query(scratch.pool(), "%FROM raw_logs raw%").await?;
+    switch_live_lineage(scratch.pool(), chain, &block_hash(chain, 1)).await?;
+    raw_log_gate.commit().await?;
+
+    let error = running
+        .await?
+        .expect_err("an ABA lineage change must not mix selected and loaded blocks");
+    assert_eq!(error.kind(), InterpretErrorKind::Transient);
+    assert!(
+        error
+            .to_string()
+            .contains("changed while loading raw facts")
+    );
+    let written: i64 = sqlx::query_scalar("SELECT count(*) FROM normalized_events")
+        .fetch_one(scratch.pool())
+        .await?;
+    assert_eq!(written, 0);
+    engine_pool.close().await;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn changed_resume_marker_before_snapshot_is_transient_without_writes() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_resume_snapshot_reorg").await?;
+    let chain = "interpret-resume-snapshot-reorg";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice"), (2, "alice")]).await?;
+    insert_orphaned_registration(scratch.pool(), chain, 1, "bob").await?;
+    insert_orphaned_registration_with_parent(
+        scratch.pool(),
+        chain,
+        2,
+        "bob",
+        &format!("{chain}-orphan-1"),
+    )
+    .await?;
+
+    let (engine_pool, suffix_selection_reached, release_suffix_selection) =
+        pool_with_acquire_gate(scratch.pool(), 3).await?;
+    let pool = engine_pool.clone();
+    let chain_for_task = chain.to_owned();
+    let running = tokio::spawn(async move {
+        Engine::new(pool)
+            .run_batch(BatchRequest {
+                chain_id: chain_for_task,
+                from_block: 0,
+                to_block: 2,
+                resume_current: Some(Marker {
+                    number: 1,
+                    hash: block_hash(chain, 1),
+                }),
+                mode: InterpretRunMode::Normal,
+            })
+            .await
+    });
+
+    suffix_selection_reached.notified().await;
+    let mut reorg = scratch.pool().begin().await?;
+    sqlx::query(
+        "
+        UPDATE chain_lineage
+        SET canonicality_state = 'orphaned'::canonicality_state
+        WHERE chain_id = $1 AND block_number BETWEEN 1 AND 2
+        ",
+    )
+    .bind(chain)
+    .execute(&mut *reorg)
+    .await?;
+    sqlx::query(
+        "
+        UPDATE chain_lineage
+        SET canonicality_state = 'canonical'::canonicality_state
+        WHERE chain_id = $1
+          AND block_hash IN ($2, $3)
+        ",
+    )
+    .bind(chain)
+    .bind(format!("{chain}-orphan-1"))
+    .bind(format!("{chain}-orphan-2"))
+    .execute(&mut *reorg)
+    .await?;
+    reorg.commit().await?;
+    release_suffix_selection.notify_one();
+
+    let error = running
+        .await?
+        .expect_err("a replaced resume block must abort the resumed suffix");
+    assert_eq!(error.kind(), InterpretErrorKind::Transient);
+    assert!(
+        error
+            .to_string()
+            .contains("changed before the input snapshot")
+    );
+    let written: i64 = sqlx::query_scalar("SELECT count(*) FROM normalized_events")
+        .fetch_one(scratch.pool())
+        .await?;
+    assert_eq!(written, 0);
+    engine_pool.close().await;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn prior_state_ignores_events_whose_lineage_is_no_longer_live() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_prior_live_lineage").await?;
+    let chain = "interpret-prior-live-lineage";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice"), (2, "alice")]).await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+    insert_orphaned_registration(scratch.pool(), chain, 1, "alice").await?;
+    sqlx::query(
+        "
+        UPDATE chain_lineage
+        SET canonicality_state = CASE
+            WHEN block_hash = $2 THEN 'canonical'::canonicality_state
+            ELSE 'orphaned'::canonicality_state
+        END
+        WHERE chain_id = $1 AND block_number = 1
+        ",
+    )
+    .bind(chain)
+    .bind(format!("{chain}-orphan-1"))
+    .execute(scratch.pool())
+    .await?;
+
+    run_engine(scratch.pool(), chain, 2, 2, InterpretRunMode::Normal).await?;
+    let prior_registrant: Option<String> = sqlx::query_scalar(
+        "
+        SELECT before_state ->> 'registrant'
+        FROM normalized_events
+        WHERE chain_id = $1
+          AND block_number = 2
+          AND event_kind = 'RegistrationGranted'
+        ",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(prior_registrant, None);
     scratch.cleanup().await
 }
 
@@ -2419,6 +3554,155 @@ async fn seed_announcement_fixture(pool: &PgPool, chain_id: &str) -> Result<()> 
     .await
 }
 
+async fn seed_hostile_wrapper_fixture(
+    pool: &PgPool,
+    chain_id: &str,
+    raw_label: &[u8],
+) -> Result<()> {
+    seed_fixture(pool, chain_id, &[]).await?;
+    sqlx::query(
+        "
+        INSERT INTO chain_lineage (
+            chain_id, block_hash, parent_hash, block_number, block_timestamp,
+            canonicality_state
+        )
+        VALUES ($1, $2, $3, 1, to_timestamp(1), 'canonical')
+        ",
+    )
+    .bind(chain_id)
+    .bind(block_hash(chain_id, 1))
+    .bind(block_hash(chain_id, 0))
+    .execute(pool)
+    .await?;
+    let payload = json!({
+        "manifest_version": 1,
+        "namespace": "ens",
+        "source_family": "ens_v1_wrapper_l1",
+        "chain": chain_id,
+        "deployment_epoch": "fixture",
+        "rollout_status": "active",
+        "normalizer_version": NORMALIZER,
+        "capability_flags": {},
+        "roots": [],
+        "contracts": [{
+            "role": "name_wrapper",
+            "address": ANNOUNCED_REGISTRY,
+            "proxy_kind": "none",
+            "implementation": null,
+            "start_block": 0
+        }],
+        "discovery_rules": [],
+        "abi": { "events": [{
+            "name": "NameWrapped",
+            "fragment": "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)",
+            "emitter_roles": ["name_wrapper"],
+            "normalized_events": [
+                "TokenControlTransferred",
+                "ExpiryChanged",
+                "PermissionScopeChanged",
+                "SurfaceBound",
+                "AuthorityEpochChanged",
+                "PreimageObserved"
+            ]
+        }], "calls": [] }
+    });
+    let manifest_id = insert_manifest(
+        pool,
+        chain_id,
+        "ens_v1_wrapper_l1",
+        "tests/hostile-wrapper.toml",
+        payload,
+    )
+    .await?;
+    let instance_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO contract_instances VALUES ($1, $2, 'contract', '{}'::jsonb, now())")
+        .bind(instance_id)
+        .bind(chain_id)
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "
+        INSERT INTO manifest_contract_instances (
+            manifest_id, chain_id, declaration_kind, declaration_name,
+            contract_instance_id, declared_address, role, proxy_kind,
+            start_block_number
+        )
+        VALUES ($1, $2, 'contract', 'name_wrapper', $3, $4,
+                'name_wrapper', 'none', 0)
+        ",
+    )
+    .bind(manifest_id)
+    .bind(chain_id)
+    .bind(instance_id)
+    .bind(ANNOUNCED_REGISTRY)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "
+        INSERT INTO contract_instance_addresses (
+            contract_instance_id, chain_id, address,
+            active_from_block_number, source_manifest_id, provenance
+        )
+        VALUES ($1, $2, $3, 0, $4, '{}'::jsonb)
+        ",
+    )
+    .bind(instance_id)
+    .bind(chain_id)
+    .bind(ANNOUNCED_REGISTRY)
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+    let mut dns_name = Vec::with_capacity(raw_label.len() + 6);
+    dns_name.push(u8::try_from(raw_label.len())?);
+    dns_name.extend_from_slice(raw_label);
+    dns_name.extend_from_slice(b"\x03eth\0");
+    let node = raw_namehash(&[raw_label, b"eth"]);
+    let encoded = NameWrapped {
+        node,
+        name: dns_name.into(),
+        owner: CONTRACT.parse()?,
+        fuses: 1,
+        expiry: 42,
+    }
+    .encode_log_data();
+    let transaction_hash = format!("{chain_id}-transaction-1");
+    sqlx::query(
+        "
+        INSERT INTO raw_transactions (
+            chain_id, block_hash, block_number, transaction_hash,
+            transaction_index, from_address, to_address
+        )
+        VALUES ($1, $2, 1, $3, 0, $4, $5)
+        ",
+    )
+    .bind(chain_id)
+    .bind(block_hash(chain_id, 1))
+    .bind(&transaction_hash)
+    .bind(SENDER)
+    .bind(ANNOUNCED_REGISTRY)
+    .execute(pool)
+    .await?;
+    insert_log(
+        pool,
+        chain_id,
+        &transaction_hash,
+        0,
+        ANNOUNCED_REGISTRY,
+        encoded.topics(),
+        encoded.data.as_ref(),
+    )
+    .await
+}
+
+fn raw_namehash(labels: &[&[u8]]) -> B256 {
+    labels.iter().rev().fold(B256::ZERO, |node, label| {
+        let mut input = [0_u8; 64];
+        input[..32].copy_from_slice(node.as_slice());
+        input[32..].copy_from_slice(keccak256(label).as_slice());
+        B256::from(keccak256(input))
+    })
+}
+
 async fn insert_manifest(
     pool: &PgPool,
     chain_id: &str,
@@ -2516,6 +3800,23 @@ async fn insert_orphaned_registration(
     block: i64,
     label: &str,
 ) -> Result<()> {
+    insert_orphaned_registration_with_parent(
+        pool,
+        chain_id,
+        block,
+        label,
+        &block_hash(chain_id, block - 1),
+    )
+    .await
+}
+
+async fn insert_orphaned_registration_with_parent(
+    pool: &PgPool,
+    chain_id: &str,
+    block: i64,
+    label: &str,
+    parent_hash: &str,
+) -> Result<()> {
     let orphan_hash = format!("{chain_id}-orphan-{block}");
     sqlx::query(
         "
@@ -2528,7 +3829,7 @@ async fn insert_orphaned_registration(
     )
     .bind(chain_id)
     .bind(&orphan_hash)
-    .bind(block_hash(chain_id, block - 1))
+    .bind(parent_hash)
     .bind(block)
     .execute(pool)
     .await?;
@@ -2757,17 +4058,27 @@ async fn insert_name_registered(
 }
 
 async fn seed_completed_phase_extent(pool: &PgPool, chain_id: &str, hash: &str) -> Result<()> {
+    seed_completed_phase_extent_at(pool, chain_id, 2, hash).await
+}
+
+async fn seed_completed_phase_extent_at(
+    pool: &PgPool,
+    chain_id: &str,
+    head: i64,
+    hash: &str,
+) -> Result<()> {
+    let head_hash = block_hash(chain_id, head);
     sqlx::query(
         "
         UPDATE chain_phase_state
         SET phase_status = 'completed',
-            current_block_number = 2,
-            current_block_hash = $2,
-            target_block_number = 2,
-            target_block_hash = $2,
-            live_handoff_block_number = CASE WHEN phase_name = 'ingest' THEN 2 END,
-            live_handoff_block_hash = CASE WHEN phase_name = 'ingest' THEN $2 END,
-            input_content_hash = CASE WHEN phase_name = 'interpret' THEN $3 END,
+            current_block_number = $2,
+            current_block_hash = $3,
+            target_block_number = $2,
+            target_block_hash = $3,
+            live_handoff_block_number = CASE WHEN phase_name = 'ingest' THEN $2 END,
+            live_handoff_block_hash = CASE WHEN phase_name = 'ingest' THEN $3 END,
+            input_content_hash = CASE WHEN phase_name = 'interpret' THEN $4 END,
             started_at = now(),
             finished_at = now()
         WHERE chain_id = $1
@@ -2775,7 +4086,8 @@ async fn seed_completed_phase_extent(pool: &PgPool, chain_id: &str, hash: &str) 
         ",
     )
     .bind(chain_id)
-    .bind(block_hash(chain_id, 2))
+    .bind(head)
+    .bind(&head_hash)
     .bind(hash)
     .execute(pool)
     .await?;
@@ -2786,13 +4098,130 @@ async fn seed_completed_phase_extent(pool: &PgPool, chain_id: &str, hash: &str) 
             next_block_number, target_block_number, last_processed_block_number,
             last_processed_block_hash
         )
-        VALUES ($1, 'source', 'test', 'ethereum_head', 0, 3, 2, 2, $2)
+        VALUES ($1, 'source', 'test', 'ethereum_head', 0, $2, $3, $3, $4)
         ",
     )
     .bind(chain_id)
-    .bind(block_hash(chain_id, 2))
+    .bind(head.saturating_add(1))
+    .bind(head)
+    .bind(head_hash)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+async fn insert_competing_live_block(pool: &PgPool, chain_id: &str, block: i64) -> Result<()> {
+    sqlx::query(
+        "
+        INSERT INTO chain_lineage (
+            chain_id, block_hash, parent_hash, block_number, block_timestamp,
+            canonicality_state
+        )
+        VALUES ($1, $2, $3, $4, to_timestamp($4), 'safe')
+        ",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-competing-{block}"))
+    .bind((block > 0).then(|| block_hash(chain_id, block - 1)))
+    .bind(block)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn permit_duplicate_live_heights_for_corruption_test(pool: &PgPool) -> Result<()> {
+    sqlx::query("DROP INDEX chain_lineage_readable_height_idx")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn pool_with_acquire_gate(
+    source: &PgPool,
+    gated_acquisition: usize,
+) -> Result<(PgPool, Arc<Notify>, Arc<Notify>)> {
+    let acquire_count = Arc::new(AtomicUsize::new(0));
+    let reached = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let count_for_hook = Arc::clone(&acquire_count);
+    let reached_for_hook = Arc::clone(&reached);
+    let release_for_hook = Arc::clone(&release);
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .test_before_acquire(false)
+        .before_acquire(move |_connection, _metadata| {
+            let reached = Arc::clone(&reached_for_hook);
+            let release = Arc::clone(&release_for_hook);
+            let acquisition = count_for_hook.fetch_add(1, Ordering::SeqCst) + 1;
+            Box::pin(async move {
+                if acquisition == gated_acquisition {
+                    reached.notify_one();
+                    release.notified().await;
+                }
+                Ok(true)
+            })
+        })
+        .connect_with(source.connect_options().as_ref().clone())
+        .await?;
+    drop(pool.acquire().await?);
+    acquire_count.store(0, Ordering::SeqCst);
+    Ok((pool, reached, release))
+}
+
+async fn wait_for_locked_query(pool: &PgPool, query_pattern: &str) -> Result<()> {
+    for _ in 0..200 {
+        let waiting: bool = sqlx::query_scalar(
+            "
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_stat_activity
+                WHERE datname = current_database()
+                  AND pid <> pg_backend_pid()
+                  AND wait_event_type = 'Lock'
+                  AND query LIKE $1
+            )
+            ",
+        )
+        .bind(query_pattern)
+        .fetch_one(pool)
+        .await?;
+        if waiting {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    anyhow::bail!("interpretation did not reach locked query matching {query_pattern}")
+}
+
+async fn switch_live_lineage(pool: &PgPool, chain_id: &str, live_hash: &str) -> Result<()> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "
+        UPDATE chain_lineage
+        SET canonicality_state = 'orphaned'::canonicality_state
+        WHERE chain_id = $1
+          AND block_number = 1
+          AND block_hash <> $2
+        ",
+    )
+    .bind(chain_id)
+    .bind(live_hash)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "
+        UPDATE chain_lineage
+        SET canonicality_state = 'canonical'::canonicality_state
+        WHERE chain_id = $1
+          AND block_number = 1
+          AND block_hash = $2
+        ",
+    )
+    .bind(chain_id)
+    .bind(live_hash)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
     Ok(())
 }
 

@@ -1,3 +1,5 @@
+use std::{collections::HashMap, sync::Mutex};
+
 use sqlx::PgPool;
 
 use crate::{InterpretError, RECOMPUTE_FLAGS_UNAVAILABLE_REASON, Result, load, write};
@@ -10,7 +12,7 @@ pub struct Marker {
     pub hash: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RunMode {
     Normal,
     Redo,
@@ -36,11 +38,27 @@ pub struct BatchOutcome {
 
 pub struct Engine {
     pool: PgPool,
+    prior_sessions: Mutex<HashMap<SessionKey, PriorSession>>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct SessionKey {
+    chain_id: String,
+    from_block: i64,
+    mode: RunMode,
+}
+
+struct PriorSession {
+    next_block: i64,
+    snapshot: load::PriorSnapshot,
 }
 
 impl Engine {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            prior_sessions: Mutex::new(HashMap::new()),
+        }
     }
 
     pub async fn run_batch(&self, request: BatchRequest) -> Result<BatchOutcome> {
@@ -88,31 +106,159 @@ impl Engine {
             )));
         };
         let (batch_to, batch_hash) = markers.last().expect("non-empty markers");
-        let input =
-            load::batch_input(&self.pool, &request.chain_id, *batch_from, *batch_to).await?;
+        let session_key = SessionKey {
+            chain_id: request.chain_id.clone(),
+            from_block: request.from_block,
+            mode: request.mode,
+        };
+        let cached_prior_snapshot = if request.resume_current.is_some() {
+            self.cached_prior_snapshot(&session_key, *batch_from)?
+        } else {
+            None
+        };
+        let loaded = load::batch_input(
+            &self.pool,
+            &request.chain_id,
+            *batch_from,
+            *batch_to,
+            request
+                .resume_current
+                .as_ref()
+                .map(|marker| (marker.number, marker.hash.as_str())),
+            cached_prior_snapshot,
+        )
+        .await?;
+        let prior_snapshot = loaded.prior_snapshot;
+        let input = loaded.input;
+        let prior_events = input.prior_events.clone();
+        let batch_blocks = input.blocks.clone();
+        let loaded_markers = batch_blocks
+            .iter()
+            .map(|block| (block.block_number, block.block_hash.clone()))
+            .collect::<Vec<_>>();
+        validate_loaded_lineage(&request.chain_id, &markers, &loaded_markers)?;
+        let mut write_lineage = Vec::with_capacity(
+            loaded_markers.len() + usize::from(request.resume_current.is_some()),
+        );
+        if let Some(resume) = &request.resume_current {
+            write_lineage.push((resume.number, resume.hash.clone()));
+        }
+        write_lineage.extend(loaded_markers.iter().cloned());
         let output =
             bigname_adapters::schema_v2::interpret_schema_v2_batch(input).map_err(|error| {
                 InterpretError::data_integrity(format!(
                     "hash-covered adapter interpretation failed: {error:#}"
                 ))
             })?;
-        let redo_range = (matches!(request.mode, RunMode::Redo)
-            && request.resume_current.is_none())
-        .then_some((request.from_block, request.to_block));
-        let estimated_write_bytes =
-            write::batch(&self.pool, &request.chain_id, redo_range, &output).await?;
+        let next_prior_events = bigname_adapters::schema_v2::seam::fold_prior_events(
+            prior_events,
+            &output.normalized_events,
+            &batch_blocks,
+        )
+        .map_err(|error| {
+            InterpretError::data_integrity(format!(
+                "hash-covered adapter prior-state fold failed: {error:#}"
+            ))
+        })?;
+        let next_prior_snapshot =
+            load::fold_prior_snapshot(prior_snapshot, next_prior_events, &output.normalized_events);
+        let complete = *batch_to == target.number;
+        let redo_range =
+            matches!(request.mode, RunMode::Redo).then_some((request.from_block, request.to_block));
+        let prepare_redo_range = redo_range.is_some() && request.resume_current.is_none();
+        let estimated_write_bytes = write::batch(
+            &self.pool,
+            &request.chain_id,
+            redo_range,
+            prepare_redo_range,
+            complete,
+            &write_lineage,
+            &output,
+        )
+        .await?;
+        self.store_prior_snapshot(
+            session_key,
+            batch_to.saturating_add(1),
+            next_prior_snapshot,
+            complete,
+        )?;
         let current = Marker {
             number: *batch_to,
             hash: batch_hash.clone(),
         };
         Ok(BatchOutcome {
-            complete: current == target,
+            complete,
             current,
             target,
             estimated_write_bytes,
         })
     }
+
+    fn cached_prior_snapshot(
+        &self,
+        key: &SessionKey,
+        next_block: i64,
+    ) -> Result<Option<load::PriorSnapshot>> {
+        let sessions = self.prior_sessions.lock().map_err(|_| {
+            InterpretError::transient("interpret prior-state session lock was poisoned")
+        })?;
+        Ok(sessions
+            .get(key)
+            .filter(|session| session.next_block == next_block)
+            .map(|session| session.snapshot.clone()))
+    }
+
+    fn store_prior_snapshot(
+        &self,
+        key: SessionKey,
+        next_block: i64,
+        snapshot: load::PriorSnapshot,
+        complete: bool,
+    ) -> Result<()> {
+        let mut sessions = self.prior_sessions.lock().map_err(|_| {
+            InterpretError::transient("interpret prior-state session lock was poisoned")
+        })?;
+        update_prior_sessions(&mut sessions, key, next_block, snapshot, complete);
+        Ok(())
+    }
 }
+
+fn update_prior_sessions(
+    sessions: &mut HashMap<SessionKey, PriorSession>,
+    key: SessionKey,
+    next_block: i64,
+    snapshot: load::PriorSnapshot,
+    complete: bool,
+) {
+    if matches!(key.mode, RunMode::Redo) && complete {
+        sessions.remove(&key);
+    } else {
+        sessions.insert(
+            key,
+            PriorSession {
+                next_block,
+                snapshot,
+            },
+        );
+    }
+}
+
+fn validate_loaded_lineage(
+    chain_id: &str,
+    selected: &[(i64, String)],
+    loaded: &[(i64, String)],
+) -> Result<()> {
+    if loaded != selected {
+        return Err(InterpretError::transient(format!(
+            "interpret batch lineage changed while loading raw facts for chain {chain_id}; retry with a fresh canonical batch"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "engine/tests.rs"]
+mod tests;
 
 fn validate_contiguous_markers(
     chain_id: &str,

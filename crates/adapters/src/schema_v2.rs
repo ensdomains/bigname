@@ -12,6 +12,7 @@ mod manifest;
 mod model;
 mod normalized;
 mod protocol;
+pub mod seam;
 mod state;
 mod state_key;
 mod state_restore;
@@ -44,7 +45,13 @@ fn settle_block_boundary(
         let transition_authority = release
             .next_authority
             .as_ref()
-            .or(release.previous_authority.as_ref());
+            .filter(|authority| authority.surface_known)
+            .or_else(|| {
+                release
+                    .previous_authority
+                    .as_ref()
+                    .filter(|authority| authority.surface_known)
+            });
         let active_source = transition_authority
             .and_then(|authority| {
                 authority
@@ -127,8 +134,19 @@ fn settle_block_boundary(
         {
             continue;
         }
+        let previous_surface = release
+            .previous_authority
+            .as_ref()
+            .filter(|authority| authority.surface_known);
+        let next_surface = release
+            .next_authority
+            .as_ref()
+            .filter(|authority| authority.surface_known);
+        if previous_surface.is_none() && next_surface.is_none() {
+            continue;
+        }
         let mut transition_events = Vec::new();
-        if let Some(previous) = release.previous_authority.as_ref() {
+        if let Some(previous) = previous_surface {
             let previous_kind = v1_authority_kind(&previous.authority_source_family);
             let previous_key = previous
                 .authority_key
@@ -152,7 +170,7 @@ fn settle_block_boundary(
                 state_scope: format!("boundary:{}:surface", release.namehash),
             });
         }
-        if let Some(next) = release.next_authority.as_ref() {
+        if let Some(next) = next_surface {
             let next_kind = v1_authority_kind(&next.authority_source_family);
             let next_key = next
                 .authority_key
@@ -177,10 +195,8 @@ fn settle_block_boundary(
         transition_events.push(protocol::EventDraft {
             event_kind: "AuthorityEpochChanged".to_owned(),
             logical_name_id: Some(logical_name_id.clone()),
-            resource_id: release
-                .next_authority
-                .as_ref()
-                .or(release.previous_authority.as_ref())
+            resource_id: next_surface
+                .or(previous_surface)
                 .map(|authority| authority.resource_id),
             identity_suffix: format!("AuthorityEpochChanged:{}", release.namehash),
             explicit_before: Some(authority_boundary_state(
@@ -189,9 +205,7 @@ fn settle_block_boundary(
             after_state: authority_boundary_state(release.next_authority.as_ref()),
             state_scope: format!("boundary:{}:authority", release.namehash),
         });
-        if let (Some(next), Some(resolver)) =
-            (release.next_authority.as_ref(), release.resolver.as_deref())
-        {
+        if let (Some(next), Some(resolver)) = (next_surface, release.resolver.as_deref()) {
             transition_events.push(protocol::EventDraft {
                 event_kind: "ResolverChanged".to_owned(),
                 logical_name_id: Some(logical_name_id.clone()),
@@ -229,7 +243,7 @@ fn settle_block_boundary(
                     "registry-resolver-grant",
                 );
             }
-        } else if let Some(next) = release.next_authority.as_ref()
+        } else if let Some(next) = next_surface
             && let Some(subject) = next.owner.as_deref()
         {
             append_boundary_permission(
@@ -243,24 +257,24 @@ fn settle_block_boundary(
             );
         }
         normalized::materialize_boundary(&active_source, block, transition_events, state, output);
-        let next_binding_id = release.next_authority.as_ref().map(|next| {
+        let next_binding_id = next_surface.map(|next| {
             common::stable_uuid(&format!(
                 "binding:{}:{}",
                 next.authority_key.as_deref().unwrap_or("registry-only"),
                 block.block_hash,
             ))
         });
-        output.binding_closures.push(BindingClosure {
-            logical_name_id: logical_name_id.clone(),
-            except_surface_binding_id: next_binding_id,
-            active_to: block.block_timestamp,
-            block_number: block.block_number,
-            transaction_index: -1,
-            log_index: -1,
-        });
-        if let (Some(next), Some(surface_binding_id)) =
-            (release.next_authority.as_ref(), next_binding_id)
-        {
+        if previous_surface.is_some() {
+            output.binding_closures.push(BindingClosure {
+                logical_name_id: logical_name_id.clone(),
+                except_surface_binding_id: next_binding_id,
+                active_to: block.block_timestamp,
+                block_number: block.block_number,
+                transaction_index: -1,
+                log_index: -1,
+            });
+        }
+        if let (Some(next), Some(surface_binding_id)) = (next_surface, next_binding_id) {
             output.surface_bindings.push(SurfaceBinding {
                 surface_binding_id,
                 logical_name_id,
@@ -394,8 +408,14 @@ pub fn interpret_schema_v2_batch(input: BatchInput) -> anyhow::Result<BatchOutpu
             interpret_raw(&mut catalog, &raw, &mut state, &mut output)?;
         }
     }
-    for raw in raw_logs {
-        interpret_raw(&mut catalog, &raw, &mut state, &mut output)?;
+    if let Some(raw) = raw_logs.next() {
+        bail!(
+            "raw log {}:{} at block {} {} has no matching loaded live-lineage block",
+            raw.transaction_hash,
+            raw.log_index,
+            raw.block_number,
+            raw.block_hash
+        );
     }
     protocol::reconcile_batch(&mut output);
     Ok(output)
@@ -425,7 +445,7 @@ fn interpret_raw(
         }
     };
     normalized::materialize(&selected, raw, interpreted.events.clone(), state, output);
-    identity::materialize(&selected, raw, &interpreted, output)?;
+    identity::materialize(&selected, raw, &interpreted, state, output)?;
     discovery::materialize(catalog, &selected, raw, interpreted.discovery, output)?;
     Ok(())
 }
@@ -435,12 +455,23 @@ fn validate_order(input: &BatchInput) -> anyhow::Result<()> {
         bail!("schema-v2 adapter batch chain ID must not be empty");
     }
     let mut previous = None;
+    let mut live_hash_by_height = std::collections::BTreeMap::new();
     for block in &input.blocks {
         if block.chain_id != input.chain_id {
             bail!(
                 "raw block chain {} does not match adapter batch chain {}",
                 block.chain_id,
                 input.chain_id
+            );
+        }
+        if let Some(existing) = live_hash_by_height.insert(block.block_number, &block.block_hash)
+            && existing != &block.block_hash
+        {
+            bail!(
+                "schema-v2 adapter received multiple live-lineage hashes at block {}: {} and {}",
+                block.block_number,
+                existing,
+                block.block_hash
             );
         }
         let position = (block.block_number, block.block_hash.as_str());

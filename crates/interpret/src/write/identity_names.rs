@@ -1,7 +1,7 @@
 use bigname_adapters::schema_v2::BatchOutput;
 use sqlx::{Postgres, Transaction};
 
-use crate::{InterpretError, Result};
+use crate::{InterpretError, RECOMPUTE_FLAGS_UNAVAILABLE_REASON, Result};
 
 pub(super) async fn write(
     transaction: &mut Transaction<'_, Postgres>,
@@ -19,16 +19,13 @@ async fn write_preimages(
         let written: Option<String> = sqlx::query_scalar(
             "
             INSERT INTO label_preimages (
-                labelhash, raw_label, normalizer_version,
+                labelhash, raw_label, decoded_label, normalizer_version,
                 normalized_under_version, normalization_error,
                 source_kind, source_priority, provenance
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ON CONFLICT (labelhash) DO UPDATE
-            SET normalizer_version = EXCLUDED.normalizer_version,
-                normalized_under_version = EXCLUDED.normalized_under_version,
-                normalization_error = EXCLUDED.normalization_error,
-                source_kind = CASE
+            SET source_kind = CASE
                     WHEN EXCLUDED.source_priority >= label_preimages.source_priority
                         THEN EXCLUDED.source_kind
                     ELSE label_preimages.source_kind
@@ -44,11 +41,16 @@ async fn write_preimages(
                 END,
                 observed_at = now()
             WHERE label_preimages.raw_label = EXCLUDED.raw_label
+              AND label_preimages.decoded_label IS NOT DISTINCT FROM EXCLUDED.decoded_label
+              AND label_preimages.normalizer_version = EXCLUDED.normalizer_version
+              AND label_preimages.normalized_under_version = EXCLUDED.normalized_under_version
+              AND label_preimages.normalization_error IS NOT DISTINCT FROM EXCLUDED.normalization_error
             RETURNING labelhash
             ",
         )
         .bind(&preimage.labelhash)
         .bind(&preimage.raw_label)
+        .bind(&preimage.decoded_label)
         .bind(&preimage.normalizer_version)
         .bind(preimage.normalized_under_version)
         .bind(&preimage.normalization_error)
@@ -60,8 +62,8 @@ async fn write_preimages(
         .map_err(|error| InterpretError::database("failed to write raw label preimage", error))?;
         if written.is_none() {
             return Err(InterpretError::data_integrity(format!(
-                "label hash {} is already bound to different raw bytes",
-                preimage.labelhash
+                "label hash {} is already bound to different raw bytes or normalization state; {}",
+                preimage.labelhash, RECOMPUTE_FLAGS_UNAVAILABLE_REASON
             )));
         }
     }
@@ -87,12 +89,7 @@ async fn write_surfaces(
                 $11, $12, $13, $14, $15, $16, $17::canonicality_state
             )
             ON CONFLICT (logical_name_id) DO UPDATE
-            SET normalizer_version = EXCLUDED.normalizer_version,
-                visibility_state = EXCLUDED.visibility_state,
-                normalization_errors = EXCLUDED.normalization_errors,
-                deactivation_reason = EXCLUDED.deactivation_reason,
-                deactivated_at = EXCLUDED.deactivated_at,
-                block_hash = CASE
+            SET block_hash = CASE
                     WHEN name_surfaces.canonicality_state = 'orphaned'
                       OR EXCLUDED.block_number < name_surfaces.block_number
                         THEN EXCLUDED.block_hash
@@ -132,6 +129,10 @@ async fn write_surfaces(
               AND name_surfaces.dns_encoded_name = EXCLUDED.dns_encoded_name
               AND name_surfaces.namehash = EXCLUDED.namehash
               AND name_surfaces.labelhashes = EXCLUDED.labelhashes
+              AND name_surfaces.normalizer_version = EXCLUDED.normalizer_version
+              AND name_surfaces.visibility_state = EXCLUDED.visibility_state
+              AND name_surfaces.normalization_errors = EXCLUDED.normalization_errors
+              AND name_surfaces.deactivation_reason IS NOT DISTINCT FROM EXCLUDED.deactivation_reason
               AND name_surfaces.chain_id = EXCLUDED.chain_id
             RETURNING logical_name_id
             ",
@@ -158,8 +159,8 @@ async fn write_surfaces(
         .map_err(|error| InterpretError::database("failed to write raw name identity", error))?;
         if written.is_none() {
             return Err(InterpretError::data_integrity(format!(
-                "logical name ID {} is already bound to different raw identity data",
-                surface.logical_name_id
+                "logical name ID {} is already bound to different raw identity or normalization state; {}",
+                surface.logical_name_id, RECOMPUTE_FLAGS_UNAVAILABLE_REASON
             )));
         }
     }

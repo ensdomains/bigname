@@ -61,6 +61,7 @@ pub struct RawBlockInput {
 
 #[derive(Clone, Debug)]
 pub struct PriorEventInput {
+    pub retained_state_key: String,
     pub chain_id: String,
     pub namespace: String,
     pub logical_name_id: Option<String>,
@@ -126,7 +127,8 @@ pub struct NormalizedEvent {
 #[derive(Clone, Debug)]
 pub struct LabelPreimage {
     pub labelhash: String,
-    pub raw_label: String,
+    pub raw_label: Vec<u8>,
+    pub decoded_label: Option<String>,
     pub normalizer_version: String,
     pub normalized_under_version: bool,
     pub normalization_error: Option<String>,

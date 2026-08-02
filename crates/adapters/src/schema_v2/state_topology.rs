@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use super::State;
+use crate::schema_v2::common::surface_labels;
 
 impl State {
     pub(super) fn v2_registry_suffix(
@@ -9,7 +10,16 @@ impl State {
         namespace: &str,
         at_unix_timestamp: i64,
     ) -> Option<Vec<String>> {
-        self.v2_registry_suffix_inner(
+        surface_labels(&self.v2_registry_raw_suffix(registry, namespace, at_unix_timestamp)?)
+    }
+
+    pub(super) fn v2_registry_raw_suffix(
+        &self,
+        registry: &str,
+        namespace: &str,
+        at_unix_timestamp: i64,
+    ) -> Option<Vec<Vec<u8>>> {
+        self.v2_registry_raw_suffix_inner(
             &registry.to_ascii_lowercase(),
             namespace,
             at_unix_timestamp,
@@ -17,15 +27,20 @@ impl State {
         )
     }
 
-    fn v2_registry_suffix_inner(
+    fn v2_registry_raw_suffix_inner(
         &self,
         registry: &str,
         namespace: &str,
         at_unix_timestamp: i64,
         visiting: &mut BTreeSet<String>,
-    ) -> Option<Vec<String>> {
+    ) -> Option<Vec<Vec<u8>>> {
         if let Some((anchor_namespace, suffix)) = self.v2_suffix_anchors.get(registry) {
-            return (anchor_namespace == namespace).then(|| suffix.clone());
+            return (anchor_namespace == namespace).then(|| {
+                suffix
+                    .iter()
+                    .map(|label| label.as_bytes().to_vec())
+                    .collect()
+            });
         }
         if !visiting.insert(registry.to_owned()) {
             return None;
@@ -43,8 +58,12 @@ impl State {
                 if now >= expiry || entry.subregistry.as_deref() != Some(registry) {
                     return None;
                 }
-                let mut suffix =
-                    self.v2_registry_suffix_inner(parent, namespace, at_unix_timestamp, visiting)?;
+                let mut suffix = self.v2_registry_raw_suffix_inner(
+                    parent,
+                    namespace,
+                    at_unix_timestamp,
+                    visiting,
+                )?;
                 suffix.insert(0, label.clone());
                 Some(suffix)
             });

@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use crate::schema_v2::{
-    protocol::{BindingClosureDraft, EventDraft, Interpreted, NameDraft},
+    protocol::{BindingClosureDraft, EventDraft, Interpreted, NameDraft, ShadowNameDraft},
     state::{V2NameTransition, V2TokenState},
 };
 
@@ -65,6 +65,13 @@ pub(super) fn append_v2_name_transitions(
                 });
             }
         }
+        if let Some(current) = transition.current_shadow.as_ref() {
+            output.shadow_names.push(ShadowNameDraft {
+                raw_labels: current.raw_labels.clone(),
+                namehash: current.namehash.clone(),
+                source_kind: format!("{source_event}_registry_suffix"),
+            });
+        }
         let Some(ref current) = transition.current else {
             continue;
         };
@@ -118,11 +125,16 @@ pub(super) fn append_v2_name_transitions(
 }
 
 pub(super) fn boundary_expiration(transition: V2NameTransition) -> anyhow::Result<Interpreted> {
-    if transition.previous.is_none() || transition.current.is_some() {
+    if transition.current.is_some()
+        || transition.current_shadow.is_some()
+        || (transition.previous.is_none() && transition.previous_shadow.is_none())
+    {
         anyhow::bail!("block-boundary ENSv2 transition is not an expiration");
     }
     let mut output = Interpreted::new();
-    append_removed_name(&mut output, &transition, "RegistryPathExpired");
+    if transition.previous.is_some() {
+        append_removed_name(&mut output, &transition, "RegistryPathExpired");
+    }
     Ok(output)
 }
 

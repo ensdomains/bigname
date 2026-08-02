@@ -1,4 +1,4 @@
-use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_primitives::{Address, B256, U256, hex, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use serde_json::json;
 use time::OffsetDateTime;
@@ -28,6 +28,15 @@ mod v1_registrar {
     }
 }
 
+mod raw_v1_registrar {
+    use alloy_sol_types::sol;
+
+    sol! {
+        event RawNameRegistered(bytes name, bytes32 indexed label, address indexed owner, uint256 expires);
+        event RawNameRenewed(bytes name, bytes32 indexed label, uint256 expires);
+    }
+}
+
 mod v2_registry {
     use alloy_sol_types::sol;
 
@@ -46,12 +55,22 @@ mod v2_registry {
     }
 }
 
+mod raw_v2_registry {
+    use alloy_sol_types::sol;
+
+    sol! {
+        event RawLabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, bytes label, address owner, uint64 expiry, address indexed sender);
+        event RawParentUpdated(address indexed parent, bytes label, address indexed sender);
+    }
+}
+
 mod v2_resolver {
     use alloy_sol_types::sol;
 
     sol! {
         event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap);
         event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName);
+        event NamedResource(uint256 indexed resource, bytes name);
     }
 }
 
@@ -98,6 +117,15 @@ mod v2_registrar {
     }
 }
 
+mod raw_v2_registrar {
+    use alloy_sol_types::sol;
+
+    sol! {
+        event RawNameRegistered(uint256 indexed tokenId, bytes label, address owner, address subregistry, address resolver, uint64 duration, address paymentToken, bytes32 indexed referrer, uint256 base, uint256 premium);
+        event RawNameRenewed(uint256 indexed tokenId, bytes label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 indexed referrer, uint256 amount);
+    }
+}
+
 #[test]
 fn wrapper_adapter_expands_the_manifest_wrapper_transition() -> anyhow::Result<()> {
     let labels = vec!["wrapped".to_owned(), "eth".to_owned()];
@@ -109,7 +137,7 @@ fn wrapper_adapter_expands_the_manifest_wrapper_transition() -> anyhow::Result<(
         expiry: 42,
     }
     .encode_log_data();
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest(
             4,
@@ -149,6 +177,930 @@ fn wrapper_adapter_expands_the_manifest_wrapper_transition() -> anyhow::Result<(
 }
 
 #[test]
+fn non_utf8_wrapper_label_becomes_a_shadow_observation() -> anyhow::Result<()> {
+    assert_hostile_wrapper_label(vec![0xff], None)
+}
+
+#[test]
+fn non_utf8_v1_registrar_string_payload_becomes_a_shadow_observation() -> anyhow::Result<()> {
+    let raw_label = vec![0xff, 0xfe, 0xfd];
+    let labelhash = keccak256(&raw_label);
+    let node = super::common::namehash_raw([raw_label.as_slice(), b"eth".as_slice()].into_iter());
+    let encoded = with_topic0(
+        raw_v1_registrar::RawNameRegistered {
+            name: raw_label.clone().into(),
+            label: labelhash,
+            owner: CONTRACT.parse()?,
+            expires: U256::from(42),
+        }
+        .encode_log_data(),
+        NameRegistered::SIGNATURE_HASH,
+    );
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            63,
+            "ens_v1_registrar_l1",
+            "NameRegistered",
+            "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+            &["registrar"],
+            &["RegistrationGranted", "PreimageObserved"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(63, "registrar")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw(encoded)],
+    })?;
+
+    assert_shadow_output(&output, &node, &raw_label, None);
+    Ok(())
+}
+
+#[test]
+fn non_utf8_v2_registry_string_payload_becomes_a_shadow_observation() -> anyhow::Result<()> {
+    let raw_label = vec![0xff, 0xfe];
+    let token_id = U256::from_be_bytes(*keccak256(&raw_label));
+    let encoded = with_topic0(
+        raw_v2_registry::RawLabelRegistered {
+            tokenId: token_id,
+            labelHash: keccak256(&raw_label),
+            label: raw_label.clone().into(),
+            owner: CONTRACT.parse()?,
+            expiry: 42,
+            sender: CONTRACT.parse()?,
+        }
+        .encode_log_data(),
+        v2_registry::LabelRegistered::SIGNATURE_HASH,
+    );
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            64,
+            "ens_v2_registry_l1",
+            "LabelRegistered",
+            "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)",
+            &["registry"],
+            &["RegistrationGranted", "PreimageObserved"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(64, "registry")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw(encoded)],
+    })?;
+
+    let namehash =
+        super::common::namehash_raw([raw_label.as_slice(), b"eth".as_slice()].into_iter());
+    assert_shadow_output(&output, &namehash, &raw_label, None);
+    Ok(())
+}
+
+#[test]
+fn hostile_parent_update_retracts_a_bound_descendant_and_records_the_shadow_claim()
+-> anyhow::Result<()> {
+    const CHILD: &str = "0x0000000000000000000000000000000000000066";
+    let owner: Address = "0x0000000000000000000000000000000000000001".parse()?;
+    let sender: Address = "0x0000000000000000000000000000000000000002".parse()?;
+    let parent_token = versioned_token("sub", 1);
+    let child_token = versioned_token("leaf", 1);
+    let hostile_label = b"a\0b".to_vec();
+    let manifest = manifest_with_events(
+        66,
+        "ens",
+        "ens_v2_registry_l1",
+        &[
+            (
+                "LabelRegistered",
+                "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)",
+                &["registry"],
+                &["RegistrationGranted"],
+            ),
+            (
+                "TokenResource",
+                "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)",
+                &["registry"],
+                &["TokenResourceLinked"],
+            ),
+            (
+                "SubregistryUpdated",
+                "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)",
+                &["registry"],
+                &["SubregistryChanged"],
+            ),
+            (
+                "ParentUpdated",
+                "event ParentUpdated(address indexed parent, string label, address indexed sender)",
+                &["registry"],
+                &["ParentChanged"],
+            ),
+        ],
+    );
+    let mut child_admission = admission(66, "registry");
+    child_admission.address = CHILD.to_owned();
+    child_admission.contract_instance_id = super::common::contract_id(CHAIN, CHILD);
+    child_admission.role = None;
+    child_admission.discovery_edge_kind = Some("registry_announcement".to_owned());
+    child_admission.discovery_from_contract_instance_id =
+        Some(super::common::contract_id(CHAIN, CHILD));
+    child_admission.discovery_observation_key = Some("registry-announcement:child".to_owned());
+    let hostile_parent_update = with_topic0(
+        raw_v2_registry::RawParentUpdated {
+            parent: CONTRACT.parse()?,
+            label: hostile_label.clone().into(),
+            sender,
+        }
+        .encode_log_data(),
+        v2_registry::ParentUpdated::SIGNATURE_HASH,
+    );
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest],
+        discovery_rules: vec![DiscoveryRuleInput {
+            manifest_id: 66,
+            edge_kind: "subregistry".to_owned(),
+            from_role: Some("registry".to_owned()),
+            admission: "linked_subregistry_event".to_owned(),
+        }],
+        admissions: vec![admission(66, "registry"), child_admission],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            raw_at(
+                v2_registry::LabelRegistered {
+                    tokenId: parent_token,
+                    labelHash: keccak256(b"sub"),
+                    label: "sub".to_owned(),
+                    owner,
+                    expiry: 1_000,
+                    sender,
+                }
+                .encode_log_data(),
+                1,
+                0,
+                CONTRACT,
+            ),
+            raw_at(
+                v2_registry::LabelRegistered {
+                    tokenId: child_token,
+                    labelHash: keccak256(b"leaf"),
+                    label: "leaf".to_owned(),
+                    owner,
+                    expiry: 1_000,
+                    sender,
+                }
+                .encode_log_data(),
+                2,
+                0,
+                CHILD,
+            ),
+            raw_at(
+                v2_registry::TokenResource {
+                    tokenId: child_token,
+                    resource: U256::from(7),
+                }
+                .encode_log_data(),
+                3,
+                0,
+                CHILD,
+            ),
+            raw_at(
+                v2_registry::SubregistryUpdated {
+                    tokenId: parent_token,
+                    subregistry: CHILD.parse()?,
+                    sender,
+                }
+                .encode_log_data(),
+                4,
+                0,
+                CONTRACT,
+            ),
+            raw_at(
+                v2_registry::ParentUpdated {
+                    parent: CONTRACT.parse()?,
+                    label: "sub".to_owned(),
+                    sender,
+                }
+                .encode_log_data(),
+                5,
+                0,
+                CHILD,
+            ),
+            raw_at(hostile_parent_update, 6, 0, CHILD),
+        ],
+    })?;
+
+    let active = output
+        .name_surfaces
+        .iter()
+        .find(|surface| surface.raw_name == "leaf.sub.eth")
+        .expect("the valid mutual claim first binds the descendant");
+    assert!(output.binding_closures.iter().any(|closure| {
+        closure.logical_name_id == active.logical_name_id && closure.block_number == 6
+    }));
+    assert!(output.normalized_events.iter().any(|event| {
+        event.event_kind == "ParentChanged"
+            && event.block_number == Some(6)
+            && event.after_state["raw_label_hex"] == hex::encode(&hostile_label)
+            && event.after_state["decoded_label"].is_null()
+    }));
+    let shadow_namehash =
+        super::common::namehash_raw([hostile_label.as_slice(), b"eth"].into_iter());
+    assert_shadow_output(&output, &shadow_namehash, &hostile_label, None);
+    Ok(())
+}
+
+#[test]
+fn announced_registry_hostile_registration_waits_for_suffix_authority() -> anyhow::Result<()> {
+    const CHILD: &str = "0x0000000000000000000000000000000000000067";
+    let owner: Address = "0x0000000000000000000000000000000000000001".parse()?;
+    let sender: Address = "0x0000000000000000000000000000000000000002".parse()?;
+    let raw_label = b"a\0b".to_vec();
+    let child_token = versioned_token_bytes(&raw_label, 1);
+    let parent_token = versioned_token("sub", 1);
+    let manifest = manifest_with_events(
+        67,
+        "ens",
+        "ens_v2_registry_l1",
+        &[
+            (
+                "LabelRegistered",
+                "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)",
+                &["registry"],
+                &["RegistrationGranted"],
+            ),
+            (
+                "SubregistryUpdated",
+                "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)",
+                &["registry"],
+                &["SubregistryChanged"],
+            ),
+            (
+                "ParentUpdated",
+                "event ParentUpdated(address indexed parent, string label, address indexed sender)",
+                &["registry"],
+                &["ParentChanged"],
+            ),
+        ],
+    );
+    let mut child_admission = admission(67, "registry");
+    child_admission.address = CHILD.to_owned();
+    child_admission.contract_instance_id = super::common::contract_id(CHAIN, CHILD);
+    child_admission.role = None;
+    child_admission.discovery_edge_kind = Some("registry_announcement".to_owned());
+    child_admission.discovery_from_contract_instance_id =
+        Some(super::common::contract_id(CHAIN, CHILD));
+    child_admission.discovery_observation_key = Some("registry-announcement:child".to_owned());
+    let admissions = || vec![admission(67, "registry"), child_admission.clone()];
+    let rules = || {
+        vec![DiscoveryRuleInput {
+            manifest_id: 67,
+            edge_kind: "subregistry".to_owned(),
+            from_role: Some("registry".to_owned()),
+            admission: "linked_subregistry_event".to_owned(),
+        }]
+    };
+    let hostile_registration = with_topic0(
+        raw_v2_registry::RawLabelRegistered {
+            tokenId: child_token,
+            labelHash: keccak256(&raw_label),
+            label: raw_label.clone().into(),
+            owner,
+            expiry: 1_000,
+            sender,
+        }
+        .encode_log_data(),
+        v2_registry::LabelRegistered::SIGNATURE_HASH,
+    );
+    let first = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest.clone()],
+        discovery_rules: rules(),
+        admissions: admissions(),
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw_at(hostile_registration, 1, 0, CHILD)],
+    })?;
+
+    assert!(
+        first.name_surfaces.is_empty(),
+        "an unattached registry cannot turn a token ID into a logical name"
+    );
+    assert!(first.normalized_events.iter().any(|event| {
+        event.event_kind == "RegistrationGranted"
+            && event.logical_name_id.is_none()
+            && event.after_state["raw_label_hex"] == hex::encode(&raw_label)
+            && event.after_state["decoded_label"].is_null()
+    }));
+
+    let second = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest],
+        discovery_rules: rules(),
+        admissions: admissions(),
+        prior_events: first.normalized_events.iter().map(prior_event).collect(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            raw_at(
+                v2_registry::LabelRegistered {
+                    tokenId: parent_token,
+                    labelHash: keccak256(b"sub"),
+                    label: "sub".to_owned(),
+                    owner,
+                    expiry: 1_000,
+                    sender,
+                }
+                .encode_log_data(),
+                2,
+                0,
+                CONTRACT,
+            ),
+            raw_at(
+                v2_registry::SubregistryUpdated {
+                    tokenId: parent_token,
+                    subregistry: CHILD.parse()?,
+                    sender,
+                }
+                .encode_log_data(),
+                3,
+                0,
+                CONTRACT,
+            ),
+            raw_at(
+                v2_registry::ParentUpdated {
+                    parent: CONTRACT.parse()?,
+                    label: "sub".to_owned(),
+                    sender,
+                }
+                .encode_log_data(),
+                4,
+                0,
+                CHILD,
+            ),
+        ],
+    })?;
+    let shadow_namehash = super::common::namehash_raw(
+        [raw_label.as_slice(), b"sub".as_slice(), b"eth".as_slice()].into_iter(),
+    );
+    assert_shadow_output(&second, &shadow_namehash, &raw_label, None);
+    assert!(second.surface_bindings.is_empty());
+    Ok(())
+}
+
+#[test]
+fn non_utf8_v2_registrar_string_payload_becomes_a_shadow_observation() -> anyhow::Result<()> {
+    let raw_label = vec![0xff, 0xfe];
+    let token_id = U256::from_be_bytes(*keccak256(&raw_label));
+    let encoded = with_topic0(
+        raw_v2_registrar::RawNameRegistered {
+            tokenId: token_id,
+            label: raw_label.clone().into(),
+            owner: CONTRACT.parse()?,
+            subregistry: Address::ZERO,
+            resolver: Address::ZERO,
+            duration: 42,
+            paymentToken: Address::ZERO,
+            referrer: B256::ZERO,
+            base: U256::ZERO,
+            premium: U256::ZERO,
+        }
+        .encode_log_data(),
+        v2_registrar::NameRegistered::SIGNATURE_HASH,
+    );
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            65,
+            "ens_v2_registrar_l1",
+            "NameRegistered",
+            "event NameRegistered(uint256 indexed tokenId, string label, address owner, address subregistry, address resolver, uint64 duration, address paymentToken, bytes32 indexed referrer, uint256 base, uint256 premium)",
+            &["registrar"],
+            &["RegistrarNameRegistered", "PreimageObserved"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(65, "registrar")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw(encoded)],
+    })?;
+
+    let namehash =
+        super::common::namehash_raw([raw_label.as_slice(), b"eth".as_slice()].into_iter());
+    assert_shadow_output(&output, &namehash, &raw_label, None);
+    Ok(())
+}
+
+#[test]
+fn hostile_v1_registrar_label_retains_registration_renewal_and_transfer_lifecycle()
+-> anyhow::Result<()> {
+    let raw_label = b"a\0b".to_vec();
+    let labelhash = keccak256(&raw_label);
+    let node = super::common::namehash_raw([raw_label.as_slice(), b"eth"].into_iter());
+    let owner: Address = "0x0000000000000000000000000000000000000001".parse()?;
+    let next_owner: Address = "0x0000000000000000000000000000000000000002".parse()?;
+    let registered = with_topic0(
+        raw_v1_registrar::RawNameRegistered {
+            name: raw_label.clone().into(),
+            label: labelhash,
+            owner,
+            expires: U256::from(42),
+        }
+        .encode_log_data(),
+        NameRegistered::SIGNATURE_HASH,
+    );
+    let renewed = with_topic0(
+        raw_v1_registrar::RawNameRenewed {
+            name: raw_label.clone().into(),
+            label: labelhash,
+            expires: U256::from(84),
+        }
+        .encode_log_data(),
+        NameRenewed::SIGNATURE_HASH,
+    );
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest_with_events(
+            68,
+            "ens",
+            "ens_v1_registrar_l1",
+            &[
+                (
+                    "NameRegistered",
+                    "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+                    &["registrar"],
+                    &["RegistrationGranted"],
+                ),
+                (
+                    "Transfer",
+                    "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
+                    &["registrar"],
+                    &["TokenControlTransferred"],
+                ),
+                (
+                    "NameRenewed",
+                    "event NameRenewed(string name, bytes32 indexed label, uint256 expires)",
+                    &["registrar"],
+                    &["RegistrationRenewed"],
+                ),
+            ],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(68, "registrar")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            raw_at(registered, 1, 0, CONTRACT),
+            raw_at(
+                v1_registrar::Transfer {
+                    from: owner,
+                    to: next_owner,
+                    tokenId: U256::from_be_bytes(*labelhash),
+                }
+                .encode_log_data(),
+                2,
+                0,
+                CONTRACT,
+            ),
+            raw_at(renewed, 3, 0, CONTRACT),
+        ],
+    })?;
+
+    for kind in [
+        "RegistrationGranted",
+        "TokenControlTransferred",
+        "RegistrationRenewed",
+    ] {
+        assert!(
+            output
+                .normalized_events
+                .iter()
+                .any(|event| event.event_kind == kind),
+            "missing hostile-label lifecycle event {kind}"
+        );
+    }
+    assert!(output.normalized_events.iter().any(|event| {
+        event.event_kind == "RegistrationGranted" && event.after_state["decoded_label"].is_null()
+    }));
+    assert!(!output.resources.is_empty());
+    assert!(!output.token_lineages.is_empty());
+    assert_shadow_output(&output, &node, &raw_label, None);
+    Ok(())
+}
+
+#[test]
+fn normalization_changed_v1_label_remains_shadow_after_registry_authority_transition()
+-> anyhow::Result<()> {
+    const REGISTRY: &str = "0x0000000000000000000000000000000000000072";
+    let raw_label = b"Alice".to_vec();
+    let labelhash = keccak256(&raw_label);
+    let node = super::common::namehash_raw([raw_label.as_slice(), b"eth"].into_iter());
+    let owner: Address = "0x0000000000000000000000000000000000000001".parse()?;
+    let next_owner: Address = "0x0000000000000000000000000000000000000002".parse()?;
+    let registrar_manifest = manifest(
+        72,
+        "ens_v1_registrar_l1",
+        "NameRegistered",
+        "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+        &["registrar"],
+        &["RegistrationGranted"],
+    );
+    let first = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![registrar_manifest],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(72, "registrar")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw_at(
+            NameRegistered {
+                name: "Alice".to_owned(),
+                label: labelhash,
+                owner,
+                expires: U256::from(1_000),
+            }
+            .encode_log_data(),
+            1,
+            0,
+            CONTRACT,
+        )],
+    })?;
+    let first_surface = first
+        .name_surfaces
+        .iter()
+        .find(|surface| surface.namehash == node)
+        .expect("normalization-changed shadow identity");
+    assert_eq!(first_surface.visibility_state, "shadow");
+    assert!(first.surface_bindings.is_empty());
+    assert!(first.label_preimages.iter().any(|preimage| {
+        preimage.raw_label == raw_label
+            && preimage.decoded_label.as_deref() == Some("Alice")
+            && !preimage.normalized_under_version
+    }));
+
+    let registry_manifest = manifest(
+        73,
+        "ens_v1_registry_l1",
+        "NewOwner",
+        "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+        &["registry"],
+        &["SubregistryChanged", "AuthorityTransferred"],
+    );
+    let mut registry_admission = admission(73, "registry");
+    registry_admission.address = REGISTRY.to_owned();
+    let second = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![registry_manifest],
+        discovery_rules: Vec::new(),
+        admissions: vec![registry_admission],
+        prior_events: first.normalized_events.iter().map(prior_event).collect(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw_at(
+            v1_registry::NewOwner {
+                node: super::common::namehash(&["eth".to_owned()]).parse()?,
+                label: labelhash,
+                owner: next_owner,
+            }
+            .encode_log_data(),
+            2,
+            0,
+            REGISTRY,
+        )],
+    })?;
+    let logical_name_id = format!("ens:{node}");
+    assert!(
+        second
+            .surface_bindings
+            .iter()
+            .all(|binding| binding.logical_name_id != logical_name_id)
+    );
+    assert!(second.normalized_events.iter().all(|event| {
+        event.event_kind != "SurfaceBound"
+            || event.logical_name_id.as_deref() != Some(logical_name_id.as_str())
+    }));
+    Ok(())
+}
+
+#[test]
+fn hostile_wrapper_label_retains_transfer_and_unwrap_authority_lifecycle() -> anyhow::Result<()> {
+    let raw_label = vec![0xff];
+    let dns_name = vec![1, 0xff, 3, b'e', b't', b'h', 0];
+    let node = super::common::namehash_raw([raw_label.as_slice(), b"eth"].into_iter());
+    let owner: Address = "0x0000000000000000000000000000000000000001".parse()?;
+    let next_owner: Address = "0x0000000000000000000000000000000000000002".parse()?;
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest_with_events(
+            69,
+            "ens",
+            "ens_v1_wrapper_l1",
+            &[
+                (
+                    "NameWrapped",
+                    "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)",
+                    &["name_wrapper"],
+                    &["TokenControlTransferred"],
+                ),
+                (
+                    "TransferSingle",
+                    "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)",
+                    &["name_wrapper"],
+                    &["TokenControlTransferred"],
+                ),
+                (
+                    "NameUnwrapped",
+                    "event NameUnwrapped(bytes32 indexed node, address owner)",
+                    &["name_wrapper"],
+                    &["SurfaceUnbound"],
+                ),
+            ],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(69, "name_wrapper")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            raw_at(
+                NameWrapped {
+                    node: node.parse()?,
+                    name: dns_name.into(),
+                    owner,
+                    fuses: 1,
+                    expiry: 42,
+                }
+                .encode_log_data(),
+                1,
+                0,
+                CONTRACT,
+            ),
+            raw_at(
+                v2_registry::TransferSingle {
+                    operator: owner,
+                    from: owner,
+                    to: next_owner,
+                    id: node.parse()?,
+                    value: U256::from(1),
+                }
+                .encode_log_data(),
+                2,
+                0,
+                CONTRACT,
+            ),
+            raw_at(
+                NameUnwrapped {
+                    node: node.parse()?,
+                    owner: next_owner,
+                }
+                .encode_log_data(),
+                3,
+                0,
+                CONTRACT,
+            ),
+        ],
+    })?;
+
+    assert!(
+        output
+            .normalized_events
+            .iter()
+            .filter(|event| event.event_kind == "TokenControlTransferred")
+            .count()
+            >= 2
+    );
+    assert!(output.normalized_events.iter().any(|event| {
+        event.event_kind == "AuthorityEpochChanged"
+            && event.after_state["source_event"] == "NameUnwrapped"
+    }));
+    assert!(!output.resources.is_empty());
+    assert!(!output.token_lineages.is_empty());
+    assert_shadow_output(&output, &node, &raw_label, None);
+    Ok(())
+}
+
+#[test]
+fn hostile_v2_registrar_label_retains_registration_and_renewal_events() -> anyhow::Result<()> {
+    let raw_label = b"a\0b".to_vec();
+    let token_id = versioned_token_bytes(&raw_label, 1);
+    let node = super::common::namehash_raw([raw_label.as_slice(), b"eth"].into_iter());
+    let owner: Address = "0x0000000000000000000000000000000000000001".parse()?;
+    let registered = with_topic0(
+        raw_v2_registrar::RawNameRegistered {
+            tokenId: token_id,
+            label: raw_label.clone().into(),
+            owner,
+            subregistry: Address::ZERO,
+            resolver: Address::ZERO,
+            duration: 42,
+            paymentToken: Address::ZERO,
+            referrer: B256::ZERO,
+            base: U256::ZERO,
+            premium: U256::ZERO,
+        }
+        .encode_log_data(),
+        v2_registrar::NameRegistered::SIGNATURE_HASH,
+    );
+    let renewed = with_topic0(
+        raw_v2_registrar::RawNameRenewed {
+            tokenId: token_id,
+            label: raw_label.clone().into(),
+            duration: 42,
+            newExpiry: 84,
+            paymentToken: Address::ZERO,
+            referrer: B256::ZERO,
+            amount: U256::ZERO,
+        }
+        .encode_log_data(),
+        alloy_primitives::keccak256(
+            b"NameRenewed(uint256,string,uint64,uint64,address,bytes32,uint256)",
+        ),
+    );
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest_with_events(
+            70,
+            "ens",
+            "ens_v2_registrar_l1",
+            &[
+                (
+                    "NameRegistered",
+                    "event NameRegistered(uint256 indexed tokenId, string label, address owner, address subregistry, address resolver, uint64 duration, address paymentToken, bytes32 indexed referrer, uint256 base, uint256 premium)",
+                    &["registrar"],
+                    &["RegistrarNameRegistered"],
+                ),
+                (
+                    "NameRenewed",
+                    "event NameRenewed(uint256 indexed tokenId, string label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 indexed referrer, uint256 amount)",
+                    &["registrar"],
+                    &["RegistrationRenewed"],
+                ),
+            ],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(70, "registrar")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            raw_at(registered, 1, 0, CONTRACT),
+            raw_at(renewed, 2, 0, CONTRACT),
+        ],
+    })?;
+
+    assert!(
+        output
+            .normalized_events
+            .iter()
+            .any(|event| event.event_kind == "RegistrarNameRegistered")
+    );
+    assert!(
+        output
+            .normalized_events
+            .iter()
+            .any(|event| event.event_kind == "RegistrationRenewed")
+    );
+    assert!(output.normalized_events.iter().all(|event| {
+        !matches!(
+            event.event_kind.as_str(),
+            "RegistrarNameRegistered" | "RegistrationRenewed"
+        ) || event.after_state["decoded_label"].is_null()
+    }));
+    assert_shadow_output(&output, &node, &raw_label, None);
+    Ok(())
+}
+
+#[test]
+fn embedded_dot_wrapper_label_becomes_a_shadow_observation() -> anyhow::Result<()> {
+    assert_hostile_wrapper_label(b"a.b".to_vec(), Some("a.b"))
+}
+
+#[test]
+fn embedded_nul_wrapper_label_becomes_a_shadow_observation() -> anyhow::Result<()> {
+    assert_hostile_wrapper_label(b"a\0b".to_vec(), None)
+}
+
+#[test]
+fn two_hundred_fifty_six_byte_registrar_label_becomes_a_shadow_observation() -> anyhow::Result<()> {
+    let raw_label = vec![b'a'; 256];
+    let label = String::from_utf8(raw_label.clone())?;
+    let node = super::common::namehash_raw([raw_label.as_slice(), b"eth".as_slice()].into_iter());
+    let encoded = NameRegistered {
+        name: label.clone(),
+        label: keccak256(&raw_label),
+        owner: CONTRACT.parse()?,
+        expires: U256::from(42),
+    }
+    .encode_log_data();
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            61,
+            "ens_v1_registrar_l1",
+            "NameRegistered",
+            "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+            &["registrar"],
+            &["RegistrationGranted", "PreimageObserved"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(61, "registrar")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw(encoded)],
+    })?;
+
+    assert_shadow_output(&output, &node, &raw_label, Some(&label));
+    Ok(())
+}
+
+fn assert_hostile_wrapper_label(
+    raw_label: Vec<u8>,
+    decoded_label: Option<&str>,
+) -> anyhow::Result<()> {
+    let mut dns_name = Vec::with_capacity(raw_label.len() + 6);
+    dns_name.push(u8::try_from(raw_label.len())?);
+    dns_name.extend_from_slice(&raw_label);
+    dns_name.extend_from_slice(b"\x03eth\0");
+    let node = super::common::namehash_raw([raw_label.as_slice(), b"eth".as_slice()].into_iter());
+    let encoded = NameWrapped {
+        node: node.parse()?,
+        name: dns_name.into(),
+        owner: CONTRACT.parse()?,
+        fuses: 1,
+        expiry: 42,
+    }
+    .encode_log_data();
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            62,
+            "ens_v1_wrapper_l1",
+            "NameWrapped",
+            "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)",
+            &["name_wrapper"],
+            &["TokenControlTransferred", "PreimageObserved"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(62, "name_wrapper")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw(encoded)],
+    })?;
+
+    assert_shadow_output(&output, &node, &raw_label, decoded_label);
+    Ok(())
+}
+
+fn assert_shadow_output(
+    output: &BatchOutput,
+    namehash: &str,
+    raw_label: &[u8],
+    decoded_label: Option<&str>,
+) {
+    let surface = output
+        .name_surfaces
+        .iter()
+        .find(|surface| surface.namehash == namehash)
+        .expect("hostile label shadow identity");
+    assert_eq!(surface.logical_name_id, format!("ens:{namehash}"));
+    assert_eq!(surface.visibility_state, "shadow");
+    assert_eq!(
+        surface.deactivation_reason.as_deref(),
+        Some("normalization_gate")
+    );
+    assert!(
+        output
+            .surface_bindings
+            .iter()
+            .all(|binding| binding.logical_name_id != surface.logical_name_id)
+    );
+    assert!(
+        output
+            .binding_closures
+            .iter()
+            .all(|closure| closure.logical_name_id != surface.logical_name_id)
+    );
+    let preimage = output
+        .label_preimages
+        .iter()
+        .find(|preimage| preimage.raw_label == raw_label)
+        .expect("hostile raw label preimage");
+    assert_eq!(preimage.decoded_label.as_deref(), decoded_label);
+    assert!(!preimage.normalized_under_version);
+    assert!(preimage.normalization_error.is_some());
+    let shadow = output
+        .normalized_events
+        .iter()
+        .find(|event| event.after_state["visibility_state"] == "shadow")
+        .expect("shadow identity observation");
+    assert_eq!(
+        shadow.logical_name_id.as_deref(),
+        Some(surface.logical_name_id.as_str())
+    );
+    assert_eq!(shadow.after_state["namehash"], namehash);
+    assert_eq!(
+        shadow.after_state["logical_name_id"],
+        format!("ens:{namehash}")
+    );
+}
+
+#[test]
 fn wrapper_incremental_updates_keep_identity_and_prior_state_across_batches() -> anyhow::Result<()>
 {
     let labels = vec!["wrapped".to_owned(), "eth".to_owned()];
@@ -184,7 +1136,7 @@ fn wrapper_incremental_updates_keep_identity_and_prior_state_across_batches() ->
             ),
         ],
     );
-    let first = interpret_schema_v2_batch(BatchInput {
+    let first = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest.clone()],
         discovery_rules: Vec::new(),
@@ -211,7 +1163,7 @@ fn wrapper_incremental_updates_keep_identity_and_prior_state_across_batches() ->
         .find(|event| event.event_kind == "SurfaceBound")
         .and_then(|event| event.resource_id)
         .expect("wrapped resource");
-    let second = interpret_schema_v2_batch(BatchInput {
+    let second = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest],
         discovery_rules: Vec::new(),
@@ -260,7 +1212,7 @@ fn registrar_adapter_emits_raw_namehash_identity_and_preimages() -> anyhow::Resu
         expires: U256::from(42),
     }
     .encode_log_data();
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest(
             1,
@@ -312,7 +1264,7 @@ fn registrar_adapter_emits_raw_namehash_identity_and_preimages() -> anyhow::Resu
         output
             .label_preimages
             .iter()
-            .map(|preimage| preimage.raw_label.as_str())
+            .filter_map(|preimage| preimage.decoded_label.as_deref())
             .collect::<std::collections::BTreeSet<_>>(),
         std::collections::BTreeSet::from(["alice", "eth"]),
     );
@@ -321,7 +1273,7 @@ fn registrar_adapter_emits_raw_namehash_identity_and_preimages() -> anyhow::Resu
 
 #[test]
 fn first_seen_renewal_synthesizes_the_retained_registration_anchor() -> anyhow::Result<()> {
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest(
             60,
@@ -380,7 +1332,7 @@ fn first_seen_renewal_synthesizes_the_retained_registration_anchor() -> anyhow::
 #[test]
 fn registry_created_emits_the_ruled_self_edge() -> anyhow::Result<()> {
     let encoded = RegistryCreated {}.encode_log_data();
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest(
             2,
@@ -411,6 +1363,57 @@ fn registry_created_emits_the_ruled_self_edge() -> anyhow::Result<()> {
 }
 
 #[test]
+fn announced_registry_prefers_a_same_namespace_declaring_manifest() -> anyhow::Result<()> {
+    let event = (
+        "RegistryCreated",
+        "event RegistryCreated()",
+        &["registry"][..],
+        &["RegistryCreated"][..],
+    );
+    let mut announced = admission(65, "registry");
+    announced.role = None;
+    announced.discovery_edge_kind = Some("registry_announcement".to_owned());
+    announced.discovery_from_contract_instance_id = Some(announced.contract_instance_id);
+    announced.discovery_observation_key = Some("registry-announcement:fixture".to_owned());
+    let mut declared = admission(66, "registry");
+    declared.contract_instance_id = announced.contract_instance_id;
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![
+            manifest_with_events(65, "ens", "ens_v2_registry_l1", &[event]),
+            manifest_with_events(66, "ens", "ens_v2_registry_l1", &[event]),
+        ],
+        discovery_rules: vec![
+            DiscoveryRuleInput {
+                manifest_id: 65,
+                edge_kind: "registry_announcement".to_owned(),
+                from_role: None,
+                admission: "event_announcement".to_owned(),
+            },
+            DiscoveryRuleInput {
+                manifest_id: 66,
+                edge_kind: "registry_announcement".to_owned(),
+                from_role: Some("registry".to_owned()),
+                admission: "declared_deployment".to_owned(),
+            },
+        ],
+        admissions: vec![announced, declared],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw(RegistryCreated {}.encode_log_data())],
+    })?;
+
+    let normalized = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RegistryCreated")
+        .expect("registry announcement event");
+    assert_eq!(normalized.source_manifest_id, Some(66));
+    assert_eq!(output.discovery_edges[0].source_manifest_id, 66);
+    Ok(())
+}
+
+#[test]
 fn registry_permission_adapter_selects_one_root_event() -> anyhow::Result<()> {
     let encoded = EACRolesChanged {
         resource: U256::ZERO,
@@ -419,7 +1422,7 @@ fn registry_permission_adapter_selects_one_root_event() -> anyhow::Result<()> {
         newRoleBitmap: U256::from(2),
     }
     .encode_log_data();
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest(
             3,
@@ -471,7 +1474,7 @@ fn registrar_transfer_reuses_and_materializes_the_registration_resource() -> any
         tokenId: U256::from_be_slice(labelhash.as_slice()),
     }
     .encode_log_data();
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest_with_events(
             10,
@@ -536,7 +1539,7 @@ fn ens_v1_reregistration_mints_a_fresh_registrar_anchor() -> anyhow::Result<()> 
         }
         .encode_log_data()
     };
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest(
             28,
@@ -601,7 +1604,7 @@ fn same_block_v1_releases_have_distinct_permission_event_identities() -> anyhow:
             CONTRACT,
         )
     };
-    let first = interpret_schema_v2_batch(BatchInput {
+    let first = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest.clone()],
         discovery_rules: Vec::new(),
@@ -610,7 +1613,7 @@ fn same_block_v1_releases_have_distinct_permission_event_identities() -> anyhow:
         blocks: Vec::new(),
         raw_logs: vec![registration("alice", 0), registration("bob", 1)],
     })?;
-    let boundary = interpret_schema_v2_batch(BatchInput {
+    let boundary = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest],
         discovery_rules: Vec::new(),
@@ -692,7 +1695,7 @@ fn same_transaction_controller_setup_is_attributed_to_the_registration() -> anyh
     );
     let mut registry_admission = admission(30, "registry");
     registry_admission.address = registry_address.to_owned();
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![
             registry,
@@ -752,7 +1755,7 @@ fn same_transaction_controller_setup_is_attributed_to_the_registration() -> anyh
 fn registry_owner_observation_mints_a_node_scoped_registry_authority() -> anyhow::Result<()> {
     let parent = B256::repeat_byte(0x61);
     let labelhash = keccak256(b"child");
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest(
             57,
@@ -816,7 +1819,7 @@ fn migrated_v1_node_ignores_later_old_registry_updates_across_batches() -> anyho
     let mut old = admission(58, "registry_old");
     old.address = OLD.to_owned();
     old.contract_instance_id = Uuid::from_u128(580);
-    let first = interpret_schema_v2_batch(BatchInput {
+    let first = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest.clone()],
         discovery_rules: Vec::new(),
@@ -841,7 +1844,7 @@ fn migrated_v1_node_ignores_later_old_registry_updates_across_batches() -> anyho
         input[32..].copy_from_slice(labelhash.as_slice());
         B256::from(keccak256(input))
     };
-    let second = interpret_schema_v2_batch(BatchInput {
+    let second = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest],
         discovery_rules: Vec::new(),
@@ -904,7 +1907,7 @@ fn same_block_binding_transitions_follow_log_order() -> anyhow::Result<()> {
     .encode_log_data();
     let mut wrapper_admission = admission(33, "name_wrapper");
     wrapper_admission.address = wrapper_address.to_owned();
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![
             manifest(
@@ -974,7 +1977,7 @@ fn ens_v1_registry_and_match_all_resolver_reuse_the_registered_authority() -> an
     .encode_log_data();
     let mut registry_admission = admission(22, "registry");
     registry_admission.address = registry_address.to_owned();
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![
             manifest(
@@ -1079,7 +2082,7 @@ fn ens_v2_token_resource_unifies_registration_binding_and_permissions() -> anyho
         newRoleBitmap: U256::from(1),
     }
     .encode_log_data();
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![registry],
         discovery_rules: Vec::new(),
@@ -1195,7 +2198,7 @@ fn ens_v2_registrar_intent_reuses_the_registry_eac_resource_without_rebinding() 
     .encode_log_data();
     let mut registrar_admission = admission(18, "registrar");
     registrar_admission.address = registrar_address.to_owned();
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![registry, registrar],
         discovery_rules: Vec::new(),
@@ -1229,7 +2232,7 @@ fn ens_v2_resource_and_lineage_survive_prior_state_and_token_regeneration() -> a
     let label = "alice";
     let old_token = versioned_token(label, 1);
     let new_token = versioned_token(label, 2);
-    let first = interpret_schema_v2_batch(BatchInput {
+    let first = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest_with_events(
             19,
@@ -1292,6 +2295,13 @@ fn ens_v2_resource_and_lineage_survive_prior_state_and_token_regeneration() -> a
         .iter()
         .filter(|event| event.block_number.is_some())
         .map(|event| PriorEventInput {
+            retained_state_key: seam::retained_prior_state_key(
+                event
+                    .raw_fact_ref
+                    .get(seam::INTERPRETER_STATE_KEY)
+                    .and_then(serde_json::Value::as_str),
+                &event.event_identity,
+            ),
             chain_id: event.chain_id.clone(),
             namespace: event.namespace.clone(),
             logical_name_id: event.logical_name_id.clone(),
@@ -1324,7 +2334,7 @@ fn ens_v2_resource_and_lineage_survive_prior_state_and_token_regeneration() -> a
         value: U256::from(1),
     }
     .encode_log_data();
-    let second = interpret_schema_v2_batch(BatchInput {
+    let second = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest_with_events(
             19,
@@ -1437,7 +2447,7 @@ fn ens_v2_prior_state_re_registration_discards_the_displaced_token() -> anyhow::
             CONTRACT,
         )
     };
-    let first = interpret_schema_v2_batch(BatchInput {
+    let first = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest.clone()],
         discovery_rules: Vec::new(),
@@ -1452,7 +2462,7 @@ fn ens_v2_prior_state_re_registration_discards_the_displaced_token() -> anyhow::
         .find(|event| event.event_kind == "TokenResourceLinked")
         .and_then(|event| event.resource_id)
         .expect("old resource");
-    let second = interpret_schema_v2_batch(BatchInput {
+    let second = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest.clone()],
         discovery_rules: Vec::new(),
@@ -1469,7 +2479,7 @@ fn ens_v2_prior_state_re_registration_discards_the_displaced_token() -> anyhow::
         .expect("new resource");
     assert_ne!(old_resource, new_resource);
 
-    let third = interpret_schema_v2_batch(BatchInput {
+    let third = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest],
         discovery_rules: Vec::new(),
@@ -1547,7 +2557,7 @@ fn ens_v2_expiry_extension_orders_the_old_unbind_before_the_new_binding() -> any
     child_admission.discovery_edge_kind = Some("registry_announcement".to_owned());
     child_admission.discovery_from_contract_instance_id = Some(Uuid::from_u128(540));
     child_admission.discovery_observation_key = Some("registry-announcement:child".to_owned());
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest.clone()],
         discovery_rules: vec![DiscoveryRuleInput {
@@ -1716,7 +2726,7 @@ fn ens_v2_parent_expiry_retracts_descendant_at_the_block_boundary() -> anyhow::R
     child_admission.discovery_observation_key = Some("registry-announcement:child".to_owned());
     let owner: Address = "0x0000000000000000000000000000000000000001".parse()?;
     let sender: Address = "0x0000000000000000000000000000000000000002".parse()?;
-    let first = interpret_schema_v2_batch(BatchInput {
+    let first = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest.clone()],
         discovery_rules: vec![DiscoveryRuleInput {
@@ -1803,7 +2813,7 @@ fn ens_v2_parent_expiry_retracts_descendant_at_the_block_boundary() -> anyhow::R
             .any(|binding| binding.logical_name_id == leaf.logical_name_id)
     );
 
-    let boundary = interpret_schema_v2_batch(BatchInput {
+    let boundary = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest.clone()],
         discovery_rules: vec![DiscoveryRuleInput {
@@ -1837,7 +2847,7 @@ fn ens_v2_parent_expiry_retracts_descendant_at_the_block_boundary() -> anyhow::R
                 && event.transaction_index.is_none()
         }));
     }
-    let restored = interpret_schema_v2_batch(BatchInput {
+    let restored = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest],
         discovery_rules: vec![DiscoveryRuleInput {
@@ -1870,6 +2880,151 @@ fn ens_v2_parent_expiry_retracts_descendant_at_the_block_boundary() -> anyhow::R
         event.event_kind == "SurfaceBound"
             && event.logical_name_id.as_deref() == Some(&leaf.logical_name_id)
     }));
+    Ok(())
+}
+
+#[test]
+fn shadow_only_v2_descendant_expiry_is_a_non_binding_boundary() -> anyhow::Result<()> {
+    const CHILD: &str = "0x0000000000000000000000000000000000000068";
+    let owner: Address = "0x0000000000000000000000000000000000000001".parse()?;
+    let sender: Address = "0x0000000000000000000000000000000000000002".parse()?;
+    let parent_token = versioned_token("sub", 1);
+    let raw_label = b"a\0b".to_vec();
+    let child_token = versioned_token_bytes(&raw_label, 1);
+    let manifest = manifest_with_events(
+        68,
+        "ens",
+        "ens_v2_registry_l1",
+        &[
+            (
+                "LabelRegistered",
+                "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)",
+                &["registry"],
+                &["RegistrationGranted"],
+            ),
+            (
+                "SubregistryUpdated",
+                "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)",
+                &["registry"],
+                &["SubregistryChanged"],
+            ),
+            (
+                "ParentUpdated",
+                "event ParentUpdated(address indexed parent, string label, address indexed sender)",
+                &["registry"],
+                &["ParentChanged"],
+            ),
+        ],
+    );
+    let mut child_admission = admission(68, "registry");
+    child_admission.address = CHILD.to_owned();
+    child_admission.contract_instance_id = super::common::contract_id(CHAIN, CHILD);
+    child_admission.role = None;
+    child_admission.discovery_edge_kind = Some("registry_announcement".to_owned());
+    child_admission.discovery_from_contract_instance_id =
+        Some(super::common::contract_id(CHAIN, CHILD));
+    child_admission.discovery_observation_key = Some("registry-announcement:child".to_owned());
+    let rules = || {
+        vec![DiscoveryRuleInput {
+            manifest_id: 68,
+            edge_kind: "subregistry".to_owned(),
+            from_role: Some("registry".to_owned()),
+            admission: "linked_subregistry_event".to_owned(),
+        }]
+    };
+    let admissions = || vec![admission(68, "registry"), child_admission.clone()];
+    let hostile_registration = with_topic0(
+        raw_v2_registry::RawLabelRegistered {
+            tokenId: child_token,
+            labelHash: keccak256(&raw_label),
+            label: raw_label.clone().into(),
+            owner,
+            expiry: 100,
+            sender,
+        }
+        .encode_log_data(),
+        v2_registry::LabelRegistered::SIGNATURE_HASH,
+    );
+    let first = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest.clone()],
+        discovery_rules: rules(),
+        admissions: admissions(),
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            raw_at(
+                v2_registry::LabelRegistered {
+                    tokenId: parent_token,
+                    labelHash: keccak256(b"sub"),
+                    label: "sub".to_owned(),
+                    owner,
+                    expiry: 7,
+                    sender,
+                }
+                .encode_log_data(),
+                1,
+                0,
+                CONTRACT,
+            ),
+            raw_at(hostile_registration, 2, 0, CHILD),
+            raw_at(
+                v2_registry::SubregistryUpdated {
+                    tokenId: parent_token,
+                    subregistry: CHILD.parse()?,
+                    sender,
+                }
+                .encode_log_data(),
+                3,
+                0,
+                CONTRACT,
+            ),
+            raw_at(
+                v2_registry::ParentUpdated {
+                    parent: CONTRACT.parse()?,
+                    label: "sub".to_owned(),
+                    sender,
+                }
+                .encode_log_data(),
+                4,
+                0,
+                CHILD,
+            ),
+        ],
+    })?;
+    let shadow_namehash = super::common::namehash_raw(
+        [raw_label.as_slice(), b"sub".as_slice(), b"eth".as_slice()].into_iter(),
+    );
+    assert_shadow_output(&first, &shadow_namehash, &raw_label, None);
+
+    let boundary = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest],
+        discovery_rules: rules(),
+        admissions: admissions(),
+        prior_events: first.normalized_events.iter().map(prior_event).collect(),
+        blocks: vec![RawBlockInput {
+            chain_id: CHAIN.to_owned(),
+            block_hash: "shadow-expiry-boundary".to_owned(),
+            block_number: 7,
+            block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(7),
+            canonicality_state: "canonical".to_owned(),
+        }],
+        raw_logs: Vec::new(),
+    })?;
+    let shadow_id = format!("ens:{shadow_namehash}");
+    assert!(
+        boundary
+            .binding_closures
+            .iter()
+            .all(|closure| closure.logical_name_id != shadow_id)
+    );
+    assert!(
+        boundary
+            .normalized_events
+            .iter()
+            .all(|event| { event.logical_name_id.as_deref() != Some(shadow_id.as_str()) })
+    );
     Ok(())
 }
 
@@ -1921,7 +3076,7 @@ fn ens_v2_unregister_emits_a_surface_binding_closure() -> anyhow::Result<()> {
         sender: "0x0000000000000000000000000000000000000002".parse()?,
     }
     .encode_log_data();
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest],
         discovery_rules: Vec::new(),
@@ -1951,7 +3106,7 @@ fn ens_v2_unregister_closes_attached_topology_with_null_boundaries() -> anyhow::
     let label = "terminal";
     let token_id = versioned_token(label, 1);
     let target = "0x0000000000000000000000000000000000000066";
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest_with_events(
             20,
@@ -2079,7 +3234,7 @@ fn discovery_reconciliation_keys_are_scoped_per_registry_token() -> anyhow::Resu
         }
         .encode_log_data()
     };
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest],
         discovery_rules: vec![DiscoveryRuleInput {
@@ -2234,7 +3389,7 @@ fn ens_v2_topology_restatement_restores_against_the_transitioned_registry() -> a
             emitter,
         )
     };
-    let first = interpret_schema_v2_batch(BatchInput {
+    let first = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest.clone()],
         discovery_rules: rules(),
@@ -2319,7 +3474,7 @@ fn ens_v2_topology_restatement_restores_against_the_transitioned_registry() -> a
         .and_then(|event| event.resource_id)
         .expect("parent resource");
 
-    let second = interpret_schema_v2_batch(BatchInput {
+    let second = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest],
         discovery_rules: rules(),
@@ -2416,7 +3571,7 @@ fn erc1155_transfers_require_positive_value_nonzero_endpoints_and_keep_lineage()
         value: U256::from(1),
     }
     .encode_log_data();
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest],
         discovery_rules: Vec::new(),
@@ -2451,7 +3606,7 @@ fn resolver_before_state_is_scoped_by_emitter_node_and_selector() -> anyhow::Res
     let node = B256::repeat_byte(0x11);
     let emitter_one = "0x0000000000000000000000000000000000000011";
     let emitter_two = "0x0000000000000000000000000000000000000022";
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest(
             15,
@@ -2518,7 +3673,7 @@ fn legacy_text_changed_without_value_uses_its_three_argument_decoder() -> anyhow
         key: "avatar".to_owned(),
     }
     .encode_log_data();
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest(
             24,
@@ -2578,7 +3733,7 @@ fn ens_v1_unwrap_prior_state_reactivates_the_live_registrar_anchor() -> anyhow::
     );
     let mut wrapper_admission = admission(25, "name_wrapper");
     wrapper_admission.address = wrapper_address.to_owned();
-    let first = interpret_schema_v2_batch(BatchInput {
+    let first = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![
             manifest(
@@ -2650,7 +3805,7 @@ fn ens_v1_unwrap_prior_state_reactivates_the_live_registrar_anchor() -> anyhow::
         .filter(|event| event.block_number.is_some())
         .map(prior_event)
         .collect();
-    let second = interpret_schema_v2_batch(BatchInput {
+    let second = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest(
             26,
@@ -2716,7 +3871,7 @@ fn released_registration_restores_registry_authority_across_batches() -> anyhow:
     );
     let mut registry_admission = admission(61, "registry");
     registry_admission.address = REGISTRY.to_owned();
-    let first = interpret_schema_v2_batch(BatchInput {
+    let first = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![registry_manifest.clone(), registrar_manifest.clone()],
         discovery_rules: Vec::new(),
@@ -2759,7 +3914,7 @@ fn released_registration_restores_registry_authority_across_batches() -> anyhow:
         .expect("registrar authority");
     assert_ne!(registry_resource, registrar_resource);
 
-    let released = interpret_schema_v2_batch(BatchInput {
+    let released = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![registry_manifest, registrar_manifest],
         discovery_rules: Vec::new(),
@@ -2786,7 +3941,7 @@ fn released_registration_restores_registry_authority_across_batches() -> anyhow:
         .map(prior_event)
         .collect::<Vec<_>>();
     prior_events.sort_by_key(|event| event.block_timestamp);
-    let linked = interpret_schema_v2_batch(BatchInput {
+    let linked = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest(
             63,
@@ -2825,6 +3980,72 @@ fn released_registration_restores_registry_authority_across_batches() -> anyhow:
 }
 
 #[test]
+fn shadow_v1_expiry_releases_resource_without_surface_boundary() -> anyhow::Result<()> {
+    let raw_label = vec![0xff];
+    let labelhash = keccak256(&raw_label);
+    let node = super::common::namehash_raw([raw_label.as_slice(), b"eth"].into_iter());
+    let owner: Address = "0x0000000000000000000000000000000000000001".parse()?;
+    let registered = with_topic0(
+        raw_v1_registrar::RawNameRegistered {
+            name: raw_label.clone().into(),
+            label: labelhash,
+            owner,
+            expires: U256::from(42),
+        }
+        .encode_log_data(),
+        NameRegistered::SIGNATURE_HASH,
+    );
+    let manifest = manifest(
+        71,
+        "ens_v1_registrar_l1",
+        "NameRegistered",
+        "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+        &["registrar"],
+        &["RegistrationGranted"],
+    );
+    let first = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest.clone()],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(71, "registrar")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw_at(registered, 1, 0, CONTRACT)],
+    })?;
+    assert_shadow_output(&first, &node, &raw_label, None);
+
+    let released = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(71, "registrar")],
+        prior_events: first.normalized_events.iter().map(prior_event).collect(),
+        blocks: vec![RawBlockInput {
+            chain_id: CHAIN.to_owned(),
+            block_hash: "shadow-v1-release".to_owned(),
+            block_number: 2,
+            block_timestamp: OffsetDateTime::UNIX_EPOCH
+                + time::Duration::seconds(42 + 90 * 24 * 60 * 60 + 1),
+            canonicality_state: "canonical".to_owned(),
+        }],
+        raw_logs: Vec::new(),
+    })?;
+    assert!(released.normalized_events.iter().any(|event| {
+        event.event_kind == "RegistrationReleased"
+            && event.logical_name_id.as_deref() == Some(format!("ens:{node}").as_str())
+    }));
+    assert!(released.normalized_events.iter().all(|event| {
+        !matches!(
+            event.event_kind.as_str(),
+            "SurfaceUnbound" | "SurfaceBound" | "AuthorityEpochChanged"
+        )
+    }));
+    assert!(released.binding_closures.is_empty());
+    assert!(released.surface_bindings.is_empty());
+    Ok(())
+}
+
+#[test]
 fn lapsed_registration_after_registry_divergence_preserves_the_registry_anchor()
 -> anyhow::Result<()> {
     const REGISTRY: &str = "0x0000000000000000000000000000000000000066";
@@ -2852,7 +4073,7 @@ fn lapsed_registration_after_registry_divergence_preserves_the_registry_anchor()
     registry_admission.address = REGISTRY.to_owned();
     let admissions = vec![registry_admission.clone(), admission(65, "registrar")];
     let manifests = vec![registry_manifest.clone(), registrar_manifest.clone()];
-    let registered = interpret_schema_v2_batch(BatchInput {
+    let registered = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: manifests.clone(),
         discovery_rules: Vec::new(),
@@ -2894,7 +4115,7 @@ fn lapsed_registration_after_registry_divergence_preserves_the_registry_anchor()
     let registry_resource =
         super::common::stable_uuid(&format!("resource:registry-only:{CHAIN}:{child}"));
 
-    let diverged = interpret_schema_v2_batch(BatchInput {
+    let diverged = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: manifests.clone(),
         discovery_rules: Vec::new(),
@@ -2935,7 +4156,7 @@ fn lapsed_registration_after_registry_divergence_preserves_the_registry_anchor()
         .map(prior_event)
         .collect::<Vec<_>>();
     prior_events.sort_by_key(|event| event.block_timestamp);
-    let lapsed = interpret_schema_v2_batch(BatchInput {
+    let lapsed = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests,
         discovery_rules: Vec::new(),
@@ -2982,7 +4203,7 @@ fn wrapper_transfers_fan_out_only_supported_moves_with_identity() -> anyhow::Res
     let operator: Address = "0x0000000000000000000000000000000000000001".parse()?;
     let from: Address = "0x0000000000000000000000000000000000000002".parse()?;
     let to: Address = "0x0000000000000000000000000000000000000003".parse()?;
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest_with_events(
             27,
@@ -3092,7 +4313,7 @@ fn wrapper_transfers_fan_out_only_supported_moves_with_identity() -> anyhow::Res
 
 #[test]
 fn basenames_resolver_signatures_match_all_emitters() -> anyhow::Result<()> {
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest_with_events(
             16,
@@ -3134,7 +4355,7 @@ fn basenames_resolver_signatures_match_all_emitters() -> anyhow::Result<()> {
 
 #[test]
 fn ens_v2_shared_resolver_signature_requires_address_admission() -> anyhow::Result<()> {
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest(
             55,
@@ -3172,7 +4393,7 @@ fn ens_v2_shared_resolver_signature_requires_address_admission() -> anyhow::Resu
 #[test]
 fn equal_alias_endpoints_emit_one_name_preimage_observation() -> anyhow::Result<()> {
     let encoded_name = b"\x05alice\x03eth\0".to_vec();
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest(
             56,
@@ -3222,8 +4443,165 @@ fn equal_alias_endpoints_emit_one_name_preimage_observation() -> anyhow::Result<
 }
 
 #[test]
+fn hostile_alias_endpoints_emit_shadow_preimages() -> anyhow::Result<()> {
+    let from_label = vec![0xff];
+    let to_label = b"a\0b".to_vec();
+    let from_name = vec![1, 0xff, 3, b'e', b't', b'h', 0];
+    let to_name = vec![3, b'a', 0, b'b', 3, b'e', b't', b'h', 0];
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            74,
+            "ens_v2_resolver_l1",
+            "AliasChanged",
+            "event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName)",
+            &[],
+            &["AliasChanged", "PreimageObserved"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(74, "resolver")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw(v2_resolver::AliasChanged {
+            indexedFromName: keccak256(&from_name),
+            indexedToName: keccak256(&to_name),
+            fromName: from_name.into(),
+            toName: to_name.into(),
+        }
+        .encode_log_data())],
+    })?;
+
+    assert!(
+        output
+            .normalized_events
+            .iter()
+            .any(|event| event.event_kind == "AliasChanged")
+    );
+    for (raw_label, namehash) in [
+        (
+            from_label.as_slice(),
+            super::common::namehash_raw([from_label.as_slice(), b"eth"].into_iter()),
+        ),
+        (
+            to_label.as_slice(),
+            super::common::namehash_raw([to_label.as_slice(), b"eth"].into_iter()),
+        ),
+    ] {
+        assert!(output.name_surfaces.iter().any(|surface| {
+            surface.namehash == namehash && surface.visibility_state == "shadow"
+        }));
+        assert!(
+            output
+                .label_preimages
+                .iter()
+                .any(|preimage| preimage.raw_label == raw_label)
+        );
+    }
+    assert!(output.surface_bindings.is_empty());
+    Ok(())
+}
+
+#[test]
+fn non_utf8_named_resource_emits_shadow_without_resolver_hint() -> anyhow::Result<()> {
+    assert_named_resource_shadow_without_hint(vec![0xff], None)
+}
+
+#[test]
+fn normalization_changed_named_resource_does_not_seed_resolver_hint() -> anyhow::Result<()> {
+    assert_named_resource_shadow_without_hint(b"Alice".to_vec(), Some("Alice"))
+}
+
+fn assert_named_resource_shadow_without_hint(
+    raw_label: Vec<u8>,
+    decoded_label: Option<&str>,
+) -> anyhow::Result<()> {
+    let mut encoded_name = vec![u8::try_from(raw_label.len())?];
+    encoded_name.extend_from_slice(&raw_label);
+    encoded_name.extend_from_slice(&[3, b'e', b't', b'h', 0]);
+    let resource = U256::from(7);
+    let manifest = manifest_with_events(
+        75,
+        "ens",
+        "ens_v2_resolver_l1",
+        &[
+            (
+                "NamedResource",
+                "event NamedResource(uint256 indexed resource, bytes name)",
+                &[],
+                &["PreimageObserved"],
+            ),
+            (
+                "EACRolesChanged",
+                "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)",
+                &[],
+                &["PermissionChanged"],
+            ),
+        ],
+    );
+    let first = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest.clone()],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(75, "resolver")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw_at(
+            v2_resolver::NamedResource {
+                resource,
+                name: encoded_name.into(),
+            }
+            .encode_log_data(),
+            1,
+            0,
+            CONTRACT,
+        )],
+    })?;
+    let namehash = super::common::namehash_raw([raw_label.as_slice(), b"eth"].into_iter());
+    let surface = first
+        .name_surfaces
+        .iter()
+        .find(|surface| surface.namehash == namehash)
+        .expect("named-resource shadow identity");
+    assert_eq!(surface.visibility_state, "shadow");
+    let preimage = first
+        .label_preimages
+        .iter()
+        .find(|preimage| preimage.raw_label == raw_label)
+        .expect("named-resource raw preimage");
+    assert_eq!(preimage.decoded_label.as_deref(), decoded_label);
+    assert!(!preimage.normalized_under_version);
+    assert!(first.surface_bindings.is_empty());
+
+    let second = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(75, "resolver")],
+        prior_events: first.normalized_events.iter().map(prior_event).collect(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw_at(
+            v2_resolver::EACRolesChanged {
+                resource,
+                account: CONTRACT.parse()?,
+                oldRoleBitmap: U256::ZERO,
+                newRoleBitmap: U256::from(1),
+            }
+            .encode_log_data(),
+            2,
+            0,
+            CONTRACT,
+        )],
+    })?;
+    assert!(second.normalized_events.iter().any(|event| {
+        event.event_kind == "PermissionChanged" && event.logical_name_id.is_none()
+    }));
+    assert!(second.surface_bindings.is_empty());
+    Ok(())
+}
+
+#[test]
 fn malformed_match_all_lookalike_is_ignored() -> anyhow::Result<()> {
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest(
             40,
@@ -3269,7 +4647,7 @@ fn detached_resolver_loses_address_scoped_admission_in_the_same_batch() -> anyho
     let old_resolver_id = Uuid::from_u128(51);
     let mut registry_admission = admission(50, "registry");
     registry_admission.contract_instance_id = registry_id;
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![
             manifest(
@@ -3370,7 +4748,7 @@ fn restored_reservation_does_not_become_a_registration_on_resource_link() -> any
         ],
     );
     let token = U256::from(7);
-    let reserved = interpret_schema_v2_batch(BatchInput {
+    let reserved = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest.clone()],
         discovery_rules: Vec::new(),
@@ -3391,7 +4769,7 @@ fn restored_reservation_does_not_become_a_registration_on_resource_link() -> any
             CONTRACT,
         )],
     })?;
-    let linked = interpret_schema_v2_batch(BatchInput {
+    let linked = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest],
         discovery_rules: Vec::new(),
@@ -3426,7 +4804,7 @@ fn invalid_resolver_name_keeps_the_record_without_preimage_materialization() -> 
         name: "bad\0name".to_owned(),
     }
     .encode_log_data();
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest(
             53,
@@ -3564,7 +4942,7 @@ fn announced_registry_gains_a_suffix_only_after_mutual_parent_agreement() -> any
     ];
     let mut later_logs = logs;
     let first_logs = later_logs.drain(..4).collect::<Vec<_>>();
-    let first = interpret_schema_v2_batch(BatchInput {
+    let first = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest.clone()],
         discovery_rules: vec![
@@ -3586,7 +4964,7 @@ fn announced_registry_gains_a_suffix_only_after_mutual_parent_agreement() -> any
         blocks: Vec::new(),
         raw_logs: first_logs,
     })?;
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest],
         discovery_rules: vec![
@@ -3682,7 +5060,7 @@ fn mutual_parent_changes_rebind_and_retract_existing_child_resources() -> anyhow
     );
     let mut parent_admission = admission(42, "registry");
     parent_admission.address = PARENT.to_owned();
-    let output = interpret_schema_v2_batch(BatchInput {
+    let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest],
         discovery_rules: vec![
@@ -3843,7 +5221,7 @@ fn schema_v2_flags_require_the_compiled_manifest_normalizer_version() {
     );
     source.normalizer_version = "ensip15@different".to_owned();
 
-    let error = interpret_schema_v2_batch(BatchInput {
+    let error = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![source],
         discovery_rules: Vec::new(),
@@ -3855,6 +5233,85 @@ fn schema_v2_flags_require_the_compiled_manifest_normalizer_version() {
     .expect_err("the flag engine must reject a differently versioned manifest");
 
     assert!(error.to_string().contains("schema-v2 label flags use"));
+}
+
+#[test]
+fn raw_log_without_a_loaded_block_errors_loudly() -> anyhow::Result<()> {
+    let encoded = NameRegistered {
+        name: "alice".to_owned(),
+        label: keccak256(b"alice"),
+        owner: CONTRACT.parse()?,
+        expires: U256::from(42),
+    }
+    .encode_log_data();
+    let input = BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            63,
+            "ens_v1_registrar_l1",
+            "NameRegistered",
+            "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+            &["registrar"],
+            &["RegistrationGranted"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(63, "registrar")],
+        prior_events: Vec::new(),
+        blocks: vec![RawBlockInput {
+            chain_id: CHAIN.to_owned(),
+            block_hash: "block-1".to_owned(),
+            block_number: 1,
+            block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1),
+            canonicality_state: "canonical".to_owned(),
+        }],
+        raw_logs: vec![raw_at(encoded, 2, 0, CONTRACT)],
+    };
+
+    let error = super::interpret_schema_v2_batch(input)
+        .expect_err("an unanchored raw log must not be interpreted out of position");
+    assert!(
+        error
+            .to_string()
+            .contains("no matching loaded live-lineage block")
+    );
+    Ok(())
+}
+
+#[test]
+fn multiple_live_hashes_at_one_height_error_loudly() {
+    let error = super::interpret_schema_v2_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            64,
+            "ens_v1_registrar_l1",
+            "NameRegistered",
+            "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+            &["registrar"],
+            &["RegistrationGranted"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: Vec::new(),
+        prior_events: Vec::new(),
+        blocks: vec![
+            RawBlockInput {
+                chain_id: CHAIN.to_owned(),
+                block_hash: "block-a".to_owned(),
+                block_number: 1,
+                block_timestamp: OffsetDateTime::UNIX_EPOCH,
+                canonicality_state: "canonical".to_owned(),
+            },
+            RawBlockInput {
+                chain_id: CHAIN.to_owned(),
+                block_hash: "block-b".to_owned(),
+                block_number: 1,
+                block_timestamp: OffsetDateTime::UNIX_EPOCH,
+                canonicality_state: "safe".to_owned(),
+            },
+        ],
+        raw_logs: Vec::new(),
+    })
+    .expect_err("one height cannot have multiple live hashes");
+    assert!(error.to_string().contains("multiple live-lineage hashes"));
 }
 
 fn manifest(
@@ -3871,6 +5328,25 @@ fn manifest(
         source_family,
         &[(name, fragment, emitter_roles, normalized_events)],
     )
+}
+
+fn interpret_test_batch(mut input: BatchInput) -> anyhow::Result<BatchOutput> {
+    if input.blocks.is_empty() {
+        let mut blocks = std::collections::BTreeMap::new();
+        for raw in &input.raw_logs {
+            blocks
+                .entry((raw.block_number, raw.block_hash.clone()))
+                .or_insert_with(|| RawBlockInput {
+                    chain_id: raw.chain_id.clone(),
+                    block_hash: raw.block_hash.clone(),
+                    block_number: raw.block_number,
+                    block_timestamp: raw.block_timestamp,
+                    canonicality_state: raw.canonicality_state.clone(),
+                });
+        }
+        input.blocks = blocks.into_values().collect();
+    }
+    super::interpret_schema_v2_batch(input)
 }
 
 type EventSpec<'a> = (&'a str, &'a str, &'a [&'a str], &'a [&'a str]);
@@ -3922,6 +5398,11 @@ fn raw(encoded: alloy_primitives::LogData) -> RawLogInput {
     raw_at(encoded, 1, 0, CONTRACT)
 }
 
+fn with_topic0(mut encoded: alloy_primitives::LogData, topic0: B256) -> alloy_primitives::LogData {
+    encoded.topics_mut()[0] = topic0;
+    encoded
+}
+
 fn raw_at(
     encoded: alloy_primitives::LogData,
     block_number: i64,
@@ -3948,13 +5429,24 @@ fn raw_at(
 }
 
 fn versioned_token(label: &str, version: u32) -> U256 {
-    let mut bytes = *keccak256(label.as_bytes());
+    versioned_token_bytes(label.as_bytes(), version)
+}
+
+fn versioned_token_bytes(label: &[u8], version: u32) -> U256 {
+    let mut bytes = *keccak256(label);
     bytes[28..].copy_from_slice(&version.to_be_bytes());
     U256::from_be_bytes(bytes)
 }
 
 fn prior_event(event: &NormalizedEvent) -> PriorEventInput {
     PriorEventInput {
+        retained_state_key: seam::retained_prior_state_key(
+            event
+                .raw_fact_ref
+                .get(seam::INTERPRETER_STATE_KEY)
+                .and_then(serde_json::Value::as_str),
+            &event.event_identity,
+        ),
         chain_id: event.chain_id.clone(),
         namespace: event.namespace.clone(),
         logical_name_id: event.logical_name_id.clone(),

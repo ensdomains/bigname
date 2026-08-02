@@ -1,14 +1,14 @@
-use alloy_primitives::Address;
+use alloy_primitives::{Address, hex};
 use alloy_sol_types::sol;
 use anyhow::bail;
 use serde_json::{Value, json};
 
-use super::super::{Interpreted, NameDraft, ensure_declared};
+use super::super::{Interpreted, NameDraft, ResourceDraft, ShadowNameDraft, ensure_declared};
 use crate::{
-    evm_abi::{address_hex, decode_event_log, hex_string, u256_word_hex},
+    evm_abi::{address_hex, decode_event_log_data_as, hex_string, u256_word_hex},
     schema_v2::{
         catalog::Selected,
-        common::{namehash, require_label},
+        common::{admitted_label, decoded_label},
         model::RawLogInput,
         state::State,
     },
@@ -17,16 +17,16 @@ use crate::{
 mod legacy {
     use super::*;
     sol! {
-        event NameRegistered(uint256 indexed tokenId, string label, address owner, address subregistry, address resolver, uint64 duration, address paymentToken, bytes32 referrer, uint256 base, uint256 premium);
-        event NameRenewed(uint256 indexed tokenId, string label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 referrer, uint256 base);
+        event RawNameRegistered(uint256 indexed tokenId, bytes label, address owner, address subregistry, address resolver, uint64 duration, address paymentToken, bytes32 referrer, uint256 base, uint256 premium);
+        event RawNameRenewed(uint256 indexed tokenId, bytes label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 referrer, uint256 base);
     }
 }
 
 mod current {
     use super::*;
     sol! {
-        event NameRegistered(uint256 indexed tokenId, string label, address owner, address subregistry, address resolver, uint64 duration, address paymentToken, bytes32 indexed referrer, uint256 base, uint256 premium);
-        event NameRenewed(uint256 indexed tokenId, string label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 indexed referrer, uint256 amount);
+        event RawNameRegistered(uint256 indexed tokenId, bytes label, address owner, address subregistry, address resolver, uint64 duration, address paymentToken, bytes32 indexed referrer, uint256 base, uint256 premium);
+        event RawNameRenewed(uint256 indexed tokenId, bytes label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 indexed referrer, uint256 amount);
     }
 }
 
@@ -35,57 +35,61 @@ pub(super) fn interpret(
     raw: &RawLogInput,
     state: &State,
 ) -> anyhow::Result<Interpreted> {
-    let (kind, token_id, label, after) = match selected.event.signature.as_str() {
+    let (kind, token_id, raw_label, after) = match selected.event.signature.as_str() {
         "NameRegistered(uint256,string,address,address,address,uint64,address,bytes32,uint256,uint256)" => {
             if raw.topics.len() == 2 {
-                let event = decode_event_log::<legacy::NameRegistered>(
+                let event = decode_event_log_data_as::<legacy::RawNameRegistered>(
                     &raw.topics,
                     &raw.data,
+                    &selected.event.topic0,
                     "legacy ENSv2 NameRegistered log is malformed",
                 )?;
                 (
                     "RegistrarNameRegistered",
                     event.tokenId,
-                    event.label,
+                    event.label.to_vec(),
                     json!({"source_event":"NameRegistered","owner":address_hex(event.owner),"subregistry":nullable_address(event.subregistry),"resolver":nullable_address(event.resolver),"duration":event.duration,"payment_token":address_hex(event.paymentToken),"referrer":hex_string(event.referrer),"base":event.base.to_string(),"premium":event.premium.to_string()}),
                 )
             } else {
-                let event = decode_event_log::<current::NameRegistered>(
+                let event = decode_event_log_data_as::<current::RawNameRegistered>(
                     &raw.topics,
                     &raw.data,
+                    &selected.event.topic0,
                     "ENSv2 NameRegistered log is malformed",
                 )?;
                 (
                     "RegistrarNameRegistered",
                     event.tokenId,
-                    event.label,
+                    event.label.to_vec(),
                     json!({"source_event":"NameRegistered","owner":address_hex(event.owner),"subregistry":nullable_address(event.subregistry),"resolver":nullable_address(event.resolver),"duration":event.duration,"payment_token":address_hex(event.paymentToken),"referrer":hex_string(event.referrer),"base":event.base.to_string(),"premium":event.premium.to_string()}),
                 )
             }
         }
         "NameRenewed(uint256,string,uint64,uint64,address,bytes32,uint256)" => {
             if raw.topics.len() == 2 {
-                let event = decode_event_log::<legacy::NameRenewed>(
+                let event = decode_event_log_data_as::<legacy::RawNameRenewed>(
                     &raw.topics,
                     &raw.data,
+                    &selected.event.topic0,
                     "legacy ENSv2 NameRenewed log is malformed",
                 )?;
                 (
                     "RegistrationRenewed",
                     event.tokenId,
-                    event.label,
+                    event.label.to_vec(),
                     json!({"source_event":"NameRenewed","duration":event.duration,"expiry":event.newExpiry,"payment_token":address_hex(event.paymentToken),"referrer":hex_string(event.referrer),"base":event.base.to_string()}),
                 )
             } else {
-                let event = decode_event_log::<current::NameRenewed>(
+                let event = decode_event_log_data_as::<current::RawNameRenewed>(
                     &raw.topics,
                     &raw.data,
+                    &selected.event.topic0,
                     "ENSv2 NameRenewed log is malformed",
                 )?;
                 (
                     "RegistrationRenewed",
                     event.tokenId,
-                    event.label,
+                    event.label.to_vec(),
                     json!({"source_event":"NameRenewed","duration":event.duration,"expiry":event.newExpiry,"payment_token":address_hex(event.paymentToken),"referrer":hex_string(event.referrer),"amount":event.amount.to_string(),"base":event.amount.to_string()}),
                 )
             }
@@ -93,18 +97,26 @@ pub(super) fn interpret(
         signature => bail!("unsupported ENSv2 registrar event {signature}"),
     };
     ensure_declared(selected, &[kind])?;
-    require_label(&label)?;
-    let labels = vec![label, "eth".to_owned()];
-    let raw_namehash = namehash(&labels);
+    let decoded_label = decoded_label(&raw_label);
+    let label = admitted_label(&raw_label);
+    let labels = label.map(|label| vec![label, "eth".to_owned()]);
+    let raw_namehash = crate::schema_v2::common::namehash_raw(
+        [raw_label.as_slice(), b"eth".as_slice()].into_iter(),
+    );
     let logical_name_id = format!("{}:{raw_namehash}", selected.source.namespace);
     let token_word = u256_word_hex(token_id);
     let linked = state.v2_token_for_logical_name(&token_word, &logical_name_id)?;
-    if let Some(linked_name) = linked.as_ref().and_then(|state| state.name.as_ref())
-        && linked_name.logical_name_id != logical_name_id
+    if let Some(linked_name) = linked.as_ref().and_then(|state| {
+        state
+            .name
+            .as_ref()
+            .map(|name| &name.logical_name_id)
+            .or_else(|| state.shadow_name.as_ref().map(|name| &name.logical_name_id))
+    }) && linked_name != &logical_name_id
     {
         bail!(
             "ENSv2 registrar token {token_word} names {logical_name_id}, but its registry resource is bound to {}",
-            linked_name.logical_name_id
+            linked_name
         );
     }
     let resource_id = linked.as_ref().and_then(|state| state.resource_id);
@@ -118,21 +130,38 @@ pub(super) fn interpret(
             json!({
                 "token_id":token_word,
                 "namehash":raw_namehash,
+                "raw_label_hex":hex::encode(&raw_label),
+                "decoded_label":decoded_label,
+                "surface_known":labels.is_some(),
                 "resource_pending":resource_id.is_none(),
             }),
         ),
     );
-    output.names.push(NameDraft {
-        labels,
-        namehash: raw_namehash,
-        resource_id,
-        token_lineage_id,
-        surface_binding_id: None,
-        bind: false,
-        binding_kind: "declared_registry_path".to_owned(),
-        source_kind: format!("{}_label", selected.event.name),
-        preimage_metadata: None,
-    });
+    if let Some(labels) = labels {
+        output.names.push(NameDraft {
+            labels,
+            namehash: raw_namehash,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id: None,
+            bind: false,
+            binding_kind: "declared_registry_path".to_owned(),
+            source_kind: format!("{}_label", selected.event.name),
+            preimage_metadata: None,
+        });
+    } else {
+        output.shadow_names.push(ShadowNameDraft {
+            raw_labels: vec![raw_label, b"eth".to_vec()],
+            namehash: raw_namehash,
+            source_kind: format!("{}_label", selected.event.name),
+        });
+        if let Some(resource_id) = resource_id {
+            output.resources.push(ResourceDraft {
+                resource_id,
+                token_lineage_id,
+            });
+        }
+    }
     Ok(output)
 }
 
