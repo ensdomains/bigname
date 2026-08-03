@@ -605,6 +605,88 @@ BEGIN
                   AND indexname =
                       'record_inventory_current_resource_idx'
             )
+        UNION ALL
+        SELECT
+            'children raw labels preserve bytes with optional exact text',
+            EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'children_current'
+                  AND column_name = 'raw_label'
+                  AND data_type = 'bytea'
+                  AND is_nullable = 'YES'
+            )
+            AND EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'children_current'
+                  AND column_name = 'decoded_label'
+                  AND data_type = 'text'
+                  AND is_nullable = 'YES'
+            )
+            AND EXISTS (
+                SELECT 1
+                FROM pg_constraint
+                WHERE conrelid = 'children_current'::regclass
+                  AND conname =
+                      'children_current_decoded_label_matches_raw_check'
+                  AND contype = 'c'
+            )
+            AND EXISTS (
+                SELECT 1
+                FROM pg_constraint
+                WHERE conrelid = 'children_current'::regclass
+                  AND conname =
+                      'children_current_decoded_label_requires_raw_check'
+                  AND contype = 'c'
+            )
+            AND EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'children_current'
+                  AND column_name = 'labelhash'
+                  AND is_nullable = 'NO'
+            )
+        UNION ALL
+        SELECT
+            'children raw names preserve bytes with optional exact text',
+            EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'children_current'
+                  AND column_name = 'raw_name'
+                  AND data_type = 'bytea'
+                  AND is_nullable = 'YES'
+            )
+            AND EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'children_current'
+                  AND column_name = 'decoded_name'
+                  AND data_type = 'text'
+                  AND is_nullable = 'YES'
+            )
+            AND EXISTS (
+                SELECT 1
+                FROM pg_constraint
+                WHERE conrelid = 'children_current'::regclass
+                  AND conname =
+                      'children_current_decoded_name_matches_raw_check'
+                  AND contype = 'c'
+            )
+            AND EXISTS (
+                SELECT 1
+                FROM pg_constraint
+                WHERE conrelid = 'children_current'::regclass
+                  AND conname =
+                      'children_current_decoded_name_requires_raw_check'
+                  AND contype = 'c'
+            )
     )
     SELECT string_agg(invariant_name, ', ' ORDER BY invariant_name)
     INTO missing_behavioral_constraints
@@ -2443,15 +2525,19 @@ BEGIN
             child_logical_name_id,
             namespace,
             raw_name,
+            raw_label,
             namehash,
+            labelhash,
             manifest_version
         )
         VALUES (
             'schema-v2-check:namehash-0',
             'schema-v2-check:child-namehash',
             'wrong-namespace',
-            'Child.Name',
+            convert_to('Child.Name', 'UTF8'),
+            convert_to('Child', 'UTF8'),
             'wrong-namehash',
+            'wrong-labelhash',
             1
         );
         accepted_projection_identity_mismatches :=
@@ -2466,6 +2552,211 @@ BEGIN
         WHEN check_violation THEN
             IF SQLERRM NOT LIKE
                 '%constraint "children_current_logical_identity_check"%'
+            THEN
+                RAISE;
+            END IF;
+    END;
+
+    INSERT INTO children_current (
+        parent_logical_name_id,
+        child_logical_name_id,
+        namespace,
+        raw_name,
+        decoded_name,
+        raw_label,
+        decoded_label,
+        namehash,
+        labelhash,
+        manifest_version
+    )
+    VALUES (
+        'schema-v2-check:namehash-0',
+        'schema-v2-check:child-clean',
+        'schema-v2-check',
+        convert_to('Clean.Name', 'UTF8'),
+        'Clean.Name',
+        convert_to('Clean', 'UTF8'),
+        'Clean',
+        'child-clean',
+        'labelhash-child-clean',
+        1
+    ), (
+        'schema-v2-check:namehash-0',
+        'schema-v2-check:child-hostile',
+        'schema-v2-check',
+        decode('ff002e4e616d65', 'hex'),
+        NULL,
+        decode('ff00', 'hex'),
+        NULL,
+        'child-hostile',
+        'labelhash-child-hostile',
+        1
+    );
+
+    INSERT INTO children_current (
+        parent_logical_name_id,
+        child_logical_name_id,
+        namespace,
+        raw_name,
+        decoded_name,
+        raw_label,
+        decoded_label,
+        namehash,
+        labelhash,
+        manifest_version
+    )
+    VALUES (
+        'schema-v2-check:namehash-0',
+        'schema-v2-check:child-topology-only',
+        'schema-v2-check',
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        'child-topology-only',
+        'labelhash-topology-only',
+        1
+    );
+
+    BEGIN
+        INSERT INTO children_current (
+            parent_logical_name_id,
+            child_logical_name_id,
+            namespace,
+            raw_name,
+            decoded_name,
+            raw_label,
+            decoded_label,
+            namehash,
+            labelhash,
+            manifest_version
+        )
+        VALUES (
+            'schema-v2-check:namehash-0',
+            'schema-v2-check:child-decoded-label-without-raw',
+            'schema-v2-check',
+            NULL,
+            NULL,
+            NULL,
+            'Synthesized',
+            'child-decoded-label-without-raw',
+            'labelhash-decoded-label-without-raw',
+            1
+        );
+        RAISE EXCEPTION
+            'children_current accepted a decoded label without raw bytes';
+    EXCEPTION
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "children_current_decoded_label_requires_raw_check"%'
+            THEN
+                RAISE;
+            END IF;
+    END;
+
+    BEGIN
+        INSERT INTO children_current (
+            parent_logical_name_id,
+            child_logical_name_id,
+            namespace,
+            raw_name,
+            decoded_name,
+            raw_label,
+            decoded_label,
+            namehash,
+            labelhash,
+            manifest_version
+        )
+        VALUES (
+            'schema-v2-check:namehash-0',
+            'schema-v2-check:child-decoded-name-without-raw',
+            'schema-v2-check',
+            NULL,
+            'Synthesized.Name',
+            NULL,
+            NULL,
+            'child-decoded-name-without-raw',
+            'labelhash-decoded-name-without-raw',
+            1
+        );
+        RAISE EXCEPTION
+            'children_current accepted a decoded name without raw bytes';
+    EXCEPTION
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "children_current_decoded_name_requires_raw_check"%'
+            THEN
+                RAISE;
+            END IF;
+    END;
+
+    BEGIN
+        INSERT INTO children_current (
+            parent_logical_name_id,
+            child_logical_name_id,
+            namespace,
+            raw_name,
+            decoded_name,
+            raw_label,
+            decoded_label,
+            namehash,
+            labelhash,
+            manifest_version
+        )
+        VALUES (
+            'schema-v2-check:namehash-0',
+            'schema-v2-check:child-decoding-drift',
+            'schema-v2-check',
+            convert_to('Raw.Name', 'UTF8'),
+            'Raw.Name',
+            convert_to('raw', 'UTF8'),
+            'different',
+            'child-decoding-drift',
+            'labelhash-child-decoding-drift',
+            1
+        );
+        RAISE EXCEPTION
+            'children_current accepted decoded text that differs from raw bytes';
+    EXCEPTION
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "children_current_decoded_label_matches_raw_check"%'
+            THEN
+                RAISE;
+            END IF;
+    END;
+
+    BEGIN
+        INSERT INTO children_current (
+            parent_logical_name_id,
+            child_logical_name_id,
+            namespace,
+            raw_name,
+            decoded_name,
+            raw_label,
+            decoded_label,
+            namehash,
+            labelhash,
+            manifest_version
+        )
+        VALUES (
+            'schema-v2-check:namehash-0',
+            'schema-v2-check:child-name-decoding-drift',
+            'schema-v2-check',
+            convert_to('Raw.Name', 'UTF8'),
+            'Different.Name',
+            convert_to('Raw', 'UTF8'),
+            'Raw',
+            'child-name-decoding-drift',
+            'labelhash-child-name-decoding-drift',
+            1
+        );
+        RAISE EXCEPTION
+            'children_current accepted decoded name text that differs from raw bytes';
+    EXCEPTION
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "children_current_decoded_name_matches_raw_check"%'
             THEN
                 RAISE;
             END IF;

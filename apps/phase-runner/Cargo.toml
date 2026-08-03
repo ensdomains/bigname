@@ -20,6 +20,7 @@ bigname-content-hash.workspace = true
 bigname-ingest = { workspace = true, features = ["reth-db"] }
 bigname-interpret.workspace = true
 bigname-manifests.workspace = true
+bigname-project.workspace = true
 bigname-storage.workspace = true
 
 [dev-dependencies]

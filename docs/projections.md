@@ -4,6 +4,14 @@
 
 This document defines the shipped projection set, replay semantics, invalidation, and worker ownership. Wire shapes live in [`api-v1.md`](api-v1.md); event taxonomy and identity rules live in [`architecture.md`](architecture.md); persistence in [`storage.md`](storage.md).
 
+Until the Stage C API cutover, the worker and route details below describe the
+legacy public-schema serving contract. The schema-v2 project phase now owns the
+retained replacement tables described in
+[`schema-v2/README.md`](../schema-v2/README.md#current-projections). Its emitted
+coverage JSON uses `projected` / `not_asserted`, and it classifies resolvers
+from manifest declarations and canonical ERC-1967 upgrade history without code
+hashes. Those replacement semantics do not change a v1 route before Stage C.
+
 ## Rules
 
 - Projections rebuild from canonical facts and normalized events.

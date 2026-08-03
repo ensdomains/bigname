@@ -92,10 +92,12 @@ CREATE TABLE IF NOT EXISTS children_current (
     child_logical_name_id text NOT NULL,
     surface_class text NOT NULL DEFAULT 'declared',
     namespace text NOT NULL,
-    raw_name text NOT NULL,
-    raw_label text,
+    raw_name bytea,
+    decoded_name text,
+    raw_label bytea,
+    decoded_label text,
     namehash text NOT NULL,
-    labelhash text,
+    labelhash text NOT NULL,
     owner text,
     registrant text,
     provenance jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -116,8 +118,23 @@ CREATE TABLE IF NOT EXISTS children_current (
     CHECK (btrim(namehash) <> ''),
     CONSTRAINT children_current_logical_identity_check
         CHECK (child_logical_name_id = namespace || ':' || namehash),
-    CHECK (raw_label IS NULL OR raw_label <> ''),
-    CHECK (labelhash IS NULL OR btrim(labelhash) <> ''),
+    CHECK (raw_name IS NULL OR octet_length(raw_name) > 0),
+    CONSTRAINT children_current_decoded_name_requires_raw_check
+        CHECK (decoded_name IS NULL OR raw_name IS NOT NULL),
+    CONSTRAINT children_current_decoded_name_matches_raw_check
+        CHECK (
+            decoded_name IS NULL
+            OR convert_to(decoded_name, 'UTF8') = raw_name
+        ),
+    CHECK (raw_label IS NULL OR octet_length(raw_label) > 0),
+    CONSTRAINT children_current_decoded_label_requires_raw_check
+        CHECK (decoded_label IS NULL OR raw_label IS NOT NULL),
+    CONSTRAINT children_current_decoded_label_matches_raw_check
+        CHECK (
+            decoded_label IS NULL
+            OR convert_to(decoded_label, 'UTF8') = raw_label
+        ),
+    CHECK (btrim(labelhash) <> ''),
     CHECK (owner IS NULL OR btrim(owner) <> ''),
     CHECK (registrant IS NULL OR btrim(registrant) <> ''),
     CHECK (jsonb_typeof(provenance) = 'object'),
@@ -471,7 +488,7 @@ COMMENT ON COLUMN name_current.inserted_at IS
     'This time records row creation.';
 
 COMMENT ON TABLE children_current IS
-    'This table stores the current direct children of each name.';
+    'This table stores current direct children. Verbatim child-name and label bytes are present when a preimage was observed on chain and are null when only topology hashes are known.';
 COMMENT ON COLUMN children_current.parent_logical_name_id IS
     'This value identifies the parent name.';
 COMMENT ON COLUMN children_current.child_logical_name_id IS
@@ -481,9 +498,13 @@ COMMENT ON COLUMN children_current.surface_class IS
 COMMENT ON COLUMN children_current.namespace IS
     'This value identifies the name system.';
 COMMENT ON COLUMN children_current.raw_name IS
-    'This value is the verbatim child name.';
+    'These bytes are the verbatim child name.';
+COMMENT ON COLUMN children_current.decoded_name IS
+    'This optional text is present only when it exactly decodes the raw name bytes.';
 COMMENT ON COLUMN children_current.raw_label IS
-    'This value is the verbatim child label.';
+    'These bytes are the verbatim child label.';
+COMMENT ON COLUMN children_current.decoded_label IS
+    'This optional text is present only when it exactly decodes the raw label bytes.';
 COMMENT ON COLUMN children_current.namehash IS
     'This value is the child name hash.';
 COMMENT ON COLUMN children_current.labelhash IS

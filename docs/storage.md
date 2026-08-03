@@ -34,8 +34,8 @@ Schema-v2 interpretation now owns Base identity and normalized-event output. A r
 
 During Stage B, these layers are split across two explicit schemas in one
 PostgreSQL database. The surviving API and worker remain on immutable
-`migrations/` history in `public`, while phase-runner ingest and interpretation
-use the fresh `schema-v2/` baseline in `bigname_phase`. The
+`migrations/` history in `public`, while phase-runner ingest, interpretation,
+and projection use the fresh `schema-v2/` baseline in `bigname_phase`. The
 `phase-runner init-schema` command accepts only an empty phase schema until a
 reviewed upgrade or rebuild mechanism exists. Serving the fresh projections is
 deferred to the worker/API port and cutover. The shared transaction domain is
@@ -45,7 +45,7 @@ eligibility atomically with phase-lineage orphaning.
 The system of record splits into six layers.
 
 1. `chain_lineage` — block ancestry, fork points, hash-first reconciliation, head promotion, one durable header-anchor row per observed block hash.
-2. `raw_facts` — hot indexed replay facts: selected/admitted target logs, the minimum transaction/receipt fields needed to decode them, retained code-hash observations, fetched call snapshots, optional header/log audit extensions, compact payload-cache metadata. The `raw_code_hashes` writer and reader remain because resolver-profile views still consume stored observations, but no current runtime produces new rows after deletion of the old intake. Whether the later port adds an ingest observation family or redesigns resolver profiles around ERC-1967 upgrade history remains deferred; see [`manifests.md`](manifests.md#discovery-admission).
+2. `raw_facts` — hot indexed replay facts: selected/admitted target logs, the minimum transaction/receipt fields needed to decode them, fetched call snapshots, optional header/log audit extensions, compact payload-cache metadata. Legacy `public.raw_code_hashes` rows and resolver-profile readers remain compiled only for the old worker's public-schema service until Stage C; no current runtime produces new rows, and schema-v2 projection does not read them. The replacement classifier uses manifest declarations and canonical ERC-1967 upgrade history; see [`manifests.md`](manifests.md#discovery-admission).
 3. `manifests_and_discovery` — source manifests, discovered edges, rollout flags.
 4. `identity_and_events` — `NameSurface`, `SurfaceBinding`, `resources`, `token_lineages`, and append-only `normalized_events`.
 5. `projections` — current-state and collection read models.
@@ -63,9 +63,9 @@ Postgres is the hot indexed and replay-focused store. It retains:
 - selected/admitted target logs and the minimal transaction and receipt fields while they are needed to decode those logs, route them through adapters, and append normalized events
 - block-scoped call snapshots and enrichments retained by an explicit replay contract for normalized events, projections, or execution artifacts
 - durable event-silent resolver call observations used as projection-invalidation inputs after selected transaction and receipt staging rows are compacted
-- retained code-hash observations and discovery/proxy evidence used by
+- legacy code-hash observations used only by old public-schema
   resolver-profile and manifest-drift views; no current runtime produces new
-  code-hash observations
+  observations, and schema-v2 projection does not consume them
 - compact metadata and optional digests for full payloads fetched as cache
 
 There is no deployed object-storage layer in the current schema or compose stack. When the system retains fetched payload metadata, Postgres stores the metadata and optional digests needed to validate later cache use; fetched bytes outside durable replay facts are cache-owned and may be absent.
@@ -163,9 +163,10 @@ loads the old indexer heartbeat shape. That read and the underlying rows are
 kept because the API/worker port has not landed; no process in this source tree
 publishes new old-indexer heartbeat state.
 
-Projection invalidation journals, replay attempts, staging checkpoints, and
-dynamic stage tables remain worker-owned. They are operational rebuild state,
-not API truth or an alternative schema-v2 interpretation writer.
+Legacy projection invalidation journals, replay attempts, staging checkpoints,
+and dynamic stage tables remain worker-owned only for the public schema. The
+schema-v2 project phase has none of them: it stages in connection-local tables
+and publishes the affected projection set in one transaction.
 
 ## Manifests and discovery persistence
 
@@ -176,7 +177,15 @@ At minimum:
 - `discovery_edges` — keyed by `edge_id` with `from_contract_instance_id`, `to_contract_instance_id`, `edge_kind`, active range, provenance, canonicality.
 - Materialized watch-plan rows keyed by `contract_instance_id` plus chain and range; root start nodes keyed by the root `contract_instance_id`. Address is a derived watch target, not the durable identity. An omitted `start_block` is persisted as null rather than coerced to zero.
 
-Resolver-profile admission state (PublicResolver-generation profiles for ENSv1, `L2Resolver` compatibility for Basenames) is gated separately from contract-instance admission. Either family may classify a manifest contract or an address-only target supplied by a normalized resolver pointer or a match-all-selected resolver log. The retained address-only view can read an existing target code-hash fact but creates no contract instance, discovery edge, or watched address; without retained evidence, admission remains pending because there is no current code-hash producer. A dedicated profile-fact table is not required. Profile admission gates complete-family, resolver-overview, latest-only, authorization, and onchain-call parity claims for the affected resolver address — not baseline generic resolver-event observation.[^v1-pres-l20][^v1-pres-l66][^bn-l2resolver-l4][^bn-l2resolver-l16][^bn-l2resolver-l29]
+Schema-v2 resolver classification is separate from contract-instance
+admission. ENSv1 and Basenames require the exact emitter address in the active
+resolver manifest. ENSv2 requires the resolver proxy's latest canonical
+`Upgraded` implementation in the active manifest's
+`resolver_implementations` list. Unknown emitters remain unsupported even when
+generic resolver events were retained; no code-hash fact participates. A
+matching `SourceManifestUpdated` event scopes inline classification
+reconvergence during project publication. The old public-schema profile views
+retain their code-hash behavior only until Stage C.[^v1-pres-l20][^v1-pres-l66][^bn-l2resolver-l4][^bn-l2resolver-l16][^bn-l2resolver-l29]
 
 `manifest_alert_*` carries an observation identity, observation kind (`manifest_drift` or `proxy_implementation_drift`), lifecycle status, manifest version, source family, chain, contract-instance references, nullable proxy/implementation edge references, expected and observed code-hash or implementation-edge material, derived watch-plan metadata, first/last observed timestamps, and nullable remediation metadata. Writing it does not write `normalized_events`, mutate manifest truth, mutate discovery admission, change capability flags, or expose API state. A proxy implementation observation preserves the proxy `contract_instance_id`; implementation churn is represented by an observed or admitted edge, not by minting a replacement proxy identity.
 
@@ -315,6 +324,25 @@ The complete-prefix-capture migration takes the automatic-bootstrap replay lock,
 ## Projection storage rules
 
 Every current-state projection row carries provenance pointers, manifest version, relevant chain positions, canonicality summary, and last-recomputed timestamp.
+
+The schema-v2 project phase reads only canonical-lineage identity rows and
+normalized events. It derives all seven builder families into connection-local
+temporary tables, then replaces the affected chain or redo scope in one
+transaction; concurrent readers therefore see the complete prior set or the
+complete successor set. Projection JSON that carries a `coverage` object uses
+`status = "projected"` and `exhaustiveness = "not_asserted"`. Those values mean
+only that the row was derived from the stored canonical inputs. Product support
+is stated separately by `support_status` and `unsupported_reason`; the JSON
+wording is not an assertion that history or enumeration is complete. The
+legacy public-schema worker vocabulary below remains unchanged until the API
+switches storage in Stage C.
+
+`children_current` remains node-complete when a current registry edge reveals
+only hashes. Such a row keeps non-null `labelhash` and `namehash`, but its
+`raw_label`, `decoded_label`, `raw_name`, and `decoded_name` are null until
+verbatim bytes are observed. Decoded text is forbidden without the matching raw
+bytes, and a display placeholder is derived only when Stage C reads the row. A
+later preimage rebuild upgrades the same row with bytes and exact decoded text.
 
 Current projection timestamp fields are representable Unix-second values or `null`. ENSv2 `type(uint64).max` expiry observations project as `null` rather than a fabricated far-future timestamp; upstream uses that value for never-expiring reverse names, while registry renewal can carry any non-decreasing `uint64` expiry.[^v2-reverse-max-expiry][^v2-registry-renew-expiry] Numeric values that do not fit the projection timestamp representation are not converted into public projection timestamps.
 

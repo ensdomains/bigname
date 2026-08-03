@@ -274,11 +274,13 @@ as `orphaned` without touching content.
 kept as audit input; internal invalidation and reorg-repair machinery still
 consumes them.
 
-**Resolver profile** — an explicit admission that a resolver implementation
-behaves like a known family (an ENS Labs PublicResolver generation, or the
-Basenames `L2Resolver`). Profile admission gates complete record coverage and
-event-to-call parity; unknown resolvers stay `pending` and expose only observed
-facts.
+**Resolver profile** — a declared resolver classification. ENSv1 and
+Basenames use an exact resolver-address declaration; ENSv2 requires the
+proxy's latest canonical ERC-1967 `Upgraded` event to name a declared
+implementation. Classification permits supported projection of retained
+canonical normalized observations, but does not assert exhaustive history or
+event-to-call parity. Unknown or mismatched resolvers are explicitly
+unsupported. See [source manifests](manifests.md#required-fields).
 
 **Resource** (backing resource, `resource_id`) — the authority object behind a
 name: a registry entry, registrar lease, wrapper position, or ENSv2 EAC

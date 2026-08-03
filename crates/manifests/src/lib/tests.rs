@@ -84,6 +84,9 @@ chain = "ethereum-mainnet"
 deployment_epoch = "ens_v2"
 rollout_status = "active"
 normalizer_version = "ensip15@ens-normalize-0.1.1"
+resolver_implementations = [
+  { role = "permissioned_resolver", address = "0x00000000000000000000000000000000000000CC" },
+]
 
 [capability_flags]
 declared_children = "supported"
@@ -154,6 +157,11 @@ fn loads_manifest_declarations_abi_and_start_blocks() -> Result<()> {
     let manifest = &repository.manifests()[0].manifest;
     assert_eq!(manifest.roots[0].start_block, Some(12_345));
     assert_eq!(manifest.contracts[0].start_block, Some(23_456));
+    assert_eq!(manifest.resolver_implementations.len(), 1);
+    assert_eq!(
+        manifest.resolver_implementations[0].role,
+        "permissioned_resolver"
+    );
     assert_eq!(manifest.abi.events[0].name, "SubregistryUpdated");
     assert_eq!(
         manifest.abi.events[0]
@@ -169,6 +177,11 @@ fn repository_loader_rejects_invalid_single_manifest_declarations() -> Result<()
     let base = manifest_contents();
     let duplicate_role = format!(
         "{base}\n[[contracts]]\nrole = \"registry\"\naddress = \"0x00000000000000000000000000000000000000BB\"\nproxy_kind = \"none\"\n"
+    );
+    let duplicate_implementation_address = base.replacen(
+        "]\n\n[capability_flags]",
+        "  { role = \"second_resolver\", address = \"0x00000000000000000000000000000000000000cc\" },\n]\n\n[capability_flags]",
+        1,
     );
     let cases = [
         (
@@ -199,6 +212,20 @@ fn repository_loader_rejects_invalid_single_manifest_declarations() -> Result<()
             "duplicate contract role",
             duplicate_role,
             "duplicates contract role registry",
+        ),
+        (
+            "invalid resolver implementation address",
+            base.replacen(
+                "0x00000000000000000000000000000000000000CC",
+                "not-an-address",
+                1,
+            ),
+            "has invalid address not-an-address",
+        ),
+        (
+            "duplicate resolver implementation address",
+            duplicate_implementation_address,
+            "duplicates resolver implementation address",
         ),
         (
             "unsupported normalizer",
