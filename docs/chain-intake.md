@@ -46,6 +46,17 @@ Before publishing a loaded suffix, live verifies that its stored parent path
 reaches the common ancestor selected from the snapshot. A provider reorg between
 the ancestry read and suffix read leaves the immutable observation stored but
 returns a retryable result, so the next attempt starts from a fresh snapshot.
+Those `observed` rows are intake staging and never become a normal spine target.
+Successful head publication atomically marks conflicting observed suffix rows
+orphaned through the proposed latest height without widening downstream redo for
+rows that were never readable. Higher observations remain staging until a
+provider snapshot proves or displaces them, so a crash before publication
+restarts without manual database repair. If a
+provider snapshot is lower than the published latest marker but its latest hash
+still matches the published readable path at that height, live treats the batch
+as provider lag and performs no publication, orphaning, or stamping. A hash
+mismatch remains a genuine lower-head reorg and follows the normal publication
+path.
 
 The `verify` reader may overlap the live loop. A chain configured with
 `verify-before-live` remains stopped at the deferred verifier until B4 lands;
@@ -142,11 +153,12 @@ normalized-event upsert, repair, supersession, adapter-checkpoint, or
 coverage-authority machinery. Historical live redo is rejected because live
 is a head follower. Verify redo uses the same phase contract as normal verify
 work and persists the verification level reported by the verifier. The B3
-deferred verifier records no processed extent or trust level. Without an
-existing verify extent, redo fails the normal recorded-extent precondition. If
-an extent exists, the deferred phase refuses the work until B4 rather than
-claiming trust. Flag recomputation also remains unavailable. Live and
-flag-recomputation requests are rejected before creating redo state.
+deferred verifier records no processed extent or trust level and refuses redo
+in phase preflight until B4 rather than claiming trust. The refusal happens
+before redo state is created even when a pre-B3 extent exists. Flag
+recomputation also remains unavailable. Live, deferred-verify, and
+flag-recomputation refusals cannot strand redo state; a configured verifier
+continues to use supported verify redo.
 
 The thin rewind command moves only the published latest head:
 

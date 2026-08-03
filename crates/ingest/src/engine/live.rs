@@ -36,6 +36,24 @@ impl Engine {
                     request.chain_id
                 ))
             })?;
+        if snapshot.latest.number < published.latest.number {
+            let stored = self
+                .load_readable_hashes(
+                    &request.chain_id,
+                    snapshot.latest.number,
+                    snapshot.latest.number,
+                )
+                .await?;
+            if stored.get(&snapshot.latest.number) == Some(&snapshot.latest.hash) {
+                return Ok(LiveBatchOutcome {
+                    caught_up: true,
+                    current: published.latest.clone(),
+                    target: published.latest,
+                    heads: None,
+                    estimated_write_bytes: 0,
+                });
+            }
+        }
         let floor = published
             .finalized
             .as_ref()
@@ -83,7 +101,7 @@ impl Engine {
         };
         Ok(LiveBatchOutcome {
             caught_up: current == target,
-            heads: publishable_heads(&current, &snapshot),
+            heads: Some(publishable_heads(&current, &snapshot)),
             current,
             target,
             estimated_write_bytes,

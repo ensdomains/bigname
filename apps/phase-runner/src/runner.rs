@@ -136,6 +136,7 @@ impl PhaseRunner {
             }
             RedoPhase::Phase(phase) => phase,
         };
+        self.phases.get(phase).preflight_redo()?;
         self.store.initialize_chain(&chain.chain_id).await?;
         let mode = RunMode::Redo(range);
         self.run_phase_with_restart(chain, phase, mode, cancellation.clone())

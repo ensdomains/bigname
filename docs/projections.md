@@ -43,8 +43,12 @@ baseline. A failed call restores that baseline, removes the stale head's
 hydration metadata, and leaves project retryable at the same head. A transport,
 RPC, or malformed whole-batch failure is treated as a failure for every call in
 that batch, so the same head-revalidated transaction retracts all affected
-baselines before reporting the retryable error; it never continues serving a
-hydrated value from an earlier fork.
+baselines before reporting the retryable error. Head publication and the next
+project hydration pass are separate operations: between a head flip and that
+pass, a row outside the pass's retraction scope can still carry a hydrated value
+and provenance from the earlier fork. The stored hydration head makes that
+window explicit; the next eligible pass refreshes the row or restores its
+event-derived baseline.
 There is no historical hydration and no write to raw facts, identity,
 normalized events, verified execution output, or execution traces. A later
 head advance or fork re-runs project first, then refreshes this enrichment at

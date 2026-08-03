@@ -233,13 +233,18 @@ Rules:
 - evictable payload-cache bytes or compacted staging rows do not erase canonicality, normalized-event provenance, or replay-critical evidence retained by the selected policy
 - optional header audit fields are verified when both stored and incoming audit rows carry them. A minimal replay does not conflict with an existing auditable row solely because it omitted those fields
 - projection rebuilds read rows that are `canonical`, `safe`, or `finalized` by default; history and audit tools may opt into `observed` and `orphaned` rows
+- normal phase targets use only that readable path. An `observed` suffix written before head publication is intake staging, not a downstream target
 - safe and finalized checkpoint promotion is monotonic per chain
 
 ## Reorg and redo boundary
 
 The phase runner stores canonicality by block hash and marks displaced readable
-lineage orphaned. Raw facts remain immutable; interpretation selects them by
-joining against readable lineage. In the same head-publication transaction,
+lineage orphaned. It also marks conflicting `observed` intake staging rows
+orphaned only through the proposed latest height, but derives downstream redo
+ranges only from displaced rows that had already been readable. Higher observed
+rows remain staging until a later provider snapshot proves or displaces them.
+Raw facts remain immutable; interpretation selects them
+by joining against readable lineage. In the same head-publication transaction,
 storage removes rows from retained `public.execution_cache_outcomes` whose block
 dependencies are orphaned in `bigname_phase.chain_lineage`. Their durable
 execution traces and steps remain in `public`; later canonical recovery does
@@ -260,7 +265,10 @@ resume; its intermediate orphaning is not a completed projection boundary.
 Verify redo uses the same marker and persists the verification level reported
 by its phase implementation.
 Unsupported `live` and flag-recomputation redo requests fail before the runner
-writes a redo marker, so they cannot leave an unresumable state row.
+writes a redo marker. The current B3 deferred verifier likewise refuses redo in
+phase preflight before any marker, while a configured verify implementation
+retains normal verify redo and level persistence. These refusals cannot leave an
+unresumable state row.
 
 System-required redo stamps reuse `chain_phase_state.redo_*`; there is no reorg
 queue or scheduler table. A stamp is created only when the phase cursor reaches

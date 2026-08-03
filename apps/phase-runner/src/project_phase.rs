@@ -87,6 +87,11 @@ impl Phase for ProjectPhase {
                     "project recompute-flags is owned by the later redo-tooling lane",
                 ));
             }
+            if let Some(hydrator) = &self.hydrator {
+                hydrator
+                    .require_rpc_configuration(&context.chain_id)
+                    .map_err(runner_error)?;
+            }
             let redo_target = if matches!(context.mode, RunMode::Redo(_)) {
                 Some(self.redo_target(&context.chain_id).await?)
             } else {

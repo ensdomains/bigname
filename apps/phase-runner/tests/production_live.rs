@@ -17,6 +17,7 @@ use phase_runner::{
     error::RunnerError,
     heads::{BlockMarker, HeadMarkers, publish_heads},
     ingest_phase::IngestPhase,
+    interpret_phase::InterpretPhase,
     live_phase::LivePhase,
     phase::{
         BlockRange, LoopbackPhase, Phase, PhaseContext, PhaseFuture, PhaseName, PhaseResume,
@@ -218,6 +219,114 @@ async fn live_retries_when_the_provider_reorgs_between_ancestry_and_suffix_reads
 }
 
 #[tokio::test]
+async fn restart_after_an_unpublished_live_window_republishes_and_advances_the_spine() -> Result<()>
+{
+    let scratch = ScratchDatabase::create("production_live_restart_unpublished_window").await?;
+    let chain = "live-restart-unpublished-window";
+    seed_branch(scratch.pool(), chain, 1, 1, None).await?;
+    publish(scratch.pool(), chain, 1, 1, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 0, &block_hash(1, 0)).await?;
+    seed_empty_watch_manifest(scratch.pool(), chain).await?;
+    let fixture = RpcFixture::spawn(1, 3).await?;
+    let engine = Arc::new(Engine::new(scratch.pool().clone()));
+
+    let unpublished = engine
+        .run_live_batch(live_request(chain, &fixture.endpoint, 0, block_hash(1, 0)))
+        .await?;
+    assert_eq!(unpublished.current.number, 3);
+    let staged: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT block_number, canonicality_state::text
+         FROM chain_lineage
+         WHERE chain_id = $1 AND block_number > 1
+         ORDER BY block_number",
+    )
+    .bind(chain)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        staged,
+        vec![(2, "observed".to_owned()), (3, "observed".to_owned())]
+    );
+
+    let runner = production_runner(&scratch, Arc::clone(&engine), chain)?;
+    let configured_chain = live_chain(chain, &fixture.endpoint)?;
+    let cancellation = CancellationToken::new();
+    let run_cancellation = cancellation.clone();
+    let mut task =
+        tokio::spawn(async move { runner.run_chain(&configured_chain, run_cancellation).await });
+    wait_for_rederived_or_runner_stop(scratch.pool(), chain, 3, &block_hash(1, 3), &mut task)
+        .await?;
+    cancellation.cancel();
+    task.await??;
+
+    let recovered: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT block_number, canonicality_state::text
+         FROM chain_lineage
+         WHERE chain_id = $1 AND block_number > 1
+         ORDER BY block_number",
+    )
+    .bind(chain)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        recovered,
+        vec![(2, "canonical".to_owned()), (3, "canonical".to_owned())]
+    );
+    fixture.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn restart_after_an_unpublished_losing_fork_orphans_the_observed_suffix() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_live_restart_losing_observed").await?;
+    let chain = "live-restart-losing-observed";
+    seed_branch(scratch.pool(), chain, 1, 1, None).await?;
+    publish(scratch.pool(), chain, 1, 1, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 0, &block_hash(1, 0)).await?;
+    seed_empty_watch_manifest(scratch.pool(), chain).await?;
+    let fixture = RpcFixture::spawn(1, 3).await?;
+    let engine = Arc::new(Engine::new(scratch.pool().clone()));
+
+    let unpublished = engine
+        .run_live_batch(live_request(chain, &fixture.endpoint, 0, block_hash(1, 0)))
+        .await?;
+    assert_eq!(unpublished.current.hash, block_hash(1, 3));
+    fixture.reorg(2, 1, 3).await;
+
+    let runner = production_runner(&scratch, Arc::clone(&engine), chain)?;
+    let configured_chain = live_chain(chain, &fixture.endpoint)?;
+    let cancellation = CancellationToken::new();
+    let run_cancellation = cancellation.clone();
+    let mut task =
+        tokio::spawn(async move { runner.run_chain(&configured_chain, run_cancellation).await });
+    wait_for_rederived_or_runner_stop(scratch.pool(), chain, 3, &block_hash(2, 3), &mut task)
+        .await?;
+    cancellation.cancel();
+    task.await??;
+
+    let suffix: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT block_number, block_hash, canonicality_state::text
+         FROM chain_lineage
+         WHERE chain_id = $1 AND block_number > 1
+         ORDER BY block_number, block_hash",
+    )
+    .bind(chain)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        suffix,
+        vec![
+            (2, block_hash(1, 2), "orphaned".to_owned()),
+            (2, block_hash(2, 2), "canonical".to_owned()),
+            (3, block_hash(1, 3), "orphaned".to_owned()),
+            (3, block_hash(2, 3), "canonical".to_owned()),
+        ]
+    );
+    fixture.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn live_reorg_walk_loads_the_winning_suffix_and_stamps_cursors() -> Result<()> {
     let scratch = ScratchDatabase::create("production_live_reorg_walk").await?;
     let chain = "live-reorg-walk";
@@ -266,6 +375,150 @@ async fn live_reorg_walk_loads_the_winning_suffix_and_stamps_cursors() -> Result
         vec![
             ("interpret".into(), Some(2), Some(3)),
             ("project".into(), Some(2), Some(3)),
+        ]
+    );
+    fixture.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn lagging_same_fork_snapshot_does_not_publish_or_stamp() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_live_lagging_same_fork").await?;
+    let chain = "live-lagging-same-fork";
+    seed_branch(scratch.pool(), chain, 1, 3, None).await?;
+    publish(scratch.pool(), chain, 1, 3, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 3, &block_hash(1, 3)).await?;
+    seed_empty_watch_manifest(scratch.pool(), chain).await?;
+    let fixture = RpcFixture::spawn(1, 2).await?;
+
+    let outcome = LivePhase::new(scratch.pool().clone())
+        .run_batch(live_context(chain, &fixture.endpoint, 3, block_hash(1, 3))?)
+        .await?;
+    if let Some(heads) = &outcome.progress().heads {
+        publish_heads(scratch.pool(), chain, heads).await?;
+    }
+
+    assert!(
+        outcome.progress().heads.is_none(),
+        "a lagging same-fork snapshot must not request head publication"
+    );
+    let head: (i64, String) = sqlx::query_as(
+        "SELECT latest_block_number, latest_block_hash
+         FROM chain_heads WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(head, (3, block_hash(1, 3)));
+    let suffix_state: String = sqlx::query_scalar(
+        "SELECT canonicality_state::text FROM chain_lineage
+         WHERE chain_id = $1 AND block_hash = $2",
+    )
+    .bind(chain)
+    .bind(block_hash(1, 3))
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(suffix_state, "canonical");
+    let stamps: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT phase_name, redo_in_progress
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')
+         ORDER BY phase_name",
+    )
+    .bind(chain)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        stamps,
+        vec![
+            ("interpret".to_owned(), false),
+            ("project".to_owned(), false)
+        ]
+    );
+    fixture.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn equal_head_lag_preserves_unpublished_same_fork_observations() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_live_equal_head_lag").await?;
+    let chain = "live-equal-head-lag";
+    seed_branch(scratch.pool(), chain, 1, 1, None).await?;
+    publish(scratch.pool(), chain, 1, 1, 0, 0).await?;
+    seed_empty_watch_manifest(scratch.pool(), chain).await?;
+    let fixture = RpcFixture::spawn(1, 3).await?;
+    let engine = Engine::new(scratch.pool().clone());
+
+    let unpublished = engine
+        .run_live_batch(live_request(chain, &fixture.endpoint, 1, block_hash(1, 1)))
+        .await?;
+    assert_eq!(unpublished.current.number, 3);
+    fixture.reorg(1, 1, 1).await;
+    let lagging = engine
+        .run_live_batch(live_request(chain, &fixture.endpoint, 1, block_hash(1, 1)))
+        .await?;
+    publish_ingest_heads(scratch.pool(), chain, lagging.heads).await?;
+
+    let staged: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT block_number, canonicality_state::text
+         FROM chain_lineage
+         WHERE chain_id = $1 AND block_number > 1
+         ORDER BY block_number",
+    )
+    .bind(chain)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        staged,
+        vec![(2, "observed".to_owned()), (3, "observed".to_owned())]
+    );
+    fixture.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn genuine_lower_fork_snapshot_still_publishes_the_reorg() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_live_genuine_lower_fork").await?;
+    let chain = "live-genuine-lower-fork";
+    seed_branch(scratch.pool(), chain, 1, 3, None).await?;
+    publish(scratch.pool(), chain, 1, 3, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 3, &block_hash(1, 3)).await?;
+    seed_empty_watch_manifest(scratch.pool(), chain).await?;
+    let fixture = RpcFixture::spawn(1, 3).await?;
+    fixture.reorg(2, 1, 2).await;
+
+    let outcome = LivePhase::new(scratch.pool().clone())
+        .run_batch(live_context(chain, &fixture.endpoint, 3, block_hash(1, 3))?)
+        .await?;
+    let heads = outcome
+        .progress()
+        .heads
+        .as_ref()
+        .expect("a genuine lower fork must request head publication");
+    publish_heads(scratch.pool(), chain, heads).await?;
+
+    let head: (i64, String) = sqlx::query_as(
+        "SELECT latest_block_number, latest_block_hash
+         FROM chain_heads WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(head, (2, block_hash(2, 2)));
+    let stamps: Vec<(String, Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT phase_name, redo_from_block_number, redo_to_block_number
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')
+         ORDER BY phase_name",
+    )
+    .bind(chain)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        stamps,
+        vec![
+            ("interpret".to_owned(), Some(2), Some(3)),
+            ("project".to_owned(), Some(2), Some(3)),
         ]
     );
     fixture.server.abort();
@@ -425,6 +678,103 @@ async fn failed_system_redo_keeps_automatic_ownership() -> Result<()> {
 }
 
 #[tokio::test]
+async fn pending_required_redo_stamp_widens_and_keeps_ownership() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_live_pending_stamp_widening").await?;
+    let chain = "live-pending-stamp-widening";
+    seed_branch(scratch.pool(), chain, 1, 5, None).await?;
+    publish(scratch.pool(), chain, 1, 5, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 5, &block_hash(1, 5)).await?;
+
+    seed_branch(scratch.pool(), chain, 2, 5, Some((2, block_hash(1, 2)))).await?;
+    publish(scratch.pool(), chain, 2, 5, 0, 0).await?;
+    let pending: Vec<RedoStampSnapshot> = sqlx::query_as(
+        "SELECT phase_name, redo_from_block_number, redo_to_block_number, last_error
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')
+         ORDER BY phase_name",
+    )
+    .bind(chain)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert!(pending.iter().all(|(_, from, to, owner)| {
+        *from == Some(3)
+            && *to == Some(5)
+            && owner
+                .as_deref()
+                .is_some_and(|message| message.starts_with("required downstream redo: "))
+    }));
+
+    seed_branch(scratch.pool(), chain, 3, 5, Some((0, block_hash(1, 0)))).await?;
+    publish(scratch.pool(), chain, 3, 5, 0, 0).await?;
+    let widened: Vec<RedoStampSnapshot> = sqlx::query_as(
+        "SELECT phase_name, redo_from_block_number, redo_to_block_number, last_error
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')
+         ORDER BY phase_name",
+    )
+    .bind(chain)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert!(widened.iter().all(|(_, from, to, owner)| {
+        *from == Some(1)
+            && *to == Some(5)
+            && owner
+                .as_deref()
+                .is_some_and(|message| message.starts_with("required downstream redo: "))
+    }));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn failed_operator_redo_range_widens_without_losing_the_operator_error() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_live_operator_stamp_widening").await?;
+    let chain = "live-operator-stamp-widening";
+    seed_branch(scratch.pool(), chain, 1, 5, None).await?;
+    publish(scratch.pool(), chain, 1, 5, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 5, &block_hash(1, 5)).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running', redo_in_progress = true, redo_mode = 'redo',
+             redo_previous_phase_status = 'completed',
+             redo_previous_started_at = started_at,
+             redo_previous_finished_at = finished_at,
+             redo_from_block_number = 3, redo_to_block_number = 5,
+             redo_current_block_number = 4, redo_current_block_hash = $2,
+             redo_target_block_number = 5, redo_target_block_hash = $3,
+             last_error = 'operator redo failed: fixture',
+             started_at = now(), finished_at = NULL
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .bind(block_hash(1, 4))
+    .bind(block_hash(1, 5))
+    .execute(scratch.pool())
+    .await?;
+
+    seed_branch(scratch.pool(), chain, 2, 5, Some((0, block_hash(1, 0)))).await?;
+    publish(scratch.pool(), chain, 2, 5, 0, 0).await?;
+    let state: (Option<i64>, Option<i64>, Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT redo_from_block_number, redo_to_block_number,
+                redo_current_block_number, last_error
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        state,
+        (
+            Some(1),
+            Some(5),
+            None,
+            Some("operator redo failed: fixture".to_owned())
+        )
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn active_required_redo_blocks_another_writer_phase() -> Result<()> {
     let scratch = ScratchDatabase::create("production_live_required_redo_exclusion").await?;
     let chain = "live-required-redo-exclusion";
@@ -514,6 +864,87 @@ async fn unsupported_live_redo_is_rejected_without_persisting_redo_state() -> Re
 }
 
 #[tokio::test]
+async fn deferred_verify_redo_is_rejected_before_persisting_redo_state() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_live_deferred_verify_redo").await?;
+    let chain = "live-deferred-verify-redo";
+    seed_branch(scratch.pool(), chain, 1, 1, None).await?;
+    publish(scratch.pool(), chain, 1, 1, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 1, &block_hash(1, 1)).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'completed', verification_level = 'quick_synced',
+             current_block_number = 1, current_block_hash = $2,
+             target_block_number = 1, target_block_hash = $2,
+             started_at = now(), finished_at = now(), updated_at = now()
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(chain)
+    .bind(block_hash(1, 1))
+    .execute(scratch.pool())
+    .await?;
+    let before: (
+        String,
+        Option<String>,
+        bool,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT phase_status, verification_level, redo_in_progress,
+                    redo_from_block_number, redo_to_block_number, last_error
+             FROM chain_phase_state
+             WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+
+    let engine = Arc::new(Engine::new(scratch.pool().clone()));
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        PhaseSet::with_ingest_interpret_project_and_live(
+            Arc::new(IngestPhase::with_engine(Arc::clone(&engine))),
+            Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
+            Arc::new(LoopbackPhase::new(PhaseName::Project)),
+            Arc::new(LivePhase::with_engine(engine)),
+        )?,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-live-deferred-verify-redo",
+        fast_timing(),
+    )?;
+    let error = runner
+        .redo(
+            &live_chain(chain, "http://unused.invalid")?,
+            RedoPhase::Phase(PhaseName::Verify),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the B3 deferred verifier must refuse redo before creating its marker");
+    assert_eq!(error.kind(), phase_runner::error::ErrorKind::Configuration);
+    assert!(error.to_string().contains("B4 verifier"));
+
+    let after: (
+        String,
+        Option<String>,
+        bool,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT phase_status, verification_level, redo_in_progress,
+                    redo_from_block_number, redo_to_block_number, last_error
+             FROM chain_phase_state
+             WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(after, before);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn rewind_uses_head_publication_and_stamps_downstream_redo() -> Result<()> {
     let scratch = ScratchDatabase::create("production_live_rewind").await?;
     let chain = "live-rewind";
@@ -572,6 +1003,71 @@ async fn rewind_uses_head_publication_and_stamps_downstream_redo() -> Result<()>
     assert!(refilled.caught_up);
     assert_eq!(refilled.current.hash, block_hash(1, 3));
     fixture.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn rewind_refuses_missing_and_non_readable_ancestors_without_state_change() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_live_rewind_invalid_ancestor").await?;
+    let chain = "live-rewind-invalid-ancestor";
+    seed_branch(scratch.pool(), chain, 1, 3, None).await?;
+    publish(scratch.pool(), chain, 1, 3, 1, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 3, &block_hash(1, 3)).await?;
+    seed_branch(scratch.pool(), chain, 2, 2, Some((0, block_hash(1, 0)))).await?;
+    let before = rewind_snapshot(scratch.pool(), chain).await?;
+
+    let missing = rewind_to_ancestor(
+        &scratch.runner(),
+        chain,
+        BlockMarker::new(
+            1,
+            "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        )?,
+    )
+    .await
+    .expect_err("rewind must refuse an ancestor that is not stored");
+    assert_eq!(
+        missing.kind(),
+        phase_runner::error::ErrorKind::DataIntegrity
+    );
+    assert!(missing.to_string().contains("is not stored"));
+    assert_eq!(rewind_snapshot(scratch.pool(), chain).await?, before);
+
+    let observed = rewind_to_ancestor(
+        &scratch.runner(),
+        chain,
+        BlockMarker::new(1, block_hash(2, 1))?,
+    )
+    .await
+    .expect_err("rewind must refuse an observed ancestor");
+    assert_eq!(
+        observed.kind(),
+        phase_runner::error::ErrorKind::DataIntegrity
+    );
+    assert!(observed.to_string().contains("not on the readable path"));
+    assert_eq!(rewind_snapshot(scratch.pool(), chain).await?, before);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn rewind_refuses_to_cross_the_safe_head_without_state_change() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_live_rewind_safe_boundary").await?;
+    let chain = "live-rewind-safe-boundary";
+    seed_branch(scratch.pool(), chain, 1, 3, None).await?;
+    publish(scratch.pool(), chain, 1, 3, 2, 1).await?;
+    seed_completed_spine(scratch.pool(), chain, 3, &block_hash(1, 3)).await?;
+    let before = rewind_snapshot(scratch.pool(), chain).await?;
+
+    let error = rewind_to_ancestor(
+        &scratch.runner(),
+        chain,
+        BlockMarker::new(1, block_hash(1, 1))?,
+    )
+    .await
+    .expect_err("rewind must not cross the published safe head");
+    assert_eq!(error.kind(), phase_runner::error::ErrorKind::DataIntegrity);
+    assert!(error.to_string().contains("below safe block 2"));
+    assert_eq!(rewind_snapshot(scratch.pool(), chain).await?, before);
     scratch.cleanup().await
 }
 
@@ -644,6 +1140,63 @@ async fn event_silent_reverse_hydration_refreshes_and_follows_a_fork() -> Result
     publish(scratch.pool(), ETHEREUM, 2, 2, 0, 0).await?;
     hydrator.hydrate_canonical_head(ETHEREUM).await?;
     assert_primary(scratch.pool(), "not_found", None, &block_hash(2, 2)).await?;
+
+    rpc.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn missing_hydration_rpc_fails_before_retracting_existing_values() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_live_missing_hydration_rpc").await?;
+    seed_branch(scratch.pool(), ETHEREUM, 1, 1, None).await?;
+    publish(scratch.pool(), ETHEREUM, 1, 1, 0, 0).await?;
+    seed_reverse_candidate(scratch.pool()).await?;
+    let resource = seed_text_candidate(scratch.pool()).await?;
+    let rpc =
+        HydrationRpc::spawn(BTreeMap::from([(block_hash(1, 1), "alice.eth".to_owned())])).await?;
+    Hydrator::new(
+        scratch.pool().clone(),
+        ChainRpcUrls::from_entries(&[format!("{ETHEREUM}={}", rpc.endpoint)])?,
+    )
+    .hydrate_canonical_head(ETHEREUM)
+    .await?;
+    let primary_before: (String, Option<String>, Value) = sqlx::query_as(
+        "SELECT claim_status, raw_claim_name, claim_provenance
+         FROM primary_names_current
+         WHERE address = $1 AND coin_type = '60' AND namespace = 'ens'",
+    )
+    .bind(ADDRESS)
+    .fetch_one(scratch.pool())
+    .await?;
+    let text_before = text_entry(scratch.pool(), resource).await?;
+
+    let error = ProjectPhase::with_hydration(scratch.pool().clone(), ChainRpcUrls::default())
+        .run_batch(PhaseContext {
+            chain_id: ETHEREUM.to_owned(),
+            phase: PhaseName::Project,
+            mode: RunMode::Normal,
+            sources: Arc::from([]),
+            available_heads: Some(HeadMarkers {
+                latest: BlockMarker::new(1, block_hash(1, 1))?,
+                safe: Some(BlockMarker::new(0, block_hash(1, 0))?),
+                finalized: Some(BlockMarker::new(0, block_hash(1, 0))?),
+            }),
+            live_handoff: None,
+            resume: PhaseResume::default(),
+        })
+        .await
+        .expect_err("hydration candidates require a configured RPC URL");
+    assert_eq!(error.kind(), phase_runner::error::ErrorKind::Configuration);
+    let primary_after: (String, Option<String>, Value) = sqlx::query_as(
+        "SELECT claim_status, raw_claim_name, claim_provenance
+         FROM primary_names_current
+         WHERE address = $1 AND coin_type = '60' AND namespace = 'ens'",
+    )
+    .bind(ADDRESS)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(primary_after, primary_before);
+    assert_eq!(text_entry(scratch.pool(), resource).await?, text_before);
 
     rpc.server.abort();
     scratch.cleanup().await
@@ -1014,8 +1567,9 @@ fn live_request(
 async fn publish_ingest_heads(
     pool: &PgPool,
     chain: &str,
-    heads: bigname_ingest::HeadMarkers,
+    heads: Option<bigname_ingest::HeadMarkers>,
 ) -> Result<()> {
+    let heads = heads.ok_or_else(|| anyhow::anyhow!("live batch did not request publication"))?;
     publish_heads(
         pool,
         chain,
@@ -1151,6 +1705,129 @@ fn live_chain(chain: &str, endpoint: &str) -> phase_runner::error::RunnerResult<
     )
 }
 
+fn production_runner(
+    scratch: &ScratchDatabase,
+    engine: Arc<Engine>,
+    chain: &str,
+) -> Result<Arc<PhaseRunner>> {
+    let phases = PhaseSet::with_ingest_interpret_project_and_live(
+        Arc::new(IngestPhase::with_engine(Arc::clone(&engine))),
+        Arc::new(InterpretPhase::new(scratch.pool().clone())),
+        Arc::new(ProjectPhase::new(scratch.pool().clone())),
+        Arc::new(LivePhase::with_engine(engine)),
+    )?;
+    Ok(Arc::new(PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        format!("production-{chain}"),
+        fast_timing(),
+    )?))
+}
+
+fn live_context(
+    chain: &str,
+    endpoint: &str,
+    current: i64,
+    current_hash: String,
+) -> phase_runner::error::RunnerResult<PhaseContext> {
+    let current_marker = BlockMarker::new(current, current_hash)?;
+    Ok(PhaseContext {
+        chain_id: chain.to_owned(),
+        phase: PhaseName::Live,
+        mode: RunMode::Normal,
+        sources: Arc::from([SourceConfig::new(
+            chain,
+            "rpc",
+            "rpc",
+            SeedBasis::NewSignatureRange,
+            0,
+            endpoint,
+        )?]),
+        available_heads: Some(HeadMarkers {
+            latest: current_marker.clone(),
+            safe: Some(BlockMarker::new(0, block_hash(1, 0))?),
+            finalized: Some(BlockMarker::new(0, block_hash(1, 0))?),
+        }),
+        live_handoff: Some(current_marker.clone()),
+        resume: PhaseResume {
+            current: Some(current_marker.clone()),
+            target: Some(current_marker),
+            ..PhaseResume::default()
+        },
+    })
+}
+
+async fn wait_for_rederived_or_runner_stop(
+    pool: &PgPool,
+    chain: &str,
+    number: i64,
+    hash: &str,
+    task: &mut tokio::task::JoinHandle<phase_runner::error::RunnerResult<()>>,
+) -> Result<()> {
+    let wait = wait_for_rederived_head(pool, chain, number, hash);
+    tokio::pin!(wait);
+    tokio::select! {
+        result = task => match result {
+            Ok(Ok(())) => anyhow::bail!("production live runner stopped before recovery completed"),
+            Ok(Err(error)) => Err(error.into()),
+            Err(error) => Err(error.into()),
+        },
+        result = &mut wait => result,
+    }
+}
+
+type RewindSnapshot = (
+    Option<(
+        i64,
+        String,
+        Option<i64>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+    )>,
+    Vec<(i64, String, String)>,
+    Vec<(
+        String,
+        String,
+        bool,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+    )>,
+);
+type RedoStampSnapshot = (String, Option<i64>, Option<i64>, Option<String>);
+
+async fn rewind_snapshot(pool: &PgPool, chain: &str) -> Result<RewindSnapshot> {
+    let heads = sqlx::query_as(
+        "SELECT latest_block_number, latest_block_hash,
+                safe_block_number, safe_block_hash,
+                finalized_block_number, finalized_block_hash
+         FROM chain_heads WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .fetch_optional(pool)
+    .await?;
+    let lineage = sqlx::query_as(
+        "SELECT block_number, block_hash, canonicality_state::text
+         FROM chain_lineage WHERE chain_id = $1
+         ORDER BY block_number, block_hash",
+    )
+    .bind(chain)
+    .fetch_all(pool)
+    .await?;
+    let phases = sqlx::query_as(
+        "SELECT phase_name, phase_status, redo_in_progress,
+                redo_from_block_number, redo_to_block_number, last_error
+         FROM chain_phase_state WHERE chain_id = $1
+         ORDER BY phase_name",
+    )
+    .bind(chain)
+    .fetch_all(pool)
+    .await?;
+    Ok((heads, lineage, phases))
+}
+
 async fn wait_for_head(pool: &PgPool, chain: &str, number: i64, hash: &str) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -1214,25 +1891,25 @@ async fn seed_empty_watch_manifest(pool: &PgPool, chain: &str) -> Result<()> {
     let contract = Uuid::new_v4();
     let payload = json!({
         "manifest_version": 1,
-        "namespace": "test",
-        "source_family": "test_events",
+        "namespace": "ens",
+        "source_family": "ens_v1_registry_l1",
         "chain": chain,
         "deployment_epoch": "fixture",
         "rollout_status": "active",
-        "normalizer_version": "fixture",
+        "normalizer_version": "ensip15@ens-normalize-0.1.1",
         "capability_flags": {},
         "roots": [],
         "contracts": [{
-            "role": "test",
+            "role": "registry",
             "address": address,
             "proxy_kind": "none",
             "start_block": 0
         }],
         "discovery_rules": [],
         "abi": {"events": [{
-            "name": "Unused",
-            "fragment": "event Unused()",
-            "emitter_roles": ["test"],
+            "name": "NewTTL",
+            "fragment": "event NewTTL(bytes32 indexed node, uint64 ttl)",
+            "emitter_roles": ["registry"],
             "normalized_events": []
         }], "calls": []}
     });
@@ -1250,8 +1927,8 @@ async fn seed_empty_watch_manifest(pool: &PgPool, chain: &str) -> Result<()> {
              manifest_version, namespace, source_family, chain_id,
              deployment_label, rollout_status, normalizer_version,
              file_path, manifest_payload
-         ) VALUES (1, 'test', 'test_events', $1, 'fixture', 'active',
-                   'fixture', $2, $3)
+         ) VALUES (1, 'ens', 'ens_v1_registry_l1', $1, 'fixture', 'active',
+                   'ensip15@ens-normalize-0.1.1', $2, $3)
          RETURNING manifest_id",
     )
     .bind(chain)
@@ -1264,7 +1941,7 @@ async fn seed_empty_watch_manifest(pool: &PgPool, chain: &str) -> Result<()> {
              manifest_id, chain_id, declaration_kind, declaration_name,
              contract_instance_id, declared_address, role, proxy_kind,
              start_block_number
-         ) VALUES ($1, $2, 'contract', 'test', $3, $4, 'test', 'none', 0)",
+         ) VALUES ($1, $2, 'contract', 'registry', $3, $4, 'registry', 'none', 0)",
     )
     .bind(manifest)
     .bind(chain)

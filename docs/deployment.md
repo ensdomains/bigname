@@ -73,13 +73,21 @@ Each `BIGNAME_PHASE_RUNNER_SOURCES` entry has the form
 `CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV`; the named environment variable
 contains the provider URL. Capacity, retry, and polling controls use the
 `BIGNAME_PHASE_RUNNER_*` names exposed by `phase-runner --help`.
+For every configured chain on which canonical-head hydration runs (currently
+`ethereum-mainnet`), `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS` must contain a
+`CHAIN=HTTP_URL` entry. A missing entry is a fatal project-phase configuration
+error. The check runs before event-derived project publication or hydration
+writes, so previously hydrated values remain intact while the chain is stopped
+for configuration repair.
 
 One-shot finite phase work is available through `phase-runner redo` for
 `ingest`, `interpret`, `project`, and a configured `verify` implementation.
 Verify redo persists the verification level that implementation reports. The
-B3 deferred verifier has no processed extent after its normal idle run, so redo
-first fails the recorded-extent precondition. If an extent already exists, the
-deferred phase refuses the work until B4 rather than claiming a trust level.
+B3 deferred verifier refuses redo in phase preflight until B4 rather than
+claiming a trust level. That refusal runs before phase initialization, locking,
+or redo-state publication, including when a pre-B3 verify extent already
+exists, so it cannot strand a redo marker. A configured verify implementation
+continues to use the ratified redo path and persists its reported level.
 Historical `live` redo is rejected because live follows only the current head.
 The not-yet-implemented flag recomputation path also fails explicitly. Project
 redo and an interpret-to-project cascade use

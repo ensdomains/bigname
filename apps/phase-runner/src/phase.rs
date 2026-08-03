@@ -200,6 +200,10 @@ impl PhaseBatchOutcome {
 pub trait Phase: Send + Sync {
     fn name(&self) -> PhaseName;
 
+    fn preflight_redo(&self) -> RunnerResult<()> {
+        Ok(())
+    }
+
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_>;
 }
 
@@ -306,14 +310,20 @@ impl Phase for DeferredVerifyPhase {
         PhaseName::Verify
     }
 
+    fn preflight_redo(&self) -> RunnerResult<()> {
+        Err(RunnerError::new(
+            crate::error::ErrorKind::Configuration,
+            "verify redo is unavailable until the B4 verifier is implemented",
+        ))
+    }
+
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        if !matches!(context.mode, RunMode::Normal)
+            && let Err(error) = self.preflight_redo()
+        {
+            return Box::pin(async move { Err(error) });
+        }
         Box::pin(async move {
-            if !matches!(context.mode, RunMode::Normal) {
-                return Err(RunnerError::new(
-                    crate::error::ErrorKind::Configuration,
-                    "verify redo is unavailable until the B4 verifier is implemented",
-                ));
-            }
             // B4 supplies the read-only verifier. Until then this slot remains active without
             // claiming a verification level, allowing Base live follow to run beside it.
             Ok(PhaseBatchOutcome::Idle(PhaseProgress::default()))

@@ -67,7 +67,7 @@ impl Phase for LivePhase {
             let progress = PhaseProgress {
                 current: Some(runner_marker(outcome.current)?),
                 target: Some(runner_marker(outcome.target)?),
-                heads: Some(runner_heads(outcome.heads)?),
+                heads: outcome.heads.map(runner_heads).transpose()?,
                 estimated_write_bytes: outcome.estimated_write_bytes,
                 ..PhaseProgress::default()
             };

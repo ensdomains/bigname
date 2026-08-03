@@ -92,7 +92,7 @@ pub struct LiveBatchOutcome {
     pub caught_up: bool,
     pub current: Marker,
     pub target: Marker,
-    pub heads: HeadMarkers,
+    pub heads: Option<HeadMarkers>,
     pub estimated_write_bytes: u64,
 }
 

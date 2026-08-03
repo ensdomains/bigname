@@ -70,7 +70,7 @@ pub(crate) async fn load_available_heads(
         SELECT block_number, block_hash
         FROM chain_lineage
         WHERE chain_id = $1
-          AND canonicality_state <> 'orphaned'
+          AND canonicality_state IN ('canonical', 'safe', 'finalized')
         ORDER BY block_number DESC, block_hash
         LIMIT 1
         ",
@@ -198,8 +198,14 @@ pub async fn publish_heads(pool: &PgPool, chain_id: &str, heads: &HeadMarkers) -
         .map(|(_, hash)| hash.as_str())
         .collect::<Vec<_>>();
 
-    let orphaned_from =
-        replace_readable_path(&mut transaction, chain_id, &hashes, path_floor).await?;
+    let orphaned_from = replace_readable_path(
+        &mut transaction,
+        chain_id,
+        &hashes,
+        path_floor,
+        heads.latest.number,
+    )
+    .await?;
     if let Some(from) = orphaned_from {
         crate::redo_stamp::stamp_orphaned_suffix(&mut transaction, chain_id, from).await?;
     }
@@ -266,6 +272,7 @@ async fn replace_readable_path(
     chain_id: &str,
     hashes: &[&str],
     path_floor: i64,
+    path_ceiling: i64,
 ) -> RunnerResult<Option<i64>> {
     sqlx::query("DELETE FROM chain_heads WHERE chain_id = $1")
         .bind(chain_id)
@@ -313,6 +320,8 @@ async fn replace_readable_path(
     .fetch_all(&mut **transaction)
     .await
     .map_err(|error| head_write_error("orphan displaced readable path", chain_id, error))?;
+    crate::head_observed::orphan_displaced(transaction, chain_id, hashes, path_floor, path_ceiling)
+        .await?;
     Ok(orphaned.into_iter().min())
 }
 
@@ -473,7 +482,7 @@ async fn promote_to_finalized(
     Ok(())
 }
 
-fn head_write_error(action: &str, chain_id: &str, error: sqlx::Error) -> RunnerError {
+pub(crate) fn head_write_error(action: &str, chain_id: &str, error: sqlx::Error) -> RunnerError {
     let retryable = match &error {
         sqlx::Error::Database(database) => database.code().is_some_and(|code| {
             ["08", "40", "53", "55", "57", "58"]

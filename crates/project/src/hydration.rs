@@ -30,6 +30,15 @@ impl Hydrator {
         Self { pool, rpc_urls }
     }
 
+    pub fn require_rpc_configuration(&self, chain_id: &str) -> Result<()> {
+        if chain_id == ETHEREUM && self.rpc_urls.url_for(chain_id).is_none() {
+            return Err(ProjectError::configuration(format!(
+                "canonical-head hydration requires an RPC URL for {chain_id}"
+            )));
+        }
+        Ok(())
+    }
+
     pub async fn hydrate_canonical_head(&self, chain_id: &str) -> Result<HydrationOutcome> {
         let head = head::load(&self.pool, chain_id).await?;
         self.hydrate_loaded_head(chain_id, head).await
@@ -63,6 +72,9 @@ impl Hydrator {
         }
         let missing_rpc = (reverse.needs_rpc() || text_candidates > 0)
             && self.rpc_urls.url_for(chain_id).is_none();
+        if missing_rpc {
+            self.require_rpc_configuration(chain_id)?;
+        }
 
         let reverse_results = reverse.execute(&self.rpc_urls, &head).await;
         let text_failures = text::hydrate(&self.rpc_urls, &head, &mut text_rows).await?;
@@ -103,11 +115,6 @@ impl Hydrator {
         transaction.commit().await.map_err(|error| {
             ProjectError::database("failed to commit canonical-head hydration", error)
         })?;
-        if missing_rpc {
-            return Err(ProjectError::configuration(format!(
-                "canonical-head hydration candidates exist for {chain_id}, but no hydration RPC URL is configured"
-            )));
-        }
         let failed_calls = reverse_failures.saturating_add(text_failures);
         if failed_calls > 0 {
             return Err(ProjectError::transient(format!(

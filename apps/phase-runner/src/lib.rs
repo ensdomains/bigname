@@ -4,6 +4,7 @@ pub mod config;
 pub mod database;
 pub mod error;
 mod head_finality;
+mod head_observed;
 pub mod heads;
 pub mod ingest_phase;
 mod ingest_progress;
