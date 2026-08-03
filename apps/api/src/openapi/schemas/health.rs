@@ -91,7 +91,7 @@ pub(super) fn health_loop_schema() -> JsonValue {
             },
             "phase": {
                 "type": ["string", "null"],
-                "description": "Named phase when the loop is inside a monolithic operation: worker rebuild phases are governed by the separately configurable worker phase maximum age, while indexer phases (such as the full-closure replay lock wait) age against the ordinary indexer maximum; null for normal loop progress.",
+                "description": "Named phase when the loop is inside a monolithic operation. Worker rebuild phases use the separately configurable worker phase maximum age. Retained indexer heartbeat rows are legacy compatibility data; no current binary publishes indexer phases. Null means normal loop progress.",
             },
             "started_at": { "type": ["string", "null"], "format": "date-time" },
             "heartbeat_at": { "type": ["string", "null"], "format": "date-time" },

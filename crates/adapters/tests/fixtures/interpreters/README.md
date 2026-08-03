@@ -4,10 +4,11 @@
 migrated database so its block, transaction, and log positions remain
 unchanged. `expected-outputs.json` records every
 [normalized event](../../../../../docs/glossary.md) and every row in the
-adapter-owned `name_surfaces`, `surface_bindings`, `resources`,
+interpret-phase-owned `name_surfaces`, `surface_bindings`, `resources`,
 `token_lineages`, and `discovery_edges` tables.
 
-The original four cases were copied from these adapter tests:
+The original four cases were copied from these now-deleted legacy adapter
+tests:
 
 - ENS and Basenames reverse records:
   `crates/adapters/src/ens_v1_reverse_claim/tests.rs`
@@ -63,19 +64,23 @@ also asserts the required event kinds, the renewal's non-empty before-state,
 the orphaned and restored reorg outputs, and the ordered wrapper transitions
 before it permits golden output to be refreshed.
 
-Refresh an intentional semantic change with:
+Validate the byte-identical corpus through its schema-v2 consumer with:
 
 ```console
-BIGNAME_BLESS_INTERPRETER_FIXTURES=1 \
-  cargo test -p bigname-adapters --test interpreter_fixtures --locked
+cargo test -p bigname-adapters --test schema_v2_interpreter_fixtures --locked
 ```
+
+This harness has no bless mode. Any intentional corpus change requires a
+separate semantic review; old-runtime co-deletion must not regenerate the
+expectations.
 
 The A3 content hash covers decode and mapping semantics. For every
 `[[abi.events]]` entry it hashes the entire block, including `fragment`,
 `emitter_roles`, and `normalized_events`, together with production adapter
-sources, manifest-authority sources used by discovery reconciliation, and
-worker projection sources. A change that only expands the watched signature
-set is an ingest concern: build-plan amendment A requires fetching the new
+sources, manifest-authority sources used to persist declarations and select
+interpretation inputs, and worker projection sources. A change that only
+expands the watched signature set is an ingest concern: build-plan amendment A
+requires fetching the new
 signature's historical [raw facts](../../../../../docs/glossary.md) before
 the derived rebuild, rather than relying on this hash.
 

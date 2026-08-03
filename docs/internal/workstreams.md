@@ -4,7 +4,8 @@ Internal reference for splitting implementation work. `AGENTS.md` is the process
 
 ## Boundaries
 
-- Adapters write identity rows and normalized events, not projection rows.
+- Schema-v2 interpret writes identity rows and normalized events; adapters
+  provide interpretation behavior and do not write projection rows.
 - Projection workers own projection tables and rebuild behavior.
 - API code reads projections and execution output, except explicit audit endpoints.
 - Execution uses declared topology and manifests, not adapter internals.
@@ -15,7 +16,7 @@ Internal reference for splitting implementation work. `AGENTS.md` is the process
 | Surface | Owner | Notes |
 | --- | --- | --- |
 | `apps/api`, `docs/api-v1.md`, `docs/api-v1-routes.md`, `docs/api-v1.openapi.json` | Projections and API | Public route shape, OpenAPI, response contracts, API tests |
-| `apps/indexer`, `crates/adapters`, `docs/chain-intake.md` | Intake and Adapters | Raw intake, adapter normalization, provider/backfill behavior |
+| `apps/phase-runner`, `crates/ingest`, `crates/interpret`, `crates/adapters`, `docs/chain-intake.md` | Intake and Adapters | Phase orchestration, raw intake, and schema-v2 interpretation behavior |
 | `apps/worker`, projection modules, `docs/projections.md` | Projections and API | Projection apply/rebuild, current read models, worker-owned operational commands |
 | `crates/storage`, `migrations`, `docs/storage.md` | Storage and Domain | Schema, canonicality, migrations, storage helpers |
 | `crates/domain` | Storage and Domain | Narrow normalization helpers only; persisted identity types live in `crates/storage/src/identity/types.rs` |

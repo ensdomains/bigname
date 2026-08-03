@@ -43,15 +43,3 @@ pub struct RawLog {
     pub data: Vec<u8>,
     pub canonicality_state: CanonicalityState,
 }
-
-/// Counts of block-scoped raw facts orphaned during a reorg repair.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct RawFactOrphanCounts {
-    pub block_count: u64,
-    pub code_hash_count: u64,
-    pub transaction_count: u64,
-    pub receipt_count: u64,
-    pub log_count: u64,
-    pub call_snapshot_count: u64,
-    pub payload_cache_metadata_count: u64,
-}

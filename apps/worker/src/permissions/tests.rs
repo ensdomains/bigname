@@ -5,9 +5,9 @@ use anyhow::{Context, Result};
 use bigname_storage::{
     CanonicalityState, NormalizedEvent, PermissionScope, PermissionsCurrentResourceSummary,
     PermissionsCurrentRow, RawBlock, Resource, ResourcePermissionCoverage, default_database_url,
-    load_permissions_current, load_permissions_current_resource_summary, upsert_normalized_events,
-    upsert_permissions_current_resource_summary, upsert_permissions_current_rows,
-    upsert_raw_blocks, upsert_resources,
+    insert_normalized_event_fixtures, load_permissions_current,
+    load_permissions_current_resource_summary, upsert_permissions_current_resource_summary,
+    upsert_permissions_current_rows, upsert_raw_blocks, upsert_resources,
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -1623,7 +1623,7 @@ async fn seed_raw_blocks(pool: &PgPool, blocks: &[RawBlock]) -> Result<()> {
 }
 
 async fn seed_permission_events(pool: &PgPool, events: &[NormalizedEvent]) -> Result<()> {
-    upsert_normalized_events(pool, events).await?;
+    insert_normalized_event_fixtures(pool, events).await?;
     Ok(())
 }
 

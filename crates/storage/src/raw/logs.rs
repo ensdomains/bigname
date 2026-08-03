@@ -7,8 +7,8 @@ use super::{
     validation::{validate_replay_hashes, validate_replay_range},
 };
 
-/// List canonical persisted raw logs in a finite range for later adapter-owned
-/// normalized-event replay. This is read-only: it performs no RPC fetch,
+/// List canonical persisted raw logs in a finite range for later schema-v2
+/// interpretation. This is read-only: it performs no RPC fetch,
 /// checkpoint mutation, projection rebuild, or normalized-event write.
 pub async fn list_canonical_raw_log_replay_inputs(
     pool: &PgPool,

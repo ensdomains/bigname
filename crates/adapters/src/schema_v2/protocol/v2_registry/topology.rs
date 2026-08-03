@@ -119,7 +119,7 @@ pub(super) fn append_v2_name_transitions(
                 }),
                 state_scope: transition_scope(&transition, source_event),
             });
-            append_rebound_state_events(output, &transition, &current, resource_id, source_event);
+            append_rebound_state_events(output, &transition, current, resource_id, source_event);
         }
     }
 }

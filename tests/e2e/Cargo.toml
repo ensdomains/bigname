@@ -9,7 +9,6 @@ license = "Apache-2.0"
 alloy-primitives = { version = "1.5.7", features = ["serde"] }
 alloy-sol-types = "1.5.7"
 anyhow = "1.0.100"
-bigname-adapters = { path = "../../crates/adapters" }
 bigname-manifests = { path = "../../crates/manifests" }
 bigname-storage = { path = "../../crates/storage" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use bigname_test_support::{TestDatabase, TestDatabaseConfig, database_url_from_env};
 use phase_runner::database::RunnerDatabase;
 use sqlx::{Connection, PgConnection, postgres::PgConnectOptions};
@@ -32,6 +32,10 @@ impl ScratchDatabase {
     }
 
     pub fn pool(&self) -> &sqlx::PgPool {
+        self.runner.pool()
+    }
+
+    pub fn legacy_pool(&self) -> &sqlx::PgPool {
         self.database.pool()
     }
 
@@ -42,53 +46,7 @@ impl ScratchDatabase {
 }
 
 async fn apply_schema(pool: &sqlx::PgPool) -> Result<()> {
-    for (name, sql) in [
-        (
-            "chain",
-            include_str!("../../../../schema-v2/baseline/01_chain.sql"),
-        ),
-        (
-            "raw facts",
-            include_str!("../../../../schema-v2/baseline/02_raw_facts.sql"),
-        ),
-        (
-            "identity",
-            include_str!("../../../../schema-v2/baseline/03_identity.sql"),
-        ),
-        (
-            "manifests",
-            include_str!("../../../../schema-v2/baseline/04_manifests.sql"),
-        ),
-        (
-            "normalized events",
-            include_str!("../../../../schema-v2/baseline/05_normalized_events.sql"),
-        ),
-        (
-            "projections",
-            include_str!("../../../../schema-v2/baseline/06_projections.sql"),
-        ),
-        (
-            "labels",
-            include_str!("../../../../schema-v2/baseline/07_labels.sql"),
-        ),
-        (
-            "heartbeats",
-            include_str!("../../../../schema-v2/baseline/08_heartbeats.sql"),
-        ),
-        (
-            "resolution differences",
-            include_str!("../../../../schema-v2/baseline/09_divergence.sql"),
-        ),
-        (
-            "phase state",
-            include_str!("../../../../schema-v2/baseline/10_phase_state.sql"),
-        ),
-    ] {
-        sqlx::raw_sql(sql)
-            .execute(pool)
-            .await
-            .with_context(|| format!("failed to apply schema-v2 {name} baseline"))?;
-    }
+    phase_runner::schema::initialize_schema_v2(pool).await?;
     Ok(())
 }
 

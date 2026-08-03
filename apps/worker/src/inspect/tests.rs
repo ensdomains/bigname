@@ -1,14 +1,14 @@
 use anyhow::{Context, Result};
 use bigname_manifests::{
-    WatchedContract, WatchedContractSource, load_repository, load_watched_contracts,
-    plan_watched_contracts, summarize_watched_contracts, sync_repository,
+    WatchedContract, WatchedContractSource, load_watched_contracts, plan_watched_contracts,
+    summarize_watched_contracts,
 };
 use bigname_storage::{
-    BackfillJob, BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,
-    BackfillRangeSpec, CanonicalityInspection, CanonicalityInspectionStatus, CanonicalityState,
-    ChainLineageBlock, DatabaseConfig, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace,
-    ExecutionTraceInspection, ExecutionTraceStep, ManifestDriftAlertInspection,
-    ManifestDriftAlertKind, ManifestDriftAlertObservation, NormalizedEvent, RawFactAuditCounts,
+    BackfillJob, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange, CanonicalityInspection,
+    CanonicalityInspectionStatus, CanonicalityState, ChainLineageBlock, DatabaseConfig,
+    ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, ExecutionTraceInspection,
+    ExecutionTraceStep, ManifestDriftAlertInspection, ManifestDriftAlertKind,
+    ManifestDriftAlertObservation, NormalizedEvent, RawFactAuditCounts,
     RawPayloadCacheAuditMetadata, upsert_chain_lineage_blocks,
 };
 use serde_json::{Value, json};
@@ -18,16 +18,13 @@ use sqlx::{
     types::time::OffsetDateTime,
 };
 use std::{
-    path::PathBuf,
     str::FromStr,
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 
-use super::backfill::{
-    inspect_backfill_job, load_backfill_job_inspection, render_backfill_job_inspection,
-};
+use super::backfill::{inspect_backfill_job, render_backfill_job_inspection};
 use super::canonicality::{inspect_canonicality, render_canonicality_inspection};
 use super::execution_trace::{inspect_execution_trace, render_execution_trace_inspection};
 use super::manifest_drift::{inspect_manifest_drift, render_manifest_drift_inspection};
@@ -124,38 +121,8 @@ impl TestDatabase {
     }
 }
 
-fn backfill_job_create(idempotency_key: &str) -> BackfillJobCreate {
-    BackfillJobCreate {
-        deployment_profile: "mainnet".to_owned(),
-        chain_id: "eth-mainnet".to_owned(),
-        source_identity: json!({
-            "source_family": "ens_v1_registry_l1",
-            "watch_targets": ["0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e"]
-        }),
-        scan_mode: "logs".to_owned(),
-        range_start_block_number: 100,
-        range_end_block_number: 120,
-        idempotency_key: idempotency_key.to_owned(),
-        ranges: vec![
-            BackfillRangeSpec {
-                range_start_block_number: 100,
-                range_end_block_number: 109,
-            },
-            BackfillRangeSpec {
-                range_start_block_number: 110,
-                range_end_block_number: 120,
-            },
-        ],
-    }
-}
-
 fn timestamp(seconds: i64) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(seconds).expect("test timestamp must be valid")
-}
-
-fn lease_deadline() -> OffsetDateTime {
-    OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp() + 300)
-        .expect("lease deadline must be valid")
 }
 
 fn lineage_block(
@@ -220,16 +187,73 @@ fn payload_cache_audit_metadata(
     }
 }
 
-fn checked_in_manifest_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("manifests/mainnet")
-}
-
 fn render_current_watch_plan(watched_contracts: &[WatchedContract]) -> Value {
     let summary = summarize_watched_contracts(watched_contracts);
     let watch_plan = plan_watched_contracts(watched_contracts);
     render_watch_plan_inspection(watched_contracts, &summary, &watch_plan)
+}
+
+async fn seed_watch_plan_fixture(pool: &sqlx::PgPool) -> Result<()> {
+    let mut transaction = pool.begin().await?;
+    let manifest_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO manifest_versions (
+            manifest_version, namespace, source_family, chain,
+            deployment_epoch, rollout_status, normalizer_version,
+            file_path, manifest_payload
+        )
+        VALUES (
+            1, 'ens', 'ens_v1_registry_l1', 'ethereum-mainnet',
+            'ens_v1', 'active', 'ensip15@ens-normalize-0.1.1',
+            'tests/worker-inspect-watch-plan.toml', '{}'::jsonb
+        )
+        RETURNING manifest_id
+        "#,
+    )
+    .fetch_one(&mut *transaction)
+    .await?;
+    let contract_instance_id = Uuid::from_u128(0x1a5_0000_0000_0000_0000_0000_0000_0001);
+    let address = "0x0000000000000000000000000000000000000011";
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instances (
+            contract_instance_id, chain_id, contract_kind, provenance
+        )
+        VALUES ($1, 'ethereum-mainnet', 'contract', '{}'::jsonb)
+        "#,
+    )
+    .bind(contract_instance_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instance_addresses (
+            contract_instance_id, chain_id, address, source_manifest_id, provenance
+        )
+        VALUES ($1, 'ethereum-mainnet', $2, $3, '{}'::jsonb)
+        "#,
+    )
+    .bind(contract_instance_id)
+    .bind(address)
+    .bind(manifest_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_contract_instances (
+            manifest_id, declaration_kind, declaration_name,
+            contract_instance_id, declared_address, role, proxy_kind
+        )
+        VALUES ($1, 'contract', 'registry', $2, $3, 'registry', 'none')
+        "#,
+    )
+    .bind(manifest_id)
+    .bind(contract_instance_id)
+    .bind(address)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(())
 }
 
 fn execution_trace() -> ExecutionTrace {
@@ -1168,9 +1192,7 @@ async fn inspect_stored_lineage_range_orders_and_bounds_stored_rows() -> Result<
 #[tokio::test]
 async fn inspect_watch_plan_does_not_mutate_watched_contract_state() -> Result<()> {
     let database = TestDatabase::new().await?;
-    let repository = load_repository(checked_in_manifest_root())?;
-    let sync_summary = sync_repository(database.pool(), &repository).await?;
-    assert!(sync_summary.active_manifest_count > 0);
+    seed_watch_plan_fixture(database.pool()).await?;
 
     let before_contracts = load_watched_contracts(database.pool()).await?;
     assert!(!before_contracts.is_empty());
@@ -1277,45 +1299,6 @@ async fn inspect_canonicality_does_not_mutate_payload_cache_metadata() -> Result
 }
 
 #[tokio::test]
-async fn inspect_backfill_job_does_not_mutate_backfill_storage() -> Result<()> {
-    let database = TestDatabase::new().await?;
-    let created = bigname_storage::create_backfill_job(
-        database.pool(),
-        &backfill_job_create("worker-inspect-readonly"),
-    )
-    .await?;
-    let reserved = bigname_storage::reserve_backfill_range(
-        database.pool(),
-        created.job.backfill_job_id,
-        "worker-a",
-        "lease-a",
-        lease_deadline(),
-    )
-    .await?
-    .expect("range must be reservable");
-    bigname_storage::advance_backfill_range(
-        database.pool(),
-        reserved.backfill_range_id,
-        "lease-a",
-        105,
-    )
-    .await?;
-
-    let before = load_backfill_job_inspection(database.pool(), created.job.backfill_job_id).await?;
-
-    inspect_backfill_job(InspectBackfillJobArgs {
-        database: database.database_config(),
-        backfill_job_id: created.job.backfill_job_id,
-    })
-    .await?;
-
-    let after = load_backfill_job_inspection(database.pool(), created.job.backfill_job_id).await?;
-    assert_eq!(after, before);
-
-    database.cleanup().await
-}
-
-#[tokio::test]
 async fn inspect_execution_trace_does_not_mutate_execution_storage() -> Result<()> {
     let database = TestDatabase::new().await?;
     let trace = execution_trace();
@@ -1351,7 +1334,7 @@ async fn inspect_execution_trace_does_not_mutate_execution_storage() -> Result<(
 #[tokio::test]
 async fn inspect_manifest_drift_does_not_mutate_alert_observations() -> Result<()> {
     let database = TestDatabase::new().await?;
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         database.pool(),
         &[
             manifest_code_hash_alert_event("manifest_alert:inspect:code"),

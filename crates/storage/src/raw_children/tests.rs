@@ -5,19 +5,13 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use serde_json::json;
 use sqlx::{
     PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 
 use super::*;
-use crate::{
-    CanonicalityState, RawBlock, RawCallSnapshot, RawCodeHash, RawPayloadCacheMetadataUpsert,
-    default_database_url, load_raw_log_staging_input_version,
-    raw_log_staging_block_range_changed_since, upsert_raw_blocks, upsert_raw_call_snapshots,
-    upsert_raw_code_hashes, upsert_raw_payload_cache_metadata,
-};
+use crate::{CanonicalityState, default_database_url};
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -94,24 +88,6 @@ impl TestDatabase {
     }
 }
 
-fn raw_block(block_hash: &str, parent_hash: &str, block_number: i64) -> RawBlock {
-    RawBlock {
-        chain_id: "eth-mainnet".to_owned(),
-        block_hash: block_hash.to_owned(),
-        parent_hash: Some(parent_hash.to_owned()),
-        block_number,
-        block_timestamp: sqlx::types::time::OffsetDateTime::from_unix_timestamp(
-            1_700_000_000 + block_number,
-        )
-        .expect("timestamp must be valid"),
-        logs_bloom: Some(vec![block_number as u8]),
-        transactions_root: Some(format!("0xtxroot{block_number:02x}")),
-        receipts_root: Some(format!("0xrcroot{block_number:02x}")),
-        state_root: Some(format!("0xstroot{block_number:02x}")),
-        canonicality_state: CanonicalityState::Canonical,
-    }
-}
-
 fn raw_transaction(state: CanonicalityState) -> RawTransaction {
     RawTransaction {
         chain_id: "eth-mainnet".to_owned(),
@@ -152,52 +128,6 @@ fn raw_log(state: CanonicalityState) -> RawLog {
         emitting_address: "0x0000000000000000000000000000000000000003".to_owned(),
         topics: vec!["0xtopic0".to_owned(), "0xtopic1".to_owned()],
         data: vec![0xde, 0xad, 0xbe, 0xef],
-        canonicality_state: state,
-    }
-}
-
-fn raw_call_snapshot(
-    block_hash: &str,
-    block_number: i64,
-    request_hash: &str,
-    state: CanonicalityState,
-) -> RawCallSnapshot {
-    RawCallSnapshot {
-        chain_id: "eth-mainnet".to_owned(),
-        block_hash: block_hash.to_owned(),
-        block_number,
-        request_hash: request_hash.to_owned(),
-        request_payload: json!({
-            "to": "0x0000000000000000000000000000000000000001",
-            "data": format!("0xcall-{request_hash}")
-        }),
-        response_hash: format!("0xresponse-{request_hash}"),
-        response_payload: json!({
-            "result": format!("0xresult-{request_hash}")
-        }),
-        canonicality_state: state,
-    }
-}
-
-fn raw_payload_cache_metadata(
-    block_hash: &str,
-    block_number: i64,
-    retained_digest: &str,
-    state: CanonicalityState,
-) -> RawPayloadCacheMetadataUpsert {
-    RawPayloadCacheMetadataUpsert {
-        chain_id: "eth-mainnet".to_owned(),
-        block_hash: block_hash.to_owned(),
-        block_number: Some(block_number),
-        payload_kind: "full_block".to_owned(),
-        digest_algorithm: Some("sha256".to_owned()),
-        retained_digest: Some(retained_digest.to_owned()),
-        payload_size_bytes: 128,
-        content_type: Some("application/json".to_owned()),
-        content_encoding: Some("identity".to_owned()),
-        cache_metadata: json!({
-            "source": "raw-child-orphan-test"
-        }),
         canonicality_state: state,
     }
 }
@@ -252,101 +182,6 @@ async fn upserts_raw_transactions_receipts_and_logs() -> Result<()> {
     assert_eq!(
         promoted_logs[0].canonicality_state,
         CanonicalityState::Finalized
-    );
-
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn raw_log_block_number_updates_retain_each_revision_number() -> Result<()> {
-    let database = TestDatabase::new().await?;
-    let log = raw_log(CanonicalityState::Canonical);
-    upsert_raw_logs(database.pool(), std::slice::from_ref(&log)).await?;
-
-    let initial = sqlx::query_as::<_, (i64, i64)>(
-        r#"
-        SELECT block_number, revision
-        FROM raw_log_staging_block_revisions
-        WHERE chain_id = $1 AND block_hash = $2
-        ORDER BY revision DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(&log.chain_id)
-    .bind(&log.block_hash)
-    .fetch_one(database.pool())
-    .await?;
-    assert_eq!(initial, (101, 1));
-
-    for (block_number, expected_revision) in [(100_i64, 2_i64), (102, 3)] {
-        sqlx::query(
-            "UPDATE raw_logs SET block_number = $1 WHERE chain_id = $2 AND block_hash = $3",
-        )
-        .bind(block_number)
-        .bind(&log.chain_id)
-        .bind(&log.block_hash)
-        .execute(database.pool())
-        .await
-        .with_context(|| format!("failed to correct raw-log block number to {block_number}"))?;
-
-        let revised = sqlx::query_as::<_, (i64, i64)>(
-            r#"
-            SELECT block_number, revision
-            FROM raw_log_staging_block_revisions
-            WHERE chain_id = $1 AND block_hash = $2
-            ORDER BY revision DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(&log.chain_id)
-        .bind(&log.block_hash)
-        .fetch_one(database.pool())
-        .await?;
-        assert_eq!(revised, (block_number, expected_revision));
-    }
-    assert_eq!(
-        sqlx::query_as::<_, (i64, i64)>(
-            r#"
-            SELECT block_number, revision
-            FROM raw_log_staging_block_revisions
-            WHERE chain_id = $1 AND block_hash = $2
-            ORDER BY revision
-            "#,
-        )
-        .bind(&log.chain_id)
-        .bind(&log.block_hash)
-        .fetch_all(database.pool())
-        .await?,
-        vec![(101, 1), (100, 2), (102, 3)]
-    );
-
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn repeated_tail_block_mutations_retain_gap_free_range_evidence() -> Result<()> {
-    let database = TestDatabase::new().await?;
-    let mut log = raw_log(CanonicalityState::Observed);
-    upsert_raw_logs(database.pool(), std::slice::from_ref(&log)).await?;
-    let recorded_revision = load_raw_log_staging_input_version(database.pool(), &log.chain_id)
-        .await?
-        .revision;
-
-    log.canonicality_state = CanonicalityState::Canonical;
-    upsert_raw_logs(database.pool(), std::slice::from_ref(&log)).await?;
-    log.canonicality_state = CanonicalityState::Safe;
-    upsert_raw_logs(database.pool(), std::slice::from_ref(&log)).await?;
-
-    assert!(
-        !raw_log_staging_block_range_changed_since(
-            database.pool(),
-            &log.chain_id,
-            recorded_revision,
-            0,
-            100,
-        )
-        .await?,
-        "two evidenced mutations of the same block above the range must preserve range reuse"
     );
 
     database.cleanup().await
@@ -526,214 +361,6 @@ async fn rejects_mismatched_raw_receipt_and_log_identity() -> Result<()> {
             .to_string()
             .contains("raw log identity mismatch for chain eth-mainnet block 0xaaa log 0"),
         "unexpected error: {log_error:#}"
-    );
-
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn orphan_range_marks_raw_block_children_orphaned() -> Result<()> {
-    let database = TestDatabase::new().await?;
-
-    upsert_raw_blocks(
-        database.pool(),
-        &[
-            raw_block("0x001", "0x000", 1),
-            raw_block("0x002", "0x001", 2),
-        ],
-    )
-    .await?;
-
-    upsert_raw_transactions(
-        database.pool(),
-        &[RawTransaction {
-            block_hash: "0x002".to_owned(),
-            block_number: 2,
-            transaction_hash: "0xtx002".to_owned(),
-            canonicality_state: CanonicalityState::Canonical,
-            ..raw_transaction(CanonicalityState::Canonical)
-        }],
-    )
-    .await?;
-    upsert_raw_receipts(
-        database.pool(),
-        &[RawReceipt {
-            block_hash: "0x002".to_owned(),
-            block_number: 2,
-            transaction_hash: "0xtx002".to_owned(),
-            canonicality_state: CanonicalityState::Canonical,
-            ..raw_receipt(CanonicalityState::Canonical)
-        }],
-    )
-    .await?;
-    upsert_raw_logs(
-        database.pool(),
-        &[RawLog {
-            block_hash: "0x002".to_owned(),
-            block_number: 2,
-            transaction_hash: "0xtx002".to_owned(),
-            canonicality_state: CanonicalityState::Canonical,
-            ..raw_log(CanonicalityState::Canonical)
-        }],
-    )
-    .await?;
-    upsert_raw_code_hashes(
-        database.pool(),
-        &[RawCodeHash {
-            chain_id: "eth-mainnet".to_owned(),
-            block_hash: "0x002".to_owned(),
-            block_number: 2,
-            contract_address: "0x00000000000000000000000000000000000000aa".to_owned(),
-            code_hash: "0x1234".to_owned(),
-            code_byte_length: 32,
-            canonicality_state: CanonicalityState::Canonical,
-        }],
-    )
-    .await?;
-    upsert_raw_call_snapshots(
-        database.pool(),
-        &[
-            raw_call_snapshot("0x002", 2, "0xreq-002", CanonicalityState::Canonical),
-            raw_call_snapshot("0x001", 1, "0xreq-001", CanonicalityState::Canonical),
-        ],
-    )
-    .await?;
-    upsert_raw_payload_cache_metadata(
-        database.pool(),
-        &[
-            raw_payload_cache_metadata("0x002", 2, "0xdigest002", CanonicalityState::Canonical),
-            raw_payload_cache_metadata("0x001", 1, "0xdigest001", CanonicalityState::Canonical),
-        ],
-    )
-    .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO event_silent_resolver_call_observations (
-            chain_id,
-            resolver_address,
-            block_hash,
-            block_number,
-            transaction_hash,
-            transaction_index,
-            canonicality_state
-        )
-        VALUES (
-            'eth-mainnet',
-            '0xa2c122be93b0074270ebee7f6b7292c7deb45047',
-            '0x002',
-            2,
-            '0xtx002',
-            0,
-            'canonical'::canonicality_state
-        )
-        "#,
-    )
-    .execute(database.pool())
-    .await?;
-
-    let counts =
-        mark_raw_block_facts_range_orphaned(database.pool(), "eth-mainnet", "0x002", Some("0x001"))
-            .await?;
-    assert_eq!(
-        counts,
-        RawFactOrphanCounts {
-            block_count: 0,
-            code_hash_count: 1,
-            transaction_count: 1,
-            receipt_count: 1,
-            log_count: 1,
-            call_snapshot_count: 1,
-            payload_cache_metadata_count: 1,
-        }
-    );
-
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM chain_lineage WHERE block_hash = '0x002'"
-        )
-        .fetch_one(database.pool())
-        .await?,
-        "canonical".to_owned()
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM raw_transactions WHERE block_hash = '0x002'"
-        )
-        .fetch_one(database.pool())
-        .await?,
-        "orphaned".to_owned()
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM event_silent_resolver_call_observations WHERE block_hash = '0x002'"
-        )
-        .fetch_one(database.pool())
-        .await?,
-        "orphaned".to_owned()
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM raw_receipts WHERE block_hash = '0x002'"
-        )
-        .fetch_one(database.pool())
-        .await?,
-        "orphaned".to_owned()
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM raw_logs WHERE block_hash = '0x002'"
-        )
-        .fetch_one(database.pool())
-        .await?,
-        "orphaned".to_owned()
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM raw_code_hashes WHERE block_hash = '0x002'"
-        )
-        .fetch_one(database.pool())
-        .await?,
-        "orphaned".to_owned()
-    );
-    assert_eq!(
-            sqlx::query_scalar::<_, String>(
-                "SELECT canonicality_state::TEXT FROM raw_call_snapshots WHERE block_hash = '0x002' AND request_hash = '0xreq-002'"
-            )
-            .fetch_one(database.pool())
-            .await?,
-            "orphaned".to_owned()
-        );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM raw_payload_cache_metadata WHERE block_hash = '0x002' AND retained_digest = '0xdigest002'"
-        )
-        .fetch_one(database.pool())
-        .await?,
-        "orphaned".to_owned()
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM chain_lineage WHERE block_hash = '0x001'"
-        )
-        .fetch_one(database.pool())
-        .await?,
-        "canonical".to_owned()
-    );
-    assert_eq!(
-            sqlx::query_scalar::<_, String>(
-                "SELECT canonicality_state::TEXT FROM raw_call_snapshots WHERE block_hash = '0x001' AND request_hash = '0xreq-001'"
-            )
-            .fetch_one(database.pool())
-            .await?,
-            "canonical".to_owned()
-        );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT canonicality_state::TEXT FROM raw_payload_cache_metadata WHERE block_hash = '0x001' AND retained_digest = '0xdigest001'"
-        )
-        .fetch_one(database.pool())
-        .await?,
-        "canonical".to_owned()
     );
 
     database.cleanup().await

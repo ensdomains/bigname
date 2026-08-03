@@ -14,9 +14,7 @@ use sqlx::{
 use tokio::time::sleep;
 
 use super::*;
-use crate::{
-    RawBlock, default_database_url, mark_raw_block_facts_range_orphaned, upsert_raw_blocks,
-};
+use crate::default_database_url;
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -111,22 +109,6 @@ fn raw_call_snapshot(request_hash: &str, state: CanonicalityState) -> RawCallSna
     }
 }
 
-fn raw_block(block_hash: &str, parent_hash: &str, block_number: i64) -> RawBlock {
-    RawBlock {
-        chain_id: "eth-mainnet".to_owned(),
-        block_hash: block_hash.to_owned(),
-        parent_hash: Some(parent_hash.to_owned()),
-        block_number,
-        block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_000 + block_number)
-            .expect("valid block timestamp"),
-        logs_bloom: None,
-        transactions_root: Some(format!("0xtxroot-{block_hash}")),
-        receipts_root: Some(format!("0xreceipts-{block_hash}")),
-        state_root: Some(format!("0xstate-{block_hash}")),
-        canonicality_state: CanonicalityState::Canonical,
-    }
-}
-
 async fn load_observed_at(
     pool: &PgPool,
     chain_id: &str,
@@ -184,73 +166,6 @@ async fn upserts_and_loads_raw_call_snapshots_by_exact_block_identity() -> Resul
             raw_call_snapshot("0xreq-a", CanonicalityState::Observed),
             raw_call_snapshot("0xreq-b", CanonicalityState::Canonical),
         ]
-    );
-
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn load_by_block_hash_includes_orphaned_raw_call_snapshots() -> Result<()> {
-    let database = TestDatabase::new().await?;
-
-    upsert_raw_blocks(
-        database.pool(),
-        &[
-            raw_block("0x001", "0x000", 1),
-            raw_block("0x002", "0x001", 2),
-        ],
-    )
-    .await?;
-    upsert_raw_call_snapshots(
-        database.pool(),
-        &[
-            RawCallSnapshot {
-                block_hash: "0x001".to_owned(),
-                block_number: 1,
-                request_hash: "0xreq-001".to_owned(),
-                canonicality_state: CanonicalityState::Canonical,
-                ..raw_call_snapshot("0xreq-001", CanonicalityState::Canonical)
-            },
-            RawCallSnapshot {
-                block_hash: "0x002".to_owned(),
-                block_number: 2,
-                request_hash: "0xreq-002".to_owned(),
-                canonicality_state: CanonicalityState::Canonical,
-                ..raw_call_snapshot("0xreq-002", CanonicalityState::Canonical)
-            },
-        ],
-    )
-    .await?;
-
-    let counts =
-        mark_raw_block_facts_range_orphaned(database.pool(), "eth-mainnet", "0x002", Some("0x001"))
-            .await?;
-    assert_eq!(counts.call_snapshot_count, 1);
-
-    let orphaned =
-        load_raw_call_snapshots_by_block_hash(database.pool(), "eth-mainnet", "0x002").await?;
-    assert_eq!(
-        orphaned,
-        vec![RawCallSnapshot {
-            block_hash: "0x002".to_owned(),
-            block_number: 2,
-            request_hash: "0xreq-002".to_owned(),
-            canonicality_state: CanonicalityState::Orphaned,
-            ..raw_call_snapshot("0xreq-002", CanonicalityState::Canonical)
-        }]
-    );
-
-    let canonical =
-        load_raw_call_snapshots_by_block_hash(database.pool(), "eth-mainnet", "0x001").await?;
-    assert_eq!(
-        canonical,
-        vec![RawCallSnapshot {
-            block_hash: "0x001".to_owned(),
-            block_number: 1,
-            request_hash: "0xreq-001".to_owned(),
-            canonicality_state: CanonicalityState::Canonical,
-            ..raw_call_snapshot("0xreq-001", CanonicalityState::Canonical)
-        }]
     );
 
     database.cleanup().await

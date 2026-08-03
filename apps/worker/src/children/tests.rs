@@ -1,7 +1,7 @@
 use anyhow::Result;
 use bigname_storage::{
-    NameSurface, NormalizedEvent, RawBlock, RawLog, label_preimage_from_label,
-    load_children_current, upsert_label_preimages, upsert_name_surfaces, upsert_normalized_events,
+    NameSurface, NormalizedEvent, RawBlock, RawLog, insert_normalized_event_fixtures,
+    label_preimage_from_label, load_children_current, upsert_label_preimages, upsert_name_surfaces,
     upsert_raw_blocks, upsert_raw_logs,
 };
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
@@ -923,7 +923,7 @@ async fn seed_name_surfaces(pool: &PgPool, surfaces: &[NameSurface]) -> Result<(
 }
 
 async fn seed_subregistry_events(pool: &PgPool, events: &[NormalizedEvent]) -> Result<()> {
-    upsert_normalized_events(pool, events).await?;
+    insert_normalized_event_fixtures(pool, events).await?;
     Ok(())
 }
 

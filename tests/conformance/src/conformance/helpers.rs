@@ -2,15 +2,6 @@ fn timestamp(seconds: i64) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(seconds).expect("conformance timestamp must be valid")
 }
 
-const RAW_REPLAY_PROBE_SOURCE_FAMILY: &str = "ens_v1_reverse_l1";
-const RAW_REPLAY_PROBE_CONTRACT_ROLE: &str = "reverse_registrar";
-const RAW_REPLAY_PROBE_CLAIMED_ADDRESS: &str = "0x1234567890abcdef1234567890abcdef12345678";
-const RAW_REPLAY_PROBE_REVERSE_CLAIMED_TOPIC0: &str =
-    "0x6ada868dd3058cf77a48a74489fd7963688e5464b2b0fa957ace976243270e92";
-const RAW_REPLAY_PROBE_CLAIMED_ADDRESS_TOPIC: &str =
-    "0x0000000000000000000000001234567890abcdef1234567890abcdef12345678";
-const RAW_REPLAY_PROBE_REVERSE_NODE_TOPIC: &str =
-    "0xab5f3e28c9cfb162e62c91f566751059da9be419f5cbd10d0645d765c061d0e3";
 const BASENAMES_L2_RESOLVER_PROFILE_CODE_HASH: &str =
     "0x1111111111111111111111111111111111111111111111111111111111111111";
 const BASENAMES_UNSUPPORTED_RESOLVER_PROFILE_CODE_HASH: &str =
@@ -210,7 +201,7 @@ async fn seed_basenames_exact_name_rebuild_inputs(
         }],
     )
     .await?;
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
                         &database.pool,
                         &[
                             NormalizedEvent {
@@ -709,7 +700,7 @@ async fn seed_basenames_control_vector_rebuild_inputs(
                         }),
                     });
 
-    bigname_storage::upsert_normalized_events(&database.pool, &events).await?;
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
 
     Ok(())
 }
@@ -730,7 +721,7 @@ async fn seed_basenames_resolution_rebuild_inputs(
     )
     .await?;
 
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
                         &database.pool,
                         &[
                             NormalizedEvent {
@@ -1069,153 +1060,6 @@ async fn replay_all_current_projections(database: &HarnessDatabase) -> Result<()
     Ok(())
 }
 
-async fn replay_raw_fact_normalized_events_for_blocks(
-    database: &HarnessDatabase,
-    deployment_profile: &str,
-    chain: &str,
-    block_hashes: &[&str],
-) -> Result<()> {
-    let database_url = database.database_url.clone();
-    let deployment_profile = deployment_profile.to_owned();
-    let chain = chain.to_owned();
-    let block_hashes = block_hashes
-        .iter()
-        .map(|block_hash| (*block_hash).to_owned())
-        .collect::<Vec<_>>();
-    let indexer_manifest_path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/indexer/Cargo.toml");
-
-    tokio::task::spawn_blocking(move || -> Result<()> {
-                let _guard = WORKER_CARGO_LOCK
-                    .lock()
-                    .expect("worker cargo lock must not be poisoned");
-                let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-                let mut command = Command::new(cargo);
-                command
-                    .arg("run")
-                    .arg("--quiet")
-                    .arg("--manifest-path")
-                    .arg(indexer_manifest_path)
-                    .arg("--")
-                    .arg("replay")
-                    .arg("normalized-events")
-                    .arg("--database-url")
-                    .arg(&database_url)
-                    .arg("--deployment-profile")
-                    .arg(&deployment_profile)
-                    .arg("--chain")
-                    .arg(&chain);
-                for block_hash in &block_hashes {
-                    command.arg("--block-hash").arg(block_hash);
-                }
-
-                let output = command.output().with_context(|| {
-                    format!(
-                        "failed to invoke bigname-indexer raw-fact normalized-event replay for {chain}"
-                    )
-                })?;
-
-                if !output.status.success() {
-                    return Err(anyhow::anyhow!(
-                        "bigname-indexer raw-fact normalized-event replay failed for {chain}\nstdout:\n{}\nstderr:\n{}",
-                        String::from_utf8_lossy(&output.stdout),
-                        String::from_utf8_lossy(&output.stderr),
-                    ));
-                }
-
-                Ok(())
-            })
-            .await
-            .context("indexer raw-fact normalized-event replay task panicked")??;
-
-    Ok(())
-}
-
-async fn seed_raw_fact_replay_probe(
-    database: &HarnessDatabase,
-    chain: &str,
-    block_hash: &str,
-    watched_address: &str,
-) -> Result<()> {
-    let manifest_id = database
-        .insert_manifest(
-            "ens",
-            RAW_REPLAY_PROBE_SOURCE_FAMILY,
-            chain,
-            "ens_v1",
-            1,
-            "active",
-            "ensip15@ens-normalize-0.1.1",
-        )
-        .await?;
-    let contract_instance_id = Uuid::from_u128(0xc0a05);
-    seed_active_replay_contract(
-        database,
-        manifest_id,
-        contract_instance_id,
-        chain,
-        RAW_REPLAY_PROBE_CONTRACT_ROLE,
-        watched_address,
-    )
-    .await?;
-
-    bigname_storage::upsert_chain_lineage_blocks(
-        &database.pool,
-        &[bigname_storage::ChainLineageBlock {
-            chain_id: chain.to_owned(),
-            block_hash: block_hash.to_owned(),
-            parent_hash: Some(
-                "0xfeed000000000000000000000000000000000000000000000000000000000000".to_owned(),
-            ),
-            block_number: 303,
-            block_timestamp: timestamp(1_717_193_303),
-            logs_bloom: None,
-            transactions_root: None,
-            receipts_root: None,
-            state_root: None,
-            canonicality_state: CanonicalityState::Canonical,
-        }],
-    )
-    .await
-    .context("failed to seed chaos raw-fact replay chain lineage")?;
-    bigname_storage::upsert_raw_blocks(
-        &database.pool,
-        &[raw_block(
-            chain,
-            block_hash,
-            Some("0xfeed000000000000000000000000000000000000000000000000000000000000"),
-            303,
-            1_717_193_303,
-        )],
-    )
-    .await
-    .context("failed to seed chaos raw-fact replay raw block")?;
-    bigname_storage::upsert_raw_logs(
-        &database.pool,
-        &[bigname_storage::RawLog {
-            chain_id: chain.to_owned(),
-            block_hash: block_hash.to_owned(),
-            block_number: 303,
-            transaction_hash: "0xfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed"
-                .to_owned(),
-            transaction_index: 0,
-            log_index: 0,
-            emitting_address: watched_address.to_ascii_lowercase(),
-            topics: vec![
-                RAW_REPLAY_PROBE_REVERSE_CLAIMED_TOPIC0.to_owned(),
-                RAW_REPLAY_PROBE_CLAIMED_ADDRESS_TOPIC.to_owned(),
-                RAW_REPLAY_PROBE_REVERSE_NODE_TOPIC.to_owned(),
-            ],
-            data: Vec::new(),
-            canonicality_state: CanonicalityState::Canonical,
-        }],
-    )
-    .await
-    .context("failed to seed chaos raw-fact replay raw log")?;
-
-    Ok(())
-}
-
 async fn seed_active_replay_contract(
     database: &HarnessDatabase,
     manifest_id: i64,
@@ -1489,101 +1333,6 @@ fn basenames_resolver_profile_code_hash(
     }
 }
 
-async fn seed_completed_backfill_job(
-    database: &HarnessDatabase,
-) -> Result<bigname_storage::BackfillJobRecord> {
-    let created = bigname_storage::create_backfill_job(
-        &database.pool,
-        &bigname_storage::BackfillJobCreate {
-            deployment_profile: "conformance".to_owned(),
-            chain_id: "base-mainnet".to_owned(),
-            source_identity: json!({
-                "source_family": "conformance_backfill",
-                "fixture": "phase9-backfilled-data-consumer-conformance-job",
-            }),
-            scan_mode: "synthetic-local".to_owned(),
-            range_start_block_number: 98,
-            range_end_block_number: 261,
-            idempotency_key: "conformance-backfilled-data-consumer-routes".to_owned(),
-            ranges: vec![
-                bigname_storage::BackfillRangeSpec {
-                    range_start_block_number: 98,
-                    range_end_block_number: 180,
-                },
-                bigname_storage::BackfillRangeSpec {
-                    range_start_block_number: 181,
-                    range_end_block_number: 261,
-                },
-            ],
-        },
-    )
-    .await
-    .context("failed to create completed backfill job for conformance")?;
-
-    for (index, range) in created.ranges.iter().enumerate() {
-        let lease_owner = "conformance-backfill";
-        let lease_token = format!("conformance-backfill-lease-{index}");
-        let lease_expires_at =
-            OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp() + 300)
-                .context("failed to build conformance backfill lease deadline")?;
-        let reserved = bigname_storage::reserve_backfill_range(
-            &database.pool,
-            created.job.backfill_job_id,
-            lease_owner,
-            &lease_token,
-            lease_expires_at,
-        )
-        .await
-        .context("failed to reserve conformance backfill range")?
-        .context("conformance backfill range should be reservable")?;
-        anyhow::ensure!(
-            reserved.backfill_range_id == range.backfill_range_id,
-            "reserved unexpected backfill range {} instead of {}",
-            reserved.backfill_range_id,
-            range.backfill_range_id
-        );
-
-        bigname_storage::advance_backfill_range(
-            &database.pool,
-            range.backfill_range_id,
-            &lease_token,
-            range.range_end_block_number,
-        )
-        .await
-        .context("failed to advance conformance backfill range to completion")?;
-        bigname_storage::complete_backfill_range(
-            &database.pool,
-            range.backfill_range_id,
-            &lease_token,
-        )
-        .await
-        .context("failed to complete conformance backfill range")?;
-    }
-
-    let job = bigname_storage::load_backfill_job(&database.pool, created.job.backfill_job_id)
-        .await
-        .context("failed to load completed conformance backfill job")?
-        .context("completed conformance backfill job must exist")?;
-    let ranges = bigname_storage::load_backfill_ranges(&database.pool, created.job.backfill_job_id)
-        .await
-        .context("failed to load completed conformance backfill ranges")?;
-
-    anyhow::ensure!(
-        job.status == bigname_storage::BackfillLifecycleStatus::Completed,
-        "conformance backfill job should be completed, got {}",
-        job.status.as_str()
-    );
-    anyhow::ensure!(
-        ranges.iter().all(|range| {
-            range.status == bigname_storage::BackfillLifecycleStatus::Completed
-                && range.checkpoint_block_number == range.range_end_block_number
-                && range.completed_at.is_some()
-        }),
-        "all conformance backfill ranges must be completed at their declared range end"
-    );
-
-    Ok(bigname_storage::BackfillJobRecord { job, ranges })
-}
 
 async fn set_normalized_events_canonicality(
     database: &HarnessDatabase,
@@ -2397,7 +2146,7 @@ impl EnsV2HistoryFixture {
             .context("failed to upsert ENSv2 history fixture address-name anchors")?;
 
         let events = self.normalized_events();
-        bigname_storage::upsert_normalized_events(&database.pool, &events)
+        bigname_storage::insert_normalized_event_fixtures(&database.pool, &events)
             .await
             .context("failed to upsert ENSv2 history fixture normalized events")?;
 
@@ -3011,7 +2760,7 @@ async fn seed_ens_v2_address_name_rebuild_inputs(
     .await
     .context("failed to upsert ENSv2 address-name surface binding for conformance")?;
 
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
                 &database.pool,
                 &[
                     NormalizedEvent {
@@ -3129,7 +2878,7 @@ async fn seed_ens_v2_event_fixture_inputs(pool: &PgPool, events: &[NormalizedEve
     bigname_storage::upsert_raw_blocks(pool, &blocks)
         .await
         .context("failed to upsert ENSv2 fixture raw blocks")?;
-    bigname_storage::upsert_normalized_events(pool, events)
+    bigname_storage::insert_normalized_event_fixtures(pool, events)
         .await
         .context("failed to upsert ENSv2 fixture normalized events")?;
 
@@ -4779,7 +4528,7 @@ async fn seed_supported_alias_only_rebuild_inputs(
         }],
     )
     .await?;
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
                 &database.pool,
                 &[
                     NormalizedEvent {
@@ -4966,7 +4715,7 @@ async fn seed_supported_wildcard_rebuild_inputs(
         ],
     )
     .await?;
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
                 &database.pool,
                 &[
                     NormalizedEvent {
@@ -5114,7 +4863,7 @@ async fn seed_supported_basenames_rebuild_inputs(
         }],
     )
     .await?;
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
                 &database.pool,
                 &[
                     NormalizedEvent {

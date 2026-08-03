@@ -73,54 +73,6 @@ impl ManifestLoadStatus {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ManifestSyncSummary {
-    pub status: ManifestSyncStatus,
-    pub synced_manifest_count: usize,
-    pub active_manifest_count: usize,
-    pub root_count: usize,
-    pub contract_count: usize,
-    pub capability_count: usize,
-    pub discovery_rule_count: usize,
-    pub removed_manifest_count: usize,
-    pub cleared_discovery_edge_count: usize,
-}
-
-impl ManifestSyncSummary {
-    pub(crate) fn skipped(status: ManifestSyncStatus) -> Self {
-        Self {
-            status,
-            synced_manifest_count: 0,
-            active_manifest_count: 0,
-            root_count: 0,
-            contract_count: 0,
-            capability_count: 0,
-            discovery_rule_count: 0,
-            removed_manifest_count: 0,
-            cleared_discovery_edge_count: 0,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ManifestSyncStatus {
-    Synced,
-    SkippedMissingRoot,
-    SkippedInvalidRoot,
-    SkippedPendingBaseRederiveReplay,
-}
-
-impl ManifestSyncStatus {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Synced => "synced",
-            Self::SkippedMissingRoot => "skipped_missing_root",
-            Self::SkippedInvalidRoot => "skipped_invalid_root",
-            Self::SkippedPendingBaseRederiveReplay => "skipped_pending_base_rederive_replay",
-        }
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ActiveManifestVersion {
     pub manifest_version: u64,

@@ -30,6 +30,14 @@ async fn main() -> Result<()> {
     });
 
     match command {
+        ResolvedCommand::InitSchema { database_url } => {
+            let database = RunnerDatabase::connect(&database_url, 1).await?;
+            phase_runner::schema::initialize_schema_v2(database.pool()).await?;
+            tracing::info!(
+                schema = phase_runner::schema::PHASE_SCHEMA_NAME,
+                "schema-v2 database is ready"
+            );
+        }
         ResolvedCommand::Run {
             database_url,
             manifests_root,
@@ -154,6 +162,20 @@ mod tests {
     use phase_runner::error::RunnerError;
 
     use super::*;
+
+    #[test]
+    fn init_schema_cli_is_available() {
+        let command = Cli::try_parse_from([
+            "phase-runner",
+            "init-schema",
+            "--database-url",
+            "postgres://phase-runner.invalid/fresh",
+        ])
+        .expect("init-schema command must parse")
+        .resolve()
+        .expect("init-schema command must resolve");
+        assert!(matches!(command, ResolvedCommand::InitSchema { .. }));
+    }
 
     #[test]
     fn terminal_chain_report_makes_run_command_fail() {

@@ -3,6 +3,7 @@ mod invalidation;
 mod keying;
 mod outcome;
 mod pruning;
+mod reorg_invalidation;
 mod snapshot_match;
 mod trace;
 mod trace_rows;
@@ -10,11 +11,8 @@ mod trace_validation;
 mod types;
 
 pub use invalidation::{
-    ExecutionOutcomeInvalidationProgress, ExecutionOutcomeInvalidationProgressFuture,
     invalidate_execution_outcomes_for_manifest_version,
     invalidate_execution_outcomes_for_manifest_version_and_request_key,
-    invalidate_execution_outcomes_for_orphaned_blocks,
-    invalidate_execution_outcomes_for_orphaned_blocks_with_progress,
     invalidate_execution_outcomes_for_record_boundary,
     invalidate_execution_outcomes_for_record_boundary_and_request_key,
     invalidate_execution_outcomes_for_topology_boundary,
@@ -26,6 +24,7 @@ pub use outcome::{
     upsert_execution_outcome_in_transaction,
 };
 pub use pruning::{PrimaryNameRouteCachePruneSummary, prune_route_local_primary_name_execution};
+pub use reorg_invalidation::invalidate_execution_outcomes_for_orphaned_blocks_in_transaction;
 pub use trace::{
     load_execution_trace, load_execution_trace_from_connection, load_execution_trace_inspection,
     upsert_execution_trace, upsert_execution_trace_in_transaction,

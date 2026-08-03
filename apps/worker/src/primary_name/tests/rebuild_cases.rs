@@ -12,10 +12,11 @@ use bigname_execution::{
 use bigname_storage::{
     CanonicalityState, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, ExecutionTraceStep,
     NormalizedEvent, PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot,
-    load_execution_outcome, load_primary_name_current, load_primary_name_current_snapshot,
+    insert_normalized_event_fixtures, load_execution_outcome, load_primary_name_current,
+    load_primary_name_current_snapshot,
     load_primary_name_current_snapshot_for_update_in_transaction,
     lock_primary_name_tuple_in_transaction, upsert_execution_outcome,
-    upsert_execution_outcome_in_transaction, upsert_execution_trace, upsert_normalized_events,
+    upsert_execution_outcome_in_transaction, upsert_execution_trace,
     upsert_primary_name_current_rows, upsert_primary_name_current_snapshots,
 };
 use serde_json::{Value, json};
@@ -32,7 +33,7 @@ use super::support::{
 async fn full_rebuild_projects_declared_claim_status_rows() -> Result<()> {
     let database = TestDatabase::new().await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             reverse_changed_event(
@@ -317,7 +318,7 @@ async fn targeted_rebuild_invalidates_verified_primary_cache_on_claim_create_upd
         1_717_180_001,
     )
     .await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             reverse_changed_event(
@@ -355,7 +356,7 @@ async fn targeted_rebuild_invalidates_verified_primary_cache_on_claim_create_upd
         1_717_180_002,
     )
     .await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[reverse_linked_name_event(
             "record-a-60-update",
@@ -451,7 +452,7 @@ async fn targeted_rebuild_serializes_claim_publish_with_verified_primary_produce
         "seeded verified-primary outcome must exist before claim-change rebuild"
     );
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             reverse_changed_event(
@@ -623,7 +624,7 @@ async fn targeted_rebuild_preserves_verified_primary_cache_when_claim_row_is_unc
     let database = TestDatabase::new().await?;
     let address = "0x0000000000000000000000000000000000000abc";
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             reverse_changed_event(
@@ -674,7 +675,7 @@ async fn full_rebuild_invalidates_changed_verified_primary_cache_without_touchin
     let target = "0x0000000000000000000000000000000000000abc";
     let sibling = "0x0000000000000000000000000000000000000def";
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             reverse_changed_event(
@@ -733,7 +734,7 @@ async fn full_rebuild_invalidates_changed_verified_primary_cache_without_touchin
     )
     .await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[reverse_linked_name_event(
             "full-record-target-new",
@@ -770,7 +771,7 @@ async fn full_rebuild_serializes_invalidation_and_publish_with_verified_primary_
 
     let database = TestDatabase::new_with_max_connections(12).await?;
     let address = "0x0000000000000000000000000000000000000abc";
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             reverse_changed_event(
@@ -806,7 +807,7 @@ async fn full_rebuild_serializes_invalidation_and_publish_with_verified_primary_
         1_717_180_201,
     )
     .await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[reverse_linked_name_event(
             "full-record-serialize-new",
@@ -965,7 +966,7 @@ async fn full_rebuild_invalidates_normalization_upgrade_in_one_set_based_stateme
             CanonicalityState::Canonical,
         ));
     }
-    upsert_normalized_events(database.pool(), &events).await?;
+    insert_normalized_event_fixtures(database.pool(), &events).await?;
     rebuild_primary_names_current(database.pool(), None, None, None).await?;
 
     let updated = sqlx::query("UPDATE primary_names_current SET claim_name_is_normalized = false")
@@ -1032,7 +1033,7 @@ async fn full_rebuild_keeps_legacy_case_variant_verified_cache_unreadable() -> R
     let database = TestDatabase::new().await?;
     let address = "0x0000000000000000000000000000000000000abc";
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             reverse_changed_event(
@@ -1090,7 +1091,7 @@ async fn targeted_rebuild_projects_invalid_name_from_latest_reverse_linked_obser
 -> Result<()> {
     let database = TestDatabase::new().await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             reverse_changed_event(

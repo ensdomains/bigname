@@ -14,6 +14,7 @@ mod redo_presence;
 mod redo_state;
 pub mod runner;
 mod runner_support;
+pub mod schema;
 pub mod state;
 mod state_persistence;
 mod supervisor;

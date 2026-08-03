@@ -231,7 +231,7 @@ async fn v2_get_history_empty_and_missing_name_semantics() -> Result<()> {
     )
     .await?;
     seed_v2_history_blocks(&database, 120..=120).await?;
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[v2_history_event(
             "quiet-surface-bound",
@@ -323,7 +323,7 @@ async fn seed_v2_history_fixture(database: &TestDatabase) -> Result<()> {
     .await?;
     seed_v2_history_blocks(database, 101..=111).await?;
 
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
             v2_history_event(
@@ -450,7 +450,7 @@ async fn seed_v2_mixed_checkpoint_history(database: &TestDatabase) -> Result<()>
         "authority_key": "registry:ethereum-sepolia:sepolia-pin",
         "registrant": "0x00000000000000000000000000000000000000aa",
     });
-    bigname_storage::upsert_normalized_events(&database.pool, &[event]).await?;
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
 
     Ok(())
 }

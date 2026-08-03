@@ -123,7 +123,7 @@
             )
             .await
             .context("failed to upsert current address-name anchors for conformance")?;
-            bigname_storage::upsert_normalized_events(
+            bigname_storage::insert_normalized_event_fixtures(
                 &database.pool,
                 &[
                     history_event(
@@ -388,7 +388,7 @@
             )
             .await
             .context("failed to upsert basenames history address-name row for conformance")?;
-            bigname_storage::upsert_normalized_events(
+            bigname_storage::insert_normalized_event_fixtures(
                 &database.pool,
                 &[
                     NormalizedEvent {
@@ -1124,7 +1124,7 @@
             )
             .await
             .context("failed to upsert filtered address-name anchors for conformance")?;
-            bigname_storage::upsert_normalized_events(
+            bigname_storage::insert_normalized_event_fixtures(
                 &database.pool,
                 &[
                     history_event(
@@ -1377,7 +1377,7 @@
             )
             .await
             .context("failed to upsert scope address-name anchors for conformance")?;
-            bigname_storage::upsert_normalized_events(
+            bigname_storage::insert_normalized_event_fixtures(
                 &database.pool,
                 &[
                     history_event(
@@ -1590,7 +1590,7 @@
             )
             .await?;
 
-            bigname_storage::upsert_normalized_events(
+            bigname_storage::insert_normalized_event_fixtures(
                 &database.pool,
                 &[
                     NormalizedEvent {
@@ -1769,7 +1769,7 @@
             )
             .await?;
 
-            bigname_storage::upsert_normalized_events(
+            bigname_storage::insert_normalized_event_fixtures(
                 &database.pool,
                 &[
                     history_event(
@@ -1991,7 +1991,7 @@
                     )
                 })
                 .collect::<Vec<_>>();
-            bigname_storage::upsert_normalized_events(&database.pool, &events)
+            bigname_storage::insert_normalized_event_fixtures(&database.pool, &events)
                 .await
                 .context("failed to upsert larger history normalized events")?;
 

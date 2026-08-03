@@ -9,16 +9,9 @@ license.workspace = true
 alloy-json-abi.workspace = true
 alloy-primitives.workspace = true
 anyhow.workspace = true
-bigname-domain.workspace = true
-bigname-storage.workspace = true
 futures-util.workspace = true
 serde.workspace = true
 serde_json = "1.0.145"
 sqlx.workspace = true
 toml = "0.8.23"
-tracing.workspace = true
 uuid.workspace = true
-
-[dev-dependencies]
-bigname-test-support.workspace = true
-tokio.workspace = true

@@ -534,21 +534,21 @@ async fn legacy_table_lock_cannot_deadlock_replay_admission() -> Result<()> {
 }
 
 #[tokio::test]
-async fn current_indexer_invalidation_upsert_checks_floor_without_waiting_for_replay_admission()
+async fn current_invalidation_producer_checks_floor_without_waiting_for_replay_admission()
 -> Result<()> {
     let database = test_database().await?;
-    insert_unclaimed_invalidation(&database, "name_current", "ens:indexer-overlap.eth").await?;
+    insert_unclaimed_invalidation(&database, "name_current", "ens:producer-overlap.eth").await?;
     let mut replay_admission = database.pool().begin().await?;
     bigname_storage::projection_staging::lock_current_projection_replay_version_for_replay_write_in_transaction(
         &mut replay_admission,
     )
     .await?;
 
-    let indexer_options = bigname_storage::stamp_projection_replay_version(
+    let producer_options = bigname_storage::stamp_projection_replay_version(
         database.pool().connect_options().as_ref().clone(),
     );
-    let mut indexer_write = tokio::spawn(async move {
-        let mut connection = sqlx::PgConnection::connect_with(&indexer_options).await?;
+    let mut producer_write = tokio::spawn(async move {
+        let mut connection = sqlx::PgConnection::connect_with(&producer_options).await?;
         sqlx::query(
             r#"
             INSERT INTO projection_invalidations (
@@ -556,7 +556,7 @@ async fn current_indexer_invalidation_upsert_checks_floor_without_waiting_for_re
                 projection_key,
                 key_payload
             )
-            VALUES ('name_current', 'ens:indexer-overlap.eth', '{}'::jsonb)
+            VALUES ('name_current', 'ens:producer-overlap.eth', '{}'::jsonb)
             ON CONFLICT (projection, projection_key)
             DO UPDATE SET
                 generation = projection_invalidations.generation + 1,
@@ -570,18 +570,18 @@ async fn current_indexer_invalidation_upsert_checks_floor_without_waiting_for_re
         .await?;
         Ok::<(), sqlx::Error>(())
     });
-    tokio::time::timeout(Duration::from_secs(1), &mut indexer_write)
+    tokio::time::timeout(Duration::from_secs(1), &mut producer_write)
         .await
-        .context("current-version indexer invalidation waited for replay admission")?
-        .context("current-version indexer invalidation task failed")?
-        .context("current-version indexer invalidation was rejected")?;
+        .context("current-version invalidation producer waited for replay admission")?
+        .context("current-version invalidation producer task failed")?
+        .context("current-version invalidation producer was rejected")?;
     replay_admission.commit().await?;
     let generation: i64 = sqlx::query_scalar(
         r#"
         SELECT generation
         FROM projection_invalidations
         WHERE projection = 'name_current'
-          AND projection_key = 'ens:indexer-overlap.eth'
+          AND projection_key = 'ens:producer-overlap.eth'
         "#,
     )
     .fetch_one(database.pool())
@@ -598,10 +598,10 @@ async fn committed_floor_enqueue_survives_concurrent_newer_replay_admission() ->
     let newer_version = current_version + 1;
     admit_replay_version(&database, current_version).await?;
 
-    let indexer_options = bigname_storage::stamp_projection_replay_version(
+    let producer_options = bigname_storage::stamp_projection_replay_version(
         database.pool().connect_options().as_ref().clone(),
     );
-    let mut indexer_connection = sqlx::PgConnection::connect_with(&indexer_options).await?;
+    let mut producer_connection = sqlx::PgConnection::connect_with(&producer_options).await?;
 
     let mut newer_admission = database.pool().begin().await?;
     sqlx::query("SELECT set_config('bigname.projection_replay_version', $1, true)")
@@ -641,7 +641,7 @@ async fn committed_floor_enqueue_survives_concurrent_newer_replay_admission() ->
             VALUES ('name_current', 'ens:crossing-floor-raise.eth', '{}'::jsonb)
             "#,
         )
-        .execute(&mut indexer_connection),
+        .execute(&mut producer_connection),
     )
     .await
     .context("current-at-committed-floor enqueue waited for newer replay admission")?
@@ -676,7 +676,7 @@ async fn committed_floor_enqueue_survives_concurrent_newer_replay_admission() ->
         VALUES ('name_current', 'ens:after-floor-raise.eth', '{}'::jsonb)
         "#,
     )
-    .execute(&mut indexer_connection)
+    .execute(&mut producer_connection)
     .await
     .expect_err("the same process stamp must be rejected after the newer floor commits");
     let error = anyhow::Error::from(error);
@@ -691,10 +691,10 @@ async fn committed_floor_enqueue_survives_concurrent_newer_replay_admission() ->
 #[tokio::test]
 async fn committed_floor_queue_rejects_repeatable_read_producer() -> Result<()> {
     let database = test_database().await?;
-    let indexer_options = bigname_storage::stamp_projection_replay_version(
+    let producer_options = bigname_storage::stamp_projection_replay_version(
         database.pool().connect_options().as_ref().clone(),
     );
-    let mut connection = sqlx::PgConnection::connect_with(&indexer_options).await?;
+    let mut connection = sqlx::PgConnection::connect_with(&producer_options).await?;
     let mut transaction = connection.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
         .execute(&mut *transaction)

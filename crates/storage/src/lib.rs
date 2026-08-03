@@ -3,14 +3,11 @@ use std::{str::FromStr, time::Duration};
 mod address_names;
 mod audit;
 mod backfill_jobs;
-mod base_normalized_rederive;
 mod checkpoints;
 mod children;
 mod connection;
-mod coverage_recovery_failures;
 mod evm_primitives;
 mod execution;
-mod full_closure_coverage;
 mod history;
 mod identity;
 mod identity_facade;
@@ -28,17 +25,12 @@ mod raw_calls;
 mod raw_children;
 mod raw_code;
 mod raw_payload_cache;
-mod raw_staging_revision;
 mod record_inventory;
 mod resolution_support;
 mod resolver;
-mod resolver_profile_authority_journal;
-mod resolver_profile_input_changes;
 mod service_heartbeats;
 mod snapshot_selection;
 pub mod sql_row;
-mod startup_adapter_sync;
-mod stored_lineage_coverage;
 mod time;
 mod versions;
 pub use address_names::{
@@ -70,29 +62,6 @@ pub use audit::{
     list_raw_payload_cache_audit_metadata, list_stored_lineage_range,
 };
 mod long_operation_exports;
-pub use base_normalized_rederive::{
-    BASE_NORMALIZED_REDERIVE_ADAPTER, BASE_NORMALIZED_REDERIVE_BACKLOG_CURSOR_KIND,
-    BASE_NORMALIZED_REDERIVE_CHAIN_ID, BASE_NORMALIZED_REDERIVE_CURSOR_KIND,
-    BASE_NORMALIZED_REDERIVE_DISCOVERY_ADAPTER,
-    BASE_NORMALIZED_REDERIVE_REGISTRY_RESOLVER_CHANGED_DERIVATION_KIND,
-    BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK, BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_ADAPTER,
-    BASE_NORMALIZED_REDERIVE_REVERSE_CLAIM_DERIVATION_KIND,
-    BASE_NORMALIZED_REDERIVE_SUBREGISTRY_CHANGED_DERIVATION_KIND,
-    BASE_NORMALIZED_REDERIVE_UNWRAPPED_AUTHORITY_DERIVATION_KIND,
-    BaseNormalizedRederiveActiveManifestSnapshot, BaseNormalizedRederiveBatchPlan,
-    BaseNormalizedRederiveBatchPlanStep, BaseNormalizedRederiveCounts,
-    BaseNormalizedRederiveCursorCensus, BaseNormalizedRederiveDerivationKindCensus,
-    BaseNormalizedRederiveExecutionOutcome, BaseNormalizedRederiveExpectedCounts,
-    BaseNormalizedRederivePlan, BaseNormalizedRederiveRatifiedDroppedEmitterCensus,
-    BaseNormalizedRederiveRawFactCompleteness, BaseNormalizedRederiveRawFactRangeProof,
-    BaseNormalizedRederiveScopeRule, DEFAULT_BASE_NORMALIZED_REDERIVE_BATCH_SIZE,
-    base_normalized_rederive_json_digest, base_normalized_rederive_manifest_sync_pending_replay,
-    base_normalized_rederive_scope_rules,
-    ensure_base_normalized_rederive_replay_manifest_snapshot_current,
-    execute_base_normalized_rederive_drop, hold_base_normalized_rederive_runtime_shared_lock,
-    load_base_normalized_rederive_plan, pending_base_normalized_rederive_replay_target,
-    refuse_base_normalized_rederive_manifest_sync_during_pending_replay,
-};
 pub use checkpoints::{
     ChainCheckpoint, ChainCheckpointUpdate, CheckpointBlockRef, advance_chain_checkpoints,
     advance_chain_checkpoints_rejecting_non_orphaned_lineage_forks,
@@ -110,17 +79,6 @@ pub use children::{
 };
 use clap::Args;
 pub use connection::{PROJECTION_REPLAY_VERSION_SETTING, stamp_projection_replay_version};
-pub use coverage_recovery_failures::fence::{
-    bind_coverage_recovery_job_write_epoch,
-    load_bound_coverage_recovery_job_with_unjournaled_attempt, load_coverage_recovery_epoch,
-};
-pub use coverage_recovery_failures::{
-    CoverageRecoveryFailureKey, CoverageRecoveryFailureRecord, CoverageRecoveryFailureState,
-    CoverageRecoveryReservationFence, clear_coverage_recovery_failure,
-    load_coverage_recovery_failure, load_coverage_recovery_job_attempt_watermark,
-    rearm_terminal_coverage_recovery_failure, record_coverage_recovery_attempt_failure,
-    record_coverage_recovery_terminal_failure,
-};
 pub use evm_primitives::{ens_namehash_label_bytes, normalize_evm_address, normalize_evm_b256};
 pub use execution::{
     ExecutionBoundaryInvalidation, ExecutionCacheKey, ExecutionManifestInvalidation,
@@ -128,7 +86,7 @@ pub use execution::{
     ExecutionTraceInspection, ExecutionTraceStep, PrimaryNameRouteCachePruneSummary,
     SELECTED_CHECKPOINT_BOUNDARY_KIND, invalidate_execution_outcomes_for_manifest_version,
     invalidate_execution_outcomes_for_manifest_version_and_request_key,
-    invalidate_execution_outcomes_for_orphaned_blocks,
+    invalidate_execution_outcomes_for_orphaned_blocks_in_transaction,
     invalidate_execution_outcomes_for_record_boundary,
     invalidate_execution_outcomes_for_record_boundary_and_request_key,
     invalidate_execution_outcomes_for_topology_boundary,
@@ -139,13 +97,6 @@ pub use execution::{
     upsert_execution_outcome, upsert_execution_outcome_in_transaction, upsert_execution_trace,
     upsert_execution_trace_in_transaction,
 };
-pub use full_closure_coverage::*;
-pub use long_operation_exports::*;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{PgPool, Postgres, pool::PoolConnection};
-use tracing::info;
-#[rustfmt::skip]
-pub use execution::{ExecutionOutcomeInvalidationProgress, ExecutionOutcomeInvalidationProgressFuture, invalidate_execution_outcomes_for_orphaned_blocks_with_progress};
 pub use history::{
     EventHistoryAddressFilter, EventHistoryFilter, HistoryChainPositionSample, HistoryCursor,
     HistoryEvent, HistoryPage, HistoryScope, HistorySummary, HistorySummaryMode,
@@ -155,7 +106,7 @@ pub use history::{
     load_resource_history, load_resource_history_page,
 };
 pub use identity::{
-    IdentityOrphanCounts, NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
+    NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
     ens_v2_registry_resource_id, load_name_surface, load_name_surface_including_noncanonical,
     load_name_surfaces_by_logical_name_ids, load_resource, load_resource_including_noncanonical,
     load_surface_binding, load_surface_binding_including_noncanonical,
@@ -163,8 +114,7 @@ pub use identity::{
     load_surface_bindings_by_logical_name_id_including_noncanonical,
     load_surface_bindings_by_resource_id,
     load_surface_bindings_by_resource_id_including_noncanonical, load_token_lineage,
-    load_token_lineage_including_noncanonical, mark_identity_rows_range_orphaned,
-    mark_surface_binding_range_orphaned, upsert_name_surfaces,
+    load_token_lineage_including_noncanonical, upsert_name_surfaces,
     upsert_name_surfaces_without_snapshots, upsert_resources, upsert_resources_without_snapshots,
     upsert_surface_bindings, upsert_surface_bindings_without_snapshots, upsert_token_lineages,
     upsert_token_lineages_without_snapshots,
@@ -179,20 +129,20 @@ pub use identity_facade::{
     load_identity_name_feed_records_by_names, load_identity_records_by_names, load_indexing_status,
     load_reverse_identity_feed_records, load_reverse_identity_records,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use label_preimages::upsert_label_preimages_from_normalized_events;
 pub use label_preimages::{
-    LabelPreimage, LabelPreimageImportSummary, backfill_label_preimages_from_existing_facts,
-    import_label_preimages_from_ens_names_table, label_preimage_from_label, upsert_label_preimages,
-    upsert_label_preimages_from_normalized_events, upsert_label_preimages_in_transaction,
+    LabelPreimage, LabelPreimageImportSummary, import_label_preimages_from_ens_names_table,
+    label_preimage_from_label, upsert_label_preimages, upsert_label_preimages_in_transaction,
 };
 pub use lineage::{
     CanonicalityState, ChainLineageBlock, chain_lineage_contains_ancestor,
     chain_lineage_contains_ancestor_at_block, chain_lineage_contains_canonical_ancestor_position,
     load_chain_lineage_block, load_chain_lineage_canonical_child_path,
-    load_highest_canonical_chain_lineage_block, mark_chain_lineage_range_orphaned,
-    upsert_chain_lineage_blocks, upsert_chain_lineage_blocks_recanonicalizing_orphaned,
+    load_highest_canonical_chain_lineage_block, upsert_chain_lineage_blocks,
     upsert_chain_lineage_blocks_without_snapshots,
-    upsert_chain_lineage_blocks_without_snapshots_recanonicalizing_orphaned,
 };
+pub use long_operation_exports::*;
 pub use migration_indexes::{
     DEFERRED_NORMALIZED_EVENT_INDEXES, NormalizedReplayIndexDdlGuard,
     RECORD_INVENTORY_REPLAY_INDEX, TEMPORARY_NORMALIZED_REPLAY_INDEXES,
@@ -244,37 +194,24 @@ pub use primary_name::{
 pub use raw::{
     RawBlock, RawLogReplayInput, list_canonical_raw_log_replay_inputs,
     list_canonical_raw_log_replay_inputs_for_block_hashes, load_raw_block,
-    load_raw_blocks_by_hashes, mark_raw_block_range_orphaned, upsert_raw_blocks,
-    upsert_raw_blocks_recanonicalizing_orphaned, upsert_raw_blocks_without_snapshots,
+    load_raw_blocks_by_hashes, upsert_raw_blocks, upsert_raw_blocks_without_snapshots,
 };
 pub use raw_calls::{
     RawCallSnapshot, load_raw_call_snapshots_by_block_hash, upsert_raw_call_snapshots,
     upsert_raw_call_snapshots_in_transaction,
 };
 pub use raw_children::{
-    RawFactOrphanCounts, RawLog, RawReceipt, RawTransaction, mark_raw_block_facts_range_orphaned,
-    upsert_raw_logs, upsert_raw_logs_without_snapshots, upsert_raw_receipts,
-    upsert_raw_receipts_without_snapshots, upsert_raw_transactions,
+    RawLog, RawReceipt, RawTransaction, upsert_raw_logs, upsert_raw_logs_without_snapshots,
+    upsert_raw_receipts, upsert_raw_receipts_without_snapshots, upsert_raw_transactions,
     upsert_raw_transactions_without_snapshots,
 };
 pub use raw_code::{
-    RawCodeHash, RawCodeHashAddressVariant, RawCodeHashCorrectionBatchOutcome,
-    RawCodeHashCorrectionCandidate, RawCodeHashCorrectionUpdate, apply_raw_code_hash_corrections,
-    count_raw_code_hash_correction_candidates, count_raw_code_hash_correction_orphaned_skips,
-    load_raw_code_hash_address_variants, load_raw_code_hash_correction_page,
-    load_raw_code_hash_counts_by_block_hashes, upsert_raw_code_hashes,
+    RawCodeHash, load_raw_code_hash_counts_by_block_hashes, upsert_raw_code_hashes,
 };
 pub use raw_payload_cache::{
     RawPayloadCacheDigestVerification, RawPayloadCacheMetadata, RawPayloadCacheMetadataUpsert,
     list_raw_payload_cache_metadata_by_block_hash, load_raw_payload_cache_metadata,
     upsert_raw_payload_cache_metadata, verify_raw_payload_cache_digest,
-};
-pub use raw_staging_revision::{
-    RawLogStagingBoundaryStatus, RawLogStagingInputVersion, RawLogStagingReadGuard,
-    RawLogStagingReadSetGuard, acquire_raw_log_staging_read_guard,
-    acquire_raw_log_staging_read_set_guard, earliest_raw_log_staging_block_changed_since,
-    load_raw_log_staging_input_version, raw_log_staging_block_range_changed_since,
-    try_load_raw_log_staging_input_version,
 };
 pub use record_inventory::{
     RecordInventoryCurrentRow, clear_record_inventory_current,
@@ -307,24 +244,6 @@ pub use resolver::{
     ResolverCurrentRow, clear_resolver_current, delete_resolver_current, load_resolver_current,
     upsert_resolver_current_rows,
 };
-pub use resolver_profile_authority_journal::{
-    RESOLVER_PROFILE_AUTHORITY_JOURNAL_ENTRY_BATCH_SIZE, ResolverProfileAuthorityJournal,
-    ResolverProfileAuthorityJournalAdvance, ResolverProfileAuthorityJournalAdvanceSummary,
-    ResolverProfileAuthorityJournalEntry, begin_resolver_profile_authority_journal_advance,
-    load_resolver_profile_authority_entries_for_targets,
-    load_resolver_profile_authority_family_target_page, load_resolver_profile_authority_journal,
-    resolver_profile_authority_entry_key,
-};
-#[rustfmt::skip]
-pub use startup_adapter_sync::{STARTUP_CANONICAL_LINEAGE_HEAD_FIELD, STARTUP_LINEAGE_MUTATION_REVISION_FIELD, StartupAdapterLineageState, StartupAdapterLineageTailPolicy, StartupAdapterSyncCompletion, StartupAdapterSyncDecision, StartupAdapterSyncKey, StartupCanonicalLineageHead, complete_startup_adapter_sync, load_startup_adapter_lineage_state, load_startup_adapter_schema_state, prepare_startup_adapter_sync};
-#[rustfmt::skip]
-pub use resolver_profile_authority_journal::{ResolverProfileAuthorityJournalProgress, ResolverProfileAuthorityJournalProgressFuture};
-pub use resolver_profile_input_changes::{
-    ResolverProfileInputChange, ResolverProfileReconciliationTarget,
-    acknowledge_resolver_profile_input_changes, enqueue_resolver_profile_reconciliations,
-    load_pending_resolver_profile_input_changes,
-    load_pending_resolver_profile_input_changes_excluding,
-};
 pub use service_heartbeats::{
     DEFAULT_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS, DEFAULT_WORKER_REBUILD_PHASE_MAX_AGE_SECS,
     INDEXER_SERVICE_NAME, ServiceLoopChainHeartbeat, ServiceLoopHeartbeat,
@@ -334,8 +253,7 @@ pub use service_heartbeats::{
     ensure_service_loop_heartbeat_recent_with_phase_and_chain, finish_service_loop_phase,
     load_preferred_service_loop_heartbeats,
     load_preferred_service_loop_heartbeats_with_indexer_chain_max_age, load_service_loop_heartbeat,
-    record_service_loop_chain_heartbeat, record_service_loop_heartbeat, register_service_loop,
-    resolve_service_instance_id,
+    record_service_loop_heartbeat, register_service_loop, resolve_service_instance_id,
 };
 pub use snapshot_selection::{
     ChainPosition, ChainPositions, SelectedSnapshot, SnapshotAt, SnapshotConsistency,
@@ -344,6 +262,9 @@ pub use snapshot_selection::{
     SnapshotSelectorInput, ensure_projection_chain_positions_match, parse_rfc3339_utc_timestamp,
     resolve_exact_name_snapshot_selection,
 };
+use sqlx::PgPool;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use tracing::info;
 pub use versions::{CURRENT_PROJECTION_REPLAY_VERSION, latest_migration_version};
 /// Checked-in database migrations.
 pub const MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
@@ -374,8 +295,6 @@ impl Default for DatabaseConfig {
 pub const fn default_database_url() -> &'static str {
     "postgres://bigname:bigname@127.0.0.1:5432/bigname"
 }
-
-const BASE_NORMALIZED_REDERIVE_WRITER_GUARD_MIN_CONNECTIONS: u32 = 2;
 
 /// Open a PostgreSQL connection pool using the shared settings.
 pub async fn connect(config: &DatabaseConfig) -> Result<PgPool> {
@@ -425,23 +344,6 @@ pub async fn connect_reserved_readiness_pool(
         .context("failed to connect reserved PostgreSQL readiness pool")
 }
 
-/// Open a named PostgreSQL pool and hold the shared operational guard that
-/// prevents the Base normalized-event correction from running concurrently.
-pub async fn connect_with_base_normalized_rederive_writer_guard(
-    config: &DatabaseConfig,
-    application_name: &str,
-) -> Result<(PgPool, PoolConnection<Postgres>)> {
-    ensure!(
-        config.max_connections >= BASE_NORMALIZED_REDERIVE_WRITER_GUARD_MIN_CONNECTIONS,
-        "Base normalized-event rederive writer guard requires at least {} database connections; set BIGNAME_DATABASE_MAX_CONNECTIONS or --database-max-connections to {} or higher",
-        BASE_NORMALIZED_REDERIVE_WRITER_GUARD_MIN_CONNECTIONS,
-        BASE_NORMALIZED_REDERIVE_WRITER_GUARD_MIN_CONNECTIONS
-    );
-    let pool = connect_with_application_name(config, application_name).await?;
-    let guard = hold_base_normalized_rederive_runtime_shared_lock(&pool, application_name).await?;
-    Ok((pool, guard))
-}
-
 async fn connect_inner(
     config: &DatabaseConfig,
     application_name: Option<&str>,
@@ -486,14 +388,5 @@ fn connect_options(
 pub async fn migrate(pool: &PgPool) -> Result<()> {
     migration_indexes::run_migrations_and_ensure_required_indexes_ready(pool, &MIGRATOR).await?;
     info!("checked-in migrations applied");
-    let summary = backfill_label_preimages_from_existing_facts(pool, None)
-        .await
-        .context("failed to backfill label preimages from retained facts")?;
-    info!(
-        scanned_row_count = summary.scanned_row_count,
-        retained_row_count = summary.retained_row_count,
-        invalidated_parent_count = summary.invalidated_parent_count,
-        "retained label preimage backfill checked"
-    );
     Ok(())
 }

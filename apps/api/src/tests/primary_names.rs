@@ -2382,7 +2382,7 @@ async fn primary_name_readback_treats_concurrent_route_cache_pruning_as_a_miss()
 async fn get_primary_names_gates_case_variant_claim_even_with_persisted_success() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         &database.pool,
         &[
             primary_name_reverse_changed_event(
@@ -2514,7 +2514,7 @@ async fn get_primary_names_gates_case_variant_claim_even_with_persisted_success(
 async fn get_primary_names_reads_basenames_declared_claim_status_for_exact_tuple() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000bcd";
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         &database.pool,
         &[
             basenames_primary_name_reverse_changed_event(
@@ -3016,7 +3016,7 @@ async fn get_primary_names_reads_raw_claim_name_for_invalid_name_exact_tuple() -
 async fn get_primary_names_rejects_invalid_claim_name_for_exact_tuple() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         &database.pool,
         &[
             primary_name_reverse_changed_event(
@@ -3427,7 +3427,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_for_e
         }
     });
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         &database.pool,
         &[
             basenames_primary_name_reverse_changed_event(

@@ -1,7 +1,8 @@
 use anyhow::Result;
 use bigname_storage::{
-    CanonicalityState, PrimaryNameClaimStatus, PrimaryNameCurrentRow, load_primary_name_current,
-    load_primary_name_current_snapshot, upsert_normalized_events,
+    CanonicalityState, PrimaryNameClaimStatus, PrimaryNameCurrentRow,
+    insert_normalized_event_fixtures, load_primary_name_current,
+    load_primary_name_current_snapshot,
 };
 
 use super::super::{PrimaryNamesCurrentRebuildSummary, rebuild_primary_names_current};
@@ -16,7 +17,7 @@ async fn full_rebuild_projects_basenames_claim_name_from_base_resolver_observati
     let database = TestDatabase::new().await?;
     let address = "0x0000000000000000000000000000000000000abc";
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             basenames_reverse_changed_event(
@@ -96,7 +97,7 @@ async fn targeted_rebuild_projects_basenames_claim_name_from_base_resolver_obser
     let database = TestDatabase::new().await?;
     let address = "0x0000000000000000000000000000000000000def";
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             basenames_reverse_changed_event(

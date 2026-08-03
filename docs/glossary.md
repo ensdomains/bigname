@@ -28,13 +28,11 @@ source is *admitted* when a manifest declares it or a discovery rule reaches it
 from a declared root; only admitted inputs can produce normalized events or
 public coverage. Cross-reference: allowlisting.
 
-**Admission epoch** (discovery-admission epoch) — a per-chain counter that any
-transaction changing what is watched must bump in that same transaction:
-discovery-edge changes (insert, reactivation, window update, deactivation) and
-manifest-declared changes (manifest entries, seeded addresses, declared start
-blocks, rollout status). Long-running work records the epoch it started under
-and fails closed if the epoch moved, instead of acting on stale authority.
-Cross-reference: optimistic concurrency, fencing token.
+**Admission epoch** (discovery-admission epoch) — a migration-era per-chain
+counter used to fence old-runtime watch-plan reconciliation. The table remains
+in immutable migration history, but Stage B manifest synchronization and
+interpretation have no Rust writer or consumer for this counter; phase locks,
+content hashes, and explicit redo state now fence derived work.
 
 **Anchor** — the concrete object a stable identity is pinned to. An *authority
 anchor* is the registry entry, registrar lease
@@ -57,23 +55,15 @@ normalized event is broader than an era flip: it records every move of a
 name's authority anchor (registry-, registrar-, or wrapper-held), so most such
 rows — millions on Basenames alone — mark within-era anchor transitions.
 
-**Backfill coverage fact** — a durable record that one completed backfill job
-fetched all matching logs over one block interval, at one of two scopes: one
-(source family, address) pair, or the whole family — a family-scoped row means
-every address of the source family is covered by a topics-complete fetch.
-Checkpoint promotion composes these facts into gap-free proof instead of
-re-deriving coverage from job definitions.
+**Backfill coverage fact** — a migration-era record that asserted one completed
+old-runtime backfill job fetched all matching logs over one block interval.
+The tables remain in migration history, but the Stage B runtime has no writer,
+repair path, or checkpoint-promotion consumer for these records.
 
-**Stored-history verification** — the fail-closed recovery check that can reuse
-retained raw logs without fetching the same log rows again. Under the raw-log
-mutation fence, each bucket's selected canonical raw-log count and 128-bit
-identity fingerprint must match evidence from an independent historical
-source over the exact address, topic set, and block window, and every selected
-local log must have readable canonical lineage. A local empty bucket is
-reusable only when the independent source also reports it empty. Mismatched
-buckets require provider row fetch and a full independent recheck. The job then
-records the exact bounds, input revision, selected-log count, and digest that
-back its generation-scoped coverage facts.
+**Stored-history verification** — the migration-era old-runtime recovery check
+that compared retained raw logs with an independent historical source before
+reusing them. Its Rust implementation and coverage consumers were deleted in
+Stage B; retained tables do not make it a current runtime capability.
 
 **Canonicality** — whether a stored fact belongs to the chain branch currently
 accepted as real, and how final that acceptance is. States: `observed` (seen,
@@ -95,11 +85,10 @@ confused.
 key for persisted primary-name claims; presence of the row never widens what
 claim sources are trusted.
 
-**Closure** — everything an adapter's internal state depends on. A *closure
-boundary* is the earliest block from which replaying a stateful adapter is
-deterministic; *full-closure replay* replays all participating source families
-together from that boundary. Batching and paging are physical I/O details and
-never create closure boundaries.
+**Closure** — everything an interpreter's state depends on. A *closure
+boundary* is the earliest block from which replaying that state is
+deterministic. The deleted old runtime called its cross-family operation a
+*full-closure replay*; Stage B uses explicit interpret redo state instead.
 
 **Companion rows** — the same-transaction raw context rows demanded for a
 family-selected log (emitter watched under a source family, block inside that
@@ -120,11 +109,10 @@ watched contract. Addresses are time-ranged attributes of an instance, a proxy
 keeps its instance across implementation changes, and re-admitting an old
 address reuses its prior instance with a new active range.
 
-**Coverage frontier** (stored-lineage coverage frontier) — a saved,
-revision-checked proof of which watched block intervals already have complete
-log-fetch coverage, so checkpoint promotion re-verifies only new or changed
-intervals instead of all history. It proves fetch coverage only; lineage and
-fork checks still run per promotion.
+**Coverage frontier** (stored-lineage coverage frontier) — a migration-era,
+revision-checked old-runtime proof of which watched block intervals had
+complete log-fetch coverage. Its tables remain in migration history, but its
+Rust writers, readers, and checkpoint-promotion path were deleted in Stage B.
 
 **Declared vs verified** — *declared* state is what protocol-side observation
 says: indexed onchain events, plus the documented hydration of event-silent
@@ -183,12 +171,10 @@ that deployment profile. Today the only family whose active manifest carries
 `supported` is the ENSv2 Sepolia registrar; the flag also exists in `shadow`
 elsewhere (for example the mainnet ENSv1 registrar). It promotes nothing else.
 
-**Generation** (raw-log retention generation) — a per-chain counter incremented
-whenever raw-log history is destroyed: rows deleted, truncated, or updated in a
-way that rewrites their identity or payload. Canonicality-only changes never
-bump it. *Generation zero* means history never destroyed: the only state in
-which "no stored row" proves "never happened". After any destructive change,
-absence claims require fresh generation-scoped backfill coverage.
+**Generation** (raw-log retention generation) — a migration-era per-chain
+counter used by old-runtime destructive raw-log repair and backfill coverage.
+The schema remains in migration history, but Stage B has no Rust writer or
+coverage consumer for this counter.
 
 **Hash-pinned** — anchored to an exact block hash rather than a block number or
 `latest` tag, so a chain reorganization cannot silently change what was read.
@@ -201,16 +187,14 @@ that changes a primary-name claim also invalidates the matching persisted
 verified answer, so verified readback re-verifies instead of serving a stale
 outcome.
 
-**Input revision** — a per-chain counter advanced by every semantic raw-log
-change (insert, payload/identity change, canonicality change, delete,
-truncate). Caches record the revision they saw; a later revision touching
-consumed history invalidates them. Commit order, not timestamps or row ids, is
-the authority.
+**Input revision** (raw-log input revision) — a migration-era per-chain counter
+used by the old runtime's raw-log mutation fence and replay caches. Its Rust
+writer and consumers were deleted in Stage B. This is distinct from projection
+input revisions that surviving worker replay still uses.
 
-**Block-revision evidence floor** — the oldest recorded raw-log input revision
-from which every later revision must have append-only per-block evidence. A
-checkpoint below that floor cannot prove its intervening changes and restarts
-conservatively from its stored replay-range start.
+**Block-revision evidence floor** — the migration-era lower bound used by the
+old runtime's raw-log revision evidence. Its tables remain historical; the
+Stage B runtime no longer computes or consumes this floor.
 
 **Latest-only** — semantics where only the current value is observable and
 history cannot be reconstructed reliably (for example event-silent reverse
@@ -223,14 +207,12 @@ usage)
 backfill range or projection invalidation (standard distributed-systems
 usage). Context disambiguates; both senses are intentional.
 
-**Lineage mutation revision** — a per-chain counter advanced once per affected
-chain by statement triggers for every insert, update, or delete of stored block
-lineage. Per-revision evidence records the lowest affected block. The current
-old-runtime startup adapter pass does not use this revision for adapter
-checkpoint reuse; the retained revision and evidence still support other
-lineage and replay validation until their transitional storage is removed.
+**Lineage mutation revision** — a migration-era per-chain counter and evidence
+trail used by old-runtime stored-lineage coverage and adapter checkpoint reuse.
+The migration-owned database objects remain, but their Rust consumers were
+deleted in Stage B.
 
-**Normalized event** — the append-only, adapter-produced record of one semantic
+**Normalized event** — the append-only, interpret-phase record of one semantic
 protocol transition, carrying identity, provenance, chain position, and
 before/after state. The event stream, not raw logs, is what projections
 consume. Cross-reference: event sourcing.
@@ -305,10 +287,10 @@ resource
 Permissions and control history key to the resource, never to the name string
 or token id.
 
-**Retained-history proof** — the ENSv2 tuple (retention generation,
-discovery-admission epoch, proven-through block) that authorizes treating
-stored root/registry history as complete for closure replay. Destroying raw
-logs clears it; recovery requires generation-scoped backfill coverage.
+**Retained-history proof** — a migration-era ENSv2 tuple (retention generation,
+discovery-admission epoch, proven-through block) used by the deleted
+full-closure replay. Its SQL history remains, but Stage B has no Rust writer or
+consumer for this proof.
 
 **Rewind horizon** — the earliest chain position reorg repair might need to
 rewind to. Compaction and pruning must never delete data needed at or behind

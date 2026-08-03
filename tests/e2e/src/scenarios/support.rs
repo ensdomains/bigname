@@ -1,17 +1,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use alloy_primitives::{Address, hex, keccak256};
-use anyhow::{Context, Result};
-use bigname_storage::{
-    CanonicalityState, RawBlock, RawCodeHash, RawLog, upsert_raw_blocks, upsert_raw_code_hashes,
-    upsert_raw_logs,
-};
-use serde_json::{Value, json};
-use sqlx::{PgPool, types::time::OffsetDateTime};
+use alloy_primitives::Address;
+use anyhow::Result;
 
 use crate::harness::{
     anvil::Anvil, basenames::BasenamesDeployment, db::HarnessDb, ens_v1::EnsV1Deployment,
-    ens_v2::EnsV2Deployment, manifests, perturb, pipeline, repo_root, rpc::RpcClient,
+    ens_v2::EnsV2Deployment, manifests, perturb, pipeline, repo_root,
 };
 
 pub struct PipelineRun {
@@ -325,160 +319,6 @@ pub async fn ingest_mainnet_composed_and_serve(
         )
     })
     .await
-}
-
-/// Base twin of the backfill helpers: derive the Basenames chain via
-/// backfill and rebuild projections without a live run (no API — backfill
-/// promotes no canonical checkpoint).
-pub async fn backfill_basenames_and_replay_projections(
-    base_anvil: &Anvil,
-    deployment: &BasenamesDeployment,
-    idempotency_key: &str,
-) -> Result<BackfillRun> {
-    backfill_local_chain(
-        LocalChain {
-            anvil: base_anvil,
-            id: "base-mainnet",
-        },
-        idempotency_key,
-        true,
-        |scratch, repo_root| {
-            manifests::generate_local_basenames_profile(
-                scratch,
-                repo_root,
-                &deployment.manifest_targets(),
-            )
-        },
-    )
-    .await
-}
-
-/// Load every log and block already emitted by a local chain before invoking
-/// an interpreter. Interpretation-level scenarios use this instead of
-/// exercising runtime discovery or checkpoint behavior.
-pub async fn prefetch_raw_facts(
-    pool: &PgPool,
-    rpc: &RpcClient,
-    chain: &str,
-) -> Result<Vec<String>> {
-    let head = rpc.block_number().await?;
-    let value = rpc
-        .call(
-            "eth_getLogs",
-            json!([{"fromBlock": "0x0", "toBlock": format!("{head:#x}")}]),
-        )
-        .await?;
-    let rows = value
-        .as_array()
-        .context("eth_getLogs returned a non-array result")?;
-    let mut logs = Vec::with_capacity(rows.len());
-    for row in rows {
-        let block_hash = string_field(row, "blockHash")?;
-        let block_number = quantity_field(row, "blockNumber")?;
-        let topics = row
-            .get("topics")
-            .and_then(Value::as_array)
-            .context("raw log is missing topics")?
-            .iter()
-            .map(|topic| {
-                topic
-                    .as_str()
-                    .map(str::to_owned)
-                    .context("raw log topic is not a string")
-            })
-            .collect::<Result<Vec<_>>>()?;
-        logs.push(RawLog {
-            chain_id: chain.to_owned(),
-            block_hash,
-            block_number,
-            transaction_hash: string_field(row, "transactionHash")?,
-            transaction_index: quantity_field(row, "transactionIndex")?,
-            log_index: quantity_field(row, "logIndex")?,
-            emitting_address: string_field(row, "address")?.to_ascii_lowercase(),
-            topics,
-            data: hex::decode(string_field(row, "data")?)?,
-            canonicality_state: CanonicalityState::Canonical,
-        });
-    }
-
-    let mut blocks = Vec::with_capacity(usize::try_from(head + 1)?);
-    for block_number in 0..=head {
-        let block = rpc
-            .call(
-                "eth_getBlockByNumber",
-                json!([format!("{block_number:#x}"), false]),
-            )
-            .await?;
-        let block_hash = string_field(&block, "hash")?;
-        let parent_hash = (block_number > 0)
-            .then(|| string_field(&block, "parentHash"))
-            .transpose()?;
-        blocks.push(RawBlock {
-            chain_id: chain.to_owned(),
-            block_hash,
-            parent_hash,
-            block_number: i64::try_from(block_number)?,
-            block_timestamp: OffsetDateTime::from_unix_timestamp(quantity_field(
-                &block,
-                "timestamp",
-            )?)?,
-            logs_bloom: None,
-            transactions_root: None,
-            receipts_root: None,
-            state_root: None,
-            canonicality_state: CanonicalityState::Finalized,
-        });
-    }
-    blocks.sort_by_key(|block| block.block_number);
-    logs.sort_by_key(|log| (log.block_number, log.transaction_index, log.log_index));
-    upsert_raw_blocks(pool, &blocks).await?;
-    upsert_raw_logs(pool, &logs).await?;
-    Ok(blocks.into_iter().map(|block| block.block_hash).collect())
-}
-
-/// Store an exact code observation for an address at the local chain head.
-pub async fn prefetch_raw_code_hash(
-    pool: &PgPool,
-    rpc: &RpcClient,
-    chain: &str,
-    address: Address,
-) -> Result<()> {
-    let block_number = rpc.block_number().await?;
-    let block = rpc
-        .call(
-            "eth_getBlockByNumber",
-            json!([format!("{block_number:#x}"), false]),
-        )
-        .await?;
-    let code = rpc.get_code(address).await?;
-    upsert_raw_code_hashes(
-        pool,
-        &[RawCodeHash {
-            chain_id: chain.to_owned(),
-            block_hash: string_field(&block, "hash")?,
-            block_number: i64::try_from(block_number)?,
-            contract_address: format!("{address:#x}"),
-            code_hash: format!("{:#x}", keccak256(&code)),
-            code_byte_length: i64::try_from(code.len())?,
-            canonicality_state: CanonicalityState::Finalized,
-        }],
-    )
-    .await?;
-    Ok(())
-}
-
-fn string_field(value: &Value, field: &str) -> Result<String> {
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .with_context(|| format!("JSON-RPC payload is missing string field {field}"))
-}
-
-fn quantity_field(value: &Value, field: &str) -> Result<i64> {
-    let raw = string_field(value, field)?;
-    i64::from_str_radix(raw.trim_start_matches("0x"), 16)
-        .with_context(|| format!("JSON-RPC field {field} is not a hex quantity: {raw}"))
 }
 
 pub async fn ingest_with_restart_and_serve<F, Fut>(

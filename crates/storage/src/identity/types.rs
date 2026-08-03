@@ -122,12 +122,3 @@ pub struct SurfaceBinding {
     pub provenance: Value,
     pub canonicality_state: CanonicalityState,
 }
-
-/// Counts of identity rows orphaned during one losing-branch repair.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct IdentityOrphanCounts {
-    pub token_lineage_count: u64,
-    pub resource_count: u64,
-    pub name_surface_count: u64,
-    pub surface_binding_count: u64,
-}

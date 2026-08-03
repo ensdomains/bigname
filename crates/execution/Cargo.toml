@@ -22,4 +22,5 @@ tower = { version = "0.5.2", default-features = false }
 uuid.workspace = true
 
 [dev-dependencies]
+bigname-test-support.workspace = true
 tokio.workspace = true

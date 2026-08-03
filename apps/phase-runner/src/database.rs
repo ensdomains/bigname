@@ -8,6 +8,7 @@ use sqlx::{
 use crate::error::{RunnerError, RunnerResult};
 
 pub const INTERPRETER_CONTENT_HASH_SETTING: &str = "bigname.interpreter_content_hash";
+pub const PHASE_SEARCH_PATH: &str = "bigname_phase";
 
 #[derive(Clone)]
 pub struct RunnerDatabase {
@@ -56,8 +57,11 @@ impl RunnerDatabase {
 }
 
 pub fn stamp_interpreter_content_hash(options: PgConnectOptions) -> PgConnectOptions {
-    options.options([(
-        INTERPRETER_CONTENT_HASH_SETTING,
-        bigname_content_hash::INTERPRETER_CONTENT_HASH,
-    )])
+    options.options([
+        (
+            INTERPRETER_CONTENT_HASH_SETTING,
+            bigname_content_hash::INTERPRETER_CONTENT_HASH,
+        ),
+        ("search_path", PHASE_SEARCH_PATH),
+    ])
 }

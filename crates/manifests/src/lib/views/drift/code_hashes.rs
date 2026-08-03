@@ -4,28 +4,18 @@ use anyhow::{Context, Result};
 use futures_util::TryStreamExt;
 use sqlx::{PgPool, Row};
 
-use crate::{ManifestRuntimeProgress, WatchedContract, WatchedContractSource, normalize_address};
+use crate::{WatchedContract, WatchedContractSource, normalize_address};
 
 use super::super::types::ManifestCodeHashObservation;
 
-const CODE_HASH_OBSERVATION_PROGRESS_ROWS: usize = 1_000;
-
-pub async fn load_manifest_code_hash_observations(
+pub(in crate::views) async fn load_manifest_code_hash_observations(
     pool: &PgPool,
 ) -> Result<Vec<ManifestCodeHashObservation>> {
-    load_manifest_code_hash_observations_inner(pool, None).await
-}
-
-pub async fn load_manifest_code_hash_observations_with_progress(
-    pool: &PgPool,
-    progress: &mut dyn ManifestRuntimeProgress,
-) -> Result<Vec<ManifestCodeHashObservation>> {
-    load_manifest_code_hash_observations_inner(pool, Some(progress)).await
+    load_manifest_code_hash_observations_inner(pool).await
 }
 
 async fn load_manifest_code_hash_observations_inner(
     pool: &PgPool,
-    mut progress: Option<&mut dyn ManifestRuntimeProgress>,
 ) -> Result<Vec<ManifestCodeHashObservation>> {
     let mut rows = sqlx::query(
         r#"
@@ -122,34 +112,20 @@ async fn load_manifest_code_hash_observations_inner(
     )
     .fetch(pool);
 
-    // `UNION ALL` allows the database to stream each branch. Restore exact
-    // `UNION` semantics in bounded Rust progress units instead of waiting for
-    // one global database sort before the first heartbeat.
+    // `UNION ALL` lets the database stream each branch. Restore exact `UNION`
+    // semantics in Rust instead of requiring one global database sort.
     let mut observations = BTreeSet::new();
-    let mut streamed_row_count = 0usize;
     while let Some(row) = rows
         .try_next()
         .await
         .context("failed to stream manifest code-hash observations")?
     {
         observations.insert(decode_manifest_code_hash_observation(row)?);
-        streamed_row_count += 1;
-        if streamed_row_count.is_multiple_of(CODE_HASH_OBSERVATION_PROGRESS_ROWS)
-            && let Some(progress) = progress.as_deref_mut()
-        {
-            progress.record(pool).await?;
-        }
-    }
-    if streamed_row_count > 0
-        && !streamed_row_count.is_multiple_of(CODE_HASH_OBSERVATION_PROGRESS_ROWS)
-        && let Some(progress) = progress
-    {
-        progress.record(pool).await?;
     }
     Ok(observations.into_iter().collect())
 }
 
-pub async fn load_manifest_code_hash_observations_for_watched_contracts(
+pub(in crate::views) async fn load_manifest_code_hash_observations_for_watched_contracts(
     pool: &PgPool,
     watched_contracts: &[WatchedContract],
 ) -> Result<Vec<ManifestCodeHashObservation>> {

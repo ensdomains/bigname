@@ -413,25 +413,6 @@ async fn generic_raw_block_reobserve_preserves_orphaned_state() -> Result<()> {
 }
 
 #[tokio::test]
-async fn explicit_raw_block_recanonicalization_revives_orphaned_state() -> Result<()> {
-    let database = TestDatabase::new().await?;
-
-    upsert_raw_blocks(database.pool(), &[raw_block(CanonicalityState::Orphaned)]).await?;
-    let refreshed = upsert_raw_blocks_recanonicalizing_orphaned(
-        database.pool(),
-        &[raw_block(CanonicalityState::Canonical)],
-    )
-    .await?;
-
-    assert_eq!(
-        refreshed[0].canonicality_state,
-        CanonicalityState::Canonical
-    );
-
-    database.cleanup().await
-}
-
-#[tokio::test]
 async fn minimal_raw_block_replay_can_be_audit_enriched_without_clearing_fields() -> Result<()> {
     let database = TestDatabase::new().await?;
 
@@ -485,58 +466,6 @@ async fn rejects_mismatched_immutable_raw_block_identity() -> Result<()> {
         error.to_string().contains("header audit identity mismatch"),
         "unexpected error: {error:#}"
     );
-
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn orphan_range_stops_before_requested_ancestor() -> Result<()> {
-    let database = TestDatabase::new().await?;
-
-    upsert_raw_blocks(
-        database.pool(),
-        &[
-            RawBlock {
-                chain_id: "eth-mainnet".to_owned(),
-                block_hash: "0x001".to_owned(),
-                parent_hash: Some("0x000".to_owned()),
-                block_number: 1,
-                block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_001)
-                    .expect("timestamp must be valid"),
-                logs_bloom: None,
-                transactions_root: None,
-                receipts_root: None,
-                state_root: None,
-                canonicality_state: CanonicalityState::Canonical,
-            },
-            RawBlock {
-                chain_id: "eth-mainnet".to_owned(),
-                block_hash: "0x002".to_owned(),
-                parent_hash: Some("0x001".to_owned()),
-                block_number: 2,
-                block_timestamp: OffsetDateTime::from_unix_timestamp(1_700_000_002)
-                    .expect("timestamp must be valid"),
-                logs_bloom: None,
-                transactions_root: None,
-                receipts_root: None,
-                state_root: None,
-                canonicality_state: CanonicalityState::Canonical,
-            },
-        ],
-    )
-    .await?;
-
-    let orphaned =
-        mark_raw_block_range_orphaned(database.pool(), "eth-mainnet", "0x002", Some("0x001"))
-            .await?;
-    assert_eq!(orphaned.len(), 1);
-    assert_eq!(orphaned[0].block_hash, "0x002");
-    assert_eq!(orphaned[0].canonicality_state, CanonicalityState::Orphaned);
-
-    let ancestor = load_raw_block(database.pool(), "eth-mainnet", "0x001")
-        .await?
-        .expect("ancestor raw block must still exist");
-    assert_eq!(ancestor.canonicality_state, CanonicalityState::Canonical);
 
     database.cleanup().await
 }

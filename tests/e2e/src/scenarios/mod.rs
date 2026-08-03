@@ -2,7 +2,6 @@ mod basenames;
 mod basenames_lifecycle;
 mod catchup_equivalence;
 mod cross_protocol;
-mod discovery_semantics;
 mod ens_v2_lifecycle;
 mod ens_v2_live_poll;
 mod lifecycle;

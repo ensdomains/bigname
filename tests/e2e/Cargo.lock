@@ -514,27 +514,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
-name = "bigname-adapters"
-version = "0.1.0"
-dependencies = [
- "alloy-json-abi",
- "alloy-primitives",
- "alloy-sol-types",
- "anyhow",
- "bigname-domain",
- "bigname-manifests",
- "bigname-storage",
- "futures-util",
- "serde",
- "serde_json",
- "sqlx",
- "time",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "bigname-domain"
 version = "0.1.0"
 dependencies = [
@@ -548,7 +527,6 @@ dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
  "anyhow",
- "bigname-adapters",
  "bigname-manifests",
  "bigname-storage",
  "reqwest",
@@ -566,14 +544,11 @@ dependencies = [
  "alloy-json-abi",
  "alloy-primitives",
  "anyhow",
- "bigname-domain",
- "bigname-storage",
  "futures-util",
  "serde",
  "serde_json",
  "sqlx",
  "toml",
- "tracing",
  "uuid",
 ]
 

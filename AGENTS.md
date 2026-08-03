@@ -18,7 +18,9 @@ bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The 
 
 ## Boundaries
 
-- Adapters write identity rows and normalized events, not projection rows.
+- Schema-v2 interpret writes identity rows, discovery edges, and normalized
+  events. Adapters provide interpretation behavior and do not write projection
+  rows.
 - API code reads projections and execution output only, except explicit audit endpoints and documented on-demand verified-resolution cache-miss writes through execution persistence.
 - Execution code uses declared topology and manifests, not adapter internals.
 - Manifest and discovery code decides what is authoritative.

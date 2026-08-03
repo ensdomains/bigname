@@ -143,34 +143,20 @@ pub(super) fn execution_outcome_block_dependencies(
         dependencies.insert((position.chain_id, position.block_hash));
     }
 
-    let topology_boundary = decode_version_boundary(
-        topology_version_boundary,
-        "topology_version_boundary",
-        request_key,
-    )?;
-    let topology_position = topology_boundary.chain_position();
-    dependencies.insert((
-        topology_position.chain_id.clone(),
-        topology_position.block_hash.clone(),
-    ));
-
-    let record_boundary = decode_version_boundary(
-        record_version_boundary,
-        "record_version_boundary",
-        request_key,
-    )?;
-    let record_position = record_boundary.chain_position();
-    dependencies.insert((
-        record_position.chain_id.clone(),
-        record_position.block_hash.clone(),
-    ));
+    for (field_name, boundary) in [
+        ("topology_version_boundary", topology_version_boundary),
+        ("record_version_boundary", record_version_boundary),
+    ] {
+        let boundary = decode_version_boundary(boundary, field_name, request_key)?;
+        let position = boundary.chain_position();
+        dependencies.insert((position.chain_id.clone(), position.block_hash.clone()));
+    }
 
     if dependencies.is_empty() {
         bail!(
             "execution outcome for request_key {request_key} has no block-hash-bearing dependencies"
         );
     }
-
     Ok(dependencies)
 }
 

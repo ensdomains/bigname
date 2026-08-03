@@ -63,12 +63,7 @@ pub(crate) async fn run_worker(args: RunArgs) -> Result<()> {
     let heartbeat_instance_id =
         bigname_storage::resolve_service_instance_id(args.heartbeat_instance_id.as_deref())?;
     let database = all_current_projections_database_config(args.database);
-    let (pool, _runtime_rederive_guard) =
-        bigname_storage::connect_with_base_normalized_rederive_writer_guard(
-            &database,
-            "bigname-worker",
-        )
-        .await?;
+    let pool = bigname_storage::connect_with_application_name(&database, "bigname-worker").await?;
     let text_hydration_config =
         record_inventory::RecordInventoryTextHydrationConfig::from_chain_rpc_url_entries(
             &args.chain_rpc_urls,

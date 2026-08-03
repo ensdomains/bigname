@@ -52,6 +52,7 @@ pub(in crate::schema_v2) struct V2NameTransition {
 }
 
 impl State {
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::schema_v2) fn replace_v2_registration(
         &mut self,
         emitter: &str,
@@ -123,6 +124,7 @@ impl State {
         replaced
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::schema_v2) fn restore_v2_registration(
         &mut self,
         emitter: &str,

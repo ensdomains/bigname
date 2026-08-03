@@ -16,11 +16,11 @@ use uuid::Uuid;
 use super::*;
 use crate::{
     NormalizedEvent, RawBlock, RawCallSnapshot, RawCodeHash, RawLog, RawPayloadCacheMetadataUpsert,
-    RawReceipt, RawTransaction, default_database_url, list_canonical_raw_log_replay_inputs,
-    list_canonical_raw_log_replay_inputs_for_block_hashes, upsert_chain_lineage_blocks,
-    upsert_normalized_events, upsert_raw_blocks, upsert_raw_call_snapshots, upsert_raw_code_hashes,
-    upsert_raw_logs, upsert_raw_payload_cache_metadata, upsert_raw_receipts,
-    upsert_raw_transactions,
+    RawReceipt, RawTransaction, default_database_url, insert_normalized_event_fixtures,
+    list_canonical_raw_log_replay_inputs, list_canonical_raw_log_replay_inputs_for_block_hashes,
+    upsert_chain_lineage_blocks, upsert_raw_blocks, upsert_raw_call_snapshots,
+    upsert_raw_code_hashes, upsert_raw_logs, upsert_raw_payload_cache_metadata,
+    upsert_raw_receipts, upsert_raw_transactions,
 };
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -800,7 +800,7 @@ async fn audit_reports_lineage_status_and_block_scoped_counts() -> Result<()> {
     .await?;
     upsert_raw_code_hashes(database.pool(), &[raw_code_hash("0xaaa", 100)]).await?;
     upsert_raw_call_snapshots(database.pool(), &[raw_call_snapshot("0xaaa", 100)]).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             normalized_event("0xaaa", 100, 0),

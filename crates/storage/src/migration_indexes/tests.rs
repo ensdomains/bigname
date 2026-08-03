@@ -347,7 +347,7 @@ async fn bulk_discovery_edge_reactivation_uses_deactivated_identity_index() -> R
                 'subregistry'::TEXT,
                 '00000000-0000-0000-0000-000000000001'::UUID,
                 '00000000-0000-0000-0000-000000000002'::UUID,
-                'ens_v1_subregistry_discovery'::TEXT,
+                'RegistryCreated'::TEXT,
                 NULL::BIGINT,
                 'reachable_from_root'::TEXT,
                 1::BIGINT,

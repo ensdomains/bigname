@@ -8,9 +8,9 @@ use anyhow::{Context, Result};
 use bigname_storage::{
     ChainLineageBlock, NameCurrentListFilter, NameCurrentListOrder, NameCurrentListSort,
     NameSurface, NormalizedEvent, RawBlock, RawLog, Resource, SurfaceBinding, TokenLineage,
-    default_database_url, label_preimage_from_label, load_name_current,
-    load_name_current_list_page_offset, upsert_chain_lineage_blocks, upsert_name_current_rows,
-    upsert_name_surfaces, upsert_normalized_events, upsert_raw_blocks, upsert_raw_logs,
+    default_database_url, insert_normalized_event_fixtures, label_preimage_from_label,
+    load_name_current, load_name_current_list_page_offset, upsert_chain_lineage_blocks,
+    upsert_name_current_rows, upsert_name_surfaces, upsert_raw_blocks, upsert_raw_logs,
     upsert_resources, upsert_surface_bindings, upsert_token_lineages,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -3718,7 +3718,7 @@ async fn seed_raw_logs(pool: &PgPool, logs: &[RawLog]) -> Result<()> {
 }
 
 async fn seed_events(pool: &PgPool, events: &[NormalizedEvent]) -> Result<()> {
-    upsert_normalized_events(pool, events).await?;
+    insert_normalized_event_fixtures(pool, events).await?;
     Ok(())
 }
 

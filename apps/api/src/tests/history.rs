@@ -110,7 +110,7 @@ async fn get_name_history_returns_canonical_only_rows_with_provenance_and_covera
     )
     .await?;
 
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
             NormalizedEvent {
@@ -468,7 +468,7 @@ async fn get_name_history_honors_scope_query_parameter() -> Result<()> {
     )
     .await?;
 
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
             history_event(
@@ -642,7 +642,7 @@ async fn get_name_history_resource_scope_preserves_rebound_resources() -> Result
     )
     .await?;
 
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
             history_event(
@@ -790,7 +790,7 @@ async fn get_resource_history_returns_chain_position_desc_ordering() -> Result<(
     )
     .await?;
 
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
             history_event(
@@ -1007,7 +1007,7 @@ async fn get_resource_history_honors_scope_query_parameter() -> Result<()> {
     )
     .await?;
 
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
             history_event(
@@ -1187,7 +1187,7 @@ async fn get_resource_history_surface_scope_preserves_multiple_bound_surfaces() 
     )
     .await?;
 
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
             history_event(
@@ -1419,7 +1419,7 @@ async fn get_address_history_composes_current_and_historical_matches() -> Result
     )
     .await?;
 
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
             history_event(
@@ -1916,7 +1916,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
     )
     .await?;
 
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
             ensv2_history_event(
@@ -2553,7 +2553,7 @@ async fn get_basenames_history_routes_read_back_canonical_rows() -> Result<()> {
     )
     .await?;
 
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
             NormalizedEvent {
@@ -2847,7 +2847,7 @@ async fn get_address_history_honors_scope_and_relation_filters() -> Result<()> {
     )
     .await?;
 
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
             history_event(

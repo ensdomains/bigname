@@ -18,7 +18,7 @@ use bigname_storage::{
     PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot, RawBlock, ResolverCurrentRow, Resource,
     SurfaceBinding, SurfaceBindingKind, TokenLineage, default_database_url,
     load_primary_name_current, upsert_execution_outcome, upsert_execution_trace,
-    upsert_normalized_events, upsert_primary_name_current_rows,
+    insert_normalized_event_fixtures, upsert_primary_name_current_rows,
     upsert_primary_name_current_snapshots,
 };
 use bigname_test_support::TestDatabaseConfig;
@@ -1275,7 +1275,7 @@ impl TestDatabase {
         )
         .await
         .context("failed to upsert basenames surface binding for API test")?;
-        bigname_storage::upsert_normalized_events(
+        bigname_storage::insert_normalized_event_fixtures(
             &self.pool,
             &[
                 NormalizedEvent {
@@ -1666,7 +1666,7 @@ impl TestDatabase {
             }),
         });
 
-        bigname_storage::upsert_normalized_events(&self.pool, &events)
+        bigname_storage::insert_normalized_event_fixtures(&self.pool, &events)
             .await
             .context("failed to upsert Basenames control-vector normalized events for API test")?;
 
@@ -1810,7 +1810,7 @@ impl TestDatabase {
         )
         .await
         .context("failed to upsert ENSv2 address-name surface binding for API test")?;
-        bigname_storage::upsert_normalized_events(
+        bigname_storage::insert_normalized_event_fixtures(
             &self.pool,
             &[
                 NormalizedEvent {
@@ -1914,7 +1914,7 @@ impl TestDatabase {
         )
         .await?;
 
-        bigname_storage::upsert_normalized_events(
+        bigname_storage::insert_normalized_event_fixtures(
             &self.pool,
             &[
                 NormalizedEvent {

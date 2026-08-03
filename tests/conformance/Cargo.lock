@@ -745,14 +745,11 @@ dependencies = [
  "alloy-json-abi",
  "alloy-primitives",
  "anyhow",
- "bigname-domain",
- "bigname-storage",
  "futures-util",
  "serde",
  "serde_json",
  "sqlx",
  "toml",
- "tracing",
  "uuid",
 ]
 

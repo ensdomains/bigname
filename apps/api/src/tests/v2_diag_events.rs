@@ -291,7 +291,7 @@ async fn seed_v2_diag_events_fixture(database: &TestDatabase) -> Result<()> {
     )
     .await?;
 
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
             v2_diag_event(

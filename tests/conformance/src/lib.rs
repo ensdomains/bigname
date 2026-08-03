@@ -22,12 +22,6 @@ mod shipped_api {
         include!("conformance/history.rs");
 
         include!("conformance/replay.rs");
-
-        include!("conformance/backfill.rs");
-
-        include!("conformance/backfill_sources.rs");
-
-        include!("conformance/chaos.rs");
     }
 }
 
@@ -35,34 +29,4 @@ mod shipped_api {
 #[tokio::test]
 async fn replay_capability_conformance() -> anyhow::Result<()> {
     shipped_api::conformance::run_replay_capability_conformance().await
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn backfilled_data_consumer_conformance_job() -> anyhow::Result<()> {
-    shipped_api::conformance::run_backfilled_data_consumer_conformance_job().await
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn backfill_sources_auto_bootstrap() -> anyhow::Result<()> {
-    shipped_api::conformance::run_backfill_sources_auto_bootstrap().await
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn backfill_sources_source_family_existing_response_lock() -> anyhow::Result<()> {
-    shipped_api::conformance::run_backfill_source_family_existing_response_lock().await
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn backfill_sources_retention_and_replay_semantics() -> anyhow::Result<()> {
-    shipped_api::conformance::run_backfill_sources_retention_and_replay_semantics().await
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn reorg_chaos_drill_conformance_job() -> anyhow::Result<()> {
-    shipped_api::conformance::run_reorg_chaos_drill_conformance_job().await
 }

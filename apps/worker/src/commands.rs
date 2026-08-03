@@ -12,11 +12,8 @@ use crate::{
 };
 use execution_invalidation::execution_command;
 
-async fn connect_worker_writer(
-    database: &bigname_storage::DatabaseConfig,
-) -> Result<(sqlx::PgPool, sqlx::pool::PoolConnection<sqlx::Postgres>)> {
-    bigname_storage::connect_with_base_normalized_rederive_writer_guard(database, "bigname-worker")
-        .await
+async fn connect_worker_writer(database: &bigname_storage::DatabaseConfig) -> Result<sqlx::PgPool> {
+    bigname_storage::connect_with_application_name(database, "bigname-worker").await
 }
 
 pub(crate) async fn dispatch(command: Command) -> Result<()> {
@@ -41,7 +38,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
 }
 
 async fn migrate(args: MigrateArgs) -> Result<()> {
-    let (pool, _rederive_guard) = connect_worker_writer(&args.database).await?;
+    let pool = connect_worker_writer(&args.database).await?;
     bigname_storage::migrate(&pool).await?;
     info!(service = "worker", "database migrations applied");
     Ok(())
@@ -124,7 +121,7 @@ async fn resolver_current(args: ResolverCurrentArgs) -> Result<()> {
 }
 
 async fn rebuild_name_current(args: NameCurrentRebuildArgs) -> Result<()> {
-    let (pool, _rederive_guard) = connect_worker_writer(&args.database).await?;
+    let pool = connect_worker_writer(&args.database).await?;
     let summary = run_standalone_projection_rebuild(
         &pool,
         "name_current",
@@ -146,7 +143,7 @@ async fn rebuild_name_current(args: NameCurrentRebuildArgs) -> Result<()> {
 }
 
 async fn rebuild_address_names_current(args: AddressNamesCurrentRebuildArgs) -> Result<()> {
-    let (pool, _rederive_guard) = connect_worker_writer(&args.database).await?;
+    let pool = connect_worker_writer(&args.database).await?;
     let summary = run_standalone_projection_rebuild(
         &pool,
         "address_names_current",
@@ -168,7 +165,7 @@ async fn rebuild_address_names_current(args: AddressNamesCurrentRebuildArgs) -> 
 }
 
 async fn rebuild_children_current(args: ChildrenCurrentRebuildArgs) -> Result<()> {
-    let (pool, _rederive_guard) = connect_worker_writer(&args.database).await?;
+    let pool = connect_worker_writer(&args.database).await?;
     let summary = run_standalone_projection_rebuild(
         &pool,
         "children_current",
@@ -192,7 +189,7 @@ async fn rebuild_children_current(args: ChildrenCurrentRebuildArgs) -> Result<()
 async fn import_ens_rainbow_label_preimages(
     args: LabelPreimagesImportEnsRainbowArgs,
 ) -> Result<()> {
-    let (pool, _rederive_guard) = connect_worker_writer(&args.database).await?;
+    let pool = connect_worker_writer(&args.database).await?;
     let summary = bigname_storage::import_label_preimages_from_ens_names_table(
         &pool,
         args.batch_size,
@@ -212,7 +209,7 @@ async fn import_ens_rainbow_label_preimages(
 }
 
 async fn rebuild_permissions_current(args: PermissionsCurrentRebuildArgs) -> Result<()> {
-    let (pool, _rederive_guard) = connect_worker_writer(&args.database).await?;
+    let pool = connect_worker_writer(&args.database).await?;
     let summary = run_standalone_projection_rebuild(
         &pool,
         "permissions_current",
@@ -234,7 +231,7 @@ async fn rebuild_permissions_current(args: PermissionsCurrentRebuildArgs) -> Res
 }
 
 async fn rebuild_primary_names_current(args: PrimaryNamesCurrentRebuildArgs) -> Result<()> {
-    let (pool, _rederive_guard) = connect_worker_writer(&args.database).await?;
+    let pool = connect_worker_writer(&args.database).await?;
     let summary = run_standalone_projection_rebuild(
         &pool,
         "primary_names_current",
@@ -268,7 +265,7 @@ async fn rebuild_primary_names_current(args: PrimaryNamesCurrentRebuildArgs) -> 
 async fn hydrate_primary_names_legacy_reverse_resolver(
     args: PrimaryNamesCurrentHydrateLegacyReverseResolverArgs,
 ) -> Result<()> {
-    let (pool, _rederive_guard) = connect_worker_writer(&args.database).await?;
+    let pool = connect_worker_writer(&args.database).await?;
     let hydration_config = primary_name_legacy_reverse_hydration_config(
         &args.chain_rpc_urls,
         args.multicall3_address,
@@ -285,7 +282,7 @@ async fn hydrate_primary_names_legacy_reverse_resolver(
 async fn replay_all_current_projections(args: AllCurrentProjectionsArgs) -> Result<()> {
     let database =
         automatic_projection_replay::all_current_projections_database_config(args.database);
-    let (pool, _rederive_guard) = connect_worker_writer(&database).await?;
+    let pool = connect_worker_writer(&database).await?;
     let text_hydration_config = optional_text_hydration_config(
         &args.chain_rpc_urls,
         args.text_hydration_multicall3_address.clone(),
@@ -327,7 +324,7 @@ async fn replay_all_current_projections(args: AllCurrentProjectionsArgs) -> Resu
 }
 
 async fn rebuild_record_inventory_current(args: RecordInventoryCurrentRebuildArgs) -> Result<()> {
-    let (pool, _rederive_guard) = connect_worker_writer(&args.database).await?;
+    let pool = connect_worker_writer(&args.database).await?;
     let summary = run_standalone_projection_rebuild(
         &pool,
         "record_inventory_current",
@@ -369,7 +366,7 @@ async fn rebuild_record_inventory_current(args: RecordInventoryCurrentRebuildArg
 async fn hydrate_record_inventory_text_values(
     args: RecordInventoryCurrentHydrateTextValuesArgs,
 ) -> Result<()> {
-    let (pool, _rederive_guard) = connect_worker_writer(&args.database).await?;
+    let pool = connect_worker_writer(&args.database).await?;
     let hydration_config = text_hydration_config(
         &args.chain_rpc_urls,
         args.multicall3_address,
@@ -442,7 +439,7 @@ fn optional_primary_name_legacy_reverse_hydration_config(
 }
 
 async fn rebuild_resolver_current(args: ResolverCurrentRebuildArgs) -> Result<()> {
-    let (pool, _rederive_guard) = connect_worker_writer(&args.database).await?;
+    let pool = connect_worker_writer(&args.database).await?;
     let summary = run_standalone_projection_rebuild(
         &pool,
         "resolver_current",

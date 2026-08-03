@@ -11,43 +11,11 @@ pub async fn upsert_chain_lineage_blocks(
     pool: &PgPool,
     blocks: &[ChainLineageBlock],
 ) -> Result<Vec<ChainLineageBlock>> {
-    upsert_chain_lineage_blocks_with_orphaned_conflict(
-        pool,
-        blocks,
-        OrphanedLineageConflict::Preserve,
-    )
-    .await
-}
-
-/// Insert missing lineage rows or refresh existing rows, allowing explicitly
-/// fresh reconciliation evidence to re-canonicalize a stored orphaned row.
-pub async fn upsert_chain_lineage_blocks_recanonicalizing_orphaned(
-    pool: &PgPool,
-    blocks: &[ChainLineageBlock],
-) -> Result<Vec<ChainLineageBlock>> {
-    upsert_chain_lineage_blocks_with_orphaned_conflict(
-        pool,
-        blocks,
-        OrphanedLineageConflict::Recanonicalize,
-    )
-    .await
-}
-
-async fn upsert_chain_lineage_blocks_with_orphaned_conflict(
-    pool: &PgPool,
-    blocks: &[ChainLineageBlock],
-    orphaned_conflict: OrphanedLineageConflict,
-) -> Result<Vec<ChainLineageBlock>> {
     if blocks.is_empty() {
         return Ok(Vec::new());
     }
 
-    upsert_chain_lineage_blocks_without_snapshots_with_orphaned_conflict(
-        pool,
-        blocks,
-        orphaned_conflict,
-    )
-    .await?;
+    upsert_chain_lineage_blocks_without_snapshots(pool, blocks).await?;
 
     let mut snapshots = Vec::with_capacity(blocks.len());
     for block in blocks {
@@ -73,34 +41,6 @@ pub async fn upsert_chain_lineage_blocks_without_snapshots(
     pool: &PgPool,
     blocks: &[ChainLineageBlock],
 ) -> Result<()> {
-    upsert_chain_lineage_blocks_without_snapshots_with_orphaned_conflict(
-        pool,
-        blocks,
-        OrphanedLineageConflict::Preserve,
-    )
-    .await
-}
-
-/// Insert or refresh chain lineage blocks without returning row snapshots,
-/// allowing explicitly fresh reconciliation evidence to re-canonicalize a
-/// stored orphaned row.
-pub async fn upsert_chain_lineage_blocks_without_snapshots_recanonicalizing_orphaned(
-    pool: &PgPool,
-    blocks: &[ChainLineageBlock],
-) -> Result<()> {
-    upsert_chain_lineage_blocks_without_snapshots_with_orphaned_conflict(
-        pool,
-        blocks,
-        OrphanedLineageConflict::Recanonicalize,
-    )
-    .await
-}
-
-async fn upsert_chain_lineage_blocks_without_snapshots_with_orphaned_conflict(
-    pool: &PgPool,
-    blocks: &[ChainLineageBlock],
-    orphaned_conflict: OrphanedLineageConflict,
-) -> Result<()> {
     if blocks.is_empty() {
         return Ok(());
     }
@@ -115,8 +55,7 @@ async fn upsert_chain_lineage_blocks_without_snapshots_with_orphaned_conflict(
         .context("failed to open transaction for chain lineage bulk upsert")?;
 
     for chunk in blocks.chunks(BULK_LINEAGE_UPSERT_CHUNK_ROWS) {
-        upsert_lineage_anchor_chunk_without_snapshots(&mut transaction, chunk, orphaned_conflict)
-            .await?;
+        upsert_lineage_anchor_chunk_without_snapshots(&mut transaction, chunk).await?;
         upsert_header_audit_chunk_without_snapshots(&mut transaction, chunk).await?;
     }
 
@@ -128,16 +67,9 @@ async fn upsert_chain_lineage_blocks_without_snapshots_with_orphaned_conflict(
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-enum OrphanedLineageConflict {
-    Preserve,
-    Recanonicalize,
-}
-
 async fn upsert_lineage_anchor_chunk_without_snapshots(
     transaction: &mut sqlx::Transaction<'_, Postgres>,
     chunk: &[ChainLineageBlock],
-    orphaned_conflict: OrphanedLineageConflict,
 ) -> Result<()> {
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
@@ -196,7 +128,7 @@ async fn upsert_lineage_anchor_chunk_without_snapshots(
                 WHEN chain_lineage.canonicality_state = 'orphaned'::canonicality_state THEN
         "#,
     );
-    push_orphaned_lineage_conflict_target(&mut builder, orphaned_conflict);
+    builder.push("'orphaned'::canonicality_state");
     builder.push(
         r#"
                 WHEN EXCLUDED.canonicality_state = 'orphaned'::canonicality_state THEN 'orphaned'::canonicality_state
@@ -218,7 +150,7 @@ async fn upsert_lineage_anchor_chunk_without_snapshots(
                 WHEN chain_lineage.canonicality_state = 'orphaned'::canonicality_state THEN
         "#,
     );
-    push_orphaned_lineage_conflict_target(&mut builder, orphaned_conflict);
+    builder.push("'orphaned'::canonicality_state");
     builder.push(
         r#"
                 WHEN EXCLUDED.canonicality_state = 'orphaned'::canonicality_state THEN 'orphaned'::canonicality_state
@@ -241,20 +173,6 @@ async fn upsert_lineage_anchor_chunk_without_snapshots(
         .context("failed to upsert chain lineage anchors without snapshots; chain lineage identity mismatch or storage write error")?;
 
     Ok(())
-}
-
-fn push_orphaned_lineage_conflict_target(
-    builder: &mut QueryBuilder<'_, Postgres>,
-    orphaned_conflict: OrphanedLineageConflict,
-) {
-    match orphaned_conflict {
-        OrphanedLineageConflict::Preserve => {
-            builder.push("'orphaned'::canonicality_state");
-        }
-        OrphanedLineageConflict::Recanonicalize => {
-            builder.push("EXCLUDED.canonicality_state");
-        }
-    }
 }
 
 async fn upsert_header_audit_chunk_without_snapshots(

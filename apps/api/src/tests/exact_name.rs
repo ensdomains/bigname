@@ -1286,7 +1286,7 @@ async fn seed_ensv2_exact_name_profile_registrar_event(
     resource_id: Uuid,
     source_manifest_id: i64,
 ) -> Result<()> {
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[NormalizedEvent {
             event_identity: format!("api-test:{logical_name_id}:ensv2-registrar-renew"),

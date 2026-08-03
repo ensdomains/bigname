@@ -557,7 +557,7 @@
                 )
                 .await
                 .context("failed to upsert surface binding for exact-name conformance")?;
-                bigname_storage::upsert_normalized_events(
+                bigname_storage::insert_normalized_event_fixtures(
                     &self.pool,
                     &[
                         authority_history_event(
@@ -730,7 +730,7 @@
                 )
                 .await
                 .context("failed to upsert basenames surface binding for conformance")?;
-                bigname_storage::upsert_normalized_events(
+                bigname_storage::insert_normalized_event_fixtures(
                     &self.pool,
                     &[
                         NormalizedEvent {
@@ -879,7 +879,7 @@
                 let normalized_address = address.to_ascii_lowercase();
                 let reverse_label = normalized_address.trim_start_matches("0x").to_owned();
 
-                bigname_storage::upsert_normalized_events(
+                bigname_storage::insert_normalized_event_fixtures(
                     &self.pool,
                     &[NormalizedEvent {
                         event_identity: format!(
@@ -934,7 +934,7 @@
                 let normalized_address = address.to_ascii_lowercase();
                 let reverse_label = normalized_address.trim_start_matches("0x").to_owned();
 
-                bigname_storage::upsert_normalized_events(
+                bigname_storage::insert_normalized_event_fixtures(
                     &self.pool,
                     &[
                         NormalizedEvent {
