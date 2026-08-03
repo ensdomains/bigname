@@ -18,6 +18,7 @@ use crate::{
     provider::{ChainProvider, ProviderKind, SharedProvider, normalized_kind, provider_error},
 };
 
+mod live;
 mod query;
 
 const BLOCKS_PER_BATCH: i64 = 256;
@@ -76,6 +77,22 @@ pub struct BatchOutcome {
     pub live_handoff: Option<Marker>,
     pub heads: Option<HeadMarkers>,
     pub sources: Vec<SourceProgress>,
+    pub estimated_write_bytes: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct LiveBatchRequest {
+    pub chain_id: String,
+    pub sources: Vec<SourceDescriptor>,
+    pub live_handoff: Marker,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiveBatchOutcome {
+    pub caught_up: bool,
+    pub current: Marker,
+    pub target: Marker,
+    pub heads: HeadMarkers,
     pub estimated_write_bytes: u64,
 }
 

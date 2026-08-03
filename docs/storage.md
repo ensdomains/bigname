@@ -144,7 +144,8 @@ For ENSv2, `resource_id` keys by `(chain_id, registry_contract_instance_id, upst
 | `name_surfaces`, `surface_bindings`, `resources`, `token_lineages` | schema-v2 `interpret` | Stable identity anchors. |
 | `normalized_events` | schema-v2 `interpret` | Derived protocol events written transactionally with identity and discovery output. |
 | `label_preimages` | schema-v2 interpretation plus surviving worker or operator imports | Verified labelhash-to-label facts used by projections. |
-| `projection_*`, `*_current`, replay staging and apply cursors | worker and storage triggers | Surviving disposable read models, rebuild/apply progress, and invalidation journals. |
+| `bigname_phase.*_current` | schema-v2 `project`, including its canonical-head hydration step | Retained replacement current read models; the event-derived core is rebuildable from canonical identity and normalized events, with head-pinned hydration layered into two documented surfaces. |
+| `public.projection_*`, `public.*_current`, replay staging and apply cursors | worker and storage triggers | Surviving legacy public-schema read models, rebuild/apply progress, and invalidation journals until Stage C. |
 | `manifest_alert_*` | worker audit | Manifest-drift and proxy observations; not admission truth. |
 | `service_loop_heartbeats` | worker | Current worker liveness. The API still reads retained old-indexer process/chain rows until its readiness port. |
 | `execution_*` | execution worker; documented API cache-miss persistence | Durable traces, steps, cache outcomes, and invalidation records. |
@@ -242,12 +243,38 @@ joining against readable lineage. In the same head-publication transaction,
 storage removes rows from retained `public.execution_cache_outcomes` whose block
 dependencies are orphaned in `bigname_phase.chain_lineage`. Their durable
 execution traces and steps remain in `public`; later canonical recovery does
-not recreate an evicted cache row. The deleted
+not recreate an evicted cache row. If the orphaned suffix starts at or below an
+`interpret` or `project` cursor, that transaction also stamps the existing redo
+fields for the inclusive affected suffix through the phase's recorded cursor.
+The deleted
 indexer reconciliation tree no longer performs its synchronous multi-family
 adapter repair, coverage proof, normalized-event supersession, or
 resolver-profile convergence.
 
 Derived schema-v2 repair is an explicit `interpret` redo over a complete ingested range. Redo preparation orphans derived identities and events anchored in the selected range, replays the range through the schema-v2 interpreter, and re-anchors stable identities when the winning facts reproduce them. An interrupted multi-batch redo remains explicit persisted redo state and must resume; its intermediate orphaning is not a completed projection boundary.
+Unsupported `live`, `verify`, and flag-recomputation redo requests fail before
+the runner writes a redo marker, so they cannot leave an unresumable state row.
+
+System-required redo stamps reuse `chain_phase_state.redo_*`; there is no reorg
+queue or scheduler table. A stamp is created only when the phase cursor reaches
+the orphaned suffix, and multiple affected ranges merge. The runner consumes an
+interpret stamp before project and restores each phase's normal cursor to the
+winning block hash. The existing ownership marker distinguishes a pending
+system stamp from a replay that has acquired its phase writer slot. Only the
+pending form is ignored while selecting dependencies or filling the winning
+gap; the active form participates in the normal non-verify writer exclusion.
+Successful interpret redo atomically stamps project for the
+same actual replayed suffix, including a same-hash operator data repair. An
+already active operator redo remains explicit and is extended rather than
+discarded.
+
+`phase-runner rewind` takes the ingest, interpret, project, and live advisory
+locks and republishes an exact stored readable ancestor without crossing the
+safe marker. It performs no raw or normalized write: suffix orphaning, cache
+invalidation, and downstream redo stamping are all effects of the same
+head-publication transaction used by live follow. A later live cycle must load
+the winning path through the stamped upper bound before the downstream redo can
+run.
 
 Storage still exposes manifest-, topology-, and record-boundary execution
 invalidation used by the worker. The retained orphan-block invalidator is
@@ -336,6 +363,25 @@ is stated separately by `support_status` and `unsupported_reason`; the JSON
 wording is not an assertion that history or enumeration is complete. The
 legacy public-schema worker vocabulary below remains unchanged until the API
 switches storage in Stage C.
+
+Canonical-head [hydration](glossary.md#hydration) is a post-publication step of
+that project phase, not an additional rebuild input. On Ethereum, it selects
+existing ENS/60 primary-name tuples whose latest canonical reverse claim and
+resolver edge name a configured event-silent resolver (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L311 @ ensnode@2017ae6) (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L316 @ ensnode@2017ae6), plus supported ENSv1
+text entries whose event did not retain a value or whose prior hydration needs
+refresh. Multicall reads are pinned to the exact `chain_heads` number and hash;
+the publication transaction takes a shared lock on the same marker and retries
+if it changed. The project publication marker must equal that canonical head;
+a behind-head bounded redo defers hydration until normal project catch-up.
+Reverse results update only `primary_names_current`; text results
+update only `record_inventory_current.entries`. Hydration provenance records the
+exact head and resolver/node where applicable, plus the event-derived fields
+that the enrichment replaced. Failed calls restore those fields, remove stale
+hydration metadata, and keep the project attempt retryable at the same head. A
+previously hydrated reverse tuple that loses legacy-resolver eligibility also
+restores those fields without issuing another resolver call.
+There are no raw-fact, identity, normalized-event,
+execution-trace, or historical-hydration writes.
 
 `children_current` remains node-complete when a current registry edge reveals
 only hashes. Such a row keeps non-null `labelhash` and `namehash`, but its

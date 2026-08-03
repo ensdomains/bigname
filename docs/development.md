@@ -67,9 +67,10 @@ writer has been removed.
 
 ## Stage B phase runner
 
-The current phase runner implements `ingest` and `interpret`. Its `project`,
-`verify`, and `live` phase slots fail explicitly until the later port lands, so
-`phase-runner run` is not yet a complete continuously serving runtime.
+The current phase runner implements `ingest`, `interpret`, `project`, and
+continuous `live` follow. The read-only `verify` slot remains deferred to B4;
+chains configured with `verify-before-live` stop there without claiming a trust
+level. The API still reads the legacy public-schema projections until Stage C.
 
 Set the [deployment profile](glossary.md#deployment-profile) root and
 chain/source descriptors, for example:
@@ -77,14 +78,16 @@ chain/source descriptors, for example:
 ```sh
 export BIGNAME_PHASE_RUNNER_MANIFESTS_ROOT=manifests/mainnet
 export BIGNAME_PHASE_RUNNER_CHAINS=ethereum-mainnet
-export ETHEREUM_RPC_URL=http://127.0.0.1:8545
-export BIGNAME_PHASE_RUNNER_SOURCES=ethereum-mainnet:rpc:json_rpc:ethereum_head:0=ETHEREUM_RPC_URL
+export RETH_DATA_DIR=/var/lib/reth/mainnet
+export BIGNAME_PHASE_RUNNER_SOURCES=ethereum-mainnet:reth:reth_db:ethereum_head:0=RETH_DATA_DIR
+export BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS=ethereum-mainnet=http://127.0.0.1:8545
 ```
 
 Then `./scripts/dev-up` launches the phase runner alongside API and worker. The
 runner uses `BIGNAME_DATABASE_URL`, selects `bigname_phase` before `public`,
-executes the implemented phases, and stops at `project`. Initialize the phase
-schema once before the first bounded or supervised invocation:
+executes the initial spine, and then follows the live head until cancellation.
+Initialize the phase schema once before the first bounded or supervised
+invocation:
 
 ```sh
 cargo phase -- init-schema
@@ -102,7 +105,13 @@ cargo phase -- redo \
   --source ethereum-mainnet:rpc:json_rpc:ethereum_head:0=ETHEREUM_RPC_URL
 ```
 
-An interpret redo uses the same range without requiring a provider source. See
+Interpret and project redo use the same range without requiring an ingest
+provider source. Project redo, including the automatic project cascade after
+interpret redo, performs the same canonical-head hydration as supervised
+project; configure `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS` or pass
+`--hydration-rpc CHAIN=HTTP_URL` when eligible Ethereum rows exist. The
+`rewind` command selects an exact stored ancestor and delegates its
+orphaning and downstream repair stamps to normal head publication. See
 [`chain-intake.md`](chain-intake.md) for the phase boundary.
 
 ## Live API execution configuration

@@ -134,8 +134,17 @@ impl PhaseStore {
             ))
         })?;
         let rows = lock_chain_phase_state(&mut transaction, chain_id).await?;
-        let status = row_for(&rows, phase)?.status()?;
-        let restarts_completed = phase == PhaseName::Live;
+        let row = row_for(&rows, phase)?;
+        let status = row.status()?;
+        let restarts_completed = if phase == PhaseName::Live {
+            true
+        } else if status == PhaseStatus::Completed
+            && matches!(phase, PhaseName::Interpret | PhaseName::Project)
+        {
+            completed_phase_is_behind(&mut transaction, chain_id, phase, row).await?
+        } else {
+            false
+        };
         if status == PhaseStatus::Completed && !restarts_completed {
             transaction.commit().await.map_err(|error| {
                 RunnerError::transient(format!(
@@ -223,6 +232,14 @@ impl PhaseStore {
         redo_state::finish(&self.pool, chain_id, phase, session, outcome).await
     }
 
+    pub(crate) async fn required_redo_range(
+        &self,
+        chain_id: &str,
+        phase: PhaseName,
+    ) -> RunnerResult<Option<crate::phase::BlockRange>> {
+        crate::redo_stamp::required_range(&self.pool, chain_id, phase).await
+    }
+
     pub async fn pause_phase(&self, chain_id: &str, phase: PhaseName) -> RunnerResult<()> {
         self.change_active_status(chain_id, phase, PhaseStatus::Paused)
             .await
@@ -308,6 +325,27 @@ impl PhaseStore {
         .await
     }
 
+    pub(crate) async fn complete_stopped_live(&self, chain_id: &str) -> RunnerResult<()> {
+        sqlx::query(
+            "UPDATE chain_phase_state
+             SET phase_status = 'completed', last_error = NULL,
+                 finished_at = now(), updated_at = now()
+             WHERE chain_id = $1 AND phase_name = 'live'
+               AND phase_status IN ('running', 'paused')
+               AND NOT redo_in_progress",
+        )
+        .bind(chain_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            RunnerError::database(
+                format!("failed to complete stopped live phase for chain {chain_id}"),
+                error,
+            )
+        })?;
+        Ok(())
+    }
+
     pub async fn fail_phase(
         &self,
         chain_id: &str,
@@ -375,84 +413,6 @@ impl PhaseStore {
             .parse()
     }
 
-    pub async fn start_heartbeat(
-        &self,
-        instance_id: &str,
-        chain_id: &str,
-        phase: PhaseName,
-    ) -> RunnerResult<()> {
-        let result = sqlx::query(
-            "
-            INSERT INTO service_heartbeats (
-                service_name,
-                instance_id,
-                chain_id,
-                phase_name,
-                started_at,
-                heartbeat_at
-            )
-            SELECT 'phase-runner', $1, chain_id, phase_name, started_at, now()
-            FROM chain_phase_state
-            WHERE chain_id = $2
-              AND phase_name = $3
-              AND phase_status IN ('running', 'paused')
-            ON CONFLICT (service_name, instance_id, chain_id, phase_name)
-            DO UPDATE SET started_at = EXCLUDED.started_at,
-                          heartbeat_at = EXCLUDED.heartbeat_at
-            ",
-        )
-        .bind(instance_id)
-        .bind(chain_id)
-        .bind(phase.as_str())
-        .execute(&self.pool)
-        .await
-        .map_err(|error| {
-            RunnerError::transient(format!(
-                "failed to write heartbeat for chain {chain_id} phase {phase}: {error}"
-            ))
-        })?;
-        if result.rows_affected() != 1 {
-            return Err(RunnerError::data_integrity(format!(
-                "heartbeat requires an active phase for chain {chain_id} phase {phase}"
-            )));
-        }
-        Ok(())
-    }
-
-    pub async fn record_heartbeat(
-        &self,
-        instance_id: &str,
-        chain_id: &str,
-        phase: PhaseName,
-    ) -> RunnerResult<()> {
-        let result = sqlx::query(
-            "
-            UPDATE service_heartbeats
-            SET heartbeat_at = now()
-            WHERE service_name = 'phase-runner'
-              AND instance_id = $1
-              AND chain_id = $2
-              AND phase_name = $3
-            ",
-        )
-        .bind(instance_id)
-        .bind(chain_id)
-        .bind(phase.as_str())
-        .execute(&self.pool)
-        .await
-        .map_err(|error| {
-            RunnerError::transient(format!(
-                "failed to update heartbeat for chain {chain_id} phase {phase}: {error}"
-            ))
-        })?;
-        if result.rows_affected() != 1 {
-            return Err(RunnerError::data_integrity(format!(
-                "heartbeat has not been started for chain {chain_id} phase {phase}"
-            )));
-        }
-        Ok(())
-    }
-
     pub async fn ingest_handoff(&self, chain_id: &str) -> RunnerResult<Option<BlockMarker>> {
         sqlx::query_as::<_, (i64, String)>(
             "
@@ -494,4 +454,46 @@ impl PhaseStore {
     ) -> RunnerResult<()> {
         update_ingest_cursors(&self.pool, sources, progress).await
     }
+}
+
+async fn completed_phase_is_behind(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    chain_id: &str,
+    phase: PhaseName,
+    row: &crate::transitions::PhaseStateRow,
+) -> RunnerResult<bool> {
+    let head: Option<(i64, String)> = sqlx::query_as(
+        "SELECT latest_block_number, latest_block_hash
+         FROM chain_heads WHERE chain_id = $1",
+    )
+    .bind(chain_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|error| {
+        RunnerError::database(
+            format!("failed to compare phase {phase} with the live head for chain {chain_id}"),
+            error,
+        )
+    })?;
+    let Some((head_number, head_hash)) = head else {
+        return Ok(false);
+    };
+    let Some(current_number) = row.current_block_number else {
+        return Ok(true);
+    };
+    if current_number > head_number {
+        return Err(RunnerError::data_integrity(format!(
+            "phase {phase} cursor {current_number} is above canonical head {head_number} for chain \
+             {chain_id} without required redo state"
+        )));
+    }
+    if current_number == head_number
+        && row.current_block_hash.as_deref() != Some(head_hash.as_str())
+    {
+        return Err(RunnerError::data_integrity(format!(
+            "phase {phase} cursor hash differs from canonical head {head_hash} at block \
+             {head_number} for chain {chain_id} without required redo state"
+        )));
+    }
+    Ok(current_number < head_number)
 }

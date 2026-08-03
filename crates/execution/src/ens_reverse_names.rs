@@ -101,7 +101,15 @@ pub async fn execute_ens_reverse_name_multicall(
     };
     let return_data = hex_to_bytes(&return_hex)
         .context("ENS reverse-name Multicall3 return data is not valid hex")?;
-    decode_multicall_results(&return_data)
+    let results = decode_multicall_results(&return_data)?;
+    if results.len() != requests.len() {
+        bail!(
+            "ENS reverse-name Multicall3 returned {} outcomes for {} calls",
+            results.len(),
+            requests.len()
+        );
+    }
+    Ok(results)
 }
 
 fn multicall_call_for_reverse_name_request(

@@ -1,6 +1,6 @@
 # Projections
 
-[Projections](glossary.md) are read models. [Normalized events](glossary.md) are the source of truth; projection rows exist to serve stable reads at predictable cost. They carry no semantics that aren't already in the event stream — they replay deterministically from canonical events, and they're disposable.
+[Projections](glossary.md) are read models. [Normalized events](glossary.md) are the source of truth for their event-derived core; projection rows exist to serve stable reads at predictable cost. That core replays deterministically from canonical events and is disposable. The documented [hydration](glossary.md#hydration) fields are the narrow execution-derived current-state exception and are layered on only after the core is rebuilt.
 
 This document defines the shipped projection set, replay semantics, invalidation, and worker ownership. Wire shapes live in [`api-v1.md`](api-v1.md); event taxonomy and identity rules live in [`architecture.md`](architecture.md); persistence in [`storage.md`](storage.md).
 
@@ -11,6 +11,44 @@ retained replacement tables described in
 coverage JSON uses `projected` / `not_asserted`, and it classifies resolvers
 from manifest declarations and canonical ERC-1967 upgrade history without code
 hashes. Those replacement semantics do not change a v1 route before Stage C.
+
+### Schema-v2 live projection maintenance
+
+The schema-v2 live cycle publishes a provider head through the phase runner,
+then advances or redoes `interpret` and `project` through that exact head. Head
+publication stamps both downstream phases when a displaced readable suffix
+starts at or below their cursor. Successful interpret redo also stamps project
+for the same actual replay suffix, so a same-hash data repair cannot leave an
+older projection behind. Project rebuild scope includes existing current rows
+whose cited normalized event is no longer readable, allowing a winning fork to
+retract rather than merely replace losing-fork output.
+
+After project publishes its event-derived rows, its configured Ethereum
+hydrator refreshes only these current surfaces:
+
+- `primary_names_current` for an existing ENS/60 reverse tuple whose latest
+  canonical reverse claim and resolver edge select a configured legacy
+  event-silent resolver;[^ensnode-legacy-revresolver-l311][^ensnode-legacy-revresolver-l316]
+- `record_inventory_current.entries` for supported ENSv1 `text:<key>` selectors
+  whose normalized event did not retain the value, plus entries carrying prior
+  canonical-head hydration provenance.[^ensnode-legacy-text-l356]
+
+The reads use Multicall3 at an exact EIP-1898 block number and hash copied from
+`chain_heads`. Publication revalidates and locks that same head; a concurrent
+advance or reorg makes the pass retry. Successful, absent, or invalid reverse
+results replace only the claim fields and hydration provenance for the existing
+tuple. Successful or absent text results replace only the selected entry value,
+status, and provenance. Hydration provenance retains the replaced event-derived
+baseline. A failed call restores that baseline, removes the stale head's
+hydration metadata, and leaves project retryable at the same head. A transport,
+RPC, or malformed whole-batch failure is treated as a failure for every call in
+that batch, so the same head-revalidated transaction retracts all affected
+baselines before reporting the retryable error; it never continues serving a
+hydrated value from an earlier fork.
+There is no historical hydration and no write to raw facts, identity,
+normalized events, verified execution output, or execution traces. A later
+head advance or fork re-runs project first, then refreshes this enrichment at
+the new canonical hash.
 
 ## Rules
 

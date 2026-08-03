@@ -210,8 +210,12 @@ Phases per chain:
    persistence
 2. `interpret` — schema-v2 identity, discovery, and normalized-event writes
 3. `project` — canonical identity and normalized-event input, staged current
-   projections, and one-transaction publication for the affected scope
-4. `verify` and `live` — deferred until their runtime ports
+   projections, one-transaction publication for the affected scope, and
+   canonical-head [hydration](glossary.md#hydration) after publication
+4. `verify` — read-only trust classification; its B4 implementation remains
+   deferred
+5. `live` — continuous provider-head walk, bounded gap fill, chain-head
+   publication, and downstream re-derivation after a reorg
 
 Postgres is the hot indexed and replay-focused store. Lineage anchors, selected target logs and their same-transaction sibling replay context, replay-required call snapshots, and compact payload-cache metadata are durable. Legacy public-schema code-hash observations remain available to the old worker but are not schema-v2 project-phase inputs. Large block payloads, non-indexed transaction or receipt bodies, and non-audit raw-log staging rows are evictable cache once their replay contract is satisfied. Empty historical blocks retain only lineage anchors and audit metadata.
 
@@ -224,19 +228,22 @@ the ingested boundary.
 
 ### Stage B runtime boundary
 
-The checked-in phase runner contains real `ingest`, `interpret`, and `project`
-implementations and explicit unavailable implementations for `verify` and
-`live`. It can therefore produce schema-v2 raw facts, identity rows, discovery
-edges, normalized events, and the retained current projections, but it is not
-yet a complete continuously serving deployment. The project phase is the
-single projection writer and has no claim queue, dead-letter referee,
-watermarks, heartbeat threading, or standing hydration planners. Hydration is
-deferred to the later live multicall port. The existing worker remains only so
-the API can read the legacy public-schema projections until the Stage C
-cutover; it does not write schema-v2 projections.
+The checked-in phase runner contains real `ingest`, `interpret`, `project`, and
+`live` implementations. The B4 `verify` implementation remains deferred: its
+slot stays idle without recording a verification level, and a chain configured
+with `verify-before-live` cannot enter live follow until that verifier exists.
+The project phase is the single schema-v2 projection writer and has no claim
+queue, dead-letter referee, watermarks, heartbeat threading, or standing
+hydration planner. When a hydration RPC is configured, the same project run
+refreshes eligible Ethereum legacy reverse-name and text values at the exact
+published canonical head after its event-derived projection work. A redo whose
+event-derived publication target is behind that head defers hydration until
+project catches up. The existing
+worker remains only so the API can read the legacy public-schema projections
+until the Stage C cutover; it does not write schema-v2 projections.
 
-Current ingest, interpretation, redo, and the deferred live boundary are
-described in [`chain-intake.md`](chain-intake.md).
+Current ingest, interpretation, projection, live follow, redo, and rewind
+boundaries are described in [`chain-intake.md`](chain-intake.md).
 
 ## Immutable facts and rebuildable state
 
@@ -252,7 +259,11 @@ edges, and normalized events can be replaced by an explicit bounded
 `interpret` redo while raw facts remain unchanged. Current name, binding,
 authority, control, permissions, resolver, record, primary-name, reverse,
 address, history, and coverage projections remain rebuildable by the project
-phase from canonical identity and normalized-event input.
+phase from canonical identity and normalized-event input. Canonical-head
+hydration values are execution-derived current-state enrichment layered into
+`record_inventory_current` and `primary_names_current` only after that
+rebuildable event-derived publication; they are never raw facts, identity rows,
+or normalized events.
 Execution traces and outcomes remain durable execution artifacts.
 
 Every projected row carries provenance pointers, manifest version, canonicality state, and chain-position context.
@@ -478,28 +489,52 @@ rewriting immutable raw rows. An explicit `interpret` redo replaces derived
 identity, discovery, and normalized-event output for its selected range.
 
 The old synchronous reorg-repair tree, normalized-event repair/replay driver,
-and its broad orphan-repair sweep have been deleted. A narrow retained storage
-invalidator runs during phase-runner head publication: in the same PostgreSQL
-transaction that orphans `bigname_phase.chain_lineage`, it removes cache
-eligibility for affected outcomes in `public.execution_cache_outcomes` while
-leaving durable traces intact. Stage B still does not provide a continuously
-supervised live/reorg service. An explicit `project` redo rebuilds the affected
-range and retracts output whose source lineage became orphaned; automatic
-reorg-to-project scheduling belongs to the later live phase. The surviving
-worker's maintenance commands remain legacy-public-schema operations only
-until Stage C.
+and its broad orphan-repair sweep have been deleted. The live phase uses the
+same head-publication transaction as ingest. That transaction orphans the
+displaced suffix, removes cache eligibility for affected rows in
+`public.execution_cache_outcomes` while leaving durable traces intact, and
+stamps `interpret` and `project` for bounded redo when the orphaned suffix
+starts at or below their recorded cursors. The live loop consumes those stamps
+in dependency order before advancing downstream work, so projections cannot
+silently retain output from the losing fork. Successful `interpret` redo also
+stamps `project` for the same replayed suffix; a direct data-repair redo
+therefore cascades without a second operator command. Since interpret replaces
+normalized events before project runs, project redo retains the incremental
+keys cited by current rows when those event IDs disappear, including both
+primary-name reverse and claim citations. The winning replay can therefore
+retract an event-only losing-fork value even when its stable identity was first
+observed before the redo range.
+The persisted system marker distinguishes a pending required range from its
+active replay. Dependency selection and live gap fill may pass a pending marker;
+after replay acquires the phase writer slot, ordinary cross-phase writer
+exclusion applies.
+Live also checks that a suffix loaded after ancestry discovery still descends
+from the selected common ancestor. A provider reorg between those reads is a
+retryable snapshot change, not a terminal lineage failure.
+
+The `phase-runner rewind` command is a thin head-publication operation. It takes
+the ingest, interpret, project, and live advisory locks so it cannot race a head
+publisher or downstream writer, selects an exact stored readable ancestor at or
+above the safe head, and invokes the same atomic orphaning, cache invalidation,
+and redo-stamping path. The next supervised live cycle fills the winning path,
+then runs the required downstream redo.
 
 Historical work is a finite `ingest`, `interpret`, or `project` run, optionally
-recorded as an explicit redo, not a persisted old-schema backfill job. The eventual live
-deployment still needs complete admitted history for ENSv1, ENSv2, and
-Basenames source families. Wildcard and offchain names remain
+recorded as an explicit redo, not a persisted old-schema backfill job. Live
+follow starts at the completed ingest handoff and only walks the current head
+and a winning-fork gap; it never provides historical coverage. Unsupported
+`live`, `verify`, and flag-recomputation redo requests fail before any redo
+state is written. A deployment
+therefore still needs complete admitted history for ENSv1, ENSv2, and Basenames
+source families. Wildcard and offchain names remain
 discovery/observed-answer based rather than exhaustively enumerable.
 
 ## Operations
 
 The old indexer metrics and backfill-capacity checks retired with that binary.
-API and worker metrics remain available; continuous chain-lag, reorg, and
-live-phase operational metrics are deferred with the live runtime.
+API and worker metrics remain available. The live phase records its phase state,
+exact block-hash progress, and heartbeat through the shared runner control
+plane; dedicated chain-lag and reorg metrics remain deferred.
 
 Worker-owned tools (none expose public `v1` routes; inspection tools are read-only):
 
@@ -512,7 +547,7 @@ Worker-owned tools (none expose public `v1` routes; inspection tools are read-on
   bounded redo. The old worker's point-or-full rebuilds,
   `replay all-current-projections`, and execution-cache invalidation commands
   remain legacy-public-schema operations. Finalized-head/backfill processing,
-  historical rewind materialization,
+  historical snapshot materialization,
   surface-binding inspection, resolver-topology inspection, raw-fact
   inspection beyond canonicality/stored-lineage views, manifest-version
   inspection, and [declared-vs-verified](glossary.md) diff tooling are deferred;

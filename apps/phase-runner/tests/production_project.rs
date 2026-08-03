@@ -15,6 +15,8 @@ use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     capacity::CapacityGuard,
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
+    heads::{BlockMarker, HeadMarkers, publish_heads},
+    interpret_phase::InterpretPhase,
     phase::{BlockRange, LoopbackPhase, PhaseName, PhaseSet},
     project_phase::ProjectPhase,
     runner::{PhaseRunner, RedoPhase},
@@ -1952,6 +1954,292 @@ async fn raw_ingest_fixture_flows_through_interpret_then_project() -> Result<()>
         .all(|count| count > 0),
         "every projection table must be populated from interpreted raw facts: {outputs:?}"
     );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn interpret_data_repair_redo_cascades_to_project_without_an_operator_step() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_interpret_redo_cascade").await?;
+    let chain = "project-interpret-redo-cascade";
+    seed_raw_registration_fixture(scratch.pool(), chain).await?;
+    InterpretEngine::new(scratch.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: 5,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 5).await?;
+    sqlx::query("UPDATE name_current SET raw_name = 'tampered.eth' WHERE raw_name = 'alice.eth'")
+        .execute(scratch.pool())
+        .await?;
+
+    let store = PhaseStore::new(scratch.pool().clone());
+    store.initialize_chain(chain).await?;
+    seed_completed_project_extent(scratch.pool(), chain, 5).await?;
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        PhaseSet::with_ingest_interpret_and_project(
+            Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+            Arc::new(InterpretPhase::new(scratch.pool().clone())),
+            Arc::new(ProjectPhase::new(scratch.pool().clone())),
+        )?,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-interpret-redo-cascade",
+        test_timing(),
+    )?;
+    runner
+        .redo(
+            &chain_config(chain)?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(2, 2)?,
+            CancellationToken::new(),
+        )
+        .await?;
+
+    let names: Vec<String> =
+        sqlx::query_scalar("SELECT raw_name FROM name_current ORDER BY raw_name")
+            .fetch_all(scratch.pool())
+            .await?;
+    assert_eq!(names, vec!["alice.eth", "eth"]);
+    let project_state: (String, bool) = sqlx::query_as(
+        "SELECT phase_status, redo_in_progress FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(project_state, ("completed".into(), false));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn reorg_below_interpret_cursor_rederives_winning_fork_through_project() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_reorg_cascade").await?;
+    let chain = "project-reorg-cascade";
+    seed_raw_registration_fixture(scratch.pool(), chain).await?;
+    let alice_node = raw_namehash(&[b"alice", b"eth"]);
+    let losing_record = TextChanged {
+        node: alice_node,
+        indexedKey: keccak256(b"avatar"),
+        key: "avatar".into(),
+        value: "ipfs://losing-fork".into(),
+    }
+    .encode_log_data();
+    insert_raw_event_at(
+        scratch.pool(),
+        chain,
+        5,
+        1,
+        1,
+        RESOLVER,
+        losing_record.topics(),
+        losing_record.data.as_ref(),
+    )
+    .await?;
+    publish_heads(
+        scratch.pool(),
+        chain,
+        &HeadMarkers {
+            latest: BlockMarker::new(5, block_hash(chain, 5))?,
+            safe: Some(BlockMarker::new(4, block_hash(chain, 4))?),
+            finalized: Some(BlockMarker::new(4, block_hash(chain, 4))?),
+        },
+    )
+    .await?;
+    InterpretEngine::new(scratch.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: 5,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 5).await?;
+    let before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM primary_names_current WHERE namespace = 'ens'")
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(before, 1);
+    let losing_record_before: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM record_inventory_current
+             WHERE entries @> '[{\"record_key\":\"text:avatar\"}]'::jsonb
+         )",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(losing_record_before);
+
+    let store = PhaseStore::new(scratch.pool().clone());
+    store.initialize_chain(chain).await?;
+    seed_completed_project_extent(scratch.pool(), chain, 5).await?;
+    let winning_hash = format!("{chain}-winning-block-5");
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state
+         ) VALUES ($1, $2, $3, 5, to_timestamp(5), 'observed')",
+    )
+    .bind(chain)
+    .bind(&winning_hash)
+    .bind(block_hash(chain, 4))
+    .execute(scratch.pool())
+    .await?;
+    publish_heads(
+        scratch.pool(),
+        chain,
+        &HeadMarkers {
+            latest: BlockMarker::new(5, winning_hash.clone())?,
+            safe: Some(BlockMarker::new(4, block_hash(chain, 4))?),
+            finalized: Some(BlockMarker::new(4, block_hash(chain, 4))?),
+        },
+    )
+    .await?;
+
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        PhaseSet::with_ingest_interpret_and_project(
+            Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+            Arc::new(InterpretPhase::new(scratch.pool().clone())),
+            Arc::new(ProjectPhase::new(scratch.pool().clone())),
+        )?,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-reorg-cascade",
+        test_timing(),
+    )?;
+    let terminal = runner
+        .run_chain(&chain_config(chain)?, CancellationToken::new())
+        .await
+        .expect_err("the intentionally unavailable verify/live slot stops after re-derivation");
+    assert_eq!(
+        terminal.kind(),
+        phase_runner::error::ErrorKind::Configuration
+    );
+
+    let readable_reverse: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'ReverseChanged'
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(readable_reverse, 0);
+    let projected: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM primary_names_current WHERE namespace = 'ens'")
+            .fetch_one(scratch.pool())
+            .await?;
+    let reverse_states: Vec<(String, String)> = sqlx::query_as(
+        "SELECT event_identity, canonicality_state::text FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'ReverseChanged'",
+    )
+    .bind(chain)
+    .fetch_all(scratch.pool())
+    .await?;
+    let primary_rows: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT address, claim_provenance FROM primary_names_current WHERE namespace = 'ens'",
+    )
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        projected, 0,
+        "reverse events: {reverse_states:?}; primary rows: {primary_rows:?}"
+    );
+    let losing_record_after: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM record_inventory_current
+             WHERE entries @> '[{\"record_key\":\"text:avatar\"}]'::jsonb
+         )",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(
+        !losing_record_after,
+        "record inventory retained a normalized event deleted by interpret redo"
+    );
+    let states: Vec<(String, String, bool, Option<String>)> = sqlx::query_as(
+        "SELECT phase_name, phase_status, redo_in_progress, current_block_hash
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')
+         ORDER BY phase_name",
+    )
+    .bind(chain)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        states,
+        vec![
+            (
+                "interpret".into(),
+                "completed".into(),
+                false,
+                Some(winning_hash.clone()),
+            ),
+            (
+                "project".into(),
+                "completed".into(),
+                false,
+                Some(winning_hash),
+            ),
+        ]
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn project_redo_retracts_a_missing_primary_claim_with_surviving_reverse() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_missing_primary_claim").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET block_number = 2, block_hash = $2
+         WHERE chain_id = $1 AND event_kind = 'ReverseChanged'",
+    )
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 2))
+    .execute(scratch.pool())
+    .await?;
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let before: (String, Option<String>) = sqlx::query_as(
+        "SELECT claim_status, raw_claim_name
+         FROM primary_names_current WHERE namespace = 'ens'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(before, ("success".to_owned(), Some("alice.eth".to_owned())));
+
+    sqlx::query(
+        "DELETE FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'RecordChanged'
+           AND after_state ? 'primary_claim_source'",
+    )
+    .bind(CHAIN)
+    .execute(scratch.pool())
+    .await?;
+    run_project(
+        scratch.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Redo,
+        3,
+        3,
+    )
+    .await?;
+
+    let after: (String, Option<String>) = sqlx::query_as(
+        "SELECT claim_status, raw_claim_name
+         FROM primary_names_current WHERE namespace = 'ens'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(after, ("not_found".to_owned(), None));
     scratch.cleanup().await
 }
 

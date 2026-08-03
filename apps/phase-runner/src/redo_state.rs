@@ -14,6 +14,7 @@ use crate::{
 pub(crate) struct RedoSession {
     previous: PhaseStateRow,
     interrupted_before_redo: bool,
+    range: BlockRange,
 }
 
 pub(crate) enum RedoOutcome<'a> {
@@ -119,7 +120,10 @@ pub(crate) async fn begin(
             redo_target_block_number = CASE WHEN $6 THEN redo_target_block_number END,
             redo_target_block_hash = CASE WHEN $6 THEN redo_target_block_hash END,
             input_content_hash = CASE WHEN $7 THEN $8 ELSE input_content_hash END,
-            last_error = CASE WHEN redo_in_progress THEN last_error END,
+            last_error = CASE
+                WHEN last_error LIKE $9 THEN $10
+                WHEN redo_in_progress THEN last_error
+            END,
             started_at = now(),
             finished_at = NULL,
             updated_at = now()
@@ -135,6 +139,8 @@ pub(crate) async fn begin(
     .bind(resume_same_redo)
     .bind(phase.writes_derived_data())
     .bind(current_interpreter_hash)
+    .bind(format!("{}%", crate::redo_stamp::REQUIRED_REDO_PREFIX))
+    .bind(crate::redo_stamp::required_redo_active_reason())
     .execute(&mut *transaction)
     .await
     .map_err(|error| {
@@ -152,6 +158,7 @@ pub(crate) async fn begin(
     Ok(RedoSession {
         interrupted_before_redo: matches!(status, PhaseStatus::Running | PhaseStatus::Paused),
         previous,
+        range: execution_range,
     })
 }
 
@@ -331,7 +338,10 @@ pub(crate) async fn finish(
             let result = sqlx::query(
                 "
                 UPDATE chain_phase_state
-                SET last_error = $3,
+                SET last_error = CASE
+                        WHEN last_error LIKE $4 THEN $5
+                        ELSE $3
+                    END,
                     updated_at = now()
                 WHERE chain_id = $1
                   AND phase_name = $2
@@ -341,6 +351,11 @@ pub(crate) async fn finish(
             .bind(chain_id)
             .bind(phase.as_str())
             .bind(error.to_string())
+            .bind(crate::redo_stamp::required_redo_owner_pattern())
+            .bind(format!(
+                "{}automatic replay remains pending; last attempt failed: {error}",
+                crate::redo_stamp::REQUIRED_REDO_PREFIX
+            ))
             .execute(pool)
             .await
             .map_err(|database_error| {
@@ -368,13 +383,30 @@ pub(crate) async fn finish(
     let RedoSession {
         previous,
         interrupted_before_redo,
+        range,
     } = session;
     let content_hash = if phase.writes_derived_data() {
         Some(bigname_content_hash::INTERPRETER_CONTENT_HASH)
     } else {
         previous.input_content_hash.as_deref()
     };
-    sqlx::query(
+    let restored_current_hash = replacement_hash(
+        previous.current_block_number,
+        previous.current_block_hash.as_deref(),
+        progress.current.as_ref(),
+    );
+    let restored_target_hash = replacement_hash(
+        previous.target_block_number,
+        previous.target_block_hash.as_deref(),
+        progress.target.as_ref(),
+    );
+    let mut transaction = pool.begin().await.map_err(|error| {
+        RunnerError::database(
+            format!("failed to begin redo completion for chain {chain_id} phase {phase}"),
+            error,
+        )
+    })?;
+    let result = sqlx::query(
         "
         UPDATE chain_phase_state
         SET phase_status = CASE WHEN $15 THEN 'failed' ELSE $3 END,
@@ -414,9 +446,9 @@ pub(crate) async fn finish(
     .bind(previous.phase_status)
     .bind(verification_level)
     .bind(previous.current_block_number)
-    .bind(previous.current_block_hash)
+    .bind(restored_current_hash)
     .bind(previous.target_block_number)
-    .bind(previous.target_block_hash)
+    .bind(restored_target_hash)
     .bind(content_hash)
     .bind(previous.live_handoff_block_number)
     .bind(previous.live_handoff_block_hash)
@@ -424,7 +456,7 @@ pub(crate) async fn finish(
     .bind(previous.started_at)
     .bind(previous.finished_at)
     .bind(interrupted_before_redo)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(|error| {
         RunnerError::database(
@@ -432,5 +464,35 @@ pub(crate) async fn finish(
             error,
         )
     })?;
-    Ok(())
+    if result.rows_affected() != 1 {
+        return Err(RunnerError::data_integrity(format!(
+            "redo completion requires phase state for chain {chain_id} phase {phase}"
+        )));
+    }
+    if phase == PhaseName::Interpret {
+        crate::redo_stamp::stamp_required_in_transaction(
+            &mut transaction,
+            chain_id,
+            PhaseName::Project,
+            range,
+            "interpret redo completed",
+        )
+        .await?;
+    }
+    transaction.commit().await.map_err(|error| {
+        RunnerError::database(
+            format!("failed to commit redo completion for chain {chain_id} phase {phase}"),
+            error,
+        )
+    })
+}
+
+fn replacement_hash<'a>(
+    recorded_number: Option<i64>,
+    recorded_hash: Option<&'a str>,
+    progress: Option<&'a crate::heads::BlockMarker>,
+) -> Option<&'a str> {
+    progress
+        .filter(|marker| Some(marker.number) == recorded_number)
+        .map_or(recorded_hash, |marker| Some(marker.hash.as_str()))
 }

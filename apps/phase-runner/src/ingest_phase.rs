@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use bigname_ingest::{
     BatchRequest, Engine, ErrorKind as IngestErrorKind, Marker, SourceCursor, SourceDescriptor,
 };
@@ -13,14 +15,16 @@ use crate::{
 };
 
 pub struct IngestPhase {
-    engine: Engine,
+    engine: Arc<Engine>,
 }
 
 impl IngestPhase {
     pub fn new(pool: PgPool) -> Self {
-        Self {
-            engine: Engine::new(pool),
-        }
+        Self::with_engine(Arc::new(Engine::new(pool)))
+    }
+
+    pub fn with_engine(engine: Arc<Engine>) -> Self {
+        Self { engine }
     }
 }
 

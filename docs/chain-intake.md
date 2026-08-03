@@ -1,36 +1,62 @@
 # Chain Intake
 
 Chain intake is split into explicit per-chain phases. The checked-in runtime
-currently implements `ingest` and `interpret`; `project`, `verify`, and `live`
-remain unavailable until their later ports land. The old monolithic indexer,
-its provider reconciliation loop, its persisted backfill scheduler, and its
-normalized-event replay driver are no longer part of the source tree.
+implements `ingest`, `interpret`, `project`, and continuous `live` follow. The
+read-only `verify` slot remains deferred to B4 and records no trust level. The
+old monolithic indexer, its provider reconciliation loop, its persisted
+backfill scheduler, and its normalized-event replay driver are no longer part
+of the source tree.
 
 The architecture model lives in [`architecture.md`](architecture.md), storage
-ownership in [`storage.md`](storage.md), and manifest and discovery authority in
+ownership in [`storage.md`](storage.md), projection behavior in
+[`projections.md`](projections.md), and manifest and discovery authority in
 [`manifests.md`](manifests.md).
 
 ## Implemented phase boundary
 
-For each configured chain, the implemented path is:
+For each configured chain, the path is:
 
-1. `ingest` resolves provider heads and source ranges, fetches selected chain
-   data, and writes lineage plus immutable [raw facts](glossary.md#raw-fact).
+1. `ingest` resolves provider heads and finite source ranges, fetches selected
+   chain data, and writes lineage plus immutable [raw facts](glossary.md#raw-fact).
 2. `interpret` waits on the ingested range and writes schema-v2 identity rows,
    discovery edges, and [normalized events](glossary.md#normalized-event).
+3. `project` publishes the retained current projections from canonical identity
+   and normalized events. When configured, it then applies
+   [canonical-head hydration](glossary.md#hydration) to the two documented
+   current projection surfaces.
+4. `verify` is the reserved read-only trust-classification slot. Its B4
+   implementation is not present in this build.
+5. `live` follows a provider snapshot from the completed ingest handoff, walks
+   backward to a stored readable ancestor, loads at most one bounded winning
+   suffix batch, and publishes the resulting head through the shared head path.
 
 The runner persists phase and per-source cursors. A phase advances only through
-the exact block-hash markers returned by its implementation. `interpret` never
-fetches missing provider data or calls an old adapter; its input is the raw fact
-range already admitted by `ingest`.
+the exact block-number/hash markers returned by its implementation. `interpret`
+never fetches missing provider data or calls an old adapter; its input is the
+raw-fact range already admitted by `ingest`. The project phase likewise reads
+only canonical identity and normalized-event input.
+
+After the initial spine completes, the live loop takes one provider snapshot,
+fills its bounded gap, then advances or redoes `interpret` and `project` through
+the published head before polling again. Base uses the RPC member of its
+Coinbase-SQL/RPC source pair for head follow; Ethereum uses the same local Reth
+database provider as ingest. The live code reuses ingest's provider cache,
+source validation, watch plan, fetch, and persistence path.
+Before publishing a loaded suffix, live verifies that its stored parent path
+reaches the common ancestor selected from the snapshot. A provider reorg between
+the ancestry read and suffix read leaves the immutable observation stored but
+returns a retryable result, so the next attempt starts from a fresh snapshot.
+
+The `verify` reader may overlap the live loop. A chain configured with
+`verify-before-live` remains stopped at the deferred verifier until B4 lands;
+the idle stub never invents a verification level.
 
 Manifest synchronization uses the schema-v2 repository and checks the selected
 [deployment profile](glossary.md#deployment-profile) fingerprint against the
-interpreter content hash before a phase runs.
-Manifest declarations and current discovery edges determine admission and the
-watch filter. Discovery does not infer missing historical facts: a newly
-admitted source must return to `ingest` for its required range before
-`interpret` can derive it.
+interpreter content hash before a phase runs. Manifest declarations and current
+discovery edges determine admission and the watch filter. Discovery does not
+infer missing historical facts: a newly admitted source must return to `ingest`
+for its required range before `interpret` can derive it.
 
 ## Sources and range progress
 
@@ -46,11 +72,42 @@ one source cannot claim another source's range. The runner records the resolved
 target and last processed block hash for each source; restart resumes from that
 stored boundary.
 
-The current source kinds and seed-basis vocabulary are validated by the phase
-runner configuration layer. Unsupported combinations fail as configuration
-errors rather than falling back to a different provider or range.
+Production source shape is exact: `ethereum-mainnet` has one local Reth DB
+source, while `base-mainnet` has one Coinbase SQL historical source and one RPC
+source meeting at block `48,428,000`. Live follow uses only the chain block
+provider from that already-validated set. Unsupported combinations fail as
+configuration errors rather than falling back to another provider or range.
 
-## Redo
+## Reorgs and required downstream redo
+
+Head publication marks a displaced readable suffix orphaned and invalidates
+affected execution-cache eligibility atomically. If that suffix starts at or
+below the recorded `interpret` or `project` cursor, the same transaction stamps
+the affected phase's existing redo state from the first orphaned block through
+that cursor. The next live cycle runs the stamped `interpret` range and then the
+stamped `project` range before either phase advances normally. If a provider's
+latest marker temporarily falls below the old downstream cursor, live keeps
+polling and fills the winning path through the stamped upper bound before redo
+starts. On process restart, the live advisory lock also fences recovery of a
+`running` live row left between atomic head publication and phase completion.
+
+A successful interpret redo also stamps project for the same actual replayed
+suffix. This includes an operator-requested data repair where the canonical
+block hash did not change. The stamp is a persisted range in
+`chain_phase_state`, not a repair queue or scheduler. Existing interrupted or
+operator-requested redo state is extended rather than silently replaced.
+System-owned state distinguishes a pending stamp from an active replay. Pending
+stamps may coexist only while live fills the required winning range or the
+runner selects the next dependency; once replay starts, that phase occupies the
+normal writer slot and excludes every other non-verify writer.
+Because interpret replaces normalized events before project runs, project redo
+also retains keys from current-row provenance when a cited normalized event is
+no longer readable. That deletion scope includes both the reverse event and
+claim event cited by a primary-name tuple, so an event-only losing-fork update
+cannot survive merely because its resource or name identity predates the redo
+range.
+
+## Redo and rewind
 
 An explicit finite redo is selected with:
 
@@ -68,20 +125,82 @@ cargo phase -- redo \
   --from-block <inclusive-start> \
   --to-block <inclusive-end> \
   --source <descriptor>
+
+cargo phase -- redo \
+  --chain <chain> \
+  --phase project \
+  --from-block <inclusive-start> \
+  --to-block <inclusive-end> \
+  --source <descriptor>
 ```
 
 Redo state is persisted and range-bound. An interpret redo prepares the
 schema-v2 derived range, replays it from retained raw facts, and resumes after
-interruption. It does not use the deleted normalized-event upsert, repair,
-supersession, adapter-checkpoint, or coverage-authority machinery.
+interruption. Project redo uses the same state machinery to replace the
+affected current projection scope. Neither path uses the deleted
+normalized-event upsert, repair, supersession, adapter-checkpoint, or
+coverage-authority machinery. Historical live redo is rejected because live
+is a head follower; verify redo and flag recomputation remain unavailable. The
+runner rejects those unsupported redo modes before creating redo state.
+
+The thin rewind command moves only the published latest head:
+
+```sh
+cargo phase -- rewind \
+  --chain <chain> \
+  --ancestor-block <block> \
+  --ancestor-hash <hash>
+```
+
+It takes the ingest, interpret, project, and live advisory locks so no head
+publisher or downstream writer can overlap it, requires the exact ancestor to
+be stored and readable, refuses to cross the safe head, and invokes normal head
+publication. It does not write raw facts or normalized events. The resulting
+orphaning stamps downstream redo; the next supervised run fills the winning
+path before consuming those stamps.
+
+## Canonical-head hydration
+
+Hydration runs as the final step of the project phase, after the event-derived
+projection publication for the selected canonical head. It batches eligible
+Ethereum calls through Multicall3 with an EIP-1898 block selector containing
+the exact stored number and hash, then revalidates that `chain_heads` marker in
+the publication transaction. If a bounded project redo publishes an older
+cursor while `chain_heads` is already newer, hydration is deferred until
+project reaches that exact current head; newer execution state is never layered
+over an older event-derived projection target.
+
+The candidate set is current-only:
+
+- existing ENS/60 `primary_names_current` tuples whose latest canonical reverse
+  claim and resolver edge select a configured legacy event-silent resolver (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L311 @ ensnode@2017ae6) (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L316 @ ensnode@2017ae6);
+- supported ENSv1 text entries in `record_inventory_current` whose event did
+  not retain a value, plus previously hydrated entries that need refresh.
+
+Successful, absent, and invalid reverse-name results update only
+`primary_names_current`. Successful or absent text results update only
+`record_inventory_current.entries`. Provenance stores both the exact hydration
+head and the event-derived fields replaced by hydration. A failed call or
+whole Multicall/RPC batch restores every affected baseline in the same
+head-revalidated publication transaction, removes the prior head's hydration
+metadata, and keeps project retryable at the same head. If a previously
+hydrated reverse tuple no longer selects a configured legacy resolver, the
+same publication restores its baseline without issuing an ineligible call. No
+hydration value is written to raw facts, identity rows, or normalized events,
+and there is no
+historical hydration pass. Advancing or replacing the canonical head causes
+project to rebuild the affected event-derived scope and refresh the current
+values at the new exact hash.
 
 ## Canonicality and replay facts
 
-Block hash is identity and block number is position. Canonicality is stored
-explicitly in lineage and raw fact rows; consumers do not infer it from row
-insertion order. Raw facts remain the durable input boundary. Schema-v2
-identity and normalized-event rows are derived output and can be recreated by
-an explicit interpret redo over a complete ingested range.
+Block hash is identity and block number is position. [Canonicality](glossary.md#canonicality)
+is stored explicitly in lineage and raw fact rows; consumers do not infer it
+from row insertion order. Raw facts remain the durable input boundary.
+Schema-v2 identity and normalized-event rows are derived output and can be
+recreated by an explicit interpret redo over a complete ingested range.
+Current projections can be rebuilt from those canonical inputs without
+hydration; hydration is a separately reproducible head-only enrichment.
 
 Execution may persist exact block-anchored call snapshots through the admitted
 raw-fact boundary. That surviving path does not make execution a general chain
@@ -89,17 +208,16 @@ intake owner.
 
 ## Current Stage B limitation
 
-`PhaseSet::with_ingest_and_interpret` deliberately installs unavailable
-implementations for `project`, `verify`, and `live`. Consequently,
-`phase-runner run` can execute the implemented phases but terminates when it
-reaches `project`; it is not yet a complete continuously serving deployment.
-The surviving worker still owns projection rebuild/apply and verified execution,
-and the API still reads those projections and execution artifacts. Their port
-to the phase pipeline is deferred to the project/live stage.
+The phase runner is now a continuously supervised ingest-through-live writer,
+but it is not yet the complete replacement deployment. B4 verification is
+still absent, and the API continues to read legacy public-schema projections
+until the Stage C cutover. The surviving worker therefore continues to serve
+its documented public-schema duties; it does not write the schema-v2 project
+tables.
 
 The historical `backfill_*`, `normalized_replay_*`, resolver-profile
 reconciliation, raw-log revision/proof, and startup-checkpoint SQL tables remain
 in migration history. This source tree has no old-runtime writer for them.
 Storage exposes only the read paths still used by the worker or API, including
 historical backfill-job inspection and the normalized replay cursor reads used
-by the still-unported projection/compaction boundary.
+by the surviving public-schema projection and compaction boundary.
