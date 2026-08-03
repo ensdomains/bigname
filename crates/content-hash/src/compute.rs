@@ -16,6 +16,7 @@ const WORKER_SOURCE_ROOT: &str = "apps/worker/src";
 const MINIMUM_MANIFEST_EVENT_COUNT: usize = 111;
 const MINIMUM_EVENT_MANIFEST_COUNT: usize = 16;
 const HASH_FORMAT: &[u8] = b"bigname-interpreter-content-v3\0";
+const MANIFEST_PROFILE_HASH_FORMAT: &[u8] = b"bigname-manifest-profile-v1\0";
 
 // `apps/phase-runner` is deliberately outside these roots: it may orchestrate phase work, but
 // semantic interpretation or projection code must never live there.
@@ -139,17 +140,56 @@ pub(crate) fn watched_paths(workspace_root: &Path) -> Vec<PathBuf> {
 
 pub(crate) fn compute(workspace_root: &Path) -> io::Result<String> {
     let mut inputs = collect_inputs(workspace_root)?;
+    Ok(hash_inputs(HASH_FORMAT, &mut inputs))
+}
+
+pub(crate) fn manifest_profile_hash(manifest_root: &Path) -> io::Result<String> {
+    let mut files = Vec::new();
+    collect_files_with_extension(manifest_root, OsStr::new("toml"), &mut files)?;
+    files.sort();
+    if files.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "manifest profile {} contains no TOML manifests",
+                manifest_root.display()
+            ),
+        ));
+    }
+
+    let mut inputs = Vec::with_capacity(files.len());
+    for path in files {
+        let key = relative_key(manifest_root, &path)?;
+        let contents = fs::read_to_string(&path)?;
+        let mut filtered = Vec::new();
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if assignment_name(trimmed) != Some("normalizer_version") {
+                filtered.extend_from_slice(line.as_bytes());
+                filtered.push(b'\n');
+            }
+        }
+        inputs.push(Input {
+            key: format!("manifest:{key}"),
+            content: filtered,
+        });
+    }
+
+    Ok(hash_inputs(MANIFEST_PROFILE_HASH_FORMAT, &mut inputs))
+}
+
+fn hash_inputs(format: &[u8], inputs: &mut [Input]) -> String {
     inputs.sort();
 
     let mut encoded = Vec::new();
-    encoded.extend_from_slice(HASH_FORMAT);
+    encoded.extend_from_slice(format);
     append_usize(&mut encoded, inputs.len());
-    for input in inputs {
+    for input in inputs.iter() {
         append_bytes(&mut encoded, input.key.as_bytes());
         append_bytes(&mut encoded, &input.content);
     }
 
-    Ok(format!("keccak256:{}", hex::encode(keccak256(encoded))))
+    format!("keccak256:{}", hex::encode(keccak256(encoded)))
 }
 
 fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {

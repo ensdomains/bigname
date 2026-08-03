@@ -208,8 +208,9 @@ impl PhaseStore {
         chain_id: &str,
         phase: PhaseName,
         mode: &RunMode,
+        sources: &[SourceConfig],
     ) -> RunnerResult<RedoSession> {
-        redo_state::begin(&self.pool, chain_id, phase, mode).await
+        redo_state::begin(&self.pool, chain_id, phase, mode, sources).await
     }
 
     pub(crate) async fn finish_redo(

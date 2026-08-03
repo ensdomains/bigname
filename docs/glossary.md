@@ -328,11 +328,13 @@ protocol truth. See ADR 0005.
 of protocol authority (for example `ens_v1_registrar_l1`). The unit of manifest
 admission, capability ownership, replay coverage, and provenance attribution.
 
-**Surface (name surface)** — the public name string as an identity
-(`logical_name_id = namespace:normalized_name`), distinct from whatever
-authority currently backs it. A **surface binding** is the time-ranged record
-of which resource backed a surface when. Surfaces survive re-registration;
-resources rotate.
+**Surface (name surface)** — an on-chain name identity
+(`logical_name_id = namespace:namehash`), distinct from whatever authority
+currently backs it. Raw labels and their normalization flags are observations,
+not identity; display names are derived when read, following the audit's
+[normalization-as-a-gate decision](../simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity).
+A **surface binding** is the time-ranged record of which resource backed a
+surface when. Surfaces survive re-registration; resources rotate.
 
 **Token lineage** (`token_lineage_id`) — the continuity of tokenized ownership
 across token-id changes (for example ENSv2 token regeneration, where a role

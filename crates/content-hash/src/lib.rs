@@ -12,5 +12,12 @@ pub fn interpreter_content_hash(workspace_root: impl AsRef<Path>) -> io::Result<
     compute::compute(workspace_root.as_ref())
 }
 
+/// Compute the deployment-manifest profile fingerprint used to bind runtime manifests to this
+/// binary. The normalizer version is deliberately excluded because flag recomputation owns that
+/// version transition.
+pub fn manifest_profile_hash(manifest_root: impl AsRef<Path>) -> io::Result<String> {
+    compute::manifest_profile_hash(manifest_root.as_ref())
+}
+
 #[cfg(test)]
 mod tests;

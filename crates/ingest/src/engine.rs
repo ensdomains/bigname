@@ -1,11 +1,14 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use sqlx::PgPool;
 use tokio::sync::Mutex;
 
 use crate::{
     IngestError, Result,
-    coinbase_sql::{CoinbaseSqlSource, source_error},
+    coinbase_sql::CoinbaseSqlSource,
     fetching::{estimated_write_bytes, fetch_selected_facts},
     manifest::load_watch_filter,
     plan::{
@@ -14,6 +17,8 @@ use crate::{
     },
     provider::{ChainProvider, ProviderKind, SharedProvider, normalized_kind, provider_error},
 };
+
+mod query;
 
 const BLOCKS_PER_BATCH: i64 = 256;
 const COINBASE_BLOCKS_PER_BATCH: i64 = 1_024;
@@ -297,52 +302,43 @@ impl Engine {
                 error,
             )
         })?;
-        let filter = load_watch_filter(&self.pool, chain_id, from, to).await?;
+        let mut filter = load_watch_filter(&self.pool, chain_id, from, to).await?;
         let coinbase = normalized_kind(&source.kind) == ProviderKind::Coinbase;
-        let queries = filter.queries();
+        let mut queries = filter.queries();
         let mut selected_by_identity = BTreeMap::new();
-        for query in &queries {
-            let logs = if coinbase {
-                self.coinbase_source(chain_id, source)
-                    .await?
-                    .fetch(
-                        query.from_block,
-                        query.to_block,
-                        &query.addresses,
-                        &query.topic0s,
-                    )
-                    .await
-                    .map_err(|error| {
-                        source_error(
-                            &format!(
-                                "failed to fetch Coinbase SQL logs {}..={}",
-                                query.from_block, query.to_block
-                            ),
-                            error,
-                        )
-                    })?
-            } else {
-                let query_blocks = resolved
-                    .iter()
-                    .filter(|block| (query.from_block..=query.to_block).contains(&block.number))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                provider
-                    .logs(&query_blocks, &query.addresses, &query.topic0s)
-                    .await
-                    .map_err(|error| provider_error("failed to fetch selected chain logs", error))?
-            };
-            for log in logs {
-                let key = (log.block_hash.clone(), log.log_index);
-                if let Some(previous) = selected_by_identity.insert(key.clone(), log.clone())
-                    && previous != log
-                {
-                    return Err(IngestError::data_integrity(format!(
-                        "ingest sources returned conflicting log identity {} {}",
-                        key.0, key.1
-                    )));
-                }
-            }
+        let coinbase_source = if coinbase {
+            Some(self.coinbase_source(chain_id, source).await?)
+        } else {
+            None
+        };
+        query::fetch_into(
+            &provider,
+            &resolved,
+            coinbase_source.as_deref(),
+            &queries,
+            &mut selected_by_identity,
+        )
+        .await?;
+        if let Some(announcement_topic0) = filter.registry_announcement_topic0() {
+            let announcements = selected_by_identity
+                .values()
+                .filter(|log| {
+                    log.topics
+                        .first()
+                        .is_some_and(|topic| topic.eq_ignore_ascii_case(announcement_topic0))
+                })
+                .map(|log| (log.address.clone(), log.block_number))
+                .collect::<BTreeSet<_>>();
+            let supplemental = filter.admit_registry_announcements(announcements, from, to);
+            query::fetch_into(
+                &provider,
+                &resolved,
+                coinbase_source.as_deref(),
+                &supplemental,
+                &mut selected_by_identity,
+            )
+            .await?;
+            queries.extend(supplemental);
         }
         let mut selected = selected_by_identity.into_values().collect::<Vec<_>>();
         selected.retain(|log| {

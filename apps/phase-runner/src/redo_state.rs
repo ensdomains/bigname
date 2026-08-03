@@ -1,6 +1,7 @@
 use sqlx::PgPool;
 
 use crate::{
+    config::SourceConfig,
     error::{RunnerError, RunnerResult},
     phase::{BlockRange, PhaseName, PhaseProgress, RunMode},
     state::PhaseStatus,
@@ -25,6 +26,7 @@ pub(crate) async fn begin(
     chain_id: &str,
     phase: PhaseName,
     mode: &RunMode,
+    sources: &[SourceConfig],
 ) -> RunnerResult<RedoSession> {
     let mut transaction = pool.begin().await.map_err(|error| {
         RunnerError::database(
@@ -37,18 +39,43 @@ pub(crate) async fn begin(
     let mut previous = row_for(&rows, phase)?.clone();
     restore_previous_lifecycle(&mut previous)?;
     let status = previous.status()?;
+    let current_interpreter_hash = bigname_content_hash::INTERPRETER_CONTENT_HASH;
     let recorded_hash = previous.input_content_hash.as_deref();
     let hash_requires_full_redo = recorded_hash
-        .is_some_and(|hash| hash != bigname_content_hash::INTERPRETER_CONTENT_HASH)
+        .is_some_and(|hash| hash != current_interpreter_hash)
         || (status != PhaseStatus::Idle && recorded_hash.is_none());
-    if matches!(phase, PhaseName::Interpret | PhaseName::Project) && hash_requires_full_redo {
+    let adopts_new_hash =
+        matches!(phase, PhaseName::Interpret | PhaseName::Project) && hash_requires_full_redo;
+    if adopts_new_hash {
         require_full_hash_redo(&mut transaction, chain_id, phase, mode).await?;
     }
     let range = mode.range().ok_or_else(|| {
         RunnerError::data_integrity("explicit redo transition is missing its block range")
     })?;
-    require_recorded_extent(&mut transaction, chain_id, phase, &previous, range).await?;
-    require_interrupted_redo_coverage(chain_id, phase, mode, &previous, range)?;
+    require_recorded_extent(
+        &mut transaction,
+        chain_id,
+        phase,
+        &previous,
+        range,
+        adopts_new_hash,
+    )
+    .await?;
+    let execution_range = if phase == PhaseName::Interpret && matches!(mode, RunMode::Redo(_)) {
+        interpret_replay_range(&previous, range)?
+    } else {
+        range
+    };
+    if phase == PhaseName::Interpret && matches!(mode, RunMode::Redo(_)) {
+        crate::redo_presence::require_interpret_raw_data(
+            &mut transaction,
+            chain_id,
+            sources,
+            execution_range,
+        )
+        .await?;
+    }
+    require_interrupted_redo_coverage(chain_id, phase, mode, &previous, execution_range)?;
     if !status.can_transition_to(PhaseStatus::Running, true) {
         return Err(invalid_transition(
             chain_id,
@@ -60,8 +87,9 @@ pub(crate) async fn begin(
     let redo_mode = redo_mode(mode)?;
     let resume_same_redo = previous.redo_in_progress
         && previous.redo_mode.as_deref() == Some(redo_mode)
-        && previous.redo_from_block_number == Some(range.from)
-        && previous.redo_to_block_number == Some(range.to);
+        && previous.redo_from_block_number == Some(execution_range.from)
+        && previous.redo_to_block_number == Some(execution_range.to)
+        && (!phase.writes_derived_data() || recorded_hash == Some(current_interpreter_hash));
     sqlx::query(
         "
         UPDATE chain_phase_state
@@ -90,6 +118,7 @@ pub(crate) async fn begin(
             redo_current_block_hash = CASE WHEN $6 THEN redo_current_block_hash END,
             redo_target_block_number = CASE WHEN $6 THEN redo_target_block_number END,
             redo_target_block_hash = CASE WHEN $6 THEN redo_target_block_hash END,
+            input_content_hash = CASE WHEN $7 THEN $8 ELSE input_content_hash END,
             last_error = CASE WHEN redo_in_progress THEN last_error END,
             started_at = now(),
             finished_at = NULL,
@@ -101,9 +130,11 @@ pub(crate) async fn begin(
     .bind(chain_id)
     .bind(phase.as_str())
     .bind(redo_mode)
-    .bind(range.from)
-    .bind(range.to)
+    .bind(execution_range.from)
+    .bind(execution_range.to)
     .bind(resume_same_redo)
+    .bind(phase.writes_derived_data())
+    .bind(current_interpreter_hash)
     .execute(&mut *transaction)
     .await
     .map_err(|error| {
@@ -122,6 +153,16 @@ pub(crate) async fn begin(
         interrupted_before_redo: matches!(status, PhaseStatus::Running | PhaseStatus::Paused),
         previous,
     })
+}
+
+fn interpret_replay_range(
+    previous: &PhaseStateRow,
+    requested: BlockRange,
+) -> RunnerResult<BlockRange> {
+    let to = previous.current_block_number.ok_or_else(|| {
+        RunnerError::data_integrity("interpret redo cannot determine the recorded interpreted head")
+    })?;
+    BlockRange::new(requested.from, to)
 }
 
 fn restore_previous_lifecycle(previous: &mut PhaseStateRow) -> RunnerResult<()> {
@@ -153,18 +194,13 @@ async fn require_recorded_extent(
     phase: PhaseName,
     previous: &PhaseStateRow,
     range: BlockRange,
+    full_hash_adoption_validated: bool,
 ) -> RunnerResult<()> {
-    let to = match (previous.current_block_number, previous.target_block_number) {
-        (Some(current), Some(target)) => current.max(target),
-        (Some(current), None) => current,
-        (None, Some(target)) => target,
-        (None, None) => {
-            return Err(RunnerError::data_integrity(format!(
-                "cannot redo chain {chain_id} phase {phase}: the phase has no recorded processed \
-                 extent"
-            )));
-        }
-    };
+    let to = previous.current_block_number.ok_or_else(|| {
+        RunnerError::data_integrity(format!(
+            "cannot redo chain {chain_id} phase {phase}: the phase has no recorded processed extent"
+        ))
+    })?;
     let from: Option<i64> = sqlx::query_scalar(
         "
         SELECT min(start_block_number)
@@ -181,7 +217,9 @@ async fn require_recorded_extent(
             error,
         )
     })?;
-    if range.to > to || from.is_some_and(|from| range.from < from) {
+    if (!full_hash_adoption_validated && range.to > to)
+        || from.is_some_and(|from| range.from < from)
+    {
         let from = from.unwrap_or(0);
         return Err(RunnerError::data_integrity(format!(
             "redo range {}..={} is outside the recorded extent {from}..={to} for chain \

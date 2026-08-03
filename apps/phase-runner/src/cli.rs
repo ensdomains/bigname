@@ -85,6 +85,16 @@ struct TimingArgs {
     live_poll_ms: u64,
 }
 
+#[derive(Clone, Debug, Args)]
+struct ManifestArgs {
+    #[arg(
+        long,
+        env = "BIGNAME_PHASE_RUNNER_MANIFESTS_ROOT",
+        default_value = "manifests/mainnet"
+    )]
+    manifests_root: PathBuf,
+}
+
 #[derive(Debug, Args)]
 struct RunArgs {
     #[command(flatten)]
@@ -95,6 +105,9 @@ struct RunArgs {
 
     #[command(flatten)]
     timing: TimingArgs,
+
+    #[command(flatten)]
+    manifests: ManifestArgs,
 
     #[arg(
         long = "chain",
@@ -130,6 +143,9 @@ struct RedoArgs {
     #[command(flatten)]
     timing: TimingArgs,
 
+    #[command(flatten)]
+    manifests: ManifestArgs,
+
     #[arg(long)]
     chain: String,
 
@@ -157,10 +173,12 @@ struct RedoArgs {
 pub enum ResolvedCommand {
     Run {
         database_url: String,
+        manifests_root: PathBuf,
         runtime: RuntimeConfig,
     },
     Redo {
         database_url: String,
+        manifests_root: PathBuf,
         instance_id: String,
         chain: ChainConfig,
         capacity: CapacityConfig,
@@ -207,6 +225,7 @@ fn resolve_run(args: RunArgs) -> RunnerResult<ResolvedCommand> {
     let runtime = RuntimeConfig::new(instance_id, chains, capacity, timing)?;
     Ok(ResolvedCommand::Run {
         database_url: args.connection.database_url,
+        manifests_root: args.manifests.manifests_root,
         runtime,
     })
 }
@@ -233,6 +252,7 @@ fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
     }
     Ok(ResolvedCommand::Redo {
         database_url: args.connection.database_url,
+        manifests_root: args.manifests.manifests_root,
         instance_id: resolve_instance_id(args.connection.instance_id)?,
         chain: ChainConfig::new(args.chain, sources, false)?,
         capacity: resolve_capacity(args.capacity)?,

@@ -114,7 +114,8 @@ CREATE TABLE IF NOT EXISTS manifest_discovery_rules (
                 'resolver',
                 'subregistry',
                 'proxy_implementation',
-                'migration'
+                'migration',
+                'registry_announcement'
             )
         ),
     CHECK (from_role IS NULL OR btrim(from_role) <> ''),

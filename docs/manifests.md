@@ -258,7 +258,7 @@ Before an ENSv2 registry sync without a source scope reconciles retained observa
 
 ## Manifest change propagation
 
-Manifest changes produce [normalized events](glossary.md): `SourceManifestUpdated`, `ProxyImplementationChanged`, `CapabilityChanged`. They update discovery admission, invalidate execution cache entries, and trigger projection recomputation where capability boundaries change.
+Manifest declaration changes produce the `SourceManifestUpdated` [normalized event](glossary.md). Its state includes proxy declarations and the staged authored capability fields, so manifest synchronization does not mint separate proxy- or capability-change event kinds. These changes update discovery admission, invalidate execution cache entries, and trigger projection recomputation where capability boundaries change.
 
 The legacy resolver-profile authority journal and input queue remain in the transitional schema, but manifest synchronization and discovery refresh no longer advance or drain them. Current manifests and discovery edges remain the source of admission truth; the old indexer does not run the removed absence-aware resolver-profile repair when that authority changes.
 

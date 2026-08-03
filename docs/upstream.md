@@ -130,12 +130,6 @@ Intentional differences between our docs/manifests and upstream. Every divergenc
 > **Why**: preserve current-registry topology after a node migrates, keep the root resolver as the explicit old-registry exception, and prevent historical backfill or old-registry admission from graduating coverage or consumer replacement without route-level evidence.
 > **Since**: `2026-04-24`
 
-> **ENSv2 normalized-label collision retirement** — upstream registry entries are keyed by the keccak hash of the raw label bytes, so raw-distinct labels such as `Foo` and `foo` can coexist on-chain. bigname's [normalized name surface](glossary.md) retires the older current binding when a later registration normalizes to the same name.
-> **Upstream**: `LibLabel.id` computes the registry entry ID as `keccak256(bytes(label))`. (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L7 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L8 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L9 @ ens_v2@ccaeb58)
-> **Our rule**: `docs/architecture.md` § Discovery graph.
-> **Why**: one normalized name maps to one current binding; retaining two current bindings for the same normalized name would make the current name surface ambiguous.
-> **Since**: `2026-08-01`
-
 > **ENSv2 ETHRegistry cutover suffix anchor** — upstream canonical-name reconstruction terminates only when its registry walk reaches the supplied `RootRegistry`; during the ENSv2 cutover window, bigname additionally treats the manifest-declared `ETHRegistry` as a suffix anchor.
 > **Upstream**: `findCanonicalName` walks until the current registry equals the supplied root registry. (upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L78 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L79 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/universalResolver/libraries/LibRegistry.sol:L80 @ ens_v2@ccaeb58)
 > **Our rule**: `docs/manifests.md` § Discovery admission; mirrored in `docs/architecture.md` § Discovery graph.

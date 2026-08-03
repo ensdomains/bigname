@@ -3,15 +3,24 @@ use std::collections::{BTreeMap, BTreeSet};
 use bigname_manifests::SourceManifest;
 use sqlx::PgPool;
 
+mod announcements;
+#[cfg(test)]
+mod tests;
+
 use crate::{
     ErrorKind, IngestError, Result,
-    event_signatures::{ENS_V1_RESOLVER_SOURCE_FAMILY, generic_resolver_topic0s},
+    event_signatures::{
+        BASENAMES_BASE_RESOLVER_SOURCE_FAMILY, ENS_V1_RESOLVER_SOURCE_FAMILY,
+        ENS_V2_REGISTRY_SOURCE_FAMILY, ENS_V2_RESOLVER_SOURCE_FAMILY,
+        ens_v2_unique_resolver_topic0s, generic_resolver_topic0s, registry_announcement_topic0,
+    },
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WatchFilter {
     address_ranges: Vec<AddressRange>,
     all_emitter_ranges: Vec<AllEmitterRange>,
+    registry_announcements: Option<RegistryAnnouncementWatch>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -35,6 +44,12 @@ struct AllEmitterRange {
     from_block: i64,
     to_block: i64,
     topic0s: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RegistryAnnouncementWatch {
+    announcement_topic0: String,
+    scoped_topic0s: Vec<String>,
 }
 
 impl WatchFilter {
@@ -90,6 +105,54 @@ impl WatchFilter {
         );
         queries
     }
+
+    pub(crate) fn registry_announcement_topic0(&self) -> Option<&str> {
+        self.registry_announcements
+            .as_ref()
+            .map(|watch| watch.announcement_topic0.as_str())
+    }
+
+    pub(crate) fn admit_registry_announcements(
+        &mut self,
+        announcements: impl IntoIterator<Item = (String, i64)>,
+        from_block: i64,
+        to_block: i64,
+    ) -> Vec<WatchQuery> {
+        let Some(watch) = &self.registry_announcements else {
+            return Vec::new();
+        };
+        let topics = watch.scoped_topic0s.clone();
+        if topics.is_empty() {
+            return Vec::new();
+        }
+        let mut addresses_by_start = BTreeMap::<i64, BTreeSet<String>>::new();
+        for (address, announced_at) in announcements {
+            let start = announced_at.max(from_block);
+            if start > to_block {
+                continue;
+            }
+            let address = address.to_ascii_lowercase();
+            addresses_by_start
+                .entry(start)
+                .or_default()
+                .insert(address.clone());
+            self.address_ranges.push(AddressRange {
+                address,
+                from_block: start,
+                to_block,
+                topic0s: topics.clone(),
+            });
+        }
+        addresses_by_start
+            .into_iter()
+            .map(|(from_block, addresses)| WatchQuery {
+                from_block,
+                to_block,
+                addresses: addresses.into_iter().collect(),
+                topic0s: topics.clone(),
+            })
+            .collect()
+    }
 }
 
 pub async fn load_watch_filter(
@@ -126,6 +189,8 @@ pub async fn load_watch_filter(
     let mut topics_by_manifest = BTreeMap::new();
     let mut all_emitter_topics_by_manifest = BTreeMap::new();
     let mut all_emitter_ranges = Vec::new();
+    let announcement_topic0 = registry_announcement_topic0();
+    let mut announced_registry_topics = BTreeSet::new();
     for (manifest_id, payload) in payloads {
         let manifest = serde_json::from_str::<SourceManifest>(&payload).map_err(|error| {
             IngestError::with_source(
@@ -153,7 +218,13 @@ pub async fn load_watch_filter(
         for topic in &manifest_topics {
             topic0s.insert(topic.clone());
         }
-        if manifest.source_family == ENS_V1_RESOLVER_SOURCE_FAMILY {
+        if matches!(
+            manifest.source_family.as_str(),
+            ENS_V1_RESOLVER_SOURCE_FAMILY
+                | BASENAMES_BASE_RESOLVER_SOURCE_FAMILY
+                | ENS_V2_RESOLVER_SOURCE_FAMILY
+                | ENS_V2_REGISTRY_SOURCE_FAMILY
+        ) {
             let all_emitter_topics = all_emitter_topics(&manifest.source_family, &manifest_topics);
             all_emitter_topics_by_manifest.insert(
                 manifest_id,
@@ -167,8 +238,24 @@ pub async fn load_watch_filter(
                 });
             }
         }
+        if manifest.source_family == ENS_V2_REGISTRY_SOURCE_FAMILY
+            && manifest_topics.contains(&announcement_topic0)
+        {
+            announced_registry_topics.extend(
+                manifest_topics
+                    .iter()
+                    .filter(|topic| *topic != &announcement_topic0)
+                    .cloned(),
+            );
+        }
         topics_by_manifest.insert(manifest_id, manifest_topics);
     }
+
+    let registry_announcements =
+        (!announced_registry_topics.is_empty()).then(|| RegistryAnnouncementWatch {
+            announcement_topic0: announcement_topic0.clone(),
+            scoped_topic0s: announced_registry_topics.into_iter().collect(),
+        });
 
     let address_rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
         "
@@ -229,7 +316,10 @@ pub async fn load_watch_filter(
                   AND source_manifest.source_family = 'ens_v1_registry_l1'
                      THEN 'ens_v1_resolver_l1'
                  WHEN edge.edge_kind = 'resolver'
-                  AND source_manifest.source_family = 'ens_v2_registry_l1'
+                  AND source_manifest.source_family IN (
+                      'ens_v2_registry_l1',
+                      'ens_v2_root_l1'
+                  )
                      THEN 'ens_v2_resolver_l1'
                  WHEN edge.edge_kind = 'resolver'
                   AND source_manifest.source_family = 'basenames_base_registry'
@@ -241,12 +331,13 @@ pub async fn load_watch_filter(
              AND address.chain_id = edge.chain_id
             WHERE edge.chain_id = $1
               AND source_manifest.rollout_status = 'active'
-              AND edge.edge_kind <> 'migration'
+              AND edge.edge_kind IN ('resolver', 'registry_announcement')
               AND (
                   edge.edge_kind <> 'resolver'
                   OR source_manifest.source_family NOT IN (
                       'ens_v1_registry_l1',
                       'ens_v2_registry_l1',
+                      'ens_v2_root_l1',
                       'basenames_base_registry'
                   )
                   OR target_manifest.manifest_id IS NOT NULL
@@ -321,121 +412,31 @@ pub async fn load_watch_filter(
             })
         })
         .collect();
-    Ok(WatchFilter {
+    let mut filter = WatchFilter {
         address_ranges,
         all_emitter_ranges,
-    })
+        registry_announcements,
+    };
+    if filter.registry_announcements.is_some() {
+        let announcements =
+            announcements::canonical(pool, chain_id, to_block, &announcement_topic0).await?;
+        filter.admit_registry_announcements(announcements, from_block, to_block);
+    }
+    Ok(filter)
 }
 
 fn all_emitter_topics(source_family: &str, manifest_topics: &[String]) -> Vec<String> {
-    if source_family != ENS_V1_RESOLVER_SOURCE_FAMILY {
-        return Vec::new();
-    }
     let manifest_topics = manifest_topics.iter().cloned().collect::<BTreeSet<_>>();
-    generic_resolver_topic0s()
+    let candidates = match source_family {
+        ENS_V1_RESOLVER_SOURCE_FAMILY | BASENAMES_BASE_RESOLVER_SOURCE_FAMILY => {
+            generic_resolver_topic0s()
+        }
+        ENS_V2_REGISTRY_SOURCE_FAMILY => vec![registry_announcement_topic0()],
+        ENS_V2_RESOLVER_SOURCE_FAMILY => ens_v2_unique_resolver_topic0s(),
+        _ => Vec::new(),
+    };
+    candidates
         .into_iter()
         .filter(|topic| manifest_topics.contains(topic))
         .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn address_range_only_admits_topics_from_its_manifest() {
-        let filter = WatchFilter {
-            address_ranges: vec![AddressRange {
-                address: "0x01".to_owned(),
-                from_block: 10,
-                to_block: 20,
-                topic0s: vec!["0xaa".to_owned()],
-            }],
-            all_emitter_ranges: Vec::new(),
-        };
-
-        assert!(filter.includes("0x01", "0xaa", 10));
-        assert!(!filter.includes("0x01", "0xbb", 10));
-        assert!(!filter.includes("0x01", "0xaa", 21));
-    }
-
-    #[test]
-    fn query_windows_do_not_cross_product_manifest_topics() {
-        let filter = WatchFilter {
-            address_ranges: vec![
-                AddressRange {
-                    address: "0x01".to_owned(),
-                    from_block: 10,
-                    to_block: 20,
-                    topic0s: vec!["0xaa".to_owned()],
-                },
-                AddressRange {
-                    address: "0x02".to_owned(),
-                    from_block: 10,
-                    to_block: 20,
-                    topic0s: vec!["0xbb".to_owned()],
-                },
-            ],
-            all_emitter_ranges: Vec::new(),
-        };
-
-        assert_eq!(
-            filter.queries(),
-            vec![
-                WatchQuery {
-                    from_block: 10,
-                    to_block: 20,
-                    addresses: vec!["0x01".to_owned()],
-                    topic0s: vec!["0xaa".to_owned()],
-                },
-                WatchQuery {
-                    from_block: 10,
-                    to_block: 20,
-                    addresses: vec!["0x02".to_owned()],
-                    topic0s: vec!["0xbb".to_owned()],
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn generic_resolver_topics_scan_all_emitters() {
-        let filter = WatchFilter {
-            address_ranges: Vec::new(),
-            all_emitter_ranges: vec![AllEmitterRange {
-                from_block: 10,
-                to_block: 20,
-                topic0s: vec!["0xaa".to_owned()],
-            }],
-        };
-
-        assert!(filter.includes("0x-unlisted", "0xaa", 10));
-        assert_eq!(
-            filter.queries(),
-            vec![WatchQuery {
-                from_block: 10,
-                to_block: 20,
-                addresses: Vec::new(),
-                topic0s: vec!["0xaa".to_owned()],
-            }]
-        );
-    }
-
-    #[test]
-    fn only_existing_generic_resolver_topics_are_selected_without_addresses() {
-        let generic = generic_resolver_topic0s()[0].clone();
-        let shared = format!(
-            "{}",
-            alloy_primitives::keccak256("ApprovalForAll(address,address,bool)".as_bytes())
-        );
-
-        assert_eq!(
-            all_emitter_topics(
-                ENS_V1_RESOLVER_SOURCE_FAMILY,
-                &[generic.clone(), shared.clone()],
-            ),
-            vec![generic]
-        );
-        assert!(all_emitter_topics("basenames_base_resolver", &[shared]).is_empty());
-    }
 }

@@ -17,6 +17,9 @@ impl PhaseRunner {
         mode: RunMode,
     ) -> RunnerResult<PhaseContext> {
         let available_heads = match mode.range() {
+            Some(_) if phase == PhaseName::Interpret && matches!(mode, RunMode::Redo(_)) => {
+                interpret_redo_heads(self.store.pool(), &chain.chain_id).await?
+            }
             Some(range) => load_marker(self.store.pool(), &chain.chain_id, range.to)
                 .await?
                 .map(|latest| HeadMarkers {
@@ -52,4 +55,40 @@ impl PhaseRunner {
             resume,
         })
     }
+}
+
+async fn interpret_redo_heads(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+) -> RunnerResult<Option<HeadMarkers>> {
+    let number: Option<i64> = sqlx::query_scalar(
+        "SELECT current_block_number
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        RunnerError::database(
+            format!("failed to load recorded interpret head for redo on chain {chain_id}"),
+            error,
+        )
+    })?
+    .flatten();
+    let number = number.ok_or_else(|| {
+        RunnerError::data_integrity(format!(
+            "cannot redo interpret on chain {chain_id}: the phase has no recorded head"
+        ))
+    })?;
+    let latest = load_marker(pool, chain_id, number).await?.ok_or_else(|| {
+        RunnerError::data_integrity(format!(
+            "cannot redo interpret on chain {chain_id}: recorded head {number} is not canonical"
+        ))
+    })?;
+    Ok(Some(HeadMarkers {
+        latest,
+        safe: None,
+        finalized: None,
+    }))
 }

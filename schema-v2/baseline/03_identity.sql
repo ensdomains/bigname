@@ -104,10 +104,14 @@ CREATE TABLE IF NOT EXISTS discovery_edges (
                 'resolver',
                 'subregistry',
                 'proxy_implementation',
-                'migration'
+                'migration',
+                'registry_announcement'
             )
         ),
-    CHECK (from_contract_instance_id <> to_contract_instance_id),
+    CHECK (
+        edge_kind = 'registry_announcement'
+        OR from_contract_instance_id <> to_contract_instance_id
+    ),
     CHECK (btrim(discovery_source) <> ''),
     CHECK (btrim(admission_basis) <> ''),
     CHECK (

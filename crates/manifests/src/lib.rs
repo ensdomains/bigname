@@ -10,6 +10,7 @@ mod managed_edges;
 mod model;
 #[path = "lib/repository.rs"]
 mod repository;
+mod schema_v2;
 #[path = "lib/support.rs"]
 mod support;
 #[path = "lib/sync.rs"]
@@ -38,6 +39,7 @@ pub use attribution::is_block_derived_preimage_source_family;
 pub use discovery::*;
 pub use model::*;
 pub use repository::load_repository;
+pub use schema_v2::{SchemaV2ManifestSyncSummary, sync_schema_v2_repository};
 pub use sync::{sync_repository, sync_repository_with_progress};
 pub use views::*;
 

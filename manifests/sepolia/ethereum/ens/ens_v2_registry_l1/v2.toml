@@ -58,7 +58,7 @@ admission = "reachable_from_root"
 [[abi.events]]
 name = "RegistryCreated"
 fragment = "event RegistryCreated()"
-normalized_events = ["RegistryCreated"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "RegistryCreated"]
 
 # URIUpdated remains excluded.
 # LabelRegistered: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L18 @ ens_v2@48b3e2d).
@@ -66,49 +66,49 @@ normalized_events = ["RegistryCreated"]
 name = "LabelRegistered"
 fragment = "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)"
 emitter_roles = ["registry"]
-normalized_events = ["RegistrationGranted"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "RegistrationGranted", "PreimageObserved", "ResolverChanged", "SubregistryChanged"]
 
 # LabelReserved: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L33 @ ens_v2@48b3e2d).
 [[abi.events]]
 name = "LabelReserved"
 fragment = "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender)"
 emitter_roles = ["registry"]
-normalized_events = ["RegistrationReserved"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "RegistrationReserved", "PreimageObserved", "ResolverChanged", "SubregistryChanged"]
 
 # LabelUnregistered: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L44 @ ens_v2@48b3e2d).
 [[abi.events]]
 name = "LabelUnregistered"
 fragment = "event LabelUnregistered(uint256 indexed tokenId, address indexed sender)"
 emitter_roles = ["registry"]
-normalized_events = ["RegistrationReleased"]
+normalized_events = ["RegistrationReleased", "SurfaceUnbound", "ResolverChanged", "SubregistryChanged"]
 
 # ExpiryUpdated: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L50 @ ens_v2@48b3e2d).
 [[abi.events]]
 name = "ExpiryUpdated"
 fragment = "event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender)"
 emitter_roles = ["registry"]
-normalized_events = ["ExpiryChanged"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "ExpiryChanged", "RegistrationRenewed", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ResolverChanged", "SubregistryChanged"]
 
 # SubregistryUpdated: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56 @ ens_v2@48b3e2d).
 [[abi.events]]
 name = "SubregistryUpdated"
 fragment = "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)"
 emitter_roles = ["registry"]
-normalized_events = ["SubregistryChanged"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "SubregistryChanged", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged", "ResolverChanged"]
 
 # ResolverUpdated: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L66 @ ens_v2@48b3e2d).
 [[abi.events]]
 name = "ResolverUpdated"
 fragment = "event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)"
 emitter_roles = ["registry"]
-normalized_events = ["ResolverChanged"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "ResolverChanged"]
 
 # TokenResource: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L38 @ ens_v2@48b3e2d).
 [[abi.events]]
 name = "TokenResource"
 fragment = "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)"
 emitter_roles = ["registry"]
-normalized_events = ["TokenResourceLinked"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenResourceLinked", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged"]
 
 # Canonical ERC-1155 transfer events are present in the deployed ETHRegistry ABI:
 # (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L652 @ ens_v2@48b3e2d)
@@ -120,13 +120,13 @@ normalized_events = ["TokenResourceLinked"]
 name = "TransferSingle"
 fragment = "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)"
 emitter_roles = ["registry"]
-normalized_events = ["TokenControlTransferred"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenControlTransferred"]
 
 [[abi.events]]
 name = "TransferBatch"
 fragment = "event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)"
 emitter_roles = ["registry"]
-normalized_events = ["TokenControlTransferred"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenControlTransferred"]
 
 # EACRolesChanged comes from the permissioned registry's inherited EnhancedAccessControl interface:
 # (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L10 @ ens_v2@48b3e2d)
@@ -135,21 +135,21 @@ normalized_events = ["TokenControlTransferred"]
 name = "EACRolesChanged"
 fragment = "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)"
 emitter_roles = ["registry"]
-normalized_events = ["PermissionChanged", "RootPermissionChanged"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "PermissionChanged", "RootPermissionChanged"]
 
 # TokenRegenerated: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L82 @ ens_v2@48b3e2d).
 [[abi.events]]
 name = "TokenRegenerated"
 fragment = "event TokenRegenerated(uint256 indexed oldTokenId, uint256 indexed newTokenId)"
 emitter_roles = ["registry"]
-normalized_events = ["TokenRegenerated"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenRegenerated"]
 
 # ParentUpdated: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@48b3e2d).
 [[abi.events]]
 name = "ParentUpdated"
 fragment = "event ParentUpdated(address indexed parent, string label, address indexed sender)"
 emitter_roles = ["registry"]
-normalized_events = ["ParentChanged"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "ParentChanged", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged", "ResolverChanged", "SubregistryChanged"]
 
 # ERC-1967 implementation history for announced UserRegistry proxies. The
 # registry inherits UUPS and its pinned deployment ABI exposes Upgraded(address):
@@ -161,4 +161,4 @@ normalized_events = ["ParentChanged"]
 name = "Upgraded"
 fragment = "event Upgraded(address indexed implementation)"
 emitter_roles = ["registry"]
-normalized_events = ["Upgraded"]
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "Upgraded"]

@@ -13,4 +13,5 @@ pub use engine::{
     SourceProgress,
 };
 pub use error::{ErrorKind, IngestError, Result};
+pub use manifest::{WatchFilter, WatchQuery, load_watch_filter};
 pub use plan::BASE_COINBASE_SEAM_BLOCK;

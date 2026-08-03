@@ -14,8 +14,7 @@ use crate::{
     phase_lock::PhaseLock,
     runner_support::{
         Backoff, HeartbeatThrottle, PhaseLoopResult, cancelled_redo_error,
-        finish_failed_redo_start, incomplete_redo_error, record_live_mismatch_with_lock,
-        redo_outcome,
+        finish_failed_redo_start, record_live_mismatch_with_lock, redo_outcome,
     },
     state::{PhaseStore, StartDisposition},
     state_persistence::{record_live_verification_mismatch, validate_progress},
@@ -118,11 +117,16 @@ impl PhaseRunner {
         range: BlockRange,
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
+        if selection == RedoPhase::RecomputeFlags {
+            return Err(RunnerError::new(
+                ErrorKind::Configuration,
+                bigname_interpret::RECOMPUTE_FLAGS_UNAVAILABLE_REASON,
+            ));
+        }
         self.store.initialize_chain(&chain.chain_id).await?;
         let (phase, mode) = match selection {
             RedoPhase::Phase(phase) => (phase, RunMode::Redo(range)),
-            // Normalization flags are interpreter-owned, so this mode uses the interpreter lock.
-            RedoPhase::RecomputeFlags => (PhaseName::Interpret, RunMode::RecomputeFlags(range)),
+            RedoPhase::RecomputeFlags => unreachable!("unavailable mode returned above"),
         };
         self.run_phase_with_restart(chain, phase, mode, cancellation)
             .await
@@ -327,7 +331,7 @@ impl PhaseRunner {
         let redo_session = if mode.is_redo() {
             Some(
                 self.store
-                    .begin_redo(&chain.chain_id, phase_name, &mode)
+                    .begin_redo(&chain.chain_id, phase_name, &mode, chain.sources.as_ref())
                     .await?,
             )
         } else {
@@ -373,7 +377,7 @@ impl PhaseRunner {
             .await;
         let result = match result {
             Ok(PhaseLoopResult::Cancelled) if mode.is_redo() => {
-                Err(incomplete_redo_error(&chain.chain_id, phase_name, &mode))
+                Err(cancelled_redo_error(&self.store, &chain.chain_id, phase_name).await?)
             }
             result => result,
         };

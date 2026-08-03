@@ -1,6 +1,7 @@
 CREATE TABLE IF NOT EXISTS label_preimages (
     labelhash text PRIMARY KEY,
-    raw_label text NOT NULL,
+    raw_label bytea NOT NULL,
+    decoded_label text,
     normalizer_version text NOT NULL,
     normalized_under_version boolean NOT NULL,
     normalization_error text,
@@ -10,7 +11,11 @@ CREATE TABLE IF NOT EXISTS label_preimages (
     observed_at timestamptz NOT NULL DEFAULT now(),
     inserted_at timestamptz NOT NULL DEFAULT now(),
     CHECK (btrim(labelhash) <> ''),
-    CHECK (raw_label <> ''),
+    CHECK (octet_length(raw_label) > 0),
+    CONSTRAINT label_preimages_decoded_label_matches_raw_check CHECK (
+        decoded_label IS NULL
+        OR convert_to(decoded_label, 'UTF8') = raw_label
+    ),
     CHECK (btrim(normalizer_version) <> ''),
     CONSTRAINT label_preimages_normalization_coherence_check CHECK (
         (normalized_under_version AND normalization_error IS NULL)
@@ -50,7 +55,9 @@ COMMENT ON TABLE label_preimages IS
 COMMENT ON COLUMN label_preimages.labelhash IS
     'This value is the label hash.';
 COMMENT ON COLUMN label_preimages.raw_label IS
-    'This value is the verbatim label.';
+    'This value is the verbatim chain label bytes.';
+COMMENT ON COLUMN label_preimages.decoded_label IS
+    'This value is the PostgreSQL-representable UTF-8 decoding of the raw bytes when one exists.';
 COMMENT ON COLUMN label_preimages.normalizer_version IS
     'This value identifies the tested normalization rules.';
 COMMENT ON COLUMN label_preimages.normalized_under_version IS

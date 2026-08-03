@@ -94,11 +94,20 @@ async fn crash_during_hash_redo_blocks_normal_resume_and_still_demands_full_rang
         crashed,
         (
             "running".to_owned(),
-            Some("keccak256:older-binary".to_owned()),
+            Some(phase_runner::INTERPRETER_CONTENT_HASH.to_owned()),
             true,
             Some(4)
         )
     );
+
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET input_content_hash = 'keccak256:intermediate-binary'
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
 
     let normal_error = store
         .start_phase(chain_id, PhaseName::Interpret, &RunMode::Normal)
@@ -126,14 +135,31 @@ async fn crash_during_hash_redo_blocks_normal_resume_and_still_demands_full_rang
     assert_eq!(partial_error.kind(), ErrorKind::ContentHashMismatch);
     assert!(partial_error.to_string().contains("full range 0..=9"));
 
-    recovery_runner
-        .redo(
-            &chain(chain_id, SeedBasis::BaseSeam)?,
-            RedoPhase::Phase(PhaseName::Interpret),
-            BlockRange::new(0, 9)?,
-            CancellationToken::new(),
-        )
-        .await?;
+    let recovered_from = Arc::new(AtomicI64::new(i64::MIN));
+    let phase_recovered_from = Arc::clone(&recovered_from);
+    let recovery_phase = Arc::new(FunctionPhase {
+        name: PhaseName::Interpret,
+        handler: Arc::new(move |context| {
+            phase_recovered_from.store(
+                context.resume.current.map_or(-1, |marker| marker.number),
+                Ordering::SeqCst,
+            );
+            Ok(PhaseBatchOutcome::Complete(PhaseProgress::default()))
+        }),
+    });
+    runner(
+        scratch.runner(),
+        phase_set_replacing(PhaseName::Interpret, recovery_phase)?,
+        "crash-hash-redo-changed-binary-recovery",
+    )?
+    .redo(
+        &chain(chain_id, SeedBasis::BaseSeam)?,
+        RedoPhase::Phase(PhaseName::Interpret),
+        BlockRange::new(0, 9)?,
+        CancellationToken::new(),
+    )
+    .await?;
+    assert_eq!(recovered_from.load(Ordering::SeqCst), -1);
     let recovered: (String, Option<String>, bool) = sqlx::query_as(
         "
         SELECT phase_status, input_content_hash, redo_in_progress
@@ -362,7 +388,7 @@ async fn failed_redo_keeps_its_durable_marker_and_blocks_normal_resume() -> Resu
     assert!(
         cancellation_error
             .to_string()
-            .contains("--from-block 5 --to-block 6")
+            .contains("--from-block 5 --to-block 9")
     );
 
     runner(
@@ -558,7 +584,7 @@ async fn cancelled_redo_is_incomplete_and_returns_the_required_rerun_command() -
         .expect_err("a cancelled redo must return a nonzero result");
     let error_message = error.to_string();
     let instruction = "rerun `phase-runner redo --chain cancelled-redo-chain --phase interpret \
-                       --from-block 5 --to-block 6`";
+                       --from-block 5 --to-block 9`";
     assert_eq!(error.kind(), ErrorKind::InvalidTransition);
     assert!(error_message.contains("is incomplete"));
     assert!(error_message.contains("the phase remains blocked from normal restart"));
@@ -652,7 +678,7 @@ async fn cancelled_redo_during_retry_backoff_is_incomplete() -> Result<()> {
             .to_string()
             .contains("the phase remains blocked from normal restart")
     );
-    assert!(error.to_string().contains("--from-block 5 --to-block 6"));
+    assert!(error.to_string().contains("--from-block 5 --to-block 9"));
     scratch.cleanup().await
 }
 
@@ -671,6 +697,16 @@ async fn redo_range_must_fit_the_recorded_phase_extent() -> Result<()> {
         Some(phase_runner::INTERPRETER_CONTENT_HASH),
     )
     .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET target_block_number = 10,
+             target_block_hash = $2
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-extent-block-10"))
+    .execute(scratch.pool())
+    .await?;
     let runner = runner(scratch.runner(), PhaseSet::loopback(), "redo-extent-runner")?;
     for range in [BlockRange::new(1, 3)?, BlockRange::new(2, 7)?] {
         let error = runner
@@ -685,6 +721,65 @@ async fn redo_range_must_fit_the_recorded_phase_extent() -> Result<()> {
         assert_eq!(error.kind(), ErrorKind::DataIntegrity);
         assert!(error.to_string().contains("recorded extent 2..=6"));
     }
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn interpret_redo_stops_at_the_recorded_processed_head() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_redo_processed_head").await?;
+    let chain_id = "redo-processed-head-chain";
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    seed_ingest_extent(scratch.pool(), chain_id, 0, 9).await?;
+    mark_phase_with_extent(
+        scratch.pool(),
+        chain_id,
+        PhaseName::Interpret,
+        4,
+        Some(phase_runner::INTERPRETER_CONTENT_HASH),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET target_block_number = 9,
+             target_block_hash = $2
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-extent-block-9"))
+    .execute(scratch.pool())
+    .await?;
+
+    let observed_head = Arc::new(AtomicI64::new(i64::MIN));
+    let phase_observed_head = Arc::clone(&observed_head);
+    let phase = Arc::new(FunctionPhase {
+        name: PhaseName::Interpret,
+        handler: Arc::new(move |context| {
+            phase_observed_head.store(
+                context
+                    .available_heads
+                    .expect("interpret redo needs its recorded head")
+                    .latest
+                    .number,
+                Ordering::SeqCst,
+            );
+            Ok(PhaseBatchOutcome::Complete(PhaseProgress::default()))
+        }),
+    });
+    runner(
+        scratch.runner(),
+        phase_set_replacing(PhaseName::Interpret, phase)?,
+        "redo-processed-head-runner",
+    )?
+    .redo(
+        &chain(chain_id, SeedBasis::BaseSeam)?,
+        RedoPhase::Phase(PhaseName::Interpret),
+        BlockRange::new(2, 3)?,
+        CancellationToken::new(),
+    )
+    .await?;
+
+    assert_eq!(observed_head.load(Ordering::SeqCst), 4);
     scratch.cleanup().await
 }
 
@@ -1941,6 +2036,11 @@ fn marker(chain_id: &str, number: i64) -> RunnerResult<BlockMarker> {
 }
 
 async fn seed_ingest_extent(pool: &sqlx::PgPool, chain_id: &str, from: i64, to: i64) -> Result<()> {
+    seed_lineage(pool, chain_id, to).await?;
+    sqlx::query("UPDATE chain_lineage SET canonicality_state = 'canonical' WHERE chain_id = $1")
+        .bind(chain_id)
+        .execute(pool)
+        .await?;
     let hash = format!("{chain_id}-extent-block-{to}");
     sqlx::query(
         "

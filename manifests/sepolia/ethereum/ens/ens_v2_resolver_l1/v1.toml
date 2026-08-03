@@ -59,25 +59,25 @@ normalized_events = ["RecordVersionChanged"]
 [[abi.events]]
 name = "AliasChanged"
 fragment = "event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName)"
-normalized_events = ["AliasChanged"]
+normalized_events = ["AliasChanged", "PreimageObserved"]
 
 # NamedResource: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L135 @ ens_v2_sepolia_dev@554c309).
 [[abi.events]]
 name = "NamedResource"
 fragment = "event NamedResource(uint256 indexed resource, bytes name)"
-normalized_events = ["RecordChanged", "PermissionChanged"]
+normalized_events = ["PreimageObserved"]
 
 # NamedTextResource: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L142 @ ens_v2_sepolia_dev@554c309).
 [[abi.events]]
 name = "NamedTextResource"
 fragment = "event NamedTextResource(uint256 indexed resource, bytes name, bytes32 indexed keyHash, string key)"
-normalized_events = ["RecordChanged", "PermissionChanged"]
+normalized_events = ["PreimageObserved"]
 
 # NamedAddrResource: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L153 @ ens_v2_sepolia_dev@554c309).
 [[abi.events]]
 name = "NamedAddrResource"
 fragment = "event NamedAddrResource(uint256 indexed resource, bytes name, uint256 indexed coinType)"
-normalized_events = ["RecordChanged", "PermissionChanged"]
+normalized_events = ["PreimageObserved"]
 
 # EACRolesChanged: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L24 @ ens_v2_sepolia_dev@554c309).
 [[abi.events]]
