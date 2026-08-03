@@ -172,7 +172,8 @@ fn require_compatible_active_phase(
         }
         let status = row.status()?;
         if matches!(status, PhaseStatus::Running | PhaseStatus::Paused)
-            && !verify_live_pair(phase, other)
+            && !verify_live_work_pair(phase, other)
+            && !is_pending_required_downstream_redo(row)
         {
             return Err(RunnerError::new(
                 ErrorKind::InvalidTransition,
@@ -185,10 +186,16 @@ fn require_compatible_active_phase(
     Ok(())
 }
 
-fn verify_live_pair(left: PhaseName, right: PhaseName) -> bool {
+fn verify_live_work_pair(left: PhaseName, right: PhaseName) -> bool {
     matches!(
         (left, right),
-        (PhaseName::Verify, PhaseName::Live) | (PhaseName::Live, PhaseName::Verify)
+        (
+            PhaseName::Verify,
+            PhaseName::Live | PhaseName::Interpret | PhaseName::Project
+        ) | (
+            PhaseName::Live | PhaseName::Interpret | PhaseName::Project,
+            PhaseName::Verify
+        )
     )
 }
 
@@ -201,6 +208,12 @@ fn require_prerequisite(
         return Ok(());
     };
     let status = row_for(rows, prerequisite)?.status()?;
+    if phase == PhaseName::Live
+        && status == PhaseStatus::Running
+        && is_pending_required_downstream_redo(row_for(rows, prerequisite)?)
+    {
+        return Ok(());
+    }
     if status != PhaseStatus::Completed {
         return Err(RunnerError::new(
             ErrorKind::InvalidTransition,
@@ -211,6 +224,14 @@ fn require_prerequisite(
         ));
     }
     Ok(())
+}
+
+fn is_pending_required_downstream_redo(row: &PhaseStateRow) -> bool {
+    row.redo_in_progress
+        && row
+            .last_error
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with(crate::redo_stamp::REQUIRED_REDO_PREFIX))
 }
 
 fn require_content_hash(

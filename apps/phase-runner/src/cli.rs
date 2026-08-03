@@ -29,6 +29,8 @@ enum Command {
     Run(RunArgs),
     /// Run one phase over an explicit block range.
     Redo(RedoArgs),
+    /// Move the published latest head back to an exact stored ancestor.
+    Rewind(RewindArgs),
 }
 
 #[derive(Clone, Debug, Args)]
@@ -138,6 +140,14 @@ struct RunArgs {
         value_delimiter = ','
     )]
     verify_before_live: Vec<String>,
+
+    #[arg(
+        long = "hydration-rpc",
+        env = "BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS",
+        value_delimiter = ',',
+        help = "CHAIN=HTTP_URL used only for hash-pinned multicall hydration"
+    )]
+    hydration_rpc_urls: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -176,6 +186,29 @@ struct RedoArgs {
         help = "CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV"
     )]
     sources: Vec<String>,
+
+    #[arg(
+        long = "hydration-rpc",
+        env = "BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS",
+        value_delimiter = ',',
+        help = "CHAIN=HTTP_URL used only for hash-pinned multicall hydration"
+    )]
+    hydration_rpc_urls: Vec<String>,
+}
+
+#[derive(Clone, Debug, Args)]
+struct RewindArgs {
+    #[command(flatten)]
+    connection: ConnectionArgs,
+
+    #[arg(long)]
+    chain: String,
+
+    #[arg(long)]
+    ancestor_block: i64,
+
+    #[arg(long)]
+    ancestor_hash: String,
 }
 
 pub enum ResolvedCommand {
@@ -186,6 +219,7 @@ pub enum ResolvedCommand {
         database_url: String,
         manifests_root: PathBuf,
         runtime: RuntimeConfig,
+        hydration_rpc_urls: bigname_execution::ChainRpcUrls,
     },
     Redo {
         database_url: String,
@@ -196,6 +230,12 @@ pub enum ResolvedCommand {
         timing: TimingConfig,
         phase: RedoPhase,
         range: BlockRange,
+        hydration_rpc_urls: bigname_execution::ChainRpcUrls,
+    },
+    Rewind {
+        database_url: String,
+        chain_id: String,
+        ancestor: crate::heads::BlockMarker,
     },
 }
 
@@ -207,8 +247,23 @@ impl Cli {
             }),
             Command::Run(args) => resolve_run(args),
             Command::Redo(args) => resolve_redo(args),
+            Command::Rewind(args) => resolve_rewind(args),
         }
     }
+}
+
+fn resolve_rewind(args: RewindArgs) -> RunnerResult<ResolvedCommand> {
+    if args.chain.trim().is_empty() {
+        return Err(RunnerError::new(
+            ErrorKind::Configuration,
+            "rewind chain must not be empty",
+        ));
+    }
+    Ok(ResolvedCommand::Rewind {
+        database_url: args.connection.database_url,
+        chain_id: args.chain,
+        ancestor: crate::heads::BlockMarker::new(args.ancestor_block, args.ancestor_hash)?,
+    })
 }
 
 fn resolve_run(args: RunArgs) -> RunnerResult<ResolvedCommand> {
@@ -237,10 +292,12 @@ fn resolve_run(args: RunArgs) -> RunnerResult<ResolvedCommand> {
     let timing = resolve_timing(args.timing)?;
     let instance_id = resolve_instance_id(args.connection.instance_id)?;
     let runtime = RuntimeConfig::new(instance_id, chains, capacity, timing)?;
+    let hydration_rpc_urls = resolve_hydration_rpc_urls(&args.hydration_rpc_urls)?;
     Ok(ResolvedCommand::Run {
         database_url: args.connection.database_url,
         manifests_root: args.manifests.manifests_root,
         runtime,
+        hydration_rpc_urls,
     })
 }
 
@@ -273,6 +330,16 @@ fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
         timing: resolve_timing(args.timing)?,
         phase,
         range,
+        hydration_rpc_urls: resolve_hydration_rpc_urls(&args.hydration_rpc_urls)?,
+    })
+}
+
+fn resolve_hydration_rpc_urls(entries: &[String]) -> RunnerResult<bigname_execution::ChainRpcUrls> {
+    bigname_execution::ChainRpcUrls::from_entries(entries).map_err(|error| {
+        RunnerError::new(
+            ErrorKind::Configuration,
+            format!("invalid hydration RPC configuration: {error:#}"),
+        )
     })
 }
 
@@ -367,4 +434,42 @@ fn invalid_source(reason: &str, specification: &str) -> RunnerError {
         ErrorKind::Configuration,
         format!("invalid source descriptor {descriptor:?}: {reason}"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redo_cli_carries_canonical_head_hydration_rpc() {
+        let command = Cli::try_parse_from([
+            "phase-runner",
+            "redo",
+            "--database-url",
+            "postgres://phase-runner.invalid/fresh",
+            "--chain",
+            "ethereum-mainnet",
+            "--phase",
+            "project",
+            "--from-block",
+            "42",
+            "--to-block",
+            "42",
+            "--hydration-rpc",
+            "ethereum-mainnet=http://hydration.invalid",
+        ])
+        .expect("redo hydration RPC option must parse")
+        .resolve()
+        .expect("redo hydration RPC option must resolve");
+
+        match command {
+            ResolvedCommand::Redo {
+                hydration_rpc_urls, ..
+            } => assert_eq!(
+                hydration_rpc_urls.url_for("ethereum-mainnet"),
+                Some("http://hydration.invalid")
+            ),
+            _ => panic!("expected redo command"),
+        }
+    }
 }

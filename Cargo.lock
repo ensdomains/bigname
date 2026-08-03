@@ -1801,6 +1801,8 @@ name = "bigname-project"
 version = "0.1.0"
 dependencies = [
  "bigname-domain",
+ "bigname-execution",
+ "bigname-storage",
  "serde_json",
  "sqlx",
 ]
@@ -5698,6 +5700,7 @@ dependencies = [
  "anyhow",
  "axum",
  "bigname-content-hash",
+ "bigname-execution",
  "bigname-ingest",
  "bigname-interpret",
  "bigname-manifests",

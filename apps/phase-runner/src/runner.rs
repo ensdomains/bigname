@@ -22,6 +22,10 @@ use crate::{
 
 #[path = "runner_context.rs"]
 mod context;
+#[path = "runner_live_follow.rs"]
+mod live_follow;
+#[path = "runner_required_redo.rs"]
+mod required_redo;
 
 type LiveMismatchReason = Arc<OnceLock<String>>;
 
@@ -87,11 +91,13 @@ impl PhaseRunner {
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
         self.store.initialize_chain(&chain.chain_id).await?;
-        for phase in [PhaseName::Ingest, PhaseName::Interpret, PhaseName::Project] {
-            if cancellation.is_cancelled() {
-                return Ok(());
-            }
-            self.run_phase_with_restart(chain, phase, RunMode::Normal, cancellation.clone())
+        self.run_spine_phase(chain, PhaseName::Ingest, cancellation.clone())
+            .await?;
+        self.recover_stopped_live(chain).await?;
+        self.catch_up_for_required_redo(chain, cancellation.clone())
+            .await?;
+        for phase in [PhaseName::Interpret, PhaseName::Project] {
+            self.run_spine_phase(chain, phase, cancellation.clone())
                 .await?;
         }
 
@@ -103,9 +109,7 @@ impl PhaseRunner {
                 cancellation.clone(),
             )
             .await?;
-            return self
-                .run_phase_with_restart(chain, PhaseName::Live, RunMode::Normal, cancellation)
-                .await;
+            return self.run_live_follow(chain, cancellation).await;
         }
         self.run_verify_and_live(chain, cancellation).await
     }
@@ -117,71 +121,43 @@ impl PhaseRunner {
         range: BlockRange,
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
-        if selection == RedoPhase::RecomputeFlags {
-            return Err(RunnerError::new(
-                ErrorKind::Configuration,
-                bigname_interpret::RECOMPUTE_FLAGS_UNAVAILABLE_REASON,
-            ));
-        }
-        self.store.initialize_chain(&chain.chain_id).await?;
-        let (phase, mode) = match selection {
-            RedoPhase::Phase(phase) => (phase, RunMode::Redo(range)),
-            RedoPhase::RecomputeFlags => unreachable!("unavailable mode returned above"),
+        let phase = match selection {
+            RedoPhase::RecomputeFlags => {
+                return Err(RunnerError::new(
+                    ErrorKind::Configuration,
+                    bigname_interpret::RECOMPUTE_FLAGS_UNAVAILABLE_REASON,
+                ));
+            }
+            RedoPhase::Phase(PhaseName::Live) => {
+                return Err(RunnerError::new(
+                    ErrorKind::Configuration,
+                    "live does not support historical redo",
+                ));
+            }
+            RedoPhase::Phase(phase) => phase,
         };
-        self.run_phase_with_restart(chain, phase, mode, cancellation)
-            .await
-    }
-
-    async fn run_verify_and_live(
-        &self,
-        chain: &ChainConfig,
-        cancellation: CancellationToken,
-    ) -> RunnerResult<()> {
-        let pair_cancellation = cancellation.child_token();
-        let live_mismatch = Arc::new(OnceLock::new());
-        let verify = self.run_phase_with_restart(
-            chain,
-            PhaseName::Verify,
-            RunMode::Normal,
-            pair_cancellation.clone(),
-        );
-        let live = self.run_phase_with_restart_inner(
-            chain,
-            PhaseName::Live,
-            RunMode::Normal,
-            pair_cancellation.clone(),
-            Some(Arc::clone(&live_mismatch)),
-        );
-        tokio::pin!(verify);
-        tokio::pin!(live);
-
-        tokio::select! {
-            verify_result = &mut verify => {
-                if let Err(error) = verify_result {
-                    if error.kind() == ErrorKind::VerificationMismatch {
-                        let _ = live_mismatch.set(error.to_string());
-                    }
-                    pair_cancellation.cancel();
-                    return match live.await {
-                        Ok(()) => Err(error),
-                        Err(live_error) => Err(error.with_secondary(
-                            "stop live after verification failed",
-                            live_error,
-                        )),
-                    };
-                }
-                live.await
-            }
-            live_result = &mut live => {
-                if let Err(error) = live_result {
-                    pair_cancellation.cancel();
-                    let _ = verify.await;
-                    return Err(error);
-                }
-                pair_cancellation.cancel();
-                verify.await
-            }
+        self.phases.get(phase).preflight_redo()?;
+        self.store.initialize_chain(&chain.chain_id).await?;
+        let mode = RunMode::Redo(range);
+        self.run_phase_with_restart(chain, phase, mode, cancellation.clone())
+            .await?;
+        if phase == PhaseName::Interpret
+            && self.store.status(&chain.chain_id, phase).await?
+                == crate::state::PhaseStatus::Completed
+            && let Some(range) = self
+                .store
+                .required_redo_range(&chain.chain_id, PhaseName::Project)
+                .await?
+        {
+            self.run_phase_with_restart(
+                chain,
+                PhaseName::Project,
+                RunMode::Redo(range),
+                cancellation,
+            )
+            .await?;
         }
+        Ok(())
     }
 
     async fn run_phase_with_restart(

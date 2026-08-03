@@ -67,6 +67,7 @@ impl Engine {
             request.affected_from_block,
             request.affected_to_block,
             full_rebuild,
+            matches!(request.mode, RunMode::Redo),
         )
         .await?;
         stage::inputs(&mut transaction, &request.chain_id, &target, full_rebuild).await?;

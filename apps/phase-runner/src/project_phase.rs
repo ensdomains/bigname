@@ -14,12 +14,22 @@ use crate::{
 pub struct ProjectPhase {
     pool: PgPool,
     engine: Engine,
+    hydrator: Option<bigname_project::Hydrator>,
 }
 
 impl ProjectPhase {
     pub fn new(pool: PgPool) -> Self {
         Self {
             engine: Engine::new(pool.clone()),
+            pool,
+            hydrator: None,
+        }
+    }
+
+    pub fn with_hydration(pool: PgPool, rpc_urls: bigname_execution::ChainRpcUrls) -> Self {
+        Self {
+            engine: Engine::new(pool.clone()),
+            hydrator: Some(bigname_project::Hydrator::new(pool.clone(), rpc_urls)),
             pool,
         }
     }
@@ -49,7 +59,7 @@ impl ProjectPhase {
                     ),
                 )
             })?;
-        let recorded = BlockMarker::new(number, hash)?;
+        let _recorded = BlockMarker::new(number, hash)?;
         let canonical = crate::heads::load_marker(&self.pool, chain_id, number)
             .await?
             .ok_or_else(|| {
@@ -60,16 +70,7 @@ impl ProjectPhase {
                     ),
                 )
             })?;
-        if canonical != recorded {
-            return Err(RunnerError::new(
-                ErrorKind::DataIntegrity,
-                format!(
-                    "cannot redo project on chain {chain_id}: recorded head {number} hash {} is not canonical",
-                    recorded.hash
-                ),
-            ));
-        }
-        Ok(recorded)
+        Ok(canonical)
     }
 }
 
@@ -85,6 +86,11 @@ impl Phase for ProjectPhase {
                     ErrorKind::Configuration,
                     "project recompute-flags is owned by the later redo-tooling lane",
                 ));
+            }
+            if let Some(hydrator) = &self.hydrator {
+                hydrator
+                    .require_rpc_configuration(&context.chain_id)
+                    .map_err(runner_error)?;
             }
             let redo_target = if matches!(context.mode, RunMode::Redo(_)) {
                 Some(self.redo_target(&context.chain_id).await?)
@@ -141,6 +147,12 @@ impl Phase for ProjectPhase {
                 })
                 .await
                 .map_err(runner_error)?;
+            if let Some(hydrator) = &self.hydrator {
+                hydrator
+                    .hydrate_if_canonical_head(&context.chain_id, &outcome.current)
+                    .await
+                    .map_err(runner_error)?;
+            }
             let progress_marker = match redo_to {
                 Some(block_number) => crate::heads::load_marker(
                     &self.pool,

@@ -1,10 +1,11 @@
 # Deployment
 
 The old `bigname-indexer` runtime has been deleted. This Stage B source tree is
-not yet a complete production indexing deployment: the phase runner implements
-`ingest` and `interpret`, while `project`, `verify`, and `live` are explicit
-unavailable phases. Production must remain on the last pre-cut release until
-the project/live port lands. Commands and environment variables for the old
+not yet a complete replacement production deployment: the phase runner
+implements `ingest`, `interpret`, `project`, and continuous `live` follow, while
+the B4 read-only `verify` implementation and the Stage C API cutover remain
+outstanding. Production must remain on the last pre-cut release until those
+gates land. Commands and environment variables for the old
 indexer, backfill scheduler, reconciliation replay, and repair tools are no
 longer supported by this source tree.
 
@@ -32,9 +33,10 @@ command invokes `phase-runner init-schema` against the same database and
 requires an empty `bigname_phase` schema. It refuses every nonempty phase schema
 until a reviewed upgrade or rebuild mechanism exists. `phases` then invokes
 `phase-runner run` with `bigname_phase` as its search path. It can
-persist ingest and interpret output, then fails closed when orchestration
-reaches the unavailable `project` phase. It is included for isolated Stage B
-verification, not as a replacement production service. The surviving
+persist ingest-through-project output and continuously follow provider heads,
+including reorg-driven downstream redo and canonical-head hydration. It is
+included for isolated Stage B verification, not as a replacement production
+service until B4 and Stage C land. The surviving
 API/worker do not consume its projection output yet; they continue to use
 `public`.
 
@@ -43,8 +45,8 @@ API/worker do not consume its projection output yet; they continue to use
 `docker-compose.server.yml` starts PostgreSQL, migrations, the surviving API,
 and the surviving worker. It intentionally has no indexer or phase-runner
 service. The stack can exercise existing read models and worker behavior, but
-without a completed project/live pipeline it is not a fresh indexing
-deployment.
+without B4 verification and the Stage C API cutover it is not the replacement
+fresh indexing deployment.
 
 ```sh
 cp .env.server.example .env.server
@@ -64,17 +66,37 @@ The implemented phases use:
 - `BIGNAME_PHASE_RUNNER_MANIFESTS_ROOT`
 - `BIGNAME_PHASE_RUNNER_CHAINS`
 - `BIGNAME_PHASE_RUNNER_SOURCES`
+- `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS`
 - `BIGNAME_PHASE_RUNNER_INSTANCE_ID`
 
 Each `BIGNAME_PHASE_RUNNER_SOURCES` entry has the form
 `CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV`; the named environment variable
 contains the provider URL. Capacity, retry, and polling controls use the
 `BIGNAME_PHASE_RUNNER_*` names exposed by `phase-runner --help`.
+For every configured chain on which canonical-head hydration runs (currently
+`ethereum-mainnet`), `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS` must contain a
+`CHAIN=HTTP_URL` entry. A missing entry is a fatal project-phase configuration
+error. The check runs before event-derived project publication or hydration
+writes, so previously hydrated values remain intact while the chain is stopped
+for configuration repair.
 
-One-shot finite phase work is available through `phase-runner redo`. Only
-`ingest` and `interpret` have implementations in this build. Selecting
-`project`, `verify`, `live`, or the not-yet-implemented flag recomputation path
-fails explicitly.
+One-shot finite phase work is available through `phase-runner redo` for
+`ingest`, `interpret`, `project`, and a configured `verify` implementation.
+Verify redo persists the verification level that implementation reports. The
+B3 deferred verifier refuses redo in phase preflight until B4 rather than
+claiming a trust level. That refusal runs before phase initialization, locking,
+or redo-state publication, including when a pre-B3 verify extent already
+exists, so it cannot strand a redo marker. A configured verify implementation
+continues to use the ratified redo path and persists its reported level.
+Historical `live` redo is rejected because live follows only the current head.
+The not-yet-implemented flag recomputation path also fails explicitly. Project
+redo and an interpret-to-project cascade use
+`BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS` (or
+`--hydration-rpc CHAIN=HTTP_URL`) for the same current-head enrichment as the
+supervised project phase. `phase-runner rewind` moves the
+published latest marker to an exact stored readable ancestor and uses normal
+head publication to orphan the suffix, invalidate affected cache eligibility,
+and stamp downstream redo.
 
 Before either command's first use, run `phase-runner init-schema` once after
 the retained migrations have prepared `public`. The phase runner owns the

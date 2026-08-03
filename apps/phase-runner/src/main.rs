@@ -8,6 +8,7 @@ use phase_runner::{
     database::RunnerDatabase,
     ingest_phase::IngestPhase,
     interpret_phase::InterpretPhase,
+    live_phase::LivePhase,
     phase::PhaseSet,
     project_phase::ProjectPhase,
     runner::{PhaseRunner, SupervisorReport},
@@ -43,6 +44,7 @@ async fn main() -> Result<()> {
             database_url,
             manifests_root,
             runtime,
+            hydration_rpc_urls,
         } => {
             let connections = u32::try_from(runtime.chains.len())
                 .unwrap_or(u32::MAX)
@@ -50,10 +52,15 @@ async fn main() -> Result<()> {
                 .max(4);
             let database = RunnerDatabase::connect(&database_url, connections).await?;
             sync_manifests(database.pool(), &manifests_root).await?;
-            let phases = PhaseSet::with_ingest_interpret_and_project(
-                Arc::new(IngestPhase::new(database.pool().clone())),
+            let ingest_engine = Arc::new(bigname_ingest::Engine::new(database.pool().clone()));
+            let phases = PhaseSet::with_ingest_interpret_project_and_live(
+                Arc::new(IngestPhase::with_engine(Arc::clone(&ingest_engine))),
                 Arc::new(InterpretPhase::new(database.pool().clone())),
-                Arc::new(ProjectPhase::new(database.pool().clone())),
+                Arc::new(ProjectPhase::with_hydration(
+                    database.pool().clone(),
+                    hydration_rpc_urls,
+                )),
+                Arc::new(LivePhase::with_engine(ingest_engine)),
             )?;
             let runner = Arc::new(PhaseRunner::new(
                 database,
@@ -74,16 +81,22 @@ async fn main() -> Result<()> {
             timing,
             phase,
             range,
+            hydration_rpc_urls,
         } => {
             if phase == phase_runner::runner::RedoPhase::RecomputeFlags {
                 bail!(bigname_interpret::RECOMPUTE_FLAGS_UNAVAILABLE_REASON);
             }
             let database = RunnerDatabase::connect(&database_url, 4).await?;
             sync_manifests(database.pool(), &manifests_root).await?;
-            let phases = PhaseSet::with_ingest_interpret_and_project(
-                Arc::new(IngestPhase::new(database.pool().clone())),
+            let ingest_engine = Arc::new(bigname_ingest::Engine::new(database.pool().clone()));
+            let phases = PhaseSet::with_ingest_interpret_project_and_live(
+                Arc::new(IngestPhase::with_engine(Arc::clone(&ingest_engine))),
                 Arc::new(InterpretPhase::new(database.pool().clone())),
-                Arc::new(ProjectPhase::new(database.pool().clone())),
+                Arc::new(ProjectPhase::with_hydration(
+                    database.pool().clone(),
+                    hydration_rpc_urls,
+                )),
+                Arc::new(LivePhase::with_engine(ingest_engine)),
             )?;
             let runner = PhaseRunner::new(
                 database,
@@ -93,6 +106,23 @@ async fn main() -> Result<()> {
                 timing,
             )?;
             runner.redo(&chain, phase, range, cancellation).await?;
+        }
+        ResolvedCommand::Rewind {
+            database_url,
+            chain_id,
+            ancestor,
+        } => {
+            let database = RunnerDatabase::connect(&database_url, 2).await?;
+            let outcome =
+                phase_runner::rewind::rewind_to_ancestor(&database, &chain_id, ancestor).await?;
+            tracing::info!(
+                chain_id,
+                previous_block = outcome.previous.number,
+                previous_hash = outcome.previous.hash,
+                ancestor_block = outcome.ancestor.number,
+                ancestor_hash = outcome.ancestor.hash,
+                "chain head rewound; affected downstream phases are stamped for redo"
+            );
         }
     }
     Ok(())
@@ -178,6 +208,36 @@ mod tests {
         .resolve()
         .expect("init-schema command must resolve");
         assert!(matches!(command, ResolvedCommand::InitSchema { .. }));
+    }
+
+    #[test]
+    fn rewind_cli_requires_an_exact_ancestor() {
+        let command = Cli::try_parse_from([
+            "phase-runner",
+            "rewind",
+            "--database-url",
+            "postgres://phase-runner.invalid/fresh",
+            "--chain",
+            "base-mainnet",
+            "--ancestor-block",
+            "42",
+            "--ancestor-hash",
+            "0x42",
+        ])
+        .expect("rewind command must parse")
+        .resolve()
+        .expect("rewind command must resolve");
+
+        match command {
+            ResolvedCommand::Rewind {
+                chain_id, ancestor, ..
+            } => {
+                assert_eq!(chain_id, "base-mainnet");
+                assert_eq!(ancestor.number, 42);
+                assert_eq!(ancestor.hash, "0x42");
+            }
+            _ => panic!("expected rewind command"),
+        }
     }
 
     #[test]

@@ -93,8 +93,24 @@ affected by an incremental run or bounded redo. Readers therefore see either
 the prior set or the complete successor set, never a half-published mixture.
 Publication has no marker, claim, journal, dead-letter, or watermark table.
 The phase runner's advisory lock, state row, content hash, and redo marker are
-the operating control plane. Hydration is deferred to the later live multicall
-port and is not a hidden project-phase input.
+the operating control plane. After event-derived publication, a project run
+with an Ethereum hydration RPC refreshes eligible legacy reverse-name and text
+values through Multicall3 at the exact `chain_heads` number and hash. It writes
+only `primary_names_current` and `record_inventory_current`, stores the pinned
+head and replaced event-derived baseline in hydration provenance, and
+revalidates that head in the publication
+transaction. These values are execution-derived enrichment, not project
+inputs: raw facts, identity, and normalized events remain unchanged, and a
+project redo first reconstructs the event-derived rows before hydration is
+layered on again. Hydration runs only when that publication target equals the
+current `chain_heads` marker; a behind-head redo defers enrichment until project
+catches up. A failed call restores the saved baseline and keeps the
+project attempt retryable instead of retaining an earlier head's value. The
+same rule applies to transport, RPC, decoding, or cardinality failure of an
+entire Multicall batch: every call in that batch restores its baseline in the
+head-revalidated publication transaction before the retryable failure returns.
+A previously hydrated reverse tuple that no longer selects an eligible legacy
+resolver also restores its baseline in that transaction without another call.
 
 Projection JSON coverage fields say only that the row was derived from stored
 canonical inputs: `status = "projected"` and
@@ -123,4 +139,17 @@ decoding round-trips to them. A later preimage upgrades the same child row.
 
 ## Ingest cursors and phase state
 
-`ingest_cursors` stores one cursor for each chain source, and `chain_phase_state` stores one state row for each of the five phases, including the verify phase trust level and an explicit `paused` state for the capacity guard. Explicit redo fields retain the requested range, a cursor separate from normal progress, and a snapshot of the pre-redo lifecycle state; the marker remains until redo succeeds and blocks normal resume after an interruption. While that marker remains, `last_error` records the most recent failed redo attempt; when a later redo completes, that attempt error is cleared and any pre-redo lifecycle error is restored. The phase runner writes both tables. The runner, redo command, health checks, and status path read them. The [indexer absorption census](../simplification-audit-20260730.md#appsindexer-fable) authorizes both tables. [Build-plan amendment B](../simplification-build-plan-20260730.md#b-verify-carried-raw-before-deleting-its-coverage-record) lists the seed inputs as Base block `48,428,000`, the verified historical starts for the three newly watched signature groups, and the observed Ethereum head. The schema does not preload the dynamic starts or Ethereum head. [Build-plan amendment D](../simplification-build-plan-20260730.md#d-status-label-honesty-razor-3) defines provider-trusted, independently cross-checked, and node-checked status. [Build-plan amendment F](../simplification-build-plan-20260730.md#f-specs-pinned) defines the five phase names and the ingest-to-live handoff fields. The [approved phase-runner design](../a2-phase-runner-design-20260731.md#status-and-heartbeats) requires capacity pauses to remain distinguishable from failures.
+`ingest_cursors` stores one cursor for each chain source, and `chain_phase_state` stores one state row for each of the five phases, including the verify phase trust level and an explicit `paused` state for the capacity guard. Explicit redo fields retain the requested range, a cursor separate from normal progress, and a snapshot of the pre-redo lifecycle state; the marker remains until redo succeeds and blocks normal resume after an interruption. While an operator marker remains, `last_error` records the most recent failed redo attempt. A system-required downstream marker instead retains its ownership prefix and appends the most recent attempt failure so restart continues automatic repair. When a later redo completes, that attempt error is cleared and any pre-redo lifecycle error is restored. The phase runner writes both tables. The runner, redo command, health checks, and status path read them. The [indexer absorption census](../simplification-audit-20260730.md#appsindexer-fable) authorizes both tables. [Build-plan amendment B](../simplification-build-plan-20260730.md#b-verify-carried-raw-before-deleting-its-coverage-record) lists the seed inputs as Base block `48,428,000`, the verified historical starts for the three newly watched signature groups, and the observed Ethereum head. The schema does not preload the dynamic starts or Ethereum head. [Build-plan amendment D](../simplification-build-plan-20260730.md#d-status-label-honesty-razor-3) defines provider-trusted, independently cross-checked, and node-checked status. [Build-plan amendment F](../simplification-build-plan-20260730.md#f-specs-pinned) defines the five phase names and the ingest-to-live handoff fields. The [approved phase-runner design](../a2-phase-runner-design-20260731.md#status-and-heartbeats) requires capacity pauses to remain distinguishable from failures.
+
+Head publication also uses those existing redo fields as a downstream guard.
+If the newly orphaned suffix begins at or below an `interpret` or `project`
+cursor, the publication transaction stamps that phase from the first orphaned
+block through its recorded cursor. A successful interpret redo stamps project
+for the same replayed suffix. The runner consumes these system-required stamps
+in dependency order; they are ranges, not a second scheduler or queue. The
+stamp's ownership marker distinguishes pending selection or live gap fill from
+an active replay. Once active, the replay observes the same non-verify writer
+exclusion as any other phase write. Project
+redo supplements the surviving-event range with current projection keys whose
+normalized-event provenance citations are no longer readable, including both
+event IDs carried by a primary-name tuple.
