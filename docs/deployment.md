@@ -149,9 +149,10 @@ One-shot finite phase work is available through `phase-runner redo` for
 `ingest`, `interpret`, `project`, and `verify`. Verify redo checks its source
 and SELECT-only database configuration before phase initialization, locking,
 or redo-state publication.
-It rechecks the requested range and cannot target above the chain's current
-finalized head. The range is not limited to the previously reported
-verification extent: a never-verified range below finality may be checked.
+It rechecks only a range inside the recorded verification extent: the range
+end cannot exceed the current verify cursor. Each batch is additionally
+constrained to finalized lineage. Blocks above the verify cursor are covered
+by normal verification resume, never by redo.
 Completion restores the pre-redo normal extent; a partial redo retains its
 level, while a redo covering the full retained extent can report the level
 fixed by its source kind. An interrupted attempt keeps the normal resumable
@@ -190,13 +191,16 @@ verification from an empty verify cursor. Do not edit immutable raw rows in
 place and do not mark the phase complete manually. A raw-data-only wipe is
 unsafe: normal verification resumes at one block above its last successful
 cursor and does not re-verify the re-ingested prefix below that cursor. If an
-approved repair procedure intentionally preserves phase state, run a verify
-redo over the full repaired verification interval, from the durable ingest
-start through the applicable verification bound (the finalized head,
-additionally capped at the Base seam for dRPC), before allowing the normal
-verifier to resume. Under that state-preserving alternative, a failed verify
-redo retains its marker and is resumed by rerunning the same redo command after
-repair. After a full phase-state reset, rerun the normal pipeline instead.
+approved repair procedure intentionally preserves phase state, run verify redo
+from the durable ingest start through the retained verified extent (the current
+verify cursor). That range satisfies the full-extent condition and records the
+level fixed by its source kind again. Normal verification resume then covers
+the re-ingested blocks above the cursor. A mismatch in the first-ever verify
+batch leaves no recorded verification extent, so no verify redo range is
+expressible and a full phase-state reset is the only repair. Under the
+state-preserving alternative, a failed verify redo retains its marker and is
+resumed by rerunning the same redo command after repair. After a full
+phase-state reset, rerun the normal pipeline instead.
 
 ## Carried-raw cutover gate
 
