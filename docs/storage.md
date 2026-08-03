@@ -251,9 +251,16 @@ indexer reconciliation tree no longer performs its synchronous multi-family
 adapter repair, coverage proof, normalized-event supersession, or
 resolver-profile convergence.
 
-Derived schema-v2 repair is an explicit `interpret` redo over a complete ingested range. Redo preparation orphans derived identities and events anchored in the selected range, replays the range through the schema-v2 interpreter, and re-anchors stable identities when the winning facts reproduce them. An interrupted multi-batch redo remains explicit persisted redo state and must resume; its intermediate orphaning is not a completed projection boundary.
-Unsupported `live`, `verify`, and flag-recomputation redo requests fail before
-the runner writes a redo marker, so they cannot leave an unresumable state row.
+Derived schema-v2 repair is an explicit `interpret` redo over a complete
+ingested range. Redo preparation orphans derived identities and events anchored
+in the selected range, replays the range through the schema-v2 interpreter, and
+re-anchors stable identities when the winning facts reproduce them. An
+interrupted multi-batch redo remains explicit persisted redo state and must
+resume; its intermediate orphaning is not a completed projection boundary.
+Verify redo uses the same marker and persists the verification level reported
+by its phase implementation.
+Unsupported `live` and flag-recomputation redo requests fail before the runner
+writes a redo marker, so they cannot leave an unresumable state row.
 
 System-required redo stamps reuse `chain_phase_state.redo_*`; there is no reorg
 queue or scheduler table. A stamp is created only when the phase cursor reaches

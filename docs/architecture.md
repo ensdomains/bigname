@@ -220,11 +220,11 @@ Phases per chain:
 Postgres is the hot indexed and replay-focused store. Lineage anchors, selected target logs and their same-transaction sibling replay context, replay-required call snapshots, and compact payload-cache metadata are durable. Legacy public-schema code-hash observations remain available to the old worker but are not schema-v2 project-phase inputs. Large block payloads, non-indexed transaction or receipt bodies, and non-audit raw-log staging rows are evictable cache once their replay contract is satisfied. Empty historical blocks retain only lineage anchors and audit metadata.
 
 The phase runner persists exact per-source and per-phase block-hash cursors.
-Historical work is an explicit finite `ingest` or `interpret` redo; the old
-persisted backfill scheduler, coverage frontier, adapter startup pass, and
-normalized-event replay driver have been deleted. A newly admitted source
-returns to `ingest` for the required range, and `interpret` cannot advance past
-the ingested boundary.
+Historical work is an explicit finite `ingest`, `interpret`, `project`, or
+`verify` redo. The old persisted backfill scheduler, coverage frontier, adapter
+startup pass, and normalized-event replay driver have been deleted. A newly
+admitted source returns to `ingest` for the required range, and `interpret`
+cannot advance past the ingested boundary.
 
 ### Stage B runtime boundary
 
@@ -519,11 +519,11 @@ above the safe head, and invokes the same atomic orphaning, cache invalidation,
 and redo-stamping path. The next supervised live cycle fills the winning path,
 then runs the required downstream redo.
 
-Historical work is a finite `ingest`, `interpret`, or `project` run, optionally
-recorded as an explicit redo, not a persisted old-schema backfill job. Live
-follow starts at the completed ingest handoff and only walks the current head
-and a winning-fork gap; it never provides historical coverage. Unsupported
-`live`, `verify`, and flag-recomputation redo requests fail before any redo
+Historical work is a finite `ingest`, `interpret`, `project`, or `verify` run.
+An explicit redo can record that work; it is not a persisted old-schema
+backfill job. Live follow starts at the completed ingest handoff and only walks
+the current head and a winning-fork gap; it never provides historical coverage.
+Unsupported `live` and flag-recomputation redo requests fail before any redo
 state is written. A deployment
 therefore still needs complete admitted history for ENSv1, ENSv2, and Basenames
 source families. Wildcard and offchain names remain

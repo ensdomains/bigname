@@ -75,10 +75,15 @@ contains the provider URL. Capacity, retry, and polling controls use the
 `BIGNAME_PHASE_RUNNER_*` names exposed by `phase-runner --help`.
 
 One-shot finite phase work is available through `phase-runner redo` for
-`ingest`, `interpret`, and `project`. Historical `live` redo is rejected because
-live follows only the current head. `verify` redo and the not-yet-implemented
-flag recomputation path fail explicitly. Project redo and an interpret-to-project
-cascade use `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS` (or
+`ingest`, `interpret`, `project`, and a configured `verify` implementation.
+Verify redo persists the verification level that implementation reports. The
+B3 deferred verifier has no processed extent after its normal idle run, so redo
+first fails the recorded-extent precondition. If an extent already exists, the
+deferred phase refuses the work until B4 rather than claiming a trust level.
+Historical `live` redo is rejected because live follows only the current head.
+The not-yet-implemented flag recomputation path also fails explicitly. Project
+redo and an interpret-to-project cascade use
+`BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS` (or
 `--hydration-rpc CHAIN=HTTP_URL`) for the same current-head enrichment as the
 supervised project phase. `phase-runner rewind` moves the
 published latest marker to an exact stored readable ancestor and uses normal

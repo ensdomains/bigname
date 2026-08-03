@@ -128,10 +128,10 @@ impl PhaseRunner {
                     bigname_interpret::RECOMPUTE_FLAGS_UNAVAILABLE_REASON,
                 ));
             }
-            RedoPhase::Phase(PhaseName::Verify | PhaseName::Live) => {
+            RedoPhase::Phase(PhaseName::Live) => {
                 return Err(RunnerError::new(
                     ErrorKind::Configuration,
-                    "verify and live do not support historical redo",
+                    "live does not support historical redo",
                 ));
             }
             RedoPhase::Phase(phase) => phase,

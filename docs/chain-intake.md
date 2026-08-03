@@ -140,8 +140,13 @@ interruption. Project redo uses the same state machinery to replace the
 affected current projection scope. Neither path uses the deleted
 normalized-event upsert, repair, supersession, adapter-checkpoint, or
 coverage-authority machinery. Historical live redo is rejected because live
-is a head follower; verify redo and flag recomputation remain unavailable. The
-runner rejects those unsupported redo modes before creating redo state.
+is a head follower. Verify redo uses the same phase contract as normal verify
+work and persists the verification level reported by the verifier. The B3
+deferred verifier records no processed extent or trust level. Without an
+existing verify extent, redo fails the normal recorded-extent precondition. If
+an extent exists, the deferred phase refuses the work until B4 rather than
+claiming trust. Flag recomputation also remains unavailable. Live and
+flag-recomputation requests are rejected before creating redo state.
 
 The thin rewind command moves only the published latest head:
 
