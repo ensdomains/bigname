@@ -12,6 +12,14 @@ chain = "ethereum-sepolia"
 deployment_epoch = "ens_v2_sepolia_dev"
 rollout_status = "deprecated"
 normalizer_version = "ensip15@ens-normalize-0.1.1"
+# Historical pre-audit implementation metadata and inherited ERC-1967 event:
+# (upstream: .refs/ens_v2_sepolia_dev/contracts/deployments/sepolia-dev/PermissionedResolverImpl.json:L2 @ ens_v2_sepolia_dev@554c309)
+# (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L85 @ ens_v2_sepolia_dev@554c309)
+# (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L88 @ ens_v2_sepolia_dev@554c309)
+# (upstream: .refs/ens_v2_sepolia_dev/contracts/deployments/sepolia-dev/PermissionedResolverImpl.json:L580 @ ens_v2_sepolia_dev@554c309).
+resolver_implementations = [
+  { role = "permissioned_resolver", address = "0xe566a1fbaf30ff7c39828fe99f955fc55544cb9c" },
+]
 roots = []
 contracts = []
 discovery_rules = []

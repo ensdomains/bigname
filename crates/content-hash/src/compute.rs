@@ -12,6 +12,7 @@ use crate::source_paths;
 const ADAPTER_SOURCE_ROOT: &str = "crates/adapters/src";
 const MANIFEST_AUTHORITY_SOURCE_ROOT: &str = "crates/manifests/src";
 const MANIFEST_ROOT: &str = "manifests";
+const PROJECT_SOURCE_ROOT: &str = "crates/project/src";
 const WORKER_SOURCE_ROOT: &str = "apps/worker/src";
 const MINIMUM_MANIFEST_EVENT_COUNT: usize = 111;
 const MINIMUM_EVENT_MANIFEST_COUNT: usize = 16;
@@ -127,6 +128,7 @@ pub(crate) fn watched_paths(workspace_root: &Path) -> Vec<PathBuf> {
         workspace_root.join(ADAPTER_SOURCE_ROOT),
         workspace_root.join(MANIFEST_AUTHORITY_SOURCE_ROOT),
         workspace_root.join(MANIFEST_ROOT),
+        workspace_root.join(PROJECT_SOURCE_ROOT),
         workspace_root.join(WORKER_SOURCE_ROOT),
     ]
 }
@@ -192,6 +194,7 @@ fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
         &[
             ADAPTER_SOURCE_ROOT,
             MANIFEST_AUTHORITY_SOURCE_ROOT,
+            PROJECT_SOURCE_ROOT,
             WORKER_SOURCE_ROOT,
         ],
     )?;
@@ -213,6 +216,12 @@ fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
     collect_rust_sources(
         workspace_root,
         &workspace_root.join(WORKER_SOURCE_ROOT),
+        &cfg_test_sources,
+        &mut inputs,
+    )?;
+    collect_rust_sources(
+        workspace_root,
+        &workspace_root.join(PROJECT_SOURCE_ROOT),
         &cfg_test_sources,
         &mut inputs,
     )?;
@@ -266,6 +275,8 @@ fn source_exclusion(
     } else if let Some(path) = relative_path.strip_prefix(MANIFEST_AUTHORITY_SOURCE_ROOT) {
         path.trim_start_matches('/')
     } else if let Some(path) = relative_path.strip_prefix(WORKER_SOURCE_ROOT) {
+        path.trim_start_matches('/')
+    } else if let Some(path) = relative_path.strip_prefix(PROJECT_SOURCE_ROOT) {
         path.trim_start_matches('/')
     } else {
         return Ok(None);
@@ -459,6 +470,7 @@ pub(crate) fn excluded_source_reason(
         &[
             ADAPTER_SOURCE_ROOT,
             MANIFEST_AUTHORITY_SOURCE_ROOT,
+            PROJECT_SOURCE_ROOT,
             WORKER_SOURCE_ROOT,
         ],
     )?;

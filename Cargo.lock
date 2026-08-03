@@ -1797,6 +1797,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bigname-project"
+version = "0.1.0"
+dependencies = [
+ "bigname-domain",
+ "serde_json",
+ "sqlx",
+]
+
+[[package]]
 name = "bigname-storage"
 version = "0.1.0"
 dependencies = [
@@ -5692,6 +5701,7 @@ dependencies = [
  "bigname-ingest",
  "bigname-interpret",
  "bigname-manifests",
+ "bigname-project",
  "bigname-storage",
  "bigname-test-support",
  "clap",

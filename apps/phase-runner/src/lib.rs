@@ -10,6 +10,7 @@ mod ingest_progress;
 pub mod interpret_phase;
 pub mod phase;
 pub mod phase_lock;
+pub mod project_phase;
 mod redo_presence;
 mod redo_state;
 pub mod runner;

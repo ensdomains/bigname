@@ -184,7 +184,7 @@ fn interpret_runtime_and_schema_writers_do_not_change_hash() {
 }
 
 #[test]
-fn newly_added_adapter_and_worker_modules_affect_the_hash() {
+fn newly_added_adapter_worker_and_project_modules_affect_the_hash() {
     let adapter_tree = SampleTree::new();
     let adapter_before =
         interpreter_content_hash(adapter_tree.path()).expect("adapter baseline must hash");
@@ -211,6 +211,20 @@ fn newly_added_adapter_and_worker_modules_affect_the_hash() {
     assert_ne!(
         worker_before, worker_after,
         "a new non-excluded worker source file must enter the hash automatically"
+    );
+
+    let project_tree = SampleTree::new();
+    let project_before =
+        interpreter_content_hash(project_tree.path()).expect("project baseline must hash");
+    project_tree.write(
+        "crates/project/src/future_projection.rs",
+        "fn derive_future_projection() {}\n",
+    );
+    let project_after =
+        interpreter_content_hash(project_tree.path()).expect("new project module must hash");
+    assert_ne!(
+        project_before, project_after,
+        "a new project semantic source file must enter the hash automatically"
     );
 }
 
@@ -355,6 +369,32 @@ fn every_worker_source_on_disk_is_hashed_or_has_a_documented_exclusion() {
         hashed.contains("apps/worker/src/projection_apply/derive.rs"),
         "invalidation derivation is projection rebuild semantics and must be hashed"
     );
+}
+
+#[test]
+fn every_project_source_on_disk_is_hash_covered() {
+    let workspace_root = workspace_root();
+    let hashed = hashed_source_paths(&workspace_root)
+        .expect("checked-in source paths must be collectable")
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut disk_sources = Vec::new();
+    collect_rust_files(
+        &workspace_root.join("crates/project/src"),
+        &mut disk_sources,
+    );
+
+    for source in disk_sources {
+        let relative_path = workspace_relative(&workspace_root, &source);
+        let excluded = excluded_source_reason(&workspace_root, &source)
+            .expect("source exclusion must be inspectable");
+        if excluded.is_none() {
+            assert!(
+                hashed.contains(&relative_path),
+                "project source {relative_path} is not content-hash covered"
+            );
+        }
+    }
 }
 
 #[test]
@@ -644,6 +684,10 @@ fn discover_cfg_test_module_sources(workspace_root: &Path) -> BTreeSet<String> {
     );
     collect_rust_files(
         &workspace_root.join("crates/manifests/src"),
+        &mut source_files,
+    );
+    collect_rust_files(
+        &workspace_root.join("crates/project/src"),
         &mut source_files,
     );
     collect_rust_files(&workspace_root.join("apps/worker/src"), &mut source_files);

@@ -287,6 +287,31 @@ fn validate_manifest_metadata(
         validate_start_block_fits_i64(root.start_block, "root", &root.name, path)?;
     }
 
+    let mut resolver_implementation_addresses = BTreeSet::new();
+    for implementation in &manifest.resolver_implementations {
+        if implementation.role.trim().is_empty() {
+            bail!(
+                "manifest {} has a resolver implementation with an empty role",
+                path.display()
+            );
+        }
+        if implementation.address.parse::<Address>().is_err() {
+            bail!(
+                "manifest resolver implementation {} in {} has invalid address {}",
+                implementation.role,
+                path.display(),
+                implementation.address
+            );
+        }
+        if !resolver_implementation_addresses.insert(normalize_address(&implementation.address)) {
+            bail!(
+                "manifest {} duplicates resolver implementation address {}",
+                path.display(),
+                implementation.address
+            );
+        }
+    }
+
     let mut contract_roles = BTreeSet::new();
     for contract in &manifest.contracts {
         if !contract_roles.insert(contract.role.as_str()) {

@@ -36,6 +36,8 @@ Each manifest contains:
 - `deployment_epoch`
 - `rollout_status` — `draft` | `shadow` | `active` | `deprecated`
 - `normalizer_version`
+- `resolver_implementations` — optional declared implementation artifacts for
+  upgradeable resolver families
 - `capability_flags`
 - `roots`
 - `contracts`
@@ -54,6 +56,15 @@ historical provenance or authority to run an unbounded ingest; the phase range
 must still be admitted explicitly.
 
 For `[[contracts]]`, `proxy_kind` is required. `proxy_kind = "none"` omits `implementation`. Any non-`none` `proxy_kind` includes `implementation` as the current implementation address for that manifest version.
+
+`resolver_implementations` is a list of `{ role, address }` entries with unique
+addresses; several implementation generations may share one role. It
+does not admit an implementation as a watched emitter. The project phase uses
+the list only to classify a discovered ENSv2 resolver proxy after canonical
+ERC-1967 `Upgraded` history identifies its current implementation. ENSv1 and
+Basenames resolver classification instead requires the resolver address itself
+to be an active `[[contracts]]` declaration. Neither path reads or infers a
+runtime code hash.
 
 For `[[discovery_rules]]`, the only authorable `admission` value is `reachable_from_root` — the discovered edge is authoritative while its `from_role` endpoint remains reachable from an active manifest root under an allowed rule. Internal labels like `manifest_declared` and `manifest_successor` are storage tags, not authored values.
 
@@ -156,7 +167,7 @@ The ENS primary-name route does not introduce a second manifest capability. `ens
 
 `ens_v1_wrapper_l1` owns NameWrapper at `0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401` with `start_block = 16925608`,[^v1-namewrapper-deploy] for wrapper authority, fuse/expiry, wrapper-revealed names, and wrapper-driven registry changes.[^v1-iname-l27][^v1-iname-l35][^v1-iname-l37][^v1-iname-l38]
 
-`ens_v1_resolver_l1` owns ENS Labs PublicResolver-generation profile admission. The seed entry is the latest PublicResolver at `0xF29100983E058B709F3D539b0c765937B804AC15` with `start_block = 22764828`.[^v1-publicresolver-deploy] [Resolver-profile](glossary.md) [admission](glossary.md) is the gate for complete record-family coverage, resolver-overview support, latest-only behavior, and event-to-call parity. Unadmitted resolvers stay `pending` or `unsupported`.
+`ens_v1_resolver_l1` owns ENS Labs PublicResolver-generation profile admission. The seed entry is the latest PublicResolver at `0xF29100983E058B709F3D539b0c765937B804AC15` with `start_block = 22764828`.[^v1-publicresolver-deploy] [Resolver-profile](glossary.md) [admission](glossary.md) is exact-address classification from this declared list. It permits the project phase to publish the canonical normalized observations retained for that resolver; it does not prove exhaustive history or event-to-call parity. Unadmitted resolvers are explicitly unsupported.
 
 Admitted ENS Labs PublicResolver generations on Ethereum Mainnet (first-party app-known data):[^v1-app-resolvers]
 
@@ -185,7 +196,7 @@ The `sepolia` profile admits four ENSv2 families from the post-audit current Sep
 - `ens_v2_root_l1` — `RootRegistry` at `0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c`, `start_block = 11163319`. Tokenized, [resource](glossary.md)-scoped permissioned registry seed for discovery and parent graph state.[^v2-pr-l22][^v2-pr-l28]
 - `ens_v2_registry_l1` — `ETHRegistry` at `0x67b728a792e789a8978b30cf1b3b641f19354b43`, `start_block = 11163391`, plus registry instances announced by `RegistryCreated()`. Direct `PermissionedRegistry` construction emits the announcement first; a `UserRegistry` proxy emits it during initialization. It admits the emitting address from that exact log position without requiring a parent link. `UserRegistryImpl` at `0x840fa461059862ea466a711e8c98c8de732061c0` is implementation metadata, not a separate owner. (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/UserRegistry.sol:L43 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/UserRegistry.sol:L47 @ ens_v2@ccaeb58)[^v2-userreg-l15]
 - `ens_v2_registrar_l1` — `ETHRegistrar` at `0xa4449a0dd2b83007553d9b1d28b583a46a805a30`, `start_block = 11163403`. Admitted registration and renewal lifecycle facts; registered-name resource identity links back to the registry resource.[^v2-ethrc-l49][^v2-ethrc-l173]
-- `ens_v2_resolver_l1` — registry-discovered resolver contract instances retain the manifest-configured normalized record and record-version observations. `PermissionedResolver` instances additionally provide alias, named-resource, and resolver-scoped EAC events. Resolver-local projection requires both the current registry binding and explicit ENSv2 resolver-profile admission; no such resolver profile is currently capability-promoted, so resolver observations do not publish selector values or authoritative record coverage. `PermissionedResolverImpl` at `0x7e4b2d59938930168024201752ee5503df402303` is the current implementation artifact.[^v2-pres-l38][^v2-pres-l70]
+- `ens_v2_resolver_l1` — registry-discovered resolver contract instances retain the manifest-configured normalized record and record-version observations. `PermissionedResolver` instances additionally provide alias, named-resource, and resolver-scoped EAC events. Resolver-local projection is supported only when the proxy's latest canonical ERC-1967 `Upgraded` event names an implementation in the active manifest's `resolver_implementations` list. The current declared `PermissionedResolverImpl` is `0x7e4b2d59938930168024201752ee5503df402303`; the contract inherits UUPS upgradeability and its deployment ABI exposes `Upgraded(address)`.[^v2-deploy-pres][^v2-pres-uups][^v2-pres-upgraded] A manifest admission change reclassifies the affected resolver inline during project-phase publication. No code-hash observation participates.
 
 The preceding `ens_v2_sepolia_dev` manifest versions remain checked in as `deprecated` historical records and citation evidence. Their addresses and ranges do not participate in the active post-audit watch or replay plan.
 
@@ -195,7 +206,7 @@ Upstream events map to normalized adapter output: `TokenResource` → `TokenReso
 
 ENSv2 terminal lifecycle events also close interpreter-owned state. `LabelUnregistered` is emitted before upstream expires the entry and has no paired zero-target subregistry or resolver updates, so the ENSv2 interpreter closes the current surface binding and emits terminal discovery observations at that log position. It also emits null `SubregistryChanged` and `ResolverChanged` boundaries for any attached roles so full and incremental projections retire the old topology. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L208 @ ens_v2@48b3e2d) A replacement registration or reservation can bump the token version and overwrite the stored subregistry and resolver, while upstream emits follow-up target updates only for nonzero replacements; the adapter therefore closes the prior discovery targets before accepting the successor lifecycle and emits the same null role boundaries. Replacement registration lets the following `TokenResource` close the old surface at the successor start; replacement reservation has no successor resource, so it closes immediately and emits `SurfaceUnbound` as position-specific reorg-repair evidence. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L452 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L459 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L471 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L474 @ ens_v2@48b3e2d)
 
-`RegistryCreated` is admitted as registry-instance history and discovery input. `URIUpdated`, the `PermissionedResolver` `DataChanged` / `NamedDataResource` pair, and ERC-1155 `ApprovalForAll` remain outside the active normalized behavior.[^v2-events-created][^v2-events-uri][^v2-pres-data] Operator approval is not treated as token ownership or an ENSv2 resource-role grant. (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L336 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L341 @ ens_v2@ccaeb58) The separately deployed `ETHRenewerV1` is not an admitted registrar emitter; `NameRenewed` intake remains limited to the admitted `ETHRegistrar` emitter.[^v2-deploy-renewer][^v2-iethrenewer-l21] `PublicResolverV2` is not directly declared by a manifest and is not an admitted resolver profile.[^v2-deploy-public-resolver] Resolver observations can discovery-admit `PublicResolverV2` as a watch-only contract instance and retain configured normalized facts, but they publish no selectors, cache values, or authoritative record coverage without explicit ENSv2 resolver-profile admission. A current-emitter `RecordVersionChanged` may remain only as an explicit `resolver_family_pending` boundary; non-current resolver emitters are always excluded.[^v2-public-resolver-discovery][^v2-public-resolver-version]
+`RegistryCreated` is admitted as registry-instance history and discovery input. `URIUpdated`, the `PermissionedResolver` `DataChanged` / `NamedDataResource` pair, and ERC-1155 `ApprovalForAll` remain outside the active normalized behavior.[^v2-events-created][^v2-events-uri][^v2-pres-data] Operator approval is not treated as token ownership or an ENSv2 resource-role grant. (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L336 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L341 @ ens_v2@ccaeb58) The separately deployed `ETHRenewerV1` is not an admitted registrar emitter; `NameRenewed` intake remains limited to the admitted `ETHRegistrar` emitter.[^v2-deploy-renewer][^v2-iethrenewer-l21] `PublicResolverV2` is not directly declared by a manifest and is not an admitted resolver profile.[^v2-deploy-public-resolver] Its configured normalized observations may remain stored, but its projection support status stays unsupported unless canonical upgrade history later matches an explicitly declared resolver implementation. Current record visibility remains limited to the current resolver emitter.[^v2-public-resolver-discovery][^v2-public-resolver-version]
 
 All other current Sepolia artifacts — including universal/reverse resolution, wrapper, migration, factory, oracle, batch-registrar, and mock-payment surfaces — remain outside admission until a doc-first update.
 
@@ -271,6 +282,10 @@ updates manifest-declared proxy edges. It does not run a full-source
 reconciliation over event-driven edges. An authority change invalidates the
 interpret and project phase content hashes; explicit redo then re-derives the
 affected discovery rows from retained facts under the new manifest authority.
+The Base project phase also consumes Ethereum Mainnet `basenames_execution`
+authority for Basenames support and provenance. Changing that family therefore
+invalidates the `base-mainnet` project epoch as well, without invalidating its
+interpret epoch.
 
 ENSv1 and Basenames owner events do not create discovery contract instances.
 Schema-v2 interpretation processes retained `RegistryCreated`,
@@ -294,7 +309,14 @@ The legacy resolver-profile authority journal, input queue, and reconciliation t
 
 ERC-1967 `Upgraded(address)` logs from manifest-declared and event-announced contracts produce `Upgraded` normalized history on the emitting contract. (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/interfaces/IERC1967.sol:L13 @ basenames@1809bbc) Manifest synchronization does not infer upgrades from code-hash drift and does not synthesize drift-alert normalized events.
 
-Code-hash observations currently have no producer—the old intake was deleted with the old runtime—and the worker/API port defers the producer decision between a new ingest observation family and a [resolver-profile](glossary.md) redesign keyed by retained ERC-1967 `Upgraded` history; admission without retained code-hash evidence therefore remains explicitly `pending`.
+The schema-v2 project phase has no code-hash reader. ENSv1 and Basenames use
+only exact resolver addresses declared by the active manifest, while ENSv2
+uses the latest canonical resolver-family `Upgraded` history and the active
+manifest's `resolver_implementations` list. A manifest admission change
+reclassifies the affected address inline; there is no journal or queue. The old
+public-schema worker still reads retained `raw_code_hashes` through its legacy
+resolver-profile views until the Stage C API cutover, but those views do not
+feed schema-v2 projections.
 
 ## Watch-plan expansion
 
@@ -306,7 +328,7 @@ Watch-plan expansion starts from active manifest roots by `contract_instance_id`
   historical ingest must obtain an explicit admitted bound. The current Stage B
   loaders nevertheless use zero as their effective range-filter fallback; that
   implementation gap does not make zero authoritative.
-- Watch rows may denormalize address and code-hash state, but their durable explanation path is `manifest root → discovery edge(s) → contract_instance_id`.
+- Legacy watch rows may denormalize address and code-hash state, but their durable explanation path is `manifest root → discovery edge(s) → contract_instance_id`; schema-v2 resolver classification does not read that denormalization.
 - Address-only watch state is rebuildable from manifests, instance attributes, and active discovery edges.
 
 `bigname-worker inspect watch-plan --json` exposes active watched contracts with source kind (`manifest_root`, `manifest_contract`, `discovery_edge`), source families, contract instance IDs, chain addresses, source manifest IDs, and active block ranges. It is read-only over existing state.
@@ -394,7 +416,9 @@ above does not change that provenance rule.
 [^v2-deploy-root]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/RootRegistry.json:L2 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/deployments/sepolia/RootRegistry.json:L2792 @ ens_v2@48b3e2d)
 [^v2-deploy-ethreg]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L2 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L2792 @ ens_v2@48b3e2d)
 [^v2-deploy-ethrc]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistrar.json:L2 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistrar.json:L1372 @ ens_v2@48b3e2d)
-[^v2-deploy-pres]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/PermissionedResolverImpl.json:L2 @ ens_v2@48b3e2d)
+[^v2-deploy-pres]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/PermissionedResolverImpl.json:L2 @ ens_v2@ccaeb58)
+[^v2-pres-uups]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L22 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L89 @ ens_v2@ccaeb58)
+[^v2-pres-upgraded]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/PermissionedResolverImpl.json:L627 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/PermissionedResolverImpl.json:L637 @ ens_v2@ccaeb58)
 [^v2-deploy-renewer]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRenewerV1.json:L2 @ ens_v2@48b3e2d)
 [^v2-deploy-public-resolver]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/PublicResolverV2.json:L2 @ ens_v2@48b3e2d)
 [^v2-public-resolver-discovery]: `PublicResolverV2` composes the standard resolver profiles and authorizes writes through registry ownership or approvals; locked-name migration can replace a recognized ENSv1 resolver with that public resolver before a nonzero registered resolver emits `ResolverUpdated`: (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L4 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L23 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L179 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L139 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L474 @ ens_v2@48b3e2d)

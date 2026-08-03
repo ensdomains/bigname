@@ -2,10 +2,9 @@
 # deployment. PermissionedResolverImpl is implementation metadata for discovered
 # or explicitly admitted resolver instances, not an initial watched root or
 # contract address:
-# (upstream: .refs/ens_v2/contracts/deployments/sepolia/PermissionedResolverImpl.json:L2 @ ens_v2@48b3e2d)
-# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L33 @ ens_v2@48b3e2d)
-# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L87 @ ens_v2@48b3e2d)
-# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L126 @ ens_v2@48b3e2d).
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/PermissionedResolverImpl.json:L2 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L22 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L89 @ ens_v2@ccaeb58).
 manifest_version = 2
 namespace = "ens"
 source_family = "ens_v2_resolver_l1"
@@ -13,6 +12,9 @@ chain = "ethereum-sepolia"
 deployment_epoch = "ens_v2_sepolia_post_audit"
 rollout_status = "active"
 normalizer_version = "ensip15@ens-normalize-0.1.1"
+resolver_implementations = [
+  { role = "permissioned_resolver", address = "0x7e4b2d59938930168024201752ee5503df402303" },
+]
 roots = []
 contracts = []
 discovery_rules = []

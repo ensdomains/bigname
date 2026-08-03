@@ -84,9 +84,30 @@ owners are defined by the canonical
 
 ## Current projections
 
-`name_current`, `children_current`, `permissions_current`, `permissions_current_resource_summary`, `record_inventory_current`, `resolver_current`, `address_names_current`, and `primary_names_current` are the retained current-state tables written by the retained projection builders. Projection code writes them. The API and GraphQL read them. The [worker census](../simplification-audit-20260730.md#appsworker--cratesexecution-fable) and the [storage census](../simplification-audit-20260730.md#cratesstorage-fable) authorize this enumerated set. The [support-status decision](../simplification-audit-20260730.md#kimi-k3-second-opinion-lenses--adjudicated) keeps explicit support fields and removes exhaustiveness accounting.
+`name_current`, `children_current`, `permissions_current`, `permissions_current_resource_summary`, `record_inventory_current`, `resolver_current`, `address_names_current`, and `primary_names_current` are the retained current-state tables written by the seven project-phase builders. The project phase is their single writer. The API and GraphQL read them after the later Stage C cutover. The [worker census](../simplification-audit-20260730.md#appsworker--cratesexecution-fable) and the [storage census](../simplification-audit-20260730.md#cratesstorage-fable) authorize this enumerated set. The [support-status decision](../simplification-audit-20260730.md#kimi-k3-second-opinion-lenses--adjudicated) keeps explicit support fields and removes exhaustiveness accounting.
 
-A full rebuild publishes every table that belongs to one [projection](../docs/glossary.md#projection) family together. The builder prepares a replacement for each family table, then one database transaction performs the rename swap for the entire family. Readers therefore see either the old family or the new family, never a mix. Publication has no marker table.
+Each run reads canonical-lineage identity rows and normalized events into
+connection-local stages. It builds all retained families before one database
+transaction replaces either the chain's complete projection set or the keys
+affected by an incremental run or bounded redo. Readers therefore see either
+the prior set or the complete successor set, never a half-published mixture.
+Publication has no marker, claim, journal, dead-letter, or watermark table.
+The phase runner's advisory lock, state row, content hash, and redo marker are
+the operating control plane. Hydration is deferred to the later live multicall
+port and is not a hidden project-phase input.
+
+Projection JSON coverage fields say only that the row was derived from stored
+canonical inputs: `status = "projected"` and
+`exhaustiveness = "not_asserted"`. Support remains separate in
+`support_status` and `unsupported_reason`.
+
+`children_current.raw_label` and `children_current.raw_name` retain exact
+observed bytes, including shadow identities that cannot be represented safely
+as PostgreSQL text. For a topology-only child known by hashes, `labelhash` and
+`namehash` remain non-null while all four byte/text fields are null; synthesized
+placeholder bytes are never stored. The nullable `decoded_label` and
+`decoded_name` companions are present only when raw bytes exist and UTF-8
+decoding round-trips to them. A later preimage upgrades the same child row.
 
 ## Label data
 

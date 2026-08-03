@@ -9,6 +9,7 @@ use phase_runner::{
     ingest_phase::IngestPhase,
     interpret_phase::InterpretPhase,
     phase::PhaseSet,
+    project_phase::ProjectPhase,
     runner::{PhaseRunner, SupervisorReport},
 };
 use tokio_util::sync::CancellationToken;
@@ -49,9 +50,10 @@ async fn main() -> Result<()> {
                 .max(4);
             let database = RunnerDatabase::connect(&database_url, connections).await?;
             sync_manifests(database.pool(), &manifests_root).await?;
-            let phases = PhaseSet::with_ingest_and_interpret(
+            let phases = PhaseSet::with_ingest_interpret_and_project(
                 Arc::new(IngestPhase::new(database.pool().clone())),
                 Arc::new(InterpretPhase::new(database.pool().clone())),
+                Arc::new(ProjectPhase::new(database.pool().clone())),
             )?;
             let runner = Arc::new(PhaseRunner::new(
                 database,
@@ -78,9 +80,10 @@ async fn main() -> Result<()> {
             }
             let database = RunnerDatabase::connect(&database_url, 4).await?;
             sync_manifests(database.pool(), &manifests_root).await?;
-            let phases = PhaseSet::with_ingest_and_interpret(
+            let phases = PhaseSet::with_ingest_interpret_and_project(
                 Arc::new(IngestPhase::new(database.pool().clone())),
                 Arc::new(InterpretPhase::new(database.pool().clone())),
+                Arc::new(ProjectPhase::new(database.pool().clone())),
             )?;
             let runner = PhaseRunner::new(
                 database,

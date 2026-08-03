@@ -232,6 +232,66 @@ async fn schema_v2_manifest_authority_change_requires_derived_redo() -> Result<(
 }
 
 #[tokio::test]
+async fn basenames_execution_retirement_invalidates_the_base_project_epoch() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_sync_basenames_dependency").await?;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests/mainnet");
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&root)?).await?;
+
+    let store = PhaseStore::new(scratch.pool().clone());
+    for chain_id in ["ethereum-mainnet", "base-mainnet"] {
+        store.initialize_chain(chain_id).await?;
+        sqlx::query(
+            "
+            UPDATE chain_phase_state
+            SET phase_status = 'completed',
+                input_content_hash = $2,
+                started_at = now(),
+                finished_at = now()
+            WHERE chain_id = $1
+              AND phase_name IN ('interpret', 'project')
+            ",
+        )
+        .bind(chain_id)
+        .bind(INTERPRETER_CONTENT_HASH)
+        .execute(scratch.pool())
+        .await?;
+    }
+
+    seed_chain_head(scratch.pool(), "ethereum-mainnet", 30_000_000).await?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(root.join("base"))?).await?;
+
+    let project_hashes: Vec<(String, String)> = sqlx::query_as(
+        "
+        SELECT chain_id, input_content_hash
+        FROM chain_phase_state
+        WHERE chain_id IN ('ethereum-mainnet', 'base-mainnet')
+          AND phase_name = 'project'
+        ORDER BY chain_id
+        ",
+    )
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(project_hashes.len(), 2);
+    assert!(
+        project_hashes
+            .iter()
+            .all(|(_, hash)| hash.starts_with("manifest-authority:")),
+        "both the Ethereum authority owner and its Base projection consumer must redo: {project_hashes:?}"
+    );
+    let base_interpret_hash: String = sqlx::query_scalar(
+        "SELECT input_content_hash
+         FROM chain_phase_state
+         WHERE chain_id = 'base-mainnet' AND phase_name = 'interpret'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(base_interpret_hash, INTERPRETER_CONTENT_HASH);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn schema_v2_manifest_readmission_appends_an_address_epoch() -> Result<()> {
     let scratch = ScratchDatabase::create("production_manifest_sync_address_epoch").await?;
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
