@@ -9,10 +9,16 @@ use crate::{
     config::SourceConfig,
     error::{RunnerError, RunnerResult},
     heads::BlockMarker,
-    phase::{IngestCursor, PhaseName, PhaseProgress, PhaseResume},
+    phase::{IngestCursor, PhaseName, PhaseProgress, PhaseResume, VerificationLevel},
 };
 
-type StoredPhasePosition = (Option<i64>, Option<String>, Option<i64>, Option<String>);
+type StoredPhasePosition = (
+    Option<i64>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+);
 
 pub(crate) async fn update_progress(
     pool: &PgPool,
@@ -175,7 +181,7 @@ pub(crate) async fn record_live_verification_mismatch(
             updated_at = now()
         WHERE chain_id = $1
           AND phase_name = 'live'
-          AND phase_status IN ('idle', 'running', 'paused', 'failed')
+          AND phase_status IN ('idle', 'running', 'paused', 'completed', 'failed')
           AND NOT redo_in_progress
         ",
     )
@@ -409,7 +415,8 @@ pub(crate) async fn load_phase_resume(
             SELECT current_block_number,
                    current_block_hash,
                    target_block_number,
-                   target_block_hash
+                   target_block_hash,
+                   verification_level
             FROM chain_phase_state
             WHERE chain_id = $1
               AND phase_name = $2
@@ -424,11 +431,12 @@ pub(crate) async fn load_phase_resume(
             "failed to load resume position for chain {chain_id} phase {phase}: {error}"
         ))
     })?;
-    let (current_number, current_hash, target_number, target_hash) = position.ok_or_else(|| {
-        RunnerError::data_integrity(format!(
-            "phase state is missing for chain {chain_id} phase {phase}"
-        ))
-    })?;
+    let (current_number, current_hash, target_number, target_hash, verification_level) =
+        position.ok_or_else(|| {
+            RunnerError::data_integrity(format!(
+                "phase state is missing for chain {chain_id} phase {phase}"
+            ))
+        })?;
     let current = marker_from_pair(current_number, current_hash);
     let target = marker_from_pair(target_number, target_hash);
     let ingest_cursors = if phase == PhaseName::Ingest {
@@ -439,6 +447,7 @@ pub(crate) async fn load_phase_resume(
     Ok(PhaseResume {
         current,
         target,
+        verification_level: parse_verification_level(verification_level.as_deref())?,
         ingest_cursors: Arc::from(ingest_cursors),
     })
 }
@@ -453,7 +462,8 @@ pub(crate) async fn load_redo_resume(
         SELECT redo_current_block_number,
                redo_current_block_hash,
                redo_target_block_number,
-               redo_target_block_hash
+               redo_target_block_hash,
+               verification_level
         FROM chain_phase_state
         WHERE chain_id = $1
           AND phase_name = $2
@@ -469,11 +479,12 @@ pub(crate) async fn load_redo_resume(
             "failed to load redo resume position for chain {chain_id} phase {phase}: {error}"
         ))
     })?;
-    let (current_number, current_hash, target_number, target_hash) = position.ok_or_else(|| {
-        RunnerError::data_integrity(format!(
-            "active redo state is missing for chain {chain_id} phase {phase}"
-        ))
-    })?;
+    let (current_number, current_hash, target_number, target_hash, verification_level) =
+        position.ok_or_else(|| {
+            RunnerError::data_integrity(format!(
+                "active redo state is missing for chain {chain_id} phase {phase}"
+            ))
+        })?;
     let ingest_cursors = if phase == PhaseName::Ingest {
         load_ingest_cursors(pool, chain_id).await?
     } else {
@@ -482,8 +493,22 @@ pub(crate) async fn load_redo_resume(
     Ok(PhaseResume {
         current: marker_from_pair(current_number, current_hash),
         target: marker_from_pair(target_number, target_hash),
+        verification_level: parse_verification_level(verification_level.as_deref())?,
         ingest_cursors: Arc::from(ingest_cursors),
     })
+}
+
+fn parse_verification_level(value: Option<&str>) -> RunnerResult<Option<VerificationLevel>> {
+    value
+        .map(|value| match value {
+            "quick_synced" => Ok(VerificationLevel::QuickSynced),
+            "cross_checked" => Ok(VerificationLevel::CrossChecked),
+            "node_checked" => Ok(VerificationLevel::NodeChecked),
+            value => Err(RunnerError::data_integrity(format!(
+                "phase state contains unknown verification level {value:?}"
+            ))),
+        })
+        .transpose()
 }
 
 async fn load_ingest_cursors(pool: &PgPool, chain_id: &str) -> RunnerResult<Vec<IngestCursor>> {

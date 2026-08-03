@@ -55,6 +55,11 @@ impl PhaseRunner {
         chain: &ChainConfig,
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
+        self.phases.get(PhaseName::Verify).preflight(
+            &chain.chain_id,
+            &chain.sources,
+            &RunMode::Normal,
+        )?;
         let pair_cancellation = cancellation.child_token();
         let live_mismatch = Arc::new(OnceLock::new());
         let verify = self.run_phase_with_restart(
@@ -74,11 +79,24 @@ impl PhaseRunner {
         tokio::select! {
             verify_result = &mut verify => {
                 if let Err(error) = verify_result {
-                    if error.kind() == ErrorKind::VerificationMismatch {
+                    let verification_mismatch = error.kind() == ErrorKind::VerificationMismatch;
+                    if verification_mismatch {
                         let _ = live_mismatch.set(error.to_string());
                     }
                     pair_cancellation.cancel();
-                    return match live.await {
+                    let live_result = live.await;
+                    let error = if verification_mismatch {
+                        match self.record_mismatch_if_present(chain, &live_mismatch).await {
+                            Ok(()) => error,
+                            Err(record_error) => error.with_secondary(
+                                "record live stop after verification failed",
+                                record_error,
+                            ),
+                        }
+                    } else {
+                        error
+                    };
+                    return match live_result {
                         Ok(()) => Err(error),
                         Err(live_error) => Err(error.with_secondary(
                             "stop live after verification failed",
@@ -89,13 +107,46 @@ impl PhaseRunner {
                 live.await
             }
             live_result = &mut live => {
-                if let Err(error) = live_result {
+                if let Err(live_error) = live_result {
                     pair_cancellation.cancel();
-                    let _ = verify.await;
-                    return Err(error);
+                    return match verify.await {
+                        Err(verify_error)
+                            if verify_error.kind() == ErrorKind::VerificationMismatch =>
+                        {
+                            let _ = live_mismatch.set(verify_error.to_string());
+                            let error = verify_error.with_secondary(
+                                "run the paired live phase",
+                                live_error,
+                            );
+                            match self.record_mismatch_if_present(chain, &live_mismatch).await {
+                                Ok(()) => Err(error),
+                                Err(record_error) => Err(error.with_secondary(
+                                    "record live stop after verification failed",
+                                    record_error,
+                                )),
+                            }
+                        }
+                        Err(verify_error) => Err(live_error.with_secondary(
+                            "stop verification after live failed",
+                            verify_error,
+                        )),
+                        Ok(()) => Err(live_error),
+                    };
                 }
                 pair_cancellation.cancel();
-                verify.await
+                match verify.await {
+                    Err(error) if error.kind() == ErrorKind::VerificationMismatch => {
+                        let _ = live_mismatch.set(error.to_string());
+                        match self.record_mismatch_if_present(chain, &live_mismatch).await {
+                            Ok(()) => Err(error),
+                            Err(record_error) => Err(error.with_secondary(
+                                "record live stop after verification failed",
+                                record_error,
+                            )),
+                        }
+                    }
+                    result => result,
+                }
             }
         }
     }

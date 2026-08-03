@@ -102,6 +102,11 @@ impl PhaseRunner {
         }
 
         if chain.verify_before_live {
+            self.phases.get(PhaseName::Verify).preflight(
+                &chain.chain_id,
+                &chain.sources,
+                &RunMode::Normal,
+            )?;
             self.run_phase_with_restart(
                 chain,
                 PhaseName::Verify,
@@ -136,9 +141,11 @@ impl PhaseRunner {
             }
             RedoPhase::Phase(phase) => phase,
         };
-        self.phases.get(phase).preflight_redo()?;
-        self.store.initialize_chain(&chain.chain_id).await?;
         let mode = RunMode::Redo(range);
+        self.phases
+            .get(phase)
+            .preflight(&chain.chain_id, &chain.sources, &mode)?;
+        self.store.initialize_chain(&chain.chain_id).await?;
         self.run_phase_with_restart(chain, phase, mode, cancellation.clone())
             .await?;
         if phase == PhaseName::Interpret
@@ -464,6 +471,13 @@ impl PhaseRunner {
                 &progress,
                 matches!(&outcome, PhaseBatchOutcome::Complete(_)),
             )?;
+            if phase_name == PhaseName::Verify {
+                crate::verify_phase::validate_reported_level(
+                    &chain.chain_id,
+                    &chain.sources,
+                    progress.verification_level,
+                )?;
+            }
             if phase_name == PhaseName::Ingest && matches!(mode, RunMode::Normal) {
                 ingest_progress::validate(
                     &chain.sources,

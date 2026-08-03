@@ -13,7 +13,9 @@ the same PostgreSQL database.
 3. Apply migrations with `./scripts/migrate`.
 4. Before the first configured phase-runner start, run
    `cargo phase -- init-schema` once.
-5. Run `./scripts/dev-up`.
+5. Provision the separate SELECT-only verification login described in
+   [`deployment.md`](deployment.md#phase-runner-configuration).
+6. Run `./scripts/dev-up`.
 
 The default compose stack provides the retained API/worker database on
 `127.0.0.1:5432`. The retained migrations live in `public`; the phase runner
@@ -54,7 +56,10 @@ Pass a focused command after `--`:
 ```
 
 `BIGNAME_TEST_DATABASE_URL` may instead name an existing PostgreSQL server
-whose configured user can create and drop temporary test databases.
+whose configured user can create and drop temporary test databases. The
+phase-runner verification integration tests also create one shared, unprivileged
+test login role; that server user therefore needs `CREATEROLE` for the full
+phase-runner suite.
 
 ## Bootstrap migration hygiene
 
@@ -67,10 +72,12 @@ writer has been removed.
 
 ## Stage B phase runner
 
-The current phase runner implements `ingest`, `interpret`, `project`, and
-continuous `live` follow. The read-only `verify` slot remains deferred to B4;
-chains configured with `verify-before-live` stop there without claiming a trust
-level. The API still reads the legacy public-schema projections until Stage C.
+The current phase runner implements `ingest`, `interpret`, `project`, read-only
+`verify`, and continuous `live` follow. Verification compares only finalized
+history: Base dRPC records `cross_checked` through the Coinbase-to-dRPC ingest
+seam, while Ethereum local reth records `node_checked` through its finalized
+marker. The API still reads the legacy public-schema
+projections until Stage C.
 
 Set the [deployment profile](glossary.md#deployment-profile) root and
 chain/source descriptors, for example:
@@ -78,14 +85,17 @@ chain/source descriptors, for example:
 ```sh
 export BIGNAME_PHASE_RUNNER_MANIFESTS_ROOT=manifests/mainnet
 export BIGNAME_PHASE_RUNNER_CHAINS=ethereum-mainnet
+export BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL=postgresql://bigname_verify:<secret>@127.0.0.1:5432/bigname
 export RETH_DATA_DIR=/var/lib/reth/mainnet
 export BIGNAME_PHASE_RUNNER_SOURCES=ethereum-mainnet:reth:reth_db:ethereum_head:0=RETH_DATA_DIR
 export BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS=ethereum-mainnet=http://127.0.0.1:8545
 ```
 
 Then `./scripts/dev-up` launches the phase runner alongside API and worker. The
-runner uses `BIGNAME_DATABASE_URL`, selects `bigname_phase` before `public`,
-executes the initial spine, and then follows the live head until cancellation.
+writer phases use `BIGNAME_DATABASE_URL`; verification uses the separately
+credentialed URL and refuses a role that can write application relations. Both
+select `bigname_phase` before `public`. The runner executes the initial spine
+and then follows the live head until cancellation.
 Initialize the phase schema once before the first bounded or supervised
 invocation:
 
@@ -93,7 +103,7 @@ invocation:
 cargo phase -- init-schema
 ```
 
-For bounded verification, invoke an implemented phase explicitly with
+For bounded phase work, invoke an implemented phase explicitly with
 `BIGNAME_DATABASE_URL` pointing at the shared PostgreSQL database:
 
 ```sh
@@ -102,8 +112,19 @@ cargo phase -- redo \
   --phase ingest \
   --from-block 0 \
   --to-block 100 \
-  --source ethereum-mainnet:rpc:json_rpc:ethereum_head:0=ETHEREUM_RPC_URL
+  --source ethereum-mainnet:reth:reth_db:ethereum_head:0=RETH_DATA_DIR
 ```
+
+Use `--phase verify` with the same `reth_db` descriptor to recheck a finalized
+Ethereum range; it also requires
+`BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL` (or
+`--verification-database-url`). Base verify redo uses its `drpc` descriptor and
+can record only `cross_checked`; the descriptor must retain the fixed
+`48,428,000` source start, and a range above that seam is rejected before the
+redo marker is written. A partial redo retains the level for the
+whole recorded extent, while a full-extent redo can change it.
+The reader URL must authenticate the dedicated role directly and resolve to the
+same PostgreSQL system/database identity as `BIGNAME_DATABASE_URL`.
 
 Interpret and project redo use the same range without requiring an ingest
 provider source. Project redo, including the automatic project cascade after

@@ -59,6 +59,30 @@ impl Phase for FailingInterpretPhase {
     }
 }
 
+struct FailingVerifyPreflightPhase;
+
+impl Phase for FailingVerifyPreflightPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Verify
+    }
+
+    fn preflight(
+        &self,
+        _chain_id: &str,
+        _sources: &[SourceConfig],
+        _mode: &RunMode,
+    ) -> phase_runner::error::RunnerResult<()> {
+        Err(RunnerError::new(
+            phase_runner::error::ErrorKind::Configuration,
+            "fixture verify preflight failed",
+        ))
+    }
+
+    fn run_batch(&self, _context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async { panic!("failed verify preflight must prevent phase execution") })
+    }
+}
+
 #[tokio::test]
 async fn live_head_walk_advances_published_markers() -> Result<()> {
     let scratch = ScratchDatabase::create("production_live_head_walk").await?;
@@ -74,6 +98,7 @@ async fn live_head_walk_advances_published_markers() -> Result<()> {
         Arc::new(IngestPhase::with_engine(Arc::clone(&ingest_engine))),
         Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
         Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(LoopbackPhase::new(PhaseName::Verify)),
         Arc::new(LivePhase::with_engine(ingest_engine)),
     )?;
     let runner = Arc::new(PhaseRunner::new(
@@ -541,6 +566,7 @@ async fn live_lower_head_waits_for_the_stamped_range_before_downstream_redo() ->
         Arc::new(IngestPhase::with_engine(Arc::clone(&ingest_engine))),
         Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
         Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(LoopbackPhase::new(PhaseName::Verify)),
         Arc::new(LivePhase::with_engine(ingest_engine)),
     )?;
     let runner = Arc::new(PhaseRunner::new(
@@ -835,6 +861,7 @@ async fn unsupported_live_redo_is_rejected_without_persisting_redo_state() -> Re
             Arc::new(IngestPhase::with_engine(Arc::clone(&engine))),
             Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
             Arc::new(LoopbackPhase::new(PhaseName::Project)),
+            Arc::new(LoopbackPhase::new(PhaseName::Verify)),
             Arc::new(LivePhase::with_engine(engine)),
         )?,
         CapacityGuard::system(CapacityConfig::default()),
@@ -864,9 +891,9 @@ async fn unsupported_live_redo_is_rejected_without_persisting_redo_state() -> Re
 }
 
 #[tokio::test]
-async fn deferred_verify_redo_is_rejected_before_persisting_redo_state() -> Result<()> {
-    let scratch = ScratchDatabase::create("production_live_deferred_verify_redo").await?;
-    let chain = "live-deferred-verify-redo";
+async fn verify_preflight_failure_is_rejected_before_persisting_redo_state() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_live_verify_preflight_redo").await?;
+    let chain = "live-verify-preflight-redo";
     seed_branch(scratch.pool(), chain, 1, 1, None).await?;
     publish(scratch.pool(), chain, 1, 1, 0, 0).await?;
     seed_completed_spine(scratch.pool(), chain, 1, &block_hash(1, 1)).await?;
@@ -906,10 +933,11 @@ async fn deferred_verify_redo_is_rejected_before_persisting_redo_state() -> Resu
             Arc::new(IngestPhase::with_engine(Arc::clone(&engine))),
             Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
             Arc::new(LoopbackPhase::new(PhaseName::Project)),
+            Arc::new(FailingVerifyPreflightPhase),
             Arc::new(LivePhase::with_engine(engine)),
         )?,
         CapacityGuard::system(CapacityConfig::default()),
-        "production-live-deferred-verify-redo",
+        "production-live-verify-preflight-redo",
         fast_timing(),
     )?;
     let error = runner
@@ -920,9 +948,13 @@ async fn deferred_verify_redo_is_rejected_before_persisting_redo_state() -> Resu
             CancellationToken::new(),
         )
         .await
-        .expect_err("the B3 deferred verifier must refuse redo before creating its marker");
+        .expect_err("verify preflight must refuse redo before creating its marker");
     assert_eq!(error.kind(), phase_runner::error::ErrorKind::Configuration);
-    assert!(error.to_string().contains("B4 verifier"));
+    assert!(
+        error
+            .to_string()
+            .contains("fixture verify preflight failed")
+    );
 
     let after: (
         String,
@@ -1714,6 +1746,7 @@ fn production_runner(
         Arc::new(IngestPhase::with_engine(Arc::clone(&engine))),
         Arc::new(InterpretPhase::new(scratch.pool().clone())),
         Arc::new(ProjectPhase::new(scratch.pool().clone())),
+        Arc::new(LoopbackPhase::new(PhaseName::Verify)),
         Arc::new(LivePhase::with_engine(engine)),
     )?;
     Ok(Arc::new(PhaseRunner::new(

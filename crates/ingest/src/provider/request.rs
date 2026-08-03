@@ -122,6 +122,8 @@ impl JsonRpcProvider {
     }
 
     async fn send(&self, request: Value) -> Result<Value> {
+        self.request_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (client, client_id) = self.client.snapshot();
         let response = match client
             .post(self.endpoint.clone())

@@ -156,6 +156,68 @@ impl JsonRpcProvider {
         Ok(logs)
     }
 
+    pub(super) async fn verification_logs(
+        &self,
+        from_block: i64,
+        to_block: i64,
+        addresses: &[String],
+        topics: &[String],
+    ) -> Result<Vec<Log>> {
+        let values = self
+            .range_log_values(from_block, to_block, addresses, topics)
+            .await?;
+        let logs = values
+            .iter()
+            .map(Log::from_unpinned_value)
+            .map(|result| {
+                let log = result?;
+                if !(from_block..=to_block).contains(&log.block_number) {
+                    bail!(
+                        "provider returned verification log at block {} outside \
+                         {from_block}..={to_block}",
+                        log.block_number
+                    );
+                }
+                Ok(log)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(logs)
+    }
+
+    async fn range_log_values(
+        &self,
+        from_block: i64,
+        to_block: i64,
+        addresses: &[String],
+        topics: &[String],
+    ) -> Result<Vec<Value>> {
+        if from_block > to_block || topics.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut queue = VecDeque::from([(from_block, to_block)]);
+        let mut values = Vec::new();
+        while let Some((first, last)) = queue.pop_front() {
+            let result = self
+                .request(
+                    "eth_getLogs",
+                    vec![range_log_filter(first, last, addresses, topics)?],
+                )
+                .await;
+            match result {
+                Ok(Some(Value::Array(logs))) => values.extend(logs),
+                Ok(Some(_)) => bail!("provider returned a non-array log result"),
+                Ok(None) => bail!("provider returned null logs for {first}..={last}"),
+                Err(error) if first < last && range_too_large(&error) => {
+                    let middle = first + (last - first) / 2;
+                    queue.push_front((middle + 1, last));
+                    queue.push_front((first, middle));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(values)
+    }
+
     pub async fn bundles(&self, resolved: &[ResolvedBlock]) -> Result<Vec<BlockBundle>> {
         let mut bundles = Vec::with_capacity(resolved.len());
         for expected in resolved {

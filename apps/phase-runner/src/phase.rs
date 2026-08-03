@@ -136,6 +136,7 @@ pub struct PhaseContext {
 pub struct PhaseResume {
     pub current: Option<crate::heads::BlockMarker>,
     pub target: Option<crate::heads::BlockMarker>,
+    pub verification_level: Option<VerificationLevel>,
     pub ingest_cursors: Arc<[IngestCursor]>,
 }
 
@@ -200,7 +201,12 @@ impl PhaseBatchOutcome {
 pub trait Phase: Send + Sync {
     fn name(&self) -> PhaseName;
 
-    fn preflight_redo(&self) -> RunnerResult<()> {
+    fn preflight(
+        &self,
+        _chain_id: &str,
+        _sources: &[SourceConfig],
+        _mode: &RunMode,
+    ) -> RunnerResult<()> {
         Ok(())
     }
 
@@ -302,35 +308,6 @@ impl Phase for UnavailablePhase {
     }
 }
 
-#[derive(Clone, Debug)]
-struct DeferredVerifyPhase;
-
-impl Phase for DeferredVerifyPhase {
-    fn name(&self) -> PhaseName {
-        PhaseName::Verify
-    }
-
-    fn preflight_redo(&self) -> RunnerResult<()> {
-        Err(RunnerError::new(
-            crate::error::ErrorKind::Configuration,
-            "verify redo is unavailable until the B4 verifier is implemented",
-        ))
-    }
-
-    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
-        if !matches!(context.mode, RunMode::Normal)
-            && let Err(error) = self.preflight_redo()
-        {
-            return Box::pin(async move { Err(error) });
-        }
-        Box::pin(async move {
-            // B4 supplies the read-only verifier. Until then this slot remains active without
-            // claiming a verification level, allowing Base live follow to run beside it.
-            Ok(PhaseBatchOutcome::Idle(PhaseProgress::default()))
-        })
-    }
-}
-
 #[derive(Clone)]
 pub struct PhaseSet {
     phases: [Arc<dyn Phase>; 5],
@@ -400,19 +377,29 @@ impl PhaseSet {
         ])
     }
 
+    pub fn with_ingest_interpret_project_and_verify(
+        ingest: Arc<dyn Phase>,
+        interpret: Arc<dyn Phase>,
+        project: Arc<dyn Phase>,
+        verify: Arc<dyn Phase>,
+    ) -> RunnerResult<Self> {
+        Self::new([
+            ingest,
+            interpret,
+            project,
+            verify,
+            Arc::new(UnavailablePhase::new(PhaseName::Live)),
+        ])
+    }
+
     pub fn with_ingest_interpret_project_and_live(
         ingest: Arc<dyn Phase>,
         interpret: Arc<dyn Phase>,
         project: Arc<dyn Phase>,
+        verify: Arc<dyn Phase>,
         live: Arc<dyn Phase>,
     ) -> RunnerResult<Self> {
-        let mut phases = Self::new([
-            ingest,
-            interpret,
-            project,
-            Arc::new(DeferredVerifyPhase),
-            live,
-        ])?;
+        let mut phases = Self::new([ingest, interpret, project, verify, live])?;
         phases.continuous_live_follow = true;
         Ok(phases)
     }
@@ -470,30 +457,17 @@ mod tests {
         assert_eq!(phases.get(PhaseName::Project).name(), PhaseName::Project);
     }
 
-    #[tokio::test]
-    async fn deferred_verify_rejects_redo_without_claiming_trust() {
+    #[test]
+    fn production_phase_set_uses_the_supplied_verifier() {
         let phases = PhaseSet::with_ingest_interpret_project_and_live(
             Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
             Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
             Arc::new(LoopbackPhase::new(PhaseName::Project)),
+            Arc::new(LoopbackPhase::new(PhaseName::Verify)),
             Arc::new(LoopbackPhase::new(PhaseName::Live)),
         )
         .unwrap();
-        let error = phases
-            .get(PhaseName::Verify)
-            .run_batch(PhaseContext {
-                chain_id: "test-chain".to_owned(),
-                phase: PhaseName::Verify,
-                mode: RunMode::Redo(BlockRange::new(0, 0).unwrap()),
-                sources: Arc::from([]),
-                available_heads: None,
-                live_handoff: None,
-                resume: PhaseResume::default(),
-            })
-            .await
-            .expect_err("deferred verification cannot complete a redo");
 
-        assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
-        assert!(error.to_string().contains("B4 verifier"));
+        assert_eq!(phases.get(PhaseName::Verify).name(), PhaseName::Verify);
     }
 }

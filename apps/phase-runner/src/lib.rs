@@ -25,5 +25,8 @@ mod state_heartbeat;
 mod state_persistence;
 mod supervisor;
 mod transitions;
+mod verify_compare;
+pub mod verify_phase;
+mod verify_store;
 
 pub use bigname_content_hash::INTERPRETER_CONTENT_HASH;

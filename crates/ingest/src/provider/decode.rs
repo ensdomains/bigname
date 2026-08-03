@@ -85,6 +85,20 @@ impl Receipt {
 }
 
 impl Log {
+    pub(super) fn from_unpinned_value(value: &Value) -> Result<Self> {
+        let log = decode_ref::<RpcLog>(value, "log")?;
+        Ok(Self {
+            block_hash: hash_hex(log.block_hash),
+            block_number: u256_i64(log.block_number, "log block number")?,
+            transaction_hash: hash_hex(log.transaction_hash),
+            transaction_index: u256_i64(log.transaction_index, "log transaction index")?,
+            log_index: u256_i64(log.log_index, "log index")?,
+            address: address_hex(log.address),
+            topics: log.topics.into_iter().map(hash_hex).collect(),
+            data: log.data.to_vec(),
+        })
+    }
+
     pub(super) fn from_value(
         value: &Value,
         expected_hash: &str,
@@ -314,5 +328,27 @@ mod tests {
             provider_error("blockHash log lookup failed", block_hash_error).kind(),
             ErrorKind::DataIntegrity
         );
+    }
+
+    #[test]
+    fn unpinned_log_decode_preserves_its_reported_position() -> Result<()> {
+        let value = json!({
+            "blockHash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "blockNumber": "0xa",
+            "transactionHash":
+                "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "transactionIndex": "0x1",
+            "logIndex": "0x2",
+            "address": "0xdddddddddddddddddddddddddddddddddddddddd",
+            "topics": [],
+            "data": "0x12"
+        });
+
+        let log = Log::from_unpinned_value(&value)?;
+        assert_eq!(log.block_number, 10);
+        assert_eq!(log.transaction_index, 1);
+        assert_eq!(log.log_index, 2);
+        assert_eq!(log.data, vec![0x12]);
+        Ok(())
     }
 }
