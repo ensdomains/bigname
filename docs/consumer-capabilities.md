@@ -70,6 +70,26 @@ separate support status and reason fields to decide whether a setup is
 supported. The retained v1 API continues reading the legacy public schema
 until the Stage C route cutover; this wording change does not re-point a route.
 
+The Stage B6 schema-v2 lookup engine is likewise staged for the Stage C route
+cutover and does not re-point a v1 route in this change. It reads a supported
+exact name, projected resolver topology, and manifest-declared execution
+entrypoint at the newest processed authoritative block and any
+timestamp-aligned projected auxiliary position. For direct and alias paths,
+the projected record boundary identifies the exact `record_inventory_current`
+comparison row. A direct live answer is durable only when it disagrees with
+that indexed entry: the engine writes the small
+[resolution divergence ledger](glossary.md#resolution-divergence-ledger) after
+re-locking the exact inventory row it compared. A wildcard lookup without an
+exact inventory comparison still executes live but cannot write or clear a
+divergence; it never substitutes the wildcard ancestor's inventory. Agreement
+writes no row, and a CCIP-participating answer never writes or clears the
+ledger. The successor stores no reusable outcome, request-validation state,
+revalidation state, or durable trace.
+The retained ENS primary-name execution path selects the registry and Universal
+Resolver from manifests at the readable Ethereum head, applies the existing raw
+claim normalization gate before any forward call, and does not use the record
+divergence ledger.
+
 ## Chain synchronization status
 
 Stage C will derive each chain's synchronization status from the schema-v2

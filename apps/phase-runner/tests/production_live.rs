@@ -7,8 +7,8 @@ use alloy_primitives::Bytes;
 use alloy_sol_types::SolValue;
 use anyhow::Result;
 use axum::{Json, Router, extract::State, routing::post};
-use bigname_execution::ChainRpcUrls;
 use bigname_ingest::{Engine, LiveBatchRequest, Marker, SourceDescriptor};
+use bigname_lookup::ChainRpcUrls;
 use bigname_project::Hydrator;
 use phase_runner::{
     INTERPRETER_CONTENT_HASH,

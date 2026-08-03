@@ -6,6 +6,7 @@ members = [
     "apps/worker",
     "crates/ingest",
     "crates/interpret",
+    "crates/lookup",
     "crates/project",
     "crates/domain",
     "crates/metrics",
@@ -57,6 +58,7 @@ bigname-domain = { path = "crates/domain" }
 bigname-execution = { path = "crates/execution" }
 bigname-ingest = { path = "crates/ingest" }
 bigname-interpret = { path = "crates/interpret" }
+bigname-lookup = { path = "crates/lookup" }
 bigname-project = { path = "crates/project" }
 bigname-manifests = { path = "crates/manifests" }
 bigname-metrics = { path = "crates/metrics" }

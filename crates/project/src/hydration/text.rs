@@ -1,4 +1,4 @@
-use bigname_execution::{
+use bigname_lookup::{
     ChainRpcUrls, EnsTextRecordMulticallBlock, EnsTextRecordMulticallRequest,
     EnsTextRecordMulticallResult, MULTICALL3_ADDRESS, execute_ens_text_record_multicall,
 };

@@ -226,7 +226,7 @@ pub enum ResolvedCommand {
         verification_database_url: String,
         manifests_root: PathBuf,
         runtime: RuntimeConfig,
-        hydration_rpc_urls: bigname_execution::ChainRpcUrls,
+        hydration_rpc_urls: bigname_lookup::ChainRpcUrls,
     },
     Redo {
         database_url: String,
@@ -238,7 +238,7 @@ pub enum ResolvedCommand {
         timing: TimingConfig,
         phase: RedoPhase,
         range: BlockRange,
-        hydration_rpc_urls: bigname_execution::ChainRpcUrls,
+        hydration_rpc_urls: bigname_lookup::ChainRpcUrls,
     },
     Rewind {
         database_url: String,
@@ -350,8 +350,8 @@ fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
     })
 }
 
-fn resolve_hydration_rpc_urls(entries: &[String]) -> RunnerResult<bigname_execution::ChainRpcUrls> {
-    bigname_execution::ChainRpcUrls::from_entries(entries).map_err(|error| {
+fn resolve_hydration_rpc_urls(entries: &[String]) -> RunnerResult<bigname_lookup::ChainRpcUrls> {
+    bigname_lookup::ChainRpcUrls::from_entries(entries).map_err(|error| {
         RunnerError::new(
             ErrorKind::Configuration,
             format!("invalid hydration RPC configuration: {error:#}"),

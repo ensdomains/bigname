@@ -26,7 +26,7 @@ impl ProjectPhase {
         }
     }
 
-    pub fn with_hydration(pool: PgPool, rpc_urls: bigname_execution::ChainRpcUrls) -> Self {
+    pub fn with_hydration(pool: PgPool, rpc_urls: bigname_lookup::ChainRpcUrls) -> Self {
         Self {
             engine: Engine::new(pool.clone()),
             hydrator: Some(bigname_project::Hydrator::new(pool.clone(), rpc_urls)),

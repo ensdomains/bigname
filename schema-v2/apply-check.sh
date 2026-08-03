@@ -486,6 +486,19 @@ BEGIN
             )
         UNION ALL
         SELECT
+            'divergence writes guard the compared record inventory row',
+            EXISTS (
+                SELECT 1
+                FROM pg_proc procedure
+                JOIN pg_namespace namespace
+                  ON namespace.oid = procedure.pronamespace
+                WHERE namespace.nspname = current_schema()
+                  AND procedure.proname = 'write_resolution_divergence'
+                  AND pg_get_function_identity_arguments(procedure.oid) =
+                      'compared_resource_id uuid, compared_boundary_key text, compared_row_xmin text, requested_logical_name_id text, requested_resolver_chain_id text, requested_resolver_address text, requested_record_key text, compared_positions jsonb, indexed_answer jsonb, live_answer jsonb, used_ccip_read boolean'
+            )
+        UNION ALL
+        SELECT
             format('%s carries its closed vocabulary', required.table_name),
             EXISTS (
                 SELECT 1
@@ -713,6 +726,9 @@ DECLARE
     accepted_projection_relationship_mismatches text[] := ARRAY[]::text[];
     accepted_manifest_mismatches text[] := ARRAY[]::text[];
     accepted_divergence_canonicality text[] := ARRAY[]::text[];
+    divergence_guard_xmin text;
+    divergence_write_status text;
+    divergence_count bigint;
 BEGIN
     INSERT INTO chain_lineage (
         chain_id,
@@ -2004,6 +2020,168 @@ BEGIN
         RAISE EXCEPTION
             'identity tables accepted cross-chain relationships: %',
             array_to_string(accepted_cross_chain_relationships, ', ');
+    END IF;
+
+    INSERT INTO record_inventory_current (
+        resource_id,
+        record_version_boundary_key,
+        record_version_boundary,
+        selectors,
+        unsupported_families,
+        entries,
+        support_status,
+        provenance,
+        chain_positions,
+        canonicality_summary,
+        manifest_version
+    ) VALUES (
+        '00000000-0000-0000-0000-000000000011',
+        'schema-v2-lookup-guard',
+        '{"kind": "schema-v2-lookup-guard"}'::jsonb,
+        '[]'::jsonb,
+        '[]'::jsonb,
+        '[]'::jsonb,
+        'supported',
+        '{}'::jsonb,
+        '{}'::jsonb,
+        '{}'::jsonb,
+        1
+    );
+
+    SELECT xmin::text
+    INTO divergence_guard_xmin
+    FROM record_inventory_current
+    WHERE resource_id = '00000000-0000-0000-0000-000000000011'
+      AND record_version_boundary_key = 'schema-v2-lookup-guard';
+
+    SELECT write_resolution_divergence(
+        '00000000-0000-0000-0000-000000000011',
+        'schema-v2-lookup-guard',
+        divergence_guard_xmin,
+        'schema-v2-check:namehash-0',
+        'schema-v2-check',
+        'resolver-address-guard',
+        'addr:60',
+        '{
+            "resolver": {
+                "chain_id": "schema-v2-check",
+                "block_hash": "block-0",
+                "block_number": 0,
+                "timestamp": "2026-01-01T00:00:00Z"
+            }
+        }'::jsonb,
+        '{"status": "not_found"}'::jsonb,
+        '{"status": "success", "value": "0x01"}'::jsonb,
+        false
+    ) INTO divergence_write_status;
+
+    IF divergence_write_status <> 'written'
+        OR NOT EXISTS (
+            SELECT 1
+            FROM resolution_divergences
+            WHERE resolver_address = 'resolver-address-guard'
+              AND indexed_result = '{"status": "not_found"}'::jsonb
+              AND live_result =
+                  '{"status": "success", "value": "0x01"}'::jsonb
+              AND observed_positions -> 'resolver' ->> 'block_hash' =
+                  'block-0'
+        )
+    THEN
+        RAISE EXCEPTION
+            'guarded divergence write did not store both answers and anchor';
+    END IF;
+
+    SELECT count(*)
+    INTO divergence_count
+    FROM resolution_divergences;
+
+    SELECT write_resolution_divergence(
+        '00000000-0000-0000-0000-000000000011',
+        'schema-v2-lookup-guard',
+        divergence_guard_xmin,
+        'schema-v2-check:namehash-0',
+        'schema-v2-check',
+        'resolver-address-guard',
+        'addr:60',
+        '{
+            "resolver": {
+                "chain_id": "schema-v2-check",
+                "block_hash": "orphaned-agreement",
+                "block_number": 1,
+                "timestamp": "2026-01-01T00:00:01Z"
+            }
+        }'::jsonb,
+        '{"status": "not_found"}'::jsonb,
+        '{"status": "not_found"}'::jsonb,
+        false
+    ) INTO divergence_write_status;
+
+    IF divergence_write_status <> 'guard_rejected'
+        OR NOT EXISTS (
+            SELECT 1
+            FROM resolution_divergences
+            WHERE resolver_address = 'resolver-address-guard'
+              AND request_kind = 'addr:60'
+              AND cleared_at IS NULL
+        )
+    THEN
+        RAISE EXCEPTION
+            'orphaned agreement cleared an older active divergence';
+    END IF;
+
+    SELECT write_resolution_divergence(
+        '00000000-0000-0000-0000-000000000011',
+        'schema-v2-lookup-guard',
+        divergence_guard_xmin || '-stale',
+        'schema-v2-check:namehash-0',
+        'schema-v2-check',
+        'resolver-address-stale-guard',
+        'text:url',
+        '{
+            "resolver": {
+                "chain_id": "schema-v2-check",
+                "block_hash": "block-0",
+                "block_number": 0,
+                "timestamp": "2026-01-01T00:00:00Z"
+            }
+        }'::jsonb,
+        '{"status": "not_found"}'::jsonb,
+        '{"status": "success", "value": "https://example.test"}'::jsonb,
+        false
+    ) INTO divergence_write_status;
+
+    IF divergence_write_status <> 'guard_rejected'
+        OR (SELECT count(*) FROM resolution_divergences) <> divergence_count
+    THEN
+        RAISE EXCEPTION
+            'row-unchanged guard accepted a stale projection comparison';
+    END IF;
+
+    SELECT write_resolution_divergence(
+        '00000000-0000-0000-0000-000000000011',
+        'schema-v2-lookup-guard',
+        divergence_guard_xmin,
+        'schema-v2-check:namehash-0',
+        'schema-v2-check',
+        'resolver-address-ccip-guard',
+        'text:ccip',
+        '{
+            "resolver": {
+                "chain_id": "schema-v2-check",
+                "block_hash": "block-0",
+                "block_number": 0,
+                "timestamp": "2026-01-01T00:00:00Z"
+            }
+        }'::jsonb,
+        '{"status": "not_found"}'::jsonb,
+        '{"status": "success", "value": "ccip"}'::jsonb,
+        true
+    ) INTO divergence_write_status;
+
+    IF divergence_write_status <> 'ccip_skipped'
+        OR (SELECT count(*) FROM resolution_divergences) <> divergence_count
+    THEN
+        RAISE EXCEPTION 'CCIP result reached the divergence ledger';
     END IF;
 
     INSERT INTO resolution_divergences (

@@ -1772,6 +1772,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "bigname-lookup"
+version = "0.1.0"
+dependencies = [
+ "alloy-json-rpc",
+ "alloy-primitives",
+ "alloy-sol-types",
+ "alloy-transport-http",
+ "anyhow",
+ "bigname-domain",
+ "bigname-test-support",
+ "futures-util",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "bigname-manifests"
 version = "0.1.0"
 dependencies = [
@@ -1801,7 +1821,7 @@ name = "bigname-project"
 version = "0.1.0"
 dependencies = [
  "bigname-domain",
- "bigname-execution",
+ "bigname-lookup",
  "bigname-storage",
  "serde_json",
  "sqlx",
@@ -5700,9 +5720,9 @@ dependencies = [
  "anyhow",
  "axum",
  "bigname-content-hash",
- "bigname-execution",
  "bigname-ingest",
  "bigname-interpret",
+ "bigname-lookup",
  "bigname-manifests",
  "bigname-project",
  "bigname-storage",
