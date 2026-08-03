@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use sqlx::{Executor, Postgres, Row};
+use sqlx::{Executor, Postgres};
 
 use super::{
     decode::{decode_raw_log, decode_raw_receipt, decode_raw_transaction},
@@ -127,50 +127,4 @@ where
     })?;
 
     row.map(decode_raw_log).transpose()
-}
-
-pub(super) async fn load_raw_block_hash_path<'e, E>(
-    executor: E,
-    chain_id: &str,
-    from_hash: &str,
-    stop_before_hash: Option<&str>,
-) -> Result<Vec<String>>
-where
-    E: Executor<'e, Database = Postgres>,
-{
-    let rows = sqlx::query(
-        r#"
-        WITH RECURSIVE raw_block_path AS (
-            SELECT chain_id, block_hash, parent_hash, 0 AS depth
-            FROM chain_lineage
-            WHERE chain_id = $1
-              AND block_hash = $2
-
-            UNION ALL
-
-            SELECT parent.chain_id, parent.block_hash, parent.parent_hash, raw_block_path.depth + 1
-            FROM chain_lineage AS parent
-            JOIN raw_block_path
-              ON parent.chain_id = raw_block_path.chain_id
-             AND parent.block_hash = raw_block_path.parent_hash
-            WHERE $3::TEXT IS NULL
-               OR parent.block_hash <> $3::TEXT
-        )
-        SELECT block_hash
-        FROM raw_block_path
-        ORDER BY depth
-        "#,
-    )
-    .bind(chain_id)
-    .bind(from_hash)
-    .bind(stop_before_hash)
-    .fetch_all(executor)
-    .await?;
-
-    rows.into_iter()
-        .map(|row| {
-            row.try_get::<String, _>("block_hash")
-                .context("missing block_hash in raw block path")
-        })
-        .collect()
 }

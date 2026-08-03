@@ -1,5 +1,11 @@
 # Production Docker Runbook
 
+> **Retired old-runtime runbook.** The Stage B source tree no longer contains
+> `bigname-indexer`, its repair commands, or its Compose service. Do not execute
+> the commands below against this revision. They are retained as operational
+> history until the project/live phase deployment runbook replaces them; use
+> [`../deployment.md`](../deployment.md) for the current executable inventory.
+
 This runbook is for operating the single-host Docker production stack from a
 server checkout. General deployment shape is documented in
 [`../deployment.md`](../deployment.md), public edge details in

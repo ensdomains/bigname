@@ -48,7 +48,7 @@ async fn get_events_returns_compact_canonical_rows_with_projection_filters() -> 
     )
     .await?;
 
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
             NormalizedEvent {

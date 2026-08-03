@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 
 use crate::{LoadedManifest, normalize_address};
 
-pub fn is_block_derived_preimage_source_family(source_family: &str) -> bool {
+fn is_block_derived_preimage_source_family(source_family: &str) -> bool {
     matches!(
         source_family,
         "ens_v1_registrar_l1"

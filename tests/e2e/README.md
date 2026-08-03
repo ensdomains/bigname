@@ -1,23 +1,20 @@
 # bigname end-to-end scenario tests
 
-This package exercises selected end-to-end paths against local EVM chains
-using contracts sourced from the pinned upstream checkouts. Where
-`tests/conformance` seeds synthetic rows directly into Postgres, this harness
-starts from actual contract emissions, drives on-chain state transitions, and
-checks the resulting raw facts, normalized events, projections, execution
-artifacts, or HTTP responses required by each scenario. Most scenarios use the
-real `bigname-indexer run` loop followed by one-shot projection replay and the
-real `bigname-api`; one focused smoke keeps `bigname-indexer run`,
-`bigname-worker run`, and the API live together.
+This package retains the pre-Stage-B end-to-end scenario inventory against
+local EVM chains. Its runtime driver still names the deleted `bigname-indexer`
+binary, so the scenarios are intentionally not runnable in this revision. The
+C-e2e port will retarget them once the project/live phase boundary exists.
+Until then this package is compile-only: it preserves scenario source and must
+continue to pass `cargo check --locked --all-targets`, but it is not evidence
+for the new ingest/interpret runtime.
 
 The two packages are complementary:
 
 - `tests/conformance` — fast, hermetic ownership of public route contracts,
   filter/mode/meta permutations, coverage semantics, and replay determinism
   over hand-authored state.
-- `tests/e2e` — selected high-value checks that upstream-shaped contract
-  emissions cross the real process and storage boundaries as expected, using
-  deployments loaded from pinned upstream artifacts or built from pinned
+- `tests/e2e` — retained high-value scenarios awaiting the C-e2e runtime port,
+  using deployments loaded from pinned upstream artifacts or built from pinned
   upstream sources.
 
 ## Prerequisites
@@ -28,7 +25,7 @@ The two packages are complementary:
 - a test Postgres: run through `scripts/test-db`
 
 ```sh
-scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml -- --test-threads=8
+cargo check --locked --all-targets --manifest-path tests/e2e/Cargo.toml
 ```
 
 The harness migrates one fingerprinted template database on that test server
@@ -40,6 +37,9 @@ templates persist as a test-server cache, which is another reason to point the
 suite only at an isolated test PostgreSQL server.
 
 ## How a scenario runs
+
+The steps below describe the retained pre-Stage-B driver. They are not
+executable against the current phase runner until the C-e2e port lands.
 
 1. **Chain** — `harness::anvil` starts a local node with a fixed genesis
    timestamp, presented to the indexer by provider label (`ethereum-mainnet`
@@ -416,15 +416,6 @@ route inventory or a claim that every protocol transition is covered.
   (upstream: .refs/basenames/src/L2/resolver/ResolverBase.sol:L35 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/L2/resolver/ContentHashResolver.sol:L32 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/L2/resolver/ContentHashResolver.sol:L34 @ basenames@1809bbc).
-- `basenames_lifecycle::unadmitted_resolver_rotation_stays_profile_gated_then_clears`
-  — rotates to an L2Resolver built against an alternate registry. An initial
-  backfill discovers the resolver, then a focused watched-target backfill
-  retains its raw `TextChanged` log and code hash. The persisted
-  immutable-dependent code-hash mismatch is therefore the record-consumption
-  gate: zero `RecordChanged` events derive. A final rotation to zero clears
-  declared resolver state
-  (upstream: .refs/basenames/src/L2/L2Resolver.sol:L113 @ basenames@1809bbc)
-  (upstream: .refs/basenames/src/L2/L2Resolver.sol:L114 @ basenames@1809bbc).
 - `basenames_lifecycle::legacy_reverse_registrar_stays_registry_and_raw_record_only`
   — drives helper `claimForBaseAddr` and `setNameForAddr`; a claim-only ingest
   derives `NewOwner`, while the combined replay retains the latter child
@@ -441,29 +432,6 @@ route inventory or a claim that every protocol transition is covered.
   `registerOnly` retains only the raw token mint and creates no registry node
   (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L237 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L248 @ basenames@1809bbc).
-- `discovery_semantics::ens_v2_prefetched_discovery_and_lifecycle_semantics`
-  — restores interpretation-level role grant/revoke, subregistry swap, and
-  unregister/re-register coverage with all raw blocks and logs supplied before
-  each interpreter pass. It asserts children present/absent across the swap and
-  admits a registry that has a `RegistryCreated` announcement but no parent
-  link. The announcement is declared and emitted by the pinned registry
-  (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@ccaeb58)
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@ccaeb58).
-  This scenario deliberately makes no in-session discovered-target fetch or
-  live-checkpoint claim.
-- `discovery_semantics::ens_v1_match_all_resolver_without_pointer_from_prefetched_raw_facts`
-  — writes an ETH address record through a resolver absent from both manifest
-  targets and discovery edges while the name's registry resolver remains zero.
-  Signature-selected interpretation retains both wire events emitted for the
-  ETH update
-  (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L59 @ ens_v1@91c966f)
-  (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L61 @ ens_v1@91c966f).
-- `discovery_semantics::declared_proxy_upgraded_history_from_prefetched_raw_facts`
-  — preloads the Basenames controller proxy's constructor log and derives one
-  normalized `Upgraded` history event on that contract. ERC-1967 declares the
-  event and the proxy constructor installs the initial implementation
-  (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/interfaces/IERC1967.sol:L13 @ basenames@1809bbc)
-  (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Proxy.sol:L27 @ basenames@1809bbc).
 - `ens_v2_lifecycle::renewal_preserves_promoted_coverage_and_registry_edges_follow` —
   registrar renewal after registry expiry but within the post-audit grace period
   derives both fragments and preserves the promoted

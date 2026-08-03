@@ -16,11 +16,14 @@ rebuildable; supported on-demand verified record reads are persisted with durabl
 ## What's here
 
 - `apps/api` — the read API (`/v1/...`, `/healthz`, `/docs`)
-- `apps/indexer` — chain intake, manifest sync, backfill, head-following
+- `apps/phase-runner` — the Stage B phase supervisor; `ingest` and `interpret`
+  are implemented, while `project`, `verify`, and `live` remain unavailable
 - `apps/worker` — projections, replay, verified execution, inspection commands
-- `crates/` — domain types, storage, manifests, adapters (ENSv1, ENSv2, Basenames), execution
+- `crates/` — domain types, storage, manifests, schema-v2 adapters, ingest,
+  interpret, and execution
 - `manifests/` — checked-in profile roots such as `mainnet` and `sepolia`, split by chain combo
 - `migrations/` — Postgres schema
+- `schema-v2/` — the fresh phase-runner schema baseline
 - `docs/` — how it works
 - `tests/conformance/` — Rust Cargo conformance project (`bigname-supported-read-conformance`), run by CI with `cargo test`
 
@@ -30,23 +33,32 @@ rebuildable; supported on-demand verified record reads are persisted with durabl
 cp .env.example .env                       # optional, for custom ports/creds
 docker compose up -d                       # PostgreSQL
 ./scripts/migrate                          # apply migrations
-./scripts/dev-up                           # boot api + indexer + worker
+./scripts/dev-up                           # boot api + worker
 ```
 
-The API binds to `127.0.0.1:3000` by default. Hit `http://127.0.0.1:3000/docs` for OpenAPI, `/healthz` for readiness.
+The API binds to `127.0.0.1:3000` by default. Hit `http://127.0.0.1:3000/docs` for OpenAPI, `/healthz` for readiness. During Stage B, API/worker use the retained `public` schema while a configured phase runner uses `bigname_phase` in the same database. Initialize that namespace once with `cargo phase -- init-schema`; its projections are not yet served by the surviving binaries.
 
 Useful one-shots:
 
 - `cargo api -- serve`
-- `cargo indexer -- run`
+- `cargo phase -- init-schema`
+- `cargo phase -- redo --help`
 - `cargo worker -- run`
 - `cargo worker -- migrate`
 
-To enable live ingestion, live verified ENS resolution, and the ENS/60 primary-name on-demand reverse/forward RPC fallback, set `BIGNAME_INDEXER_CHAIN_RPC_URLS` and `BIGNAME_API_CHAIN_RPC_URLS`. See [`docs/development.md`](docs/development.md).
+Set `BIGNAME_API_CHAIN_RPC_URLS` for live verified ENS resolution and the ENS/60
+primary-name on-demand reverse/forward fallback. The old live indexer has been
+deleted; the checked-in phase runner is not a complete deployment until the
+project/live port lands. See [`docs/development.md`](docs/development.md).
 
 ## Container
 
-Published as `ghcr.io/ensdomains/bigname`. The image entrypoint takes a service name (`api`, `indexer`, `worker`, or `migrate`).
+Published as `ghcr.io/ensdomains/bigname`. The image entrypoint takes a service
+name (`api`, `phases`, `phases-migrate`, `worker`, or `migrate`). `migrate`
+prepares the retained API/worker `public` schema; the one-time
+`phases-migrate` command installs schema-v2 into an empty `bigname_phase`
+namespace in that same database. The phase runner is present for Stage B
+verification and stops at the unavailable project phase.
 
 For server deployment:
 
@@ -55,7 +67,10 @@ cp .env.server.example .env.server         # set passwords + image tag
 docker compose --env-file .env.server -f docker-compose.server.yml up -d
 ```
 
-The compose file runs `migrate` once, then leaves `api`, `indexer`, and `worker` as long-running services. One-shot invocations (`migrate`, `bigname-api print-openapi`, `bigname-worker inspect ...`) can be run with `docker run --rm ghcr.io/ensdomains/bigname:latest <command>`.
+The compose file runs `migrate` once, then leaves `api` and `worker` as
+long-running services. One-shot invocations (`migrate`, `bigname-api
+print-openapi`, `bigname-worker inspect ...`) can be run with `docker run --rm
+ghcr.io/ensdomains/bigname:latest <command>`.
 
 See [`docs/deployment.md`](docs/deployment.md) and [`docs/production.md`](docs/production.md) for the public-edge stack.
 
@@ -78,7 +93,8 @@ Internal planning notes (implementation sequencing, parallel workstreams) live u
 
 ## Guardrails
 
-- adapters write identity rows and normalized events, not projection rows
+- schema-v2 `interpret` writes identity rows, discovery edges, and normalized
+  events; adapters provide interpretation behavior, not projection writes
 - the API reads projections and execution output, not raw facts
 - raw facts are immutable; projections are rebuildable; verified answers are durable
 - update the relevant doc before changing public semantics, shared IDs, manifest schema, or coverage meaning

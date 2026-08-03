@@ -65,7 +65,7 @@ impl ManifestDriftAlertInspection {
 
     /// Persist one rendered worker alert observation into the worker-owned
     /// alert table. This compatibility API keeps callers on the exported
-    /// observation shape while avoiding adapter-owned normalized-event writes.
+    /// observation shape while avoiding interpret-phase normalized-event writes.
     pub async fn persist_manifest_drift_alert_observation(
         pool: &PgPool,
         observation: &ManifestDriftAlertObservation,

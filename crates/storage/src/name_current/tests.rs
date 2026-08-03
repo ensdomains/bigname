@@ -9,8 +9,9 @@ use crate::{
     AddressNameCurrentRow, AddressNameRelation, CanonicalityState, ChainLineageBlock,
     ChainPositions, NameSurface, NormalizedEvent, Resource, SnapshotProjectionRead,
     SnapshotSelectionErrorKind, SurfaceBinding, SurfaceBindingKind, TokenLineage,
-    upsert_address_names_current_rows, upsert_chain_lineage_blocks, upsert_name_surfaces,
-    upsert_normalized_events, upsert_resources, upsert_surface_bindings, upsert_token_lineages,
+    insert_normalized_event_fixtures, upsert_address_names_current_rows,
+    upsert_chain_lineage_blocks, upsert_name_surfaces, upsert_resources, upsert_surface_bindings,
+    upsert_token_lineages,
 };
 
 async fn test_database() -> Result<TestDatabase> {
@@ -504,7 +505,7 @@ async fn name_current_snapshot_read_covers_later_snapshot_until_new_input() -> R
         SnapshotProjectionRead::Found(expected.clone())
     );
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[normalized_event(
             logical_name_id,

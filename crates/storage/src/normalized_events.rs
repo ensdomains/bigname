@@ -1,29 +1,11 @@
 mod decode;
-mod orphaning;
 mod reads;
 mod types;
-mod upsert;
-mod validation;
 
-#[cfg(test)]
-use crate::CanonicalityState;
-#[cfg(test)]
-use anyhow::Context;
+#[cfg(any(test, feature = "test-support"))]
+mod fixture_writes;
 
-pub use orphaning::mark_block_derived_normalized_events_range_orphaned;
+#[cfg(any(test, feature = "test-support"))]
+pub use fixture_writes::insert_normalized_event_fixtures;
 pub use reads::{load_normalized_event_counts_by_kind, load_normalized_events_by_namespace};
 pub use types::NormalizedEvent;
-pub use upsert::{
-    NormalizedEventReplayAuthoritySummary, NormalizedEventUpsertSummary,
-    StartupAdapterReconcileCheckpoint, StartupAdapterReconcileEventBatch,
-    StartupAdapterReconcileEventObserver, StartupAdapterReconcileFamily,
-    configure_startup_adapter_reconcile_event_observer,
-    load_active_startup_adapter_reconcile_checkpoints, serialize_jsonb_value,
-    upsert_normalized_events, upsert_normalized_events_count_only,
-    upsert_normalized_events_count_only_in_transaction,
-    upsert_normalized_events_with_stateless_replay_authority,
-    upsert_normalized_events_with_summary,
-};
-
-#[cfg(test)]
-mod tests;

@@ -301,13 +301,6 @@ async fn healthz_honors_the_indexer_chain_threshold_independently_of_process_age
     .bind(wedged_chain)
     .execute(&database.pool)
     .await?;
-    bigname_storage::record_service_loop_chain_heartbeat(
-        &database.pool,
-        "api-health-indexer",
-        peer_chain,
-    )
-    .await?;
-
     let response = app_router(
         database
             .app_state()

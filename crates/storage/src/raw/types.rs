@@ -17,7 +17,7 @@ pub struct RawBlock {
     pub canonicality_state: CanonicalityState,
 }
 
-/// Canonical raw log input for adapter-owned normalized-event replay.
+/// Canonical raw log input for schema-v2 interpretation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RawLogReplayInput {
     pub raw_log_id: i64,

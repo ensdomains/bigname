@@ -7,8 +7,8 @@ use std::{
 use anyhow::{Context, Result};
 use bigname_storage::{
     CanonicalityState, NameSurface, NormalizedEvent, RawBlock, Resource, SurfaceBinding,
-    SurfaceBindingKind, TokenLineage, default_database_url, label_preimage_from_label,
-    upsert_name_surfaces, upsert_normalized_events, upsert_raw_blocks, upsert_resources,
+    SurfaceBindingKind, TokenLineage, default_database_url, insert_normalized_event_fixtures,
+    label_preimage_from_label, upsert_name_surfaces, upsert_raw_blocks, upsert_resources,
     upsert_surface_bindings, upsert_token_lineages,
 };
 use serde_json::{Value, json};
@@ -421,7 +421,7 @@ pub(super) async fn seed_replay_inputs(pool: &PgPool) -> Result<()> {
         }],
     )
     .await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         pool,
         &[
             registration_granted_event(resource_id),
@@ -468,7 +468,7 @@ pub(super) async fn seed_moved_child_staging_inputs(pool: &PgPool) -> Result<()>
 
     let parent_contract = Uuid::from_u128(0xf102);
     let child_registry_contract = Uuid::from_u128(0xf103);
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         pool,
         &[
             ensv2_subregistry_event(
@@ -508,7 +508,7 @@ pub(super) async fn seed_moved_child_staging_inputs(pool: &PgPool) -> Result<()>
 }
 
 pub(super) async fn move_staged_child_to_new_parent(pool: &PgPool) -> Result<()> {
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         pool,
         &[ensv2_parent_changed_event(
             "worker-replay:moved-child-new-parent",
@@ -622,7 +622,7 @@ pub(super) async fn append_name_source_after_completed_cursor(pool: &PgPool) -> 
         )],
     )
     .await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         pool,
         &[NormalizedEvent {
             event_identity: "worker-replay:appended-name-source".to_owned(),
@@ -650,7 +650,7 @@ pub(super) async fn append_name_source_after_completed_cursor(pool: &PgPool) -> 
 }
 
 pub(super) async fn append_manifest_sync_change(pool: &PgPool) -> Result<()> {
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         pool,
         &[NormalizedEvent {
             event_identity: "worker-replay:manifest-stage-drift".to_owned(),

@@ -6,8 +6,8 @@ use std::{
 use anyhow::Result;
 use bigname_storage::{
     ChainLineageBlock, NormalizedEvent, RawBlock, RawCodeHash, RawLog, Resource,
-    default_database_url, load_record_inventory_current, upsert_chain_lineage_blocks,
-    upsert_normalized_events, upsert_raw_blocks, upsert_raw_code_hashes, upsert_raw_logs,
+    default_database_url, insert_normalized_event_fixtures, load_record_inventory_current,
+    upsert_chain_lineage_blocks, upsert_raw_blocks, upsert_raw_code_hashes, upsert_raw_logs,
     upsert_resources,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -5820,7 +5820,7 @@ async fn seed_raw_logs(database: &PgPool, logs: &[RawLog]) -> Result<()> {
 }
 
 async fn seed_events(database: &PgPool, events: &[NormalizedEvent]) -> Result<()> {
-    upsert_normalized_events(database, events).await?;
+    insert_normalized_event_fixtures(database, events).await?;
     Ok(())
 }
 

@@ -85,7 +85,8 @@ Rules:
 - `mode=verified|both`: persisted verified output joins only when its stored chain positions exactly match the selected snapshot. `GET /v1/profiles/names/{name}` executes every server-selected profile record derived from declared state; it never accepts a caller-supplied selector subset. If matching output is missing for a supported ENS selector, the route executes against the selected snapshot, persists the outcome, and returns it. Verified execution never advances positions mid-request.
 - Without `at` or `chain_positions`, the snapshot is `consistency=head` at the latest stored checkpoint, and live execution targets that.
 - Live ENS verified resolution requires an Ethereum RPC provider on the API process. If unconfigured or unable to serve the selected block, supported selectors return `409 stale` with a configuration message; declared cache is not a fallback.
-- Handlers serve from projections and execution output. Raw facts and adapter-owned normalized events are never read directly.
+- Handlers serve from projections and execution output. Raw facts and
+  interpret-owned normalized events are never read directly.
 - The slim API does not expose namespace-inferred resolution aliases; callers pass `{namespace}` explicitly on name routes.
 
 ## Response envelope
@@ -420,7 +421,7 @@ The running API also serves `GET /`, `GET /docs`, and `GET /openapi.json` as hel
 | `GET /v1/history/addresses/{address}` | `chain_position_desc` |
 | `GET /v1/events` | `chain_position_desc` |
 
-Other routes don't honor `cursor` or `page_size`. Surface-first views break ties on `logical_name_id`; resource-grouped address views break on `resource_id`. `page.cursor` echoes the applied cursor or `null` on the first page; `page.next_cursor=null` means no further rows at the requested snapshot. Cursors are stable under replay for the same chain positions. Operational label-preimage imports and retained-fact backfills may repair unknown-label child display names without changing chain positions; cursors captured before that repair may become stale and return `400 invalid_input`.
+Other routes don't honor `cursor` or `page_size`. Surface-first views break ties on `logical_name_id`; resource-grouped address views break on `resource_id`. `page.cursor` echoes the applied cursor or `null` on the first page; `page.next_cursor=null` means no further rows at the requested snapshot. Cursors are stable under replay for the same chain positions. Operational label-preimage imports may repair unknown-label child display names without changing chain positions; cursors captured before that repair may become stale and return `400 invalid_input`.
 
 Deploy note: name-role pagination now orders the `account_resource_scope_asc` text components with bytewise PostgreSQL `COLLATE "C"`, and the cursor envelope version is `2`. Cursors issued before that ordering change fail with `400 invalid_input` after rollout; clients must restart pagination from the first page.
 

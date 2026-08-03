@@ -6,9 +6,9 @@ use std::{
 use anyhow::{Context, Result};
 use bigname_storage::{
     NameSurface, NormalizedEvent, RawBlock, RawCodeHash, RawLog, Resource, SurfaceBinding,
-    default_database_url, load_resolver_current, upsert_name_surfaces, upsert_normalized_events,
-    upsert_raw_blocks, upsert_raw_code_hashes, upsert_raw_logs, upsert_resolver_current_rows,
-    upsert_resources, upsert_surface_bindings,
+    default_database_url, insert_normalized_event_fixtures, load_resolver_current,
+    upsert_name_surfaces, upsert_raw_blocks, upsert_raw_code_hashes, upsert_raw_logs,
+    upsert_resolver_current_rows, upsert_resources, upsert_surface_bindings,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
@@ -547,7 +547,7 @@ async fn resolver_current_projects_latest_ensv2_alias_tombstone() -> Result<()> 
     )
     .await?;
     upsert_resources(database.pool(), &[resource(target_resource_id)]).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             alias_event(
@@ -1265,7 +1265,7 @@ async fn seed_raw_logs(pool: &PgPool, logs: &[RawLog]) -> Result<()> {
 }
 
 async fn seed_resolver_events(pool: &PgPool, events: &[NormalizedEvent]) -> Result<()> {
-    upsert_normalized_events(pool, events).await?;
+    insert_normalized_event_fixtures(pool, events).await?;
     Ok(())
 }
 
@@ -1278,7 +1278,7 @@ async fn seed_permission_events(pool: &PgPool, events: &[NormalizedEvent]) -> Re
     resource_ids.dedup();
     let resources = resource_ids.into_iter().map(resource).collect::<Vec<_>>();
     upsert_resources(pool, &resources).await?;
-    upsert_normalized_events(pool, events).await?;
+    insert_normalized_event_fixtures(pool, events).await?;
     Ok(())
 }
 

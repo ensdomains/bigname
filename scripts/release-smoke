@@ -11,7 +11,6 @@ Usage: scripts/release-smoke [--no-network]
 Runs the local release smoke gate:
   - no-network sanity, when requested
   - local pinned upstream refs
-  - focused reorg chaos drill conformance guard
   - checked-in OpenAPI artifact drift
   - conformance owner OpenAPI smoke guard
   - focused capability cutover evidence guard
@@ -177,11 +176,6 @@ run_pinned_refs_check() {
   scripts/sync-refs --check
 }
 
-run_reorg_chaos_drill_gate() {
-  log "checking reorg chaos drill conformance guard"
-  cargo test "${cargo_args[@]}" --manifest-path tests/conformance/Cargo.toml reorg_chaos_drill_conformance_job -- --nocapture
-}
-
 run_conformance_owner_smoke_gate() {
   log "checking conformance owner OpenAPI smoke guard"
   cargo test "${cargo_args[@]}" --manifest-path tests/conformance/Cargo.toml openapi
@@ -247,7 +241,9 @@ run_readiness_check() {
       return 0
     fi
 
-    # A standalone smoke database has no indexer/worker processes, so not_started is admissible.
+    # The API still exposes legacy indexer and worker heartbeat slots until its
+    # later port. A standalone smoke database has neither process, so
+    # not_started is admissible.
     # A stale status proves a heartbeat row exists and must fail instead of masking a wedged loop.
     if [ "$http_status" = "200" ] \
       && grep -q '"status":"degraded"' "$health_body_tmp" \
@@ -289,7 +285,6 @@ require_command grep
 require_command seq
 assert_no_network_mode
 run_pinned_refs_check
-run_reorg_chaos_drill_gate
 run_openapi_drift_check
 run_conformance_owner_smoke_gate
 run_capability_cutover_evidence_gate

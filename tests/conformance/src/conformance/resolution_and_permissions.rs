@@ -1395,7 +1395,7 @@ async fn dynamic_resolver_profile_gate_controls_ensv1_record_readback() -> Resul
     )
     .await
     .context("failed to seed ENSv1 dynamic resolver raw logs")?;
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
             ensv1_dynamic_resolver_normalized_event(
@@ -1545,7 +1545,7 @@ async fn dynamic_resolver_profile_gate_controls_ensv1_record_readback() -> Resul
     );
     assert_eq!(supported_payload.verified_state, None);
 
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[ensv1_dynamic_resolver_normalized_event(
             "conformance:ensv1:dynamic:pending-resolver",
@@ -1582,7 +1582,7 @@ async fn dynamic_resolver_profile_gate_controls_ensv1_record_readback() -> Resul
     )
     .await?;
 
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[ensv1_dynamic_resolver_normalized_event(
             "conformance:ensv1:dynamic:unsupported-resolver",
@@ -1842,7 +1842,7 @@ async fn dynamic_resolver_profile_gate_controls_basenames_l2resolver_readback() 
     )
     .await
     .context("failed to seed Basenames dynamic resolver raw logs")?;
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
             basenames_dynamic_resolver_normalized_event(
@@ -2047,7 +2047,7 @@ async fn dynamic_resolver_profile_gate_controls_basenames_l2resolver_readback() 
     );
     assert!(supported_overview_payload.get("verified_state").is_none());
 
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[basenames_dynamic_resolver_normalized_event(
             "conformance:basenames:dynamic:pending-resolver",
@@ -2096,7 +2096,7 @@ async fn dynamic_resolver_profile_gate_controls_basenames_l2resolver_readback() 
     )
     .await?;
 
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[basenames_dynamic_resolver_normalized_event(
             "conformance:basenames:dynamic:unsupported-resolver",
@@ -5077,7 +5077,7 @@ async fn resolver_overview_contract_reads_basenames_truth_from_resolver_and_perm
         ],
     )
     .await?;
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
                 &database.pool,
                 &[
                     NormalizedEvent {
@@ -5767,7 +5767,7 @@ async fn resource_permissions_contract_reads_basenames_permission_changed_rows_o
         ],
     )
     .await?;
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
                 &database.pool,
                 &[
                     NormalizedEvent {

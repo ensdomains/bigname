@@ -11,8 +11,8 @@ use sqlx::{
 use super::*;
 use crate::{
     CanonicalityState, NameSurface, NormalizedEvent, default_database_url,
-    label_preimage_from_label, upsert_label_preimages, upsert_name_surfaces,
-    upsert_normalized_events,
+    insert_normalized_event_fixtures, label_preimage_from_label, upsert_label_preimages,
+    upsert_name_surfaces,
 };
 
 struct TestDatabase {
@@ -995,7 +995,7 @@ async fn children_current_declared_child_sources_filter_noncanonical_events_and_
     )
     .await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             subregistry_event(SubregistryEventSeed {
@@ -1138,7 +1138,7 @@ async fn children_current_declared_child_sources_dedupe_pairs_across_child_nodes
     )
     .await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             // Older edge: unknown label, no child surface, no preimage — the
@@ -1210,7 +1210,7 @@ async fn children_current_parent_surface_upsert_invalidates_retained_registry_ed
         )?],
     )
     .await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[subregistry_event(SubregistryEventSeed {
             event_identity: "mystery-before-parent",
@@ -1310,7 +1310,7 @@ async fn children_current_declared_child_sources_ignore_events_without_child_nod
         .expect("test event after_state must be an object")
         .remove("child_node");
 
-    upsert_normalized_events(database.pool(), &[missing_child_node]).await?;
+    insert_normalized_event_fixtures(database.pool(), &[missing_child_node]).await?;
 
     let sources = load_canonical_ens_v1_declared_child_sources(database.pool(), None).await?;
     assert!(sources.is_empty());
@@ -1365,7 +1365,7 @@ async fn children_current_declared_child_sources_include_basenames_base_registry
     )
     .await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             subregistry_event(SubregistryEventSeed {
@@ -1440,7 +1440,7 @@ async fn children_current_declared_child_sources_use_unknown_label_placeholders_
         )],
     )
     .await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[subregistry_event(SubregistryEventSeed {
             event_identity: "mystery-base-registry",
@@ -1506,7 +1506,7 @@ async fn children_current_declared_child_sources_rank_child_nodes_per_namespace_
     )
     .await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             subregistry_event(SubregistryEventSeed {
@@ -1599,7 +1599,7 @@ async fn children_current_declared_child_sources_include_ensv2_linked_subregistr
     )
     .await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             ensv2_subregistry_event(
@@ -1699,7 +1699,7 @@ async fn children_current_declared_child_sources_include_ensv2_linked_subregistr
     assert_eq!(current[0].normalized_event_ids.len(), 3);
     assert_eq!(current[0].raw_fact_refs.as_array().map(Vec::len), Some(3));
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[ensv2_subregistry_event(
             "ensv2-subregistry-terminal",

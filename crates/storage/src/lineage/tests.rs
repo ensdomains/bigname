@@ -254,8 +254,7 @@ async fn minimal_lineage_replay_can_be_audit_enriched_without_clearing_fields() 
 }
 
 #[tokio::test]
-async fn generic_upsert_preserves_orphaned_block_after_mid_backfill_reorg_without_rewriting_identity()
--> Result<()> {
+async fn generic_upsert_preserves_orphaned_block_without_rewriting_identity() -> Result<()> {
     let database = TestDatabase::new().await?;
     let timestamp = timestamp(1_717_171_717);
 
@@ -267,12 +266,10 @@ async fn generic_upsert_preserves_orphaned_block_after_mid_backfill_reorg_withou
             Some("0x999"),
             10,
             timestamp,
-            CanonicalityState::Observed,
+            CanonicalityState::Orphaned,
         )],
     )
     .await?;
-
-    mark_chain_lineage_range_orphaned(database.pool(), "eth-mainnet", "0xaaa", None).await?;
 
     let refreshed = upsert_chain_lineage_blocks(
         database.pool(),
@@ -291,109 +288,6 @@ async fn generic_upsert_preserves_orphaned_block_after_mid_backfill_reorg_withou
     assert_eq!(refreshed[0].parent_hash.as_deref(), Some("0x999"));
     assert_eq!(refreshed[0].block_number, 10);
     assert_eq!(refreshed[0].block_timestamp, timestamp);
-
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn explicit_lineage_recanonicalization_revives_orphaned_block_with_same_identity()
--> Result<()> {
-    let database = TestDatabase::new().await?;
-    let timestamp = timestamp(1_717_171_717);
-
-    upsert_chain_lineage_blocks(
-        database.pool(),
-        &[block(
-            "eth-mainnet",
-            "0xaaa",
-            Some("0x999"),
-            10,
-            timestamp,
-            CanonicalityState::Canonical,
-        )],
-    )
-    .await?;
-
-    mark_chain_lineage_range_orphaned(database.pool(), "eth-mainnet", "0xaaa", None).await?;
-
-    let refreshed = upsert_chain_lineage_blocks_recanonicalizing_orphaned(
-        database.pool(),
-        &[block(
-            "eth-mainnet",
-            "0xaaa",
-            Some("0x999"),
-            10,
-            timestamp,
-            CanonicalityState::Canonical,
-        )],
-    )
-    .await?;
-
-    assert_eq!(
-        refreshed[0].canonicality_state,
-        CanonicalityState::Canonical
-    );
-
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn orphan_range_stops_before_requested_ancestor() -> Result<()> {
-    let database = TestDatabase::new().await?;
-    let base_timestamp = timestamp(1_717_171_717);
-
-    upsert_chain_lineage_blocks(
-        database.pool(),
-        &[
-            block(
-                "eth-mainnet",
-                "0x001",
-                None,
-                1,
-                base_timestamp,
-                CanonicalityState::Canonical,
-            ),
-            block(
-                "eth-mainnet",
-                "0x002",
-                Some("0x001"),
-                2,
-                timestamp(1_717_171_729),
-                CanonicalityState::Canonical,
-            ),
-            block(
-                "eth-mainnet",
-                "0x003",
-                Some("0x002"),
-                3,
-                timestamp(1_717_171_741),
-                CanonicalityState::Canonical,
-            ),
-        ],
-    )
-    .await?;
-
-    let orphaned =
-        mark_chain_lineage_range_orphaned(database.pool(), "eth-mainnet", "0x003", Some("0x001"))
-            .await?;
-
-    assert_eq!(
-        orphaned
-            .into_iter()
-            .map(|snapshot| (snapshot.block_hash, snapshot.canonicality_state))
-            .collect::<Vec<_>>(),
-        vec![
-            ("0x003".to_owned(), CanonicalityState::Orphaned),
-            ("0x002".to_owned(), CanonicalityState::Orphaned),
-        ]
-    );
-    assert_eq!(
-        load_chain_lineage_block(database.pool(), "eth-mainnet", "0x001")
-            .await?
-            .expect("ancestor row must still exist")
-            .canonicality_state,
-        CanonicalityState::Canonical
-    );
 
     database.cleanup().await
 }
@@ -457,8 +351,11 @@ async fn ancestry_proof_rejects_orphaned_path_rows() -> Result<()> {
         "an ancestor hash at a different evidence height must fail closed"
     );
 
-    mark_chain_lineage_range_orphaned(database.pool(), "eth-mainnet", "0x003", Some("0x001"))
-        .await?;
+    sqlx::query(
+        "UPDATE chain_lineage SET canonicality_state = 'orphaned' WHERE chain_id = 'eth-mainnet' AND block_hash IN ('0x002', '0x003')",
+    )
+    .execute(database.pool())
+    .await?;
 
     assert!(
         !chain_lineage_contains_ancestor(database.pool(), "eth-mainnet", "0x003", "0x001").await?,

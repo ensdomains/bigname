@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use bigname_storage::{
     AddressNameRelation, CanonicalityState, NameSurface, NormalizedEvent, RawBlock, Resource,
     SurfaceBinding, SurfaceBindingKind, TokenLineage, default_database_url,
-    label_preimage_from_label, load_address_names_current, upsert_name_surfaces,
-    upsert_normalized_events, upsert_raw_blocks, upsert_resources, upsert_surface_bindings,
+    insert_normalized_event_fixtures, label_preimage_from_label, load_address_names_current,
+    upsert_name_surfaces, upsert_raw_blocks, upsert_resources, upsert_surface_bindings,
     upsert_token_lineages,
 };
 use serde_json::{Value, json};
@@ -1472,7 +1472,7 @@ async fn seed_raw_blocks(pool: &PgPool, blocks: &[RawBlock]) -> Result<()> {
 }
 
 async fn seed_events(pool: &PgPool, events: &[NormalizedEvent]) -> Result<()> {
-    upsert_normalized_events(pool, events).await?;
+    insert_normalized_event_fixtures(pool, events).await?;
     Ok(())
 }
 

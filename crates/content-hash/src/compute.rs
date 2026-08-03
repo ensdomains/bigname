@@ -85,13 +85,6 @@ struct CfgTestSourceExclusion {
 }
 
 const CFG_TEST_SOURCE_EXCLUSIONS: &[CfgTestSourceExclusion] = &[
-    // Resolver preimage builders are compiled only for adapter tests.
-    CfgTestSourceExclusion {
-        relative_path: "crates/adapters/src/ens_v2_resolver/testsupport.rs",
-        parent_module: "crates/adapters/src/ens_v2_resolver.rs",
-        module_declaration: "pub(crate) mod testsupport;",
-        reason: "cfg(test)-gated ENSv2 resolver test support",
-    },
     // Projection rebuild hooks are compiled only for worker tests.
     CfgTestSourceExclusion {
         relative_path: "apps/worker/src/primary_name/projection/test_hooks.rs",
@@ -208,9 +201,9 @@ fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
         &cfg_test_sources,
         &mut inputs,
     )?;
-    // ENSv2 registry interpretation delegates discovery reconciliation and identity writes to
-    // this crate. Scan the whole production source tree so a new manifest-authority dependency
-    // cannot silently change interpreter output without changing the content hash.
+    // Manifest declarations select interpretation inputs and supply authority for derived
+    // identity and discovery rows. Scan the whole production source tree so a manifest-authority
+    // change cannot silently change interpreter output without changing the content hash.
     collect_rust_sources(
         workspace_root,
         &workspace_root.join(MANIFEST_AUTHORITY_SOURCE_ROOT),

@@ -45,7 +45,13 @@ For one `(namespace, source_family, chain)` tuple in a selected deployment-profi
 
 The loader also rejects two active manifest versions on the same chain when both declare the same address as roots or both declare it as contracts, their open-ended `start_block` ranges overlap, and either family feeds manifest-declared event data into `PreimageObserved` rows produced directly from block logs. Those families are `ens_v1_registrar_l1`, `basenames_base_registrar`, `ens_v1_wrapper_l1`, `ens_v2_root_l1`, `ens_v2_registry_l1`, `ens_v2_registrar_l1`, and `ens_v2_resolver_l1`. This check does not compare a root declaration with a contract declaration. Two roots or two contracts may still share an address when neither family is in that list; this is why the shared `l1_resolver` declaration in `basenames_l1_compat` and `basenames_execution` is accepted.
 
-Each `[[roots]]` and `[[contracts]]` entry may declare an optional `start_block`. `start_block` is the inclusive first historical block for that target. Omitted means unknown — adapters preserve that state rather than inferring zero, the current job range, the manifest activation height, or any other fallback.
+Each `[[roots]]` and `[[contracts]]` entry may declare an optional `start_block`.
+`start_block` is the inclusive first historical block for that target. Omitted
+means unknown, and manifest storage preserves it as null. The stabilized Stage B
+ingest and interpret loaders currently use zero as the effective range-filter
+fallback for an omitted value. That fallback is a documented port gap, not
+historical provenance or authority to run an unbounded ingest; the phase range
+must still be admitted explicitly.
 
 For `[[contracts]]`, `proxy_kind` is required. `proxy_kind = "none"` omits `implementation`. Any non-`none` `proxy_kind` includes `implementation` as the current implementation address for that manifest version.
 
@@ -187,7 +193,7 @@ Exact-name profile [capability promotion](glossary.md) is deployment-profile-sco
 
 Upstream events map to normalized adapter output: `TokenResource` → `TokenResourceLinked`, `TokenRegenerated` → `TokenRegenerated`, each positive-value item in `TransferSingle` or `TransferBatch` with nonzero `from` and `to` → `TokenControlTransferred`, `SubregistryUpdated` → `SubregistryChanged`, `ParentUpdated` → `ParentChanged`, `AliasChanged` → `AliasChanged`, `EACRolesChanged` → resource- or resolver-scoped permission events.[^v2-iperm-l34][^v2-events-l49][^v2-events-l69][^v2-events-l75][^v2-iperm-resolver-l14][^v2-eac-l19] The deployed `ETHRegistry` and `UserRegistryImpl` ABIs both contain the transfer events, and upstream changes the stored owner only for a positive value; mint and burn use a zero endpoint and therefore do not become token-control transfers. (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L652 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L689 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L723 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L760 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L194 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L201 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L208 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L210 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L318 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L333 @ ens_v2@48b3e2d) These are adapter semantics, not manifest schema fields. Role changes remain permission events and are not ownership evidence.
 
-ENSv2 terminal lifecycle events also close adapter-owned state. `LabelUnregistered` is emitted before upstream expires the entry and has no paired zero-target subregistry or resolver updates, so the adapter closes the current surface binding and emits terminal discovery observations at that log position. It also emits null `SubregistryChanged` and `ResolverChanged` boundaries for any attached roles so full and incremental projections retire the old topology. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L208 @ ens_v2@48b3e2d) A replacement registration or reservation can bump the token version and overwrite the stored subregistry and resolver, while upstream emits follow-up target updates only for nonzero replacements; the adapter therefore closes the prior discovery targets before accepting the successor lifecycle and emits the same null role boundaries. Replacement registration lets the following `TokenResource` close the old surface at the successor start; replacement reservation has no successor resource, so it closes immediately and emits `SurfaceUnbound` as position-specific reorg-repair evidence. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L452 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L459 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L471 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L474 @ ens_v2@48b3e2d)
+ENSv2 terminal lifecycle events also close interpreter-owned state. `LabelUnregistered` is emitted before upstream expires the entry and has no paired zero-target subregistry or resolver updates, so the ENSv2 interpreter closes the current surface binding and emits terminal discovery observations at that log position. It also emits null `SubregistryChanged` and `ResolverChanged` boundaries for any attached roles so full and incremental projections retire the old topology. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L208 @ ens_v2@48b3e2d) A replacement registration or reservation can bump the token version and overwrite the stored subregistry and resolver, while upstream emits follow-up target updates only for nonzero replacements; the adapter therefore closes the prior discovery targets before accepting the successor lifecycle and emits the same null role boundaries. Replacement registration lets the following `TokenResource` close the old surface at the successor start; replacement reservation has no successor resource, so it closes immediately and emits `SurfaceUnbound` as position-specific reorg-repair evidence. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L452 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L459 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L471 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L474 @ ens_v2@48b3e2d)
 
 `RegistryCreated` is admitted as registry-instance history and discovery input. `URIUpdated`, the `PermissionedResolver` `DataChanged` / `NamedDataResource` pair, and ERC-1155 `ApprovalForAll` remain outside the active normalized behavior.[^v2-events-created][^v2-events-uri][^v2-pres-data] Operator approval is not treated as token ownership or an ENSv2 resource-role grant. (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L336 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L341 @ ens_v2@ccaeb58) The separately deployed `ETHRenewerV1` is not an admitted registrar emitter; `NameRenewed` intake remains limited to the admitted `ETHRegistrar` emitter.[^v2-deploy-renewer][^v2-iethrenewer-l21] `PublicResolverV2` is not directly declared by a manifest and is not an admitted resolver profile.[^v2-deploy-public-resolver] Resolver observations can discovery-admit `PublicResolverV2` as a watch-only contract instance and retain configured normalized facts, but they publish no selectors, cache values, or authoritative record coverage without explicit ENSv2 resolver-profile admission. A current-emitter `RecordVersionChanged` may remain only as an explicit `resolver_family_pending` boundary; non-current resolver emitters are always excluded.[^v2-public-resolver-discovery][^v2-public-resolver-version]
 
@@ -248,21 +254,47 @@ Each admitted edge stores `from_contract_instance_id`, `to_contract_instance_id`
 
 Discovery resolves `(chain, address, point in time)` to endpoint `contract_instance_id`s before storing the edge. Re-admitting an address that was previously admitted on the same chain reuses the prior `contract_instance_id` and appends a new range; replaying the exact same observation reuses its historical edge epoch instead of appending a duplicate. A new ID is minted only for addresses never admitted on that chain. Manifest-declared and discovered proxy/implementation links share the same edge and active-range rules.
 
-Discovery reconciliation distinguishes a complete source replay from a scoped update. A complete replay of retained canonical history through its target treats an omitted observation key as absent and deactivates any stale current edge for that source. A block- or target-scoped replay changes only the observation keys it carries and never interprets unrelated omissions as deletion. When a scoped update removes a role-propagating subregistry edge, descendant teardown follows the post-update graph: outgoing edges are closed only for contract instances no longer reachable from an active manifest contract, while another authoritative incoming subregistry path preserves the shared descendant branch. Closed discovery intervals remain authoritative historical emitter ranges for [full-closure](glossary.md) adapter replay while their manifest authority remains active; they no longer expand the current watch plan. For stored-lineage coverage, a closed interval remains required only while its source manifest and any mapped target-family manifest remain active in the selected deployment profile. Deprecated-profile intervals remain stored audit evidence but cannot authorize or require [checkpoint promotion](glossary.md) coverage. Out-of-order replay inserts an observation between its predecessor and successor boundaries, tightening the predecessor end so stored intervals for one observation key do not overlap. Raw-log observations in the same block are ordered by the non-negative `transaction_index` and `log_index` pair retained in discovery provenance; providing only one offset, a non-integer offset, or a negative offset fails closed before discovery state changes. Observations without either offset retain block-inclusive chronology for non-log and legacy evidence. A terminal observation older than a later non-orphaned assignment cannot close that later assignment; a target-bounded complete replay likewise preserves a non-orphaned assignment whose start is after the replay target. If that later start is orphaned, reconciliation removes it without manufacturing an end before its start. Repeating the same endpoint at a later block preserves the original edge epoch instead of creating a second active edge epoch or bumping the [admission epoch](glossary.md). Scoped summaries report the source-wide active-edge count after reconciliation, not merely the count among keys touched by that update.
+Schema-v2 interpretation applies discovery opens and closes in block,
+transaction, and log order. Every raw-log discovery edge requires non-negative
+transaction and log positions and an observation key. Inserting an earlier
+observation caps its predecessor at that position; repeating the same target
+reuses or backdates the existing epoch instead of creating an overlapping
+active epoch. An `interpret` redo first prepares the selected derived range and
+then applies the same ordered writer. It does not use omitted observations as a
+complete-source deletion signal or consult the deleted stored-lineage coverage
+and adapter-checkpoint machinery. Closed intervals remain historical emitter
+admission while their manifest authority is active, but do not expand the
+current watch plan.
 
-Manifest synchronization deactivates an event-driven edge when its active source manifest no longer declares that edge kind. Manifest-declared proxy and version-successor edges continue to follow their declarations rather than `discovery_rules`.
+Schema-v2 manifest synchronization retires manifest-declared address ranges and
+updates manifest-declared proxy edges. It does not run a full-source
+reconciliation over event-driven edges. An authority change invalidates the
+interpret and project phase content hashes; explicit redo then re-derives the
+affected discovery rows from retained facts under the new manifest authority.
 
-ENSv1 and Basenames owner events do not run discovery reconciliation. ENSv2 synchronization interprets retained `RegistryCreated`, `SubregistryUpdated`, and `ResolverUpdated` facts through the ordinary adapter entry point. Orphaning a creation or assignment deactivates only the edge introduced by that observation and then applies the existing descendant reachability rules.
-
-Before an ENSv2 registry sync without a source scope reconciles retained observations, it checks active registry-announcement, subregistry, and resolver discovery edges whose `active_from_block_hash` now identifies an orphaned `chain_lineage` row. For each match it synthesizes a terminal observation that preserves the edge's chain, origin address, edge kind, discovery source, observation key, and start block number and hash; preserves `transaction_index` and `log_index` when both are present and omits both for a legacy positionless edge; sets `to_address` to `0x0000000000000000000000000000000000000000`; and records `source = "orphaned_discovery_edge"`, `source_event = "CanonicalityChanged"`, and `tombstone = true`. The ordinary scoped transition reconciliation then deactivates the orphaned edge and applies the usual reachability cascade. A source-scoped sync does not synthesize these records.
+ENSv1 and Basenames owner events do not create discovery contract instances.
+Schema-v2 interpretation processes retained `RegistryCreated`,
+`SubregistryUpdated`, and `ResolverUpdated` facts through the current
+interpreter. The deleted indexer no longer synthesizes
+`orphaned_discovery_edge` tombstones; branch replacement is handled through
+lineage selection plus an explicit derived-range redo.
 
 ## Manifest change propagation
 
-Manifest declaration changes produce the `SourceManifestUpdated` [normalized event](glossary.md). Its state includes proxy declarations and the staged authored capability fields, so manifest synchronization does not mint separate proxy- or capability-change event kinds. These changes update discovery admission, invalidate execution cache entries, and trigger projection recomputation where capability boundaries change.
+Manifest declaration changes produce the `SourceManifestUpdated` [normalized
+event](glossary.md). Its state includes proxy declarations and the staged
+authored capability fields, so manifest synchronization does not mint separate
+proxy- or capability-change event kinds. The synchronization transaction also
+invalidates completed interpret and project phase content hashes for changed
+chains. The deleted admission-epoch and full-source reconciliation writers no
+longer participate; phase redo applies the new authority to discovery and
+projection state.
 
-The legacy resolver-profile authority journal and input queue remain in the transitional schema, but manifest synchronization and discovery refresh no longer advance or drain them. Current manifests and discovery edges remain the source of admission truth; the old indexer does not run the removed absence-aware resolver-profile repair when that authority changes.
+The legacy resolver-profile authority journal, input queue, and reconciliation tables remain only in immutable migration history. Their Rust APIs and consumers have been deleted. Current manifests and schema-v2 discovery edges are the admission truth; legacy rows do not gate synchronization or interpretation.
 
 ERC-1967 `Upgraded(address)` logs from manifest-declared and event-announced contracts produce `Upgraded` normalized history on the emitting contract. (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/interfaces/IERC1967.sol:L13 @ basenames@1809bbc) Manifest synchronization does not infer upgrades from code-hash drift and does not synthesize drift-alert normalized events.
+
+Code-hash observations currently have no producer—the old intake was deleted with the old runtime—and the worker/API port defers the producer decision between a new ingest observation family and a [resolver-profile](glossary.md) redesign keyed by retained ERC-1967 `Upgraded` history; admission without retained code-hash evidence therefore remains explicitly `pending`.
 
 ## Watch-plan expansion
 
@@ -270,7 +302,10 @@ Watch-plan expansion starts from active manifest roots by `contract_instance_id`
 
 - The chain-intake watch target is the address range attached to each active contract instance at the requested time.
 - If a manifest target carries `start_block`, the materialized watch range starts at that inclusive block unless a later active-range boundary narrows it.
-- If `start_block` is omitted, the historical start is unknown. Live watch may still produce a target; automatic historical bootstrap treats it as unbootstrapable until a finite start is declared.
+- If `start_block` is omitted, the historical start is unknown and a finite
+  historical ingest must obtain an explicit admitted bound. The current Stage B
+  loaders nevertheless use zero as their effective range-filter fallback; that
+  implementation gap does not make zero authoritative.
 - Watch rows may denormalize address and code-hash state, but their durable explanation path is `manifest root → discovery edge(s) → contract_instance_id`.
 - Address-only watch state is rebuildable from manifests, instance attributes, and active discovery edges.
 
@@ -283,7 +318,7 @@ Capabilities gate behavior, not public-contract existence. An unsupported capabi
 ## Ownership
 
 - Manifest/discovery owners maintain the TOML files.
-- Adapter owners consume manifest versions as inputs.
+- Schema-v2 interpretation consumes manifest versions as inputs.
 - Execution owners depend on manifest versions for cache keys and invalidation.
 - Schema changes require a doc-first update to this file.
 
@@ -291,7 +326,11 @@ Capabilities gate behavior, not public-contract existence. An unsupported capabi
 
 ## Bootstrap `start_block` provenance
 
-Known historical starts cite a pinned upstream source. Targets without a pinned source omit `start_block`; automatic bootstrap skips them rather than inventing values. Basenames mainnet families and the ENS Universal Resolver remain unknown.
+Known historical starts cite a pinned upstream source. Targets without a pinned
+source omit `start_block`; the deleted old-indexer automatic bootstrap skipped
+them rather than inventing values. Basenames mainnet families and the ENS
+Universal Resolver remain unknown. The current Stage B loader fallback described
+above does not change that provenance rule.
 
 | Target | `start_block` | Source |
 | --- | --- | --- |

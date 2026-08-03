@@ -4,15 +4,13 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use crate::identity::NameSurface;
+#[cfg(any(test, feature = "test-support"))]
 use crate::normalized_events::NormalizedEvent;
-
-mod backfill;
-
-pub use backfill::backfill_label_preimages_from_existing_facts;
-
+#[cfg(any(test, feature = "test-support"))]
 const NORMALIZED_EVENT_PREIMAGE_SOURCE_KIND: &str = "normalized_event_preimage";
 const NAME_SURFACE_SOURCE_KIND: &str = "name_surface";
 const ENS_RAINBOW_SOURCE_KIND: &str = "ens_rainbow_import";
+#[cfg(any(test, feature = "test-support"))]
 const NORMALIZED_EVENT_PREIMAGE_PRIORITY: i32 = 100;
 const NAME_SURFACE_PRIORITY: i32 = 90;
 const ENS_RAINBOW_PRIORITY: i32 = 10;
@@ -252,6 +250,7 @@ async fn insert_label_preimages_in_transaction(
     Ok(changed_labelhashes)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub async fn upsert_label_preimages_from_normalized_events(
     transaction: &mut Transaction<'_, Postgres>,
     events: &[NormalizedEvent],
@@ -490,6 +489,7 @@ async fn enqueue_children_invalidations_for_labelhashes(
     .map(|result| result.rows_affected())
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn label_preimages_from_normalized_event(
     event: &NormalizedEvent,
 ) -> Option<Result<Vec<LabelPreimage>>> {

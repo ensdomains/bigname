@@ -5832,7 +5832,6 @@ fn mutual_parent_changes_rebind_and_retract_existing_child_resources() -> anyhow
     Ok(())
 }
 
-#[cfg(feature = "legacy")]
 #[test]
 fn checked_in_manifest_event_corpus_has_typed_schema_v2_adapters() -> anyhow::Result<()> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

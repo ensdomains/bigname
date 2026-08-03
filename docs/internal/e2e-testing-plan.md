@@ -5,15 +5,21 @@ same change that adds or unblocks a scenario. The harness mechanics live in
 `tests/e2e/README.md`; the contractual scenario list this plan expands is
 `docs/architecture.md` § Test matrix.
 
+Stage B note: the old runtime driver has been deleted and this suite is
+compile-only until the C-e2e port. Every `covered_*` status below records
+pre-Stage-B retained evidence; it is not evidence for the current
+ingest/interpret runtime.
+
 ## What this suite is for
 
 Every other suite in the repo starts from state we authored: unit tests and
 `tests/conformance` seed the database with rows that encode our own beliefs
-about what the ENS, ENSv2, and Basenames contracts emit. This suite starts
-from the contracts themselves: pinned ENSv1/ENSv2 deployment artifacts and
-forge-built pinned Basenames sources run on local chains, real transactions
-drive name lifecycles, and the real indexer, worker, and API binaries process
-the results. It answers two questions nothing else answers:
+about what the ENS, ENSv2, and Basenames contracts emit. Before Stage B, this
+suite started from the contracts themselves: pinned ENSv1/ENSv2 deployment
+artifacts and forge-built pinned Basenames sources ran on local chains, real
+transactions drove name lifecycles, and the old indexer, worker, and API
+binaries processed the results. The retained scenarios are intended to answer
+these questions again after the C-e2e port:
 
 1. Are our beliefs about upstream behavior true? (decoding, event mix,
    ordering, state transitions)
@@ -385,12 +391,11 @@ and the blocked rows.
 
 ## CI gate
 
-The current `test (e2e)` job runs the full suite, including the representative
-perturbation tests, on every pull request and every push to `main`, with
-`--test-threads=8`. It also runs fmt/check/clippy against the standalone e2e
-workspace. There is no scheduled nightly workflow and no env-gated slow tier;
-all compiled scenarios are expected to run, so an omitted scenario cannot be
-mistaken for a green nightly result.
+Current CI runs fmt, strict clippy, and locked `cargo check --all-targets`
+against the standalone e2e workspace. It does not execute the retained
+scenarios. A green e2e job therefore proves compile integrity only; scenario
+statuses cannot become current runtime evidence until the C-e2e port restores
+execution.
 
 ## Ledger discipline
 

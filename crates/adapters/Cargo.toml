@@ -5,35 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-[[example]]
-name = "sync_ens_v1_unwrapped_authority_block_hashes"
-required-features = ["legacy"]
-
-[[test]]
-name = "interpreter_fixtures"
-required-features = ["legacy"]
-
 [[test]]
 name = "schema_v2_interpreter_fixtures"
-required-features = ["legacy", "schema-v2"]
+required-features = ["schema-v2"]
 
 [features]
-default = ["legacy", "schema-v2"]
-legacy = [
-    "dep:alloy-primitives",
-    "dep:alloy-sol-types",
-    "dep:anyhow",
-    "dep:bigname-domain",
-    "dep:bigname-manifests",
-    "dep:bigname-storage",
-    "dep:futures-util",
-    "dep:serde",
-    "dep:serde_json",
-    "dep:sqlx",
-    "dep:time",
-    "dep:tokio",
-    "dep:tracing",
-]
+default = ["schema-v2"]
 schema-v2 = [
     "dep:alloy-json-abi",
     "dep:alloy-primitives",
@@ -52,18 +29,11 @@ alloy-primitives = { workspace = true, optional = true }
 alloy-sol-types = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
 bigname-domain = { workspace = true, optional = true }
-bigname-manifests = { workspace = true, optional = true }
-bigname-storage = { workspace = true, optional = true }
-futures-util = { version = "0.3.31", optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { version = "1.0.145", features = ["raw_value"], optional = true }
-sqlx = { workspace = true, optional = true }
 time = { version = "0.3.47", features = ["serde"], optional = true }
-tokio = { workspace = true, optional = true }
-tracing = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 
 [dev-dependencies]
-bigname-test-support.workspace = true
-tokio.workspace = true
+bigname-manifests.workspace = true
 uuid.workspace = true

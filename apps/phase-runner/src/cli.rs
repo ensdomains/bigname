@@ -23,10 +23,18 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Install the fresh schema-v2 baseline into an empty phase schema.
+    InitSchema(InitSchemaArgs),
     /// Supervise every configured chain.
     Run(RunArgs),
     /// Run one phase over an explicit block range.
     Redo(RedoArgs),
+}
+
+#[derive(Clone, Debug, Args)]
+struct InitSchemaArgs {
+    #[arg(long, env = "BIGNAME_DATABASE_URL")]
+    database_url: String,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -171,6 +179,9 @@ struct RedoArgs {
 }
 
 pub enum ResolvedCommand {
+    InitSchema {
+        database_url: String,
+    },
     Run {
         database_url: String,
         manifests_root: PathBuf,
@@ -191,6 +202,9 @@ pub enum ResolvedCommand {
 impl Cli {
     pub fn resolve(self) -> RunnerResult<ResolvedCommand> {
         match self.command {
+            Command::InitSchema(args) => Ok(ResolvedCommand::InitSchema {
+                database_url: args.database_url,
+            }),
             Command::Run(args) => resolve_run(args),
             Command::Redo(args) => resolve_redo(args),
         }

@@ -20,343 +20,32 @@ tool must be idempotent, resumable, fail closed on verification disagreement,
 and update only the ratified fields. Any wider rewrite requirement is a new
 doc-first storage task.
 
-### 2026-07-03 raw code-hash padding correction
+### 2026-07-03 raw code-hash padding correction (retired)
 
-The maintainer ratified the re-derive-and-rewrite correction (recorded as
-"option (a)" in that decision) on 2026-07-03 for
-the padded `raw_code_hashes` corpus written by the pre-#21 Reth DB code reader.
-The audited bigname bug used the padded/analyzed bytecode view (`bytes_ref()`)
-instead of the original deployed bytecode path, while the pinned Reth RPC
-account-code path reads `.original_bytes()` for account bytecode
-`(upstream: .refs/reth/crates/rpc/rpc-eth-api/src/helpers/state.rs:L237 @ reth@88505c7)`
-`(upstream: .refs/reth/crates/rpc/rpc-eth-api/src/helpers/state.rs:L244 @ reth@88505c7)`.
-The corrupted rows therefore carried deterministic `code_hash` and
-`code_byte_length` values that were 1 to 19 bytes longer than the consensus
-bytecode for affected observations.
+The ratified pre-cut correction rewrote only `raw_code_hashes.code_hash` and `code_byte_length` after node-backed verification. Its old-indexer command and the storage selection/update helpers have now been deleted. Historical results remain raw facts; there is no current Rust correction writer for this class. Any future raw-fact rewrite requires a new doc-first correction record and implementation.
 
-The live audit measured 3,736,298 padded-corrupt rows, 94.7% of the audited
-corpus, and 208,320 already-correct rows. The corrupt writes span
-2026-05-01 through 2026-07-03 by `raw_code_hashes.observed_at`. The state-root
-consensus anchor for the audit was a live `eth_getProof` sample on the immutable
-registry contracts: the EIP-1186 `codeHash` agreed with the value derived from
-the original-bytecode reader, not with the padded stored value. Pinned Reth
-serves `eth_getProof` and populates the EIP-1186 response `code_hash` from the
-account bytecode hash
-`(upstream: .refs/reth/crates/rpc/rpc-eth-api/src/core.rs:L900 @ reth@88505c7)`
-`(upstream: .refs/reth/crates/rpc/rpc-eth-api/src/core.rs:L908 @ reth@88505c7)`
-`(upstream: .refs/reth/crates/trie/common/src/proofs.rs:L733 @ reth@88505c7)`
-`(upstream: .refs/reth/crates/trie/common/src/proofs.rs:L736 @ reth@88505c7)`.
+### 2026-07-03 Base normalized-event drop-and-rederive correction (retired)
 
-The ratified correction selection excludes 432 rows whose `block_hash` is
-orphaned or absent from retained `chain_lineage` for the window. Those rows
-retain their padded values as unverifiable historical observations of orphaned
-blocks. No future canonical upsert touches those `(chain_id, block_hash,
-contract_address)` keys, and deletion of those rows was not ratified.
+This ratified pre-cut correction and its `bigname-indexer drop-and-rederive-base-normalized-events` implementation are retired. The command, its Base-tail rederive state machine, and its Rust storage helpers were deleted with the old runtime. The `base_normalized_rederive_*` tables remain only in immutable migration history and have no current writer or repair authority.
 
-The guarded raw-fact rewrite scope is limited to `raw_code_hashes.code_hash` and
-`raw_code_hashes.code_byte_length`. It does not alter `raw_code_hash_id`,
-`chain_id`, `block_hash`, `block_number`, `contract_address`,
-`canonicality_state`, `observed_at`, any other raw-fact table, manifests,
-discovery rows, execution artifacts, or service configuration. Storage triggers
-may append a legacy resolver-profile queue row for an effective transition, but
-the old indexer no longer drains that queue or refreshes normalized events and
-projections from it. Any resulting resolver or record projection refresh needs
-a separately reviewed explicit replay or restage. The implementation owner is
-the indexer repair tooling invoking storage-owned guarded update helpers for
-this raw-fact family.
-
-The approved method is:
-
-1. Select the ratified observed-at window, excluding rows whose block hash has
-   no non-orphaned `chain_lineage` row. The tool reports the excluded rows in
-   the `orphaned_skipped` bucket instead of attempting to prove them against a
-   node state that no longer exists.
-2. Re-derive each selected `(chain_id, block_hash, contract_address)` from the
-   v2.2.0 Reth DB reader that uses `original_bytes()`.
-3. Classify correction candidates by direct comparison between the stored value
-   and the re-derived `(code_hash, code_byte_length)`, not by padding-length
-   heuristics.
-4. Refuse the run if a re-derived hash falls outside the stored variant family
-   for an address that already has multiple stored variants.
-5. Verify a substantive JSON-RPC sample before any write: at least 1% of
-   selected rows, every distinct address at least once, and all mandatory
-   out-of-family findings if any exist. The mandatory per-run sample uses
-   `eth_getCode` by block hash and compares both bytecode hash and byte length
-   to the Reth-derived value. The tool also attempts a small best-effort
-   `eth_getProof` spot-check for state-root anchoring on the most recent
-   correctable row per address; node timeout or provider-serving failure is
-   logged as non-fatal after the mandatory `eth_getCode` sample, while a
-   completed proof disagreement remains a verification disagreement.
-6. Rewrite only `code_hash` and `code_byte_length` in guarded batched
-   transactions. Each batch logs a correction-event line with row counts and
-   block range, and enforces that corrected, already-correct, conflicting, and
-   orphaned-skipped rows account for the requested batch. A rerun skips
-   already-correct rows.
-
-The post-run acceptance checks are node-dependent and are not CI gates. The
-supervised operations run must finish with zero RPC verification disagreements,
-zero unexpected variant rows, a dry-run census of zero remaining correctable
-non-orphan rows for the ratified window, the audited 432 `orphaned_skipped`
-rows reported, recorded `eth_getProof` spot-check status, and the env-widened
-live verification test green table-wide, including
-`reth_db_provider_latest_rows_match_consensus`.
-
-### 2026-07-03 Base normalized-event drop-and-rederive correction
-
-The maintainer ratified a supervised corpus correction on 2026-07-03 for Base
-Basenames normalized events and adapter-owned identity rows that accumulated
-conflicting payloads across multiple derivation and manifest changes during the
-outage window. The approved method is drop plus full-closure re-derive from
-retained canonical raw facts. This is an exception to normal replay behavior:
-the ordinary raw-fact normalized-event replay path remains upsert-only and does
-not delete stale rows.
-
-The implementation owner is the indexer command
-`bigname-indexer drop-and-rederive-base-normalized-events`. Its dry run is the
-maintainer review gate: it prints the exact live census by table,
-derivation-kind/source-family delete/keep partition, block range, active replay
-target and manifest snapshot digests, and replay reset target without writing.
-Every `delete_census` field is an exact execute gate: execute requires the
-corresponding `--expected-*` value and refuses review-to-write drift. The
-derivation-kind/source-family partition, ratified dropped-emitter section,
-cursor-census breakdown, estimated batch counts, and deferred raw-fact safety
-line are review visibility only. `resolver_current` and
-`primary_names_current` have no identity foreign key in this correction; they
-are represented by the exact gated `current_projection_replay_status` reset
-count instead of by per-row projection delete counts.
-The heavyweight raw-fact completeness anti-join and retained raw-log byte proof
-are intentionally deferred from dry-run and recomputed by execute-start under
-the advisory lock before any delete. The execute mode
-requires the explicit `--execute --confirm-ratified-2026-07-03` flags, the
-reviewed `--replay-target-block`, records a structured correction-event log
-line, takes a PostgreSQL exclusive advisory session lock for the full batched
-run, refuses
-concurrent `bigname-indexer` or `bigname-worker` sessions that are visible in
-`pg_stat_activity`, and fails closed unless the reviewed expected counts still
-match. Indexer and worker runtime processes and write-capable one-shot commands
-also hold the corresponding shared advisory lock while they run, so the
-correction command cannot execute concurrently with updated bigname writers.
-Execute records durable progress in `base_normalized_rederive_runs` and
-`base_normalized_rederive_run_batches`, keyed by a reviewed `--run-id`. A
-re-invocation with the same run id, target block, batch size, and expected
-census resumes incomplete work; if the live census plus recorded deleted counts
-does not equal the reviewed census, it refuses to continue. Resume also reruns
-the re-runnable replay-coverage and raw-fact completeness guards before any
-additional batch is deleted. The reviewed plan stored in the run row includes
-the active Base replay target/range digest, active manifest digest, reviewed
-census, target, progress, and compact raw-fact range proof; it does not store
-the full active target rows. Resume rebuilds the active target snapshot and
-active manifest snapshot and requires their digests to match the stored
-reviewed digests, so the check remains non-vacuous even after the scoped
-`normalized_events` rows have already been deleted. Execute also requires the
-dry-run's active target snapshot digest and active manifest snapshot digest as
-expected values, so review-to-write replay-target or manifest drift cannot
-become the stored run snapshot. The run row's retained raw-fact range proof
-covers canonical raw-log identity, payload fields, and lineage rows at run
-creation. In-progress resume validates that stored proof target, the active
-target and manifest digests, raw-fact completeness, and live-plus-deleted
-census, but it does not recompute the full retained raw-log byte checksum on
-every resume. The session advisory lock plus guarded-writer exclusion make the
-raw-fact corpus immutable for the run except for this command's scoped deletes,
-which never touch raw-fact tables. A long-paused run cannot continue after the
-active replay targets, active manifests, or raw-fact completeness guards have
-drifted out of the reviewed safe state.
-
-The normalized-event scope is:
-
-- `chain_id = 'base-mainnet'`
-- `block_number BETWEEN 17571485 AND <validated replay target>`
-- `block_hash IS NOT NULL`
-- a re-derivable derivation/source-family pair emitted by the selected Base
-  closure replay adapters:
-  - `ens_v1_reverse_claim`: `source_family IN ('ens_v1_reverse_l1',
-    'basenames_base_primary')`
-  - `ens_v1_registry_resolver_changed` or `ens_v1_subregistry_changed`:
-    `source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')`
-  - `ens_v1_unwrapped_authority` (the ENSv1 pipeline deriving ownership and
-    control for names — registry-, registrar-, and NameWrapper-held alike —
-    see [glossary](glossary.md)): `source_family IN
-    ('ens_v1_registrar_l1',
-    'ens_v1_registry_l1', 'ens_v1_resolver_l1', 'ens_v1_wrapper_l1',
-    'basenames_base_registrar', 'basenames_base_registry',
-    'basenames_base_resolver')`
-
-The scope does not use `source_manifest_id`; rows with a NULL manifest id are
-included when their derivation/source-family pair is re-derivable. The dry-run
-also enumerates every other `base-mainnet` derivation/source-family pair present
-in the same block-backed range and reports it as kept. In particular,
-`raw_log_preimage_observation` rows and re-derivable-looking derivation kinds on
-non-replay source families are not in the delete scope because this supervised
-Base closure replay does not re-derive them.
-
-A second ratification (2026-07-05, recorded as "option A" in that decision)
-adds one deliberate-drop class
-inside that delete scope: 3,939,502 `ens_v1_reverse_claim` /
-`basenames_base_primary` log-derived rows emitted by the legacy Basenames
-`ReverseRegistrar` `0x79ea96012eea67a83431f1701b3dff7e37f9e282`, with event
-and source-event shape `ReverseChanged` / `BaseReverseClaimed`, coin type `60`,
-and block range `17575714..46903158`. The Basenames `ReverseRegistrar` can establish primary
-records upstream, but bigname's declared Base primary-name value authority for
-`basenames_base_primary` is the ENSv1 Base `L2ReverseRegistrar`
-`0x0000000000D8e504002cC26E3Ec46D81971C1664`, keyed by
-`NameForAddrChanged(address,string)` and Base coin type `2147492101`.[^bn-revreg-l12][^bn-revreg-l150][^bn-revreg-l193][^v1-l2rev-base-deploy][^v1-l2rev-base-args][^v1-l2rev-event]
-The reviewed live manifest state also had the legacy
-`0x79ea96012eea67a83431f1701b3dff7e37f9e282` path deprecated behind a
-deactivated `manifest_successor` edge to the ENS
-`0x0000000000D8e504002cC26E3Ec46D81971C1664` authority. These 3,939,502 rows
-remain in the delete census and are not re-created by the full-closure replay;
-after replay and projection rebuild, Base primary names sourced only from the
-legacy Basenames reverse registrar are removed and `primary_names_current`
-reflects the ENS Base L2 reverse-registrar authority. Dry-run prints the
-ratified dropped-emitter count separately from the ordinary delete/keep
-partition so maintainers can confirm the deliberately dropped class before
-execute.
-
-The identity-row scope is `resources`, `token_lineages`, `name_surfaces`, and
-`surface_bindings` where `chain_id = 'base-mainnet'` and
-`provenance->>'adapter' = 'ens_v1_unwrapped_authority'`. The command also
-removes dependent current-projection rows and `projection_normalized_event_changes`
-rows only to satisfy foreign keys and to force the later projection rebuild to
-publish from the re-derived event stream. The final reset transaction clears
-`current_projection_replay_status` markers for `name_current`,
-`address_names_current`, `children_current`, `permissions_current`, and
-`record_inventory_current`, plus `resolver_current` and `primary_names_current`
-because those families consume normalized events that this correction deletes
-and re-derives. That prevents automatic all-current replay from skipping a
-family with a stale completion marker after the delete finishes. The same final
-transaction advances `current_projection_full_replay_input_revision` and clears
-the automatic replay attempt, so a logged stage or baseline captured from the
-deleted corpus cannot be reused. The global
-`projection_apply_cursors` watermark is not reset because it is not scoped to
-these affected families. It does not rebuild projections, so the API must be
-drained or stopped from execute through the replay, projection rebuild, and
-verification window.
-
-The delete is batched and resumable. The order is FK-safe at every commit:
-current projections keyed by scoped identity rows, then
-`projection_normalized_event_changes`, then scoped `normalized_events`, then
-`surface_bindings`, `resources`, `name_surfaces`, and `token_lineages`.
-Each execution session materializes the reviewed event and identity scopes into
-temporary tables, then materializes one candidate-key table for the current
-delete step by driving from those scope tables into the projection, event, or
-identity lookup indexes. Batches delete from that candidate table in
-deterministic key/block order. On crash or operator resume, the session
-rebuilds temporary scope and candidate tables from the remaining live rows and
-continues under the same reviewed run state. Identity-row batches do not begin
-until all dependent current projections, projection change rows, and normalized
-events are gone, so a crash leaves a partially deleted but referentially valid
-database. During the destructive delete, the API must remain drained:
-reverse-identity sidecar triggers are disabled only inside the affected
-projection and identity-anchor delete transactions, and the final reset
-transaction rebuilds `address_names_current_identity_counts` and
-`address_names_current_identity_feed` from the remaining current projections
-before marking the run completed.
-After all delete batches have completed, one final small transaction clears
-affected `current_projection_replay_status` rows, advances the full-replay input
-revision, clears any automatic replay attempt,
-`normalized_replay_adapter_checkpoint_items` and
-`normalized_replay_adapter_checkpoints` for
-`ens_v1_reverse_claim`, `ens_v1_subregistry_discovery`, and
-`ens_v1_unwrapped_authority`, clears any sibling
-`mainnet/base-mainnet/post_replay_live_adapter_backlog` cursor, then resets the
-`normalized_replay_cursors` row for
-`mainnet/base-mainnet/raw_fact_normalized_events` to
-`range_start_block_number = next_block_number = 17571485` and
-`target_block_number = <validated replay target>`. The final reset revalidates
-that the retained canonical Base raw-log floor is exactly block `17571485`, and
-the catch-up path repeats that floor check while the completed run's reset cursor
-is still pending replay. Because the catch-up cursor's replay bounds are derived
-from the canonical raw-log floor, replay refuses before cursor refresh if a later
-retention change would widen this correction below the delete boundary. The
-generic catch-up cursor refresh and older-log rewind paths otherwise retain their
-normal ability to widen or rewind when older retained raw logs appear. If the
-process dies before that final reset, replay cursors and projection markers
-remain untouched and the same `--run-id` must be resumed before replay starts.
-Guarded writer processes also refuse to start while a Base rederive run remains
-incomplete (`status` other than `completed` or `aborted`), so a released session
-lock after a crash is not enough for normal writers to proceed against a
-partially deleted corpus.
-
-The command must not delete `chain_lineage`, `raw_logs`, `raw_transactions`,
-`raw_receipts`, `raw_code_hashes`, `payload_cache`, or any other raw-fact source.
-Before execution it proves that the scoped log-derived normalized events still
-join retained non-orphaned `raw_logs`, scoped boundary events still join retained
-non-orphaned `chain_lineage`, and the canonical raw-log range inside the
-ratified replay window spans the closure boundary and validated replay target.
-It also proves that the retained canonical Base raw-log floor itself equals the
-ratified closure boundary, block `17571485`.
-It also refuses if any row in the delete scope is above the retained canonical
-raw-log head, or if any present delete-scope `(derivation_kind, source_family)`
-pair lacks currently active Base replay adapter/source-family target ranges
-whose union covers the ratified closure boundary through the validated replay
-target with no block gap, or if any in-scope log-derived row was emitted by an
-address outside the current active replay target set for that row's source
-family at the event block. The only exception is the 2026-07-05 ratified
-deliberate-drop allowlist class ("option A" above)
-`(ens_v1_reverse_claim, basenames_base_primary, 0x79ea96012eea67a83431f1701b3dff7e37f9e282,
-ReverseChanged, BaseReverseClaimed, coin_type=60, blocks=17575714..46903158)`;
-that exact class is deliberately dropped and not re-derived, and any other
-orphaned emitter remains a hard stop. `ens_v1_unwrapped_authority` raw-block boundary rows
-(`transaction_hash` and `log_index` are null and `raw_fact_ref.kind` is
-explicitly `raw_block`) are checked against coverage for the source family that
-will rederive the boundary row rather than blindly against the stored source
-family. For Basenames registry boundary rows whose stored family is the legacy
-`ens_v1_registry_l1` drift, that rederive family is `basenames_base_registry`.
-Rows missing the explicit `raw_block` marker remain subject to strict
-same-source-family coverage. Apart from the explicit 2026-07-05 deliberate-drop
-class, these are hard stops because the correction may only delete rows that
-current full-closure replay can recreate from retained raw facts.
-The completed run records the reviewed active replay target/range digest and
-the reviewed active Base manifest digest. The active manifest digest is computed
-from manifest payloads plus deterministic compact row-summary digests for
-manifest-linked capability flags, discovery rules, contract instances, active
-addresses, and active discovery edges, so the review pin detects
-manifest-linked row additions, removals, and modifications without storing the
-live discovery graph in the run row. While the reset cursor is still pending
-replay and the reviewed replay has not yet begun, the catch-up replay path
-rebuilds the current active snapshots, compares their digests with those
-reviewed digests, and refuses to replay if a different manifest image was
-synced after review, even when the replay target addresses and ranges would
-otherwise be unchanged. Current plain adapter replay does not create a
-`full_closure` adapter-checkpoint marker, so the reviewed target and manifest
-digests remain enforced across its retries. A matching checkpoint row left by
-an older binary still activates the legacy in-progress allowance; a row pinned
-to another target does not. Repository manifest sync is
-skipped while the reviewed completed run's reset cursor is still pending, so
-the active manifest tables cannot be rotated by normal repository sync between
-the replay guard and the full-closure adapter reads; that sync gate is what
-protects manifest-owned state during the checkpoint-skip window. A skipped repository
-refresh remains marked for retry, so the same long-running indexer syncs the
-repository normally once the pending reset replay cursor completes.
-Because the delete scope is global for `base-mainnet` while replay reset is
-profile-scoped, dry-run and execute also require the requested deployment
-profile to own an existing `base-mainnet/raw_fact_normalized_events` replay
-cursor before they report or run the correction.
-Dry-run defaults the target to the live canonical Base raw-log head and reports
-the maximum affected normalized-event block plus the effective replay target
-floor. The floor is the greater of the maximum affected block and any pending
-closure-boundary raw-fact replay cursor target from an earlier drop, so neither
-idempotent nor partial-replay reruns can shrink the intended replay range while
-replay is still pending. Execute requires an explicitly provided
-`--replay-target-block`; that reviewed value is accepted when it is not above the
-current canonical raw-log head and not below the reported replay target floor.
-Raw-fact completeness is recomputed for the requested target. The command also
-refuses if any normalized event outside the delete scope still references an
-identity row that the correction would drop. If any proof fails, no write is
-allowed.
-The default batch size is `100000` rows; operators may lower it with
-`--batch-size` to keep per-commit WAL and lock duration within the deployment's
-headroom. The correction leaves row-level sidecar delete triggers enabled. That
-keeps sidecar invalidation semantics normal while batching bounds WAL per
-commit; sidecars are then reconciled by the required all-current projection
-rebuild.
+Schema-v2 interpretation now owns Base identity and normalized-event output. A required re-derivation is an explicit finite `interpret` redo over a complete ingested range; it does not resume or consult the retired correction tables.
 
 ## Storage layers
+
+During Stage B, these layers are split across two explicit schemas in one
+PostgreSQL database. The surviving API and worker remain on immutable
+`migrations/` history in `public`, while phase-runner ingest and interpretation
+use the fresh `schema-v2/` baseline in `bigname_phase`. The
+`phase-runner init-schema` command accepts only an empty phase schema until a
+reviewed upgrade or rebuild mechanism exists. Serving the fresh projections is
+deferred to the worker/API port and cutover. The shared transaction domain is
+intentional: it lets head publication invalidate retained execution-cache
+eligibility atomically with phase-lineage orphaning.
 
 The system of record splits into six layers.
 
 1. `chain_lineage` — block ancestry, fork points, hash-first reconciliation, head promotion, one durable header-anchor row per observed block hash.
-2. `raw_facts` — hot indexed replay facts: selected/admitted target logs, the minimum transaction/receipt fields needed to decode them, code-hash observations, fetched call snapshots, optional header/log audit extensions, compact payload-cache metadata. Code-hash observations are activity-scoped, not a per-block grid: a block admits `raw_code_hashes` rows only for that block's selected log emitters, plus the live tailer's one-time baseline for a watched address with no stored observation. Consumers read the latest non-orphaned observation per target; the code at an intervening block is a read-side answer, never a materialized raw fact. See [`chain-intake.md`](chain-intake.md).
+2. `raw_facts` — hot indexed replay facts: selected/admitted target logs, the minimum transaction/receipt fields needed to decode them, retained code-hash observations, fetched call snapshots, optional header/log audit extensions, compact payload-cache metadata. The `raw_code_hashes` writer and reader remain because resolver-profile views still consume stored observations, but no current runtime produces new rows after deletion of the old intake. Whether the later port adds an ingest observation family or redesigns resolver profiles around ERC-1967 upgrade history remains deferred; see [`manifests.md`](manifests.md#discovery-admission).
 3. `manifests_and_discovery` — source manifests, discovered edges, rollout flags.
 4. `identity_and_events` — `NameSurface`, `SurfaceBinding`, `resources`, `token_lineages`, and append-only `normalized_events`.
 5. `projections` — current-state and collection read models.
@@ -364,7 +53,7 @@ The system of record splits into six layers.
 
 Layers 1–5 rebuild current declared state. Layer 6 replays verified answers and explains them.
 
-Worker-owned manifest/proxy alert observations live alongside these layers as an operational audit family. They record drift findings; they are not manifest truth, discovery admission, projection state, or adapter-owned events.
+Worker-owned manifest/proxy alert observations live alongside these layers as an operational audit family. They record drift findings; they are not manifest truth, discovery admission, projection state, or interpret-phase events.
 
 ## Storage substrates
 
@@ -374,59 +63,26 @@ Postgres is the hot indexed and replay-focused store. It retains:
 - selected/admitted target logs and the minimal transaction and receipt fields while they are needed to decode those logs, route them through adapters, and append normalized events
 - block-scoped call snapshots and enrichments retained by an explicit replay contract for normalized events, projections, or execution artifacts
 - durable event-silent resolver call observations used as projection-invalidation inputs after selected transaction and receipt staging rows are compacted
-- code-hash observations and discovery/proxy evidence used by manifests, adapter routing, and audit tooling
+- retained code-hash observations and discovery/proxy evidence used by
+  resolver-profile and manifest-drift views; no current runtime produces new
+  code-hash observations
 - compact metadata and optional digests for full payloads fetched as cache
 
 There is no deployed object-storage layer in the current schema or compose stack. When the system retains fetched payload metadata, Postgres stores the metadata and optional digests needed to validate later cache use; fetched bytes outside durable replay facts are cache-owned and may be absent.
 
-## Raw-log retention modes
+## Raw facts and retained staging
 
-`raw_logs`, selected `raw_transactions`, and selected `raw_receipts` have two retention modes selected operationally:
+The schema-v2 `ingest` phase owns chain lineage and selected `raw_*` writes. Raw facts are immutable inputs to `interpret`; canonicality is explicit and block-hash anchored. The deleted old runtime no longer maintains raw-log input revisions, retention generations, retained-history proofs, coverage facts, or adapter startup checkpoints. Their SQL tables remain migration history and have no current Rust authority.
 
-- **minimal** — these rows are adapter-replay staging. They may be compacted after the normalized replay cursor advances past the retained block range and the corresponding `normalized_events`, identity rows, lineage rows, and projection rebuild inputs are durable.
-- **log-audit** — the same rows remain durable audit facts and may keep heavier indexes for historical raw-fact replay.
+`raw_logs`, selected `raw_transactions`, and selected `raw_receipts` still support the surviving minimal-versus-audit retention policy. In minimal mode, `bigname-worker raw-facts compact-log-staging` remains because the worker has not yet been ported. It still reads the historical normalized replay cursor before compacting. That read-only compatibility boundary is deferred to the worker port; it does not reactivate the deleted normalized replay writer or prove schema-v2 interpret completeness.
 
-Switching modes is operational policy. It does not change route coverage, projection truth, canonicality semantics, manifest rollout, or consumer-replacement meaning.
-
-Live polling may retain selected `raw_transactions` and `raw_receipts` for successful direct transactions to configured event-silent resolver addresses even when those transactions do not emit selected logs. Intake copies the chain id, resolver address, block number/hash, transaction hash/index, and canonicality into `event_silent_resolver_call_observations` before those staging rows become compactable. The durable observation row is the projection-invalidation trigger for explicitly documented hydration repairs, such as legacy ENSv1 reverse-resolver primary-name hydration. It does not authorize adapters to synthesize normalized events from calldata or receipts, does not make raw facts an API fallback, and does not change minimal/log-audit compaction boundaries once downstream normalized replay and projection inputs are durable.
-
-`bigname-worker raw-facts compact-log-staging` is the manual compaction boundary for minimal mode. It refuses to compact unless the `raw_fact_normalized_events` replay cursor is caught up and failure-free, and only operates on raw-log staging families. Log-audit deployments do not run it for retained ranges.
-
-Raw-log inserts and semantic updates advance a commit-ordered per-chain [input revision](glossary.md) and append per-revision evidence for every old or new block hash they touch. Multiple block hashes can share one revision, while repeated mutations of the same hash retain separate revision witnesses. Semantic updates are changes to `raw_log_id`, chain, block, transaction, log position, emitting address, topics, payload bytes, or canonicality. An `observed_at`-only refresh is metadata and does not advance either revision. This is synchronization metadata, not a raw fact or an adapter snapshot. Stateful live adapters may use it to prove that all raw-log mutations since a cached block anchor leave the cached ancestor path unchanged; sequence-allocated `raw_log_id` values are not a commit-order proof.
-
-The append-only evidence-key migration records each existing chain's current
-revision as its [block-revision evidence
-floor](glossary.md#block-revision-evidence-floor). The legacy latest-per-block
-key could already have discarded witnesses, so a checkpoint below that floor
-cannot use the retained rows as a complete sequence and must restart. A
-checkpoint recorded at the floor needs only the gap-free witnesses written
-after the cutover; new chains start at floor zero.
-
-[Retained-history](glossary.md) authority is a separate proof tuple: raw-log retention [generation](glossary.md), discovery-[admission epoch](glossary.md), and inclusive proven-through block. A fresh chain starts incomplete; inserting its first raw log does not claim that earlier selected history is complete. Deleting or truncating raw-log staging increments the retention generation, clears the proof, and invalidates every process-local cache built under the previous generation. Updating a raw log's identity or payload has the same destructive effect for both the old and new chain identities because the retained corpus no longer proves what was fetched; a canonicality-only update retains the generation and proof, while an `observed_at`-only update changes neither revision nor proof. Per-block input-revision metadata cannot carry a cache across a generation change.
-
-Automatic full-closure normalized replay after a destructive raw-log retention change requires a stored ENSv2 proof whose generation and discovery epoch match and whose inclusive boundary covers the replay target. The proof is backed by gap-free current-generation coverage facts for every authoritative `ens_v2_root_l1` and `ens_v2_registry_l1` interval, including retained closed intervals. Plain startup, live polling, and direct adapter entry points do not establish this absence authority.
-
-Automatic normalized-event catch-up retains the bounded exact-interval recovery path for source families whose completeness is represented by per-address coverage intervals. An uncovered reported interval is fetched through the ordinary raw-only recovery job before a later catch-up iteration retries. A provider failure, stale generation or admission epoch, or exhausted attempt budget leaves the global replay cursor pending. This batch path does not create or repair the separate ENSv2 root/registry retained-history proof. The transitional old runtime validates an already stored proof after retention rotation, but a missing or stale proof leaves replay pending because the ENSv2 recovery wave and proof publisher are gone. Startup and live adapter synchronization do not invoke either recovery path.
-
-ENSv2 `RegistryCreated()` admission starts a registry instance at the emitting creation log and does not require a parent link. `SubregistryUpdated` supplies parent-child reachability separately. The registry emits `RegistryCreated()` during construction. (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@ccaeb58) Resolver discovery still starts at its registry attachment. Full closure reloads every bounded retained discovery interval even when every edge for that source family is closed and the current watch plan is empty. The one-time historical fetch for creation events that predate the new match-all scope is a separate ingest operation; interpretation does not infer missing creation facts from parent links.
-
-Deactivated discovery edges without an `active_to_block_number` close bound — losing-fork retractions and manifest-sweep removals — are not emitter authority for any log. Rows derived under the pre-fix admission on stores populated by older binaries are not reproduced by a full replay; any retained copies require a complete-history [adapter repair](#adapter-repair) under the standard repair policy.
-
-After compaction, `chain_lineage` and any retained compact block-anchor metadata remain the block-hash path for losing-branch repair, and `normalized_events` carry the block identity, source identity, event identity, and provenance needed by projection rebuilds and history reads. If raw-log staging rows are already gone, reorg repair marks normalized events and identity rows orphaned from lineage and updates zero raw-log rows for that range. Historical adapter replay from compacted ranges is an explicit backfill/refetch operation against the configured provider/cache substrate or requires log-audit retention; it is not an implicit API fallback.
-
-Compaction and pruning must stay behind the rewind horizon they serve. Minimal mode may drop staging rows after replay is durable, but it must not drop lineage, normalized-event provenance, identity intervals, projection change records, or retained replay facts needed to orphan a losing branch and rebuild the canonical snapshot. If a compacted range later needs adapter-level byte replay and no retained digest-checked payload or provider/cache fill can satisfy it, that repair fails closed rather than inventing state from current projections.
+Exact block-anchored `raw_call_snapshots` also survive because verified execution persists and reuses them through the admitted raw-fact boundary. Worker inspection reads selected raw facts and lineage for audit output. The API does not acquire a general raw-fact read path.
 
 ## Evictable payload cache
 
-Large/full block payloads, non-indexed transaction/receipt/block bodies, and non-audit raw-log staging rows are evictable cache by default once the selected replay contract has been satisfied. They may live inline during a hot window, in local/provider cache, or not be retained at all.
+Large block payloads and non-selected transaction or receipt bodies are evictable cache once no admitted replay contract needs them. Retained cache metadata may record a digest, size, encoding, source, observation time, and canonicality. A later provider fill is explicit, block-hash scoped, digest checked when a digest exists, and fail-closed; it is not a substitute for lineage, normalized events, identity rows, projections, or execution artifacts.
 
-Retained cache metadata describes what was fetched: payload kind, chain id, block hash/number where block-scoped, optional digest, size, content type or encoding, source observation metadata, observed time, canonicality state. A retained digest authorizes later byte use; metadata without one cannot.
-
-Provider re-fetch is an explicit, fallible cache-fill path. For block-scoped payloads it is block-hash-scoped, verifies the retained digest before any bytes are used, and fails closed when the digest is absent, the digest mismatches, or the provider cannot serve the exact historical payload. It is not a substitute for retained lineage, normalized events, execution artifacts, or orphaned-branch audit truth.
-
-Local execution-client storage (e.g. a same-host Reth database) is provider/cache substrate, not a new storage family. Client table keys, row cursors, static-file offsets, and data-directory paths appear only in operational source metadata or evictable cache metadata — never as durable `raw_fact_ref` identities, normalized-event provenance, or projection inputs.
-
-Historical backfill does not turn empty blocks into hot payload archives. A block with no selected target logs and no replay-required enrichment retains lineage/header anchors and any compact audit metadata required by the selected retention policy. Full block bodies, receipt bundles, transaction bundles, and payload-cache bytes for those empty historical blocks remain evictable or absent.
+Local execution-client storage is provider or cache substrate, not a durable bigname identity namespace. Client table keys, cursors, and data-directory paths do not become normalized-event provenance or projection inputs.
 
 ## Identity strategy
 
@@ -442,7 +98,7 @@ Solidity `string` values in resolver and reverse-name events are likewise decode
 
 ENSv2 resolver `AliasChanged` and `Named*Resource` payloads with a structurally malformed DNS wire name remain available in the immutable raw log but produce no normalized name or preimage observation: without a valid length-delimited label path, the interpreter cannot derive a chain-native namehash. A structurally valid DNS name whose individual labels contain hostile bytes instead follows the shadow-identity rule above.
 
-`label_preimages` is a hash-to-verbatim-label fact table, not a name-surface table. Rows may be learned from retained `PreimageObserved` normalized events, retained `name_surfaces`, or imported operationally from a rainbow-table source such as Graph Protocol's `ens-rainbow` dump. The pinned generator emits a prepared `ens_names(hash, name)` table and computes `hash` as `keccak256(name)`.[^graph-ens-rainbow-table][^graph-ens-rainbow-hash] Each retained label must hash back to the stored labelhash. Its current normalizer result is stored as `normalized_under_version` plus an error when false; rejection does not discard the preimage. Label preimages can improve projection readability, but they do not by themselves create ownership, resolver topology, record facts, or primary-name truth, and normalized display text remains a read-time derivation.
+`label_preimages` is a hash-to-verbatim-label fact table, not a name-surface table. The schema-v2 interpret phase writes label preimages alongside admitted name observations; the surviving worker may also import them operationally from a rainbow-table source such as Graph Protocol's `ens-rainbow` dump. The old migrate-time scan over retained normalized events and name surfaces has been deleted. The pinned generator emits a prepared `ens_names(hash, name)` table and computes `hash` as `keccak256(name)`.[^graph-ens-rainbow-table][^graph-ens-rainbow-hash] Each retained label must hash back to the stored labelhash. Its current normalizer result is stored as `normalized_under_version` plus an error when false; rejection does not discard the preimage. Label preimages can improve projection readability, but they do not by themselves create ownership, resolver topology, record facts, or primary-name truth, and normalized display text remains a read-time derivation.
 
 `bigname-worker label-preimages import-ens-rainbow` is worker-owned operational tooling. Operators must first load the pinned `ens-rainbow`-shape source table `ens_names(hash, name)` into the bigname database. The command reads that table in hash order, validates and stores only labels that normalize as one ENS label and hash back to the supplied `hash`, and enqueues `children_current` invalidations for known parents that have matching canonical ENSv1 or Basenames registry child edges.
 
@@ -473,232 +129,43 @@ The storage-side guarantees those rules depend on:
 - Normalizer-version changes are owned by interpret redo's flag-recompute mode. The command remains intentionally unavailable until binding reconciliation is implemented; its contract is to recompute `label_preimages` flags and reconcile affected `name_surfaces` visibility while preserving stable identity and chain observation anchors, never rewriting normalized label text into identity.
 - The schema-v2 interpret phase loads the prior-state fold once per chain run or redo session and keeps that compact fold resident while it advances across physical 500-block batches. This accepted memory cost is proportional to the distinct retained interpreter state keys and their live-lineage dependency anchors; it avoids reloading the full prior normalized-event history for every batch. Completing a redo evicts every resident fold for that chain so the restored normal cursor reloads the rewritten database state.
 - Redo preparation marks stable identity rows anchored in the requested range `orphaned` before the later physical batches have necessarily re-observed them. If a multi-batch redo exits after that first transaction, identities not yet repopulated intentionally remain orphaned until the same redo resumes and completes; the interrupted redo state prevents an unrelated redo from treating that intermediate database state as complete.
-- For interval identity rows like `surface_bindings`, `active_from`, identity-defining fields, and the observation anchor of every readable row are immutable; `active_to` is replay-derived. The only anchor exception is reorg replacement: an already `orphaned` row may adopt the winning branch's chain/block observation anchor when the stable identity, `active_from`, kind, and provenance still match, while a readable row rejects the same change. That replacement also discards the orphaned row's replay-derived close and uses the winning observation's `active_to`; a winning registration with no unregister evidence therefore restores the stable binding as open. Canonical historical replay may tighten an existing non-null `active_to` to an earlier close point when older or more complete facts reveal an earlier end. Normal replay and identity upsert paths do not extend or reopen a readable closed interval. Explicit adapter repairs are governed by the adapter-repair policy below: any future interval widening or reopen must be named there with its proof, overlap guard, and invalidation behavior. Replay batches that both close an existing interval and open a replacement at the same boundary apply the existing interval update before inserting the replacement, so the non-overlap invariant is enforced without relying on implicit snapshots.
+- For interval identity rows like `surface_bindings`, `active_from`, identity-defining fields, and the observation anchor of every readable row are immutable; `active_to` is replay-derived. The only anchor exception is reorg replacement: an already `orphaned` row may adopt the winning branch's chain/block observation anchor when the stable identity, `active_from`, kind, and provenance still match, while a readable row rejects the same change. That replacement also discards the orphaned row's replay-derived close and uses the winning observation's `active_to`; a winning registration with no unregister evidence therefore restores the stable binding as open. Canonical historical replay may tighten an existing non-null `active_to` to an earlier close point when older or more complete facts reveal an earlier end. Normal replay and identity upsert paths do not extend or reopen a readable closed interval. Any future interval widening or reopen requires a new doc-first rule with its proof, overlap guard, and invalidation behavior. Replay batches that both close an existing interval and open a replacement at the same boundary apply the existing interval update before inserting the replacement, so the non-overlap invariant is enforced without relying on implicit snapshots.
 
 For ENSv2, `resource_id` keys by `(chain_id, registry_contract_instance_id, upstream_eac_resource)` after observing the upstream EAC resource — not by the current ERC-1155 token id. Upstream exposes both `getResource(anyId)` and `getTokenId(anyId)`, emits `TokenResource(tokenId, resource)` when a token links to a resource, and emits `TokenRegenerated(oldTokenId, newTokenId)` when role changes burn and mint a replacement token while leaving the resource unchanged.[^v2-iperm-l34][^v2-iperm-l67][^v2-iperm-l72][^v2-events-l69][^v2-pr-l216][^v2-pr-l451] Unregister/re-register increments both `eacVersionId` and `tokenVersionId` and mints fresh `resource_id` and `token_lineage_id`.[^v2-pr-l28][^v2-pr-l203][^v2-pr-l237][^v2-pr-l536]
 
 ## Table families and write ownership
 
-| Family | Write owner | Purpose |
+| Family | Current owner | Purpose and Stage B status |
 | --- | --- | --- |
-| `chain_*` | intake owns lineage and the canonical block graph; storage triggers own `chain_lineage_mutation_revisions` | lineage and canonical block graph plus transitional commit-ordered per-chain revision metadata |
-| `raw_*` | intake; storage triggers own raw-log revision and retention-generation metadata | immutable hot replay facts, payload-cache metadata, append-only per-chain/revision/block-hash mutation evidence, and generation/epoch/through-bound retained-history proofs |
-| `backfill_*` | worker/backfill substrate through storage-owned lifecycle helpers | persisted backfill jobs, bounded range leases, resumable range checkpoints, and completion-scoped coverage facts |
-| `normalized_replay_*` | indexer/replay orchestration; legacy adapter checkpoint rows are no longer written by the old runtime | operational replay cursors, transitional adapter checkpoint storage, and per-window automatic coverage-recovery retry/terminal records |
-| `resolver_profile_input_changes` | storage triggers may enqueue; no old-indexer consumer | transitional generation-fenced resolver-profile work; it is not a readiness or checkpoint gate |
-| `resolver_profile_authority_journal`, `resolver_profile_authority_journal_entries` | retained legacy storage API; no old-indexer driver | transitional resolver-authority snapshot rows that the old runtime no longer advances |
-| `resolver_profile_reconciliation_runs`, `resolver_profile_reconciliation_targets`, `resolver_profile_reconciliation_state_items` | no active old-runtime writer | transitional staging rows from the removed absence-aware resolver-profile reconciliation |
-| `resolver_profile_reconciliation_invalidation_keys` | no active old-runtime writer | transitional projection-key staging from the removed resolver-profile convergence driver |
-| `manifest_*` | manifests/discovery | source manifests, declared contract admission, capability versions |
-| `discovery_*` | manifests/discovery | canonical reachable contract graph, watch-plan expansion keyed by `contract_instance_id` |
-| `manifest_alert_*` | worker/audit | persisted manifest-drift and proxy-alert observations |
-| `name_surfaces`, `surface_bindings`, `resources`, `token_lineages` | adapters | stable identity anchors |
-| `name_surface_normalization_repair_findings` | indexer repair | audit table for retained name-surface rows that reject or remap under the active normalizer and therefore need explicit semantic follow-up rather than silent metadata rewrite |
-| `label_preimages` | storage from verified retained name-bearing facts; worker/operator rainbow imports | retained labelhash-to-label facts used to resolve child labels and other display preimages without minting exact-name identity |
-| `normalized_events` | adapters | append-only normalized protocol events |
-| `event_silent_resolver_call_observations` | intake | durable block-scoped direct-call observations for documented projection hydration invalidation where the watched resolver emits no usable event |
-| `projection_*` | projection workers | disposable read models |
-| `address_names_current_identity_counts`, `address_names_current_identity_feed` | storage triggers on `address_names_current`, `primary_names_current`, and supporting identity-anchor and `name_current` readability changes | exact reverse identity total counts and compact feed display rows by address, role filter, and primary-name coin type for the partner-compatible identity façade, using the same canonical/read-safe and reachable-`name_current` row eligibility as reverse identity pages; this is the bounded exception in [`adrs/0005-identity-count-sidecar.md`](adrs/0005-identity-count-sidecar.md) |
-| `permissions_current_publication` | permission projection worker, keyed and full publication transactions | singleton projection-owned compatibility version and monotonic data revision; API-readable schema/version and request-coherence guard, not replay progress or freshness |
-| `current_projection_replay_status` | projection workers; ratified storage correction tooling may clear affected markers when it deletes projection rows | durable operational completion markers for bootstrap/full all-current projection replay |
-| `current_projection_full_replay_input_revision`, `current_projection_replay_attempt`, `current_projection_staging_checkpoints`, dynamically named `cprs_*` tables | projection workers; direct non-event source repairs advance the singleton revision and invalidate replay progress | durable automatic-replay target and apply baseline, [projection replay-version fence](glossary.md#projection-replay-version-fence) activation and minimum admitted version, per-family source cursors, compatibility fences, and logged pre-publication rows for resumable full all-current projection staging |
-| `projection_normalized_event_changes` | normalized-event storage trigger; projection workers consume | append-only downstream change log for normalized-event inserts, admitted semantic content updates, and canonicality-state updates, consumed through finite, bounded-wait complete-prefix captures |
-| `projection_direct_invalidation_revisions` | storage trigger on direct invalidation generations; projection workers consume | durable latest revision and key payload for every direct queue generation, retained after the live queue row is consumed and captured through a finite, bounded-wait watermark |
-| `projection_permissions_resource_input_revisions` | storage trigger on staging-relevant `resources` changes; projection workers consume | durable latest resource-keyed revision for permission target discovery and zero-event resource summaries, retained independently of normalized events |
-| `projection_apply_cursors`, `projection_invalidations`, `projection_invalidation_dead_letters` | projection workers; storage trigger for projection-relevant `surface_bindings` repairs; bounded normalized-event adapter repair invalidations | durable projection apply watermarks, live key-scoped projection invalidation queue, and terminal operator-visible dead-letter records |
-| `service_loop_heartbeats` | indexer and worker main loops | durable per-process loop liveness, per-chain indexer loop liveness, and named service-operation phases; operational health evidence only, not chain progress or API read-model data |
-| `execution_*` | execution workers; API on-demand verified-resolution cache misses for documented product routes; synchronous indexer/reorg repair for orphan-block cache outcome deletes only | durable traces and steps, normal `execution_cache_outcomes` writes, invalidation records |
+| `chain_*` | `ingest` | Block-hash lineage and explicit canonicality. Legacy revision/proof tables have no current Rust writer. |
+| selected `raw_*` | `ingest`; execution persistence for admitted exact-block call snapshots | Immutable interpretation inputs and execution snapshot facts. Worker audit and compaction reads survive. |
+| `manifest_*` | schema-v2 manifest synchronization | Authored declarations, admission, and capability versions. |
+| `discovery_*` | schema-v2 `interpret` | Canonical discovered edges and current watch-plan expansion. |
+| `name_surfaces`, `surface_bindings`, `resources`, `token_lineages` | schema-v2 `interpret` | Stable identity anchors. |
+| `normalized_events` | schema-v2 `interpret` | Derived protocol events written transactionally with identity and discovery output. |
+| `label_preimages` | schema-v2 interpretation plus surviving worker or operator imports | Verified labelhash-to-label facts used by projections. |
+| `projection_*`, `*_current`, replay staging and apply cursors | worker and storage triggers | Surviving disposable read models, rebuild/apply progress, and invalidation journals. |
+| `manifest_alert_*` | worker audit | Manifest-drift and proxy observations; not admission truth. |
+| `service_loop_heartbeats` | worker | Current worker liveness. The API still reads retained old-indexer process/chain rows until its readiness port. |
+| `execution_*` | execution worker; documented API cache-miss persistence | Durable traces, steps, cache outcomes, and invalidation records. |
+| `backfill_*` | no current writer | Immutable migration-era jobs and ranges; storage retains read-only worker inspection. |
+| `normalized_replay_*` | no current writer | Migration-era replay/checkpoint state. The worker still reads selected cursors for projection readiness and raw staging compaction. |
+| `base_normalized_rederive_*`, resolver-profile queues/journals/reconciliation, retained-history/coverage/frontier tables, startup adapter checkpoints | no current writer | Stranded transitional schema retained only because migrations are immutable. These rows are not current admission, readiness, replay, or repair authority. |
+| `name_surface_normalization_repair_findings` | no current writer | Historical audit rows from the deleted indexer repair command. |
 
-The API process is otherwise read-only against storage.
+The API is otherwise read-only over projections and execution output, except for
+its documented on-demand verified-resolution persistence path. It does not gain
+a raw-fact or legacy operational-table fallback.
 
-`service_loop_heartbeats` identifies a service instance by `service_name` and
-`instance_id`. An indexer process row persists its exact expected live-chain
-set. Registering an indexer instance inherits the most recent process row's
-expected set, clears only the registering instance's prior non-process rows and
-orphan scopes whose instance no longer has a process row, and preserves another
-registered instance's chain rows during rolling handoff. The replacement is
-therefore unhealthy until it records the inherited expected chains instead of
-masking a running predecessor's missing or stale lane evidence. A full
-indexer-parent heartbeat replaces the expected set, seeds every expected chain
-row, and removes that instance's decommissioned chain rows. Worker registration
-retains its single-writer behavior and retires predecessor non-process rows.
-Process rows remain available to rank instances during a handoff.
-The supported deployment has one active writer for each service. Each main-loop tick
-advances `heartbeat_at` for its process row. The indexer registers this row
-immediately after opening its database pool, before startup bootstrap, and
-advances the process plus deduplicated chain rows after completed hash-pinned
-bootstrap progress units of at most 32 blocks. Startup adapter synchronization
-uses the plain full-family entry points; the old runtime records liveness at
-completed family boundaries, not while a family call is pending and not from
-adapter-private checkpoint pages or `_with_progress` callbacks. Live manifest
-and discovery refreshes retain their own bounded progress and family-boundary
-beats. This does not change the configured 1,024-block default checkpoint
-boundary for non-startup backfills. The worker
-advances the process row after bounded
-[projection](glossary.md) rebuild batches and projection-apply units. This
-keeps long, actively progressing work live without using a detached timer that
-could mask a stuck operation. A missing process-scoped row therefore means that
-instance's loop never registered or gracefully deregistered. Before the
-indexer's live-chain rows exist, a process row older than the configured
-maximum means the loop stopped or wedged after starting. Once those chain rows
-exist, the indexer container healthcheck uses the per-chain contract described
-below. For each service, the API
-prefers an instance whose normal heartbeat or active phase is within that
-service's configured age, then falls back to the newest stale evidence when
-none is healthy. An indexer candidate with an expected live-chain set is
-healthy only when every expected row exists and is within
-`BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS`, which defaults to 14,400
-seconds independently of `BIGNAME_API_HEARTBEAT_MAX_AGE_SECS`. Indexer phases
-use the ordinary API indexer maximum; worker rebuild
-phases use their separate long-operation maximum. One live instance can
-therefore satisfy shared readiness
-without being hidden by a newer retained instance that stopped. Each
-container's `healthcheck` subcommand reads its own instance row, so another
-instance cannot hide a stopped process. These rows are mutable operational signals. They are
-not raw facts, [replay](glossary.md) checkpoints, chain checkpoints, or
-projection freshness evidence.
+The worker continues to update its process and named rebuild-phase heartbeat
+rows at bounded projection progress points. Existing API readiness code also
+loads the old indexer heartbeat shape. That read and the underlying rows are
+kept because the API/worker port has not landed; no process in this source tree
+publishes new old-indexer heartbeat state.
 
-The worker's parent projection loop and required spawned hydration or
-invalidation-derivation work share an exclusive process-heartbeat ownership
-gate. For the indexer, the parent poll takes exclusive ownership against the
-complete set of active normalized-event replay chain lanes, while chain lanes
-may hold child ownership concurrently. A parent work unit or required child
-iteration acquires ownership before it starts and releases ownership before an
-idle poll sleep. Parent progress stamps the process row and the complete current
-chain set. Each successful child-lane iteration, including an idle poll after
-catch-up, attempts the ordinary throttled progress write, which stamps the
-process row and only that lane's chain row. Concurrent peer lanes can therefore
-keep the shared process row fresh, but cannot refresh a wedged lane's row. The
-indexer container healthcheck fails when an expected row is missing or any
-current chain row exceeds
-`BIGNAME_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS`, independently of the process-row
-maximum; when an expected chain set exists, its all-chains check replaces the
-process-row age check. The API aggregate health evaluation applies the
-corresponding API threshold above. A parent wedge ages every chain row because
-the parent owns the exclusive boundary and new lane iterations cannot start.
-
-Catch-up heartbeats are completion-driven, not timer-driven. The chain
-threshold must exceed the longest legitimate atomic SQL statement or other
-indivisible operation inside one lane iteration. Live deployment evidence
-includes full-closure coverage-violation scans approaching two hours
-mid-recovery, and that duration grows with watch-plan size. Both the indexer
-and API chain thresholds therefore default to 14,400 seconds (4 hours),
-providing roughly 2x margin over the observed scans. Operators must raise
-`BIGNAME_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS` and
-`BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS` together if a larger watch
-plan admits a longer atomic unit; changing either process-row threshold is not
-a substitute. A lane wedge becomes unhealthy only after this bound; until then
-it is intentionally indistinguishable from a slow atomic unit. Full-closure lock
-waits for each deployment profile and chain are tracked as separate in-process
-memberships that share one aggregate phase row; its oldest timestamp remains
-until the final unresolved wait acquires ownership. No timer generates beats
-on either operation's behalf.
-
-Full worker rebuild heartbeat routes are explicit:
-
-| Rebuild step | Bounded progress heartbeat | Named monolithic phases |
-| --- | --- | --- |
-| `name_current` | each completed name task; staged writes remain in 2,000-row batches | `name_current.load_inputs`, `name_current.publish` |
-| `children_current` | each completed declared-child source; staged writes remain in 2,000-row batches | `children_current.count_existing`, `children_current.publish`, `children_current.count_published_parents` |
-| `permissions_current` | each completed resource task; staged writes remain in 2,000-row batches | `permissions_current.count_existing`, `permissions_current.publish` |
-| `record_inventory_current` | each completed resource task, staged in 500-row batches; text hydration also beats after each bounded 500-row page | `record_inventory_current.count_existing`, `record_inventory_current.publish` |
-| `resolver_current` | each completed resolver target; staged writes remain in 1,000-row batches | `resolver_current.load_profile`, `resolver_current.load_targets`, `resolver_current.count_existing`, `resolver_current.publish` |
-| `address_names_current` | each completed surface binding; staged writes remain in 2,000-row batches | `address_names_current.prepare`, `address_names_current.publish`, `address_names_current.count_published_addresses` |
-| `primary_names_current` | each streamed tuple; legacy hydration beats during 1,000-candidate planning, configured provider batches, resolver-edge batches, and 1,000-row upserts | `primary_names_current.count_existing`, `primary_names_current.invalidate_execution_cache`, `primary_names_current.publish`, `primary_names_current.legacy_hydration.load_reverse_claim_candidates`, `primary_names_current.legacy_hydration.load_resolver_edge_candidates` |
-
-The following table is the maintained coverage audit for work performed by the
-worker and indexer service loops, including their spawned tasks. `covered`
-means the progress route predates the systematic audit; `newly-covered` means
-the audit added the route. Both advance liveness only after a completed unit of
-work. `cannot-exceed-20s-with-reason` is reserved for operations whose input
-cardinality is fixed independently of mainnet history. `n-a` means the operation does not own
-the service-loop heartbeat or has no smaller successful progress unit. In
-particular, a slow or stuck atomic database statement or RPC is not progress
-and must be allowed to make the heartbeat stale.
-
-| Service stage | Operation | Disposition | Progress boundary or scale reason |
-| --- | --- | --- | --- |
-| worker pre-registration | parse fixed CLI hydration and chain/provider configuration | cannot-exceed-20s-with-reason | Linear in the finite configured chain, resolver-address, and RPC-URL lists; it does not read chain history. |
-| worker pre-registration | connect to PostgreSQL and register the service loop | n-a | No heartbeat row exists yet, and each connection or registration statement is atomic. A stalled database operation has no completed progress unit and must not be kept green. |
-| worker startup/poll | replay-readiness and handoff checks | cannot-exceed-20s-with-reason | Scalar counts over configured replay cursors, seven replay markers, and PostgreSQL index metadata; cardinality does not grow with names or events. |
-| worker rebuild | `name_current` | covered (#213) | Completed name tasks and the named load/publication phases listed above. |
-| worker rebuild | `children_current` | covered (#213) | Completed child-source tasks and the named count/publication phases listed above. |
-| worker rebuild | `permissions_current` | covered (#213) | Completed resource tasks and the named count/publication phases listed above. |
-| worker rebuild | `record_inventory_current` | covered (#213) | Completed resource tasks and the named count/publication phases listed above. |
-| worker rebuild | `resolver_current` | covered (#213) | Completed resolver-target tasks and the named load/count/publication phases listed above. |
-| worker rebuild | `address_names_current` | covered (#213) | Completed surface-binding tasks and the named prepare/count/publication phases listed above. |
-| worker rebuild | `primary_names_current` | covered (#213) | Streamed tuples and the named count/cache-invalidation/publication phases listed above. |
-| worker hydration | record-inventory text values | covered (#213) | Each bounded 500-row input/provider/persistence page. |
-| worker hydration | legacy reverse-resolver primary names, including the spawned continuing pass | covered (#213) | Each 1,000-candidate planning or upsert page, configured provider batch, and resolver-edge batch; the spawned task uses the same shared progress recorder. |
-| worker invalidation | derive normalized-event changes, including the spawned continuing pass | newly-covered (#229; bounded derive beats originated in #213) | Each successfully derived bounded change unit. Parent work and the spawned pass mutually exclude each other's heartbeat writes while either owns a work unit, so neither can mask the other's wedge; exit and panic remain supervised (#242). |
-| worker invalidation | claim, dispatch, and complete queued keys | covered (#213) | Each completed claimed key or bounded address group. Claim-lease refreshes are separate queue ownership evidence, not service-loop liveness. |
-| worker invalidation | targeted rebuild work inside an applied key or address group | newly-covered (#229) | Completed projection-specific loads, source/target rows, bounded writes, and cleanup pages for all seven projection families. |
-| worker spawned task | route-local primary-name execution pruning | n-a | Detached best-effort maintenance does not own worker readiness; every call is capped by the configured delete batch, and the parent loop remains independently observable. |
-| worker/indexer main loop | idle poll sleep and subtask supervision | n-a | Sleeping is intentional inactivity; loop ticks record liveness only while no required spawned task owns the row. Spawned-task exit and panic are reported by the existing supervisor (#242), not by synthetic progress beats. |
-| indexer pre-registration and live poll | parse the checked-in manifest repository | cannot-exceed-20s-with-reason | Bounded by the finite checked-in deployment files, not chain history; live parsing runs before deciding whether stored manifest state needs refresh. |
-| indexer pre-registration | connect to PostgreSQL and register the service loop | n-a | No heartbeat row exists yet, and each connection or registration statement is atomic. A stalled database operation has no completed progress unit and must not be kept green. `indexer run` rejects pools below four connections before opening them. After the live chain plan is known, automatic catch-up additionally requires `max(4, 1 + 3 * chain lane count)` pooled connections for the permanent runtime writer guard and each lane's bounded work guard, nested work, and progress or lease-heartbeat write. |
-| indexer startup | synchronize manifest declarations, source graph, active addresses, and stale discovery rows | newly-covered (#229) | Completed manifest, discovery-edge, active-address, and stale-row stream pages through `ManifestRuntimeProgress`. Full-source discovery reconciliation pages the active-edge summary, desired/insert and deactivation diffs, candidate observations, same-assignment retention, set-based historical-successor resolution, historical materialization, and final active-edge summary; the candidate allocation cap is checked before extending the retained vector with each bounded page. |
-| indexer startup | load discovery admission, watched contracts, drift inputs, and manifest-derived normalized events | newly-covered (#229) | Completed 1,000-row or 10,000-row database pages and bounded event-upsert pages. |
-| indexer startup | build and persist intake tasks from the watched-chain plan | newly-covered (#229) | Each completed 10,000-address plan copy/comparison chunk and persisted chain task. |
-| indexer startup adapter sync | plain full-family interpretation | covered | Completed family-boundary beats only; a pending plain adapter call receives no synthetic liveness and makes no adapter-private checkpoint or page-progress claim. |
-| indexer startup | plan source identities, targets, segments, reservations, and coverage for hash-pinned bootstrap | newly-covered (#229) | Completed 1,000-target planning/identity pages, durable reservation and coverage pages, and completed worker-result handling. |
-| indexer startup | execute hash-pinned bootstrap provider units | covered (#213) | Provider-backed ranges are divided into at-most-32-block progress units; a beat follows only a fully persisted unit. Worker completion and failure remain coordinator-owned. |
-| indexer startup | replay normalized events from each completed hash-pinned bootstrap range | newly-covered (#229) | Reuses the normalized-event replay progress entrypoint so completed raw-log, processing, and persistence pages beat before the enclosing bootstrap segment completes. |
-| indexer startup | post-bootstrap adapter synchronization | covered | Invokes the same plain adapter entry points and records family boundaries. |
-| indexer startup | widen bootstrap admission to the live watch plan | newly-covered (#229) | Reuses manifest/discovery page progress and records each 10,000-address plan/task copy or comparison chunk. |
-| indexer live poll | refresh manifest declarations, source graph, active addresses, and stale discovery rows | newly-covered (#229) | Same `ManifestRuntimeProgress` pages as startup; no timer runs beside the refresh. |
-| indexer live poll | refresh discovery admission, watched plan, and intake tasks | newly-covered (#229) | Completed discovery pages, 10,000-address plan builds/copies/comparisons, and persisted chain tasks. |
-| indexer live poll | refresh resolver-profile inputs and manifest-derived normalized events | newly-covered (#229) | Completed 1,000-row code-hash, address, discovery-parent, event-input, and event-upsert pages. Code hashes are classifier inputs; this path emits no drift alerts. |
-| indexer live poll | full-corpus adapter refresh after manifest/discovery changes | newly-covered (#229) | Plain family calls retain the live caller's wait liveness plus completed family, reconciliation, and finalization boundaries; there is no adapter-private page-progress callback. |
-| indexer live poll | post-replay adapter backlog and cursor publication | newly-covered (#229) | Completed adapter families and bounded publication/cursor units; publication beats only after its transaction commits. |
-| indexer live poll | fetch the provider head, safe head, and finalized head | n-a | A fixed set of atomic RPC results is required before reconciliation can advance. A provider call taking more than 20 seconds represents no completed progress and must not receive a beat. |
-| indexer canonical reconciliation | walk provider parents and fill a contiguous gap | newly-covered (#229) | Each fetched parent and each completed block-persistence unit; non-reorg adapter work is split into at-most-32-block chunks, while winning-branch lineage re-canonicalization beats after its branch-atomic transaction commits. |
-| indexer canonical reconciliation | prove stored lineage and retained-history coverage | newly-covered (#229) | Completed lineage blocks and bounded coverage candidate, companion, fork, and delta pages. |
-| indexer canonical reconciliation | orphan the losing branch | newly-covered (#229) | Each losing block during read-only path validation, each committed branch-wide raw-fact, normalized-event, or identity transaction, and each bounded execution-invalidation page. |
-| indexer canonical reconciliation | persist winning raw blocks, transactions, receipts, logs, and event-silent calls | newly-covered (#229) | Each block and each 1,000-row persistence page. |
-| indexer canonical reconciliation | observe code hashes and replay adapter-owned state | newly-covered (#229) | Completed code-observation pages, at-most-32-block adapter chunks, block-derived-event pages, and selected adapter-family boundaries; ENSv1/ENSv2 adapters expose no private page-progress callback. |
-| indexer canonical reconciliation | publish chain checkpoints | newly-covered (#229) | A beat follows the committed checkpoint and admission-epoch fence; the atomic publication itself has no synthetic keepalive. |
-| indexer spawned task | wait for full-closure replay ownership | newly-covered (#156) | The first unresolved nonblocking lock attempt starts the aggregate `full_closure_replay_lock.wait` phase; 50-millisecond poll ticks never beat. Waits remain separate for each deployment profile and chain, so another chain cannot clear or refresh the oldest timestamp; the final unresolved acquisition finishes the phase. |
-| indexer spawned task | automatic normalized-event replay catch-up | newly-covered (#229) | One required task per chain independently runs chunks, coverage recovery, failure journaling, and idle/error poll sleeps. Completed stateless replay pages, plain full-closure adapter boundaries, replay chunks, durable global cursor publications, and successful idle iterations advance the shared process row plus only that lane's chain row, subject to the ordinary write throttle. Chain lanes may own work concurrently; a healthy peer cannot refresh another lane's row, and parent work takes exclusive activity ownership. Full-closure waits for each deployment profile and chain share the aggregate phase without interfering with each other's membership, and every lane's exit or panic fails supervision (#242). |
-| indexer spawned task | normalized-replay projection-index preparation and restoration DDL statements | n-a | Each PostgreSQL catalog check and `CREATE INDEX` or `DROP INDEX` statement is atomic at the application boundary, with no safe successful progress callback inside the statement. Every session that requires restored indexes holds a process-shared read permit for its complete replay, while index deferral takes the exclusive permit before the existing DDL guard. Both restoration and deferral therefore acquire process coordination before the DDL guard; a drop waits for active closure replay, and closure replay waits for an in-progress drop without a reverse lock order. The replay iteration retains heartbeat ownership, so a slow or stuck statement intentionally ages its chain row instead of receiving a synthetic beat; a peer may still advance the shared process row and its own chain row. |
-| indexer one-shot modes | manual backfill, replay, rewind, repair, and operational catch-up commands | n-a | These commands do not run inside the registered `indexer run` service loop, so service-loop heartbeat coverage does not describe their completion. Backfill range leases retain their separate ownership heartbeat. |
-
-A named phase is a distinct `scope_kind='phase'` row for a service instance.
-Its `heartbeat_at` is the phase start rather than a free-running timer, so a
-crash or wedge still ages out. Worker rebuild phases use the separately
-environment-tunable phase maximum (default 43,200 seconds), while an indexer
-phase uses the ordinary indexer heartbeat maximum. Completing either kind of
-phase removes it and refreshes ordinary process evidence. Graceful worker
-shutdown first deletes its process row as a write fence, then deletes the
-instance's remaining heartbeat rows; a new same-service registration also
-clears phases left by a predecessor that exited without running the hook.
-Indexer same-instance registration clears that prior lifetime's scopes, and any
-later registration prunes non-process scopes whose departed instance no longer
-owns a process row.
-Ordinary worker heartbeat-write failures warn and
-continue so a transient database write failure degrades liveness evidence and
-remains due for retry, rather than converting the database blip into worker
-restart churn. A
-named phase is different: if its start marker cannot be persisted, the current
-operation fails before entering the work, so it never runs without the evidence
-used to interpret it.
-
-Within `execution_*`, the API may write traces, steps, and normal
-`execution_cache_outcomes` only for documented on-demand verified-resolution
-product routes when a selected-snapshot cache miss is live-executed and
-returned in the same response. That path uses execution persistence and does
-not write projections, API state, manifests, discovery rows, normalized events,
-identity rows, or adapter-owned facts. Synchronous indexer/reorg repair is the
-other non-execution-worker write owner during chain reconciliation. It may
-delete or invalidate reusable `execution_cache_outcomes` rows whose dependency
-set includes an orphaned block identity. It does not write traces, steps,
-normal outcomes, projections, API state, or manifest state.
-
-For identity-row repair, the storage-owned `surface_bindings` update trigger is the bounded non-projection-worker writer for `projection_invalidations`. It enqueues `name_current` and `address_names_current` keys when repair updates change `active_to` or `canonicality_state` for an identity row. When a readable predecessor was closed by a now-orphaned successor binding, ENSv2 `RegistrationReleased`, ENSv2 replacement-reservation `SurfaceUnbound`, or ENSv1/Basenames `SurfaceUnbound`, losing-branch repair requires that orphaned boundary to equal the stored `active_to`. ENSv2 close evidence starts from the lineage block timestamp plus the normalized event's transaction/log offset and is clamped to at least one microsecond after the closing binding's `active_from`; ENSv1/Basenames `SurfaceUnbound` uses its recorded `active_to`. When block timestamps tie, successor ordering uses `(block_number, intra-block active_from)`, so a later block cannot be mistaken for an earlier successor solely because its timestamp is equal. Repair then chooses the earliest surviving readable same-chain successor start or canonical close event for the same logical name and resource after the predecessor start, and reopens the binding only when no surviving boundary remains. This preserves a winning-branch re-included release, prevents unrelated orphaned evidence from reopening a different boundary, and leaves the predecessor's stable creation anchor unchanged. The normalized-event upsert repair path has bounded stale-key invalidation exceptions: Basenames primary-claim source repair enqueues both old and repaired `primary_names_current` tuple keys when it rewrites an existing `RecordChanged(name)`/resolver claim observation from the old Basenames reverse-registrar tuple to the ENSv1 Base `L2ReverseRegistrar` tuple; ENSv1 reverse-name profile enrichment enqueues the added `primary_names_current` tuple but refuses a replay that would remove its durable claim source; ENSv1 registrar renewal resource repair enqueues old and repaired resource keys for affected resource-keyed projections when it repoints stale renewal/resource events; ENSv1 and Basenames Base registry/registrar event-time resource repair enqueues stale and repaired resource keys, or only the non-null key when one side of the repair has no resource anchor, for affected resource-keyed projections; ENSv1 same-transaction registration setup repair enqueues affected `name_current` and `permissions_current` keys when it repairs a `RegistrationGranted` pre-state and orphans leaked registry-only setup control rows; ENSv1 authority-epoch registry-owner repair updates existing deterministic `AuthorityEpochChanged` after-state rows when replay adds the registry owner field; ENSv1 authority-epoch resolver-boundary repair enqueues affected `record_inventory_current` keys when it repairs deterministic `ResolverChanged` boundary rows; ENSv1 registry resolver before-state repair enqueues affected `record_inventory_current` keys when it repairs anchored `ResolverChanged` before-state rows; and ENSv1 wrapper-token before-state repair updates existing deterministic `TokenControlTransferred` before-state rows when replay replaces a stale pre-wrapper authority kind or stale previous wrapper owner with the current replay-derived value. ENSv1 reverse primary-claim resolver before-state repair has no projection key to invalidate because the repaired row is intentionally unanchored; it records only a normalized-event change. These authority repair paths record normalized-event changes so downstream projections can refresh. Label-preimage insertion is another bounded storage-owned invalidation path: new retained labelhashes enqueue `children_current` keys for known parent surfaces that have historical canonical ENSv1 or Basenames registry child edges using that labelhash, so later projection rebuilds can replace unknown-label placeholders. Read-safe parent `name_surfaces` insertion or refresh also enqueues `children_current` for retained canonical registry child edges under that parent, so child enumeration does not depend on whether the registry edge, label preimage, or parent surface arrived first. `label_preimages` rows are proof-checked by normalizing the candidate label and recomputing the keccak labelhash; once retained, the mapping is durable even if the source event or surface later becomes noncanonical. Canonicality still gates the registry child edge and exact-name surface rows that projections publish. Adapters write identity rows and normalized events; the retained resolver-profile reconciliation staging tables have no active adapter writer. Adapters do not write projection rows directly.[^v1-l2rev-base-deploy][^v1-l2rev-base-args][^v1-l2rev-event][^bn-revreg-l12][^bn-revreg-l150]
-
-ENSv1 same-resource registration-release repair updates existing synthetic `RegistrationReleased` before-state rows when replay recovers a different prior registrant for the same registrar resource. It records normalized-event changes for downstream projection refresh without changing resource keys.
-
-For interval identity and normalized authority/permission events, adapters mint and reuse `resource_id`, `token_lineage_id`, and `surface_binding_id` per the architecture identity rules. Projection workers consume those rows; they do not infer alternate continuity or synthesize cross-resource permission carry.
+Projection invalidation journals, replay attempts, staging checkpoints, and
+dynamic stage tables remain worker-owned. They are operational rebuild state,
+not API truth or an alternative schema-v2 interpretation writer.
 
 ## Manifests and discovery persistence
 
@@ -709,454 +176,21 @@ At minimum:
 - `discovery_edges` — keyed by `edge_id` with `from_contract_instance_id`, `to_contract_instance_id`, `edge_kind`, active range, provenance, canonicality.
 - Materialized watch-plan rows keyed by `contract_instance_id` plus chain and range; root start nodes keyed by the root `contract_instance_id`. Address is a derived watch target, not the durable identity. An omitted `start_block` is persisted as null rather than coerced to zero.
 
-Resolver-profile admission state (PublicResolver-generation profiles for ENSv1, `L2Resolver` compatibility for Basenames) is gated separately from contract-instance admission. Either family may classify a manifest contract or an address-only target supplied by a normalized resolver pointer or a match-all-selected resolver log. The address-only path reads the target's code-hash fact but creates no contract instance, discovery edge, or watched address. A dedicated profile-fact table is not required. Profile admission gates complete-family, resolver-overview, latest-only, authorization, and onchain-call parity claims for the affected resolver address — not baseline generic resolver-event observation.[^v1-pres-l20][^v1-pres-l66][^bn-l2resolver-l4][^bn-l2resolver-l16][^bn-l2resolver-l29]
+Resolver-profile admission state (PublicResolver-generation profiles for ENSv1, `L2Resolver` compatibility for Basenames) is gated separately from contract-instance admission. Either family may classify a manifest contract or an address-only target supplied by a normalized resolver pointer or a match-all-selected resolver log. The retained address-only view can read an existing target code-hash fact but creates no contract instance, discovery edge, or watched address; without retained evidence, admission remains pending because there is no current code-hash producer. A dedicated profile-fact table is not required. Profile admission gates complete-family, resolver-overview, latest-only, authorization, and onchain-call parity claims for the affected resolver address — not baseline generic resolver-event observation.[^v1-pres-l20][^v1-pres-l66][^bn-l2resolver-l4][^bn-l2resolver-l16][^bn-l2resolver-l29]
 
 `manifest_alert_*` carries an observation identity, observation kind (`manifest_drift` or `proxy_implementation_drift`), lifecycle status, manifest version, source family, chain, contract-instance references, nullable proxy/implementation edge references, expected and observed code-hash or implementation-edge material, derived watch-plan metadata, first/last observed timestamps, and nullable remediation metadata. Writing it does not write `normalized_events`, mutate manifest truth, mutate discovery admission, change capability flags, or expose API state. A proxy implementation observation preserves the proxy `contract_instance_id`; implementation churn is represented by an observed or admitted edge, not by minting a replacement proxy identity.
 
-## Backfill persistence
+## Historical backfill inspection
 
-At minimum:
+The old persisted backfill scheduler has been deleted. No surviving Rust path creates, leases, advances, completes, fails, repairs, or publishes coverage from `backfill_jobs`, `backfill_ranges`, or their companion tables. Historical range work is represented in the new runtime by explicit finite phase redo state instead of by these migration-era jobs.
 
-- `backfill_jobs` — one row per bounded backfill job with selected profile, chain, selector kind, resolved source identity, scan mode, declared range start and end, the atomically captured `raw_log_retention_generation`, idempotency key, lifecycle status, failure metadata, timestamps. Automatic full-closure jobs also carry a nullable mutable recovery-write-epoch binding and the job-attempt count captured when that binding was made. Those fields fence reuse and reservation without changing the immutable creation identity. Jobs using [stored-history verification](glossary.md) also carry a projected minimum and the actual provider-query count plus nullable verification revision, inclusive bounds, selected-log count, and digest.
-- `backfill_ranges` — child range records with declared range bounds, last-completed checkpoint, lease owner, lease token, lease expiry, attempt counters, lifecycle status, failure metadata, timestamps. A new range initializes its checkpoint to one block before the declared start so resume starts at `checkpoint_block_number + 1`.
-- `normalized_replay_coverage_recovery_failures` — one retry budget and schedule per deployment profile, chain, retention generation, source family, exact address, and exact missing interval. It records cumulative attempts across immutable job revisions, the retry deadline, last job id and observed job attempt count, and an operator-facing terminal cause.
-- `normalized_replay_coverage_recovery_job_attempts` — the highest attempt count already added to that retry budget for each immutable job revision. These per-job watermarks prevent a revisited revision from being counted twice after recovery has tried another revision; they are removed with their parent failure record on success or re-arm.
-- `normalized_replay_coverage_recovery_epochs` — the monotonic compare-and-set epoch for the same exact key. Unlike the current failure row, this tombstone survives successful recovery and operator re-arm; every failure writer must match the epoch captured before planning, while clear and re-arm advance it before removing failure state.
-- Monotonic helper-owned checkpoint fields that let a worker resume after crash without widening the original range or reclassifying already admitted facts.
+Storage retains only `load_backfill_job` and `load_backfill_ranges` because `bigname-worker inspect backfill-job` is a surviving read-only audit command. The returned lifecycle, range, selector, source identity, timestamps, and failure metadata describe rows written by an older binary. They do not establish current ingest completeness, interpret readiness, checkpoint promotion, or projection freshness.
 
-Stored-history planning retains the fenced raw-log revision that authorized its locally reusable segments. Final verification rejects a newer per-block revision inside any such segment. A checkpoint alone is not verification evidence: on resume, provider-classified segments are fetched again unless the job already has a generation-current final verification covering the exact range with no later in-range mutation.
-
-Operational finalized catch-up uses these same families. It may create many finite chunks, but each chunk preserves one immutable job shape and idempotency key. Capacity preflight (current Postgres size, writable free disk, configured object-cache budget) records explicit failure or paused state in existing lifecycle/failure metadata when capacity is insufficient.
-
-The normalized replay catch-up loop also performs the bounded stale-claim sweep. When both a `reserved` or `running` job and its active child range have not updated for one hour, storage acquires locks in the ordinary job-then-range order, marks both failed with `phase=stale_claim_sweep`, clears the child lease, and preserves its checkpoint. Existing reservation code can then reclaim that range; the sweep does not introduce a second claim lifecycle. A separate generation sweep marks pending, reserved, or running automatic full-closure recovery jobs and unfinished child ranges failed with `cause=obsolete_retention_generation` when their captured generation is no longer current. That includes a never-leased pending job created immediately before a retention rotation.
-
-The selector identity fields on a job:
-
-- `selector_kind` — `whole_active_watched_chain`, `source_family`, or `watched_target_set`
-- `source_family` — the requested family for `selector_kind=source_family`, otherwise null
-- `requested_watched_targets` — caller-supplied watched targets for `selector_kind=watched_target_set`, otherwise empty
-- `selected_targets` — the resolved materialized target set sorted by `source_family`, `contract_instance_id`, normalized address, effective from-block, effective to-block
-- `source_identity_hash` — digest of `selector_kind`, `source_family`, `requested_watched_targets`, and `selected_targets`
-
-Very large source-family jobs and whole-active watched-chain jobs may persist compact selector identity instead of a full `selected_targets` array. Whole-active selectors use this compact form when the resolved target set has more than 10,000 targets. Compact identity sets `source_identity_payload_format=selected_targets_digest_v1`, keeps the selector fields including `source_family` (null for whole-active selectors), and carries `selected_target_count`, `selected_targets_digest_algorithm=keccak256`, `selected_targets_digest`, a first/last `selected_targets_sample`, and `source_identity_hash`. The digest input remains the sorted canonical `selected_targets` tuple; the compact payload is therefore `source_family` plus the target-set digest, not a source-family-only identity.
-
-Idempotency validation has one compatibility bridge for jobs created before compact identity was introduced: a legacy full-payload identity and a `selected_targets_digest_v1` identity may match even when their `source_identity_hash` values differ, but only when every selector/provider field outside the selected-target representation and hash matches exactly and the compact count, digest, and sample recompute from the full `selected_targets` set. A different target set, topic plan, scan/provider field, range, chain, profile, scan mode, or idempotency key remains an immutable-job conflict.
-
-Automatic full-closure recovery derives its logical key from the exact identity that will be persisted after provider selection, its exact interval, and the maximum committed raw-log block revision inside that interval when the job is created. It does not bind the chain-global input revision, so live-tail writes outside the violation window neither mint a replacement job nor reset an incomplete hash-pinned fetch. A hash-pinned job records the manifest topic set used by its final verification; a Coinbase SQL job additionally records its provider, validation mode, and topic plan used for stored-history evidence and gap fetches. Those fields participate in `source_identity_hash`, so changing provider or topic/validation identity at the same exact-window revision creates a distinct generation-bound job rather than colliding with an immutable prior job. The stable per-window failure record directs a retry to its last incomplete job. If a crash occurred before that record committed, recovery rediscovers the newest incomplete job with the same source identity, interval, and generation. Either path resumes that job even when its own writes advanced an in-range revision. A later in-range mutation that invalidates completed verification raises the interval maximum and produces a new revision-bound job. Execution carries the creation-time topic plan through the job instead of reloading a possibly newer manifest plan.
-
-When whole-chain or mixed-source backfill uses generic ENSv1 resolver topic scanning, the persisted identity records that scan in `generic_topic_scans` with `source_identity_payload_format=generic_resolver_event_topics_v1` and records the exact fetched topic set in `topic0s_by_source_family`. The address-scoped portion may be stored as `selected_targets_with_generic_topic_scans_v1` or, when compact, `selected_targets_digest_with_generic_topic_scans_v1`; in both forms `selected_targets`, `selected_target_count`, digest, and sample intentionally exclude the resolver-family targets covered by the generic topic scan while `source_identity_hash` covers the selected-target identity, generic scan declaration, and fetched topic set.
-
-Manual backfill idempotency is derived from deployment profile, chain, finite range, scan family, and source identity. It must not include the local manifest root path: moving the same selected manifest corpus between filesystem locations does not create new raw backfill work. Automatic bootstrap and operations catch-up additionally append the raw-log retention generation captured atomically when the job is created. The logical selector/range may therefore produce new work after compaction instead of reusing a completed job from an older generation. Bootstrap checkpoint reuse matches persisted source identity, contiguous range coverage, and the exact current retention generation rather than the literal idempotency-key text.
-
-Bootstrap planning clips new work only with checkpoints whose parent job and child range are both completed. A failed, expired, or otherwise incomplete child checkpoint remains resumability state inside its original full-range job; it is not durable fetch-coverage authority and cannot turn a restart into a suffix-only replacement job. Restarting reconstructs the original selector and range identity, reuses that idempotent job, and resumes its child checkpoint so the parent can record full-range coverage facts atomically at completion.
-
-Historic checkpoint promotion consumes durable `backfill_coverage_facts`
-rows (see below) instead of recomputing coverage from persisted job source
-identities. Coverage is keyed by active `(source_family, address)` intervals,
-so a tuple is required only for blocks where it is active, one source
-family's coverage never credits another family at the same address, and
-family-scope fact rows credit every address of that family over the fact
-interval. Retained full-block payload metadata is cache evidence, not a
-substitute for fetch coverage. Watched source families with no active ABI
-event topics do not impose historical selected-log coverage, because there
-are no selected log facts for backfill to prove. Event-silent
-reverse-resolver direct-call indexing is scoped to ordinary live-tip
-reconciliation: live intake retains direct-call transactions and receipts
-from the current live block payload and records durable observations for
-later current-state hydration, but historic stored-lineage promotion does not
-require or synthesize per-block event-silent reverse-resolver state. That
-reverse resolver data is latest-only by design.
-
-`effective_to_block` is finite for every persisted selected target — backfill jobs are finite at creation time. The initial bootstrap planning snapshot includes eligible manifest-declared targets plus already-materialized finite-known-start ENSv2 root, registry, and resolver discovery targets; their ranges end at the provider finalized head latched for that chain's startup run. That snapshot is the complete startup plan: interpretation does not add newly discovered ENSv2 targets or launch further provider-backed recovery waves. Match-all ENSv1 and Basenames resolver history uses separate topic-scan scopes. A watched target whose manifest-declared `start_block` is unknown is skipped by bootstrap; it leaves no synthetic block-zero, provider-history, recent-window, or job-start range in `backfill_*`.
-
-### Backfill coverage facts
-
-`backfill_coverage_facts` records, per completed job, which watched
-`(source_family, address)` tuples had their logs fetched over which block
-interval — durable fetch evidence derived from the job's immutable selector
-plan at completion time. Facts and the job status flip commit in one transaction. Historic stored-lineage
-checkpoint promotion consumes these rows
-instead of recomputing selector plans from persisted identities. A row is
-authoritative only while its parent job is `completed` and the whole fact
-interval is contained by that job's declared range. Writers reject other
-rows, and promotion applies the same checks so legacy or manually corrupted
-rows fail closed.
-
-Target-bounded ENSv1 and Basenames registry-discovery repair also consumes
-these facts after a raw-log retention rotation. It loads every manifest-backed
-current or closed historical registry-emitter interval through the winning
-head and requires a gap-free union of exact-address or family-scope facts whose
-completed parent jobs captured the current retention generation. Facts from an
-older generation never compose into that proof, and a topic-filtered job must
-still match the current manifest event-topic set. The proof records the
-concrete discovery-admission epoch it inspected; the absence-aware discovery
-writer compares that epoch under its writer fence. A chain-scoped raw-log
-mutation guard remains held from proof loading through adapter persistence, so
-generation drift, admission drift, or a same-chain raw-log mutation fails
-closed before the winning checkpoint can advance.
-
-When live target-bounded reconciliation finds that this proof is incomplete,
-it returns the first uncovered `ens_v1_registry_l1` or
-`basenames_base_registry` tuple with its retention generation, exact address,
-and inclusive missing bounds. Poll recovery may create an ordinary raw-only,
-hash-pinned provider job for exactly that historical watched target and range;
-the recovery job records raw facts and current-generation coverage but does not
-run adapters, mutate discovery, or advance the chain checkpoint. The unchanged
-reconciliation attempt must then reload and validate the complete proof before
-its absence-aware writer can proceed. Authority drift before or after provider
-I/O causes a replan, while a missing or out-of-bounds target, widened selector,
-provider failure, stale topic evidence, untyped adapter error, or failure to
-converge within the bounded poll loop remains fail-closed.
-
-Full-closure normalized-event replay consumes the same current-generation fact
-authority for every closure family outside the ENSv2 root/registry retained-
-history proof. It requires gap-free exact-address or family-scope coverage for
-every current or closed historical interval through the replay target, rejects
-older-generation facts and stale topic-filtered evidence, and rechecks the
-raw-log input version and discovery-admission epoch while establishing the
-proof. A migrated generation-one database can therefore recover replay
-authority by completing generation-scoped historical backfill; a retained
-suffix without independent completeness evidence still fails closed.
-
-The full-closure comparison keeps a storage-owned, fact-derived aggregate in
-`full_closure_coverage_rollups`, keyed by chain, raw-log retention generation,
-source family, scope, and address. `backfill_coverage_facts` and their completed
-parent jobs remain the source of truth; the aggregate is rebuildable
-operational state, not raw fact authority, a projection, an execution artifact,
-or API-readable state. `full_closure_coverage_rollup_states` binds each saved
-aggregate to its proof-format version, commit-ordered coverage input revision,
-raw-log [input revision](glossary.md), raw-log
-[retention generation](glossary.md), discovery-[admission epoch](glossary.md),
-and the chain-wide current manifest topic map. The additive migration does not
-backfill these tables: the first upgraded proof builds one current-generation
-aggregate from the authoritative facts, so migrations may still be pre-applied
-before the new indexer rolls.
-
-One deliberate difference from the former fact scan is the
-`block_revision_evidence_floor`: facts whose stored-history verification
-revision is below that floor are excluded from the aggregate, while the former
-scan counted them. The first post-deploy proof can therefore report currently
-required intervals that relied only on those facts as uncovered, causing
-recovery to verify those intervals once. The pre-deploy excluded-fact inventory
-measured `base-mainnet`: 0 facts; `ethereum-mainnet`: 855 facts belonging to 16
-parent jobs. Any resulting Ethereum recovery uses only the local provider.
-
-Every proof reloads the current watched requirements and compares them with at
-most the exact-address and family aggregate rows. The commit-ordered
-`full_closure_coverage_input_changes` journal lets a later proof merge only new
-eligible fact intervals or rebuild only keys whose authority may have shrunk.
-The chain-scoped aggregate transaction is repeatable-read and serialized with
-the journal triggers. It takes an `ACCESS SHARE` fact-table lock before the
-chain advisory lock, matching the table-then-advisory order of fact truncation
-without blocking ordinary inserts, updates, or deletes. It prunes a journal
-prefix only after publishing the matching state revision, and it rechecks the
-coverage input revision after commit. Saved state therefore survives an
-indexer restart without turning the aggregate into independent authority.
-
-The invalidation rules are fail-closed:
-
-| Input change | Required aggregate behavior |
-| --- | --- |
-| New `backfill_coverage_facts` rows | Every insert statement advances the commit-ordered coverage input revision. Once saved aggregate state exists, the trigger also records the fact identities and tuple keys, and the next proof validates only those facts against current job, generation, stored-verification, and topic authority before unioning their intervals into the affected aggregate rows. Before the first saved state—including generation zero—the journal remains empty because the first eventual proof must cold-rebuild from all authoritative facts. |
-| Fact update, delete, cascade retirement, truncation, or an authority-relevant parent-job change | The trigger records rebuild entries for every affected old or new tuple key. Parent-job authority includes chain, lifecycle status, declared bounds, retention generation, stored-verification fields, and immutable source identity. The next proof deletes and re-derives those keys from authoritative facts; it never subtracts intervals optimistically. |
-| Raw-log input revision | Complete per-block revision evidence identifies only stored-verification-backed fact keys whose intervals a newer mutation touched; those keys are re-derived. A missing intervening revision witness fails the proof. If the saved revision falls below the evidence floor, the whole aggregate is rebuilt. |
-| Watch-set or discovery-admission change | Requirements are never cached. The next proof reads the changed set, and the mandatory admission-epoch bump invalidates the whole saved aggregate. Epoch drift during the proof fails before closure can be claimed. |
-| Current manifest topic set | A topic-map mismatch rebuilds the whole aggregate, re-evaluating every topic-filtered parent-job identity. |
-| Raw-log retention generation or coverage-fact parent generation | A retention-generation mismatch rebuilds from only current-generation facts. A parent-job generation mutation also journals every affected tuple key. Older-generation aggregate rows and facts never compose into the proof. |
-| Proof-format change, saved-revision regression, or coverage-journal gap | The whole aggregate is discarded and rebuilt from facts. No saved interval is reused across an unexplained state transition. |
-
-With `T` watched requirements, `F` eligible coverage facts, `ΔF` new facts, and
-`F_changed` the facts belonging to invalidated tuple keys, the former
-correlated comparison re-ran `range_agg` over coverage facts for every tuple,
-making each iteration `O(T × F)`. Initial or wholesale-invalidated
-synchronization is now one grouped `O(F)` pass followed by an indexed `O(T)`
-comparison. An ordinary iteration is `O(ΔF + F_changed + T)`; an unchanged
-restart is `O(T)` and does not rescan accumulated facts. Raw-log revision work
-also scales with the new block-revision evidence and the affected
-stored-verification keys rather than with every fact for every requirement.
-
-For Coinbase SQL recovery, retained raw logs may replace provider row fetches
-only after independent aggregate queries over the exact address, manifest
-topic set, and job window. The indexer divides the window into 131,072-block
-buckets and computes the selected canonical raw-log count plus a 128-bit
-identity fingerprint from the multiset of `(block_hash, transaction_hash,
-log_index)` identities. Coinbase SQL computes the same bounded evidence through
-disjoint block sub-ranges whose bucket numbering remains anchored to the job
-start. Counts add and fingerprint halves XOR when a bucket crosses a sub-range,
-so the composed evidence equals one whole-window aggregate.
-Equality proves identity-set equality only; it does not prove that every stored
-payload field is correct. A bucket is reusable only when count and fingerprint
-match and every selected local log has readable canonical lineage. This permits
-an empty bucket only when the independent query also reports it empty; local
-emptiness alone proves nothing. Adjacent mismatches are coalesced and fetched
-through the existing Coinbase SQL row path. After any gap fetch, the indexer
-repeats the aggregate comparison over the full job window and fails if a
-mismatch remains. Hash-pinned recovery instead fetches the exact requirement
-window and does not infer completeness from local rows.
-
-The local bucket and final payload-digest aggregations run outside the
-chain-scoped raw-log staging fence. Each scan is bracketed by short fenced
-revision reads; after the scan, the per-block mutation ledger must prove that
-no selected block changed before the evidence can be accepted, and the final
-revision check plus verification-record write remain inside the second fence.
-Canonical, safe, and finalized rows use
-`raw_logs_canonical_emitter_block_idx`; a separate observed-row invalidation
-branch uses `raw_logs_by_state_idx`. Registrar addresses currently hold about
-1.3–4.3 million rows each, so the emitter index bounds the heavy branch while
-moving the aggregation outside the fence prevents those rows from blocking
-all same-chain raw-log writers.
-
-Operations must not interpret a matched identity bucket as a content audit.
-Content-divergent stored rows in the stale-vintage class can match the identity
-count and fingerprint and are not detected on that skipped bucket. A
-mismatched bucket takes the refetch path, where an incompatible stored payload
-fails loudly, and final verification records a full local payload digest; those
-checks do not retroactively make a matched identity-only bucket a content proof.
-
-The fenced verification record on the parent job contains the exact verified
-bounds, selected-log count, deterministic local payload digest, and raw-log
-input revision. Coverage readers require the fact interval to be contained by
-those verified bounds, require the job's retention generation to remain
-current, and reject the fact when `raw_log_staging_block_revisions` records any
-later mutation inside the fact interval. The count and digest remain
-operator-visible audit evidence; the commit-ordered block revision ledger is
-the inexpensive digest-validity check on subsequent reads.
-
-Automatic full-closure recovery allows no more provider attempts per catch-up
-iteration than the positive
-`BIGNAME_INDEXER_COVERAGE_RECOVERY_MAX_ATTEMPTS_PER_ITERATION` cap, which
-defaults to `4`, but continues inspecting later reported violations after an
-individual failure. Its logical key includes the exact provider-specific
-source identity, interval, per-window recovery write epoch, and maximum
-committed revision inside that interval at job creation; generation-scoped job
-creation appends the captured retention generation. Provider failures persist
-exponential backoff from 5 seconds to a
-300-second cap in the per-window failure record. Attempts accumulate across
-immutable job revisions and become terminal at 32 for that exact window and
-generation. A per-job watermark adds only newly observed attempts when a
-revision is revisited. Before reservation, exact-window binding serializes the
-natural key and leaves exactly one incomplete revision reservation-eligible;
-it refuses to supersede a revision with an active lease or an unjournaled
-attempt. Before resolving a possibly changed provider or topic identity, a poll
-journals any failed bound job whose persisted attempt count is ahead of that
-baseline, including a first crashed attempt for which no failure row exists,
-and defers the identity switch until the next eligible poll. Reservation then
-compares the current window epoch, planned cumulative failure count, bound
-job-attempt baseline, and maximum persisted job-attempt count while holding the
-same natural-key and job locks. Concurrent polls
-therefore cannot both claim the final allowed attempt, and a superseded plan
-defers without issuing a provider query or publishing a terminal failure.
-Terminal intervals continue to block
-replay closure but consume no
-further provider queries until operator remediation and exact re-arming through
-`bigname-indexer repair coverage-recovery-rearm`. A
-topic-less source family is recorded terminal with cause
-`source_family_without_active_event_topic0` during preparation. The required
-catch-up failure record names completed, attempted, failed, retry-delayed,
-terminal, and prepared-but-unattempted jobs in that iteration so operators can
-distinguish bounded recovery progress from a replay loop that created no work.
-Coinbase SQL recovery persists a pre-fetch lower bound containing one initial
-aggregate query per configured evidence sub-window, one row query per
-configured initial block window containing a true gap, and the same aggregate
-sub-window count for final verification when any gap exists. Actuals include
-halving attempts after query-memory or leaf bytes-read-limit errors, retries,
-pagination, and query-size filter-pack splits. Each returned query's attempts are recorded before subsequent
-validation and materialization so a later failure preserves the paid-work
-count. Provider row gaps retain the existing window, page, query-size, timeout,
-and rate limits.
-
-Stored-lineage promotion ([checkpoint promotion](glossary.md); "promotion"
-unqualified in this section always means the checkpoint sense, never capability
-promotion) persists a storage-owned operational [coverage frontier](glossary.md):
-a saved proof of which [watched](glossary.md) block intervals have complete
-backfill coverage. It is
-durable across indexer restarts and independent of projection tables and replay
-markers. It is not a raw fact, manifest or discovery authority, chain checkpoint,
-projection, execution artifact, or API-readable state, and discarding it only
-forces fail-closed re-verification. Stored-lineage reconciliation in
-`bigname-indexer` is its only publication owner and writes it through
-storage-owned persistence helpers; manifest and discovery queries remain the
-authority for candidate requirements. Publishing, replacing, or invalidating a
-frontier does not write canonicality, enqueue projection work, or invalidate an
-execution-cache outcome.
-
-`stored_lineage_coverage_frontiers` has one header row per chain. The header
-contains a monotonically increasing `snapshot_revision`, a
-`proof_format_version`, the `discovery_admission_epoch` used to build the
-snapshot, the raw-log input revision and retention generation under which its
-coverage facts were verified, inclusive `verified_from_block` and
-`verified_through_block` bounds,
-the canonical map of active event topic0 values by source family, the exact
-requirement-row count, a constant-state 128-bit integrity fingerprint over the
-normalized requirement rows, and `updated_at`. The count and fingerprint detect
-missing or altered child rows without materializing the complete snapshot in an
-aggregate value; they are integrity metadata, not fetch evidence or a
-cryptographic authority claim. Proof format `stored_lineage_coverage_v1` binds
-the header to the watched-tuple and `backfill_coverage_facts` rules in this
-section. Topic values
-are 32-byte lower-hex topic0 values, sorted and deduplicated within each family;
-the map omits families without active log-producing topics, and those families
-create no tuple requirement. A header with inverted bounds, malformed
-topics, or an unsupported proof format is not coverage authority. This release
-hard-refuses every proof format other than `stored_lineage_coverage_v1`; it does
-not overwrite or downgrade an unrecognized row. `updated_at` is audit metadata,
-not a separate freshness signal.
-
-A saved frontier is reusable only while its retention generation is current
-and no later per-block raw-log revision touched its inclusive verified bounds.
-A generation rotation or in-range mutation forces the complete candidate to be
-verified again; revisions confined outside the saved bounds do not invalidate
-the proof.
-
-`stored_lineage_coverage_frontier_requirements` stores one normalized row for
-each `(chain_id, source_family, lowercased address)` in the header snapshot. Its
-`required_intervals INT8MULTIRANGE` value represents inclusive block intervals,
-with overlaps and adjacent intervals coalesced and every interval clipped to the
-header bounds. Storage encodes an inclusive `from..=through` interval as the
-canonical PostgreSQL half-open range `[from, through + 1)`; an inclusive upper
-bound at the signed-64-bit maximum is rejected rather than becoming unbounded.
-Empty, lower-unbounded, and upper-unbounded child multiranges are malformed.
-The primary key is `(chain_id, source_family, address)`. An empty snapshot has no
-requirement rows; it is not represented by synthetic block-zero requirements.
-Current watched rows and finitely closed historical discovery rows participate
-under the same active source and mapped target-manifest rules as direct fact
-verification. Deprecated-profile intervals remain audit evidence but not
-coverage authority, and a watch with an unknown start remains unknown.
-
-Postgres builds the complete candidate requirement snapshot in a
-transaction-local table from manifest and discovery authority. It also computes
-the candidate difference against the saved requirement rows; the indexer does
-not fetch the whole watched surface or submit a trusted snapshot or difference.
-For a tuple whose source-family topic set is unchanged, the proof work is only
-the candidate intervals not present in the saved interval set. For a new family
-or a family whose topic set changed, every candidate interval for that family is
-new proof work. A valid candidate retains the saved lower bound unless a newly
-explicit watched interval begins earlier, and uses the attempted look-ahead
-block as its upper bound. Extending that upper bound naturally adds the
-uncovered suffix for each active tuple. Removed tuples and shortened interval
-portions require no fact read, but they disappear from the candidate that will
-replace the saved snapshot. A retroactive admission therefore proves its own
-added history instead of inheriting an advanced checkpoint, while an unrelated
-watched-set change does not rescan unchanged history.
-
-Every added or topic-changed candidate interval must pass the indexed,
-gap-free `backfill_coverage_facts` check before publication. The proof uses only
-completed-job facts and the exact address-scope, family-scope, interval, and
-topic-plan rules below. It never treats the prior frontier, a projection, a job
-checkpoint, retained payload metadata, or stored lineage alone as fetch
-evidence. The append-only fact discipline and the prohibition on pruning parent
-jobs are therefore prerequisites for durable frontier reuse.
-
-After proof succeeds, publication takes the chain's
-`discovery_admission_epochs` row in shared mode, requires the candidate epoch to
-remain current, and atomically replaces the header and all requirement rows.
-The header write is a compare-and-swap (CAS) against the revision that produced
-the difference, or against expected absence for a cold chain. The first publish
-uses revision 1 and each replacement increments it by exactly one. Epoch drift
-or a lost CAS publishes nothing. Missing state, malformed current-format state
-(including a child count or fingerprint mismatch),
-or a saved lower bound that does not contain the next promotion path is handled
-as a cold proof: no saved intervals are reused, and promotion remains refused
-until a complete current-format candidate has been proved and published. An
-unsupported format remains a hard refusal. A CAS conflict reloads the winning
-snapshot and replans; it does not let the losing attempt promote from its
-unpublished proof.
-
-A checkpoint regression whose next promoted path begins below
-`verified_from_block` invalidates reuse of the whole saved frontier. The stale
-row may remain as diagnostic state, but the indexer must perform the cold proof
-from the earlier of the path and the earliest explicit watched start, then
-publish a complete replacement before promotion. Closed historical discovery
-intervals participate in that lower bound. Normal polls extend or
-differentially replace the durable frontier, so a restart does not by itself
-rescan unchanged history.
-
-The frontier proves selected-log fetch coverage only. Provider hash and ancestry
-validation, canonical child-path validation, same-height non-orphan fork checks,
-selected-log [companion checks](glossary.md), and the final admission-epoch fence remain
-per-promotion checks. Immediately before checkpoint advancement, promotion
-reacquires the shared admission-epoch lock for the frontier's epoch and holds it
-through the checkpoint write. That final transaction briefly excludes lineage
-writers and repeats the fork check over the exact promoted path. Manifest sync
-and discovery admission still take the owning chain's epoch row in exclusive
-mode and bump it for every real watched-set mutation, so either frontier
-publication or final checkpoint advancement refuses concurrent authority drift.
-
-Topic-filtered coverage facts are valid relative to the manifest event topics
-persisted by their job. A retained stale job does not by itself poison a range:
-promotion refuses only when one of that job's facts would supply coverage for
-a historically required `(source_family, address)` interval and no gap-free
-union of current-topic or topic-unfiltered facts replaces that evidence.
-Closed intervals remain required after the address or discovery edge is
-deactivated while their source and mapped target manifests remain active.
-This keeps immutable job history auditable while allowing one or more complete
-reruns on the current manifest to restore promotion.
-
-- Scope semantics: `scope=address` rows carry the lowercased emitting
-  address and cover exactly that tuple. `scope=family` rows carry a NULL
-  address and mean every address of the family is covered by a
-  topics-complete fetch over the row's interval (ENSv1 generic resolver
-  scans and Base Basenames registry topic scan-all, whether Coinbase SQL or
-  hash-pinned).
-- Promotion coverage is the gap-free union of the exact tuple's address rows
-  and its family's family-scope rows. Overlapping or adjacent intervals from
-  separate completed jobs compose; a missing block, a different address, or a
-  different source family does not. This lets the default sequence of
-  independently completed 32-block `ops-catchup` jobs prove a larger
-  stored-lineage promotion slice without weakening the exact watched-tuple
-  requirement.
-- Stored-lineage companion validation uses the same scope semantics.
-  Address-scoped facts select every log from the exact watched address during
-  its active interval; family-scoped facts select only logs whose topic0 is in
-  the family's current active manifest ABI. Same-transaction sibling logs are
-  retained replay context, not independent code-observation requirements, while
-  the transaction and receipt containing a selected log remain required.
-- Derivation kinds: `job_completion` rows are written by the completing
-  job from its validated in-memory plan;
-  `legacy_full_payload_identity` rows are
-  re-derived by `repair derive-backfill-coverage-facts` from persisted
-  verbatim-target identities of already-completed jobs.
-- Append-only discipline: no code path UPDATEs a fact row. Re-derivation is
-  idempotent through `ON CONFLICT DO NOTHING` against the tuple key
-  `(backfill_job_id, source_family, scope, address, covered_from_block,
-  covered_to_block)` (`NULLS NOT DISTINCT`); the same derivation re-run
-  inserts nothing.
-- Family facts are clamped to the merged union segments of the family's
-  target effective windows intersected with the job range — a deliberate
-  under-claim relative to the raw job range, because the Coinbase SQL
-  scan-all planner skips windows holding no targets. It cannot cause a
-  spurious promotion refusal: requirement tuples are by construction inside
-  the union of the family's target windows.
-- Repair derivability: identities that persist the fetched target set
-  verbatim (jobs created before compact digests, whose identities used
-  fnv1a64 hashes and stored the full target payload) re-derive completely, as does the
-  hash-pinned registry scan-all identity
-  (`basenames_registry_scan_all_topics_v1`), which persists its topic0 set
-  verbatim — repair derives a full-job-range family fact from it (unlike its
-  Coinbase SQL counterpart below, which persists no spans and is refused). Compact digest
-  identities (`selected_targets_digest_v1` and its generic-scan variant)
-  are refused — the target set is unrecoverable from a digest. Family-scan
-  identities that do not persist the scanned family's target windows
-  (`basenames_registry_scan_all_event_signatures_v1`,
-  `generic_resolver_event_topics_v1`, and
-  `selected_targets_with_generic_topic_scans_v1` whose producers filtered
-  the generic families' targets out of `selected_targets`) are refused
-  rather than deriving partial coverage; those jobs must be re-run on
-  fact-writing code.
-- `backfill_coverage_facts.backfill_job_id` cascades on job delete. Once
-  checkpoint promotion relies on facts, deleting or pruning completed
-  `backfill_jobs` rows silently destroys promotion evidence — job pruning
-  is forbidden.
-
-### Backfill range checkpoint vs chain checkpoint
-
-Backfill range checkpoints are operational state. They record only that bounded fetch/resume work reached a position in a declared range. They do not change any `canonicality_state` value and do not advance `canonical_head`, `safe_head`, or `finalized_head`.
-
-Backfill raw admission still writes canonicality for the facts it admits. When the admitted historical range is already proven canonical, safe, or finalized by retained lineage or provider checkpoint evidence, new lineage, raw-fact, and normalized-event rows use `canonical`, `safe`, or `finalized` as appropriate rather than staying `observed` solely because the source was backfill. If the evidence is absent, the storage layer preserves the weaker state.
+The old coverage facts, source selectors, frontier calculations, recovery failures, job leases, retention-generation fences, and stored-lineage proofs have no current Rust owner. Their SQL migrations remain unchanged. Any future deletion or replacement of those tables belongs to the worker/API port and migration-baseline work, not this code deletion.
 
 ## Partitioning status
 
-The current migrations create ordinary PostgreSQL tables for lineage, raw facts, normalized events, execution, identity, and projections. There is no checked-in table partitioning baseline yet. Row-volume control currently comes from explicit indexes, bounded backfill ranges, normalized-replay catch-up chunks, and retention/compaction policy. Any future partitioning change is a migration-bearing storage change and must update this section with the concrete table list and keys.
+The current migrations create ordinary PostgreSQL tables for lineage, raw facts, normalized events, execution, identity, and projections. There is no checked-in table partitioning baseline yet. Row-volume control currently comes from explicit indexes, phase batching, projection batching, and retained-staging compaction policy. Any future partitioning change is a migration-bearing storage change and must update this section with the concrete table list and keys.
 
 ## Canonicality model
 
@@ -1191,359 +225,38 @@ Rules:
 - projection rebuilds read rows that are `canonical`, `safe`, or `finalized` by default; history and audit tools may opt into `observed` and `orphaned` rows
 - safe and finalized checkpoint promotion is monotonic per chain
 
-## Reorg repair
+## Reorg and redo boundary
 
-Reorg repair preserves audit truth: orphaned rows persist for explanation and rebuild, not deletion. The losing branch's lineage, identity rows, and normalized events stay canonical-state `orphaned` so explain and history routes can still reconstruct what was observed.
+The phase runner stores canonicality by block hash and marks displaced readable
+lineage orphaned. Raw facts remain immutable; interpretation selects them by
+joining against readable lineage. In the same head-publication transaction,
+storage removes rows from retained `public.execution_cache_outcomes` whose block
+dependencies are orphaned in `bigname_phase.chain_lineage`. Their durable
+execution traces and steps remain in `public`; later canonical recovery does
+not recreate an evicted cache row. The deleted
+indexer reconciliation tree no longer performs its synchronous multi-family
+adapter repair, coverage proof, normalized-event supersession, or
+resolver-profile convergence.
 
-Reconciliation validates the complete losing path before changing canonicality.
-The selected lineage branch, each dependent raw-fact, normalized-event, or
-identity storage family, and winning-lineage re-canonicalization each commit
-their complete branch range in one transaction. Progress heartbeats occur
-during the read-only path walk and after those transactions commit, never
-inside a write window that could expose only part of one branch.
+Derived schema-v2 repair is an explicit `interpret` redo over a complete ingested range. Redo preparation orphans derived identities and events anchored in the selected range, replays the range through the schema-v2 interpreter, and re-anchors stable identities when the winning facts reproduce them. An interrupted multi-batch redo remains explicit persisted redo state and must resume; its intermediate orphaning is not a completed projection boundary.
 
-Registry discovery authority is repaired before the winning chain checkpoint advances. Reconciliation runs canonical ENSv1, Basenames, and ENSv2 registry-source passes through the winning head even when that head is event-silent. ENSv1 and Basenames replay closed historical registry-emitter intervals through that boundary, and after destructive retention rotation their absence-aware repair still requires gap-free current-generation coverage under an unchanged discovery-admission epoch. The ENSv2 pass now interprets the retained selected facts without the deleted completeness and provider-recovery driver; it does not fetch historical facts for a registry or resolver first discovered during that pass. Raw facts after the winning head do not enter any of these repairs, and existing non-orphaned later discovery assignments are preserved.
+Storage still exposes manifest-, topology-, and record-boundary execution
+invalidation used by the worker. The retained orphan-block invalidator is
+narrower: phase-runner head publication invokes it in the canonicality
+transaction, and it changes only cache eligibility while preserving durable
+execution evidence.
 
-Execution cache rows follow the same hash-first canonicality rule. When reorg repair marks a block identity `orphaned`, synchronous indexer/reorg repair invalidates or deletes any reusable `execution_cache_outcomes` row whose dependency set includes that `(chain_id, block_hash)` or a boundary resolved through it. The invalidation makes the cached outcome ineligible for reuse; it does not delete raw facts, traces, steps, attachments, or any execution-owned audit artifact.
+The resolver-profile queue, journal, and reconciliation tables remain migration-era data with no Rust storage API or runtime consumer. Rows left by an older binary do not gate phase progress, worker replay, API reads, or current manifest admission.
 
-The resolver-profile input queue, authority journal, reconciliation staging tables, and their storage helpers remain during the staged schema transition. Raw-code triggers may still add queue rows, but the old indexer no longer advances the authority journal, drains or acknowledges those rows, invokes absence-aware resolver replay, or publishes its direct projection invalidations. Pending legacy rows do not gate startup, live or reorg checkpoints, backfill, catch-up, rewind, or repair commands.
+## Interpretation replay semantics
 
-Reusable `execution_cache_outcomes` rows carry dependencies tied to explicit block-hash-bearing chain positions or boundaries. Rows that lack those dependencies fail closed.
+Schema-v2 `interpret` is the sole current writer of identity rows, discovery output, and normalized events from retained chain facts. Normal execution advances only through the completed ingest boundary. A redo selects one inclusive finite block range and reconstructs it chronologically from the admitted raw facts and manifest state.
 
-## Replay semantics
+Interpretation loads the prior state needed before the range, keeps the compact fold across physical batches, and writes identity, discovery, and normalized events in one transaction per batch after revalidating lineage. Stable identity fields remain conflict checked. Redo may replace only the selected derived range and uses explicit orphan/re-anchor behavior rather than the deleted old-schema upsert, field-repair, canonicality-supersession, closure-proof, or adapter-checkpoint machinery.
 
-Raw-fact normalized-event replay is indexer-owned orchestration over the adapter-owned `normalized_events` boundary. It selects bounded canonical raw facts and asks adapters to perform an upsert-only resync; it advances only its own `normalized_replay_*` cursor.
+The old `normalized_replay_*` cursor and checkpoint tables are not interpret progress. They have no writer in this source tree. Selected reads remain solely because the unported worker uses them when deciding projection readiness and raw staging compaction.
 
-Whole-range replay is the default. Automatic bootstrap and automatic catch-up share one all-source chain cursor over persisted canonical raw facts in block order — adapter-owned identity histories combine registry, registrar, wrapper, resolver, and reverse-claim signals into one storage write boundary, so independent per-source-family cursors would tear those histories.
-
-For a chain that requires stateful or dependency-ordered replay, automatic catch-up runs two ordered phases while holding the existing deployment-profile/chain replay ownership fence. First it runs the block-derived stateless producers that the following full-history pass does not re-emit, using the same selected canonical raw logs, manifest/source identity, decoder, event identity, provenance, and canonicality rules as live adapter sync. That stateless work uses the configured canonical raw-log candidate cap and whole-block boundaries for physical pages, but the ownership and raw-log input-version fences remain session-wide. It then runs the existing stateful and dependency-ordered pass through the latched target. The all-source cursor is the completion fence for both phases: it advances only after the second phase succeeds and the raw-log input version is accepted. A process exit after the first phase leaves that cursor pending, so restart repeats the idempotent stateless upserts before resuming the second phase; projection workers and live-poll handoff therefore cannot observe an intermediate phase as completed replay.
-
-That completion marker does not record whether the binary that advanced it ran one
-phase or two. A `raw_fact_normalized_events` cursor completed by a pre-two-phase
-indexer remains complete after upgrade, so the upgraded loop is idle and does not
-backfill stateless label-preimage rows omitted from that completed span. Operators
-must use the [manual normalized-event replay stopgap](deployment.md#single-phase-to-two-phase-normalized-replay-upgrade)
-for the exact completed range. Because cursor completion may already have
-permitted raw-log compaction, that stopgap first requires current-generation
-retained-history authority; operators must restore it with provider-backed
-backfill or rebuild a clean generation-zero database before replay. A pending
-cursor upgraded in place does run the full stateless phase and then repeats the
-stateful closure pass from its retained closure boundary. Deploying the
-two-phase image before an in-progress cursor completes avoids the manual
-stopgap, at the cost of that one full stateless pass.
-
-Normalized events are adapter-owned semantic transition rows, not guaranteed-stateless decorations on individual raw logs. Only producers whose existing replay dependency model is `stateless_raw_fact` may derive rows from a block-hash selection. The central replay contract carries that one dependency-model classification and mechanically derives stateless-only eligibility from it; there is no parallel per-adapter lane flag. Stateful adapters derive `before_state`, resource continuity, authority metadata, resolver state, wrapper state, registrar expiry, permission provenance, or discovery attribution from chronological adapter history and reconciled context. For those adapters, replay that emits or compares transition rows must start from a valid closure boundary and carry adapter state across every physical page in the replay.
-
-Where a stateful adapter's replay may start depends on whether raw-log history
-was ever destroyed — the retention [generation](glossary.md):
-
-- At generation zero (raw-log staging history never destroyed — no delete,
-  truncate, or destructive identity/payload update), the
-  current valid [closure](glossary.md) boundary is the earliest retained
-  canonical raw fact for that adapter/source graph. If the required source
-  graph has no retained canonical raw fact at all, a generation-zero replay
-  beginning at block zero is a genuinely empty closure: there is nothing to
-  replay, and generation zero itself proves the absence.
-- After deletion, truncation, or another destructive generation change, a
-  retained suffix of history is not a closure boundary. Replay then requires
-  current-generation, gap-free `backfill_coverage_facts` through the target
-  for every historically authoritative interval of each participating closure
-  family, or a documented durable versioned adapter-state snapshot anchored to
-  that generation and input revision.
-- The persisted [retained-history proof](glossary.md) tuple remains the
-  stronger authority for ENSv2 root/registry closure; those two families do
-  not substitute ordinary tuple facts for that proof.
-- Target-bounded live reorg repair carries a transient ENSv1/Basenames
-  registry proof and discovery-admission epoch into its destructive writer.
-  That transient writer token is not reusable as general replay authority: a
-  full-closure replay separately validates current-generation facts for all of
-  its non-ENSv2 closure families, including resolver, registrar, wrapper,
-  authority, and permission inputs.
-- Existing `normalized_events`, `surface_bindings`, `resources`, projection
-  rows, or API-visible state are not semantic input for deterministic stateful
-  replay and must not be used as implicit snapshots.
-
-The global automatic replay cursor records the raw-log retention generation and commit-ordered input revision accepted for its range. At rewind inspection it latches the current version, then rewinds to the earliest already-consumed block changed by a newer committed revision, or to the range start when the retention generation changed. Cursor publication treats the completed iteration boundary as inclusive: it may advance the stored input version when per-block revision metadata proves that every newer mutation is strictly above that boundary and the retention generation is unchanged. A newer mutation at or below the boundary, a missing per-block revision witness, or a retention-generation change fails publication and is replanned by the next iteration. Publication performs that check under the raw-log mutation fence. Raw-log commit revisions, rather than `observed_at` timestamps or sequence allocation order, are the durable rewind authority.
-
-A replay cursor below the block-revision evidence floor also rewinds to
-its range start. This is the populated-database upgrade path for legacy
-latest-per-block evidence: it invalidates the unprovable prefix without
-changing retained raw facts or turning the known legacy gap into a permanent
-handoff error.
-
-The raw-staging boundary classifier distinguishes an accepted newer input version from retention-generation drift and a witnessed mutation at or before an inclusive boundary. Missing per-block evidence, revision rollback, and storage failures remain integrity errors rather than ordinary stale-readiness results. The multi-chain form holds one transaction, takes chain advisory locks in sorted order, and holds one `ACCESS SHARE` lock on `raw_logs`, so final handoff validation observes one raw-input snapshot without consuming one connection per chain.
-
-The `post_replay_live_adapter_backlog` cursor stores the raw-log retention generation and commit revision accepted for every consumed block through `next_block_number - 1`, including empty advancement. A legacy/default-version cursor or a cursor whose accepted version predates the replay prefix resets to `replay_target + 1` at the replay cursor's accepted version and reprocesses instead of waiting forever. A later same-generation mutation touching the consumed post-target range rewinds to its earliest affected block; replay-prefix drift returns ownership to full replay, while a mutation strictly after the consumed range becomes later backlog work. Adapter execution holds the chain-scoped raw-log mutation guard, and page publication reacquires the guard to publish the cursor at the observed version, rewind and retry, or defer to replay. Final ownership uses the sorted multi-chain guard to validate replay prefixes, backlog cursors, and current canonical raw maxima, grants only a one-poll adapter permit while that guard is held, and repeats the proof on every poll. Raw-only writers queued behind the final guard commit on the far side of that permit and are therefore detected by the next cycle.
-
-The `normalized_replay_adapter_checkpoints` and `normalized_replay_adapter_checkpoint_items` tables can still contain legacy rows, but current production adapter entry points neither publish nor resume them. One cross-process ownership fence per deployment profile and chain still serializes automatic and operator full-closure sessions. An automatic or operator retry reruns the plain, idempotent adapter pass from the retained closure boundary; source-restricted and block-hash selections remain restricted repair sessions.
-
-The [full-closure](glossary.md) ownership fence polls a dedicated PostgreSQL
-connection with a nonblocking lock attempt every 50 milliseconds, so contention
-does not leave a blocking statement or long-lived snapshot behind. The first
-failed attempt and then every
-`BIGNAME_INDEXER_FULL_CLOSURE_REPLAY_LOCK_WAIT_LOG_INTERVAL_SECS` seconds
-(default 60) emit a warning with the deployment profile, chain, elapsed time,
-and the holder's PostgreSQL process ID and application name; acquisition logs
-the total wait duration. The optional
-`BIGNAME_INDEXER_FULL_CLOSURE_REPLAY_LOCK_WAIT_DEADLINE_SECS` is unlimited when
-unset or zero. A positive value fails the waiting session with a typed error
-without entering the fenced operation or disturbing the holder. An operator
-replay exits without publishing global completion, while automatic catch-up
-records the iteration failure and retries on a later loop.
-
-When automatic catch-up has the registered indexer heartbeat handle, its first
-failed lock attempt starts the named `full_closure_replay_lock.wait` phase.
-Polling never advances that phase or the process heartbeat: its initial
-timestamp ages under the ordinary indexer health threshold and remains visible
-to startup readiness. Acquisition removes the phase and records the completed
-transition. A deadline or other wait failure leaves the phase aging; repeated
-automatic retries do not refresh it because retrying is not forward progress.
-Unresolved waits are tracked by deployment profile and chain, so work or lock
-acquisition on another chain cannot clear or refresh the oldest wait evidence.
-The later attempt that acquires the final unresolved ownership removes the
-phase, including when that acquisition is uncontended. One-shot operator replay
-has no service-loop heartbeat row and relies on the same warnings and terminal
-error.
-
-Post-bootstrap startup invokes each adapter's plain full-source `sync_*` entry
-point. It does not consult or publish the legacy
-`startup_adapter_owned_raw_log_state` cursor namespace or
-`startup_adapter_sync` checkpoint scope, and it does not dispatch on per-family
-adapter derivation versions. A restart repeats the idempotent full-family
-upserts from retained raw facts.
-
-The startup checkpoint tables, lineage-revision evidence, and storage helper
-APIs remain transitional schema surface for this PR, but they are not consumed
-by `bigname-indexer run` and do not establish startup readiness or resume
-authority. Existing rows are ignored by the old runtime.
-
-The ENSv1 owner-based subregistry discovery adapter is deleted. ENSv1
-unwrapped authority and ENSv2 registry contain no adapter-private checkpoint or
-self-repair implementation.
-
-Timer-driven manifest refresh and live discovery refresh invoke the same plain
-full-family derivation as startup. Live intake may advance raw-log revisions
-during those scans; the refresh still completes without publishing legacy
-startup checkpoint rows. Long-running calls receive old-runtime liveness beats
-from their caller.
-
-Full-closure replay chooses physical pages by canonical raw-log event candidate count while preserving whole-block boundaries; adapter routing may then filter that page down to the watched or generic source events that the closure pass consumes. Implementation scan guards may limit one database range probe, but they are throughput guards rather than semantic 512-block replay windows. If a single block exceeds the configured candidate-log cap, the full block is still replayed as one page; the cap is not allowed to split a block or create a replay cursor. When a scan guard is reached before the candidate-log cap, the page may advance through empty or low-density whole blocks because no semantic boundary is created until the closure target completes.
-
-The global `raw_fact_normalized_events` cursor advances only after the stateless phase and every stateful or dependency-ordered adapter finalize their adapter-owned writes through the requested target block. Automatic full-closure catch-up latches that requested target when the cursor is created and does not widen the same closure pass just because newer live raw facts arrive while it is running or after it completes; a later closure target requires an explicit cursor rewind/reset or a documented adapter-state snapshot boundary.
-
-A completed automatic catch-up may be followed by a separate `post_replay_live_adapter_backlog` operational cursor that live-normalizes canonical raw-log blocks already persisted after the latched replay target before normal live polling resumes adapter sync. That cursor scopes adapter routing from the selected raw-log emitters, is not a closure replay cursor, does not change the full-closure target, and remains replay-safe because it uses the same deterministic adapter-owned upsert path as live polling. Backlog normalization never replaces provider-backed live intake; the following live reconciliation still admits raw payloads for canonical blocks that were not already persisted.
-
-ENSv2 startup, live, backlog, and automatic replay discovery writes reconcile
-observed transitions and any descendant branch made unreachable by those
-transitions. The surviving plain adapter does not treat an omitted observation
-as deletion: a retained suffix or cold live hydration is not complete-source
-authority. It still loads current emitters and closed canonical discovery
-intervals that intersect retained history so positive historical transitions
-remain interpretable.
-
-ENSv2 registry/resource replay runs before ENSv2 registrar and resolver replay so contextual rows see stable registry/resource outputs; ENSv2 permissions replay then runs over the retained resolver-family raw-log history. These ENSv2 closure passes do not currently publish durable adapter-private snapshots, so a restart reruns the topologically ordered closure pass from the retained closure boundary and relies on idempotent normalized-event and identity upserts.
-
-Ordinary ENSv2 registry live polling may retain lifecycle state in a best-effort process-local cache with at most 32 entries and an estimated 32 MiB state-weight limit per entry. The process-local cache is not a snapshot or replay boundary. A result that exceeds its budget is used for the current call and discarded rather than written to a durable checkpoint.
-
-Reuse requires exactly one selected non-orphaned target, a cached anchor on that target's exact parent-hash path, and an unchanged discovery-admission epoch. The cache stores the commit-ordered raw-log input revision it observed. Per-block-hash revisions must prove that no later raw-log mutation touched the cached ancestor path; a lower-`raw_log_id` late commit, canonicality repair, or newly admitted log on that path forces complete hydration, while a mutation confined to an unselected fork does not. Incremental hydration consumes every retained registry log after the anchor on that exact path, independent of a caller's narrower page scope.
-
-A process-cache miss, process restart, cache eviction, target ambiguity, ancestor-path mutation, or discovery drift triggers cold hydration over the exact selected retained path through the target. There is no durable live-checkpoint fallback.
-
-Non-live registry sync clears process-local live state before rewriting adapter output. Unregister and regeneration transitions remove unreachable registrations, aliases, and subregistry suffixes from cached state.
-
-Before publishing process-local state, the live sync verifies that the raw-log input revision did not change and that the discovery-admission epoch changed only by its own reconciliation. The adapter's deleted registry-specific advisory fence, retained-history completion pass, and recovery driver are not part of this path. Its indexer caller holds the shared chain-scoped raw-log mutation guard across interpretation and persistence.
-
-Contextual adapters are not stateful because of `before_state`; they are contextual because their emitted identity, row set, or payload depends on another adapter-owned identity/discovery output being stable. Empty `before_state` is not proof of stateless replay. Replay for these adapters is deterministic only after dependency closure is complete and stable, or inside a documented topologically ordered closure replay.
-
-Batching is only a physical IO and throughput detail. Chunk size, log-count caps, whole-block replay pages, block-hash paging, process restarts, and cursor checkpoints do not create semantic replay boundaries for stateful or contextual adapters. If automatic replay cannot resume with a durable adapter snapshot, it restarts from the closure boundary. Source-scoped, per-target, and block-hash replay for a stateful or contextual adapter is operational repair only and fails closed unless the requested selection is proven closure-complete.
-
-Current raw-fact normalized replay allows restricted block-hash/source-scoped replay only for adapters classified `stateless_raw_fact`. `stateful_closure_required` and `contextual_dependency_required` adapters fail closed for restricted replay unless the requested range starts at the retained closure boundary and the adapter has an implemented closure/dependency replay session. `--stateless-only` derives its adapter set mechanically from that same dependency model: every `stateless_raw_fact` producer is selected and every other model is excluded. There is no second per-adapter replay lane or allowlist to drift from the ordinary replay classification. The central code contract is mirrored here:
-
-| Adapter / producer | Ordinary model | Derived `--stateless-only` behavior | Raw-fact restricted replay | Reason and proof |
-| --- | --- | --- | --- | --- |
-| `block_derived_normalized_events` | `stateless_raw_fact` | Whole adapter | Allowed | Preimage rows are decoded from selected canonical raw logs, manifest/source metadata, and decoder constants. Covered by idempotent normalized replay and block-derived adapter tests. |
-| `ens_v1_reverse_claim` | `stateless_raw_fact` | Whole adapter | Allowed | `ReverseChanged` rows are derived from selected reverse raw logs and immutable manifest/source metadata. ENSv1 Mainnet uses `ReverseClaimed`; Basenames primary-name value intake uses the ENSv1 Base `L2ReverseRegistrar` `NameForAddrChanged` log and emits the companion `RecordChanged(name)` claim observation from the same raw fact.[^v1-l2rev-event] Covered by block-range, source-scoped, and block-hash replay tests. |
-| `ens_v1_unwrapped_authority` | `stateful_closure_required` | Unsupported | Restricted replay denied; full retained closure replay allowed | Authority transitions, `before_state`, resource continuity, resolver state, wrapper state, registrar expiry, and permission provenance require one ordered in-memory history across registry, registrar, wrapper, resolver, and related Basenames families. |
-| `ens_v2_registry_resource_surface` | `stateful_closure_required` | Unsupported | Restricted replay denied; full retained closure replay allowed | Token/resource identity, suffix state, bindings, discovery observations, and regeneration intervals depend on canonical ordered registry history through the replay target. Prior-state reconstruction walks exact parent hashes from the selected event through the observed/canonical tail to a safe or finalized boundary in the paged history query. Above that boundary it admits only blocks on the selected path; a retained canonical-marked sibling is not prefix state, and the adapter does not restart a recursive ancestry query for every historical log block. |
-| `ens_v2_registrar` | `contextual_dependency_required` | Unsupported | Restricted replay denied; full retained closure replay allowed | Registrar rows resolve `logical_name_id` and `resource_id` from stable ENSv2 registry/resource output replayed through the same target. |
-| `ens_v2_resolver` | `contextual_dependency_required` | Unsupported | Restricted replay denied; full retained closure replay allowed | Resolver rows resolve name/resource links from stable `name_surfaces` and `surface_bindings` replayed through the same target. Full closure loads bounded historical discovery intervals even when no resolver remains in the current watch plan. |
-| `ens_v2_permissions` | `stateful_closure_required` | Unsupported | Restricted replay denied; full retained closure replay allowed | Permission resources and role events depend on prior resolver resource-hint observations in canonical order through the replay target. An in-memory hint from a `Named*` log in the same ordered batch bypasses the durable-evidence lookup only after its exact source-log position is before the role log and a single set-based parent walk selects the newest candidate on the role log's stored ancestry. On a cross-call reload, persisted provenance proves only that the resource belongs to this resolver and source family; its selector, normalized name, and DNS bytes are metadata because they carry no source-log anchor and may have been written while another retained canonical-marked branch was processed. The adapter therefore recovers the whole selector and exact DNS bytes from the newest admitted durable `PreimageObserved` row produced by `block_derived_normalized_events` before the current permission log on that ancestry. The durable query builds that selected path once down to the oldest candidate, returns at most the newest selected-path evidence row, and fails closed if that row is malformed instead of materializing candidates or restarting an ancestry query for each row. The parent walk is seeded with the evidence floor, requires each parent to have a strictly lower height, and cannot recurse deeper than the descendant-to-evidence distance. Later evidence, canonical evidence from a sibling branch, and observed or orphaned evidence are ineligible; ordinary block sync runs the stateless producer first, and automatic full closure completes its stateless phase before permission replay. Missing, mismatched, or unadmitted preimage evidence fails closed to the explicit unknown selector. |
-| `manifest_normalized_events` | `contextual_dependency_required` | Unsupported | Not a raw-fact replay participant | Manifest rows derive from manifest, capability, code-hash, and discovery-edge corpus state rather than selected raw logs. |
-
-`--stateless-only` is a producer-selection mode, not a separate write authority. It re-derives the selected canonical raw facts with the producers classified `stateless_raw_fact` and sends their events through the same plain chunked upsert as ordinary family sync. Missing identities are inserted, matching identities are idempotent, and a differing payload for an existing identity fails closed. The mode does not perform canonicality arbitration, replace semantic content, publish `content_update`, or emit superseded/skipped arbitration outcomes. Omitting the flag preserves the closure/context-dependent selection guard.
-
-The stateless-only mode does not delete raw facts, synthesize closure state, run adapter checkpoints, mutate adapter-owned identity rows, or reconcile discovery.
-
-Source-scoped or per-target replay is an operational repair mode. It narrows the raw-log selection and adapter source scope; it does not narrow canonicality, change persisted backfill job identity, delete raw facts from other sources, mutate discovery or manifests, or promote any coverage to supported. Storage helpers, projections, API code, and inspection tooling do not synthesize normalized events outside this boundary.
-
-Replay reads canonical durable hot facts first. It may use a retained durable cold payload only when an explicitly retained replay contract requires that payload. For block-scoped payloads it may use provider re-fetch only through the digest-checked, fail-closed cache-fill path.
-
-Ordinary replay does not delete stale `normalized_events` or replace existing payloads for an already persisted normalized-event identity. Its upsert path inserts absent rows and treats matching identities as idempotent; conflicting payloads remain mismatches except for the explicitly documented adapter-repair fields below. `--stateless-only` uses that same conflict behavior. Adapter-owned identity rows may be marked `orphaned` only when those rows have no backing normalized event, were produced by the same adapter boundary, and would otherwise overlap the incoming identity interval.
-
-Replay does not mutate `chain_*`, `raw_*`, `backfill_*`, `execution_*`, manifests, public API state, or checkpoint promotion state. Restricted stateless, source-scoped, and per-target replay does not mutate discovery rows. A retained full-closure session may reconcile discovery rows inside the documented adapter boundary so contextual event derivation reads the closure produced by that same session. Replay does not write projection output tables directly: normalized-event persistence appends the storage-owned `projection_normalized_event_changes` journal, and explicitly documented key-aware repairs may enqueue `projection_invalidations`; projection workers remain the only owners of projection re-derivation and publication.
-
-### Adapter repair
-
-Explicit adapter repair is narrower than replay and exists for deterministic adapter bugs where existing normalized-event rows can be proven to be the same adapter output but a documented field or adapter-derived identity component was encoded lossily. The triggering conflicted row matches the retained source identity; related-row repair is constrained to the same adapter, chain, logical name, canonical state, and documented repair boundary. Repair updates only the fields, identity components, stale-row orphaning, and stale-key invalidations listed below. In minimal raw-log deployments, repair may fetch exact historical logs directly from the configured provider or same-host Reth substrate without re-materializing `raw_logs`.
-
-New repair work lands in the Rust repair framework, or in shared SQL functions invoked from that framework when SQL is the natural expression of the proof. Migration-only repair rewrites are reserved for schema/index/trigger changes or tightly bounded one-time invocations of the same guarded repair logic; they must not depend on `_sqlx_migrations.installed_on` or wall-clock cutoffs. Repair code that rewrites `event_identity` must include the same collision handling as the Rust framework, and repair code that widens or reopens a `surface_bindings.active_to` interval must be explicitly listed in this section with the proof that no successor interval is invalidated, the non-overlap guard, and the downstream invalidations it records. Historical pre-framework SQL repair migrations that widened or reopened intervals are remediation artifacts, not precedent for future repair policy; the known artifacts are `20260508203000_ens_v1_registrar_live_renewal_resource_repair.sql`, `20260508204000_ens_v1_registrar_registry_boundary_repair.sql`, and `20260514110000_ens_v1_recent_renewal_resource_repair.sql`.
-
-The admitted interval repair is losing-branch surface-binding closure repair. Its proof is an orphaned successor binding whose start equals the stored close, an orphaned ENSv2 `RegistrationReleased` or replacement-reservation `SurfaceUnbound` whose lineage timestamp plus transaction/log offset equals that close, or an orphaned ENSv1/Basenames `SurfaceUnbound` whose recorded `active_to` equals that close; event evidence must match the predecessor logical name and resource. It changes only that readable predecessor's `active_to`: the repaired value is the earliest surviving readable same-chain successor start or canonical close-event boundary strictly after the predecessor start, or `NULL` when none exists. Exact equality to the orphaned boundary prevents unrelated evidence from reopening the interval, while canonical close-event evidence preserves a winning-branch re-included release. The resulting earliest boundary is the non-overlap guard. The storage-owned surface-binding update trigger enqueues `name_current` and `address_names_current` invalidations for the changed interval.
-
-Orphaned stable-binding reobservation is the other admitted interval reopen. Its proof is that the stored row is already `orphaned` and the winning observation matches its stable binding id, logical name, resource, kind, `active_from`, and provenance. Reobservation replaces the orphaned `active_to` with the winning observation's derived value instead of applying readable-row monotonic close rules; an open winning registration therefore removes a losing-branch unregister close, while a winning unregister in the same replay supplies its own close. The surface-binding non-overlap constraint remains the guard, and the storage-owned update trigger enqueues `name_current` and `address_names_current` invalidations when the interval changes.
-
-The currently admitted normalized-event field repairs are:
-
-- Retained ENSv1/Basenames `SubregistryChanged` owner-discovery rows may drop only `topic0`, `topic1`, `topic2`, and `data_hex` from `raw_fact_ref`, plus `discovery_source`, `edge_kind`, `observation_key`, `from_contract_instance_id`, and `to_contract_instance_id` from `after_state`, when the remaining `NewOwner` assignment payload is identical. This is a one-way compatibility repair for rows emitted by the deleted owner-discovery adapter; it does not admit arbitrary normalized-event identity changes.
-- Retained ENSv1 and Basenames resolver-local `RecordChanged` and `RecordVersionChanged` rows produced by `ens_v1_unwrapped_authority` may add only a missing lower-hex `raw_fact_ref.emitting_address`. The repair is limited to `ens_v1_resolver_l1` on Ethereum Mainnet and `basenames_base_resolver` on Base Mainnet, requires every pre-existing raw-fact field and every other normalized-event field to remain identical, and rejects replacement of an existing emitter. This one-way provenance enrichment keeps resolver-pointer projection filtering replayable after compactable `raw_logs` staging has been removed; the normalized-event update trigger records the downstream content change.
-- ENSv1 PublicResolver-compatible `TextChanged` payload repair: legacy generic `RecordChanged` rows with `record_family=text`, `record_key=text`, `selector_key=null` are rewritten to selector-specific `text:<key>` rows; selector-specific text rows missing a retained value have that value filled when the source log verifies against the indexed key hash.[^v1-text-l5][^v1-text-l21]
-- ENSv1 registrar renewal resource repair: `ExpiryChanged`/`RegistrationRenewed` rows whose event identity, name, and payload match may update `resource_id` when replay recovers the stable registrar/wrapper resource anchor that an earlier replay encoded incorrectly. The old and repaired `resources` rows must be canonical ENSv1 registrar anchors for the same mainnet logical name and labelhash; when the normalized event payload does not carry `labelhash`, as with expiry-only rows, the resource provenance provides that equality check. The same repair map may update `before_state.expiry` on the repaired renewal/expiry row when the stale row had copied the renewal after-expiry into the before-state and the repaired resource provenance, or an earlier canonical registrar grant/renewal/expiry event on the repaired resource, proves the replayed pre-renewal expiry. It may also repoint later authority events on the stale resource to the repaired resource, rewrite `PermissionChanged` grant/revocation authority keys, preserve each current replay-batch renewal/expiry row's own replayed `before_state`, refresh older related renewal/expiry `before_state.expiry` from the repaired replay proof, and rewrite a stale `RegistrationReleased` event identity from the old authority key to the repaired authority key. If that repaired release identity already exists, the stale release row is marked `orphaned` instead of rewritten. The repair also orphans stale synthetic registrar grant/surface events plus old `resources`/`surface_bindings` scaffolding when no earlier canonical backing event still uses the old resource, and enqueues old and repaired resource keys for resource-keyed projections whose stale key is no longer derivable after the row is repointed.
-- ENSv1 renewal before-state repair: `ExpiryChanged`/`RegistrationRenewed` rows may update only `before_state.expiry` when the source identity, namespace, logical name, registrar resource, source family, derivation kind, and `after_state` are unchanged. The stale before-expiry may be the renewal after-expiry, a later/current expiry retained on the same registrar resource, or an earlier stale expiry in the same retained registrar-resource history when both stale and replayed before-expiries are numeric and strictly less than the unchanged renewal after-expiry. The canonical mainnet registrar resource must still anchor the same logical name and labelhash, but its provenance expiry is not the proof for the repaired before-expiry because the resource can carry the current post-renewal expiry for the same registrar authority. Outside the bounded numeric same-resource case, the replayed before-expiry must match an earlier canonical ENSv1 unwrapped-authority registrar grant, expiry, or renewal event on the same resource. The repair records a normalized-event projection change and does not rewrite resource keys.
-- ENSv1 registration-release before-state repair: synthetic raw-block `RegistrationReleased` rows may update only `before_state.registrant` when the namespace, logical name, registrar resource, source identity, `before_state.expiry`, and full `after_state` are unchanged, both old and replayed registrants are non-empty, and the registrar resource is a canonical mainnet resource for that logical name. The repair records a normalized-event projection change and does not rewrite resource keys.
-- ENSv2 registration link-time expiry repair: `RegistrationGranted` rows from `ens_v2_root_l1` or `ens_v2_registry_l1` may update only `after_state.expiry` when retained replay had copied a later mutable registry expiry into the stable registration event and full-closure replay recovers the numeric expiry observed when the resource was first linked.[^v2-registry-link-time-expiry] The normalized-event identity, raw-log source, logical name, resource, registry authority, and every other state field must be unchanged. The repair records a normalized-event projection change and does not rewrite identity or resource keys.
-- ENSv2 legacy resolver permission selector repair: `PermissionChanged` rows from `ens_v2_resolver_l1` may update `logical_name_id` from null to the validated ENS logical name and replace only an explicit unknown selector with a validated `name`, `text`, or `addr` selector when retained replay had processed `EACRolesChanged` without the earlier resolver-resource hint. The normalized-event identity, raw-log source, resource, permission state, resolver scope, and every other field must be unchanged; the selector DNS bytes must decode to the incoming raw label path, and the incoming logical-name ID must be `ens:<namehash>` for that path. The repair is one-way and records a `content_update`. The resource-keyed permission projection and resolver-scoped projection keys remain unchanged, while the old null logical name produced no name-keyed projection to invalidate.
-- ENSv1 registry/registrar event-time resource repair: resolver, record, and permission rows may update `resource_id` when replay recovers the registry-only resource that was authoritative at the event block but an earlier replay attached the row to a later registrar/wrapper resource, to a legacy registry-only resource keyed only by labelhash, or to no resource anchor; they may also drop a later registrar/wrapper resource when replay proves there is no resource anchor at the event block. Repaired registry-only resources must be canonical mainnet resources for the same logical name and leftmost labelhash; legacy registry-only sources are admitted only as stale labelhash-key collisions and are rewritten to the node/namehash-scoped registry-only resource. A nullable repaired resource is admitted only when the stale resource is a later mainnet registrar/wrapper anchor for the same logical name and the source identity plus before/after state still match. A null-to-resource repair is admitted only when the source identity, logical name, and event kind still match; before/after state must still match except registry `ResolverChanged` rows may combine the resource repair with a `before_state.resolver` update from JSON `null` to a lower-hex resolver address when the after-state namehash and resolver are lower-hex values. The referenced `resource_id` remains normal adapter-owned identity output, and downstream projection publication remains gated by the corresponding identity rows. Same-transaction registration setup is excluded from that registry-only rewrite: when block-scoped replay preloads an older registry-only authority, `RegistryOwnerChanged` and `ResolverChanged` observations before a later `RegistrationGranted` in the same transaction are deferred to that new registrar resource. Record writes, renewals, and wrapper observations retain event-time attribution. Registrar-family permission rows may also be repointed from a stale registry-only resource to that registrar resource only when the registrar resource, authority key, and later `RegistrationGranted` row prove the same block/transaction ordering. Selector-specific text `RecordChanged` repairs may combine a `resource_id` update with a `value`-only after-state repair; the value-bearing after-state is preserved so event-time anchor repair does not erase a previously retained or newly replayed text value. If the renewal resource repair already repointed a related resolver/record row earlier in the same upsert transaction, the registry/registrar event-time repair treats the row as repaired when the current row now matches the replayed resource and state. `AuthorityTransferred` repairs may update only `before_state.owner` when the source identity, canonical mainnet resource, logical name, `resource_id`, and `after_state` are unchanged; a JSON `null` owner may be upgraded to a concrete owner, while an incoming JSON `null` owner is accepted as compatible but must not erase a retained concrete owner. The admitted Basenames Base in-place extension is the 2026-07-03 node/namehash re-keying ratification (recorded as "option (i)" in that decision) applied to the `basenames_base_registry` observation class on `base-mainnet`: `AuthorityTransferred`, log-scoped `PermissionChanged`, and observation-scoped `ResolverChanged` rows whose identities do not embed the registry-only authority key. It covers retained rows whose legacy registry-only resource or authority state used the pre-12bcea0 labelhash-scoped key and whose replayed row uses the current node/namehash-scoped registry-only resource. The repair may rewrite `resource_id` and only derivation-affected observation state fields: `PermissionChanged` grant/revocation source authority objects; observation `ResolverChanged` changes only `resource_id` when state is otherwise unchanged. `AuthorityEpochChanged`, boundary `PermissionChanged`, `SurfaceBound`, `SurfaceUnbound`, and `ResolverChanged` rows whose `after_state.source_event` is `AuthorityEpochChanged` are excluded from this in-place repair because their event identities include the registry-only authority key. The same guarded ENSv1 mainnet source-family class remains admitted for structurally identical event-time repairs. No `event_identity` rewrite is admitted. `RecordVersionChanged` repairs may update only `before_state.record_version`, with or without a `resource_id` change, between `null` and the immediately previous numeric version when `after_state.record_version` is unchanged, the numeric previous version is exactly `after_state.record_version - 1`, and the source identity is unchanged. Permission repairs may update only `grant_source` and `revocation_source` authority objects between the old and repaired resource provenance, and they enqueue stale and repaired resource keys, or only the non-null key for nullable repairs, for affected resource-keyed projections.
-- Basenames Base registry boundary derivation-change supersession: for the same 2026-07-03 re-keying class, `basenames_base_registry` `AuthorityEpochChanged`, boundary `PermissionChanged`, `SurfaceBound`, `SurfaceUnbound`, and boundary `ResolverChanged` rows with `after_state.source_event = AuthorityEpochChanged` use identity-aware canonicality supersession instead of in-place repair. When replay inserts or re-observes a current node/namehash-scoped boundary row and a canonical stale row exists for the same raw-block anchor, logical name, block, source family, and event kind, storage verifies the old and current registry-only resources are canonical `base-mainnet` resources for the same logical name and labelhash, that the stale resource authority key is `registry-only:base-mainnet:<labelhash>`, that the current resource authority key is `registry-only:base-mainnet:<namehash>`, and that only derivation-affected state fields differ. Boundary `PermissionChanged` state verification is limited to `grant_source` and `revocation_source` authority objects changing from the stale registry resource provenance to the current registry resource provenance; subject, scope, powers, transfer behavior, inheritance path, and source event kind must otherwise match. The disclosed second widening under that standing re-keying ratification also admits the `basenames_base_registrar` `AuthorityEpochChanged` subclass whose stale identity embeds a labelhash-scoped registry-only `before_state.authority_key` while the event `resource_id` is the registrar resource. That subclass resolves the stale before authority key to its legacy registry-only resource by key, resolves the current registry-only counterpart by the same logical name and labelhash under the node/namehash derivation, verifies the stale and current rows share the same canonical registrar resource and registrar after-state, and accepts the current replay shape where `before_state` is either the node/namehash registry-only key or explicit `authority_kind=null`/`authority_key=null` when replay defers the transient registry-only epoch. The registrar before-key proof is materialized from the distinct stale before keys in each repair batch and requires the concurrent `resources_basenames_registry_authority_key_idx` and `resources_basenames_registry_logical_labelhash_idx` indexes before the supervised run. The stale row is marked `orphaned`; its `event_identity`, payload, resource, and provenance are never rewritten. This path is not gated on persisted `surface_bindings` rows. The current replayed row remains the only canonical boundary timeline, and the canonicality update is recorded through the normalized-event projection-change trigger.
-- Legacy ENSv1 registry resolver discovery-attribution repair: retained unanchored Ethereum Mainnet `ResolverChanged` rows historically produced by the now-deleted `ens_v1_subregistry_discovery` adapter from the `ens_v1_registry_l1` source family may update a tombstone's `after_state.observation_key` to the emitting-address/node key when every other field is unchanged. For a retained nonzero resolver edge, the 2026-07-23 attribution class may update only `after_state.observation_key` and `after_state.from_contract_instance_id` when every other identity and payload field is unchanged. Both observation keys must address the unchanged resolver node, and the replayed row must carry valid from/to contract-instance IDs. Storage additionally requires a reconciled legacy `discovery_edges` row whose discovery source, observation key, edge kind, exact active-from block/hash, and from/to instance IDs match the replayed content. This compatibility repair does not make resolver edges part of current discovery semantics. Both cases record a `content_update` through the normalized-event storage trigger.
-- ENSv1 registry resolver before-state repair: anchored mainnet `ResolverChanged` rows from `ens_v1_registry_l1`/`ens_v1_unwrapped_authority` may update only `before_state.resolver` between JSON `null` and a lower-hex resolver address, or between lower-hex resolver addresses when the replayed before resolver equals the unchanged lower-hex `after_state.resolver`, when the source identity, logical name, canonical mainnet resource, `after_state`, and all other `before_state` fields are unchanged. The unchanged `after_state` must carry a lower-hex namehash and resolver address, and the resource provenance must still anchor the same logical name with `registrar`, `wrapper`, or `registry_only` authority. The repair records a normalized-event projection change and enqueues the affected `record_inventory_current` resource key.
-- ENSv1 reverse primary-claim resolver before-state repair: unanchored mainnet `ResolverChanged` rows from `ens_v1_registry_l1`/`ens_v1_unwrapped_authority` may update only `before_state.resolver` between JSON `null` and a lower-hex resolver address when the source identity, `after_state`, and lack of `logical_name_id`/`resource_id` are unchanged. The unchanged `after_state` must carry an ENS primary-claim source whose reverse node equals the row namehash and whose claim provenance is the ENSv1 reverse registrar. The repair records a normalized-event projection change and does not enqueue resource-key invalidations because no stale projection key exists on the row.
-- ENSv1 authority-epoch resolver-boundary repair: deterministic raw-block `ResolverChanged` rows whose `after_state.source_event` is `AuthorityEpochChanged` may update only `after_state.resolver` when the source identity, canonical mainnet resource, logical name, `resource_id`, `before_state`, and the rest of `after_state` are unchanged. The repair records a normalized-event projection change and enqueues the affected `record_inventory_current` resource key.
-- ENSv1 same-transaction registration setup repair: legacy rows may update a `RegistrationGranted.before_state` from an inferred registry-only authority to no prior authority when replay proves earlier registry owner observations in the same transaction were deferred setup for that registration. Under the completion of the 2026-07-03 re-keying ratification, the same guarded before-state repair is admitted for `basenames_base_registrar` `RegistrationGranted` rows on `base-mainnet` when the registrar resource is canonical for the same logical name and labelhash and the stable-identity row moves from the adapter-produced keyless `{"authority_kind":"registry_only","registrant":null}` pre-state to the replayed deferred-setup no-authority pre-state. Retained leaked setup rows are not required for the Base before-state rewrite; when present, the repair may orphan same-transaction `AuthorityTransferred` and `PermissionChanged` rows plus synthetic registry-only boundary rows that were minted from the setup observation against a registry-only resource for the same logical name. It enqueues the repaired name key and affected registry-only/registrar resource keys for projection rebuilds. For the older known-name derivation, deployment alone changes no retained row: replay repairs rows whose stable event identities are emitted again, but an old transient setup event that the new derivation no longer emits is left standing unless a separately ratified repair or sweep supersedes it. The attribution rule therefore governs newly derived output and full-versus-block-scoped replay parity; it does not claim a historical rewrite of vanished setup events.
-- ENSv1 wrapper-token before-state repair: deterministic `TokenControlTransferred` wrapper rows may update only `before_state.authority_kind` between stale `registrar`, `registry_only`, or JSON `null` values and current replay-derived `registrar`, `registry_only`, or JSON `null` values, or only `before_state.from` between lower-hex previous-owner addresses, when the source identity, metadata, `after_state`, and all other `before_state` fields match. The repair records a normalized-event projection change so downstream projections can refresh.
-- Basenames primary-claim source repair: `RecordChanged(name)` claim-observation rows for `basenames_base_primary` may update only `after_state.primary_claim_source` when the stored tuple uses the old Basenames `ReverseRegistrar`/coin type `60`, while replay recovers the ENSv1 Base `L2ReverseRegistrar`/coin type `2147492101` tuple for the same address, namespace, reverse node, and reverse name.[^bn-readme-base-revreg][^v1-l2rev-base-deploy][^v1-l2rev-base-args][^v1-l2rev-event][^bn-revreg-l12][^bn-revreg-l150]
-
-2026-07-03 Basenames Base registry-only derivation-change repair record: commit 12bcea0 intentionally moved registry-only ENSv1 authority resource derivation from a labelhash-scoped key to the current node/namehash-scoped key. Its checked-in repair record admitted only the Basenames `AuthorityTransferred` parity case; widening beyond that was not anticipated there. The ratified re-keying method ("option (i)") is the sanctioned Rust repair machinery, not an ad-hoc SQL migration. The completing live census checked every 12bcea0 embedding path in canonical/safe/finalized `basenames_base_registry` and `basenames_base_registrar` rows on `base-mainnet`: `resource_id`, event identity, top-level boundary `authority_key`, nested `grant_source` and `revocation_source` authority objects, and `inheritance_path[*].authority_key`. `inheritance_path` had zero hits. The complete affected-class matrix is: `basenames_base_registry` `AuthorityTransferred` 6,924 log-scoped rows, covered by in-place repair; `PermissionChanged` 275,964 log-scoped rows, covered by in-place repair; boundary `PermissionChanged` 1,164,540 rows, added here to boundary supersession; observation `ResolverChanged` 162,495 rows, covered by in-place repair; boundary `ResolverChanged` 617,928 rows, covered by supersession; `AuthorityEpochChanged` 623,707 rows, covered by supersession; `SurfaceBound` 623,706 rows, covered by supersession; `SurfaceUnbound` 41,284 rows, covered by supersession. For `basenames_base_registrar`, `RegistrationGranted` has 3,716,130 stable-identity rows with the adapter-produced keyless registry-only pre-state and is added here to the before-state repair from that keyless shape to replayed no-authority deferred setup; `AuthorityEpochChanged` has 3,750,941 stale before-key rows and remains covered by the registrar supersession subclass. `basenames_base_registrar` `PermissionChanged`, `ResolverChanged`, `SurfaceBound`, and `SurfaceUnbound` had zero old labelhash-scoped key hits. The checked-in repository does not contain the deployment corpus needed to recompute these counts.
-
-Preflight event-class census query:
-
-```sql
-SELECT
-  CASE
-    WHEN source_family = 'basenames_base_registrar'
-     AND event_kind = 'AuthorityEpochChanged'
-     AND transaction_hash IS NULL
-	    AND log_index IS NULL
-	    AND before_state->>'authority_kind' = 'registry_only'
-	      THEN 'registrar_authority_epoch_before_registry_only'
-	    WHEN source_family = 'basenames_base_registry'
-	     AND event_kind = 'PermissionChanged'
-	     AND transaction_hash IS NULL
-	     AND log_index IS NULL
-	      THEN 'registry_boundary_permission_changed'
-	    WHEN source_family = 'basenames_base_registry'
-	     AND event_kind = 'PermissionChanged'
-	      THEN 'registry_log_permission_changed'
-	    WHEN source_family = 'basenames_base_registry'
-	     AND event_kind = 'ResolverChanged'
-	     AND transaction_hash IS NULL
-     AND log_index IS NULL
-     AND after_state->>'source_event' = 'AuthorityEpochChanged'
-      THEN 'registry_boundary_resolver_changed_population'
-    WHEN source_family = 'basenames_base_registry'
-     AND event_kind = 'ResolverChanged'
-      THEN 'observation_resolver_changed'
-    ELSE concat(source_family, ':', event_kind)
-  END AS repair_class,
-  COUNT(*) AS row_count,
-  MIN(block_number) AS min_block,
-  MAX(block_number) AS max_block
-FROM normalized_events
-WHERE namespace = 'basenames'
-  AND chain_id = 'base-mainnet'
-  AND source_family IN ('basenames_base_registry', 'basenames_base_registrar')
-  AND derivation_kind = 'ens_v1_unwrapped_authority'
-  AND canonicality_state IN ('canonical', 'safe', 'finalized')
-  AND (
-      (source_family = 'basenames_base_registry'
-       AND block_number BETWEEN 17577060 AND 46945560)
-      OR
-      (source_family = 'basenames_base_registrar'
-       AND block_number BETWEEN 18715358 AND 46945560)
-  )
-GROUP BY 1
-ORDER BY 1;
-```
-
-Registrar before-key verification spot-check query:
-
-```sql
-WITH registrar_aec AS (
-  SELECT
-    event_identity,
-    logical_name_id,
-    resource_id AS registrar_resource_id,
-    block_number,
-    before_state->>'authority_key' AS stale_before_authority_key,
-    after_state->>'authority_key' AS registrar_authority_key
-  FROM normalized_events
-  WHERE namespace = 'basenames'
-    AND chain_id = 'base-mainnet'
-    AND source_family = 'basenames_base_registrar'
-    AND derivation_kind = 'ens_v1_unwrapped_authority'
-    AND event_kind = 'AuthorityEpochChanged'
-    AND transaction_hash IS NULL
-    AND log_index IS NULL
-    AND before_state->>'authority_kind' = 'registry_only'
-    AND canonicality_state IN ('canonical', 'safe', 'finalized')
-    AND block_number BETWEEN 18715358 AND 46945560
-)
-SELECT
-  COUNT(*) AS registrar_aec_rows,
-  MIN(block_number) AS min_block,
-  MAX(block_number) AS max_block,
-  COUNT(*) FILTER (WHERE legacy_registry.resource_id IS NULL) AS missing_legacy_key_resource,
-  COUNT(*) FILTER (WHERE current_registry.resource_id IS NULL) AS missing_current_key_resource,
-  COUNT(*) FILTER (WHERE registrar.resource_id IS NULL) AS missing_registrar_resource
-FROM registrar_aec event
-LEFT JOIN resources legacy_registry
-  ON legacy_registry.chain_id = 'base-mainnet'
- AND legacy_registry.canonicality_state IN ('canonical', 'safe', 'finalized')
- AND legacy_registry.provenance->>'authority_kind' = 'registry_only'
- AND legacy_registry.provenance->>'authority_key' = event.stale_before_authority_key
- AND legacy_registry.provenance->>'authority_key' =
-     concat('registry-only:', legacy_registry.chain_id, ':', legacy_registry.provenance->>'labelhash')
-LEFT JOIN resources current_registry
-  ON current_registry.chain_id = 'base-mainnet'
- AND current_registry.canonicality_state IN ('canonical', 'safe', 'finalized')
- AND current_registry.provenance->>'authority_kind' = 'registry_only'
- AND current_registry.provenance->>'logical_name_id' = event.logical_name_id
- AND lower(current_registry.provenance->>'labelhash') =
-     lower(legacy_registry.provenance->>'labelhash')
- AND current_registry.provenance->>'authority_key' =
-     concat('registry-only:', current_registry.chain_id, ':', current_registry.provenance->>'namehash')
-LEFT JOIN resources registrar
-  ON registrar.resource_id = event.registrar_resource_id
- AND registrar.chain_id = 'base-mainnet'
- AND registrar.canonicality_state IN ('canonical', 'safe', 'finalized')
- AND registrar.provenance->>'authority_kind' = 'registrar'
- AND registrar.provenance->>'authority_key' = event.registrar_authority_key;
-```
-
-The earlier `664,470 resources total` figure was an event-conflict distinct-resource count from the blocker query, not the live legacy-resource census. The live legacy registry-only resource census reviewed for this ratification was 3,707,844 rows. Operators must rerun and archive this resource-census query before the supervised repair:
-
-```sql
-SELECT COUNT(*) AS legacy_registry_only_resource_count
-FROM resources
-WHERE chain_id = 'base-mainnet'
-  AND canonicality_state IN ('canonical', 'safe', 'finalized')
-  AND provenance->>'authority_kind' = 'registry_only'
-  AND provenance->>'authority_key' =
-      concat('registry-only:', chain_id, ':', provenance->>'labelhash')
-  AND COALESCE(provenance->>'labelhash', '') <> ''
-  AND (
-      NOT (provenance ? 'namehash')
-      OR provenance->>'authority_key' IS DISTINCT FROM
-          concat('registry-only:', chain_id, ':', provenance->>'namehash')
-  );
-```
-
-The in-place observation repair verifies the same event identity, logical name, chain, source family, event kind, canonical resource anchors, and legacy/current labelhash relationship, then rewrites only `resource_id` and derivation-affected observation state fields listed above. The boundary supersession path verifies the same raw-block anchor, logical name, chain, source family, event kind, manifest metadata, canonical resource anchors, and legacy/current labelhash relationship, then marks only the stale old-identity row `orphaned`; it does not rewrite identity or payload. The registrar-family subclass verifies the legacy before key through canonical `resources` provenance rather than through the event's registrar `resource_id`. Before the supervised registrar-family run, operators must apply the concurrent resources provenance-index migrations, wait for both index builds to finish valid, then archive `EXPLAIN (ANALYZE, BUFFERS)` for a representative registrar batch. The plan must use `resources_basenames_registry_authority_key_idx` for `candidate.stale_authority_key = resource.provenance->>'authority_key'` and `resources_basenames_registry_logical_labelhash_idx` for the current registry-only counterpart lookup by `resource.provenance->>'logical_name_id'` plus `lower(resource.provenance->>'labelhash')`; any plan that repeats `resources` scans per input row remains a hard stop. The repair appends normalized-event projection changes and directly enqueues stale and repaired resource keys for `permissions_current` on in-place observation `AuthorityTransferred`/log-scoped `PermissionChanged` and observation-scoped `record_inventory_current` on `ResolverChanged`. Boundary supersession rows publish through normalized-event insert/canonicality changes. After the supervised repair run, operators must drain replay/apply or rebuild `name_current`, `address_names_current`, `permissions_current`, and `record_inventory_current`. `name_current` consumes normalized-event insert/canonicality changes for the boundary class by logical name, `address_names_current` depends on the repaired authority/name state after `name_current`, and the two resource-keyed projections consume the directly enqueued stale and repaired resource keys for observation rows plus normalized-event changes for boundary permission rows. `children_current`, `primary_names_current`, `resolver_current`, and execution caches are not direct rebuild targets for this repair unless a separate run changes their inputs. Basenames manifest metadata mismatches are a hard stop: the existing boundary manifest-metadata mismatch allowance is ENS L1 only, the boundary supersession path rejects mismatched persisted Basenames metadata, and the operator must verify the replayed `basenames_base_registry` and `basenames_base_registrar` `manifest_version` and `source_manifest_id` match persisted rows before the supervised run; this ratification does not admit Basenames manifest metadata repair.
-
-Repair does not write `raw_*`, `backfill_*`, projections, manifests, discovery rows, execution rows, or public API state directly. Field repairs append a normalized-event projection change. Repair paths also enqueue bounded key invalidations when a projection key is added or changed by repair or when an anchored resource projection should be refreshed immediately: Basenames primary-claim source repair enqueues old and repaired `primary_names_current` keys; ENSv1 reverse-name profile enrichment enqueues the added `primary_names_current` key; ENSv1 registrar renewal and ENSv1 or Basenames Base registry/registrar event-time resource repairs enqueue stale and repaired resource keys for affected resource-keyed projections, with nullable-resource repairs enqueueing only the non-null resource key; ENSv1 registry resolver before-state and authority-epoch resolver-boundary repairs enqueue affected `record_inventory_current` resource keys; and ENSv1 same-transaction registration setup repair enqueues the repaired `name_current` key plus affected `permissions_current` resource keys. Unanchored ENSv1 reverse primary-claim resolver before-state repair records only the normalized-event projection change. ENSv1 renewal repair updates to `surface_bindings` use the storage-owned surface-binding repair trigger to enqueue affected name/address keys.
-
-### Bulk-load index deferral
-
-During fresh normalized replay — current projection tables empty, normalized replay cursor not at target — the indexer may defer normalized-event indexes that exist only for projection/API readback while keeping replay-required indexes for event identity, reverse-claim lookup, and latest resolver/version preloads. The retained temporary latest-resolver, latest-record-version, and latest-registrar indexes are the database marker that this absence is intentional. Index deferral/restoration and post-migration index repair use one cross-process advisory fence. Inside one indexer process, every closure/dependency replay session holds a shared restored-index permit for its full history scan, while a fresh stateless session takes the exclusive permit before attempting deferral and releases it after the index-mode transition. Both paths acquire that process permit before the advisory DDL guard, so a fresh lane cannot drop indexes during another lane's closure scan and neither ordering creates a lock cycle. `worker migrate` does not recreate a deliberately deferred record-inventory replay index while any marker remains, but it repairs an invalid or missing index when replay is not deferring it. Replay removes the markers only after every deferred index is ready. Deferred indexes are therefore recreated before projection rebuilds or API-ready declared reads complete.
+### Projection replay durability
 
 `current_projection_replay_status` rows let worker restarts resume from the first unfinished projection family instead of restarting bootstrap/full replay from the start. They are worker-owned operational progress: not API truth, not projection data, not live-readiness state, and ignored unless the recorded replay version and full-replay input revision are current and the recorded normalized target covers the requested replay target. The API does not read this table. The full-replay input singleton also retains the activation state and minimum projection replay version admitted to projection-owned writes, even when a later direct-input repair invalidates all markers and the automatic attempt. Every new database connection stamps the binary's compiled replay version. Replay-state writers lock the singleton exclusively, reject a compiled version below the stored minimum or any persisted attempt, checkpoint, or marker version, and activate or raise the fence in the same transaction. Statement triggers on the invalidation queue and cursor, current projection and companion tables, replay state, and the singleton itself normally take the shared lock before every write. Before activation they serialize any already-running pre-fence writer with the first fence-aware replay. After activation, they reject both a lower stamp and a missing stamp from a pre-fence binary. A statement trigger that finds replay admission already holding the singleton fails immediately rather than waiting after its table lock and creating a reverse lock-order deadlock. A current, validly stamped writer receives the one retryable admission error. An unstamped or already-outdated process receives the fatal outdated-process error; missing singleton state and invalid stamps are also fatal fence failures, but are not classified as outdated. Claimed apply also holds an explicit shared fence through projection publication and queue completion, while claim, claim-heartbeat, invalidation derive, and hydration transactions perform their own typed checks. An earlier shared writer therefore commits before newer replay admission, while an outdated writer arriving afterward fails fatally without claiming or publishing. Dynamic stage-table writes are coupled to a protected checkpoint mutation in the same transaction. A direct non-event source repair advances the input revision and invalidates markers and the automatic attempt in its source-update transaction without lowering the replay-version minimum. Automatic bootstrap holds its cross-process replay lock from apply-cursor baseline selection through family replay. The manual `replay all-current-projections` command tries to acquire that same lock and exits with a clear ownership error instead of competing with automatic replay. Projection-specific one-shot rebuild commands also acquire it before clearing a marker or entering durable full-family staging, and fail without changing shared replay state when another process owns the lock. Once admitted, a manual all-current command first reuses a compatible persisted attempt and its target. Without an attempt, it starts one at the same normalized-replay and chain-checkpoint head used by automatic bootstrap when either head exists, resumes only unfinished families, and writes that real target on every completion marker. Those target-bearing markers can therefore satisfy the later automatic handoff. When no attempt and neither head exist, the manual command instead proceeds without creating an attempt and writes `NULL`-target checkpoints and completion markers. No automatic attempt exists to consume that targetless progress, and a later attempt with a concrete target does not treat those markers as covering it. The final automatic transaction locks the input revision, verifies all seven compatible markers, creates a missing `projection_apply_cursors` row at the persisted attempt baseline, and consumes the attempt. Continuous apply therefore cannot observe the handoff cursor before the protected replay has completed.
 
@@ -1582,7 +295,7 @@ Waiting for the singleton is also unsafe: the identity transaction can already
 hold a normalized-event, permission-resource, or direct-invalidation journal
 lock while the replay owner holds the singleton and waits to take `SHARE` on
 that journal. The sidecar triggers therefore retain the non-waiting admission
-check. Current-version indexer identity transactions retry the entire failed
+check. Current-version schema-v2 identity transactions retry the entire failed
 transaction with a fresh `READ COMMITTED` snapshot and bounded backoff; an
 admission collision is not recorded as a cursor or range failure unless that
 retry budget is exhausted. Canonicality flips may consequently retry during
@@ -1591,11 +304,11 @@ state.
 
 `current_projection_staging_checkpoints` is the earlier, per-family stage of that worker progress. One row records the projection replay version, a staging-schema version, the exact normalized target, the `current_projection_full_replay_input_revision` value, the normalized-event change-log prefix, direct-invalidation revision, and permission-resource revision validated for its completed source range, dynamically named logged stage tables, the last completed ordered source key, source and output counts, and `running` or `staging_complete` state. Before each fresh keyset-paged source query, the worker captures complete watermarks and checks projection-relevant keys through the stored cursor. A page transaction commits its stage rows, cursor, counts, and new validated watermarks together. After an empty final page, it captures fresh watermarks and repeats the check across the full source range before marking the stage complete. Immediately before replacing the live projection, the publication transaction captures fresh watermarks and repeats that full-range check again. Its `SHARE` locks on all three input journals remain held through the live-table commit, so a relevant invalidation or permission-resource change that was in flight after staging completion either commits first and forces a fresh stage or waits until publication commits and remains incremental apply work. The dynamic tables intentionally survive connection loss and worker or database-backend termination; they are not temporary or unlogged tables. Their extra `inserted_at` value is stage-only and uses a deterministic epoch default, while publication selects only the declared projection columns and lets the target table own its insertion timestamp.
 
-The worker reuses a checkpoint only when every compatibility field, cursor shape, and stage table matches. Missing tables, changed full-replay input revisions or targets, and replay- or staging-version mismatches cause transactional deletion of the old stage and creation of a fresh one. A direct source repair that cannot emit normalized-event changes or complete key-scoped invalidations locks and advances the singleton revision before its source mutation in the same transaction; the name-surface normalization metadata repair does this when it changes compatible rows. Staging-page and publication transactions hold a shared lock on the matching revision, so they cannot commit stale progress across a concurrent revision advance.
+The worker reuses a checkpoint only when every compatibility field, cursor shape, and stage table matches. Missing tables, changed full-replay input revisions or targets, and replay- or staging-version mismatches cause transactional deletion of the old stage and creation of a fresh one. The replay input revision remains the worker fence for any admitted direct source mutation. The old name-surface normalization repair producer has been deleted; no current runtime advances that revision through that command. Staging-page and publication transactions hold a shared lock on the matching revision, so they cannot commit stale progress across a concurrent revision advance.
 
-Normalized-event change-log growth by itself is deliberately not a checkpoint compatibility mismatch. A relevant family-specific or manifest-derived change at or before the completed source cursor discards that family's running stage for a fresh restage; a later-key change is included by a subsequent fresh page. Direct invalidations use the same key-range rule through their retained generation revision. Publication repeats the full-range check from the completion watermarks inside the replacement transaction, including invalidations whose live queue row has already been consumed. Drift discards the completed stage and starts a fresh one without touching the live table. Changes whose writers begin only after guarded publication commits remain key-scoped invalidations for handoff. `current_projection_replay_attempt` durably preserves the original target and pre-replay apply baseline across kills, allowing live indexer intake and chain-checkpoint advancement during a long projection replay without treating every new event as a global restart. A completed stage remains through publication and replay-owned hydration. The worker then writes its revision-bound completion marker and removes the consumed checkpoint and logged tables in one transaction. Published-family skip and completed handoff clean residue from older non-atomic workers. A running worker revalidates marker/revision handoff before continuous apply and re-enters bootstrap if a direct-input repair invalidates it. Neither the API nor continuous projection apply reads replay attempts, checkpoints, or dynamic stage tables, and they are not projection truth, freshness evidence, or a replacement for invalidation catch-up.
+Normalized-event change-log growth by itself is deliberately not a checkpoint compatibility mismatch. A relevant family-specific or manifest-derived change at or before the completed source cursor discards that family's running stage for a fresh restage; a later-key change is included by a subsequent fresh page. Direct invalidations use the same key-range rule through their retained generation revision. Publication repeats the full-range check from the completion watermarks inside the replacement transaction, including invalidations whose live queue row has already been consumed. Drift discards the completed stage and starts a fresh one without touching the live table. Changes whose writers begin only after guarded publication commits remain key-scoped invalidations for handoff. `current_projection_replay_attempt` durably preserves the original target and pre-replay apply baseline across kills, allowing concurrent schema-v2 interpretation and chain-head advancement during a long projection replay without treating every new event as a global restart. A completed stage remains through publication and replay-owned hydration. The worker then writes its revision-bound completion marker and removes the consumed checkpoint and logged tables in one transaction. Published-family skip and completed handoff clean residue from older non-atomic workers. A running worker revalidates marker/revision handoff before continuous apply and re-enters bootstrap if a direct-input repair invalidates it. Neither the API nor continuous projection apply reads replay attempts, checkpoints, or dynamic stage tables, and they are not projection truth, freshness evidence, or a replacement for invalidation catch-up.
 
-`projection_invalidations` rows are the durable key-scoped work queue for projection refreshes. `projection_normalized_event_changes` is the append-only downstream input for normalized-event inserts, admitted semantic content updates, and canonicality-state updates. Continuing storage writers record semantic replacements as `content_update` and canonicality transitions as `canonicality_update`; when one update changes both, the normalized-event trigger appends both records. Historical one-time repair migrations that ran before `content_update` existed retain their legacy `canonicality_update` labels, and consumers treat both kinds as invalidation input. Migrations install the forward log and trigger without bulk-copying historical `normalized_events`. Its identity-assigned `change_id` values are allocation-ordered, not assumed to be commit-ordered. Before bootstrap captures its initial cursor or continuous derive chooses a batch, storage captures a finite complete-prefix bound in a short transaction: it takes a `SHARE` table lock, waits out prior `ROW EXCLUSIVE` change-log insert transactions for at most 100 milliseconds, reads `MAX(change_id)`, and commits to release the lock before derivation. New insert writers cannot allocate a change id while that bound is queued or held, but the timeout bounds that writer barrier. A capture that times out fails without entering the cursor-advancement transaction; the worker retries later from the unchanged cursor. Derive processes only rows above its cursor and at or below a successfully captured bound; later inserts remain explicit subsequent work, and unused identity values remain harmless gaps. A cursor therefore cannot skip a lower-id transaction that was still in flight when the bound was selected.
+`projection_invalidations` rows are the durable key-scoped work queue for projection refreshes. `projection_normalized_event_changes` is the append-only downstream input for normalized-event inserts, admitted semantic content updates, and canonicality-state updates. Migration-owned triggers record schema-v2 interpretation replacements as `content_update` and canonicality transitions as `canonicality_update`; when one update changes both, the normalized-event trigger appends both records. Historical one-time repair migrations that ran before `content_update` existed retain their legacy `canonicality_update` labels, and consumers treat both kinds as invalidation input. Migrations install the forward log and trigger without bulk-copying historical `normalized_events`. Its identity-assigned `change_id` values are allocation-ordered, not assumed to be commit-ordered. Before bootstrap captures its initial cursor or continuous derive chooses a batch, storage captures a finite complete-prefix bound in a short transaction: it takes a `SHARE` table lock, waits out prior `ROW EXCLUSIVE` change-log insert transactions for at most 100 milliseconds, reads `MAX(change_id)`, and commits to release the lock before derivation. New insert writers cannot allocate a change id while that bound is queued or held, but the timeout bounds that writer barrier. A capture that times out fails without entering the cursor-advancement transaction; the worker retries later from the unchanged cursor. Derive processes only rows above its cursor and at or below a successfully captured bound; later inserts remain explicit subsequent work, and unused identity values remain harmless gaps. A cursor therefore cannot skip a lower-id transaction that was still in flight when the bound was selected.
 
 The complete-prefix-capture migration takes the automatic-bootstrap replay lock, pre-locks and rewinds an existing `normalized_events_to_projection_invalidations` cursor, then takes `ACCESS EXCLUSIVE` on the change log to drain old derive readers and insert writers in cursor-then-change-log order. While that cutover lock remains held, it removes the obsolete global insert-order advisory trigger, installs the reader-side capture function, and repeats the targeted cursor rewind. If the cursor was initially absent, an in-flight pre-cutover derive either publishes before the exclusive lock and is caught by the second rewind, or resumes afterward from a safe zero lower bound. Deployments therefore pay one full, idempotent change-log derivation after this migration. A follow-up migration attaches the 100-millisecond function-scoped `lock_timeout`; it does not rewrite the already-applied cutover migration or relax complete-prefix correctness. `projection_apply_cursors` rows track consumed `change_id` watermarks for that input. Normalized-event derive writes both family-specific and manifest-derived keys; execution and other non-normalized-event producers write the same queue directly. A queue trigger assigns every direct inserted or advanced generation a monotonic revision and upserts its key into `projection_direct_invalidation_revisions`; normalized-event derive sets a transaction-local marker to avoid duplicating changes already covered by the normalized-event journal. The retained row is not apply work and survives deletion or dead-lettering of the live queue row. Its watermark capture uses the same short `SHARE`-lock pattern and 100-millisecond bound as normalized-event capture, making unenumerated future direct producers part of the staging fence automatically. The queue primary key is `(projection, projection_key)`; repeated invalidations for the same key update the row generation, clear retry metadata, return the row to `pending`, and release any stale claim so an older apply cannot erase newer work. Projection workers claim and apply rows in projection dependency order, then delete only the claimed generation. Claims are leases with retry recovery, so rows claimed by a stopped worker become eligible again after the retry delay rather than requiring manual queue repair. Rows that fail the same claimed generation five times are removed from the live queue and copied to `projection_invalidation_dead_letters` with `state='dead_letter'`, the failure reason, timestamps, attempt count, and original queue identity for operator inspection. Dead-letter rows are durable operational evidence, not claimable work.
 
@@ -1607,9 +320,9 @@ Current projection timestamp fields are representable Unix-second values or `nul
 
 Projection tables may be truncated and rebuilt from canonical facts plus normalized events.
 
-`permissions_current_resource_summary` is the projection-owned per-resource companion to `permissions_current`. It persists permission-authority support classification, an optional ENSv2 registry-root anchor, and chain-position/canonicality evidence from the authority inputs even for resources with zero holder rows. Its JSONB coverage column has a typed storage boundary: only the documented `full`/`authoritative`, `partial`/`best_effort`, and `unsupported`/`not_applicable` combinations and permission-specific unsupported reasons decode. Unknown vocabulary and inconsistent status/exhaustiveness/reason combinations are storage read errors rather than implicit public downgrades. Keyed rebuild replaces one resource's holder rows and summary in one transaction. Full rebuild target discovery additionally selects canonical zero-event resources with positive source-family/manifest-version identity evidence, then stages and publishes both families in one transaction. For a zero-event current resource, the worker may derive summary evidence from either the normal resource provenance keys (`source_family`, `manifest_version`) or the ENSv1 binding-authority keys (`binding_source_family`, `binding_manifest_version`); these are identity evidence for the projection rebuild, not an API fallback. A storage trigger records insertion, deletion, key changes, anchor/provenance changes, and canonicality changes in `projection_permissions_resource_input_revisions`, so durable full-rebuild staging does not depend on a normalized event existing for the resource. Base normalized-event rederive deletes affected summaries in the same permission-projection delete transaction, and deleting an identity resource cascades its summary. Public role and permission reads use this companion for support metadata and fail closed when it is absent; they do not recover that metadata from adapter-owned `resources` provenance.
+`permissions_current_resource_summary` is the projection-owned per-resource companion to `permissions_current`. It persists permission-authority support classification, an optional ENSv2 registry-root anchor, and chain-position/canonicality evidence from the authority inputs even for resources with zero holder rows. Its JSONB coverage column has a typed storage boundary: only the documented `full`/`authoritative`, `partial`/`best_effort`, and `unsupported`/`not_applicable` combinations and permission-specific unsupported reasons decode. Unknown vocabulary and inconsistent status/exhaustiveness/reason combinations are storage read errors rather than implicit public downgrades. Keyed rebuild replaces one resource's holder rows and summary in one transaction. Full rebuild target discovery additionally selects canonical zero-event resources with positive source-family/manifest-version identity evidence, then stages and publishes both families in one transaction. For a zero-event current resource, the worker may derive summary evidence from either the normal resource provenance keys (`source_family`, `manifest_version`) or the ENSv1 binding-authority keys (`binding_source_family`, `binding_manifest_version`); these are identity evidence for the projection rebuild, not an API fallback. A storage trigger records insertion, deletion, key changes, anchor/provenance changes, and canonicality changes in `projection_permissions_resource_input_revisions`, so durable full-rebuild staging does not depend on a normalized event existing for the resource. Deleting an identity resource cascades its summary. Public role and permission reads use this companion for support metadata and fail closed when it is absent; they do not recover that metadata from interpret-phase `resources` provenance.
 
-`permissions_current_publication` has one row keyed by `projection='permissions_current'`, with positive `publication_version`, positive monotonic `data_revision`, and `published_at`. Version 2 denotes the holder-row plus typed per-resource-summary publication contract. The full staged rebuild upserts the compatible version and advances the revision in the same transaction that replaces both projection families. A keyed resource rebuild advances the revision in its row-and-summary transaction only when the existing publication version is already exact-current; it neither creates the row nor upgrades an old version. Public permission-backed reads require the exact current version, capture its revision before reading, and verify the same revision before returning. Missing or incompatible versions and an interleaved revision change return `409 stale` before an assembled response is exposed. Readers do not use the revision or `published_at` as a freshness signal, and this artifact does not replace operational replay markers, apply cursors, invalidation draining, or deployment coordination. The supervised Base normalized-event correction is the only direct permission-projection deletion path outside these publishers: it runs with the API drained and does not advance the revision, then requires a full projection rebuild and compatible publication before reads are restored. Exported row/summary upsert and delete helpers are low-level storage/test construction boundaries, not public-generation publishers; production worker publication uses the keyed or full transaction.
+`permissions_current_publication` has one row keyed by `projection='permissions_current'`, with positive `publication_version`, positive monotonic `data_revision`, and `published_at`. Version 2 denotes the holder-row plus typed per-resource-summary publication contract. The full staged rebuild upserts the compatible version and advances the revision in the same transaction that replaces both projection families. A keyed resource rebuild advances the revision in its row-and-summary transaction only when the existing publication version is already exact-current; it neither creates the row nor upgrades an old version. Public permission-backed reads require the exact current version, capture its revision before reading, and verify the same revision before returning. Missing or incompatible versions and an interleaved revision change return `409 stale` before an assembled response is exposed. Readers do not use the revision or `published_at` as a freshness signal, and this artifact does not replace operational replay markers, apply cursors, invalidation draining, or deployment coordination. The retired Base normalized-event correction was the only direct permission-projection deletion path outside these publishers. Its command and storage helpers are deleted; current production writes use the keyed or full publishers. Exported row/summary upsert and delete helpers are low-level storage/test construction boundaries, not public-generation publishers; production worker publication uses the keyed or full transaction.
 
 When a code change widens the normalized-event set consumed by a projection,
 already-consumed change cursors do not by themselves revisit old current rows.
@@ -1636,12 +349,11 @@ fail fatally. A write already holding the shared database fence finishes before
 replay admission, so the later replay supersedes it. Deployment automation must
 still stop or drain every old worker before a newer worker starts and keep
 public reads drained until every new-version marker is current and all pending
-invalidations have drained. A matching-version indexer may keep producing
-invalidations; its stamped queue DML checks the committed floor without waiting
-for replay admission, whereas a
-pre-fence indexer must be replaced before activation. Those steps remain the
-supported rollout and freshness gate rather than the sole protection against
-an outdated writer.
+invalidations have drained. The deleted indexer no longer participates in this
+handoff. Schema-v2 interpretation is the current normalized-event producer, and
+migration-owned change-log triggers make those writes visible to the surviving
+worker. The drain steps remain the supported rollout and freshness gate rather
+than the sole protection against an outdated worker.
 
 Replay version 10 retains the version-9 outputs and rebuilds
 `primary_names_current` to materialize `claim_name_is_normalized` from the
@@ -1670,7 +382,7 @@ Historical projection materializations are projection-owned caches, not truth. W
 
 Exact-name snapshot selection is a storage read boundary, not a new family. The API resolves `at`, explicit `chain_positions`, and `consistency` to one concrete `ChainPositions` object, then reads only projection rows and execution outputs eligible for that exact object. `name_current`, `coverage_current`, `surface_bindings_current`, `permissions_current` with its transactionally co-published resource summary, and `record_inventory_current` retain enough chain-position and canonicality context for the API to reject mismatched joins rather than combine rows from different snapshots.
 
-If the selected positions are valid but no eligible projection or persisted execution output exists, the serving path returns the documented `stale`, `unsupported`, or `not_found` API state. It does not read raw facts, adapter-owned identity/event rows, or provider data directly to fill the public response.
+If the selected positions are valid but no eligible projection or persisted execution output exists, the serving path returns the documented `stale`, `unsupported`, or `not_found` API state. It does not read raw facts, interpret-phase identity/event rows, or provider data directly to fill the public response.
 
 ## Execution storage
 
@@ -1780,7 +492,9 @@ Worker-owned, read-only operational tooling reads storage audit helpers and rend
 
 - `bigname-worker inspect canonicality --chain-id <id> --block-hash <hash>` — for a stored block: lineage, parent hash, block number, canonicality state, optional header-audit presence, raw fact counts, payload-cache metadata counts/digests where retained, normalized-event counts.
 - `bigname-worker inspect stored-lineage-range --chain-id <id> --from <block> --to <block>` — lists only lineage rows already stored for the requested chain and finite block range, ordered by `(block_number, block_hash)`. Renders chain id, block number, block hash, parent hash, canonicality state, timestamp, and stored promotion markers per observed block. Nullable fields render as `null`. Does not infer missing heights, gaps, span-wide canonicality, or completeness.
-- `bigname-worker inspect backfill-job --backfill-job-id <id>` — resolves one persisted job and its child ranges. Renders job lifecycle, declared range, selector kind, resolved source identity, idempotency key, timestamps, failure metadata, and a `ranges` array sorted by range bounds and id.
+- `bigname-worker inspect backfill-job --backfill-job-id <id>` — resolves one
+  historical job and its child ranges. It is read-only migration-era audit
+  output, not current phase progress or authority.
 - `bigname-worker inspect execution-trace --execution-trace-id <id>` — reads `execution_traces`, `execution_steps`, and trace-attachment metadata for one stored trace.
 - Manifest-drift and proxy-alert inspection — joins stored alert observations to manifest/discovery identifiers, code-hash facts, proxy/implementation edges, and derived watch-target metadata. Does not fetch fresh chain state, create alerts, mutate alert lifecycle, mutate manifest truth, or change capability flags.
 
@@ -1788,32 +502,36 @@ Worker-owned, read-only operational tooling reads storage audit helpers and rend
 
 - Schema changes land through checked-in migrations only.
 - Append-only tables prefer additive changes over destructive rewrites.
-- Backfill job and range checkpoint storage lands as additive `backfill_*` tables or additive columns; it does not overload `chain_lineage`, projection job state, or public API tables.
+- Old-schema migrations, including `backfill_*`, normalized replay, coverage,
+  reconciliation, and repair tables, remain immutable even after their Rust
+  writers are deleted.
 - Projection tables may be recreated when the rebuild path already exists.
 - Migrations that change a shared interface require the companion doc update first.
 - If `CREATE INDEX CONCURRENTLY` leaves an `INVALID` index, the runbook is a later `-- no-transaction` migration that `DROP INDEX CONCURRENTLY IF EXISTS` for the invalid name before recreating or replacing it; do not rebuild by editing an already-applied migration.
 
 ## Repository ownership
 
-- Storage owns migrations and query primitives.
-- Storage owns backfill job/range helper primitives for idempotent create, reserve, advance, complete, and fail transitions.
-- Worker/backfill code owns operational writes to `backfill_*` through those helpers, including finalized catch-up chunk creation and capacity pause/failure metadata.
-- Adapters own inserts into identity and `normalized_events` tables. The retained `resolver_profile_reconciliation_*` tables have no active old-runtime writer after removal of the reconciliation adapter and indexer convergence driver.
-- Projection workers own materialized read models.
-- Execution workers own trace and step writes plus normal cache outcome writes,
-  with the API on-demand verified-resolution product-route exception for
-  selected-snapshot cache misses.
-- Synchronous indexer/reorg repair owns only `execution_cache_outcomes` deletes/invalidations tied to orphaned block dependencies.
-- Raw-fact normalized-event replay is indexer-owned orchestration over the adapter-owned `normalized_events` boundary; selected-target replay scopes are operational scan bounds and do not change adapter ownership.
-- Normalized replay cursor and adapter-checkpoint storage is indexer-owned operational state for resuming bounded replay; it does not define canonicality, widen backfill jobs, or change adapter event ownership.
-- Intake owns durable hot raw-fact writes, including admitted exact-block
-  `raw_call_snapshots` handed off by execution persistence, plus optional
-  payload-cache metadata. Replay and inspection tooling may dereference
-  object-backed cache or re-fetch provider payloads only through the
-  digest-checked, fail-closed boundary.
-- API code does not query raw-fact tables directly except for explicit audit endpoints.
-- Canonicality, raw-fact, stored-lineage-range, backfill-job, and execution-trace inspection tooling is worker-owned and read-only over storage audit helpers; none expose public `v1` routes.
-- Manifest drift and proxy alerting tooling is worker-owned observation over `manifest_*`, `discovery_*`, code-hash facts, proxy/implementation edges, and derived watch targets. Its live audit path writes only `manifest_alert_*`; its read-only inspection path renders those observations as operational JSON without writing `normalized_events` or mutating manifest/discovery/projection/API state.
+- Storage owns migrations, surviving read/query primitives, projection and
+  execution persistence primitives, and test-only fixture insertion helpers.
+- `ingest` owns lineage and selected raw-fact production. Execution persistence
+  may hand admitted exact-block `raw_call_snapshots` through that raw-fact
+  boundary.
+- Schema-v2 `interpret` owns identity, discovery, and normalized-event writes.
+  Protocol adapters provide interpretation behavior; they do not write
+  projection rows.
+- Projection workers own current read models, replay staging, apply cursors,
+  invalidation journals, and worker heartbeats.
+- Execution workers own traces, steps, and normal cache outcomes, with the
+  documented API on-demand verified-resolution cache-miss exception.
+- The API reads projections and execution output. It has no general raw-fact or
+  legacy operational-table fallback; explicit audit endpoints remain the only
+  documented exception.
+- Worker inspection of canonicality, stored lineage, historical backfill jobs,
+  and execution traces is read-only.
+- No current Rust owner writes `backfill_*`, `normalized_replay_*`, the Base
+  rederive tables, resolver-profile reconciliation state, old coverage/frontier
+  state, or old startup adapter checkpoints. Their removal or replacement is
+  deferred to the worker/API port and migration-baseline work.
 
 ---
 

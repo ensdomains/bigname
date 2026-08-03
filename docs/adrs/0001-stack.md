@@ -3,6 +3,12 @@
 Status: Accepted
 Date: 2026-04-16
 
+Amended: 2026-08-03. Stage B replaced the `apps/indexer` intake and
+interpretation runtime with `apps/phase-runner`, `crates/ingest`, and
+`crates/interpret`. The API and projection worker remain while their later
+phase ports are pending. The repository shape below records the original
+baseline rather than the current executable inventory.
+
 ## Context
 
 `bigname` needs a replay-safe indexing and read system with high schema complexity, strong auditability requirements, and enough modularity for parallel work from an empty repository.

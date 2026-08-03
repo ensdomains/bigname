@@ -220,13 +220,13 @@ fn manifest_authority_source_changes_affect_the_hash() {
     let before =
         interpreter_content_hash(tree.path()).expect("manifest-authority baseline must hash");
     tree.write(
-        "crates/manifests/src/lib/discovery/reconciliation.rs",
-        "fn reconcile_discovery_output() {}\n",
+        "crates/manifests/src/schema_v2.rs",
+        "fn persist_manifest_authority() {}\n",
     );
     let after = interpreter_content_hash(tree.path()).expect("manifest-authority source must hash");
     assert_ne!(
         before, after,
-        "manifest discovery reconciliation must affect the hash"
+        "manifest authority persistence must affect the hash"
     );
 }
 
@@ -243,10 +243,6 @@ fn excluded_sources_are_insensitive_but_production_support_is_hashed() {
     tree.write(
         "apps/worker/src/name_current/tests.rs",
         "fn changed_projection_test() {}\n",
-    );
-    tree.write(
-        "crates/adapters/src/ens_v2_resolver/testsupport.rs",
-        "fn changed_resolver_test_support() {}\n",
     );
     tree.write(
         "apps/worker/src/primary_name/projection/test_hooks.rs",
@@ -268,7 +264,7 @@ fn excluded_sources_are_insensitive_but_production_support_is_hashed() {
     );
 
     tree.write(
-        "crates/adapters/src/normalized_event_support.rs",
+        "crates/adapters/src/schema_v2/protocol.rs",
         "fn production_support_changed() {}\n",
     );
     let production_support_change =
@@ -391,8 +387,8 @@ fn cfg_test_gated_sources_are_excluded_and_hashed_sources_are_not_test_gated() {
         "cfg(test)-gated external modules entered the hash: {accidentally_hashed:?}"
     );
     assert!(
-        hashed.contains("crates/adapters/src/normalized_event_support.rs"),
-        "production normalized-event support must remain hashed"
+        hashed.contains("crates/adapters/src/schema_v2/protocol.rs"),
+        "schema-v2 interpreter support must remain hashed"
     );
 }
 
@@ -434,7 +430,7 @@ impl SampleTree {
             "pub fn interpret() -> bool { true }\n",
         );
         tree.write(
-            "crates/adapters/src/normalized_event_support.rs",
+            "crates/adapters/src/schema_v2/protocol.rs",
             "fn production_support() {}\n",
         );
         tree.write(

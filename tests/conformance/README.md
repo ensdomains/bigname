@@ -50,30 +50,6 @@ path lacks either a conformance harness owner or an explicit out-of-scope reason
 the unversioned `/healthz` operator contract remains outside the published path
 set and is frozen by the API health/OpenAPI-component tests instead.
 
-Focused backfilled-data consumer conformance job, from the repository root:
-
-```sh
-cargo test --manifest-path tests/conformance/Cargo.toml backfill
-```
-
-Focused source-family backfill conformance lock, from the repository root:
-
-```sh
-cargo test --manifest-path tests/conformance/Cargo.toml backfill_sources_source_family
-```
-
-Focused automatic-bootstrap backfill conformance lock, from the repository root:
-
-```sh
-cargo test --manifest-path tests/conformance/Cargo.toml backfill_sources_auto_bootstrap -- --nocapture
-```
-
-Focused reorg chaos drill conformance job, from the repository root:
-
-```sh
-cargo test --manifest-path tests/conformance/Cargo.toml reorg_chaos_drill_conformance_job
-```
-
 Focused dynamic resolver profile conformance coverage, from the repository root:
 
 ```sh
@@ -106,14 +82,12 @@ Execution notes:
 - uses `BIGNAME_DATABASE_URL` when set, then `DATABASE_URL` when set
 - otherwise falls back to the bootstrap default `postgres://bigname:bigname@127.0.0.1:5432/bigname`
 - each test creates, migrates, and drops its own temporary database
-- replay, backfill, and chaos-drill conformance jobs expect that configured Postgres server to be
-  local and reachable with privileges to create and drop per-test databases; when no local
-  Postgres is available, standalone backfill jobs and the focused chaos drill may be treated as
-  no-run fallback instead of route contract failures, and should be rerun in an environment with
-  Postgres before relying on them
-- the capability golden fixture guards are static no-Postgres checks; route readback, replay,
-  backfill, chaos-drill, and Basenames verified-resolution commands use the configured local
-  PostgreSQL expectations above whenever they create temporary databases
+- replay conformance expects that configured Postgres server to be local and
+  reachable with privileges to create and drop per-test databases
+- the capability golden fixture guards are static no-Postgres checks; route
+  readback, replay, and Basenames verified-resolution commands use the
+  configured local PostgreSQL expectations above whenever they create
+  temporary databases
 - the golden fixture pack under `tests/conformance/fixtures/capabilities` is deterministic local
   bigname cutover evidence only. The harness asserts that the checked-in fixture set is exactly
   the local cutover evidence set, each fixture keeps `scope=local_cutover_evidence`, fixture IDs
@@ -339,53 +313,3 @@ Execution notes:
   rebuild behavior over the shipped route contracts only; it does not widen route support,
   coverage semantics, verified execution support, manifest capabilities, ENSv2 exact-name support,
   Basenames path classes, or consumer replacement
-- `backfilled_data_consumer_conformance_job` is the standalone backfilled-data consumer
-  conformance entry point. It seeds a synthetic local persisted backfill job with completed child
-  ranges, replays all current projections, and asserts the existing shipped consumer capability
-  route families for exact name, children, address names, name/resource/address history,
-  resolution, resource permissions, resolver overview, and primary name. The job also keeps the
-  replay negative checks for losing-branch address-name, address-history, and resolver answers, so
-  backfilled data is validated against canonical current projection behavior without widening the
-  shipped route contracts
-- the source-family backfill conformance lock is focused with
-  `cargo test --manifest-path tests/conformance/Cargo.toml backfill_sources_source_family`
-  and, in the worker run that introduced the lock, passed as one selected test with 73 tests
-  filtered out. The test uses the same local Postgres and per-test temporary database expectations
-  as the rest of the harness, seeds synthetic/local completed source-family jobs, and exercises no
-  live RPC or chain intake. It persists one synthetic completed job record for each source family
-  currently locked by the conformance slice: ENSv1 `ens_v1_registry_l1`, `ens_v1_registrar_l1`, and
-  `ens_v1_reverse_l1`; ENSv2 shadow `ens_v2_root_l1`, `ens_v2_registry_l1`,
-  `ens_v2_registrar_l1`, and `ens_v2_resolver_l1`; and Basenames
-  `basenames_base_registry`, `basenames_base_registrar`, `basenames_base_resolver`, and
-  `basenames_base_primary`. Each job persists `selector_kind=source_family`, one synthetic
-  selected target, `scan_mode=hash_pinned_block`, and two completed child ranges alongside the
-  separately seeded shipped route inputs; replay then rebuilds existing current projections before
-  the harness asserts the already shipped route responses, resolver-profile-gated answers, and
-  losing-branch negative checks. This proves completed source-family job lifecycle state can
-  coexist with replayed existing consumer-capability responses, including the local supported
-  resolver-profile answers, after source-family backfill; it does not prove those synthetic jobs
-  admitted the route data or
-  graduate unsupported coverage, ENSv2 exact-name support, wrapper/migration history, manifest
-  capabilities, public API routes, or consumer-replacement semantics
-- the automatic-bootstrap backfill conformance lock is focused with
-  `cargo test --manifest-path tests/conformance/Cargo.toml backfill_sources_auto_bootstrap -- --nocapture`.
-  It uses the same local Postgres and per-test temporary database expectations as the nearby
-  backfill conformance entries, persists automatic-bootstrap job identity and effective ranges,
-  covers the conformance-only Basenames unknown-start exclusion case, and keeps unsupported
-  coverage non-graduated. It exercises no live RPC scheduling or drain; those remain covered by
-  `apps/indexer` unit tests
-- `reorg_chaos_drill_conformance_job` is the standalone reorg chaos drill conformance entry
-  point. It is focused with
-  `cargo test --manifest-path tests/conformance/Cargo.toml reorg_chaos_drill_conformance_job`.
-  The drill seeds the existing replay-style stale current corpus, applies shipped reorg orphaning
-  helpers to losing-branch raw blocks and normalized events, runs the shipped indexer raw-fact
-  normalized-event replay against a deterministic canonical raw-log probe, runs
-  `bigname-worker replay all-current-projections`, and reuses existing consumer-response
-  convergence and losing-branch absence assertions. It uses the same local Postgres and per-test
-  temporary database expectations as the rest of the harness; when no local Postgres is available,
-  the focused chaos drill may be treated as a no-run fallback instead of a route contract failure,
-  and should be rerun in an environment with Postgres before relying on it. This validates
-  reorg/replay hardening over shipped route contracts only; it does not widen route support or
-  route coverage semantics, graduate unsupported coverage, change verified execution support,
-  manifest capabilities, ENSv2 exact-name support, Basenames path classes, public API routes, or
-  consumer-replacement semantics

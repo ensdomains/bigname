@@ -154,18 +154,18 @@ Family ownership is fixed:
 - ENS verified resolution belongs to `ens_execution` at the official Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`,[^ens-docs-univ] not to `ens_v1_registry_l1`. The pinned implementation artifact is recorded under `.refs/`.[^v1-ur-deploy][^v1-ursol-l8] (See [`upstream.md`](upstream.md) for the proxy-vs-implementation divergence.)
 - ENS reverse-claim intake belongs to `ens_v1_reverse_l1` at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`.[^v1-revreg-deploy][^v1-revreg-l15][^v1-revreg-l19]
 - ENSv1 `.eth` registrar label intake belongs to `ens_v1_registrar_l1`. BaseRegistrar is the tokenized authority; legacy, wrapped, and current registrar-controller contracts are admitted within the same family for label-bearing registration and renewal observations only.[^subgraph-l145][^subgraph-l170][^subgraph-l226][^v1-ethrc-l116][^v1-ethrc-l133] Label preimage intake is shared storage support rather than a new authority source family: proof-checked on-chain preimage observations, retained name surfaces, and optional rainbow-table imports may resolve labelhashes for projection readability, but they do not create exact-name authority, ownership, resolver, record, or primary-name truth.
-- ENSv1 `NewResolver(node, resolver)` changes only the node-to-resolver binding; it creates no resolver contract instance or discovery edge.[^v1-ens-l12][^v1-ensreg-l89][^v1-ensreg-l174] A nonzero pointer is an address-only resolver-profile input, so the transitional code-hash classifier can preserve existing profile behavior without making the address a watch target. Resolver-local logs come only from the manifest-declared match-all resolver signature set. Those logs feed observed selector and cache state for any emitter. Current record visibility still follows the node's resolver pointer.
+- ENSv1 `NewResolver(node, resolver)` changes only the node-to-resolver binding; it creates no resolver contract instance or discovery edge.[^v1-ens-l12][^v1-ensreg-l89][^v1-ensreg-l174] A nonzero pointer is an address-only resolver-profile input. The retained classifier can use an existing code-hash observation without making the address a watch target, but no current runtime produces new observations and missing evidence leaves admission pending. Resolver-local logs come only from the manifest-declared match-all resolver signature set. Those logs feed observed selector and cache state for any emitter. Current record visibility still follows the node's resolver pointer.
 - `ENSRegistryOld` is admitted as migration-aware input under `ens_v1_registry_l1`. Old- and current-registry logs are not unioned by latest block: a current-registry `NewOwner` marks a node migrated; later old-registry updates for that node are suppressed except for the root resolver.[^subgraph-l15][^subgraph-l39][^subgraph-l44][^subgraph-ts-l134][^subgraph-ts-l230][^subgraph-ts-l238][^subgraph-ts-l246]
 - ENSv2 post-audit Sepolia admits four families: `ens_v2_root_l1` (`RootRegistry`), `ens_v2_registry_l1` (`ETHRegistry` plus discovered `UserRegistry`), `ens_v2_registrar_l1` (`ETHRegistrar`), and `ens_v2_resolver_l1` (discovered or explicitly admitted `PermissionedResolver` instances). `PermissionedResolverImpl` is implementation metadata, not a watched root or contract.[^v2-deploy-root][^v2-deploy-ethreg][^v2-deploy-ethrc][^v2-deploy-pres][^v2-userreg-l15][^v2-ethrc-l30][^v2-ethrc-l151] No other current Sepolia deployment artifact is admitted until a doc-first update.
 - ENSv2 exact-name profile support is only promoted — a [capability promotion](glossary.md) — in the post-audit Sepolia deployment profile when `ens_v2_registrar_l1` declares `exact_name_profile = "supported"`. Other deployment profiles or capability states stay unsupported or shadow.
 - Basenames mainnet authority splits across `basenames_base_registry` (`registry` at `0xb94704422c2a1e396835a571837aa5ae53285a95`), `basenames_base_registrar` (`registrar` at `0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a`, with `legacy_registrar_controller` at `0x4cCb0BB02FCABA27e82a56646E81d8c5bC4119a5` and `upgradeable_registrar_controller` proxy at `0xa7d2607c6BD39Ae9521e514026CBB078405Ab322` admitted for label-bearing registration and renewal observations), and `basenames_base_resolver` (`resolver` at `0xC6d566A56A1aFf6508b41f6c90ff131615583BCD`).[^bn-readme-l28][^bn-readme-l29][^bn-readme-l30][^bn-readme-l34][^bn-readme-l37][^bn-registry-l10][^bn-baseregistrar-l15][^bn-registrar-controller-l180][^bn-registrar-controller-l187][^bn-upgradeable-registrar-controller-l191][^bn-upgradeable-registrar-controller-l198][^bn-l2resolver-l22] `basenames_base_primary` uses the ENSv1 Base `L2ReverseRegistrar` at `0x0000000000D8e504002cC26E3Ec46D81971C1664` for declared primary-name value intake at Base coin type `2147492101`; the Basenames `ReverseRegistrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282` is not the primary-name value authority.[^v1-l2rev-base-deploy][^v1-l2rev-base-args][^v1-l2rev-event][^v1-l2rev-nameforaddr][^bn-readme-l33][^bn-revreg-l12][^bn-revreg-l150] `basenames_l1_compat` and `basenames_execution` both reference the L1 Resolver at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` for transport and execution respectively.[^bn-readme-l22][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
-- Basenames `NewResolver` changes only the node-to-resolver binding; it creates no resolver contract instance or discovery edge.[^bn-registry-l19][^bn-registry-l132][^bn-registry-l223] A nonzero pointer or match-all-selected Base resolver log may supply an address-only input to the `L2Resolver`-compatible code-hash classifier. The Base resolver signature set selects resolver-local logs across all emitters, while profile admission remains the gate for consuming those facts.[^bn-l2resolver-l4][^bn-l2resolver-l16][^bn-l2resolver-l29][^bn-l2resolver-l182][^bn-l2resolver-l193][^bn-l2resolver-l209][^bn-l2resolver-l225]
+- Basenames `NewResolver` changes only the node-to-resolver binding; it creates no resolver contract instance or discovery edge.[^bn-registry-l19][^bn-registry-l132][^bn-registry-l223] A nonzero pointer or match-all-selected Base resolver log may supply an address-only input to the retained `L2Resolver`-compatible code-hash classifier. It can consume existing observations but has no current producer, so missing evidence remains pending. The Base resolver signature set selects resolver-local logs across all emitters, while profile admission remains the gate for consuming those facts.[^bn-l2resolver-l4][^bn-l2resolver-l16][^bn-l2resolver-l29][^bn-l2resolver-l182][^bn-l2resolver-l193][^bn-l2resolver-l209][^bn-l2resolver-l225]
 
 ## Source manifests
 
 Manifests pin each [source family](glossary.md) by version and live under a selected deployment-profile root at `manifests/<profile>/<chain_combo>/<namespace>/<source_family>/<version>.toml`. The shipped runtime default is `manifests/mainnet/`; the Sepolia profile root is `manifests/sepolia/`. One runtime selects exactly one profile root.
 
-Each manifest contains: `manifest_version`, `namespace`, `source_family`, `chain`, `deployment_epoch`, `rollout_status` (`draft` | `shadow` | `active` | `deprecated`), `normalizer_version`, `capability_flags` (`unsupported` | `shadow` | `supported`), `roots`, `contracts`, `discovery_rules`. `start_block` is optional inclusive bootstrap metadata; omitted means unknown — adapters preserve that state rather than inferring zero.
+Each manifest contains: `manifest_version`, `namespace`, `source_family`, `chain`, `deployment_epoch`, `rollout_status` (`draft` | `shadow` | `active` | `deprecated`), `normalizer_version`, `capability_flags` (`unsupported` | `shadow` | `supported`), `roots`, `contracts`, `discovery_rules`. `start_block` is optional inclusive bootstrap metadata; omitted remains unknown in manifest storage. The stabilized Stage B ingest and interpret loaders currently use zero as the effective range-filter fallback for an omitted value. That fallback is a documented port gap, not historical provenance or authority for an unbounded ingest.
 
 Manifest declaration changes are first-class `SourceManifestUpdated` normalized events. Proxy declarations and authored capability fields are part of that source-manifest state; the schema does not mint separate manifest-change event kinds for them.
 
@@ -204,49 +204,52 @@ Three intake planes for one selected deployment profile:
 
 Per-profile provider availability: a Base RPC is not required for an Ethereum-only run, and a deployment profile with no Base provider must mark Base intake idle/unavailable rather than failing startup.
 
-Stages per chain:
+Phases per chain:
 
-1. block lineage intake
-2. transactions, receipts, logs
-3. raw fact persistence + payload-cache metadata
-4. manifest/discovery updates
-5. adapter routing
-6. normalized event persistence
-7. projection updates
-8. execution-cache invalidation
+1. `ingest` — block lineage, selected transactions/receipts/logs, and raw-fact
+   persistence
+2. `interpret` — schema-v2 identity, discovery, and normalized-event writes
+3. `project` — deferred; the surviving worker still owns projection rebuild and
+   apply
+4. `verify` and `live` — deferred until the project/live runtime port
 
-Postgres is the hot indexed and replay-focused store. Lineage anchors, selected target logs and their same-transaction sibling replay context, replay-required call snapshots, code-hash observations, and compact payload-cache metadata are durable. Large block payloads, non-indexed transaction or receipt bodies, and non-audit raw-log staging rows are evictable cache once their replay contract is satisfied. Empty historical blocks retain only lineage anchors and audit metadata.
+Postgres is the hot indexed and replay-focused store. Lineage anchors, selected target logs and their same-transaction sibling replay context, replay-required call snapshots, retained code-hash observations, and compact payload-cache metadata are durable. Large block payloads, non-indexed transaction or receipt bodies, and non-audit raw-log staging rows are evictable cache once their replay contract is satisfied. Empty historical blocks retain only lineage anchors and audit metadata.
 
-Backfill enters as bounded persisted jobs with resumable range checkpoints and uses the same stages as live intake. Backfill checkpoint state is operational worker state — it does not promote canonical, safe, or finalized chain checkpoints.
+The phase runner persists exact per-source and per-phase block-hash cursors.
+Historical work is an explicit finite `ingest` or `interpret` redo; the old
+persisted backfill scheduler, coverage frontier, adapter startup pass, and
+normalized-event replay driver have been deleted. A newly admitted source
+returns to `ingest` for the required range, and `interpret` cannot advance past
+the ingested boundary.
 
-At process startup, the old indexer invokes each adapter's plain full-corpus
-`sync_*` entry point over retained raw facts. It does not reuse or publish
-startup adapter checkpoints, dispatch on per-family adapter derivation
-versions, or repeat ENSv2 discovery to a provider-backed coverage fixed point.
-Restart therefore repeats the idempotent adapter upserts. The private ENSv1
-subregistry checkpoint implementation remains with that still-retained
-discovery adapter, but the production startup caller supplies no checkpoint
-context.
+### Stage B runtime boundary
 
-### Transitional old-indexer limits
+The checked-in phase runner contains real `ingest` and `interpret`
+implementations and explicit unavailable implementations for `project`,
+`verify`, and `live`. It can therefore produce schema-v2 raw facts, identity
+rows, discovery edges, and normalized events, but it is not yet a complete
+continuously serving deployment. The existing worker continues to serve the
+projection and verified-execution boundary, and the API continues to read its
+projections and execution output. Those consumers, their storage reads, and
+the old SQL tables they still inspect are deferred to the worker/API port.
 
-A target discovered during an old-indexer session enters stored discovery and a later watch-plan reload, but the old runtime no longer fetches that target's earlier logs in the same session. This is acceptable only because a build containing these Stage B cuts is limited to CI and end-to-end tests until the old runtime is deleted; the new phase pipeline will return newly admitted sources to `ingest`, and `interpret` will wait for that source range.
-
-An ENSv1 manifest rollover now makes broad synchronization fail closed when retained [normalized events](glossary.md) still carry the previous manifest provenance; the deleted provenance-pinning path no longer rewrites them. This is acceptable only because a build containing these Stage B cuts is limited to CI and end-to-end tests until the old runtime is deleted; later in Stage B, an explicit `phase-runner redo --phase interpret` over the affected range will own re-derivation under the new manifest.
-
-Outside the storage contract's explicitly admitted normalized-event field repairs and Basenames boundary supersession classes, automatic raw-fact replay now fails closed when an existing normalized-event identity has a stale payload; the deleted general arbitration path no longer supersedes that row automatically. This is acceptable only because a build containing these Stage B cuts is limited to CI and end-to-end tests until the old runtime is deleted; the new pipeline will require an explicit `interpret` redo/restage to replace the affected derived output.
-
-ENSv2 live-poll registry-state reconstruction now uses the earliest retained watched log as its floor and walks forward to the selected target without proof that earlier required history is complete; the [closure](glossary.md) gate that supplied that proof was deleted. This is acceptable only because a build containing these Stage B cuts is limited to CI and end-to-end tests until the old runtime is deleted; the new pipeline will establish source-range completeness in `ingest` before `interpret` reconstructs registry state.
-
-A full-source ENSv2 registry sync now always interprets the retained facts instead of becoming a no-op when closure authority is absent. This is acceptable only because a build containing these Stage B cuts is limited to CI and end-to-end tests until the old runtime is deleted; the new pipeline will keep completeness as an `ingest` readiness prerequisite and run `interpret` only after that boundary is established.
-
-Reconciliation, fetch, notification, and historical-backfill detail live in [`chain-intake.md`](chain-intake.md).
+Current ingest, interpretation, redo, and the deferred live boundary are
+described in [`chain-intake.md`](chain-intake.md).
 
 ## Immutable facts and rebuildable state
 
-Immutable: blocks, transactions, receipts, logs, contract code hashes, manifests, discovery edges, normalized events, normalization results, preimage observations, selected `eth_call` snapshots, CCIP request/response digests, verification outcomes, metadata responses, sync cursors. For large payloads the durable fact may be selected replay fields plus optional cache metadata or a digest, not the full body — compaction can evict non-critical bytes after replay facts are extracted.
+Immutable raw facts: blocks, transactions, receipts, logs, contract code hashes,
+preimage observations, and selected `eth_call` snapshots. For large payloads
+the durable fact may be selected replay fields plus optional cache metadata or
+a digest, not the full body — compaction can evict non-critical bytes after
+replay facts are extracted.
 
-Rebuildable: current name-surface snapshot, surface-binding snapshot, authority/registration snapshot, control snapshot, permissions snapshot, resolver topology, record inventory, record cache, primary-name snapshot, reverse and address indexes, resource-role indexes, resolver indexes, history materializations, coverage snapshots, execution cache, subscriptions/feeds.
+Interpretation output is replay-derived: schema-v2 identity rows, discovery
+edges, and normalized events can be replaced by an explicit bounded
+`interpret` redo while raw facts remain unchanged. Current name, binding,
+authority, control, permissions, resolver, record, primary-name, reverse,
+address, history, and coverage projections remain rebuildable by the worker.
+Execution traces and outcomes remain durable execution artifacts.
 
 Every projected row carries provenance pointers, manifest version, canonicality state, and chain-position context.
 
@@ -298,7 +301,14 @@ ENSv1 wrapper/resolver mappings: `PreimageObserved`, `SurfaceBound`, `SurfaceUnb
 
 Every normalized event carries: namespace, `logical_name_id` when applicable, `resource_id` when applicable, source family, manifest version, chain position, raw fact reference, derivation kind, canonicality flag, and before/after state where possible.
 
-Normalized events are semantic adapter transitions. Replay needs different amounts of history depending on the event kind: A row may be stateless when every payload field is derivable from one selected raw fact, stateful when fields such as `before_state`, resource continuity, authority metadata, resolver state, wrapper state, registrar expiry, and permission provenance depend on the adapter's prior canonical observations, or contextual when identity/resource/discovery fields depend on another adapter-owned output already being stable. Stateful replay is deterministic only from a full [closure](glossary.md) boundary for that adapter/source graph; contextual replay is deterministic only after dependency closure is stable or inside a topologically ordered closure replay. Source-family slices, target slices, block-hash selections, and IO chunks are not semantic substitutes for those closures.
+Normalized events are schema-v2 interpreter transitions. Interpretation loads
+canonical raw facts in chain order and carries the compact prior state needed
+across physical batches. A redo is an explicit bounded operation: it prepares
+the selected derived range, replays it through the same interpreter, and
+re-anchors stable identities when the winning facts reproduce them. The
+deleted old-schema storage layer no longer provides general field repair,
+payload arbitration, supersession, full-closure proof, or adapter-checkpoint
+reuse.
 
 ## Resolution
 
@@ -455,19 +465,36 @@ The execution engine supports onchain calls, wildcard resolution, alias-aware ex
 
 Cache identity: request, chain positions, manifest versions, relevant topology/version boundaries. Invalidate on reorg, manifest change, relevant topology change, relevant record change, relevant alias/wildcard change.
 
-## Reorg, replay, backfill
+## Reorg, redo, and historical ranges
 
-The system stores block lineage per chain. On divergence: detect fork point, mark affected facts `orphaned`, invalidate dependent normalized events and execution cache, rebuild projections deterministically. Reorg repair preserves audit trail — orphaned rows persist for explanation and rebuild. Detail in [`chain-intake.md`](chain-intake.md).
+The phase runner stores competing block lineage per chain. Head publication
+marks a displaced readable lineage branch `orphaned` and promotes the selected
+branch; interpretation selects raw facts through that lineage rather than
+rewriting immutable raw rows. An explicit `interpret` redo replaces derived
+identity, discovery, and normalized-event output for its selected range.
 
-Backfills use the same path as live ingestion (raw → manifest/discovery → normalized → projection). Source-scoped backfill is selected-target-only — it must not turn unselected block-wide bodies into hot rows merely because they were fetched. Operational catch-up to finalized head runs as bounded idempotent chunks; capacity failures pause the chunk explicitly rather than silently retaining less data.
+The old synchronous reorg-repair tree, normalized-event repair/replay driver,
+and its broad orphan-repair sweep have been deleted. A narrow retained storage
+invalidator runs during phase-runner head publication: in the same PostgreSQL
+transaction that orphans `bigname_phase.chain_lineage`, it removes cache
+eligibility for affected outcomes in `public.execution_cache_outcomes` while
+leaving durable traces intact. Stage B still does not provide a continuously
+supervised live/reorg service or automatic projection reconciliation. The
+surviving worker can rebuild current projections and run its explicit
+key-scoped execution invalidation commands; the complete handoff belongs to the
+later project/live phases.
 
-Required backfills: ENSv1 historical state, ENSv1 wrapper/migration history, ENSv1 DNS and offchain discovery where supported, ENS reverse/primary history, ENSv2 historical registration, topology, permissions, alias history, Basenames historical registration, control, primary, resolution history.
-
-Wildcard and offchain names cannot be assumed exhaustively enumerable; backfill for those classes is discovery- and observed-answer-based.
+Historical work is a finite `ingest` or `interpret` run, optionally recorded as
+an explicit redo, not a persisted old-schema backfill job. The eventual live
+deployment still needs complete admitted history for ENSv1, ENSv2, and
+Basenames source families. Wildcard and offchain names remain
+discovery/observed-answer based rather than exhaustively enumerable.
 
 ## Operations
 
-Metrics: chain lag, safe/finalized lag, reorg depth, adapter failure rate, manifest drift, proxy upgrade detection, execution latency, CCIP error rate, verification failure rate, coverage partial rate, replay duration, backfill capacity checks (Postgres size, free disk).
+The old indexer metrics and backfill-capacity checks retired with that binary.
+API and worker metrics remain available; continuous chain-lag, reorg, and
+live-phase operational metrics are deferred with the live runtime.
 
 Worker-owned tools (none expose public `v1` routes; inspection tools are read-only):
 
@@ -476,7 +503,14 @@ Worker-owned tools (none expose public `v1` routes; inspection tools are read-on
 - `bigname-worker inspect backfill-job --backfill-job-id <id>` — one persisted backfill job plus child ranges.
 - `bigname-worker inspect execution-trace --execution-trace-id <id>` — one persisted execution trace and its persisted steps.
 - `bigname-worker inspect manifest-drift --json` and `bigname-worker inspect watch-plan --json` — persisted manifest/proxy alert observations and runtime watch-plan state.
-- Current projection maintenance is shipped as point-or-full rebuilds for each current projection family, `replay all-current-projections`, execution-cache invalidation commands, and bounded finalized-head/backfill processing with capacity preflight. Range-scoped projection rebuild, historical rewind materialization, surface-binding inspection, resolver-topology inspection, raw-fact inspection beyond canonicality/stored-lineage views, manifest-version inspection, and [declared-vs-verified](glossary.md) diff tooling are deferred; operators should not treat them as available CLI contracts.
+- Current projection maintenance is shipped as point-or-full rebuilds for each
+  current projection family, `replay all-current-projections`, and explicit
+  execution-cache invalidation commands. Range-scoped projection rebuild,
+  finalized-head/backfill processing, historical rewind materialization,
+  surface-binding inspection, resolver-topology inspection, raw-fact
+  inspection beyond canonicality/stored-lineage views, manifest-version
+  inspection, and [declared-vs-verified](glossary.md) diff tooling are deferred;
+  operators should not treat them as available CLI contracts.
 
 Live manifest drift / proxy upgrade alerting is a worker-owned operational loop. It does not write `normalized_events`, mutate manifests, rewrite discovery, or expose a public route.
 
@@ -502,16 +536,19 @@ Rust modular monolith. PostgreSQL is the hot indexed/replay store for durable re
 
 Repository layout:
 
-- `apps/api`, `apps/indexer`, `apps/worker`
-- `crates/domain`, `crates/storage`, `crates/manifests`, `crates/adapters`, `crates/execution`, `crates/test-support`
+- `apps/api`, `apps/phase-runner`, `apps/worker`
+- `crates/domain`, `crates/storage`, `crates/manifests`, `crates/adapters`,
+  `crates/ingest`, `crates/interpret`, `crates/execution`,
+  `crates/test-support`
 - `tests/conformance`
 
 ## Test matrix
 
 This is a protocol-risk inventory, not a claim that the e2e suite covers every
-row. `tests/conformance` owns public route-contract permutations; `tests/e2e`
-selects high-value upstream-to-storage-to-HTTP paths and documents its explicit
-gaps.
+row. `tests/conformance` owns public route-contract permutations. `tests/e2e`
+retains the high-value upstream-to-storage-to-HTTP scenario inventory, but it is
+compile-only until the C-e2e runtime port and is not current Stage B runtime
+evidence.
 
 ENSv1 and wrapper: ENSv1-only name, wrapped name, wrapped expiry/grace edge, fuse-scope history plus missing wrapper-holder permission projection and public suppression of stale internal control inputs, wrapped owner ≠ registrant, reverse claim vs verified primary mismatch.
 
@@ -523,9 +560,10 @@ Basenames: NFT-only transfer, management-only transfer, address-resolution chang
 
 Operational: reorg across authority events, reorg across verified execution cache, replay determinism from raw facts, replay determinism from normalized events, proxy implementation change, manifest version change.
 
-End-to-end cases validate the layers material to their claim: raw facts,
-normalized events, projections, execution traces, and/or public API output.
-They do not replace conformance coverage of the documented route surface.
+When the C-e2e runtime port lands, end-to-end cases must again validate the
+layers material to their claim: raw facts, normalized events, projections,
+execution traces, and/or public API output. They do not replace conformance
+coverage of the documented route surface.
 
 ## Open decisions
 

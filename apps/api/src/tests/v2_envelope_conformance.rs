@@ -414,7 +414,7 @@ async fn v2_address_history_filters_relation_sets_and_defaults_namespace() -> Re
         CanonicalityState::Canonical,
     );
     beta_event.event_kind = "RegistrationRenewed".to_owned();
-    bigname_storage::upsert_normalized_events(&database.pool, &[beta_event]).await?;
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[beta_event]).await?;
 
     let set_payload = v2_conformance_get_json(
         &database,
@@ -1520,7 +1520,7 @@ async fn seed_v2_address_history_conformance_fixture(database: &TestDatabase) ->
     );
     resource_event.event_kind = "RegistrationRenewed".to_owned();
 
-    bigname_storage::upsert_normalized_events(&database.pool, &[surface_event, resource_event])
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[surface_event, resource_event])
         .await?;
     Ok(())
 }

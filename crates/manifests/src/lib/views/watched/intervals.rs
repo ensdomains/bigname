@@ -1,15 +1,12 @@
-/// Canonical manifest/discovery interval rowset used by current watch-plan,
-/// scoped-address, historical replay, and coverage reads.
+/// Canonical manifest/discovery interval rowset used by current watch-plan and
+/// source-family reads, including resolver-profile inputs.
 ///
 /// The rowset deliberately carries eligibility as columns instead of applying
-/// one global filter: current watch-plan reads exclude every deactivated row,
-/// while historical replay and coverage retain only finitely bounded closed
-/// rows. All consumers share rollout, mapped target-family, migration, and
-/// interval-overlap decisions.
+/// one global filter. All consumers share rollout, mapped target-family,
+/// migration, current-address, and interval-overlap decisions.
 pub(super) const WATCHED_INTERVALS_CTES: &str = r#"
 manifest_watched_intervals AS (
     SELECT
-        cia.contract_instance_address_id AS source_row_id,
         mv.chain AS chain,
         mv.source_family AS source_family,
         LOWER(cia.address) AS address,
@@ -27,11 +24,7 @@ manifest_watched_intervals AS (
         cia.active_to_block_number AS active_to_block_number,
         mv.rollout_status = 'active' AS rollout_eligible,
         TRUE AS interval_eligible,
-        cia.deactivated_at IS NULL AS current_eligible,
-        (
-            cia.deactivated_at IS NULL
-            OR cia.active_to_block_number IS NOT NULL
-        ) AS historical_eligible
+        cia.deactivated_at IS NULL AS current_eligible
     FROM manifest_versions mv
     JOIN manifest_contract_instances mci ON mci.manifest_id = mv.manifest_id
     LEFT JOIN LATERAL (
@@ -59,7 +52,6 @@ manifest_watched_intervals AS (
 ),
 discovery_watched_intervals AS (
     SELECT
-        de.discovery_edge_id AS source_row_id,
         de.chain_id AS chain,
         COALESCE(target_mv.source_family, mv.source_family) AS source_family,
         LOWER(cia.address) AS address,
@@ -104,18 +96,7 @@ discovery_watched_intervals AS (
         (
             de.deactivated_at IS NULL
             AND cia.deactivated_at IS NULL
-        ) AS current_eligible,
-        (
-            (
-                de.deactivated_at IS NULL
-                OR de.active_to_block_number IS NOT NULL
-            )
-            AND (
-                cia.deactivated_at IS NULL
-                OR cia.active_to_block_number IS NOT NULL
-                OR de.active_to_block_number IS NOT NULL
-            )
-        ) AS historical_eligible
+        ) AS current_eligible
     FROM discovery_edges de
     JOIN manifest_versions mv ON mv.manifest_id = de.source_manifest_id
     LEFT JOIN manifest_versions target_mv
@@ -148,8 +129,7 @@ watched_intervals AS (
         active_to_block_number,
         rollout_eligible,
         interval_eligible,
-        current_eligible,
-        historical_eligible
+        current_eligible
     FROM manifest_watched_intervals
     UNION
     SELECT
@@ -163,8 +143,7 @@ watched_intervals AS (
         active_to_block_number,
         rollout_eligible,
         interval_eligible,
-        current_eligible,
-        historical_eligible
+        current_eligible
     FROM discovery_watched_intervals
 )
 "#;
@@ -175,25 +154,6 @@ AND watched.interval_eligible
 AND watched.current_eligible
 "#;
 
-pub(super) const HISTORICAL_WATCHED_INTERVAL_PREDICATE: &str = r#"
-watched.rollout_eligible
-AND watched.interval_eligible
-AND watched.historical_eligible
-"#;
-
 pub(super) fn with_watched_intervals(query_body: &str) -> String {
     format!("WITH\n{WATCHED_INTERVALS_CTES}\n{query_body}")
-}
-
-/// Stream the two disjoint source kinds without forcing PostgreSQL to
-/// materialize and sort the multi-million-row union before returning its
-/// first row. The progress-aware caller restores exact `UNION` deduplication
-/// in a sorted set while rows arrive.
-pub(super) fn with_streaming_watched_intervals(query_body: &str) -> String {
-    let streaming_ctes = WATCHED_INTERVALS_CTES.replacen(
-        "\n    FROM manifest_watched_intervals\n    UNION\n",
-        "\n    FROM manifest_watched_intervals\n    UNION ALL\n",
-        1,
-    );
-    format!("WITH\n{streaming_ctes}\n{query_body}")
 }

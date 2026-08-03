@@ -10,7 +10,7 @@ publish = false
 anyhow.workspace = true
 sqlx.workspace = true
 
-bigname-storage.workspace = true
+bigname-storage = { workspace = true, features = ["test-support"] }
 bigname-content-hash.workspace = true
 
 [dev-dependencies]

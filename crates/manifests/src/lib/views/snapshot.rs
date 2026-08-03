@@ -7,7 +7,7 @@ use crate::{
     ActiveManifestVersion, CapabilityFlag, CapabilitySupportStatus, NamespaceManifestSnapshot,
 };
 
-pub async fn load_active_manifests_for_namespace(
+async fn load_active_manifests_for_namespace(
     pool: &PgPool,
     namespace: &str,
 ) -> Result<Vec<ActiveManifestVersion>> {

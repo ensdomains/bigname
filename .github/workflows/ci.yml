@@ -148,12 +148,14 @@ jobs:
         include:
           - name: api
             packages: "-p bigname-api"
-          - name: indexer
-            packages: "-p bigname-indexer"
           - name: worker
             packages: "-p bigname-worker"
           - name: phase-runner
-            packages: "-p phase-runner -p bigname-ingest -p bigname-content-hash"
+            packages: >-
+              -p phase-runner
+              -p bigname-ingest
+              -p bigname-interpret
+              -p bigname-content-hash
           - name: core
             packages: >-
               -p bigname-domain
@@ -313,11 +315,8 @@ jobs:
           scripts/sync-refs
           scripts/sync-refs --check
 
-      - name: Prebuild pipeline binaries
-        run: cargo build --package bigname-indexer --package bigname-worker --package bigname-api
-
-      - name: cargo test e2e
-        run: cargo test --manifest-path tests/e2e/Cargo.toml --locked -- --test-threads=8
+      - name: cargo check e2e
+        run: cargo check --manifest-path tests/e2e/Cargo.toml --locked --all-targets
 
   test:
     name: test

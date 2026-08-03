@@ -15,7 +15,7 @@ use super::*;
 use crate::{
     AddressNameCurrentRow, AddressNameRelation, NameSurface, NormalizedEvent, RawBlock, Resource,
     SurfaceBinding, SurfaceBindingKind, TokenLineage, default_database_url,
-    upsert_address_names_current_rows, upsert_name_surfaces, upsert_normalized_events,
+    insert_normalized_event_fixtures, upsert_address_names_current_rows, upsert_name_surfaces,
     upsert_raw_blocks, upsert_resources, upsert_surface_bindings, upsert_token_lineages,
 };
 
@@ -414,7 +414,7 @@ async fn canonical_only_history_excludes_observed_and_orphaned_rows() -> Result<
     )
     .await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             history_event(
@@ -548,7 +548,7 @@ async fn name_history_scope_uses_logical_name_and_resource_filters() -> Result<(
     )
     .await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             history_event(
@@ -722,7 +722,7 @@ async fn event_history_filter_composes_projection_anchors_and_event_filters() ->
     )
     .await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             NormalizedEvent {
@@ -852,7 +852,7 @@ async fn name_history_resource_scope_preserves_rebound_resource_ids() -> Result<
     )
     .await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             history_event(
@@ -942,7 +942,7 @@ async fn resource_history_scope_uses_resource_and_logical_name_filters() -> Resu
     )
     .await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             history_event(
@@ -1111,7 +1111,7 @@ async fn resource_history_surface_scope_preserves_multiple_bound_surfaces() -> R
     )
     .await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             history_event(
@@ -1265,7 +1265,7 @@ async fn address_history_uses_current_and_historical_address_matches() -> Result
     )
     .await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             history_event(
@@ -1486,7 +1486,7 @@ async fn address_history_basenames_matches_do_not_require_token_lineage_ids() ->
     )
     .await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             NormalizedEvent {
@@ -1707,7 +1707,7 @@ async fn address_history_ens_tokenized_matches_require_token_lineage_ids() -> Re
     )
     .await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             history_event(
@@ -1918,7 +1918,7 @@ async fn address_history_ensv2_uses_current_and_historical_registry_matches() ->
     )
     .await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             history_event(
@@ -2134,7 +2134,7 @@ async fn address_history_effective_controller_includes_registry_owner_matches() 
     .await?;
     upsert_resources(database.pool(), &[resource(resource_id)]).await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             authority_match_event(
@@ -2249,7 +2249,7 @@ async fn address_history_relation_filters_distinguish_registrant_and_token_holde
         ],
     )
     .await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             ensv2_registry_event(
@@ -2352,7 +2352,7 @@ async fn history_reads_use_deterministic_chain_position_desc_ordering() -> Resul
     )
     .await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             history_event(
@@ -2466,7 +2466,7 @@ async fn history_page_uses_storage_limit_and_keyset_cursor() -> Result<()> {
     )
     .await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             history_event(
@@ -2560,7 +2560,7 @@ async fn history_page_size_one_walk_matches_unpaged_order_across_sort_ties() -> 
     let logical_name_id = "ens:ties.eth";
     let resource_id = Uuid::from_u128(0xa307);
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             history_event(
@@ -2815,7 +2815,7 @@ async fn history_page_rejects_cursor_when_selector_is_empty() -> Result<()> {
     )
     .await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[history_event(
             "page:cursor",
@@ -2907,7 +2907,7 @@ async fn name_history_head_matches_first_row_for_surface_and_resource_scopes() -
     )
     .await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             history_event(
@@ -3002,7 +3002,7 @@ async fn history_rows_expose_object_provenance_and_coverage_payloads() -> Result
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0xa400);
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             history_event(

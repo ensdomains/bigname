@@ -279,10 +279,10 @@ fn alias(selected: &Selected, raw: &RawLogInput, state: &mut State) -> anyhow::R
         from_labels,
         None,
     );
-    if let Some(to_raw_labels) = to_raw_labels {
-        if !same_endpoint {
-            observe_resolver_name(selected, state, &mut output, to_raw_labels, to_labels, None);
-        }
+    if let Some(to_raw_labels) = to_raw_labels
+        && !same_endpoint
+    {
+        observe_resolver_name(selected, state, &mut output, to_raw_labels, to_labels, None);
     }
     Ok(output)
 }

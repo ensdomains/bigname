@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::CanonicalityState;
 
-/// Persisted adapter-owned normalized event used to rebuild projections.
+/// Persisted interpret-owned normalized event used to rebuild projections.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NormalizedEvent {
     pub event_identity: String,

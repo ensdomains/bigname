@@ -16,13 +16,14 @@ COPY apps apps
 COPY crates crates
 COPY migrations migrations
 COPY manifests manifests
+COPY schema-v2 schema-v2
 
 ARG BIGNAME_BUILD_SHA=unknown
 ENV BIGNAME_BUILD_SHA=${BIGNAME_BUILD_SHA}
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    cargo build --locked --release --workspace --bins --features bigname-indexer/reth-db
+    cargo build --locked --release --workspace --bins
 
 FROM ubuntu:24.04 AS runtime
 
@@ -35,13 +36,13 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY --from=builder /app/target/release/bigname-api /usr/local/bin/bigname-api
-COPY --from=builder /app/target/release/bigname-indexer /usr/local/bin/bigname-indexer
+COPY --from=builder /app/target/release/phase-runner /usr/local/bin/phase-runner
 COPY --from=builder /app/target/release/bigname-worker /usr/local/bin/bigname-worker
 COPY --from=builder --chown=bigname:bigname /app/manifests /app/manifests
 COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/bigname
 
 ENV BIGNAME_API_BIND_ADDR=0.0.0.0:3000 \
-    BIGNAME_INDEXER_MANIFESTS_ROOT=/app/manifests/mainnet \
+    BIGNAME_PHASE_RUNNER_MANIFESTS_ROOT=/app/manifests/mainnet \
     RUST_LOG=info
 
 EXPOSE 3000

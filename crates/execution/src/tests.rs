@@ -1462,7 +1462,7 @@ async fn seed_alias_only_name_current_rebuild_inputs(
         }],
     )
     .await?;
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         database.pool(),
         &[
             NormalizedEvent {
@@ -1702,7 +1702,7 @@ async fn seed_wildcard_name_current_rebuild_inputs(
         ],
     )
     .await?;
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         database.pool(),
         &[
             NormalizedEvent {
@@ -2003,7 +2003,7 @@ async fn seed_basenames_name_current_rebuild_inputs(
         }],
     )
     .await?;
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         database.pool(),
         &[
             NormalizedEvent {

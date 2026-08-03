@@ -11,40 +11,9 @@ wiring_allowlist_required_loc = 500
 wiring_files = ["lib.rs", "main.rs"]
 
 [[files]]
-path = "apps/indexer/src/main/backfill/fetching/historical.rs"
-loc = 797
-justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
-
-[[files]]
-path = "apps/indexer/src/main/backfill/fetching/historical/log_payloads.rs"
-loc = 653
-justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
-
-[[files]]
-path = "apps/indexer/src/main/backfill/reservation_execution/coinbase_sql.rs"
-loc = 677
-justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
-
-[[files]]
-path = "apps/indexer/src/main/cli.rs"
-loc = 604
-justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
-
-[[files]]
-path = "crates/adapters/src/ens_v1_unwrapped_authority/loading/active_emitters.rs"
-loc = 733
-justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
-
-[[files]]
 path = "crates/manifests/src/lib/views/resolver_profiles.rs"
 loc = 706
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
-
-[[files]]
-path = "crates/storage/src/base_normalized_rederive/batch/delete.rs"
-loc = 1076
-justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
-review_justification = "Explicit review accepted this file above 900 LOC; future changes should split or shrink it."
 
 [[files]]
 path = "crates/storage/src/identity/write_fast.rs"

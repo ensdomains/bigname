@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "apps/api",
-    "apps/indexer",
     "apps/phase-runner",
     "apps/worker",
     "crates/ingest",
@@ -18,7 +17,6 @@ members = [
 ]
 default-members = [
     "apps/api",
-    "apps/indexer",
     "apps/phase-runner",
     "apps/worker",
 ]

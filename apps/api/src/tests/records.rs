@@ -725,7 +725,7 @@ async fn get_resolve_records_returns_stale_when_default_snapshot_outruns_project
     )
     .await
     .context("failed to insert later lineage block for compact records stale test")?;
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[history_event(
             "api-test:compact-records-later-input",

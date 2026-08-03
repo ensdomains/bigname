@@ -5,6 +5,16 @@ This directory is the fresh-schema baseline defined by the
 modify `migrations/`. The SQL stores only the product data and phase state
 authorized below.
 
+## Installation boundary
+
+`phase-runner init-schema` is the runtime installer for this baseline. It
+installs into an empty `bigname_phase` PostgreSQL schema and refuses a nonempty
+phase schema until a reviewed upgrade or rebuild mechanism exists. During Stage
+B the surviving API and worker continue to use `public` in the same database;
+they move to schema-v2 only with their later port. The shared database permits
+atomic phase-lineage orphaning and retained execution-cache invalidation across
+the two namespaces.
+
 ## Chain lineage and heads
 
 `chain_lineage`, `chain_header_audit`, and `chain_heads` store block ancestry, explicit chain state, optional raw header fields, and the latest, safe, and finalized markers. A stored block's chain, hash, parent, height, and timestamp are immutable; only its explicit canonicality and observation metadata may change. Head validation locks its referenced lineage rows through commit, so a concurrent canonicality change cannot strand a marker on a noncanonical block. Intake writes these tables. The phase runner, the API status path, and read-only block inspection read them. The [storage census and head-marker finding](../simplification-audit-20260730.md#cratesstorage-fable) authorize all three tables, and [audit entry 9](../simplification-audit-20260730.md#inventory--verdicts) authorizes the stored-header inspection fields.
@@ -30,7 +40,7 @@ An attacker-controlled label that cannot decode as PostgreSQL-safe UTF-8 still h
 
 `manifest_versions`, `manifest_contract_instances`, and `manifest_discovery_rules` store loaded declarations, declared contracts, start blocks, proxy links, ABI data, and admission rules. Manifest sync writes these tables. Intake, interpretation, projection, and execution read them. The [manifest census](../simplification-audit-20260730.md#cratesmanifests--domain--metrics-fable) authorizes the declaration tables. The [declared-means-supported decision](../simplification-audit-20260730.md#maintainer-question-list-consolidated-for-decision) excludes a capability-flag table. During the staged port, existing authored flags remain inside `manifest_payload` and keep their current meaning; changes to them are part of `SourceManifestUpdated`. The later API-and-surface port in the [replacement build plan](../simplification-build-plan-20260730.md) removes the authored fields when it adopts declared-means-supported.
 
-The authored manifest field remains `deployment_epoch` under the public [manifest contract](../docs/manifests.md#required-fields). Manifest sync stores that value unchanged in `manifest_versions.deployment_label`; it does not reinterpret or mint a second identifier. The interpreter and manifest-sync port in the [replacement build plan](../simplification-build-plan-20260730.md) must make this one-to-one field mapping explicit in inserts, uniqueness checks, and prior-declaration queries. `manifest_payload` retains the authored field name.
+The authored manifest field remains `deployment_epoch` under the public [manifest contract](../docs/manifests.md#required-fields). Manifest sync stores that value unchanged in `manifest_versions.deployment_label`; it does not reinterpret or mint a second identifier. The schema-v2 writer applies this one-to-one field mapping in inserts, uniqueness checks, and prior-declaration queries. `manifest_payload` retains the authored field name.
 
 ## Normalized events
 

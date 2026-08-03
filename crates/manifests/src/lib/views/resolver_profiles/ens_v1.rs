@@ -26,8 +26,8 @@ mod profile_config;
 
 use profile_config::{
     DEFAULT_PENDING_FACT_FAMILIES, ENS_V1_PUBLIC_RESOLVER_COMPATIBLE_PROFILE,
-    ENS_V1_PUBLIC_RESOLVER_ROLE, ENS_V1_RESOLVER_PROFILE_CONFIGS, ENS_V1_RESOLVER_SOURCE_FAMILY,
-    EnsV1ResolverProfileConfig, profile_config_for_role,
+    ENS_V1_RESOLVER_PROFILE_CONFIGS, ENS_V1_RESOLVER_SOURCE_FAMILY, EnsV1ResolverProfileConfig,
+    profile_config_for_role,
 };
 
 #[derive(Clone, Debug)]
@@ -159,34 +159,6 @@ pub async fn load_ens_v1_public_resolver_profile_admissions_for_targets(
     .await?;
     sort_resolver_profile_admissions(&mut admissions);
     Ok(admissions)
-}
-
-pub fn derive_ens_v1_public_resolver_profile_admissions(
-    watched_contracts: &[WatchedContract],
-    code_hash_observations: &[ManifestCodeHashObservation],
-    public_resolver_seed_ids: &[Uuid],
-) -> Vec<ResolverProfileAdmission> {
-    let public_resolver_seed_ids = public_resolver_seed_ids
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>();
-    let public_resolver_config =
-        profile_config_for_role(ENS_V1_PUBLIC_RESOLVER_ROLE).expect("latest profile must exist");
-    let seed_contracts = watched_contracts
-        .iter()
-        .filter(|contract| public_resolver_seed_ids.contains(&contract.contract_instance_id))
-        .cloned()
-        .map(|contract| EnsV1ResolverProfileSeed {
-            contract,
-            config: public_resolver_config,
-        })
-        .collect::<Vec<_>>();
-
-    derive_ens_v1_resolver_profile_admissions(
-        watched_contracts,
-        code_hash_observations,
-        &seed_contracts,
-    )
 }
 
 async fn load_ens_v1_resolver_profile_seed_watched_contracts(

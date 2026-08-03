@@ -3,14 +3,6 @@ set -eu
 
 command="${1:-api}"
 
-if [ "${BIGNAME_INDEXER_CHAIN_RPC_URLS+x}" = "x" ] && [ -z "$BIGNAME_INDEXER_CHAIN_RPC_URLS" ]; then
-  unset BIGNAME_INDEXER_CHAIN_RPC_URLS
-fi
-
-if [ "${BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES+x}" = "x" ] && [ -z "$BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES" ]; then
-  unset BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES
-fi
-
 case "$command" in
   -*)
     exec bigname-api "$@"
@@ -22,9 +14,13 @@ case "$command" in
     shift
     exec bigname-api serve "$@"
     ;;
-  indexer)
+  phases)
     shift
-    exec bigname-indexer run "$@"
+    exec phase-runner run "$@"
+    ;;
+  phases-migrate)
+    shift
+    exec phase-runner init-schema "$@"
     ;;
   worker)
     shift
@@ -38,7 +34,7 @@ case "$command" in
     shift
     exec bigname-api print-openapi "$@"
     ;;
-  bigname-api | bigname-indexer | bigname-worker)
+  bigname-api | phase-runner | bigname-worker)
     exec "$@"
     ;;
   *)

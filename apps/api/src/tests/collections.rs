@@ -3553,7 +3553,7 @@ async fn get_address_names_include_role_summary_reads_basenames_permissions_from
         ],
     )
     .await?;
-    bigname_storage::upsert_normalized_events(
+    bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
             bigname_storage::NormalizedEvent {

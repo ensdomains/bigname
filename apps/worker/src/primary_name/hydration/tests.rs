@@ -11,9 +11,10 @@ use bigname_storage::{
     CanonicalityState, ENS_NAMESPACE, ETHEREUM_MAINNET_CHAIN_ID, ExecutionCacheKey,
     ExecutionOutcome, ExecutionTrace, ExecutionTraceStep, NormalizedEvent, PrimaryNameClaimStatus,
     PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot, VERIFIED_PRIMARY_NAME_REQUEST_TYPE,
-    default_database_url, load_execution_outcome, load_primary_name_current_snapshot,
+    default_database_url, insert_normalized_event_fixtures, load_execution_outcome,
+    load_primary_name_current_snapshot,
     load_primary_name_current_snapshot_for_update_in_transaction, upsert_execution_outcome,
-    upsert_execution_outcome_in_transaction, upsert_execution_trace, upsert_normalized_events,
+    upsert_execution_outcome_in_transaction, upsert_execution_trace,
     upsert_primary_name_current_snapshots,
 };
 use futures_util::{FutureExt, future::BoxFuture};
@@ -338,7 +339,7 @@ async fn hydrates_current_legacy_reverse_resolver_primary_name() -> Result<()> {
     let reverse_node = reverse_node_for_block(reverse_block);
 
     insert_chain_checkpoint(database.pool(), 300).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             reverse_changed_event("reverse-claim", address, reverse_block, 0),
@@ -428,7 +429,7 @@ async fn hydration_claim_change_invalidates_verified_primary_outcome() -> Result
     let reverse_node = reverse_node_for_block(reverse_block);
 
     insert_chain_checkpoint(database.pool(), 300).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             reverse_changed_event("reverse-claim", address, reverse_block, 0),
@@ -572,7 +573,7 @@ async fn hydrates_resolver_edge_only_legacy_reverse_resolver_primary_name() -> R
     let reverse_node = reverse_node_for_address(address)?;
 
     insert_chain_checkpoint(database.pool(), 300).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             generic_reverse_resolver_changed_event(
@@ -681,7 +682,7 @@ async fn rejects_non_normalized_resolver_edge_primary_name_before_forward_confir
     let reverse_node = reverse_node_for_address(address)?;
 
     insert_chain_checkpoint(database.pool(), 300).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[generic_reverse_resolver_changed_event(
             "resolver-edge-non-normalized",
@@ -744,7 +745,7 @@ async fn resolver_edge_delete_and_recreate_invalidates_verified_primary_outcome(
     let reverse_node = reverse_node_for_address(address)?;
 
     insert_chain_checkpoint(database.pool(), 300).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[generic_reverse_resolver_changed_event(
             "resolver-edge-only",
@@ -844,7 +845,7 @@ async fn deletes_resolver_edge_row_when_forward_confirmation_stops_matching() ->
     let reverse_node = reverse_node_for_address(address)?;
 
     insert_chain_checkpoint(database.pool(), 300).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[generic_reverse_resolver_changed_event(
             "resolver-edge-only",
@@ -920,7 +921,7 @@ async fn keeps_resolver_edge_row_when_forward_confirmation_errors() -> Result<()
     let reverse_node = reverse_node_for_address(address)?;
 
     insert_chain_checkpoint(database.pool(), 300).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[generic_reverse_resolver_changed_event(
             "resolver-edge-only",
@@ -1001,7 +1002,7 @@ async fn treats_universal_resolver_revert_as_resolver_edge_non_confirmation() ->
     let reverse_node = reverse_node_for_address(address)?;
 
     insert_chain_checkpoint(database.pool(), 300).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[generic_reverse_resolver_changed_event(
             "resolver-edge-only",
@@ -1063,7 +1064,7 @@ async fn keeps_resolver_edge_row_when_forward_confirmation_requires_offchain_loo
     let reverse_node = reverse_node_for_address(address)?;
 
     insert_chain_checkpoint(database.pool(), 300).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[generic_reverse_resolver_changed_event(
             "resolver-edge-only",
@@ -1153,7 +1154,7 @@ async fn treats_offchain_required_new_resolver_edge_as_non_confirmation() -> Res
     let reverse_node = reverse_node_for_address(address)?;
 
     insert_chain_checkpoint(database.pool(), 300).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[generic_reverse_resolver_changed_event(
             "resolver-edge-only",
@@ -1216,7 +1217,7 @@ async fn keeps_resolver_edge_row_when_checkpoint_is_missing() -> Result<()> {
     let reverse_node = reverse_node_for_address(address)?;
 
     insert_chain_checkpoint(database.pool(), 300).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[generic_reverse_resolver_changed_event(
             "resolver-edge-only",
@@ -1287,7 +1288,7 @@ async fn rehydrates_after_new_successful_live_call_to_legacy_resolver() -> Resul
     let reverse_node = reverse_node_for_block(reverse_block);
 
     insert_chain_checkpoint(database.pool(), 300).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             reverse_changed_event("reverse-claim", address, reverse_block, 0),
@@ -1389,7 +1390,7 @@ async fn ignores_live_call_observation_ahead_of_hydration_checkpoint_until_check
     let reverse_node = reverse_node_for_block(reverse_block);
 
     insert_chain_checkpoint(database.pool(), 300).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             reverse_changed_event("reverse-claim", address, reverse_block, 0),
@@ -1594,7 +1595,7 @@ async fn ignores_future_reverse_and_resolver_events_until_hydration_checkpoint_c
     let replacement_resolver = "0x00000000000000000000000000000000000000f4";
 
     insert_chain_checkpoint(database.pool(), 300).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             reverse_changed_event("reverse-claim", address, initial_reverse_block, 0),
@@ -1624,7 +1625,7 @@ async fn ignores_future_reverse_and_resolver_events_until_hydration_checkpoint_c
     )
     .await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             reverse_changed_event("future-reverse-claim", address, future_reverse_block, 0),
@@ -1706,7 +1707,7 @@ async fn restores_event_replayed_row_when_resolver_changes_away_from_configured_
     let unconfigured_resolver = "0x00000000000000000000000000000000000000f1";
 
     insert_chain_checkpoint(database.pool(), 300).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             reverse_changed_event("reverse-claim", address, reverse_block, 0),
@@ -1736,7 +1737,7 @@ async fn restores_event_replayed_row_when_resolver_changes_away_from_configured_
     )
     .await?;
 
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[reverse_resolver_changed_event(
             "reverse-resolver-away",
@@ -1799,7 +1800,7 @@ async fn rehydrates_when_current_resolver_changes_to_another_configured_address(
     let replacement_resolver = "0x00000000000000000000000000000000000000f2";
 
     insert_chain_checkpoint(database.pool(), 300).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             reverse_changed_event("reverse-claim", address, reverse_block, 0),
@@ -1830,7 +1831,7 @@ async fn rehydrates_when_current_resolver_changes_to_another_configured_address(
     .await?;
 
     insert_chain_checkpoint(database.pool(), 360).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[reverse_resolver_changed_event(
             "reverse-resolver-replacement",
@@ -1892,7 +1893,7 @@ async fn failed_rehydration_after_previous_success_restores_event_replayed_row()
     let reverse_node = reverse_node_for_block(reverse_block);
 
     insert_chain_checkpoint(database.pool(), 300).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             reverse_changed_event("reverse-claim", address, reverse_block, 0),
@@ -1992,7 +1993,7 @@ async fn rehydrates_when_latest_direct_call_observation_disappears_after_reorg()
     let reverse_node = reverse_node_for_block(reverse_block);
 
     insert_chain_checkpoint(database.pool(), 340).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             reverse_changed_event("reverse-claim", address, reverse_block, 0),
@@ -2078,7 +2079,7 @@ async fn hydrates_from_durable_call_observation_after_raw_staging_compaction() -
     let reverse_node = reverse_node_for_block(reverse_block);
 
     insert_chain_checkpoint(database.pool(), 330).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             reverse_changed_event("reverse-claim", address, reverse_block, 0),
@@ -2141,7 +2142,7 @@ async fn rehydrates_when_live_call_trigger_reorgs_at_same_height() -> Result<()>
     let reverse_node = reverse_node_for_block(reverse_block);
 
     insert_chain_checkpoint(database.pool(), 340).await?;
-    upsert_normalized_events(
+    insert_normalized_event_fixtures(
         database.pool(),
         &[
             reverse_changed_event("reverse-claim", address, reverse_block, 0),

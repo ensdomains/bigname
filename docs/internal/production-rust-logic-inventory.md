@@ -2,6 +2,14 @@
 
 Status: initial audit snapshot, 2026-05-05.
 
+> **Historical snapshot after Stage B:** this inventory is frozen at its
+> 2026-05-05 audit state and no longer describes the current source tree. The
+> old `apps/indexer` runtime and the legacy adapter/storage paths named below
+> were co-deleted as the ingest and interpret phases landed. Use the public
+> architecture, storage, manifest, deployment, and consumer-capability docs for
+> current ownership; the maintenance rules below apply only if this snapshot is
+> deliberately refreshed.
+
 Gate: implementation-only inventory. Follow-up cleanup slices stay
 implementation-only when they preserve API semantics, manifest semantics, storage
 ownership, shared IDs, and coverage meaning. If a slice changes those public

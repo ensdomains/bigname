@@ -1,14 +1,12 @@
-use std::{collections::BTreeSet, future::Future, pin::Pin};
-
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use sqlx::{Executor, PgPool, Postgres, Row, postgres::PgRow};
+use sqlx::{PgPool, Postgres};
 
 use super::{
     keying::{
-        execution_cache_key_storage_key, execution_outcome_block_dependencies,
-        manifest_version_identity_key, manifest_versions_contain_identity,
-        validate_version_boundary, version_boundary_storage_key,
+        execution_cache_key_storage_key, manifest_version_identity_key,
+        manifest_versions_contain_identity, validate_version_boundary,
+        version_boundary_storage_key,
     },
     outcome::load_execution_outcomes_for_scope_internal,
     types::{
@@ -16,29 +14,6 @@ use super::{
         ExecutionOutcomeInvalidationSummary,
     },
 };
-
-#[cfg(not(test))]
-const REORG_INVALIDATION_BATCH_SIZE: i64 = 500;
-#[cfg(test)]
-const REORG_INVALIDATION_BATCH_SIZE: i64 = 2;
-
-pub type ExecutionOutcomeInvalidationProgressFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
-
-pub trait ExecutionOutcomeInvalidationProgress: Send {
-    fn record<'a>(&'a mut self, pool: &'a PgPool)
-    -> ExecutionOutcomeInvalidationProgressFuture<'a>;
-}
-
-#[derive(Clone, Debug)]
-struct ExecutionOutcomeReorgInvalidationCandidate {
-    execution_cache_key: String,
-    request_type: String,
-    request_key: String,
-    requested_chain_positions: Value,
-    topology_version_boundary: Value,
-    record_version_boundary: Value,
-}
 
 /// Delete cached execution outcomes for one exact stale manifest identity/version.
 pub async fn invalidate_execution_outcomes_for_manifest_version(
@@ -183,105 +158,6 @@ pub async fn invalidate_execution_outcomes_for_record_boundary_and_request_key(
         |outcome| &outcome.cache_key.record_version_boundary,
     )
     .await
-}
-
-/// Delete verified resolution and verified primary-name cache outcomes whose
-/// cache dependencies reference a block identity marked `orphaned`.
-pub async fn invalidate_execution_outcomes_for_orphaned_blocks(
-    pool: &PgPool,
-) -> Result<ExecutionOutcomeInvalidationSummary> {
-    invalidate_execution_outcomes_for_orphaned_blocks_inner(pool, &mut None).await
-}
-
-pub async fn invalidate_execution_outcomes_for_orphaned_blocks_with_progress(
-    pool: &PgPool,
-    progress: &mut dyn ExecutionOutcomeInvalidationProgress,
-) -> Result<ExecutionOutcomeInvalidationSummary> {
-    invalidate_execution_outcomes_for_orphaned_blocks_inner(pool, &mut Some(progress)).await
-}
-
-async fn invalidate_execution_outcomes_for_orphaned_blocks_inner(
-    pool: &PgPool,
-    progress: &mut Option<&mut dyn ExecutionOutcomeInvalidationProgress>,
-) -> Result<ExecutionOutcomeInvalidationSummary> {
-    let mut transaction = pool
-        .begin()
-        .await
-        .context("failed to open transaction for execution reorg invalidation")?;
-
-    let mut deleted_outcome_count = 0;
-    let mut last_seen_cache_key = None;
-    loop {
-        let outcomes = load_execution_outcome_reorg_invalidation_candidate_batch_internal(
-            &mut *transaction,
-            last_seen_cache_key.as_deref(),
-        )
-        .await?;
-        let Some(last_outcome) = outcomes.last() else {
-            break;
-        };
-        last_seen_cache_key = Some(last_outcome.execution_cache_key.clone());
-
-        let mut cache_keys = Vec::new();
-        let mut parsed_dependencies = Vec::new();
-        let mut candidate_dependencies = BTreeSet::new();
-        for outcome in outcomes {
-            if !matches!(
-                outcome.request_type.as_str(),
-                "verified_resolution" | "verified_primary_name"
-            ) {
-                continue;
-            }
-            let dependencies = match execution_outcome_block_dependencies(
-                &outcome.request_key,
-                &outcome.requested_chain_positions,
-                &outcome.topology_version_boundary,
-                &outcome.record_version_boundary,
-            ) {
-                Ok(dependencies) => dependencies,
-                Err(_) => {
-                    cache_keys.push(outcome.execution_cache_key);
-                    continue;
-                }
-            };
-            candidate_dependencies.extend(dependencies.iter().cloned());
-            parsed_dependencies.push((outcome.execution_cache_key, dependencies));
-        }
-        let orphaned_dependencies =
-            load_orphaned_block_dependencies_internal(&mut *transaction, &candidate_dependencies)
-                .await?;
-        for (execution_cache_key, dependencies) in parsed_dependencies {
-            if dependencies
-                .iter()
-                .any(|dependency| orphaned_dependencies.contains(dependency))
-            {
-                cache_keys.push(execution_cache_key);
-            }
-        }
-
-        deleted_outcome_count +=
-            delete_execution_outcomes_by_keys(&mut transaction, &cache_keys).await?;
-        record_reorg_invalidation_progress(pool, progress).await?;
-    }
-
-    transaction
-        .commit()
-        .await
-        .context("failed to commit execution reorg invalidation")?;
-
-    Ok(ExecutionOutcomeInvalidationSummary {
-        deleted_outcome_count,
-    })
-}
-
-async fn record_reorg_invalidation_progress(
-    pool: &PgPool,
-    progress: &mut Option<&mut dyn ExecutionOutcomeInvalidationProgress>,
-) -> Result<()> {
-    if let Some(progress) = progress.as_deref_mut() {
-        progress.record(pool).await?;
-    }
-    Ok(())
 }
 
 impl ExecutionManifestInvalidation {
@@ -436,86 +312,6 @@ fn outcome_matches_request_key(outcome: &ExecutionOutcome, request_key: Option<&
     request_key.is_none_or(|request_key| outcome.cache_key.request_key == request_key)
 }
 
-async fn load_execution_outcome_reorg_invalidation_candidate_batch_internal<'e, E>(
-    executor: E,
-    after_execution_cache_key: Option<&str>,
-) -> Result<Vec<ExecutionOutcomeReorgInvalidationCandidate>>
-where
-    E: Executor<'e, Database = Postgres>,
-{
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            execution_cache_key,
-            request_type,
-            request_key,
-            requested_chain_positions,
-            topology_version_boundary,
-            record_version_boundary
-        FROM execution_cache_outcomes
-        WHERE request_type IN ('verified_resolution', 'verified_primary_name')
-          AND ($1::text IS NULL OR execution_cache_key > $1)
-        ORDER BY execution_cache_key
-        LIMIT $2
-        "#,
-    )
-    .bind(after_execution_cache_key)
-    .bind(REORG_INVALIDATION_BATCH_SIZE)
-    .fetch_all(executor)
-    .await
-    .context("failed to load execution outcome batch for reorg invalidation scope")?;
-
-    rows.into_iter()
-        .map(decode_execution_outcome_reorg_invalidation_candidate_row)
-        .collect()
-}
-
-async fn load_orphaned_block_dependencies_internal<'e, E>(
-    executor: E,
-    dependencies: &BTreeSet<(String, String)>,
-) -> Result<BTreeSet<(String, String)>>
-where
-    E: Executor<'e, Database = Postgres>,
-{
-    if dependencies.is_empty() {
-        return Ok(BTreeSet::new());
-    }
-    let chains = dependencies
-        .iter()
-        .map(|(chain, _)| chain.as_str())
-        .collect::<Vec<_>>();
-    let block_hashes = dependencies
-        .iter()
-        .map(|(_, block_hash)| block_hash.as_str())
-        .collect::<Vec<_>>();
-    let rows = sqlx::query(
-        r#"
-        SELECT lineage.chain_id, lineage.block_hash
-        FROM UNNEST($1::TEXT[], $2::TEXT[]) dependency(chain_id, block_hash)
-        JOIN chain_lineage lineage
-          ON lineage.chain_id = dependency.chain_id
-         AND lineage.block_hash = dependency.block_hash
-        WHERE lineage.canonicality_state = 'orphaned'::canonicality_state
-        "#,
-    )
-    .bind(chains)
-    .bind(block_hashes)
-    .fetch_all(executor)
-    .await
-    .context("failed to match execution dependencies against orphaned block identities")?;
-
-    rows.into_iter()
-        .map(|row| {
-            Ok((
-                row.try_get("chain_id")
-                    .context("orphaned lineage row missing chain_id")?,
-                row.try_get("block_hash")
-                    .context("orphaned lineage row missing block_hash")?,
-            ))
-        })
-        .collect()
-}
-
 async fn delete_execution_outcomes_by_keys(
     executor: &mut sqlx::Transaction<'_, Postgres>,
     execution_cache_keys: &[String],
@@ -537,29 +333,4 @@ async fn delete_execution_outcomes_by_keys(
     .rows_affected();
 
     Ok(deleted_outcome_count)
-}
-
-fn decode_execution_outcome_reorg_invalidation_candidate_row(
-    row: PgRow,
-) -> Result<ExecutionOutcomeReorgInvalidationCandidate> {
-    Ok(ExecutionOutcomeReorgInvalidationCandidate {
-        execution_cache_key: row
-            .try_get("execution_cache_key")
-            .context("execution outcome row missing execution_cache_key")?,
-        request_type: row
-            .try_get("request_type")
-            .context("execution outcome row missing request_type")?,
-        request_key: row
-            .try_get("request_key")
-            .context("execution outcome row missing request_key")?,
-        requested_chain_positions: row
-            .try_get("requested_chain_positions")
-            .context("execution outcome row missing requested_chain_positions")?,
-        topology_version_boundary: row
-            .try_get("topology_version_boundary")
-            .context("execution outcome row missing topology_version_boundary")?,
-        record_version_boundary: row
-            .try_get("record_version_boundary")
-            .context("execution outcome row missing record_version_boundary")?,
-    })
 }

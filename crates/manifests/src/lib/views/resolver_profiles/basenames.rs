@@ -136,7 +136,7 @@ pub async fn load_basenames_l2_resolver_profile_admissions_for_targets(
     Ok(admissions)
 }
 
-pub fn derive_basenames_l2_resolver_profile_admissions(
+fn derive_basenames_l2_resolver_profile_admissions(
     watched_contracts: &[WatchedContract],
     code_hash_observations: &[ManifestCodeHashObservation],
     l2_resolver_seed_ids: &[Uuid],

@@ -2,28 +2,7 @@ use anyhow::{Result, bail};
 use serde_json::Value;
 use sqlx::types::time::OffsetDateTime;
 
-#[derive(Debug)]
-pub struct CoverageRecoveryReservationConflict {
-    message: String,
-}
-
-impl CoverageRecoveryReservationConflict {
-    pub(super) fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
-impl std::fmt::Display for CoverageRecoveryReservationConflict {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for CoverageRecoveryReservationConflict {}
-
-/// Persisted lifecycle state for backfill jobs and range checkpoints.
+/// Persisted lifecycle state for historical backfill jobs and range checkpoints.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackfillLifecycleStatus {
     Pending,
@@ -56,28 +35,7 @@ impl BackfillLifecycleStatus {
     }
 }
 
-/// Child range bounds for a bounded backfill job.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BackfillRangeSpec {
-    pub range_start_block_number: i64,
-    pub range_end_block_number: i64,
-}
-
-/// Immutable job creation contract. Empty `ranges` creates one range covering
-/// the declared job bounds.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BackfillJobCreate {
-    pub deployment_profile: String,
-    pub chain_id: String,
-    pub source_identity: Value,
-    pub scan_mode: String,
-    pub range_start_block_number: i64,
-    pub range_end_block_number: i64,
-    pub idempotency_key: String,
-    pub ranges: Vec<BackfillRangeSpec>,
-}
-
-/// Persisted backfill job snapshot.
+/// Read-only snapshot of a historical backfill job.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackfillJob {
     pub backfill_job_id: i64,
@@ -97,7 +55,7 @@ pub struct BackfillJob {
     pub completed_at: Option<OffsetDateTime>,
 }
 
-/// Persisted child range checkpoint snapshot.
+/// Read-only snapshot of a historical backfill range checkpoint.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackfillRange {
     pub backfill_range_id: i64,
@@ -117,7 +75,7 @@ pub struct BackfillRange {
     pub completed_at: Option<OffsetDateTime>,
 }
 
-/// Job plus child ranges returned by idempotent creation.
+/// Historical job plus its child ranges, used by the surviving worker inspection command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackfillJobRecord {
     pub job: BackfillJob,
