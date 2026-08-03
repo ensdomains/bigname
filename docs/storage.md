@@ -265,14 +265,15 @@ resume; its intermediate orphaning is not a completed projection boundary.
 Verify redo uses the same marker and persists the
 [verification level](glossary.md#verification-level) reported by its phase
 implementation. The production phase rechecks the requested
-inclusive range and cannot target a block above the previously recorded
-finalized verification extent. A partial production redo retains the level for
-the whole recorded extent; only a full-extent redo can change it. A normal
-verification run freezes its target at the finalized head and can run beside
-live follow. Its start comes from durable ingest cursors rather than replacement
-runtime descriptors; a resumed normal scan retains the weaker whole-extent
-level if the reference level changed. Base additionally caps the independent
-dRPC comparison at the
+inclusive range and cannot target above the chain's current finalized head. It
+may check blocks outside the previously reported verification extent when they
+are below finality. Redo completion restores the pre-redo normal extent; a
+partial production redo retains its level, while a redo covering the full
+retained extent can change it. A normal verification run freezes its target at
+the finalized head and can run beside live follow. Its start comes from durable
+ingest cursors rather than replacement runtime descriptors; a resumed normal
+scan retains the weaker whole-extent level if the reference level changed. Base
+additionally caps the independent dRPC comparison at the
 Coinbase-to-dRPC ingest seam. Its separately credentialed database handle must
 have SELECT on every `bigname_phase` relation and is rejected at startup if its
 login can write any application relation, create schemas/database objects, has
@@ -289,9 +290,11 @@ failures cannot leave an unresumable state row.
 A verification mismatch is a non-retryable chain failure. The verify row's
 `last_error` stores the block number, differing field, stored value, and
 reference value. No attestation or repair row is written. Normal verification
-does not advance past the last successful batch, so a repaired chain can start
-again from that point. The live row records that verification stopped its
-paired live loop.
+does not advance past the last successful batch. That cursor is safe only while
+the lower stored history is unchanged: wipe-and-resync repair must also reset
+the chain's phase state or recheck the full applicable repaired verification
+interval with verify redo, because normal resume skips every block below its
+cursor. The live row records that verification stopped its paired live loop.
 
 System-required redo stamps reuse `chain_phase_state.redo_*`; there is no reorg
 queue or scheduler table. A stamp is created only when the phase cursor reaches

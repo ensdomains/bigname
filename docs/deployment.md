@@ -84,6 +84,15 @@ reader is accepted only when its PostgreSQL system identifier, database OID,
 and database name match the writer connection. A non-verification redo does
 not require the reader URL.
 
+Point both database URLs at the writer primary. Never point the verification
+URL at a replica, standby, physical basebackup clone, or a pooler that can route
+it to one. Physical copies retain the system identifier, database OID, and
+database name, so a lagging copy can pass the identity check and then cause a
+spurious fatal mismatch because recent stored rows are absent. A logical
+restore has a new identity: repoint both URLs to its primary together so both
+connections observe that new identity. A mixed old/restored pair fails the
+startup check, as intended.
+
 Provision the login after `phase-runner init-schema` (substitute the database,
 role, and secret through the normal secret-management path):
 
@@ -118,9 +127,17 @@ above that seam is rejected before redo state is created.
 `node_checked`. A generic RPC kind is not accepted as Base verification
 authority because it does not identify the ratified independent provider.
 Each completed verification batch logs its actual dRPC request count, including
-transport retries, range-splitting attempts, and target-marker checks. Record
-those counts and the provider's billed volume during the production sweep; the
-measured dRPC cost remains a required D3 cutover input.
+transport retries, range-splitting attempts, and target-marker checks. The count
+is log-only: `chain_phase_state` does not persist it. At sweep time, copy every
+structured `INFO` event with
+`message="stored history verification batch matched its reference"` and fields
+`chain_id`, `source_key`, `reference_kind`,
+`reference_verification_level`, `reported_verification_level`, `from_block`,
+`to_block`, and `reference_rpc_request_count` into the durable operational
+record alongside the provider's billed volume. If those events are lost, phase
+state cannot reconstruct the count. The measured dRPC cost remains a required
+D3 cutover input; D1/D7 tooling must close this durable-accounting gap before
+automating the evidence capture.
 For every configured chain on which canonical-head hydration runs (currently
 `ethereum-mainnet`), `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS` must contain a
 `CHAIN=HTTP_URL` entry. A missing entry is a fatal project-phase configuration
@@ -132,11 +149,13 @@ One-shot finite phase work is available through `phase-runner redo` for
 `ingest`, `interpret`, `project`, and `verify`. Verify redo checks its source
 and SELECT-only database configuration before phase initialization, locking,
 or redo-state publication.
-It rechecks the requested range, remains below the recorded finalized extent,
-and persists the level reported by the production verifier. A partial redo
-retains the level for the full recorded extent; a full-extent redo reports the
-level fixed by its source kind. An interrupted attempt keeps the normal
-resumable redo marker and must be rerun with the same range.
+It rechecks the requested range and cannot target above the chain's current
+finalized head. The range is not limited to the previously reported
+verification extent: a never-verified range below finality may be checked.
+Completion restores the pre-redo normal extent; a partial redo retains its
+level, while a redo covering the full retained extent can report the level
+fixed by its source kind. An interrupted attempt keeps the normal resumable
+redo marker and must be rerun with the same range.
 Historical `live` redo is rejected because live follows only the current head.
 The not-yet-implemented flag recomputation path also fails explicitly. Project
 redo and an interpret-to-project cascade use
@@ -164,13 +183,20 @@ follow, the `live` row records the same stop reason. The other configured chain
 continues.
 
 Treat the mismatch as a data-integrity incident. Preserve the recorded context
-for diagnosis. Then wipe the affected chain's schema-v2 data, ingest it again
-from the configured sources, rebuild interpretation and projections, and rerun
-verification. Do not edit immutable raw rows in place and do not mark the phase
-complete manually. A normal retry resumes from the last successful verification
-batch and retains the weaker level for the resulting whole extent if the
-reference kind changed. A failed verify redo is resumed by rerunning the same
-redo command after the wipe-and-resync repair.
+for diagnosis. Then wipe the affected chain's schema-v2 data, including its
+`chain_phase_state` and `ingest_cursors` rows, ingest it again from the
+configured sources, rebuild interpretation and projections, and rerun
+verification from an empty verify cursor. Do not edit immutable raw rows in
+place and do not mark the phase complete manually. A raw-data-only wipe is
+unsafe: normal verification resumes at one block above its last successful
+cursor and does not re-verify the re-ingested prefix below that cursor. If an
+approved repair procedure intentionally preserves phase state, run a verify
+redo over the full repaired verification interval, from the durable ingest
+start through the applicable verification bound (the finalized head,
+additionally capped at the Base seam for dRPC), before allowing the normal
+verifier to resume. Under that state-preserving alternative, a failed verify
+redo retains its marker and is resumed by rerunning the same redo command after
+repair. After a full phase-state reset, rerun the normal pipeline instead.
 
 ## Carried-raw cutover gate
 

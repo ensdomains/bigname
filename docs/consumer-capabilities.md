@@ -85,7 +85,10 @@ API route.
   finalized block. Its extent cannot pass the Coinbase-to-dRPC ingest seam at
   block `48,428,000`: later Base facts came from dRPC, so reading them from dRPC
   again would not be an independent comparison. It does not mean that a Base
-  node checked the data.
+  node checked the data. The cap includes seam block `48,428,000`, which was
+  fetched from both Coinbase and dRPC; its selected stored copy may therefore
+  make that one comparison dRPC-vs-dRPC, and any disagreement still fails
+  closed.
 - `verified (node-checked)` means the canonical selected raw logs match a local
   node through the reported finalized block. Ethereum earns this label from
   reth. A dRPC-backed Base verification cannot record this level.
