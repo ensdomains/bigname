@@ -71,6 +71,7 @@ mod v2_resolver {
         event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap);
         event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName);
         event NamedResource(uint256 indexed resource, bytes name);
+        event NamedTextResource(uint256 indexed resource, bytes name, bytes32 indexed keyHash, string key);
     }
 }
 
@@ -88,6 +89,29 @@ mod resolver_name {
 
     sol! {
         event NameChanged(bytes32 indexed node, string name);
+    }
+}
+
+mod resolver_strings {
+    use alloy_sol_types::sol;
+
+    sol! {
+        event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value);
+        event DataChanged(bytes32 indexed node, string indexed indexedKey, string key, bytes indexed indexedData);
+        event NameForAddrChanged(address indexed addr, string name);
+        event NamedTextResource(uint256 indexed resource, bytes name, bytes32 indexed keyHash, string key);
+    }
+}
+
+mod raw_resolver_strings {
+    use alloy_sol_types::sol;
+
+    sol! {
+        event RawNameChanged(bytes32 indexed node, bytes name);
+        event RawTextChanged(bytes32 indexed node, bytes32 indexed indexedKey, bytes key, bytes value);
+        event RawDataChanged(bytes32 indexed node, bytes32 indexed indexedKey, bytes key, bytes32 indexed indexedData);
+        event RawNameForAddrChanged(address indexed addr, bytes name);
+        event RawNamedTextResource(uint256 indexed resource, bytes name, bytes32 indexed keyHash, bytes key);
     }
 }
 
@@ -1410,6 +1434,64 @@ fn announced_registry_prefers_a_same_namespace_declaring_manifest() -> anyhow::R
         .expect("registry announcement event");
     assert_eq!(normalized.source_manifest_id, Some(66));
     assert_eq!(output.discovery_edges[0].source_manifest_id, 66);
+    Ok(())
+}
+
+#[test]
+fn foreign_announcement_does_not_make_declared_admission_tie_match_all() -> anyhow::Result<()> {
+    let resolver_event = (
+        "AddrChanged",
+        "event AddrChanged(bytes32 indexed node, address a)",
+        &[][..],
+        &["RecordChanged"][..],
+    );
+    let mut foreign_announcement = admission(68, "registry");
+    foreign_announcement.role = None;
+    foreign_announcement.discovery_edge_kind = Some("registry_announcement".to_owned());
+    foreign_announcement.discovery_from_contract_instance_id =
+        Some(foreign_announcement.contract_instance_id);
+    foreign_announcement.discovery_observation_key =
+        Some("registry-announcement:foreign".to_owned());
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![
+            manifest_with_events(67, "ens", "ens_v1_resolver_l1", &[resolver_event]),
+            manifest_with_events(
+                68,
+                "foreign",
+                "ens_v2_registry_l1",
+                &[(
+                    "RegistryCreated",
+                    "event RegistryCreated()",
+                    &[][..],
+                    &["RegistryCreated"][..],
+                )],
+            ),
+            manifest_with_events(
+                69,
+                "basenames",
+                "basenames_base_resolver",
+                &[resolver_event],
+            ),
+        ],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(67, "resolver"), foreign_announcement],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw(resolver::AddrChanged {
+            node: B256::repeat_byte(0x67),
+            a: CONTRACT.parse()?,
+        }
+        .encode_log_data())],
+    })?;
+
+    let event = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RecordChanged")
+        .expect("declared resolver admission");
+    assert_eq!(event.source_manifest_id, Some(67));
+    assert_eq!(event.namespace, "ens");
     Ok(())
 }
 
@@ -4502,6 +4584,66 @@ fn hostile_alias_endpoints_emit_shadow_preimages() -> anyhow::Result<()> {
 }
 
 #[test]
+fn malformed_dns_wire_names_emit_no_normalized_identity_observation() -> anyhow::Result<()> {
+    let malformed = vec![3, b'a', 0];
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest_with_events(
+            77,
+            "ens",
+            "ens_v2_resolver_l1",
+            &[
+                (
+                    "AliasChanged",
+                    "event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName)",
+                    &[],
+                    &["AliasChanged", "PreimageObserved"],
+                ),
+                (
+                    "NamedResource",
+                    "event NamedResource(uint256 indexed resource, bytes name)",
+                    &[],
+                    &["PreimageObserved"],
+                ),
+            ],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(77, "resolver")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            raw_at(
+                v2_resolver::AliasChanged {
+                    indexedFromName: keccak256(&malformed),
+                    indexedToName: keccak256([]),
+                    fromName: malformed.clone().into(),
+                    toName: Vec::new().into(),
+                }
+                .encode_log_data(),
+                1,
+                0,
+                CONTRACT,
+            ),
+            raw_at(
+                v2_resolver::NamedResource {
+                    resource: U256::from(1),
+                    name: malformed.into(),
+                }
+                .encode_log_data(),
+                1,
+                1,
+                CONTRACT,
+            ),
+        ],
+    })?;
+
+    assert!(output.normalized_events.is_empty());
+    assert!(output.name_surfaces.is_empty());
+    assert!(output.label_preimages.is_empty());
+    Ok(())
+}
+
+#[test]
 fn non_utf8_named_resource_emits_shadow_without_resolver_hint() -> anyhow::Result<()> {
     assert_named_resource_shadow_without_hint(vec![0xff], None)
 }
@@ -4509,6 +4651,76 @@ fn non_utf8_named_resource_emits_shadow_without_resolver_hint() -> anyhow::Resul
 #[test]
 fn normalization_changed_named_resource_does_not_seed_resolver_hint() -> anyhow::Result<()> {
     assert_named_resource_shadow_without_hint(b"Alice".to_vec(), Some("Alice"))
+}
+
+#[test]
+fn nul_named_text_key_remains_lossless_in_later_permission_hint() -> anyhow::Result<()> {
+    let encoded_name = b"\x05alice\x03eth\0".to_vec();
+    let raw_key = b"x\0y";
+    let resource = U256::from(8);
+    let manifest = manifest_with_events(
+        76,
+        "ens",
+        "ens_v2_resolver_l1",
+        &[
+            (
+                "NamedTextResource",
+                "event NamedTextResource(uint256 indexed resource, bytes name, bytes32 indexed keyHash, string key)",
+                &[],
+                &["PreimageObserved"],
+            ),
+            (
+                "EACRolesChanged",
+                "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)",
+                &[],
+                &["PermissionChanged"],
+            ),
+        ],
+    );
+    let named = with_topic0(
+        raw_resolver_strings::RawNamedTextResource {
+            resource,
+            name: encoded_name.into(),
+            keyHash: keccak256(raw_key),
+            key: raw_key.to_vec().into(),
+        }
+        .encode_log_data(),
+        v2_resolver::NamedTextResource::SIGNATURE_HASH,
+    );
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(76, "resolver")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            raw_at(named, 1, 0, CONTRACT),
+            raw_at(
+                v2_resolver::EACRolesChanged {
+                    resource,
+                    account: CONTRACT.parse()?,
+                    oldRoleBitmap: U256::ZERO,
+                    newRoleBitmap: U256::from(1),
+                }
+                .encode_log_data(),
+                1,
+                1,
+                CONTRACT,
+            ),
+        ],
+    })?;
+
+    let permission = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "PermissionChanged")
+        .expect("permission using named-text hint");
+    assert_eq!(
+        permission.after_state["selector"]["key"],
+        json!({"encoding":"hex","bytes":"0x780079"})
+    );
+    Ok(())
 }
 
 fn assert_named_resource_shadow_without_hint(
@@ -4798,16 +5010,381 @@ fn restored_reservation_does_not_become_a_registration_on_resource_link() -> any
 }
 
 #[test]
-fn invalid_resolver_name_keeps_the_record_without_preimage_materialization() -> anyhow::Result<()> {
-    let encoded = resolver_name::NameChanged {
-        node: B256::repeat_byte(0x33),
-        name: "bad\0name".to_owned(),
-    }
-    .encode_log_data();
+fn nul_text_value_is_retained_as_tagged_raw_bytes() -> anyhow::Result<()> {
+    let key = b"url";
+    let raw_value = b"a\0b";
+    let encoded = with_topic0(
+        raw_resolver_strings::RawTextChanged {
+            node: B256::repeat_byte(0x31),
+            indexedKey: keccak256(key),
+            key: key.to_vec().into(),
+            value: raw_value.to_vec().into(),
+        }
+        .encode_log_data(),
+        resolver_strings::TextChanged::SIGNATURE_HASH,
+    );
     let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest(
             53,
+            "ens_v1_resolver_l1",
+            "TextChanged",
+            "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+            &[],
+            &["RecordChanged"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: Vec::new(),
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw(encoded)],
+    })?;
+
+    let event = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RecordChanged")
+        .expect("NUL text value observation");
+    assert_eq!(event.after_state["selector_key"], "url");
+    assert_eq!(
+        event.after_state["value"],
+        json!({"encoding":"hex","bytes":"0x610062"})
+    );
+    Ok(())
+}
+
+#[test]
+fn nul_text_key_hashes_raw_bytes_and_uses_a_lossless_selector() -> anyhow::Result<()> {
+    let raw_key = b"x\0y";
+    let encoded = with_topic0(
+        raw_resolver_strings::RawTextChanged {
+            node: B256::repeat_byte(0x32),
+            indexedKey: keccak256(raw_key),
+            key: raw_key.to_vec().into(),
+            value: b"ok".to_vec().into(),
+        }
+        .encode_log_data(),
+        resolver_strings::TextChanged::SIGNATURE_HASH,
+    );
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            54,
+            "ens_v1_resolver_l1",
+            "TextChanged",
+            "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+            &[],
+            &["RecordChanged"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: Vec::new(),
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw(encoded)],
+    })?;
+
+    let event = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RecordChanged")
+        .expect("NUL text key observation");
+    assert_eq!(event.after_state["record_key"], "text_opaque:0x780079");
+    assert_eq!(event.after_state["record_family"], "text_opaque");
+    assert_eq!(event.after_state["selector_key"], "0x780079");
+    assert_eq!(
+        event.after_state["raw_selector_key"],
+        json!({"encoding":"hex","bytes":"0x780079"})
+    );
+    assert_eq!(event.after_state["value"], "ok");
+    Ok(())
+}
+
+#[test]
+fn leading_tilde_text_key_remains_a_plain_projection_selector() -> anyhow::Result<()> {
+    let raw_key = b"~url";
+    let encoded = with_topic0(
+        raw_resolver_strings::RawTextChanged {
+            node: B256::repeat_byte(0x34),
+            indexedKey: keccak256(raw_key),
+            key: raw_key.to_vec().into(),
+            value: b"ok".to_vec().into(),
+        }
+        .encode_log_data(),
+        resolver_strings::TextChanged::SIGNATURE_HASH,
+    );
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            82,
+            "ens_v1_resolver_l1",
+            "TextChanged",
+            "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+            &[],
+            &["RecordChanged"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: Vec::new(),
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw(encoded)],
+    })?;
+
+    let event = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RecordChanged")
+        .expect("leading-tilde text key observation");
+    assert_eq!(event.after_state["record_key"], "text:~url");
+    assert_eq!(event.after_state["record_family"], "text");
+    assert_eq!(event.after_state["selector_key"], "~url");
+    assert!(event.after_state.get("raw_selector_key").is_none());
+    Ok(())
+}
+
+#[test]
+fn nul_v2_text_key_uses_a_projection_safe_opaque_selector() -> anyhow::Result<()> {
+    let raw_key = b"v2\0key";
+    let encoded = with_topic0(
+        raw_resolver_strings::RawTextChanged {
+            node: B256::repeat_byte(0x35),
+            indexedKey: keccak256(raw_key),
+            key: raw_key.to_vec().into(),
+            value: b"ok".to_vec().into(),
+        }
+        .encode_log_data(),
+        resolver_strings::TextChanged::SIGNATURE_HASH,
+    );
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            83,
+            "ens_v2_resolver_l1",
+            "TextChanged",
+            "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+            &[],
+            &["RecordChanged"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(83, "resolver")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw(encoded)],
+    })?;
+
+    let event = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RecordChanged")
+        .expect("ENSv2 NUL text key observation");
+    assert_eq!(event.after_state["record_family"], "text_opaque");
+    assert_eq!(event.after_state["selector_key"], "0x7632006b6579");
+    assert_eq!(
+        event.after_state["raw_selector_key"],
+        json!({"encoding":"hex","bytes":"0x7632006b6579"})
+    );
+    Ok(())
+}
+
+#[test]
+fn nul_data_key_uses_a_projection_safe_opaque_selector() -> anyhow::Result<()> {
+    let raw_key = b"data\0key";
+    let encoded = with_topic0(
+        raw_resolver_strings::RawDataChanged {
+            node: B256::repeat_byte(0x36),
+            indexedKey: keccak256(raw_key),
+            key: raw_key.to_vec().into(),
+            indexedData: B256::repeat_byte(0x37),
+        }
+        .encode_log_data(),
+        resolver_strings::DataChanged::SIGNATURE_HASH,
+    );
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            84,
+            "ens_v1_resolver_l1",
+            "DataChanged",
+            "event DataChanged(bytes32 indexed node, string indexed indexedKey, string key, bytes indexed indexedData)",
+            &[],
+            &["RecordChanged"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: Vec::new(),
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw(encoded)],
+    })?;
+
+    let event = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RecordChanged")
+        .expect("NUL data key observation");
+    assert_eq!(event.after_state["record_family"], "data_opaque");
+    assert_eq!(event.after_state["selector_key"], "0x64617461006b6579");
+    assert_eq!(
+        event.after_state["raw_selector_key"],
+        json!({"encoding":"hex","bytes":"0x64617461006b6579"})
+    );
+    Ok(())
+}
+
+#[test]
+fn nul_resolver_name_emits_a_shadow_with_exact_raw_preimage() -> anyhow::Result<()> {
+    assert_hostile_resolver_name(b"bad\0name".to_vec(), 55)
+}
+
+#[test]
+fn invalid_utf8_resolver_name_emits_no_lossy_fabricated_hash() -> anyhow::Result<()> {
+    let raw_label = vec![0xff, 0xfe];
+    let output = hostile_resolver_name_output(raw_label.clone(), 56)?;
+    let raw_namehash = super::common::namehash_raw([raw_label.as_slice()].into_iter());
+    assert_shadow_output(&output, &raw_namehash, &raw_label, None);
+    assert!(
+        output
+            .label_preimages
+            .iter()
+            .all(|preimage| preimage.raw_label != "��".as_bytes()),
+        "lossy UTF-8 replacement bytes must never become a chain preimage"
+    );
+    let event = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RecordChanged")
+        .expect("invalid UTF-8 name record");
+    assert_eq!(
+        event.after_state["raw_name"],
+        json!({"encoding":"hex","bytes":"0xfffe"})
+    );
+    Ok(())
+}
+
+#[test]
+fn invalid_utf8_reverse_name_emits_exact_shadow_preimage() -> anyhow::Result<()> {
+    let raw_name = vec![0xff];
+    let encoded = with_topic0(
+        raw_resolver_strings::RawNameForAddrChanged {
+            addr: CONTRACT.parse()?,
+            name: raw_name.clone().into(),
+        }
+        .encode_log_data(),
+        resolver_strings::NameForAddrChanged::SIGNATURE_HASH,
+    );
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            78,
+            "basenames_base_primary",
+            "NameForAddrChanged",
+            "event NameForAddrChanged(address indexed addr, string name)",
+            &[],
+            &["ReverseChanged", "RecordChanged"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(78, "reverse_registrar")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw(encoded)],
+    })?;
+
+    let namehash = super::common::namehash_raw([raw_name.as_slice()].into_iter());
+    assert_shadow_output(&output, &namehash, &raw_name, None);
+    let record = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RecordChanged")
+        .expect("reverse name record");
+    assert_eq!(record.after_state["raw_name"], json!(null));
+    assert_eq!(
+        record.after_state["raw_name_bytes"],
+        json!({"encoding":"hex","bytes":"0xff"})
+    );
+    Ok(())
+}
+
+#[test]
+fn nul_v2_resolver_name_emits_exact_shadow_preimage() -> anyhow::Result<()> {
+    let raw_name = b"bad\0name".to_vec();
+    let encoded = with_topic0(
+        raw_resolver_strings::RawNameChanged {
+            node: B256::repeat_byte(0x79),
+            name: raw_name.clone().into(),
+        }
+        .encode_log_data(),
+        resolver_name::NameChanged::SIGNATURE_HASH,
+    );
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            79,
+            "ens_v2_resolver_l1",
+            "NameChanged",
+            "event NameChanged(bytes32 indexed node, string name)",
+            &[],
+            &["RecordChanged"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(79, "resolver")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw(encoded)],
+    })?;
+
+    let namehash = super::common::namehash_raw([raw_name.as_slice()].into_iter());
+    assert_shadow_output(&output, &namehash, &raw_name, None);
+    let record = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RecordChanged")
+        .expect("ENSv2 hostile name record");
+    assert_eq!(
+        record.after_state["raw_name"],
+        json!({"encoding":"hex","bytes":"0x626164006e616d65"})
+    );
+    Ok(())
+}
+
+fn assert_hostile_resolver_name(raw_name: Vec<u8>, manifest_id: i64) -> anyhow::Result<()> {
+    let output = hostile_resolver_name_output(raw_name.clone(), manifest_id)?;
+    let raw_labels = raw_name
+        .split(|byte| *byte == b'.')
+        .map(<[u8]>::to_vec)
+        .collect::<Vec<_>>();
+    let raw_namehash = super::common::namehash_raw(raw_labels.iter().map(Vec::as_slice));
+    let surface = output
+        .name_surfaces
+        .iter()
+        .find(|surface| surface.namehash == raw_namehash)
+        .expect("hostile resolver-name shadow");
+    assert_eq!(surface.visibility_state, "shadow");
+    assert!(output.surface_bindings.is_empty());
+    for raw_label in raw_labels {
+        assert!(
+            output
+                .label_preimages
+                .iter()
+                .any(|preimage| preimage.raw_label == raw_label)
+        );
+    }
+    Ok(())
+}
+
+fn hostile_resolver_name_output(
+    raw_name: Vec<u8>,
+    manifest_id: i64,
+) -> anyhow::Result<BatchOutput> {
+    let encoded = with_topic0(
+        raw_resolver_strings::RawNameChanged {
+            node: B256::repeat_byte(0x33),
+            name: raw_name.into(),
+        }
+        .encode_log_data(),
+        resolver_name::NameChanged::SIGNATURE_HASH,
+    );
+    interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            manifest_id,
             "ens_v1_resolver_l1",
             "NameChanged",
             "event NameChanged(bytes32 indexed node, string name)",
@@ -4819,14 +5396,7 @@ fn invalid_resolver_name_keeps_the_record_without_preimage_materialization() -> 
         prior_events: Vec::new(),
         blocks: Vec::new(),
         raw_logs: vec![raw(encoded)],
-    })?;
-
-    assert!(output.normalized_events.iter().any(|event| {
-        event.event_kind == "RecordChanged" && event.after_state["raw_name"] == "bad\0name"
-    }));
-    assert!(output.label_preimages.is_empty());
-    assert!(output.name_surfaces.is_empty());
-    Ok(())
+    })
 }
 
 #[test]

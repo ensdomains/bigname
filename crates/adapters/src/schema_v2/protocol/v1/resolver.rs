@@ -3,28 +3,39 @@ use alloy_sol_types::sol;
 use anyhow::bail;
 use serde_json::{Map, Value, json};
 
-use super::super::{Interpreted, ensure_declared};
-use super::support::{name_labels, single_event};
-use crate::evm_abi::{address_hex, decode_event_log, hex_string};
-use crate::schema_v2::{catalog::Selected, model::RawLogInput, state::State};
+use super::super::{Interpreted, ensure_declared, raw_name_observation};
+use super::support::single_event;
+use crate::evm_abi::{address_hex, decode_event_log, decode_event_log_data_as, hex_string};
+use crate::schema_v2::{
+    catalog::Selected,
+    common::{event_string_has_content, event_string_selector, event_string_value},
+    model::RawLogInput,
+    state::State,
+};
 
 mod text_without_value {
     use super::*;
-    sol! { event TextChanged(bytes32 indexed node, string indexed indexedKey, string key); }
+    sol! { event RawTextChanged(bytes32 indexed node, bytes32 indexed indexedKey, bytes key); }
+}
+
+mod raw_strings {
+    use super::*;
+    sol! {
+        event RawNameChanged(bytes32 indexed node, bytes name);
+        event RawTextChanged(bytes32 indexed node, bytes32 indexed indexedKey, bytes key, bytes value);
+        event RawDataChanged(bytes32 indexed node, bytes32 indexed indexedKey, bytes key, bytes32 indexed indexedData);
+    }
 }
 
 sol! {
     event AddrChanged(bytes32 indexed node, address a);
     event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress);
-    event NameChanged(bytes32 indexed node, string name);
-    event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value);
     event ContentChanged(bytes32 indexed node, bytes32 hash);
     event ContenthashChanged(bytes32 indexed node, bytes hash);
     event ABIChanged(bytes32 indexed node, uint256 indexed contentType);
     event DNSRecordChanged(bytes32 indexed node, bytes name, uint16 resource, bytes record);
     event DNSRecordDeleted(bytes32 indexed node, bytes name, uint16 resource);
     event DNSZonehashChanged(bytes32 indexed node, bytes lastzonehash, bytes zonehash);
-    event DataChanged(bytes32 indexed node, string indexed indexedKey, string key, bytes indexed indexedData);
     event InterfaceChanged(bytes32 indexed node, bytes4 indexed interfaceID, address implementer);
     event VersionChanged(bytes32 indexed node, uint64 newVersion);
 }
@@ -34,6 +45,7 @@ pub(super) fn interpret(
     raw: &RawLogInput,
     state: &mut State,
 ) -> anyhow::Result<Interpreted> {
+    let mut shadow_names = Vec::new();
     let (kind, after, labels) = match selected.event.name.as_str() {
         "AddrChanged" => {
             let event = decode_event_log::<AddrChanged>(
@@ -50,7 +62,7 @@ pub(super) fn interpret(
                     hex_string(event.node),
                     "addr:60".to_owned(),
                     "addr",
-                    Some("60".to_owned()),
+                    Some(json!("60")),
                     Some(json!(address_hex(event.a))),
                     None,
                 ),
@@ -72,7 +84,7 @@ pub(super) fn interpret(
                     hex_string(event.node),
                     format!("addr:{}", event.coinType),
                     "addr",
-                    Some(event.coinType.to_string()),
+                    Some(json!(event.coinType.to_string())),
                     Some(
                         if event.coinType == alloy_primitives::U256::from(60)
                             && event.newAddress.len() == 20
@@ -88,12 +100,15 @@ pub(super) fn interpret(
             )
         }
         "NameChanged" => {
-            let event = decode_event_log::<NameChanged>(
+            let event = decode_event_log_data_as::<raw_strings::RawNameChanged>(
                 &raw.topics,
                 &raw.data,
+                &selected.event.topic0,
                 "NameChanged log is malformed",
             )?;
-            let labels = name_labels(&event.name, "NameChanged_name").unwrap_or_default();
+            let raw_name = event.name.to_vec();
+            let (labels, shadows) = raw_name_observation(&raw_name, "NameChanged_name");
+            shadow_names.extend(shadows);
             (
                 "RecordChanged",
                 record_after(
@@ -105,7 +120,7 @@ pub(super) fn interpret(
                     "name",
                     None,
                     None,
-                    Some(event.name),
+                    Some(event_string_value(&raw_name)),
                 ),
                 labels,
             )
@@ -113,58 +128,54 @@ pub(super) fn interpret(
         "TextChanged"
             if selected.event.signature == "TextChanged(bytes32,string,string,string)" =>
         {
-            let event = decode_event_log::<TextChanged>(
+            let event = decode_event_log_data_as::<raw_strings::RawTextChanged>(
                 &raw.topics,
                 &raw.data,
+                &selected.event.topic0,
                 "TextChanged log is malformed",
             )?;
-            if event.key.trim().is_empty()
-                || hex_string(event.indexedKey) != format!("{:#x}", keccak256(event.key.as_bytes()))
-            {
+            if !event_string_has_content(&event.key) || event.indexedKey != keccak256(&event.key) {
                 return Ok(Interpreted::new());
             }
-            (
-                "RecordChanged",
-                record_after(
-                    selected,
-                    raw,
-                    "TextChanged",
-                    hex_string(event.node),
-                    format!("text:{}", event.key),
-                    "text",
-                    Some(event.key),
-                    Some(json!(event.value)),
-                    None,
-                ),
-                vec![],
-            )
+            let selector = event_string_selector("text", &event.key);
+            let mut after = record_after(
+                selected,
+                raw,
+                "TextChanged",
+                hex_string(event.node),
+                selector.record_key.clone(),
+                &selector.record_family,
+                Some(selector.selector_key.clone()),
+                Some(event_string_value(&event.value)),
+                None,
+            );
+            selector.retain_raw_selector(&mut after);
+            ("RecordChanged", after, vec![])
         }
         "TextChanged" => {
-            let event = decode_event_log::<text_without_value::TextChanged>(
+            let event = decode_event_log_data_as::<text_without_value::RawTextChanged>(
                 &raw.topics,
                 &raw.data,
+                &selected.event.topic0,
                 "TextChanged log is malformed",
             )?;
-            if event.key.trim().is_empty()
-                || hex_string(event.indexedKey) != format!("{:#x}", keccak256(event.key.as_bytes()))
-            {
+            if !event_string_has_content(&event.key) || event.indexedKey != keccak256(&event.key) {
                 return Ok(Interpreted::new());
             }
-            (
-                "RecordChanged",
-                record_after(
-                    selected,
-                    raw,
-                    "TextChanged",
-                    hex_string(event.node),
-                    format!("text:{}", event.key),
-                    "text",
-                    Some(event.key),
-                    None,
-                    None,
-                ),
-                vec![],
-            )
+            let selector = event_string_selector("text", &event.key);
+            let mut after = record_after(
+                selected,
+                raw,
+                "TextChanged",
+                hex_string(event.node),
+                selector.record_key.clone(),
+                &selector.record_family,
+                Some(selector.selector_key.clone()),
+                None,
+                None,
+            );
+            selector.retain_raw_selector(&mut after);
+            ("RecordChanged", after, vec![])
         }
         "VersionChanged" => {
             let event = decode_event_log::<VersionChanged>(
@@ -243,7 +254,7 @@ pub(super) fn interpret(
                     hex_string(event.node),
                     format!("abi:{}", event.contentType),
                     "abi",
-                    Some(event.contentType.to_string()),
+                    Some(json!(event.contentType.to_string())),
                     Some(json!(event.contentType.to_string())),
                     None,
                 ),
@@ -265,7 +276,11 @@ pub(super) fn interpret(
                     hex_string(event.node),
                     format!("dns:{}:{}", event.resource, hex_string(&event.name)),
                     "dns",
-                    Some(format!("{}:{}", event.resource, hex_string(&event.name))),
+                    Some(json!(format!(
+                        "{}:{}",
+                        event.resource,
+                        hex_string(&event.name)
+                    ))),
                     Some(json!({"encoding":"hex","bytes":hex_string(event.record)})),
                     None,
                 ),
@@ -287,7 +302,11 @@ pub(super) fn interpret(
                     hex_string(event.node),
                     format!("dns:{}:{}", event.resource, hex_string(&event.name)),
                     "dns",
-                    Some(format!("{}:{}", event.resource, hex_string(&event.name))),
+                    Some(json!(format!(
+                        "{}:{}",
+                        event.resource,
+                        hex_string(&event.name)
+                    ))),
                     Some(json!({"deleted":true})),
                     None,
                 ),
@@ -309,7 +328,7 @@ pub(super) fn interpret(
                     hex_string(event.node),
                     "dns:zonehash".to_owned(),
                     "dns",
-                    Some("zonehash".to_owned()),
+                    Some(json!("zonehash")),
                     Some(json!({
                         "previous":{"encoding":"hex","bytes":hex_string(event.lastzonehash)},
                         "current":{"encoding":"hex","bytes":hex_string(event.zonehash)},
@@ -320,29 +339,29 @@ pub(super) fn interpret(
             )
         }
         "DataChanged" => {
-            let event = decode_event_log::<DataChanged>(
+            let event = decode_event_log_data_as::<raw_strings::RawDataChanged>(
                 &raw.topics,
                 &raw.data,
+                &selected.event.topic0,
                 "DataChanged log is malformed",
             )?;
-            if hex_string(event.indexedKey) != format!("{:#x}", keccak256(event.key.as_bytes())) {
+            if event.indexedKey != keccak256(&event.key) {
                 return Ok(Interpreted::new());
             }
-            (
-                "RecordChanged",
-                record_after(
-                    selected,
-                    raw,
-                    "DataChanged",
-                    hex_string(event.node),
-                    format!("data:{}", event.key),
-                    "data",
-                    Some(event.key),
-                    Some(json!({"indexed_data_hash":hex_string(event.indexedData)})),
-                    None,
-                ),
-                vec![],
-            )
+            let selector = event_string_selector("data", &event.key);
+            let mut after = record_after(
+                selected,
+                raw,
+                "DataChanged",
+                hex_string(event.node),
+                selector.record_key.clone(),
+                &selector.record_family,
+                Some(selector.selector_key.clone()),
+                Some(json!({"indexed_data_hash":hex_string(event.indexedData)})),
+                None,
+            );
+            selector.retain_raw_selector(&mut after);
+            ("RecordChanged", after, vec![])
         }
         "InterfaceChanged" => {
             let event = decode_event_log::<InterfaceChanged>(
@@ -359,7 +378,7 @@ pub(super) fn interpret(
                     hex_string(event.node),
                     format!("interface:{}", hex_string(event.interfaceID)),
                     "interface",
-                    Some(hex_string(event.interfaceID)),
+                    Some(json!(hex_string(event.interfaceID))),
                     Some(json!(address_hex(event.implementer))),
                     None,
                 ),
@@ -382,6 +401,7 @@ pub(super) fn interpret(
         output.events[0].resource_id = Some(linked.resource_id);
     }
     output.labels = labels;
+    output.shadow_names = shadow_names;
     Ok(output)
 }
 
@@ -393,9 +413,9 @@ fn record_after(
     node: String,
     record_key: String,
     record_family: &str,
-    selector_key: Option<String>,
+    selector_key: Option<Value>,
     value: Option<Value>,
-    raw_name: Option<String>,
+    raw_name: Option<Value>,
 ) -> Value {
     let value_retained = value.is_some();
     let mut after = Map::from_iter([
@@ -415,7 +435,7 @@ fn record_after(
         after.insert("value".to_owned(), value);
     }
     if let Some(raw_name) = raw_name {
-        after.insert("raw_name".to_owned(), json!(raw_name));
+        after.insert("raw_name".to_owned(), raw_name);
     }
     Value::Object(after)
 }

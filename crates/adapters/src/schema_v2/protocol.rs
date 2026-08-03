@@ -77,6 +77,41 @@ pub(super) struct ShadowNameDraft {
     pub source_kind: String,
 }
 
+pub(super) fn raw_name_observation(
+    raw_name: &[u8],
+    source_kind: &str,
+) -> (Vec<LabelDraft>, Vec<ShadowNameDraft>) {
+    if raw_name.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let raw_labels = raw_name
+        .split(|byte| *byte == b'.')
+        .map(<[u8]>::to_vec)
+        .collect::<Vec<_>>();
+    let raw_namehash = super::common::namehash_raw(raw_labels.iter().map(Vec::as_slice));
+    if super::common::surface_labels(&raw_labels).is_some() {
+        (
+            raw_labels
+                .into_iter()
+                .map(|raw_label| LabelDraft {
+                    raw_label,
+                    source_kind: source_kind.to_owned(),
+                })
+                .collect(),
+            Vec::new(),
+        )
+    } else {
+        (
+            Vec::new(),
+            vec![ShadowNameDraft {
+                raw_labels,
+                namehash: raw_namehash,
+                source_kind: source_kind.to_owned(),
+            }],
+        )
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct NameDraft {
     pub labels: Vec<String>,

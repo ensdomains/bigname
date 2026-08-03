@@ -436,6 +436,16 @@ async fn reanchor_stable_identities(
             "token_lineages" => TOKEN_LINEAGE_ID_KEY,
             _ => unreachable!("fixed stable identity table"),
         };
+        let deactivation_assignment = if table == "name_surfaces" {
+            ",
+                deactivated_at = CASE
+                    WHEN identity.visibility_state = 'shadow'
+                        THEN candidate.block_timestamp
+                    ELSE NULL
+                END"
+        } else {
+            ""
+        };
         let statement = format!(
             "
             WITH candidates AS (
@@ -444,6 +454,7 @@ async fn reanchor_stable_identities(
                        event.block_number,
                        event.raw_fact_ref AS provenance,
                        lineage.canonicality_state,
+                       lineage.block_timestamp,
                        row_number() OVER (
                            PARTITION BY identity.{identity_column}
                            ORDER BY event.block_number,
@@ -470,7 +481,7 @@ async fn reanchor_stable_identities(
             SET block_hash = candidate.block_hash,
                 block_number = candidate.block_number,
                 provenance = candidate.provenance,
-                canonicality_state = candidate.canonicality_state,
+                canonicality_state = candidate.canonicality_state{deactivation_assignment},
                 observed_at = now()
             FROM candidates candidate
             WHERE candidate.candidate_rank = 1

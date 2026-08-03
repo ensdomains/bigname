@@ -107,6 +107,12 @@ async fn write_surfaces(
                         THEN EXCLUDED.provenance
                     ELSE name_surfaces.provenance
                 END,
+                deactivated_at = CASE
+                    WHEN name_surfaces.canonicality_state = 'orphaned'
+                      OR EXCLUDED.block_number < name_surfaces.block_number
+                        THEN EXCLUDED.deactivated_at
+                    ELSE name_surfaces.deactivated_at
+                END,
                 canonicality_state = CASE
                     WHEN name_surfaces.canonicality_state = 'orphaned'
                       OR EXCLUDED.block_number < name_surfaces.block_number

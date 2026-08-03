@@ -2,24 +2,37 @@ use alloy_sol_types::sol;
 use anyhow::bail;
 use serde_json::json;
 
-use super::super::{Interpreted, ensure_declared};
+use super::super::{Interpreted, ensure_declared, raw_name_observation};
 use super::support::{events, single_event};
-use crate::evm_abi::{address_hex, decode_event_log, hex_string};
-use crate::schema_v2::{catalog::Selected, common::namehash, model::RawLogInput};
+use crate::evm_abi::{address_hex, decode_event_log, decode_event_log_data_as, hex_string};
+use crate::schema_v2::{
+    catalog::Selected,
+    common::{decoded_label, event_string_value, namehash},
+    model::RawLogInput,
+};
+
+mod raw_strings {
+    use super::*;
+    sol! {
+        event RawNameForAddrChanged(address indexed addr, bytes name);
+    }
+}
 
 sol! {
-    event NameForAddrChanged(address indexed addr, string name);
     event ReverseClaimed(address indexed addr, bytes32 indexed node);
 }
 
 pub(super) fn interpret(selected: &Selected, raw: &RawLogInput) -> anyhow::Result<Interpreted> {
     match selected.event.name.as_str() {
         "NameForAddrChanged" => {
-            let event = decode_event_log::<NameForAddrChanged>(
+            let event = decode_event_log_data_as::<raw_strings::RawNameForAddrChanged>(
                 &raw.topics,
                 &raw.data,
+                &selected.event.topic0,
                 "NameForAddrChanged log is malformed",
             )?;
+            let raw_name = event.name.to_vec();
+            let (labels, shadow_names) = raw_name_observation(&raw_name, "NameForAddrChanged_name");
             let kinds = vec!["ReverseChanged", "RecordChanged"];
             ensure_declared(selected, &kinds)?;
             let address = address_hex(event.addr);
@@ -54,9 +67,16 @@ pub(super) fn interpret(selected: &Selected, raw: &RawLogInput) -> anyhow::Resul
                 "record_key":"name",
                 "record_family":"name",
                 "selector_key":serde_json::Value::Null,
-                "raw_name":event.name,
+                "raw_name":decoded_label(&raw_name),
                 "primary_claim_source":primary_claim_source,
             });
+            if output.events[1].after_state["raw_name"].is_null()
+                && let Some(after_state) = output.events[1].after_state.as_object_mut()
+            {
+                after_state.insert("raw_name_bytes".to_owned(), event_string_value(&raw_name));
+            }
+            output.labels = labels;
+            output.shadow_names = shadow_names;
             Ok(output)
         }
         "ReverseClaimed" => {

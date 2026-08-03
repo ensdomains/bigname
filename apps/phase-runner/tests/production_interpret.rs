@@ -62,6 +62,7 @@ sol! {
         string key,
         string value
     );
+    event NameChanged(bytes32 indexed node, string name);
     event RegistryCreated();
     event NameWrapped(
         bytes32 indexed node,
@@ -70,6 +71,15 @@ sol! {
         uint32 fuses,
         uint64 expiry
     );
+}
+
+mod raw_string_events {
+    use alloy_sol_types::sol;
+
+    sol! {
+        event RawTextChanged(bytes32 indexed node, bytes32 indexed indexedKey, bytes key, bytes value);
+        event RawNameChanged(bytes32 indexed node, bytes name);
+    }
 }
 
 mod v2_registry_events {
@@ -512,6 +522,67 @@ async fn cached_prior_state_reloads_when_an_earlier_dependency_is_repaired() -> 
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(prior_registrant, None);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn completed_redo_evicts_cached_normal_fold_before_resume() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_redo_cache_evict").await?;
+    let chain = "interpret-redo-cache-evict";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice"), (501, "alice")]).await?;
+    let engine = Engine::new(scratch.pool().clone());
+    let first = engine
+        .run_batch(BatchRequest {
+            chain_id: chain.to_owned(),
+            from_block: 0,
+            to_block: 501,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    assert!(!first.complete);
+    assert_eq!(first.current.number, 499);
+
+    replace_registered_label(scratch.pool(), chain, 1, "bob").await?;
+    let redo_first = engine
+        .run_batch(BatchRequest {
+            chain_id: chain.to_owned(),
+            from_block: 0,
+            to_block: 501,
+            resume_current: None,
+            mode: InterpretRunMode::Redo,
+        })
+        .await?;
+    assert!(!redo_first.complete);
+    let redo_second = engine
+        .run_batch(BatchRequest {
+            chain_id: chain.to_owned(),
+            from_block: 0,
+            to_block: 501,
+            resume_current: Some(redo_first.current),
+            mode: InterpretRunMode::Redo,
+        })
+        .await?;
+    assert!(redo_second.complete);
+
+    let resumed = engine
+        .run_batch(BatchRequest {
+            chain_id: chain.to_owned(),
+            from_block: 0,
+            to_block: 501,
+            resume_current: Some(first.current),
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    assert!(resumed.complete);
+    let before_registrant: Option<String> = sqlx::query_scalar(
+        "SELECT before_state ->> 'registrant' FROM normalized_events \
+         WHERE chain_id = $1 AND block_number = 501 AND event_kind = 'RegistrationGranted'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(before_registrant, None, "resume must reload the redo fold");
     scratch.cleanup().await
 }
 
@@ -969,6 +1040,73 @@ async fn embedded_nul_label_persists_bytes_and_completes_as_shadow() -> Result<(
         .fetch_one(scratch.pool())
         .await?;
     assert_eq!(binding_count, 1);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn hostile_resolver_strings_persist_losslessly_and_batch_completes() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_hostile_resolver_strings").await?;
+    let chain = "interpret-hostile-resolver-strings";
+    seed_hostile_resolver_strings(scratch.pool(), chain).await?;
+
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+
+    let states: Vec<(i64, serde_json::Value)> = sqlx::query_as(
+        "
+        SELECT log_index, after_state
+        FROM normalized_events
+        WHERE chain_id = $1 AND event_kind = 'RecordChanged'
+        ORDER BY log_index
+        ",
+    )
+    .bind(chain)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(states.len(), 4);
+    assert_eq!(
+        states[0].1["value"],
+        json!({"encoding":"hex","bytes":"0x610062"})
+    );
+    assert_eq!(
+        states[1].1["raw_selector_key"],
+        json!({"encoding":"hex","bytes":"0x780079"})
+    );
+    assert_eq!(states[1].1["record_family"], "text_opaque");
+    assert_eq!(states[1].1["selector_key"], "0x780079");
+    assert_eq!(states[1].1["record_key"], "text_opaque:0x780079");
+    assert_eq!(
+        states[2].1["raw_name"],
+        json!({"encoding":"hex","bytes":"0x626164006e616d65"})
+    );
+    assert_eq!(
+        states[3].1["raw_name"],
+        json!({"encoding":"hex","bytes":"0xfffe"})
+    );
+    let hostile_preimages: Vec<(Vec<u8>, Option<String>, bool)> = sqlx::query_as(
+        "
+        SELECT raw_label, decoded_label, normalized_under_version
+        FROM label_preimages
+        WHERE raw_label IN ($1, $2)
+        ORDER BY raw_label
+        ",
+    )
+    .bind(b"bad\0name".as_slice())
+    .bind([0xff_u8, 0xfe].as_slice())
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(hostile_preimages.len(), 2);
+    assert!(
+        hostile_preimages
+            .iter()
+            .all(|(_, decoded, normalized)| decoded.is_none() && !normalized)
+    );
+    let shadows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM name_surfaces WHERE chain_id = $1 AND visibility_state = 'shadow'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(shadows, 2);
     scratch.cleanup().await
 }
 
@@ -2155,6 +2293,92 @@ async fn partial_redo_restores_resource_and_token_anchors_from_150_to_250() -> R
 }
 
 #[tokio::test]
+async fn partial_redo_reanchors_shadow_deactivation_time_to_surviving_observation() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_shadow_redo_reanchor").await?;
+    let chain = "interpret-shadow-redo-reanchor";
+    let hostile_label = "bad\u{1}";
+    seed_fixture(scratch.pool(), chain, &[(1, hostile_label)]).await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+
+    sqlx::query(
+        "
+        INSERT INTO chain_lineage (
+            chain_id, block_hash, parent_hash, block_number, block_timestamp,
+            canonicality_state
+        )
+        SELECT $1,
+               $1 || '-block-' || height::text,
+               $1 || '-block-' || (height - 1)::text,
+               height,
+               to_timestamp(height),
+               'canonical'::canonicality_state
+        FROM generate_series(2, 250) AS height
+        ",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "
+        INSERT INTO normalized_events (
+            event_identity, namespace, logical_name_id, resource_id, event_kind,
+            source_family, manifest_version, source_manifest_id, chain_id,
+            block_number, block_hash, raw_fact_ref, derivation_kind,
+            canonicality_state, before_state, after_state
+        )
+        SELECT 'shadow-anchor-observation-250', namespace, logical_name_id, resource_id,
+               event_kind, source_family, manifest_version, source_manifest_id, chain_id,
+               250, $2, jsonb_build_object('kind', 'raw_block'),
+               derivation_kind, 'canonical', '{}'::jsonb, after_state
+        FROM normalized_events
+        WHERE chain_id = $1 AND logical_name_id IS NOT NULL
+        ORDER BY normalized_event_id
+        LIMIT 1
+        ",
+    )
+    .bind(chain)
+    .bind(block_hash(chain, 250))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "DELETE FROM normalized_events WHERE chain_id = $1 AND event_identity <> 'shadow-anchor-observation-250'",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "
+        UPDATE name_surfaces
+        SET block_number = 150,
+            block_hash = $2,
+            deactivated_at = to_timestamp(150),
+            canonicality_state = 'canonical'
+        WHERE chain_id = $1
+        ",
+    )
+    .bind(chain)
+    .bind(block_hash(chain, 150))
+    .execute(scratch.pool())
+    .await?;
+    insert_name_registered(scratch.pool(), chain, 150, hostile_label).await?;
+
+    run_engine(scratch.pool(), chain, 100, 200, InterpretRunMode::Redo).await?;
+
+    let anchor: (i64, i64) = sqlx::query_as(
+        "
+        SELECT block_number, extract(epoch FROM deactivated_at)::bigint
+        FROM name_surfaces
+        WHERE chain_id = $1
+        ",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(anchor, (250, 250));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn redo_without_the_orphaned_terminal_fact_reopens_the_prior_binding() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_terminal_redo").await?;
     let chain = "interpret-terminal-redo";
@@ -2603,11 +2827,10 @@ async fn prior_state_ignores_events_whose_lineage_is_no_longer_live() -> Result<
 }
 
 #[tokio::test]
-async fn orphaned_token_and_resource_identities_reanchor_to_the_winning_observation() -> Result<()>
-{
+async fn orphaned_stable_identities_reanchor_to_the_winning_observation() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_identity_reanchor").await?;
     let chain = "interpret-identity-reanchor";
-    seed_fixture(scratch.pool(), chain, &[(1, "alice")]).await?;
+    seed_fixture(scratch.pool(), chain, &[(1, "bad\u{1}")]).await?;
     run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
 
     sqlx::query(
@@ -2631,6 +2854,21 @@ async fn orphaned_token_and_resource_identities_reanchor_to_the_winning_observat
             block_number = 0,
             provenance = '{\"branch\":\"losing\"}'::jsonb,
             canonicality_state = 'orphaned'
+        WHERE chain_id = $1
+        ",
+    )
+    .bind(chain)
+    .bind(block_hash(chain, 0))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "
+        UPDATE name_surfaces
+        SET block_hash = $2,
+            block_number = 0,
+            provenance = '{\"branch\":\"losing\"}'::jsonb,
+            canonicality_state = 'orphaned',
+            deactivated_at = to_timestamp(999)
         WHERE chain_id = $1
         ",
     )
@@ -2667,6 +2905,23 @@ async fn orphaned_token_and_resource_identities_reanchor_to_the_winning_observat
     .await?;
     assert_eq!(resource_anchor, (1, true, "canonical".into()));
     assert_eq!(lineage_anchor, (1, true, "canonical".into()));
+    let surface_anchor: (i64, bool, String, time::OffsetDateTime) = sqlx::query_as(
+        "
+        SELECT block_number,
+               provenance ->> 'branch' IS NULL,
+               canonicality_state::text,
+               deactivated_at
+        FROM name_surfaces
+        WHERE chain_id = $1
+        ",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(surface_anchor.0, 1);
+    assert!(surface_anchor.1);
+    assert_eq!(surface_anchor.2, "canonical");
+    assert_eq!(surface_anchor.3.unix_timestamp(), 1);
     scratch.cleanup().await
 }
 
@@ -3554,6 +3809,135 @@ async fn seed_announcement_fixture(pool: &PgPool, chain_id: &str) -> Result<()> 
     .await
 }
 
+async fn seed_hostile_resolver_strings(pool: &PgPool, chain_id: &str) -> Result<()> {
+    for block in 0..=1 {
+        sqlx::query(
+            "
+            INSERT INTO chain_lineage (
+                chain_id, block_hash, parent_hash, block_number, block_timestamp,
+                canonicality_state
+            )
+            VALUES ($1, $2, $3, $4, to_timestamp($4), 'canonical')
+            ",
+        )
+        .bind(chain_id)
+        .bind(block_hash(chain_id, block))
+        .bind((block > 0).then(|| block_hash(chain_id, block - 1)))
+        .bind(block)
+        .execute(pool)
+        .await?;
+    }
+    let payload = json!({
+        "manifest_version": 1,
+        "namespace": "ens",
+        "source_family": "ens_v1_resolver_l1",
+        "chain": chain_id,
+        "deployment_epoch": "fixture",
+        "rollout_status": "active",
+        "normalizer_version": NORMALIZER,
+        "capability_flags": {},
+        "roots": [],
+        "contracts": [],
+        "discovery_rules": [],
+        "abi": { "events": [
+            {
+                "name": "TextChanged",
+                "fragment": "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+                "emitter_roles": [],
+                "normalized_events": ["RecordChanged"]
+            },
+            {
+                "name": "NameChanged",
+                "fragment": "event NameChanged(bytes32 indexed node, string name)",
+                "emitter_roles": [],
+                "normalized_events": ["RecordChanged"]
+            }
+        ], "calls": [] }
+    });
+    insert_manifest(
+        pool,
+        chain_id,
+        "ens_v1_resolver_l1",
+        "tests/hostile-resolver-strings.toml",
+        payload,
+    )
+    .await?;
+    let transaction_hash = format!("{chain_id}-transaction-1");
+    sqlx::query(
+        "
+        INSERT INTO raw_transactions (
+            chain_id, block_hash, block_number, transaction_hash,
+            transaction_index, from_address, to_address
+        )
+        VALUES ($1, $2, 1, $3, 0, $4, $5)
+        ",
+    )
+    .bind(chain_id)
+    .bind(block_hash(chain_id, 1))
+    .bind(&transaction_hash)
+    .bind(SENDER)
+    .bind(CONTRACT)
+    .execute(pool)
+    .await?;
+    let node = B256::repeat_byte(0x31);
+    let logs = vec![
+        with_topic0(
+            raw_string_events::RawTextChanged {
+                node,
+                indexedKey: keccak256(b"url"),
+                key: b"url".to_vec().into(),
+                value: b"a\0b".to_vec().into(),
+            }
+            .encode_log_data(),
+            TextChanged::SIGNATURE_HASH,
+        ),
+        with_topic0(
+            raw_string_events::RawTextChanged {
+                node,
+                indexedKey: keccak256(b"x\0y"),
+                key: b"x\0y".to_vec().into(),
+                value: b"ok".to_vec().into(),
+            }
+            .encode_log_data(),
+            TextChanged::SIGNATURE_HASH,
+        ),
+        with_topic0(
+            raw_string_events::RawNameChanged {
+                node,
+                name: b"bad\0name".to_vec().into(),
+            }
+            .encode_log_data(),
+            NameChanged::SIGNATURE_HASH,
+        ),
+        with_topic0(
+            raw_string_events::RawNameChanged {
+                node,
+                name: vec![0xff, 0xfe].into(),
+            }
+            .encode_log_data(),
+            NameChanged::SIGNATURE_HASH,
+        ),
+    ];
+    for (log_index, encoded) in logs.into_iter().enumerate() {
+        insert_log(
+            pool,
+            chain_id,
+            &transaction_hash,
+            i64::try_from(log_index)?,
+            CONTRACT,
+            encoded.topics(),
+            encoded.data.as_ref(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+fn with_topic0(mut encoded: alloy_primitives::LogData, topic0: B256) -> alloy_primitives::LogData {
+    encoded.topics_mut()[0] = topic0;
+    encoded
+}
+
 async fn seed_hostile_wrapper_fixture(
     pool: &PgPool,
     chain_id: &str,
@@ -4050,6 +4434,37 @@ async fn insert_name_registered(
     .bind(block)
     .bind(transaction_hash)
     .bind(CONTRACT)
+    .bind(topics)
+    .bind(encoded.data.to_vec())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn replace_registered_label(
+    pool: &PgPool,
+    chain_id: &str,
+    block: i64,
+    label: &str,
+) -> Result<()> {
+    let encoded = NameRegistered {
+        name: label.to_owned(),
+        label: B256::from(keccak256(label.as_bytes())),
+        owner: CONTRACT.parse::<Address>()?,
+        expires: U256::from(1_000_000u64 + block as u64),
+    }
+    .encode_log_data();
+    let topics = encoded
+        .topics()
+        .iter()
+        .map(|topic| format!("{topic:#x}"))
+        .collect::<Vec<_>>();
+    sqlx::query(
+        "UPDATE raw_logs SET topics = $3, data = $4 \
+         WHERE chain_id = $1 AND block_number = $2",
+    )
+    .bind(chain_id)
+    .bind(block)
     .bind(topics)
     .bind(encoded.data.to_vec())
     .execute(pool)

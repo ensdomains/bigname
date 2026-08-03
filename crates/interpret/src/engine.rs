@@ -231,7 +231,7 @@ fn update_prior_sessions(
     complete: bool,
 ) {
     if matches!(key.mode, RunMode::Redo) && complete {
-        sessions.remove(&key);
+        sessions.retain(|candidate, _| candidate.chain_id != key.chain_id);
     } else {
         sessions.insert(
             key,

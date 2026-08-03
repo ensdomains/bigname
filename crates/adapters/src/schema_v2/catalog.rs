@@ -116,6 +116,8 @@ impl Catalog {
                 Some("registry_announcement") => 1,
                 None if announcement_namespaces.contains(source.namespace.as_str()) => 0,
                 None if !announcement_namespaces.is_empty() => 2,
+                // Protocol-specific discovery, including resolver admission, is direct authority
+                // rather than the declaration fallback ranked around registry announcements.
                 _ => 0,
             };
             let target_family = inferred_family(
@@ -166,7 +168,7 @@ impl Catalog {
                     .next()
                     .unwrap_or_else(|| contract_id(&raw.chain_id, &raw.emitting_address));
                 candidates.push((
-                    2,
+                    3,
                     Selected {
                         source: source.clone(),
                         event: event.clone(),

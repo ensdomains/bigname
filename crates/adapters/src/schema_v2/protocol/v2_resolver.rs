@@ -1,14 +1,17 @@
-use alloy_primitives::U256;
+use alloy_primitives::{U256, keccak256};
 use alloy_sol_types::sol;
 use anyhow::bail;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
-    evm_abi::{address_hex, decode_event_log, hex_string, u256_word_hex},
+    evm_abi::{address_hex, decode_event_log, decode_event_log_data_as, hex_string, u256_word_hex},
     schema_v2::{
         catalog::Selected,
-        common::{decode_dns_labels, namehash, namehash_raw, surface_labels},
+        common::{
+            decode_dns_labels, event_string_has_content, event_string_selector, event_string_value,
+            namehash, namehash_raw, surface_labels,
+        },
         model::RawLogInput,
         state::State,
     },
@@ -18,17 +21,24 @@ use super::{
     DiscoveryDraft, EventDraft, Interpreted, NameDraft, ResourceDraft, ShadowNameDraft,
     ensure_declared,
     permissions::{V2PermissionState, V2Vocabulary, v2_states},
+    raw_name_observation,
 };
+
+mod raw_strings {
+    use super::*;
+    sol! {
+        event RawTextChanged(bytes32 indexed node, bytes32 indexed indexedKey, bytes key, bytes value);
+        event RawNameChanged(bytes32 indexed node, bytes name);
+        event RawNamedTextResource(uint256 indexed resource, bytes name, bytes32 indexed keyHash, bytes key);
+    }
+}
 
 sol! {
     event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress);
-    event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value);
     event ContenthashChanged(bytes32 indexed node, bytes hash);
-    event NameChanged(bytes32 indexed node, string name);
     event VersionChanged(bytes32 indexed node, uint64 newVersion);
     event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName);
     event NamedResource(uint256 indexed resource, bytes name);
-    event NamedTextResource(uint256 indexed resource, bytes name, bytes32 indexed keyHash, string key);
     event NamedAddrResource(uint256 indexed resource, bytes name, uint256 indexed coinType);
     event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap);
     event Upgraded(address indexed implementation);
@@ -67,35 +77,33 @@ pub(super) fn interpret(
             )
         }
         "TextChanged" => {
-            let event = decode_event_log::<TextChanged>(
+            let event = decode_event_log_data_as::<raw_strings::RawTextChanged>(
                 &raw.topics,
                 &raw.data,
+                &selected.event.topic0,
                 "TextChanged log is malformed",
             )?;
-            if event.key.trim().is_empty() {
+            if !event_string_has_content(&event.key) || event.indexedKey != keccak256(&event.key) {
                 return Ok(Interpreted::new());
             }
             let node = hex_string(event.node);
             let value_length = event.value.len();
-            record(
-                selected,
-                raw,
-                state,
-                &node,
-                json!({
-                    "source_event": "TextChanged",
-                    "resolver": raw.emitting_address,
-                    "resolver_contract_instance_id": selected.contract_instance_id.to_string(),
-                    "node": node,
-                    "record_key": format!("text:{}", event.key),
-                    "record_family": "text",
-                    "selector_key": event.key,
-                    "text_key": event.key,
-                    "value_retained": true,
-                    "value": event.value,
-                    "value_length": value_length,
-                }),
-            )
+            let selector = event_string_selector("text", &event.key);
+            let mut after_state = json!({
+                "source_event": "TextChanged",
+                "resolver": raw.emitting_address,
+                "resolver_contract_instance_id": selected.contract_instance_id.to_string(),
+                "node": node,
+                "record_key": selector.record_key,
+                "record_family": selector.record_family,
+                "selector_key": selector.selector_key,
+                "text_key": event_string_value(&event.key),
+                "value_retained": true,
+                "value": event_string_value(&event.value),
+                "value_length": value_length,
+            });
+            selector.retain_raw_selector(&mut after_state);
+            record(selected, raw, state, &node, after_state)
         }
         "ContenthashChanged" => {
             let event = decode_event_log::<ContenthashChanged>(
@@ -123,13 +131,16 @@ pub(super) fn interpret(
             )
         }
         "NameChanged" => {
-            let event = decode_event_log::<NameChanged>(
+            let event = decode_event_log_data_as::<raw_strings::RawNameChanged>(
                 &raw.topics,
                 &raw.data,
+                &selected.event.topic0,
                 "NameChanged log is malformed",
             )?;
+            let raw_name = event.name.to_vec();
+            let (labels, shadow_names) = raw_name_observation(&raw_name, "NameChanged_name");
             let node = hex_string(event.node);
-            record(
+            let mut output = record(
                 selected,
                 raw,
                 state,
@@ -143,9 +154,13 @@ pub(super) fn interpret(
                     "record_family": "name",
                     "selector_key": Value::Null,
                     "value_retained": false,
-                    "value_length": event.name.len(),
+                    "raw_name": event_string_value(&raw_name),
+                    "value_length": raw_name.len(),
                 }),
-            )
+            )?;
+            output.labels = labels;
+            output.shadow_names = shadow_names;
+            Ok(output)
         }
         "VersionChanged" => {
             let event = decode_event_log::<VersionChanged>(
@@ -298,15 +313,23 @@ fn named_resource(
             )
         }
         NamedKind::Text => {
-            let event = decode_event_log::<NamedTextResource>(
+            let event = decode_event_log_data_as::<raw_strings::RawNamedTextResource>(
                 &raw.topics,
                 &raw.data,
+                &selected.event.topic0,
                 "NamedTextResource log is malformed",
             )?;
+            if event.keyHash != keccak256(&event.key) {
+                return Ok(Interpreted::new());
+            }
             (
                 event.resource,
                 event.name.to_vec(),
-                json!({"kind":"text","key":event.key,"hash":hex_string(event.keyHash)}),
+                json!({
+                    "kind":"text",
+                    "key":event_string_value(&event.key),
+                    "hash":hex_string(event.keyHash)
+                }),
             )
         }
         NamedKind::Address => {

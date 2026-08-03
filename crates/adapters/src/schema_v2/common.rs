@@ -112,6 +112,63 @@ pub(super) fn decoded_label(raw_label: &[u8]) -> Option<String> {
         .map(str::to_owned)
 }
 
+pub(super) fn event_string_value(raw_value: &[u8]) -> Value {
+    decoded_label(raw_value).map_or_else(
+        || {
+            json!({
+                "encoding": "hex",
+                "bytes": crate::evm_abi::hex_string(raw_value),
+            })
+        },
+        Value::String,
+    )
+}
+
+pub(super) fn event_string_has_content(raw_value: &[u8]) -> bool {
+    decoded_label(raw_value)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| !raw_value.is_empty())
+}
+
+pub(super) struct EventStringSelector {
+    pub record_key: String,
+    pub record_family: String,
+    pub selector_key: Value,
+    pub raw_selector_key: Option<Value>,
+}
+
+impl EventStringSelector {
+    pub fn retain_raw_selector(&self, after_state: &mut Value) {
+        if let (Some(after_state), Some(raw_selector_key)) =
+            (after_state.as_object_mut(), self.raw_selector_key.as_ref())
+        {
+            after_state.insert("raw_selector_key".to_owned(), raw_selector_key.clone());
+        }
+    }
+}
+
+pub(super) fn event_string_selector(record_family: &str, raw_key: &[u8]) -> EventStringSelector {
+    if let Some(selector_key) = decoded_label(raw_key)
+        && !selector_key.trim().is_empty()
+    {
+        return EventStringSelector {
+            record_key: format!("{record_family}:{selector_key}"),
+            record_family: record_family.to_owned(),
+            selector_key: Value::String(selector_key),
+            raw_selector_key: None,
+        };
+    }
+
+    let record_family = format!("{record_family}_opaque");
+    let selector_key = crate::evm_abi::hex_string(raw_key);
+    EventStringSelector {
+        record_key: format!("{record_family}:{selector_key}"),
+        record_family,
+        selector_key: Value::String(selector_key),
+        raw_selector_key: Some(event_string_value(raw_key)),
+    }
+}
+
 pub(super) fn admitted_label(raw_label: &[u8]) -> Option<String> {
     let label = decoded_label(raw_label)?;
     require_label(&label).ok()?;

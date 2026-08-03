@@ -1,22 +1,6 @@
 use serde_json::Value;
 
-use super::super::{EventDraft, Interpreted, LabelDraft};
-use crate::schema_v2::common::require_label;
-
-pub(super) fn name_labels(name: &str, source_kind: &str) -> anyhow::Result<Vec<LabelDraft>> {
-    if name.is_empty() {
-        return Ok(Vec::new());
-    }
-    name.split('.')
-        .map(|label| {
-            require_label(label)?;
-            Ok(LabelDraft {
-                raw_label: label.as_bytes().to_vec(),
-                source_kind: source_kind.to_owned(),
-            })
-        })
-        .collect()
-}
+use super::super::{EventDraft, Interpreted};
 
 pub(super) fn single_event(
     kind: &str,
