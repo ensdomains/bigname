@@ -89,7 +89,8 @@ pub(super) fn raw_name_observation(
         .map(<[u8]>::to_vec)
         .collect::<Vec<_>>();
     let raw_namehash = super::common::namehash_raw(raw_labels.iter().map(Vec::as_slice));
-    if super::common::surface_labels(&raw_labels).is_some() {
+    let has_empty_segment = raw_labels.iter().any(Vec::is_empty);
+    if !has_empty_segment && super::common::surface_labels(&raw_labels).is_some() {
         (
             raw_labels
                 .into_iter()

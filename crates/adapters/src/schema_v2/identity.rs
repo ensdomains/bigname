@@ -46,6 +46,9 @@ pub(super) fn materialize(
     );
     let mut labels = BTreeMap::new();
     for label in &interpreted.labels {
+        if label.raw_label.is_empty() {
+            continue;
+        }
         let decoded_label = decoded_label(&label.raw_label);
         let flag = normalization_flag(decoded_label.as_deref());
         let labelhash = hash_hex(&label.raw_label);
@@ -63,6 +66,9 @@ pub(super) fn materialize(
     }
     for name in &interpreted.names {
         for raw_label in &name.labels {
+            if raw_label.is_empty() {
+                continue;
+            }
             let flag = normalization_flag(Some(raw_label));
             let labelhash = hash_hex(raw_label.as_bytes());
             labels.entry(labelhash.clone()).or_insert(LabelPreimage {
@@ -80,6 +86,9 @@ pub(super) fn materialize(
     }
     for name in &interpreted.shadow_names {
         for raw_label in &name.raw_labels {
+            if raw_label.is_empty() {
+                continue;
+            }
             let decoded_label = decoded_label(raw_label);
             let flag = normalization_flag(decoded_label.as_deref());
             let labelhash = hash_hex(raw_label);
@@ -347,7 +356,7 @@ pub(super) fn materialize(
         ));
     }
     for label in &interpreted.labels {
-        if represented.contains(&label.raw_label) {
+        if label.raw_label.is_empty() || represented.contains(&label.raw_label) {
             continue;
         }
         let labelhash = hash_hex(&label.raw_label);
@@ -377,6 +386,9 @@ fn binding_id(logical_name_id: &str, resource_id: uuid::Uuid, raw: &RawLogInput)
 fn dns_encode_raw(labels: &[Vec<u8>]) -> Option<Vec<u8>> {
     let mut encoded = Vec::new();
     for label in labels {
+        if label.is_empty() {
+            return None;
+        }
         encoded.push(u8::try_from(label.len()).ok()?);
         encoded.extend_from_slice(label);
     }

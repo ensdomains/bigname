@@ -5344,6 +5344,87 @@ fn nul_v2_resolver_name_emits_exact_shadow_preimage() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn trailing_dot_resolver_name_emits_shadow_without_empty_preimage() -> anyhow::Result<()> {
+    assert_empty_segment_resolver_name(b"alice.eth.", 85)
+}
+
+#[test]
+fn leading_dot_resolver_name_emits_shadow_without_empty_preimage() -> anyhow::Result<()> {
+    assert_empty_segment_resolver_name(b".alice.eth", 86)
+}
+
+#[test]
+fn consecutive_dot_resolver_name_emits_shadow_without_empty_preimage() -> anyhow::Result<()> {
+    assert_empty_segment_resolver_name(b"a..b", 87)
+}
+
+#[test]
+fn bare_dot_resolver_name_emits_shadow_without_empty_preimage() -> anyhow::Result<()> {
+    assert_empty_segment_resolver_name(b".", 88)
+}
+
+#[test]
+fn empty_registrar_name_emits_shadow_without_empty_preimage() -> anyhow::Result<()> {
+    let raw_label = b"";
+    let encoded = NameRegistered {
+        name: String::new(),
+        label: keccak256(raw_label),
+        owner: CONTRACT.parse()?,
+        expires: U256::from(42),
+    }
+    .encode_log_data();
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            89,
+            "ens_v1_registrar_l1",
+            "NameRegistered",
+            "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+            &["registrar"],
+            &["RegistrationGranted"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(89, "registrar")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw(encoded)],
+    })?;
+
+    let namehash = super::common::namehash_raw([raw_label.as_slice(), b"eth"].into_iter());
+    assert_empty_segment_shadow(&output, &namehash, ".eth");
+    Ok(())
+}
+
+fn assert_empty_segment_resolver_name(raw_name: &[u8], manifest_id: i64) -> anyhow::Result<()> {
+    let output = hostile_resolver_name_output(raw_name.to_vec(), manifest_id)?;
+    let raw_labels = raw_name.split(|byte| *byte == b'.').collect::<Vec<_>>();
+    let namehash = super::common::namehash_raw(raw_labels.iter().copied());
+    assert_empty_segment_shadow(&output, &namehash, std::str::from_utf8(raw_name)?);
+    Ok(())
+}
+
+fn assert_empty_segment_shadow(output: &BatchOutput, namehash: &str, raw_name: &str) {
+    let surface = output
+        .name_surfaces
+        .iter()
+        .find(|surface| surface.namehash == namehash)
+        .expect("empty-segment shadow identity");
+    assert_eq!(surface.visibility_state, "shadow");
+    assert_eq!(surface.raw_name, raw_name);
+    assert!(
+        output
+            .label_preimages
+            .iter()
+            .all(|preimage| !preimage.raw_label.is_empty()),
+        "empty label content must not reach label_preimages"
+    );
+    assert!(
+        surface.dns_encoded_name.is_empty(),
+        "an empty label segment has no valid DNS wire encoding"
+    );
+}
+
 fn assert_hostile_resolver_name(raw_name: Vec<u8>, manifest_id: i64) -> anyhow::Result<()> {
     let output = hostile_resolver_name_output(raw_name.clone(), manifest_id)?;
     let raw_labels = raw_name

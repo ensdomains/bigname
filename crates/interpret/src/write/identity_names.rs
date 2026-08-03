@@ -15,7 +15,7 @@ async fn write_preimages(
     transaction: &mut Transaction<'_, Postgres>,
     output: &BatchOutput,
 ) -> Result<()> {
-    for preimage in &output.label_preimages {
+    for preimage in preimages_for_submission(output) {
         let written: Option<String> = sqlx::query_scalar(
             "
             INSERT INTO label_preimages (
@@ -68,6 +68,15 @@ async fn write_preimages(
         }
     }
     Ok(())
+}
+
+fn preimages_for_submission(
+    output: &BatchOutput,
+) -> impl Iterator<Item = &bigname_adapters::schema_v2::LabelPreimage> {
+    output
+        .label_preimages
+        .iter()
+        .filter(|preimage| !preimage.raw_label.is_empty())
 }
 
 async fn write_surfaces(
@@ -171,4 +180,39 @@ async fn write_surfaces(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use bigname_adapters::schema_v2::LabelPreimage;
+    use serde_json::json;
+
+    use super::*;
+
+    fn preimage(raw_label: &[u8]) -> LabelPreimage {
+        LabelPreimage {
+            labelhash: format!("test-{}", raw_label.len()),
+            raw_label: raw_label.to_vec(),
+            decoded_label: std::str::from_utf8(raw_label).ok().map(str::to_owned),
+            normalizer_version: "test".to_owned(),
+            normalized_under_version: false,
+            normalization_error: Some("test".to_owned()),
+            source_kind: "test".to_owned(),
+            source_priority: 0,
+            provenance: json!({}),
+        }
+    }
+
+    #[test]
+    fn empty_label_preimages_are_filtered_before_submission() {
+        let output = BatchOutput {
+            label_preimages: vec![preimage(b""), preimage(b"alice")],
+            ..BatchOutput::default()
+        };
+
+        let submitted = preimages_for_submission(&output)
+            .map(|preimage| preimage.raw_label.as_slice())
+            .collect::<Vec<_>>();
+        assert_eq!(submitted, vec![b"alice".as_slice()]);
+    }
 }
