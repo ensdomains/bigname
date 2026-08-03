@@ -212,8 +212,10 @@ Phases per chain:
 3. `project` — canonical identity and normalized-event input, staged current
    projections, one-transaction publication for the affected scope, and
    canonical-head [hydration](glossary.md#hydration) after publication
-4. `verify` — read-only trust classification; its B4 implementation remains
-   deferred
+4. `verify` — read-only [stored-history verification](glossary.md#stored-history-verification)
+   through a finalized boundary; Base compares its Coinbase-loaded range with
+   dRPC through the ingest seam and Ethereum compares with local reth through
+   the finalized head
 5. `live` — continuous provider-head walk, bounded gap fill, chain-head
    publication, and downstream re-derivation after a reorg
 
@@ -228,10 +230,24 @@ cannot advance past the ingested boundary.
 
 ### Stage B runtime boundary
 
-The checked-in phase runner contains real `ingest`, `interpret`, `project`, and
-`live` implementations. The B4 `verify` implementation remains deferred: its
-slot stays idle without recording a verification level, and a chain configured
-with `verify-before-live` cannot enter live follow until that verifier exists.
+The checked-in phase runner contains real `ingest`, `interpret`, `project`,
+`verify`, and `live` implementations. Verification reads canonical selected
+raw logs and the manifest-derived watch set through a separately credentialed,
+SELECT-only database handle. Startup requires that login to be directly
+authenticated (the session user and active role must match) and rejects one that has
+application-relation write privileges, schema/database creation authority,
+elevated role attributes, or another role membership; the verifier never
+receives the phase runner's writer pool. The reader and writer connections must
+also report the same PostgreSQL system identifier, database OID, and database
+name. It compares Base's Coinbase-loaded
+range with dRPC through the fixed block `48,428,000` ingest seam and records
+`cross_checked`; the later dRPC-ingested suffix does not inherit
+that level. It compares Ethereum with local reth and records `node_checked`.
+Provider typing prevents a dRPC-backed chain from recording `node_checked`. A
+mismatch records its block, field, stored value, and reference value, then stops
+only that chain. Normal verification starts at the durable ingest-cursor extent,
+not a replacement command-line start, and a resumed scan retains the weaker of
+its prior whole-extent level and the current reference's level.
 The project phase is the single schema-v2 projection writer and has no claim
 queue, dead-letter referee, watermarks, heartbeat threading, or standing
 hydration planner. When a hydration RPC is configured, the same project run

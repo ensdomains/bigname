@@ -1,4 +1,10 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use anyhow::{Result, bail};
 use reqwest::Url;
@@ -29,6 +35,7 @@ pub enum ChainProvider {
 pub struct JsonRpcProvider {
     endpoint: Url,
     client: RecoveringHttpClient,
+    request_attempts: Arc<AtomicUsize>,
 }
 
 impl JsonRpcProvider {
@@ -36,7 +43,12 @@ impl JsonRpcProvider {
         Ok(Self {
             endpoint: validate_endpoint(endpoint)?,
             client: RecoveringHttpClient::new(CONNECT_TIMEOUT, REQUEST_TIMEOUT)?,
+            request_attempts: Arc::new(AtomicUsize::new(0)),
         })
+    }
+
+    pub(super) fn request_attempts(&self) -> usize {
+        self.request_attempts.load(Ordering::Relaxed)
     }
 }
 
@@ -86,6 +98,52 @@ impl ChainProvider {
         match self {
             Self::JsonRpc(provider) => provider.bundles(blocks).await,
             Self::RethDb(provider) => provider.bundles(blocks).await,
+        }
+    }
+
+    pub(crate) async fn verification_blocks(
+        &self,
+        from_block: i64,
+        to_block: i64,
+    ) -> Result<Vec<ResolvedBlock>> {
+        match self {
+            Self::JsonRpc(_) => self.resolve(&[to_block]).await,
+            Self::RethDb(_) => {
+                self.resolve(&(from_block..=to_block).collect::<Vec<_>>())
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn verification_logs(
+        &self,
+        resolved: &[ResolvedBlock],
+        from_block: i64,
+        to_block: i64,
+        addresses: &[String],
+        topics: &[String],
+    ) -> Result<Vec<Log>> {
+        match self {
+            Self::JsonRpc(provider) => {
+                provider
+                    .verification_logs(from_block, to_block, addresses, topics)
+                    .await
+            }
+            Self::RethDb(provider) => {
+                let blocks = resolved
+                    .iter()
+                    .filter(|block| (from_block..=to_block).contains(&block.number))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                provider.logs(&blocks, addresses, topics).await
+            }
+        }
+    }
+
+    pub(crate) fn verification_rpc_request_attempts(&self) -> usize {
+        match self {
+            Self::JsonRpc(provider) => provider.request_attempts(),
+            Self::RethDb(_) => 0,
         }
     }
 }

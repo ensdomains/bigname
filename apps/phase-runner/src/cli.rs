@@ -110,6 +110,9 @@ struct RunArgs {
     #[command(flatten)]
     connection: ConnectionArgs,
 
+    #[arg(long, env = "BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL")]
+    verification_database_url: String,
+
     #[command(flatten)]
     capacity: CapacityArgs,
 
@@ -154,6 +157,9 @@ struct RunArgs {
 struct RedoArgs {
     #[command(flatten)]
     connection: ConnectionArgs,
+
+    #[arg(long, env = "BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL")]
+    verification_database_url: Option<String>,
 
     #[command(flatten)]
     capacity: CapacityArgs,
@@ -217,12 +223,14 @@ pub enum ResolvedCommand {
     },
     Run {
         database_url: String,
+        verification_database_url: String,
         manifests_root: PathBuf,
         runtime: RuntimeConfig,
         hydration_rpc_urls: bigname_execution::ChainRpcUrls,
     },
     Redo {
         database_url: String,
+        verification_database_url: Option<String>,
         manifests_root: PathBuf,
         instance_id: String,
         chain: ChainConfig,
@@ -295,6 +303,7 @@ fn resolve_run(args: RunArgs) -> RunnerResult<ResolvedCommand> {
     let hydration_rpc_urls = resolve_hydration_rpc_urls(&args.hydration_rpc_urls)?;
     Ok(ResolvedCommand::Run {
         database_url: args.connection.database_url,
+        verification_database_url: args.verification_database_url,
         manifests_root: args.manifests.manifests_root,
         runtime,
         hydration_rpc_urls,
@@ -321,8 +330,15 @@ fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
             "redo ingest requires at least one --source",
         ));
     }
+    if phase == RedoPhase::Phase(PhaseName::Verify) && args.verification_database_url.is_none() {
+        return Err(RunnerError::new(
+            ErrorKind::Configuration,
+            "verify redo requires --verification-database-url backed by a SELECT-only role",
+        ));
+    }
     Ok(ResolvedCommand::Redo {
         database_url: args.connection.database_url,
+        verification_database_url: args.verification_database_url,
         manifests_root: args.manifests.manifests_root,
         instance_id: resolve_instance_id(args.connection.instance_id)?,
         chain: ChainConfig::new(args.chain, sources, false)?,
@@ -471,5 +487,30 @@ mod tests {
             ),
             _ => panic!("expected redo command"),
         }
+    }
+
+    #[test]
+    fn verify_redo_requires_a_separate_verification_database_url() {
+        let command = Cli::try_parse_from([
+            "phase-runner",
+            "redo",
+            "--database-url",
+            "postgres://phase-runner.invalid/fresh",
+            "--chain",
+            "ethereum-mainnet",
+            "--phase",
+            "verify",
+            "--from-block",
+            "42",
+            "--to-block",
+            "42",
+        ])
+        .expect("verify redo without the reader URL must parse before semantic validation");
+        let error = match command.resolve() {
+            Ok(_) => panic!("verify redo must reject a missing verification database URL"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), ErrorKind::Configuration);
+        assert!(error.to_string().contains("SELECT-only role"));
     }
 }

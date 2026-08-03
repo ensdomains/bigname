@@ -5,13 +5,14 @@ use clap::Parser;
 use phase_runner::{
     capacity::CapacityGuard,
     cli::{Cli, ResolvedCommand},
-    database::RunnerDatabase,
+    database::{RunnerDatabase, VerificationDatabase},
     ingest_phase::IngestPhase,
     interpret_phase::InterpretPhase,
     live_phase::LivePhase,
     phase::PhaseSet,
     project_phase::ProjectPhase,
     runner::{PhaseRunner, SupervisorReport},
+    verify_phase::VerifyPhase,
 };
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
@@ -42,6 +43,7 @@ async fn main() -> Result<()> {
         }
         ResolvedCommand::Run {
             database_url,
+            verification_database_url,
             manifests_root,
             runtime,
             hydration_rpc_urls,
@@ -52,6 +54,14 @@ async fn main() -> Result<()> {
                 .max(4);
             let database = RunnerDatabase::connect(&database_url, connections).await?;
             sync_manifests(database.pool(), &manifests_root).await?;
+            let verification_database = VerificationDatabase::connect(
+                &verification_database_url,
+                &database,
+                u32::try_from(runtime.chains.len())
+                    .unwrap_or(u32::MAX)
+                    .max(1),
+            )
+            .await?;
             let ingest_engine = Arc::new(bigname_ingest::Engine::new(database.pool().clone()));
             let phases = PhaseSet::with_ingest_interpret_project_and_live(
                 Arc::new(IngestPhase::with_engine(Arc::clone(&ingest_engine))),
@@ -60,6 +70,7 @@ async fn main() -> Result<()> {
                     database.pool().clone(),
                     hydration_rpc_urls,
                 )),
+                Arc::new(VerifyPhase::new(verification_database)),
                 Arc::new(LivePhase::with_engine(ingest_engine)),
             )?;
             let runner = Arc::new(PhaseRunner::new(
@@ -74,6 +85,7 @@ async fn main() -> Result<()> {
         }
         ResolvedCommand::Redo {
             database_url,
+            verification_database_url,
             manifests_root,
             instance_id,
             chain,
@@ -89,15 +101,32 @@ async fn main() -> Result<()> {
             let database = RunnerDatabase::connect(&database_url, 4).await?;
             sync_manifests(database.pool(), &manifests_root).await?;
             let ingest_engine = Arc::new(bigname_ingest::Engine::new(database.pool().clone()));
-            let phases = PhaseSet::with_ingest_interpret_project_and_live(
-                Arc::new(IngestPhase::with_engine(Arc::clone(&ingest_engine))),
-                Arc::new(InterpretPhase::new(database.pool().clone())),
-                Arc::new(ProjectPhase::with_hydration(
-                    database.pool().clone(),
-                    hydration_rpc_urls,
-                )),
-                Arc::new(LivePhase::with_engine(ingest_engine)),
-            )?;
+            let ingest = Arc::new(IngestPhase::with_engine(ingest_engine));
+            let interpret = Arc::new(InterpretPhase::new(database.pool().clone()));
+            let project = Arc::new(ProjectPhase::with_hydration(
+                database.pool().clone(),
+                hydration_rpc_urls,
+            ));
+            let phases = if phase
+                == phase_runner::runner::RedoPhase::Phase(phase_runner::phase::PhaseName::Verify)
+            {
+                let verification_database_url =
+                    verification_database_url.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "verify redo requires a SELECT-only verification database URL"
+                        )
+                    })?;
+                let verification_database =
+                    VerificationDatabase::connect(verification_database_url, &database, 1).await?;
+                PhaseSet::with_ingest_interpret_project_and_verify(
+                    ingest,
+                    interpret,
+                    project,
+                    Arc::new(VerifyPhase::new(verification_database)),
+                )?
+            } else {
+                PhaseSet::with_ingest_interpret_and_project(ingest, interpret, project)?
+            };
             let runner = PhaseRunner::new(
                 database,
                 phases,

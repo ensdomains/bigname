@@ -60,10 +60,24 @@ old-runtime backfill job fetched all matching logs over one block interval.
 The tables remain in migration history, but the Stage B runtime has no writer,
 repair path, or checkpoint-promotion consumer for these records.
 
-**Stored-history verification** — the migration-era old-runtime recovery check
-that compared retained raw logs with an independent historical source before
-reusing them. Its Rust implementation and coverage consumers were deleted in
-Stage B; retained tables do not make it a current runtime capability.
+**Stored-history verification** — the read-only phase that compares canonical
+selected raw logs with the chain's configured reference source through a
+finalized block. Base uses dRPC to cross-check the Coinbase-loaded history and
+cannot extend that independent comparison past the Coinbase-to-dRPC ingest seam.
+Ethereum uses local reth for a node check. The phase records only its block
+extent, trust level, and any fatal mismatch in phase state. It does not write
+coverage attestations or repair raw data.
+
+**Verification level** — the source-bounded trust label for a chain's stored
+history through its reported verification extent: `quick_synced` is
+provider-trusted bootstrap data, `cross_checked` matched an independent
+provider, and `node_checked` matched a local node. The live-follow block is a
+separate position rather than a verification level. A partial verification
+redo rechecks its requested range but retains the level that applies to the
+whole recorded extent; only a full-extent redo can change that level. A normal
+scan starts from the durable ingest extent. If it resumes through a reference
+with a different level, the completed extent retains the weaker level rather
+than upgrading the already-checked prefix.
 
 **Canonicality** — whether a stored fact belongs to the chain branch currently
 accepted as real, and how final that acceptance is. States: `observed` (seen,

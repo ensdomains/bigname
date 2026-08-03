@@ -1,11 +1,10 @@
 # Chain Intake
 
 Chain intake is split into explicit per-chain phases. The checked-in runtime
-implements `ingest`, `interpret`, `project`, and continuous `live` follow. The
-read-only `verify` slot remains deferred to B4 and records no trust level. The
-old monolithic indexer, its provider reconciliation loop, its persisted
-backfill scheduler, and its normalized-event replay driver are no longer part
-of the source tree.
+implements `ingest`, `interpret`, `project`, read-only `verify`, and continuous
+`live` follow. The old monolithic indexer, its provider reconciliation loop,
+its persisted backfill scheduler, and its normalized-event replay driver are no
+longer part of the source tree.
 
 The architecture model lives in [`architecture.md`](architecture.md), storage
 ownership in [`storage.md`](storage.md), projection behavior in
@@ -24,8 +23,10 @@ For each configured chain, the path is:
    and normalized events. When configured, it then applies
    [canonical-head hydration](glossary.md#hydration) to the two documented
    current projection surfaces.
-4. `verify` is the reserved read-only trust-classification slot. Its B4
-   implementation is not present in this build.
+4. `verify` scans canonical selected raw logs through a frozen finalized
+   boundary and compares them with the chain's configured reference. Base dRPC
+   records `cross_checked` only through the Coinbase-to-dRPC ingest seam;
+   Ethereum reth records `node_checked`.
 5. `live` follows a provider snapshot from the completed ingest handoff, walks
    backward to a stored readable ancestor, loads at most one bounded winning
    suffix batch, and publishes the resulting head through the shared head path.
@@ -58,9 +59,10 @@ as provider lag and performs no publication, orphaning, or stamping. A hash
 mismatch remains a genuine lower-head reorg and follows the normal publication
 path.
 
-The `verify` reader may overlap the live loop. A chain configured with
-`verify-before-live` remains stopped at the deferred verifier until B4 lands;
-the idle stub never invents a verification level.
+The `verify` reader may overlap the live loop. It freezes its target at the
+finalized marker while live continues toward the latest head. A chain
+configured with `verify-before-live` instead completes that finite scan before
+entering live follow. A mismatch is non-retryable and stops only that chain.
 
 Manifest synchronization uses the schema-v2 repository and checks the selected
 [deployment profile](glossary.md#deployment-profile) fingerprint against the
@@ -84,10 +86,15 @@ target and last processed block hash for each source; restart resumes from that
 stored boundary.
 
 Production source shape is exact: `ethereum-mainnet` has one local Reth DB
-source, while `base-mainnet` has one Coinbase SQL historical source and one RPC
-source meeting at block `48,428,000`. Live follow uses only the chain block
-provider from that already-validated set. Unsupported combinations fail as
-configuration errors rather than falling back to another provider or range.
+source, while `base-mainnet` has one Coinbase SQL historical source and one
+dRPC source meeting at block `48,428,000`. Live follow uses only the chain block
+provider from that already-validated set. Verification uses local reth for
+Ethereum and dRPC as the independent reference for Base facts loaded from
+Coinbase. The dRPC source kind is capped at `cross_checked`, and its independent
+extent cannot pass the `48,428,000` seam because dRPC supplies intake after that
+block; only a local reth source can report `node_checked`. Unsupported
+combinations fail as configuration errors rather than falling back to another
+provider or range.
 
 ## Reorgs and required downstream redo
 
@@ -143,6 +150,13 @@ cargo phase -- redo \
   --from-block <inclusive-start> \
   --to-block <inclusive-end> \
   --source <descriptor>
+
+cargo phase -- redo \
+  --chain <chain> \
+  --phase verify \
+  --from-block <inclusive-start> \
+  --to-block <inclusive-end> \
+  --source <drpc-or-reth-descriptor>
 ```
 
 Redo state is persisted and range-bound. An interpret redo prepares the
@@ -151,14 +165,15 @@ interruption. Project redo uses the same state machinery to replace the
 affected current projection scope. Neither path uses the deleted
 normalized-event upsert, repair, supersession, adapter-checkpoint, or
 coverage-authority machinery. Historical live redo is rejected because live
-is a head follower. Verify redo uses the same phase contract as normal verify
-work and persists the verification level reported by the verifier. The B3
-deferred verifier records no processed extent or trust level and refuses redo
-in phase preflight until B4 rather than claiming trust. The refusal happens
-before redo state is created even when a pre-B3 extent exists. Flag
-recomputation also remains unavailable. Live, deferred-verify, and
-flag-recomputation refusals cannot strand redo state; a configured verifier
-continues to use supported verify redo.
+is a head follower. Verify redo uses the same scanner as normal verification,
+rechecks the requested finalized range, and persists the level reported by the
+phase. A partial redo retains the level for the full recorded extent; a
+full-extent redo can report the level fixed by the reference source. Its source
+and Base seam preflight happens before redo state is created. A mismatch retains
+the resumable redo marker and its diagnosis;
+rerunning the same command after wipe-and-resync repair resumes the attempt.
+Flag recomputation remains unavailable. These preflight refusals and terminal
+verification failures cannot strand unresumable redo state.
 
 The thin rewind command moves only the published latest head:
 
@@ -225,12 +240,14 @@ intake owner.
 
 ## Current Stage B limitation
 
-The phase runner is now a continuously supervised ingest-through-live writer,
-but it is not yet the complete replacement deployment. B4 verification is
-still absent, and the API continues to read legacy public-schema projections
-until the Stage C cutover. The surviving worker therefore continues to serve
-its documented public-schema duties; it does not write the schema-v2 project
-tables.
+The phase runner is now a continuously supervised ingest-through-live writer
+with finalized
+[stored-history verification](glossary.md#stored-history-verification), but it
+is not yet the complete
+replacement deployment. The API continues to read legacy public-schema
+projections until the Stage C cutover. The surviving worker therefore
+continues to serve its documented public-schema duties; it does not write the
+schema-v2 project tables.
 
 The historical `backfill_*`, `normalized_replay_*`, resolver-profile
 reconciliation, raw-log revision/proof, and startup-checkpoint SQL tables remain

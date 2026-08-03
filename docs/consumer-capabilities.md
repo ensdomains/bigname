@@ -70,6 +70,37 @@ separate support status and reason fields to decide whether a setup is
 supported. The retained v1 API continues reading the legacy public schema
 until the Stage C route cutover; this wording change does not re-point a route.
 
+## Chain synchronization status
+
+Stage C will derive each chain's synchronization status from the schema-v2
+[verification level](glossary.md#verification-level), phase extent, and chain
+heads. This Stage B change supplies that state; it does not add or change an
+API route.
+
+- `quick-synced (provider-trusted)` means Base history was loaded from Coinbase
+  SQL and has not completed an independent comparison through the reported
+  block.
+- `cross-checked (independent provider)` means the Coinbase-loaded part of
+  Base's canonical selected raw logs matches dRPC through the reported
+  finalized block. Its extent cannot pass the Coinbase-to-dRPC ingest seam at
+  block `48,428,000`: later Base facts came from dRPC, so reading them from dRPC
+  again would not be an independent comparison. It does not mean that a Base
+  node checked the data. The cap includes seam block `48,428,000`, which was
+  fetched from both Coinbase and dRPC; its selected stored copy may therefore
+  make that one comparison dRPC-vs-dRPC, and any disagreement still fails
+  closed.
+- `verified (node-checked)` means the canonical selected raw logs match a local
+  node through the reported finalized block. Ethereum earns this label from
+  reth. A dRPC-backed Base verification cannot record this level.
+- `live at block N` reports the separate live-follow position. Live follow can
+  advance while [stored-history verification](glossary.md#stored-history-verification)
+  remains behind the finalized head.
+
+The comparison reports what its source proves. It is not an attestation,
+completeness proof, or claim about blocks above the recorded finalized extent.
+The later `live at block N` position does not inherit the verification level of
+an earlier extent.
+
 `GET /v1/names` keeps the namespace-omitted bridge where an omitted `namespace` spans supported public namespaces. First-party replacement mappings should pass an explicit namespace whenever the app knows it; omitted namespace is not an ENS-only shortcut.
 
 The slim surface removes namespace-inferred `/v1/resolve*` aliases. Canonical name collection, exact-name, records, children, and role routes keep explicit `{namespace}`. The app full-profile fast path is the deliberate namespace-inferred exception: `GET /v1/profiles/names/{name}` normalizes the input, infers the namespace, and returns the inferred namespace on `data.namespace`.
