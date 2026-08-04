@@ -23,7 +23,10 @@ use phase_runner::{
     state::PhaseStore,
 };
 use serde_json::{Value, json};
-use sqlx::{PgPool, Row, types::Uuid};
+use sqlx::{
+    PgPool, Row,
+    types::{Uuid, time},
+};
 use tokio_util::sync::CancellationToken;
 
 use support::ScratchDatabase;
@@ -164,6 +167,141 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
         resolver_status,
         ("supported".into(), "manifest_declared_address".into())
     );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn recompute_flags_refreshes_same_class_flags_and_primary_projection_without_replay()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_recompute_flags").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let store = PhaseStore::new(scratch.pool().clone());
+    store.initialize_chain(CHAIN).await?;
+    seed_completed_project_extent(scratch.pool(), CHAIN, 3).await?;
+
+    sqlx::query(
+        "UPDATE label_preimages
+         SET normalizer_version = 'stale-version',
+             normalized_under_version = false,
+             normalization_error = 'stale flag'
+         WHERE decoded_label = 'alice'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE name_surfaces SET normalizer_version = 'stale-version' WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE primary_names_current SET claim_name_is_normalized = false WHERE namespace = 'ens'",
+    )
+    .execute(scratch.pool())
+    .await?;
+
+    let events_before: Vec<(i64, Value, Value, String)> = sqlx::query_as(
+        "SELECT normalized_event_id, before_state, after_state, canonicality_state::text
+         FROM normalized_events WHERE chain_id = $1 ORDER BY normalized_event_id",
+    )
+    .bind(CHAIN)
+    .fetch_all(scratch.pool())
+    .await?;
+    let anchors_before: Vec<(String, String, i64, Value, time::OffsetDateTime)> = sqlx::query_as(
+        "SELECT logical_name_id, block_hash, block_number, provenance, observed_at
+         FROM name_surfaces WHERE chain_id = $1 ORDER BY logical_name_id",
+    )
+    .bind(CHAIN)
+    .fetch_all(scratch.pool())
+    .await?;
+    let bindings_before: Vec<(Uuid, String, i64, Option<time::OffsetDateTime>, String)> =
+        sqlx::query_as(
+            "SELECT surface_binding_id, block_hash, block_number, active_to,
+                    canonicality_state::text
+             FROM surface_bindings WHERE chain_id = $1 ORDER BY surface_binding_id",
+        )
+        .bind(CHAIN)
+        .fetch_all(scratch.pool())
+        .await?;
+
+    let phases = PhaseSet::with_ingest_interpret_and_project(
+        Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+        Arc::new(InterpretPhase::new(scratch.pool().clone())),
+        Arc::new(ProjectPhase::new(scratch.pool().clone())),
+    )?;
+    PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-project-recompute-flags",
+        test_timing(),
+    )?
+    .redo(
+        &chain_config(CHAIN)?,
+        RedoPhase::RecomputeFlags,
+        BlockRange::new(0, 3)?,
+        CancellationToken::new(),
+    )
+    .await?;
+
+    let label: (String, bool, Option<String>) = sqlx::query_as(
+        "SELECT normalizer_version, normalized_under_version, normalization_error
+         FROM label_preimages WHERE decoded_label = 'alice'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(label, (NORMALIZER.into(), true, None));
+    let stale_surfaces: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM name_surfaces
+         WHERE chain_id = $1 AND normalizer_version <> $2",
+    )
+    .bind(CHAIN)
+    .bind(NORMALIZER)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(stale_surfaces, 0);
+    let claim_is_normalized: bool = sqlx::query_scalar(
+        "SELECT claim_name_is_normalized FROM primary_names_current WHERE namespace = 'ens'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(claim_is_normalized);
+    let pending_redos: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project') AND redo_in_progress",
+    )
+    .bind(CHAIN)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(pending_redos, 0, "same-class names must not stamp replay");
+
+    let events_after: Vec<(i64, Value, Value, String)> = sqlx::query_as(
+        "SELECT normalized_event_id, before_state, after_state, canonicality_state::text
+         FROM normalized_events WHERE chain_id = $1 ORDER BY normalized_event_id",
+    )
+    .bind(CHAIN)
+    .fetch_all(scratch.pool())
+    .await?;
+    let anchors_after: Vec<(String, String, i64, Value, time::OffsetDateTime)> = sqlx::query_as(
+        "SELECT logical_name_id, block_hash, block_number, provenance, observed_at
+         FROM name_surfaces WHERE chain_id = $1 ORDER BY logical_name_id",
+    )
+    .bind(CHAIN)
+    .fetch_all(scratch.pool())
+    .await?;
+    let bindings_after: Vec<(Uuid, String, i64, Option<time::OffsetDateTime>, String)> =
+        sqlx::query_as(
+            "SELECT surface_binding_id, block_hash, block_number, active_to,
+                    canonicality_state::text
+             FROM surface_bindings WHERE chain_id = $1 ORDER BY surface_binding_id",
+        )
+        .bind(CHAIN)
+        .fetch_all(scratch.pool())
+        .await?;
+    assert_eq!(events_after, events_before);
+    assert_eq!(anchors_after, anchors_before);
+    assert_eq!(bindings_after, bindings_before);
     scratch.cleanup().await
 }
 

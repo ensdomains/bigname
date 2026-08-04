@@ -17,11 +17,7 @@ pub(crate) fn required_redo_owner_pattern() -> String {
     format!("{REQUIRED_REDO_OWNER_PREFIX}%")
 }
 
-pub(crate) fn required_redo_active_reason() -> String {
-    format!("{REQUIRED_REDO_ACTIVE_PREFIX}replay holds the phase writer slot")
-}
-
-type RedoStampRow = (Option<i64>, bool, Option<i64>, Option<i64>, Option<String>);
+type RedoStampRow = (Option<i64>, bool, Option<i64>, Option<i64>);
 
 pub(crate) async fn required_range(
     pool: &PgPool,
@@ -81,7 +77,7 @@ pub(crate) async fn stamp_required_in_transaction(
     }
     let row: Option<RedoStampRow> = sqlx::query_as(
         "SELECT current_block_number, redo_in_progress,
-                    redo_from_block_number, redo_to_block_number, last_error
+                    redo_from_block_number, redo_to_block_number
              FROM chain_phase_state
              WHERE chain_id = $1 AND phase_name = $2
              FOR UPDATE",
@@ -96,7 +92,7 @@ pub(crate) async fn stamp_required_in_transaction(
             error,
         )
     })?;
-    let Some((Some(current), active, active_from, active_to, last_error)) = row else {
+    let Some((Some(current), active, active_from, active_to)) = row else {
         return Ok(false);
     };
     if current < requested.from {
@@ -112,8 +108,6 @@ pub(crate) async fn stamp_required_in_transaction(
             through,
             active_from,
             active_to,
-            last_error.as_deref(),
-            reason,
         )
         .await?;
         return Ok(true);
@@ -129,7 +123,6 @@ pub(crate) async fn stamp_required_in_transaction(
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn extend_active(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -138,8 +131,6 @@ async fn extend_active(
     through: i64,
     active_from: Option<i64>,
     active_to: Option<i64>,
-    last_error: Option<&str>,
-    reason: &str,
 ) -> RunnerResult<()> {
     let from = active_from
         .ok_or_else(|| RunnerError::data_integrity("active redo is missing its start block"))?
@@ -147,13 +138,11 @@ async fn extend_active(
     let to = active_to
         .ok_or_else(|| RunnerError::data_integrity("active redo is missing its end block"))?
         .max(through);
-    let preserve_operator_error = last_error.is_some_and(|message| !owns_required_redo(message));
     sqlx::query(
         "UPDATE chain_phase_state
          SET redo_from_block_number = $3, redo_to_block_number = $4,
              redo_current_block_number = NULL, redo_current_block_hash = NULL,
              redo_target_block_number = NULL, redo_target_block_hash = NULL,
-             last_error = CASE WHEN $5 THEN last_error ELSE $6 END,
              updated_at = now()
          WHERE chain_id = $1 AND phase_name = $2 AND redo_in_progress",
     )
@@ -161,8 +150,6 @@ async fn extend_active(
     .bind(phase.as_str())
     .bind(from)
     .bind(to)
-    .bind(preserve_operator_error)
-    .bind(format!("{REQUIRED_REDO_PREFIX}{reason}"))
     .execute(&mut **transaction)
     .await
     .map_err(|error| {

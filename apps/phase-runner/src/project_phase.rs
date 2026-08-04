@@ -81,22 +81,17 @@ impl Phase for ProjectPhase {
 
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
         Box::pin(async move {
-            if matches!(context.mode, RunMode::RecomputeFlags(_)) {
-                return Err(RunnerError::new(
-                    ErrorKind::Configuration,
-                    "project recompute-flags is owned by the later redo-tooling lane",
-                ));
-            }
             if let Some(hydrator) = &self.hydrator {
                 hydrator
                     .require_rpc_configuration(&context.chain_id)
                     .map_err(runner_error)?;
             }
-            let redo_target = if matches!(context.mode, RunMode::Redo(_)) {
-                Some(self.redo_target(&context.chain_id).await?)
-            } else {
-                None
-            };
+            let redo_target =
+                if matches!(context.mode, RunMode::Redo(_) | RunMode::RecomputeFlags(_)) {
+                    Some(self.redo_target(&context.chain_id).await?)
+                } else {
+                    None
+                };
             let Some(available) = context.available_heads.as_ref() else {
                 if let Some(range) = context.mode.range() {
                     return Err(RunnerError::new(
@@ -128,8 +123,7 @@ impl Phase for ProjectPhase {
                     );
                     (from, target_block)
                 }
-                RunMode::Redo(range) => (range.from, range.to),
-                RunMode::RecomputeFlags(_) => unreachable!("handled above"),
+                RunMode::Redo(range) | RunMode::RecomputeFlags(range) => (range.from, range.to),
             };
             let outcome = self
                 .engine

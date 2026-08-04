@@ -1835,6 +1835,81 @@ async fn different_writer_phases_cannot_overlap_on_one_chain() -> Result<()> {
 }
 
 #[tokio::test]
+async fn redo_completion_preserves_a_range_widened_while_the_phase_is_running() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_redo_concurrent_widening").await?;
+    let chain_id = "redo-concurrent-widening-chain";
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    seed_interpret_redo_presence(scratch.pool(), chain_id, 2).await?;
+    for phase in [PhaseName::Ingest, PhaseName::Interpret, PhaseName::Project] {
+        mark_completed(
+            scratch.pool(),
+            chain_id,
+            phase,
+            phase
+                .writes_derived_data()
+                .then_some(phase_runner::INTERPRETER_CONTENT_HASH),
+        )
+        .await?;
+        set_phase_extent(scratch.pool(), chain_id, phase, 2).await?;
+    }
+
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let blocking = Arc::new(BlockingPhase {
+        name: PhaseName::Project,
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+    });
+    let phase_runner = runner(
+        scratch.runner(),
+        phase_set_replacing(PhaseName::Project, blocking)?,
+        available_capacity(),
+        "redo-concurrent-widening-runner",
+    )?;
+    let configured_chain = chain(chain_id)?;
+    let task = tokio::spawn(async move {
+        phase_runner
+            .redo(
+                &configured_chain,
+                RedoPhase::Phase(PhaseName::Project),
+                BlockRange::new(1, 1).expect("fixed range"),
+                CancellationToken::new(),
+            )
+            .await
+    });
+    entered.notified().await;
+
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET redo_from_block_number = 0,
+             redo_to_block_number = 2,
+             redo_current_block_number = NULL,
+             redo_current_block_hash = NULL,
+             redo_target_block_number = NULL,
+             redo_target_block_hash = NULL,
+             updated_at = now()
+         WHERE chain_id = $1 AND phase_name = 'project' AND redo_in_progress",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+    release.notify_one();
+    task.await??;
+
+    let marker: (bool, Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT redo_in_progress, redo_from_block_number, redo_to_block_number
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(marker, (true, Some(0), Some(2)));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn ingest_cursor_records_the_distinct_source_target() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_cursor_target").await?;
     let store = PhaseStore::new(scratch.runner().pool().clone());

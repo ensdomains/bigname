@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Mutex};
 
 use sqlx::PgPool;
 
-use crate::{InterpretError, RECOMPUTE_FLAGS_UNAVAILABLE_REASON, Result, load, write};
+use crate::{InterpretError, Result, load, recompute, write};
 
 const CANONICAL_BLOCKS_PER_BATCH: i64 = 500;
 
@@ -63,11 +63,6 @@ impl Engine {
 
     pub async fn run_batch(&self, request: BatchRequest) -> Result<BatchOutcome> {
         validate_request(&request)?;
-        if matches!(request.mode, RunMode::RecomputeFlags) {
-            return Err(InterpretError::configuration(
-                RECOMPUTE_FLAGS_UNAVAILABLE_REASON,
-            ));
-        }
         let target = load::marker(&self.pool, &request.chain_id, request.to_block)
             .await?
             .map(|(number, hash)| Marker { number, hash })
@@ -88,6 +83,21 @@ impl Engine {
                 target,
                 complete: true,
                 estimated_write_bytes: 0,
+            });
+        }
+        if matches!(request.mode, RunMode::RecomputeFlags) {
+            let estimated_write_bytes = recompute::run(
+                &self.pool,
+                &request.chain_id,
+                request.from_block,
+                request.to_block,
+            )
+            .await?;
+            return Ok(BatchOutcome {
+                current: target.clone(),
+                target,
+                complete: true,
+                estimated_write_bytes,
             });
         }
         let markers = load::canonical_markers(

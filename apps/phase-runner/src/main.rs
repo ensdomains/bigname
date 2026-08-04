@@ -95,9 +95,6 @@ async fn main() -> Result<()> {
             range,
             hydration_rpc_urls,
         } => {
-            if phase == phase_runner::runner::RedoPhase::RecomputeFlags {
-                bail!(bigname_interpret::RECOMPUTE_FLAGS_UNAVAILABLE_REASON);
-            }
             let database = RunnerDatabase::connect(&database_url, 4).await?;
             sync_manifests(database.pool(), &manifests_root).await?;
             let chains = match chains {
