@@ -34,6 +34,7 @@ struct Case {
 #[serde(rename_all = "snake_case")]
 enum Runner {
     ReverseClaim,
+    ReverseResolverBurst,
     BlockDerived,
     UnwrappedAuthority,
     EnsV2Registry,
@@ -106,6 +107,15 @@ fn runner_for_derivation(derivation: &str) -> Option<Runner> {
         "ens_v2_registrar" => Some(Runner::EnsV2Registrar),
         _ => None,
     }
+}
+
+fn runner_accepts_derivation(runner: Runner, derivation: &str) -> bool {
+    runner_for_derivation(derivation) == Some(runner)
+        || runner == Runner::ReverseResolverBurst
+            && matches!(
+                runner_for_derivation(derivation),
+                Some(Runner::ReverseClaim | Runner::UnwrappedAuthority | Runner::BlockDerived)
+            )
 }
 
 fn schema_v2_companion(
@@ -211,7 +221,7 @@ fn assert_semantic_output(
             .enumerate()
             .find(|(index, event)| {
                 !event_matches.contains(index)
-                    && runner_for_derivation(&event.derivation_kind) == Some(case.runner)
+                    && runner_accepts_derivation(case.runner, &event.derivation_kind)
                     && event.event_kind == expected_kind
                     && event.source_family == expected_family
                     && event.block_number == Some(expected_block)
@@ -266,7 +276,7 @@ fn assert_semantic_output(
         .iter()
         .enumerate()
         .filter(|(index, event)| {
-            runner_for_derivation(&event.derivation_kind) == Some(case.runner)
+            runner_accepts_derivation(case.runner, &event.derivation_kind)
                 && !event_matches.contains(index)
                 && !schema_v2_companion(case_id, event)
         })

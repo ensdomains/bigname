@@ -1,3 +1,4 @@
+mod reconcile_support;
 mod registrar;
 mod registry;
 mod resolver;
@@ -7,6 +8,10 @@ mod upgrade;
 mod wrapper;
 
 use anyhow::bail;
+
+use self::reconcile_support::{
+    event_position, is_pending_resolver_setup, is_pending_setup, is_registry_ownership_setup,
+};
 
 use super::Interpreted;
 use crate::schema_v2::{
@@ -104,6 +109,26 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
         registration_emitter,
     ) in registrations
     {
+        // The legacy mainnet controller's `registerWithConfig` first registers to the
+        // controller, writes resolver configuration, and only then reclaims to the user.
+        // Resolver retargeting must therefore begin after the first ownership setup.
+        // (upstream: .refs/ens_subgraph/subgraph.yaml:L145 @ ens_subgraph@723f1b6)
+        // (upstream: .refs/ens_v1/deployments/mainnet/solcInputs/40ce5451dce8f428cafdaca8fb82d91d.json:L158 @ ens_v1@91c966f)
+        let first_ownership_setup_log_index = output
+            .normalized_events
+            .iter()
+            .filter(|event| {
+                is_registry_ownership_setup(
+                    event,
+                    &namespace,
+                    &block_hash,
+                    &transaction_hash,
+                    log_index,
+                    &namehash,
+                )
+            })
+            .filter_map(|event| event.log_index)
+            .min();
         let pending_positions = output
             .normalized_events
             .iter()
@@ -258,6 +283,7 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
             event.logical_name_id = Some(logical_name_id.clone());
             refresh_interpreter_state_key(event);
         }
+        let mut retargeted_resolver_starts = std::collections::BTreeMap::new();
         for event in output.normalized_events.iter_mut().filter(|event| {
             if concerns_predecessor_epoch(
                 event,
@@ -274,6 +300,15 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
                 &transaction_hash,
                 log_index,
                 &namehash,
+            ) || is_pending_resolver_setup(
+                event,
+                &namespace,
+                &block_hash,
+                &transaction_hash,
+                log_index,
+                &namehash,
+                first_ownership_setup_log_index,
+                &stale_registry_resources,
             );
             let references_pending_resource = event_position(event)
                 .is_some_and(|position| pending_positions.contains(&position))
@@ -282,11 +317,12 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
                     .is_some_and(|resource| stale_registry_resources.contains(&resource));
             targets_registration || references_pending_resource
         }) {
+            let resolver_event = matches!(
+                event.source_family.as_str(),
+                "ens_v1_resolver_l1" | "basenames_base_resolver"
+            );
             event.logical_name_id = Some(logical_name_id.clone());
             event.resource_id = Some(resource_id);
-            // Retargeting intentionally records the authority established by NameRegistered, not
-            // the authority present when the earlier setup log was emitted.
-            event.before_state = serde_json::json!({});
             if let Some(authority_key) = authority_key.as_deref() {
                 retarget_permission_authority(&mut event.after_state, authority_key);
             }
@@ -295,6 +331,40 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
                 state.remove("authority_key");
             }
             refresh_interpreter_state_key(event);
+            event.before_state = serde_json::json!({});
+            if resolver_event
+                && let (Some(state_key), Some(position)) = (
+                    event
+                        .raw_fact_ref
+                        .get(INTERPRETER_STATE_KEY)
+                        .and_then(serde_json::Value::as_str),
+                    event_position(event),
+                )
+            {
+                retargeted_resolver_starts
+                    .entry(state_key.to_owned())
+                    .and_modify(|start: &mut (i64, i64, i64)| *start = (*start).min(position))
+                    .or_insert(position);
+            }
+        }
+        let mut resolver_after_by_state_key = std::collections::BTreeMap::new();
+        for event in &mut output.normalized_events {
+            let Some(state_key) = event
+                .raw_fact_ref
+                .get(INTERPRETER_STATE_KEY)
+                .and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            let Some(start) = retargeted_resolver_starts.get(state_key) else {
+                continue;
+            };
+            if event_position(event).is_none_or(|position| position < *start) {
+                continue;
+            }
+            event.before_state = resolver_after_by_state_key
+                .insert(state_key.to_owned(), event.after_state.clone())
+                .unwrap_or_else(|| serde_json::json!({}));
         }
         output.surface_bindings.retain(|binding| {
             !stale_registry_resources.contains(&binding.resource_id)
@@ -452,41 +522,4 @@ fn refresh_interpreter_state_key(event: &mut NormalizedEvent) {
             serde_json::Value::String(state_key),
         );
     }
-}
-
-fn event_position(event: &NormalizedEvent) -> Option<(i64, i64, i64)> {
-    Some((
-        event.block_number?,
-        event.transaction_index?,
-        event.log_index?,
-    ))
-}
-
-fn is_pending_setup(
-    event: &NormalizedEvent,
-    namespace: &str,
-    block_hash: &str,
-    transaction_hash: &str,
-    registration_log_index: i64,
-    namehash: &str,
-) -> bool {
-    event.namespace == namespace
-        && matches!(
-            event.source_family.as_str(),
-            "ens_v1_registry_l1" | "basenames_base_registry"
-        )
-        && event.block_hash.as_deref() == Some(block_hash)
-        && event.transaction_hash.as_deref() == Some(transaction_hash)
-        && event
-            .log_index
-            .is_some_and(|index| index < registration_log_index)
-        && event_target_namehash(event).is_some_and(|target| target.eq_ignore_ascii_case(namehash))
-}
-
-fn event_target_namehash(event: &NormalizedEvent) -> Option<&str> {
-    event
-        .after_state
-        .get("child_node")
-        .or_else(|| event.after_state.get("node"))
-        .and_then(serde_json::Value::as_str)
 }
