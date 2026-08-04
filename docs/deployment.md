@@ -146,7 +146,16 @@ writes, so previously hydrated values remain intact while the chain is stopped
 for configuration repair.
 
 One-shot finite phase work is available through `phase-runner redo` for
-`ingest`, `interpret`, `project`, and `verify`. Verify redo checks its source
+`ingest`, `interpret`, `project`, and `verify`.
+`--phase all` runs ingest through verify for each selected chain, and
+`--all-chains` discovers active manifest chains before dispatching the same
+per-chain path. A chain failure stops its remaining phases but does not prevent
+later selected chains from running; the command still exits nonzero with the
+collected failures. Interpret's effective replay range is handed to Project
+through the downstream redo stamp. `--phase all` refuses a chain with any
+already-pending redo rather than absorbing that work. If one of its phases
+fails, the error gives the phase-specific command that must complete the
+durable marker before the operator reruns `--phase all`. Verify redo checks its source
 and SELECT-only database configuration before phase initialization, locking,
 or redo-state publication.
 It rechecks only a range inside the recorded verification extent: the range
@@ -159,7 +168,7 @@ fixed by its source kind. An interrupted attempt keeps the normal resumable
 redo marker and must be rerun with the same range.
 Historical `live` redo is rejected because live follows only the current head.
 The not-yet-implemented flag recomputation path also fails explicitly. Project
-redo and an interpret-to-project cascade use
+redo, `--phase all`, and an interpret-to-project cascade use
 `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS` (or
 `--hydration-rpc CHAIN=HTTP_URL`) for the same current-head enrichment as the
 supervised project phase. `phase-runner rewind` moves the
@@ -167,7 +176,13 @@ published latest marker to an exact stored readable ancestor and uses normal
 head publication to orphan the suffix, invalidate affected cache eligibility,
 and stamp downstream redo.
 
-Before either command's first use, run `phase-runner init-schema` once after
+`phase-runner inspect block-canonicality`, `stored-lineage`, and `raw-events`
+provide the three read-only bounded schema-v2 operator windows. They do not
+expose API routes. No drift, cache, execution-trace, or watch-plan inspection
+surface is ported to the phase runner.
+
+Before these schema-v2 operator commands are first used, run
+`phase-runner init-schema` once after
 the retained migrations have prepared `public`. The phase runner owns the
 `bigname_phase` namespace in that database. Keeping both namespaces in one
 transaction domain is required while head publication atomically marks phase

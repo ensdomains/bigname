@@ -536,11 +536,12 @@ and redo-stamping path. The next supervised live cycle fills the winning path,
 then runs the required downstream redo.
 
 Historical work is a finite `ingest`, `interpret`, `project`, or `verify` run.
-An explicit redo can record that work; it is not a persisted old-schema
+An explicit redo can select one phase or all four in dependency order for one,
+several, or every active-manifest chain; it is not a persisted old-schema
 backfill job. Live follow starts at the completed ingest handoff and only walks
 the current head and a winning-fork gap; it never provides historical coverage.
-Unsupported `live` and flag-recomputation redo requests fail before any redo
-state is written. A deployment
+Unsupported historical `live` and flag-recomputation requests, and unreadable
+range ends, fail before redo state is written. A deployment
 therefore still needs complete admitted history for ENSv1, ENSv2, and Basenames
 source families. Wildcard and offchain names remain
 discovery/observed-answer based rather than exhaustively enumerable.
@@ -552,22 +553,20 @@ API and worker metrics remain available. The live phase records its phase state,
 exact block-hash progress, and heartbeat through the shared runner control
 plane; dedicated chain-lag and reorg metrics remain deferred.
 
-Worker-owned tools (none expose public `v1` routes; inspection tools are read-only):
+The phase runner owns the current schema-v2 operator tools. None expose public
+API routes:
 
-- `bigname-worker inspect canonicality --chain-id <id> --block-hash <hash>` — single-block lineage, canonicality state, parent hash, raw fact counts, normalized-event counts.
-- `bigname-worker inspect stored-lineage-range --chain-id <id> --from-block <n> --to-block <n>` — stored lineage rows in a bounded block range.
-- `bigname-worker inspect backfill-job --backfill-job-id <id>` — one persisted backfill job plus child ranges.
-- `bigname-worker inspect execution-trace --execution-trace-id <id>` — one persisted execution trace and its persisted steps.
-- `bigname-worker inspect manifest-drift --json` and `bigname-worker inspect watch-plan --json` — persisted manifest/proxy alert observations and runtime watch-plan state.
-- Schema-v2 projection maintenance is an explicit project-phase normal run or
-  bounded redo. The old worker's point-or-full rebuilds,
-  `replay all-current-projections`, and execution-cache invalidation commands
-  remain legacy-public-schema operations. Finalized-head/backfill processing,
-  historical snapshot materialization,
-  surface-binding inspection, resolver-topology inspection, raw-fact
-  inspection beyond canonicality/stored-lineage views, manifest-version
-  inspection, and [declared-vs-verified](glossary.md) diff tooling are deferred;
-  operators should not treat them as available CLI contracts.
+- `phase-runner redo` and `phase-runner rewind` own finite phase repair and thin head publication, respectively.
+- `phase-runner inspect block-canonicality` reads bounded fork labels plus retained fact counts.
+- `phase-runner inspect stored-lineage` reads bounded lineage and optional stored header audit fields.
+- `phase-runner inspect raw-events` reads bounded raw logs with transaction, receipt, lineage, header-presence, and normalized-event context.
+
+The inspection commands use read-only repeatable-read transactions and retain
+orphaned forks in their output with explicit canonicality labels. Drift,
+payload-cache, execution-trace, and watch-plan views were cut and have no
+schema-v2 phase-runner replacements. Schema-v2 projection maintenance remains
+an explicit project-phase normal run or bounded redo; there is no independent
+projection replay command.
 
 Live manifest drift / proxy upgrade alerting is a worker-owned operational loop. It does not write `normalized_events`, mutate manifests, rewrite discovery, or expose a public route.
 

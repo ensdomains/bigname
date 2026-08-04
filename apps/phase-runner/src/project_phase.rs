@@ -66,7 +66,7 @@ impl ProjectPhase {
                 RunnerError::new(
                     ErrorKind::DataIntegrity,
                     format!(
-                        "cannot redo project on chain {chain_id}: recorded head {number} is not canonical"
+                        "cannot redo project on chain {chain_id}: recorded head {number} is not readable (canonical, safe, or finalized)"
                     ),
                 )
             })?;
@@ -102,7 +102,7 @@ impl Phase for ProjectPhase {
                     return Err(RunnerError::new(
                         ErrorKind::DataIntegrity,
                         format!(
-                            "project redo block {} for chain {} is not canonical",
+                            "project redo block {} for chain {} is not readable (canonical, safe, or finalized)",
                             range.to, context.chain_id
                         ),
                     ));
@@ -164,7 +164,7 @@ impl Phase for ProjectPhase {
                     RunnerError::new(
                         ErrorKind::DataIntegrity,
                         format!(
-                            "project redo block {block_number} for chain {} is not canonical",
+                            "project redo block {block_number} for chain {} is not readable (canonical, safe, or finalized)",
                             context.chain_id
                         ),
                     )

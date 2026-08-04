@@ -309,6 +309,65 @@ async fn primary_name_builder_preserves_success_invalid_blank_and_byte_only_clai
 }
 
 #[tokio::test]
+async fn project_redo_rejects_an_observed_only_range_end_before_claiming_state() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_observed_redo_end").await?;
+    let chain = "project-observed-redo-end";
+    seed_lineage(scratch.pool(), chain, 2).await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state
+         ) VALUES ($1, $2, $3, 3, to_timestamp(3), 'observed')",
+    )
+    .bind(chain)
+    .bind(block_hash(chain, 3))
+    .bind(block_hash(chain, 2))
+    .execute(scratch.pool())
+    .await?;
+    let store = PhaseStore::new(scratch.pool().clone());
+    store.initialize_chain(chain).await?;
+    seed_completed_project_extent(scratch.pool(), chain, 3).await?;
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        PhaseSet::with_ingest_interpret_and_project(
+            Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+            Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
+            Arc::new(ProjectPhase::new(scratch.pool().clone())),
+        )?,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-project-observed-redo-end",
+        test_timing(),
+    )?;
+
+    let error = runner
+        .redo(
+            &chain_config(chain)?,
+            RedoPhase::Phase(PhaseName::Project),
+            BlockRange::new(3, 3)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("observed staging must not become a project redo marker");
+    assert_eq!(error.kind(), phase_runner::error::ErrorKind::DataIntegrity);
+    assert!(
+        error
+            .to_string()
+            .contains("not readable (canonical, safe, or finalized)")
+    );
+    assert!(!error.to_string().contains("not canonical"));
+    let state: (String, bool, Option<String>, Option<i64>) = sqlx::query_as(
+        "SELECT phase_status, redo_in_progress, redo_mode, redo_current_block_number
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(state, ("completed".into(), false, None, None));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn record_version_boundary_excludes_prior_records_and_keeps_later_records() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_record_version").await?;
     seed_project_fixture(scratch.pool()).await?;

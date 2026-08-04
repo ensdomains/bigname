@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
 use phase_runner::{
     capacity::CapacityGuard,
-    cli::{Cli, ResolvedCommand},
+    cli::{Cli, RedoChains, ResolvedCommand, resolve_all_redo_chains},
     database::{RunnerDatabase, VerificationDatabase},
     ingest_phase::IngestPhase,
     interpret_phase::InterpretPhase,
@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
             verification_database_url,
             manifests_root,
             instance_id,
-            chain,
+            chains,
             capacity,
             timing,
             phase,
@@ -100,6 +100,13 @@ async fn main() -> Result<()> {
             }
             let database = RunnerDatabase::connect(&database_url, 4).await?;
             sync_manifests(database.pool(), &manifests_root).await?;
+            let chains = match chains {
+                RedoChains::Explicit(chains) => chains,
+                RedoChains::All { sources } => {
+                    resolve_all_redo_chains(database.pool(), sources, phase.requires_ingest())
+                        .await?
+                }
+            };
             let ingest_engine = Arc::new(bigname_ingest::Engine::new(database.pool().clone()));
             let ingest = Arc::new(IngestPhase::with_engine(ingest_engine));
             let interpret = Arc::new(InterpretPhase::new(database.pool().clone()));
@@ -107,9 +114,7 @@ async fn main() -> Result<()> {
                 database.pool().clone(),
                 hydration_rpc_urls,
             ));
-            let phases = if phase
-                == phase_runner::runner::RedoPhase::Phase(phase_runner::phase::PhaseName::Verify)
-            {
+            let phases = if phase.requires_verify() {
                 let verification_database_url =
                     verification_database_url.as_deref().ok_or_else(|| {
                         anyhow::anyhow!(
@@ -134,7 +139,10 @@ async fn main() -> Result<()> {
                 instance_id,
                 timing,
             )?;
-            runner.redo(&chain, phase, range, cancellation).await?;
+            let report = runner
+                .redo_chains(&chains, phase, range, cancellation)
+                .await?;
+            require_clean_supervisor_exit(report)?;
         }
         ResolvedCommand::Rewind {
             database_url,
@@ -153,6 +161,10 @@ async fn main() -> Result<()> {
                 "chain head rewound; affected downstream phases are stamped for redo"
             );
         }
+        ResolvedCommand::Inspect {
+            database_url,
+            request,
+        } => phase_runner::inspect::run(&database_url, request).await?,
     }
     Ok(())
 }

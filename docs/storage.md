@@ -634,15 +634,17 @@ Before a verified-resolution selector persists as a supported reusable outcome, 
 
 ## Read-only inspection tooling
 
-Worker-owned, read-only operational tooling reads storage audit helpers and renders stable JSON. It does not create public `v1` routes, mutate state, fetch fresh chain data, or bypass API read boundaries.
+`phase-runner inspect` owns three bounded schema-v2 windows and renders JSON
+from a read-only repeatable-read transaction. It does not create public API
+routes, mutate state, or fetch fresh chain data.
 
-- `bigname-worker inspect canonicality --chain-id <id> --block-hash <hash>` — for a stored block: lineage, parent hash, block number, canonicality state, optional header-audit presence, raw fact counts, payload-cache metadata counts/digests where retained, normalized-event counts.
-- `bigname-worker inspect stored-lineage-range --chain-id <id> --from <block> --to <block>` — lists only lineage rows already stored for the requested chain and finite block range, ordered by `(block_number, block_hash)`. Renders chain id, block number, block hash, parent hash, canonicality state, timestamp, and stored promotion markers per observed block. Nullable fields render as `null`. Does not infer missing heights, gaps, span-wide canonicality, or completeness.
-- `bigname-worker inspect backfill-job --backfill-job-id <id>` — resolves one
-  historical job and its child ranges. It is read-only migration-era audit
-  output, not current phase progress or authority.
-- `bigname-worker inspect execution-trace --execution-trace-id <id>` — reads `execution_traces`, `execution_steps`, and trace-attachment metadata for one stored trace.
-- Manifest-drift and proxy-alert inspection — joins stored alert observations to manifest/discovery identifiers, code-hash facts, proxy/implementation edges, and derived watch-target metadata. Does not fetch fresh chain state, create alerts, mutate alert lifecycle, mutate manifest truth, or change capability flags.
+- `block-canonicality --chain <id> --from-block <n> --to-block <n>` lists every stored fork by `(block_number, block_hash)`, its explicit canonicality, optional header-audit presence, and retained raw-fact and normalized-event counts.
+- `stored-lineage --chain <id> --from-block <n> --to-block <n>` lists stored lineage and optional `chain_header_audit` fields in stable order. It does not infer missing heights, completeness, or canonicality for absent rows.
+- `raw-events --chain <id> --from-block <n> --to-block <n>` lists retained raw logs with their raw transaction, optional receipt, header-presence, lineage canonicality, and matching normalized-event context.
+
+All three include orphaned forks with `canonicality_state='orphaned'`. Retired
+drift, payload-cache, execution-trace, and watch-plan views have no schema-v2
+phase-runner commands.
 
 ## Migration rules
 

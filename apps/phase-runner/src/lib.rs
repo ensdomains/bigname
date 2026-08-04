@@ -8,6 +8,7 @@ mod head_observed;
 pub mod heads;
 pub mod ingest_phase;
 mod ingest_progress;
+pub mod inspect;
 pub mod interpret_phase;
 pub mod live_phase;
 pub mod phase;

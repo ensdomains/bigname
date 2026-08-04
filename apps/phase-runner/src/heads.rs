@@ -108,16 +108,7 @@ pub(crate) async fn load_marker(
         FROM chain_lineage
         WHERE chain_id = $1
           AND block_number = $2
-          AND canonicality_state <> 'orphaned'
-        ORDER BY
-            CASE canonicality_state
-                WHEN 'finalized' THEN 4
-                WHEN 'safe' THEN 3
-                WHEN 'canonical' THEN 2
-                ELSE 1
-            END DESC,
-            block_hash
-        LIMIT 1
+          AND canonicality_state IN ('canonical', 'safe', 'finalized')
         ",
     )
     .bind(chain_id)
