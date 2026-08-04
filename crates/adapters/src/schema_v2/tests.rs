@@ -1724,11 +1724,47 @@ fn same_block_v1_releases_have_distinct_permission_event_identities() -> anyhow:
 
 #[test]
 fn same_transaction_controller_setup_is_attributed_to_the_registration() -> anyhow::Result<()> {
+    assert_same_transaction_controller_setup(
+        "ens",
+        "ens_v1_registry_l1",
+        "ens_v1_registrar_l1",
+        &["eth"],
+    )
+}
+
+#[test]
+fn basenames_same_transaction_controller_setup_uses_the_registration_resource() -> anyhow::Result<()>
+{
+    // Basenames likewise writes the registry subnode before emitting the registration event.
+    // (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L421 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L425 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/src/L2/Registry.sol:L120 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/src/L2/Registry.sol:L122 @ basenames@1809bbc)
+    assert_same_transaction_controller_setup(
+        "basenames",
+        "basenames_base_registry",
+        "basenames_base_registrar",
+        &["base", "eth"],
+    )
+}
+
+fn assert_same_transaction_controller_setup(
+    namespace: &str,
+    registry_family: &str,
+    registrar_family: &str,
+    suffix: &[&str],
+) -> anyhow::Result<()> {
     let label = "alice";
     let labelhash = keccak256(label.as_bytes());
-    let labels = vec![label.to_owned(), "eth".to_owned()];
+    let suffix = suffix
+        .iter()
+        .map(|label| (*label).to_owned())
+        .collect::<Vec<_>>();
+    let labels = std::iter::once(label.to_owned())
+        .chain(suffix.iter().cloned())
+        .collect::<Vec<_>>();
     let node = super::common::namehash(&labels).parse::<B256>()?;
-    let eth_node = super::common::namehash(&["eth".to_owned()]).parse::<B256>()?;
+    let parent_node = super::common::namehash(&suffix).parse::<B256>()?;
     let registry_address = "0x0000000000000000000000000000000000000043";
     let resolver_address = "0x0000000000000000000000000000000000000044";
     let transient_owner_address = "0x0000000000000000000000000000000000000045";
@@ -1740,13 +1776,13 @@ fn same_transaction_controller_setup_is_attributed_to_the_registration() -> anyh
     }
     .encode_log_data();
     let transient_owner = v1_registry::NewOwner {
-        node: eth_node,
+        node: parent_node,
         label: labelhash,
         owner: transient_owner_address.parse()?,
     }
     .encode_log_data();
     let owner = v1_registry::NewOwner {
-        node: eth_node,
+        node: parent_node,
         label: labelhash,
         owner: CONTRACT.parse()?,
     }
@@ -1758,8 +1794,8 @@ fn same_transaction_controller_setup_is_attributed_to_the_registration() -> anyh
     .encode_log_data();
     let registry = manifest_with_events(
         30,
-        "ens",
-        "ens_v1_registry_l1",
+        namespace,
+        registry_family,
         &[
             (
                 "NewOwner",
@@ -1781,13 +1817,16 @@ fn same_transaction_controller_setup_is_attributed_to_the_registration() -> anyh
         chain_id: CHAIN.to_owned(),
         manifests: vec![
             registry,
-            manifest(
+            manifest_with_events(
                 31,
-                "ens_v1_registrar_l1",
-                "NameRegistered",
-                "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
-                &["registrar"],
-                &["RegistrationGranted"],
+                namespace,
+                registrar_family,
+                &[(
+                    "NameRegistered",
+                    "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+                    &["registrar"],
+                    &["RegistrationGranted"],
+                )],
             ),
         ],
         discovery_rules: Vec::new(),
@@ -1801,13 +1840,116 @@ fn same_transaction_controller_setup_is_attributed_to_the_registration() -> anyh
             raw_at(registration, 1, 3, CONTRACT),
         ],
     })?;
+    assert_batch_resource_referential_integrity(&output, &std::collections::BTreeSet::new())?;
 
-    let registrar_resource = output
+    let registration_event = output
         .normalized_events
         .iter()
         .find(|event| event.event_kind == "RegistrationGranted")
-        .and_then(|event| event.resource_id)
+        .expect("registration event");
+    let registrar_resource = registration_event
+        .resource_id
         .expect("registration resource");
+    let registrar_authority_key = registration_event
+        .after_state
+        .get("authority_key")
+        .and_then(serde_json::Value::as_str)
+        .expect("registration authority key");
+    let registry_permission_events = output
+        .normalized_events
+        .iter()
+        .filter(|event| event.source_family == registry_family)
+        .filter(|event| event.event_kind == "PermissionChanged")
+        .collect::<Vec<_>>();
+    assert!(!registry_permission_events.is_empty());
+    assert!(
+        registry_permission_events
+            .iter()
+            .all(|event| event.resource_id == Some(registrar_resource)),
+        "same-transaction registry permission events must use the registrar resource"
+    );
+    let resource_bearing_registry_events = output
+        .normalized_events
+        .iter()
+        .filter(|event| event.source_family == registry_family)
+        .filter(|event| event.resource_id.is_some())
+        .collect::<Vec<_>>();
+    assert!(!resource_bearing_registry_events.is_empty());
+    assert!(
+        resource_bearing_registry_events
+            .iter()
+            .all(|event| event.resource_id == Some(registrar_resource)),
+        "every reconciled registry event must use the registrar resource"
+    );
+    let batch_resource_ids = output
+        .resources
+        .iter()
+        .map(|resource| resource.resource_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        batch_resource_ids,
+        std::collections::BTreeSet::from([registrar_resource]),
+        "the superseded registry-only resource must not survive the reconciled batch"
+    );
+    assert!(
+        registry_permission_events
+            .iter()
+            .all(|event| event.log_index != Some(0)),
+        "permissions derived from transient setup ownership must be discarded with that observation"
+    );
+    for event in &registry_permission_events {
+        assert!(
+            event
+                .raw_fact_ref
+                .get(seam::INTERPRETER_STATE_KEY)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|state_key| state_key.contains(&registrar_resource.to_string())),
+            "retargeted event state must be keyed to the registrar resource"
+        );
+        let mut saw_authority_source = false;
+        for field in ["grant_source", "revocation_source"] {
+            let Some(source) = event
+                .after_state
+                .get(field)
+                .and_then(serde_json::Value::as_object)
+                .filter(|source| {
+                    source.get("kind").and_then(serde_json::Value::as_str)
+                        == Some("ens_v1_authority")
+                })
+            else {
+                continue;
+            };
+            saw_authority_source = true;
+            assert_eq!(
+                source
+                    .get("authority_kind")
+                    .and_then(serde_json::Value::as_str),
+                Some("registrar"),
+                "retargeted permission provenance must identify the registrar authority"
+            );
+            assert_eq!(
+                source
+                    .get("authority_key")
+                    .and_then(serde_json::Value::as_str),
+                Some(registrar_authority_key),
+                "retargeted permission provenance must use the registration authority key"
+            );
+        }
+        assert!(
+            saw_authority_source,
+            "registry permission event must retain its ENSv1 authority source"
+        );
+    }
+    for event in resource_bearing_registry_events {
+        assert!(
+            event
+                .raw_fact_ref
+                .get(seam::INTERPRETER_STATE_KEY)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|state_key| state_key.contains(&registrar_resource.to_string())),
+            "every reconciled event state must be keyed to the registrar resource"
+        );
+    }
     for kind in [
         "SubregistryChanged",
         "AuthorityTransferred",
@@ -5997,6 +6139,39 @@ fn interpret_test_batch(mut input: BatchInput) -> anyhow::Result<BatchOutput> {
         input.blocks = blocks.into_values().collect();
     }
     super::interpret_schema_v2_batch(input)
+}
+
+fn assert_batch_resource_referential_integrity(
+    output: &BatchOutput,
+    persisted_resources: &std::collections::BTreeSet<(String, Uuid)>,
+) -> anyhow::Result<()> {
+    let available_resources = output
+        .resources
+        .iter()
+        .map(|resource| (resource.chain_id.clone(), resource.resource_id))
+        .chain(persisted_resources.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>();
+    for event in &output.normalized_events {
+        if let Some(resource_id) = event.resource_id {
+            anyhow::ensure!(
+                available_resources.contains(&(event.chain_id.clone(), resource_id)),
+                "normalized event {} references resource {} on chain {} without a batch or persisted resource row",
+                event.event_identity,
+                resource_id,
+                event.chain_id,
+            );
+        }
+    }
+    for binding in &output.surface_bindings {
+        anyhow::ensure!(
+            available_resources.contains(&(binding.chain_id.clone(), binding.resource_id)),
+            "surface binding {} references resource {} on chain {} without a batch or persisted resource row",
+            binding.surface_binding_id,
+            binding.resource_id,
+            binding.chain_id,
+        );
+    }
+    Ok(())
 }
 
 type EventSpec<'a> = (&'a str, &'a str, &'a [&'a str], &'a [&'a str]);

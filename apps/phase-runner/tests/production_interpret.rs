@@ -40,6 +40,7 @@ use tokio_util::sync::CancellationToken;
 use support::ScratchDatabase;
 
 const CONTRACT: &str = "0x0000000000000000000000000000000000000042";
+const REGISTRY: &str = "0x0000000000000000000000000000000000000046";
 const DISCOVERED_RESOLVER: &str = "0x0000000000000000000000000000000000000044";
 const ANNOUNCED_REGISTRY: &str = "0x0000000000000000000000000000000000000045";
 const SENDER: &str = "0x0000000000000000000000000000000000000043";
@@ -53,6 +54,7 @@ sol! {
         address indexed owner,
         uint256 expires
     );
+    event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
     event ResolverUpdated(
         uint256 indexed tokenId,
         address indexed resolver,
@@ -155,6 +157,66 @@ async fn production_interpret_writes_plain_events_identity_preimages_and_flags()
         .fetch_one(scratch.pool())
         .await?;
     assert_eq!(binding_count, 1);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn same_transaction_registry_permission_writes_with_registration_resource() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_same_transaction_resource").await?;
+    let chain = "interpret-same-transaction-resource";
+    seed_same_transaction_registration_fixture(scratch.pool(), chain).await?;
+
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+
+    let (registration_resource, registration_authority_key): (Uuid, String) = sqlx::query_as(
+        "SELECT resource_id, after_state ->> 'authority_key' FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'RegistrationGranted'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    let registry_permissions: Vec<(Uuid, serde_json::Value, String)> = sqlx::query_as(
+        "SELECT resource_id, after_state, raw_fact_ref ->> 'interpreter_state_key'
+         FROM normalized_events
+         WHERE chain_id = $1
+           AND source_family = 'ens_v1_registry_l1'
+           AND event_kind = 'PermissionChanged'",
+    )
+    .bind(chain)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert!(!registry_permissions.is_empty());
+    for (resource_id, after_state, interpreter_state_key) in registry_permissions {
+        assert_eq!(resource_id, registration_resource);
+        assert!(interpreter_state_key.contains(&registration_resource.to_string()));
+        let mut saw_authority_source = false;
+        for field in ["grant_source", "revocation_source"] {
+            let Some(source) = after_state
+                .get(field)
+                .and_then(serde_json::Value::as_object)
+                .filter(|source| {
+                    source.get("kind").and_then(serde_json::Value::as_str)
+                        == Some("ens_v1_authority")
+                })
+            else {
+                continue;
+            };
+            saw_authority_source = true;
+            assert_eq!(
+                source
+                    .get("authority_kind")
+                    .and_then(serde_json::Value::as_str),
+                Some("registrar")
+            );
+            assert_eq!(
+                source
+                    .get("authority_key")
+                    .and_then(serde_json::Value::as_str),
+                Some(registration_authority_key.as_str())
+            );
+        }
+        assert!(saw_authority_source);
+    }
     scratch.cleanup().await
 }
 
@@ -5044,6 +5106,115 @@ async fn insert_orphaned_registration_with_parent(
 
 async fn seed_fixture(pool: &PgPool, chain_id: &str, labels: &[(i64, &str)]) -> Result<()> {
     seed_fixture_with_timestamps(pool, chain_id, labels, &[]).await
+}
+
+async fn seed_same_transaction_registration_fixture(pool: &PgPool, chain_id: &str) -> Result<()> {
+    seed_fixture(pool, chain_id, &[(1, "alice")]).await?;
+    sqlx::query("UPDATE raw_logs SET log_index = 1 WHERE chain_id = $1")
+        .bind(chain_id)
+        .execute(pool)
+        .await?;
+
+    let contract_instance_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO contract_instances VALUES ($1, $2, 'contract', '{}'::jsonb, now())")
+        .bind(contract_instance_id)
+        .bind(chain_id)
+        .execute(pool)
+        .await?;
+    let payload = json!({
+        "manifest_version": 1,
+        "namespace": "ens",
+        "source_family": "ens_v1_registry_l1",
+        "chain": chain_id,
+        "deployment_epoch": "fixture",
+        "rollout_status": "active",
+        "normalizer_version": NORMALIZER,
+        "capability_flags": {},
+        "roots": [],
+        "contracts": [{
+            "role": "registry",
+            "address": REGISTRY,
+            "proxy_kind": "none",
+            "implementation": null,
+            "start_block": 0
+        }],
+        "discovery_rules": [],
+        "abi": { "events": [{
+            "name": "NewOwner",
+            "fragment": "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+            "emitter_roles": ["registry"],
+            "normalized_events": [
+                "SubregistryChanged",
+                "AuthorityTransferred",
+                "PermissionChanged",
+                "SurfaceUnbound",
+                "SurfaceBound",
+                "AuthorityEpochChanged",
+                "ResolverChanged"
+            ]
+        }], "calls": [] }
+    });
+    let manifest_id = insert_manifest(
+        pool,
+        chain_id,
+        "ens_v1_registry_l1",
+        &format!("tests/{chain_id}-registry.toml"),
+        payload,
+    )
+    .await?;
+    sqlx::query(
+        "
+        INSERT INTO manifest_contract_instances (
+            manifest_id, chain_id, declaration_kind, declaration_name,
+            contract_instance_id, declared_address, role, proxy_kind, start_block_number
+        )
+        VALUES ($1, $2, 'contract', 'registry', $3, $4, 'registry', 'none', 0)
+        ",
+    )
+    .bind(manifest_id)
+    .bind(chain_id)
+    .bind(contract_instance_id)
+    .bind(REGISTRY)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "
+        INSERT INTO contract_instance_addresses (
+            contract_instance_id, chain_id, address, active_from_block_number,
+            source_manifest_id, provenance
+        )
+        VALUES ($1, $2, $3, 0, $4, '{}'::jsonb)
+        ",
+    )
+    .bind(contract_instance_id)
+    .bind(chain_id)
+    .bind(REGISTRY)
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+
+    // Registrar registration calls the registry before emitting NameRegistered, and that registry
+    // call emits NewOwner for the registered subnode.
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L149 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L152 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L82 @ ens_v1@91c966f)
+    let transaction_hash = format!("{chain_id}-transaction-1");
+    let encoded = NewOwner {
+        node: raw_namehash(&[b"eth"]),
+        label: B256::from(keccak256(b"alice")),
+        owner: CONTRACT.parse()?,
+    }
+    .encode_log_data();
+    insert_log(
+        pool,
+        chain_id,
+        &transaction_hash,
+        0,
+        REGISTRY,
+        encoded.topics(),
+        encoded.data.as_ref(),
+    )
+    .await
 }
 
 async fn seed_fixture_with_timestamps(
