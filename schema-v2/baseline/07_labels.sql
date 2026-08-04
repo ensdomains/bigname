@@ -30,9 +30,6 @@ CREATE TABLE IF NOT EXISTS label_preimages (
     CHECK (jsonb_typeof(provenance) = 'object')
 );
 
-CREATE INDEX IF NOT EXISTS label_preimages_raw_label_idx
-    ON label_preimages (raw_label, labelhash);
-
 CREATE INDEX IF NOT EXISTS label_preimages_normalization_idx
     ON label_preimages (
         normalizer_version,
@@ -47,15 +44,12 @@ CREATE TABLE IF NOT EXISTS ens_names (
     CHECK (name <> '')
 );
 
-CREATE INDEX IF NOT EXISTS ens_names_name_idx
-    ON ens_names (name, hash);
-
 COMMENT ON TABLE label_preimages IS
-    'This table maps label hashes to verified raw labels.';
+    'This table maps label hashes to verified raw labels. Consumers use the bounded labelhash primary key; unbounded raw label bytes are deliberately absent from btree indexes.';
 COMMENT ON COLUMN label_preimages.labelhash IS
     'This value is the label hash.';
 COMMENT ON COLUMN label_preimages.raw_label IS
-    'This value is the verbatim chain label bytes.';
+    'This value is the verbatim chain label bytes. Lookup uses the labelhash primary key because these attacker-controlled bytes are unbounded.';
 COMMENT ON COLUMN label_preimages.decoded_label IS
     'This value is the PostgreSQL-representable UTF-8 decoding of the raw bytes when one exists.';
 COMMENT ON COLUMN label_preimages.normalizer_version IS
@@ -76,8 +70,8 @@ COMMENT ON COLUMN label_preimages.inserted_at IS
     'This time records row creation.';
 
 COMMENT ON TABLE ens_names IS
-    'This table stores the imported ENS rainbow data.';
+    'This table stores the imported ENS rainbow data. Import traversal uses the bounded hash primary key; unbounded names are deliberately absent from btree indexes.';
 COMMENT ON COLUMN ens_names.hash IS
     'This value is the imported label hash.';
 COMMENT ON COLUMN ens_names.name IS
-    'This value is the imported label.';
+    'This value is the imported label. Lookup and import traversal use the hash primary key because label text is unbounded.';

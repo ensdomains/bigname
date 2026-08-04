@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS name_current (
 );
 
 CREATE INDEX IF NOT EXISTS name_current_lookup_idx
-    ON name_current (namespace, raw_name, logical_name_id);
+    ON name_current (namespace, namehash, logical_name_id);
 
 CREATE INDEX IF NOT EXISTS name_current_resource_idx
     ON name_current (resource_id)
@@ -147,7 +147,7 @@ CREATE INDEX IF NOT EXISTS children_current_parent_idx
     ON children_current (
         parent_logical_name_id,
         surface_class,
-        raw_name,
+        namehash,
         child_logical_name_id
     );
 
@@ -389,7 +389,7 @@ CREATE INDEX IF NOT EXISTS address_names_current_address_idx
         lower(address),
         relation,
         namespace,
-        raw_name,
+        namehash,
         logical_name_id
     );
 
@@ -444,7 +444,6 @@ CREATE TABLE IF NOT EXISTS primary_names_current (
 CREATE INDEX IF NOT EXISTS primary_names_current_claim_idx
     ON primary_names_current (
         namespace,
-        raw_claim_name,
         coin_type,
         address
     )
@@ -699,3 +698,12 @@ COMMENT ON COLUMN primary_names_current.unsupported_reason IS
     'This value explains an unsupported claim.';
 COMMENT ON COLUMN primary_names_current.claim_provenance IS
     'This object identifies the claim source.';
+
+COMMENT ON INDEX name_current_lookup_idx IS
+    'This bounded index supports namespace and name identity lookup by name hash. Verbatim names remain unbounded payload and are not btree-indexed.';
+COMMENT ON INDEX children_current_parent_idx IS
+    'This bounded index supports direct-child enumeration by parent, surface class, and child name hash. Verbatim child names and labels remain unbounded payload.';
+COMMENT ON INDEX address_names_current_address_idx IS
+    'This bounded index supports address relation reads by namespace and name hash. Verbatim names remain unbounded payload and are not btree-indexed.';
+COMMENT ON INDEX primary_names_current_claim_idx IS
+    'This bounded partial index supports successful-claim scans by namespace, coin type, and address. The verbatim claim is returned payload, not an index key.';

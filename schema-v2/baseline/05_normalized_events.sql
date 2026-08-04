@@ -141,9 +141,12 @@ CREATE INDEX IF NOT EXISTS normalized_events_interpreter_state_history_idx
     ON normalized_events (
         chain_id,
         (raw_fact_ref ? 'interpreter_state_key'),
-        (COALESCE(
-            raw_fact_ref ->> 'interpreter_state_key',
-            event_identity
+        (public.digest(
+            COALESCE(
+                raw_fact_ref ->> 'interpreter_state_key',
+                event_identity
+            ),
+            'sha256'
         )),
         block_number DESC,
         transaction_index DESC,
@@ -151,6 +154,9 @@ CREATE INDEX IF NOT EXISTS normalized_events_interpreter_state_history_idx
         normalized_event_id DESC
     )
     WHERE canonicality_state IN ('canonical', 'safe', 'finalized');
+
+COMMENT ON INDEX normalized_events_interpreter_state_history_idx IS
+    'This bounded history index groups adapter state by SHA-256 of its unbounded state key. Prior-state reads also compare the original key, preserving exact grouping if digests collide.';
 
 CREATE INDEX IF NOT EXISTS normalized_events_block_idx
     ON normalized_events (
