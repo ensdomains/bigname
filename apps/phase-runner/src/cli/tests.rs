@@ -1,0 +1,154 @@
+use super::*;
+
+#[test]
+fn redo_cli_carries_canonical_head_hydration_rpc() {
+    let command = Cli::try_parse_from([
+        "phase-runner",
+        "redo",
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+        "--chain",
+        "ethereum-mainnet",
+        "--phase",
+        "project",
+        "--from-block",
+        "42",
+        "--to-block",
+        "42",
+        "--hydration-rpc",
+        "ethereum-mainnet=http://hydration.invalid",
+    ])
+    .expect("redo hydration RPC option must parse")
+    .resolve()
+    .expect("redo hydration RPC option must resolve");
+
+    match command {
+        ResolvedCommand::Redo {
+            hydration_rpc_urls, ..
+        } => assert_eq!(
+            hydration_rpc_urls.url_for("ethereum-mainnet"),
+            Some("http://hydration.invalid")
+        ),
+        _ => panic!("expected redo command"),
+    }
+}
+
+#[test]
+fn verify_redo_requires_a_separate_verification_database_url() {
+    let command = Cli::try_parse_from([
+        "phase-runner",
+        "redo",
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+        "--chain",
+        "ethereum-mainnet",
+        "--phase",
+        "verify",
+        "--from-block",
+        "42",
+        "--to-block",
+        "42",
+    ])
+    .expect("verify redo without the reader URL must parse before semantic validation");
+    let error = match command.resolve() {
+        Ok(_) => panic!("verify redo must reject a missing verification database URL"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert!(error.to_string().contains("SELECT-only role"));
+}
+
+#[test]
+fn all_phase_redo_requires_ingest_sources_before_dispatch() {
+    let command = Cli::try_parse_from([
+        "phase-runner",
+        "redo",
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+        "--verification-database-url",
+        "postgres://phase-runner.invalid/verification",
+        "--chain",
+        "ethereum-mainnet",
+        "--phase",
+        "all",
+        "--from-block",
+        "42",
+        "--to-block",
+        "43",
+    ])
+    .expect("all-phase redo must parse before source validation");
+    let error = match command.resolve() {
+        Ok(_) => panic!("all-phase redo must require ingest source configuration"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert!(error.to_string().contains("all-phase redo requires"));
+}
+
+#[test]
+fn recompute_flags_accepts_the_all_chains_selector_without_sources() {
+    let command = Cli::try_parse_from([
+        "phase-runner",
+        "redo",
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+        "--all-chains",
+        "--phase",
+        "recompute-flags",
+        "--from-block",
+        "42",
+        "--to-block",
+        "43",
+    ])
+    .expect("all-chains recompute must parse")
+    .resolve()
+    .expect("all-chains recompute must resolve");
+    assert!(matches!(
+        command,
+        ResolvedCommand::Redo {
+            chains: RedoChains::All { .. },
+            phase: RedoPhase::RecomputeFlags,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn inspect_cli_resolves_each_kept_schema_v2_window() {
+    for (window, expected) in [
+        (
+            "block-canonicality",
+            crate::inspect::InspectionKind::BlockCanonicality,
+        ),
+        (
+            "stored-lineage",
+            crate::inspect::InspectionKind::StoredLineage,
+        ),
+        ("raw-events", crate::inspect::InspectionKind::RawEvents),
+    ] {
+        let command = Cli::try_parse_from([
+            "phase-runner",
+            "inspect",
+            "--database-url",
+            "postgres://phase-runner.invalid/fresh",
+            window,
+            "--chain",
+            "ethereum-mainnet",
+            "--from-block",
+            "42",
+            "--to-block",
+            "43",
+        ])
+        .expect("inspection window must parse")
+        .resolve()
+        .expect("inspection window must resolve");
+        match command {
+            ResolvedCommand::Inspect { request, .. } => {
+                assert_eq!(request.kind, expected);
+                assert_eq!(request.chain_id, "ethereum-mainnet");
+                assert_eq!(request.range, BlockRange { from: 42, to: 43 });
+            }
+            _ => panic!("expected inspect command"),
+        }
+    }
+}

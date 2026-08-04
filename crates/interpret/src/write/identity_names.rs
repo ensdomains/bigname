@@ -1,7 +1,7 @@
 use bigname_adapters::schema_v2::BatchOutput;
 use sqlx::{Postgres, Transaction};
 
-use crate::{InterpretError, RECOMPUTE_FLAGS_UNAVAILABLE_REASON, Result};
+use crate::{InterpretError, NORMALIZATION_STATE_REPAIR_REASON, Result};
 
 pub(super) async fn write(
     transaction: &mut Transaction<'_, Postgres>,
@@ -63,7 +63,7 @@ async fn write_preimages(
         if written.is_none() {
             return Err(InterpretError::data_integrity(format!(
                 "label hash {} is already bound to different raw bytes or normalization state; {}",
-                preimage.labelhash, RECOMPUTE_FLAGS_UNAVAILABLE_REASON
+                preimage.labelhash, NORMALIZATION_STATE_REPAIR_REASON
             )));
         }
     }
@@ -175,7 +175,7 @@ async fn write_surfaces(
         if written.is_none() {
             return Err(InterpretError::data_integrity(format!(
                 "logical name ID {} is already bound to different raw identity or normalization state; {}",
-                surface.logical_name_id, RECOMPUTE_FLAGS_UNAVAILABLE_REASON
+                surface.logical_name_id, NORMALIZATION_STATE_REPAIR_REASON
             )));
         }
     }

@@ -83,7 +83,7 @@ async fn interpret_redo_heads(
     })?;
     let latest = load_marker(pool, chain_id, number).await?.ok_or_else(|| {
         RunnerError::data_integrity(format!(
-            "cannot redo interpret on chain {chain_id}: recorded head {number} is not canonical"
+            "cannot redo interpret on chain {chain_id}: recorded head {number} is not readable (canonical, safe, or finalized)"
         ))
     })?;
     Ok(Some(HeadMarkers {

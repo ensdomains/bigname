@@ -127,37 +127,37 @@ range.
 
 ## Redo and rewind
 
-An explicit finite redo is selected with:
+`phase-runner redo` runs a finite historical range through the existing phase
+implementation and its per-chain writer lock:
 
 ```sh
 cargo phase -- redo \
   --chain <chain> \
-  --phase ingest \
+  --phase <ingest|interpret|project|verify|recompute-flags|all> \
   --from-block <inclusive-start> \
-  --to-block <inclusive-end> \
-  --source <descriptor>
-
-cargo phase -- redo \
-  --chain <chain> \
-  --phase interpret \
-  --from-block <inclusive-start> \
-  --to-block <inclusive-end> \
-  --source <descriptor>
-
-cargo phase -- redo \
-  --chain <chain> \
-  --phase project \
-  --from-block <inclusive-start> \
-  --to-block <inclusive-end> \
-  --source <descriptor>
-
-cargo phase -- redo \
-  --chain <chain> \
-  --phase verify \
-  --from-block <inclusive-start> \
-  --to-block <inclusive-end> \
-  --source <drpc-or-reth-descriptor>
+  --to-block <inclusive-end>
 ```
+
+Ingest and `all` require a `--source` descriptor for every selected chain.
+Verify requires exactly one `drpc` or `reth_db` source per selected chain;
+`all` must satisfy that same verify-source rule. Verify and `all` also require
+the SELECT-only verification database URL. More than one `--chain` may be
+supplied. `--all-chains` is separate sugar that discovers every chain with an
+active synchronized manifest and applies the same phase selection and range
+through the ordinary per-chain path.
+
+`--phase all` means all four finite phases: ingest, interpret, project, and
+verify in dependency order. If Interpret widens a
+partial request through its recorded head, its downstream redo stamp carries
+that widened range into Project. Project still owns canonical-head hydration;
+there is no standalone hydrate phase. Any already-pending redo must be
+completed before `--phase all`, so the all-phases shorthand cannot consume or
+clear unrelated operator work. A phase failure leaves its normal durable redo
+marker, reports the exact phase-specific recovery command, and stops the
+remaining phases for that chain. Complete that phase-specific redo, then rerun
+`--phase all`. Historical live redo remains invalid because live is a head
+follower. A multi-chain command continues with later chains and exits nonzero
+with the collected chain failures; cancellation stops further chain dispatch.
 
 Redo state is persisted and range-bound. An interpret redo prepares the
 schema-v2 derived range, replays it from retained raw facts, and resumes after
@@ -172,8 +172,13 @@ full-extent redo can report the level fixed by the reference source. Its source
 and Base seam preflight happens before redo state is created. A mismatch retains
 the resumable redo marker and its diagnosis;
 rerunning the same command after wipe-and-resync repair resumes the attempt.
-Flag recomputation remains unavailable. These preflight refusals and terminal
-verification failures cannot strand unresumable redo state.
+The range end must already be `canonical`, `safe`, or `finalized`; an
+`observed` staging row is rejected before a redo session is claimed.
+Flag recomputation is supported through `--phase recompute-flags`. Among
+otherwise configured redo requests, only historical `live` redo and an
+unreadable range end are rejected before a redo marker is written. These
+preflight refusals and terminal verification failures cannot strand
+unresumable redo state.
 
 The thin rewind command moves only the published latest head:
 
@@ -190,6 +195,29 @@ be stored and readable, refuses to cross the safe head, and invokes normal head
 publication. It does not write raw facts or normalized events. The resulting
 orphaning stamps downstream redo; the next supervised run fills the winning
 path before consuming those stamps.
+
+The retained schema-v2 inspection windows are read-only `phase-runner`
+subcommands alongside redo and rewind:
+
+```sh
+cargo phase -- inspect --database-url "$BIGNAME_DATABASE_URL" \
+  block-canonicality --chain <chain> --from-block <n> --to-block <n>
+
+cargo phase -- inspect --database-url "$BIGNAME_DATABASE_URL" \
+  stored-lineage --chain <chain> --from-block <n> --to-block <n>
+
+cargo phase -- inspect --database-url "$BIGNAME_DATABASE_URL" \
+  raw-events --chain <chain> --from-block <n> --to-block <n>
+```
+
+Each command reads one bounded repeatable-read snapshot and emits JSON.
+Block-canonicality labels every stored fork and reports raw-fact and
+normalized-event counts. Stored-lineage includes optional
+`chain_header_audit` fields. Raw-events joins retained logs to their raw
+transaction, receipt, header-presence, lineage canonicality, and matching
+normalized events. Orphaned forks remain visible and explicitly labeled.
+There are no API routes for these windows. Drift, cache, execution-trace, and
+watch-plan inspection were cut and have no phase-runner replacements.
 
 ## Canonical-head hydration
 

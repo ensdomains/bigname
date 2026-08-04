@@ -90,7 +90,7 @@ Local execution-client storage is provider or cache substrate, not a durable big
 
 `logical_name_id = "<namespace>:<namehash>"` — stable and derivable without a database lookup. `namehash` is the lowercase `0x`-prefixed 32-byte node computed from the verbatim on-chain label path.
 
-The ENSIP-15 normalizer is an inclusion gate, not an identity transform. Each verbatim label records the normalizer version and whether the raw bytes equal the normalized result under that version. A name containing a rejected or changed label remains as a deactivated shadow identity row. A normalizer-version change recomputes those flags and reconciles visibility without changing `logical_name_id`, rebuilding the name tree, or replaying chain interpretation, as ratified by the audit's [normalization-as-a-gate decision](../simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity). `primary_names_current` separately preserves its documented raw-claim and `invalid_name` behavior.
+The ENSIP-15 normalizer is an inclusion gate, not an identity transform. Each verbatim label records the normalizer version and whether the raw bytes equal the normalized result under that version. A name containing a rejected or changed label remains as a deactivated shadow identity row. A normalizer-version change recomputes those flags without changing `logical_name_id` or rebuilding the name tree, as ratified by the audit's [normalization-as-a-gate decision](../simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity). Names that remain active or remain shadow need no chain replay; names that cross between active and shadow are handed to the standard Interpret and Project redo path so bindings are created or retracted by their existing owner. `primary_names_current` separately preserves its documented raw-claim and `invalid_name` behavior.
 
 ENSv1 registrar labels and wrapper DNS labels that contain embedded NUL bytes, are not UTF-8, contain a dot, or exceed the DNS one-label limit remain attacker-controlled chain truth rather than interpretation failures. The controller's registration predicate checks only a minimum decoded length and keys registration in BaseRegistrar by `keccak256(bytes(label))`, while its string-length helper advances from the leading byte without validating UTF-8 continuation bytes. NameWrapper emits the DNS name as bytes and its namehash helper hashes each length-delimited label directly. (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L191 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L192 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L247 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L250 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L288 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L290 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/utils/StringUtils.sol:L13 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/utils/StringUtils.sol:L16 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/utils/StringUtils.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/utils/StringUtils.sol:L25 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L29 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/utils/NameCoder.sol:L126 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/utils/NameCoder.sol:L134 @ ens_v1@91c966f) The interpreter stores their byte preimages and a deactivated `NameSurface` keyed by the raw chain-native namehash, without creating a surface binding. When a label cannot be represented safely as PostgreSQL UTF-8 text, the shadow row's text display inputs are empty; `label_preimages.raw_label`, the namehash, and, where encodable, `dns_encoded_name` retain the byte identity.[^ens-subgraph-label-null][^ens-subgraph-name-null][^ensnode-null-label]
 
@@ -126,7 +126,7 @@ The storage-side guarantees those rules depend on:
 - Proxy contracts and their implementations are separate `contract_instance_id`s. Implementation churn updates the proxy/implementation discovery edge, not the proxy id.
 - Contract addresses are time-ranged attributes for raw-fact lookup, log routing, and watch-plan materialization. Addresses are never the primary key of the source graph.
 - Stable adapter identity rows for `token_lineages`, `resources`, and `name_surfaces` are idempotent across retained replay anchors. Replaying a compatible readable resource or name-surface row with the same stable identity and identity-defining fields from a later raw-log anchor may be accepted as an existing identity without rewriting the original anchor, anchor provenance, or `observed_at`; incompatible identity fields remain hard conflicts. The hash-covered adapter seam emits a token-lineage row only when that lineage first enters interpreter state, and replay of that row requires the retained chain/block anchor and provenance to match exactly. Once the stored row is explicitly `orphaned`, re-observing the same stable identity on the winning branch replaces its chain/block anchor and anchor provenance with the winning observation while preserving immutable identity fields. A `name_surfaces` re-anchor also replaces `deactivated_at` from that winning observation alongside the block anchor, provenance, and canonicality. For `name_surfaces`, compatibility requires the stable namespace/namehash ID and the same verbatim raw name, labels, DNS wire encoding, and labelhash path. Normalizer version, flags, visibility, and errors are recomputable metadata, not identity. ENSv1 registrar resources materialized only from a closed surface-binding segment after the lease has been released intentionally carry binding-derived provenance: `released_at` is the binding close time, `expiry` is that time minus the ENS grace period, and the prior registrant is not reconstructed into the resource row unless an unreleased current or superseded registrar lease survives finalization.[^v1-registrar-grace]
-- Normalizer-version changes are owned by interpret redo's flag-recompute mode. The command remains intentionally unavailable until binding reconciliation is implemented; its contract is to recompute `label_preimages` flags and reconcile affected `name_surfaces` visibility while preserving stable identity and chain observation anchors, never rewriting normalized label text into identity.
+- Normalizer-version changes are owned by Interpret redo's `recompute-flags` mode. It updates normalization metadata in `label_preimages` and `name_surfaces` while preserving stable identity and chain-observation anchors. Same-class names are updated without event replay. For an active-to-shadow or shadow-to-active change, it records the affected block range as ordinary Interpret and Project redo instead of creating, reopening, closing, or retracting a `surface_bindings` row itself.
 - The schema-v2 interpret phase loads the prior-state fold once per chain run or redo session and keeps that compact fold resident while it advances across physical 500-block batches. This accepted memory cost is proportional to the distinct retained interpreter state keys and their live-lineage dependency anchors; it avoids reloading the full prior normalized-event history for every batch. Completing a redo evicts every resident fold for that chain so the restored normal cursor reloads the rewritten database state.
 - Redo preparation marks stable identity rows anchored in the requested range `orphaned` before the later physical batches have necessarily re-observed them. If a multi-batch redo exits after that first transaction, identities not yet repopulated intentionally remain orphaned until the same redo resumes and completes; the interrupted redo state prevents an unrelated redo from treating that intermediate database state as complete.
 - For interval identity rows like `surface_bindings`, `active_from`, identity-defining fields, and the observation anchor of every readable row are immutable; `active_to` is replay-derived. The only anchor exception is reorg replacement: an already `orphaned` row may adopt the winning branch's chain/block observation anchor when the stable identity, `active_from`, kind, and provenance still match, while a readable row rejects the same change. That replacement also discards the orphaned row's replay-derived close and uses the winning observation's `active_to`; a winning registration with no unregister evidence therefore restores the stable binding as open. Canonical historical replay may tighten an existing non-null `active_to` to an earlier close point when older or more complete facts reveal an earlier end. Normal replay and identity upsert paths do not extend or reopen a readable closed interval. Any future interval widening or reopen requires a new doc-first rule with its proof, overlap guard, and invalidation behavior. Replay batches that both close an existing interval and open a replacement at the same boundary apply the existing interval update before inserting the replacement, so the non-overlap invariant is enforced without relying on implicit snapshots.
@@ -265,6 +265,44 @@ in the selected range, replays the range through the schema-v2 interpreter, and
 re-anchors stable identities when the winning facts reproduce them. An
 interrupted multi-batch redo remains explicit persisted redo state and must
 resume; its intermediate orphaning is not a completed projection boundary.
+`recompute-flags` is the bounded normalizer-version repair mode. Under the
+Interpret and Project phase locks, it first uses the existing scoped Project
+machinery to refresh `primary_names_current.claim_name_is_normalized`, then
+recomputes `label_preimages` and `name_surfaces` normalization metadata with the
+current normalizer; correctness does not depend on this order because Project
+derives claim normalization with the current normalizer when it builds the
+projection. A name that remains active or remains shadow takes this flags-only
+path: normalized events, identity anchors, and surface bindings are not
+re-derived. A name whose visibility class changes is enumerated and reported to
+the operator, and its affected chain range is merged into the standard Interpret
+redo and required Project continuation. The recompute path never fabricates,
+reopens, closes, or retracts a surface binding. After a shadow-to-active
+recompute commits, the surface has active visibility while its bindings and
+projections remain at the pre-transition class until the stamped Interpret and
+Project redo runs. The API serves the conservative pre-transition projection
+state in that window, and the stamped markers block normal Interpret work. The
+operator must run the stamped redo to make transitions visible; until then,
+affected names serve their pre-transition state.
+An interrupted recompute retains its resumable marker. Its own queued scoped
+Project refresh is distinguishable and resumable. After that refresh completes,
+the Project marker remains in a distinct "Interpret flags pending" state until
+Interpret completion atomically restores it or replaces it with the ordinary
+transition redo; there is no unmarked Project-to-Interpret crash handoff. An
+unrelated ordinary Project redo that was already pending is widened or left
+pending rather than consumed as recompute work. The label scope includes
+in-range name surfaces, label provenance, and retained in-range
+`PreimageObserved` evidence, so resolver label observations remain repairable
+even when they do not materialize a name surface.
+
+This is an explicit design divergence from amendment E of the simplification
+plan, whose bare rule said that `recompute-flags` runs without replay. A shadow
+name intentionally has no active binding. Moving shadow to active therefore
+requires the standard interpreter to derive a binding, and moving active to
+shadow requires the same replay path to retract it. Only names that stay in the
+same visibility class can honestly complete without replay; class transitions
+are stamped for ordinary Interpret and Project redo to preserve derivation
+ownership and replay purity.
+
 Verify redo uses the same marker and persists the
 [verification level](glossary.md#verification-level) reported by its phase
 implementation. The production phase rechecks the requested
@@ -286,11 +324,11 @@ elevated role attributes, belongs to another role, or was reached by assuming a
 reader role from a different session user. The verifier never receives a
 writer-role pool, and its connection must report the same PostgreSQL system
 identifier, database OID, and database name as that pool.
-Unsupported `live` and flag-recomputation redo requests fail before the runner
-writes a redo marker. Verification configuration is checked before a redo
-marker is written. A failed verification redo retains the normal resumable redo
-marker; rerunning the same range after repair resumes it. These refusals and
-failures cannot leave an unresumable state row.
+Unsupported historical `live` redo requests fail before the runner writes a
+redo marker. Verification configuration is checked before a redo marker is
+written. A failed verification redo retains the normal resumable redo marker;
+rerunning the same range after repair resumes it. These refusals and failures
+cannot leave an unresumable state row.
 
 A verification mismatch is a non-retryable chain failure. The verify row's
 `last_error` stores the block number, differing field, stored value, and
@@ -480,7 +518,7 @@ migration-owned change-log triggers make those writes visible to the surviving
 worker. The drain steps remain the supported rollout and freshness gate rather
 than the sole protection against an outdated worker.
 
-Replay version 10 retains the version-9 outputs and rebuilds
+Replay version 10 retained the version-9 outputs and rebuilt
 `primary_names_current` to materialize `claim_name_is_normalized` from the
 untrimmed reverse claim under the pinned normalizer. The migration adds the
 non-null flag with a false default, so existing successful rows are deliberately
@@ -488,11 +526,11 @@ not readable as verified successes until replay recomputes them. Full rebuild
 compares the current and staged claim rows, including this flag, and deletes
 request-matching `verified_primary_name` cache outcomes for changed tuples in one
 set-based statement before publishing the staged projection. Targeted rebuilds
-keep the existing transaction-scoped tuple invalidation. Because this field has
-no normalizer-version-keyed repair, a pinned-normalizer change requires another
-projection replay-version bump. Deployments must not run version-9 and version-10
-workers concurrently and must keep public reads drained until every version-10
-marker is current and pending invalidations have drained.
+keep the existing transaction-scoped tuple invalidation. Later pinned-normalizer
+changes use the bounded `recompute-flags` repair described above instead of
+requiring another projection replay-version bump. Deployments must not run
+version-9 and version-10 workers concurrently and must keep public reads drained
+until every version-10 marker is current and pending invalidations have drained.
 
 Permission-backed v1/v2 routes and permission-derived address-name expansions
 enforce `permissions_current_publication` version 2 and return `409 stale` when
@@ -634,15 +672,17 @@ Before a verified-resolution selector persists as a supported reusable outcome, 
 
 ## Read-only inspection tooling
 
-Worker-owned, read-only operational tooling reads storage audit helpers and renders stable JSON. It does not create public `v1` routes, mutate state, fetch fresh chain data, or bypass API read boundaries.
+`phase-runner inspect` owns three bounded schema-v2 windows and renders JSON
+from a read-only repeatable-read transaction. It does not create public API
+routes, mutate state, or fetch fresh chain data.
 
-- `bigname-worker inspect canonicality --chain-id <id> --block-hash <hash>` — for a stored block: lineage, parent hash, block number, canonicality state, optional header-audit presence, raw fact counts, payload-cache metadata counts/digests where retained, normalized-event counts.
-- `bigname-worker inspect stored-lineage-range --chain-id <id> --from <block> --to <block>` — lists only lineage rows already stored for the requested chain and finite block range, ordered by `(block_number, block_hash)`. Renders chain id, block number, block hash, parent hash, canonicality state, timestamp, and stored promotion markers per observed block. Nullable fields render as `null`. Does not infer missing heights, gaps, span-wide canonicality, or completeness.
-- `bigname-worker inspect backfill-job --backfill-job-id <id>` — resolves one
-  historical job and its child ranges. It is read-only migration-era audit
-  output, not current phase progress or authority.
-- `bigname-worker inspect execution-trace --execution-trace-id <id>` — reads `execution_traces`, `execution_steps`, and trace-attachment metadata for one stored trace.
-- Manifest-drift and proxy-alert inspection — joins stored alert observations to manifest/discovery identifiers, code-hash facts, proxy/implementation edges, and derived watch-target metadata. Does not fetch fresh chain state, create alerts, mutate alert lifecycle, mutate manifest truth, or change capability flags.
+- `block-canonicality --chain <id> --from-block <n> --to-block <n>` lists every stored fork by `(block_number, block_hash)`, its explicit canonicality, optional header-audit presence, and retained raw-fact and normalized-event counts.
+- `stored-lineage --chain <id> --from-block <n> --to-block <n>` lists stored lineage and optional `chain_header_audit` fields in stable order. It does not infer missing heights, completeness, or canonicality for absent rows.
+- `raw-events --chain <id> --from-block <n> --to-block <n>` lists retained raw logs with their raw transaction, optional receipt, header-presence, lineage canonicality, and matching normalized-event context.
+
+All three include orphaned forks with `canonicality_state='orphaned'`. Retired
+drift, payload-cache, execution-trace, and watch-plan views have no schema-v2
+phase-runner commands.
 
 ## Migration rules
 

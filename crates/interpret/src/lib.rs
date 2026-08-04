@@ -3,12 +3,15 @@
 mod engine;
 mod error;
 mod load;
+mod recompute;
 mod write;
 
 pub use engine::{BatchOutcome, BatchRequest, Engine, Marker, RunMode};
 pub use error::{ErrorKind, InterpretError, Result};
+pub use recompute::{RecomputeSummary, finalize_recompute_flags};
 
-pub const RECOMPUTE_FLAGS_UNAVAILABLE_REASON: &str = "interpret recompute-flags is unavailable: label flags cannot be published until name-surface visibility and active binding reconciliation are implemented";
+pub const NORMALIZATION_STATE_REPAIR_REASON: &str =
+    "run interpret recompute-flags before retrying ordinary interpretation";
 
 #[cfg(test)]
 mod tests {

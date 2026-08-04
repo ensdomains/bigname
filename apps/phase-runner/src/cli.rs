@@ -1,4 +1,9 @@
-use std::{collections::BTreeSet, path::PathBuf, str::FromStr, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    str::FromStr,
+    time::Duration,
+};
 
 use clap::{Args, Parser, Subcommand};
 use uuid::Uuid;
@@ -12,6 +17,13 @@ use crate::{
     phase::{BlockRange, PhaseName},
     runner::RedoPhase,
 };
+
+#[path = "cli_inspect.rs"]
+mod inspect_resolution;
+
+#[cfg(test)]
+#[path = "cli/tests.rs"]
+mod tests;
 
 #[derive(Debug, Parser)]
 #[command(name = "phase-runner")]
@@ -31,6 +43,8 @@ enum Command {
     Redo(RedoArgs),
     /// Move the published latest head back to an exact stored ancestor.
     Rewind(RewindArgs),
+    /// Read bounded schema-v2 lineage and raw-event inspection windows.
+    Inspect(InspectArgs),
 }
 
 #[derive(Clone, Debug, Args)]
@@ -170,12 +184,24 @@ struct RedoArgs {
     #[command(flatten)]
     manifests: ManifestArgs,
 
-    #[arg(long)]
-    chain: String,
+    #[arg(
+        long = "chain",
+        value_delimiter = ',',
+        required_unless_present = "all_chains",
+        conflicts_with = "all_chains"
+    )]
+    chains: Vec<String>,
 
     #[arg(
         long,
-        help = "ingest, interpret, project, verify, live, or recompute-flags"
+        conflicts_with = "chains",
+        help = "redo every chain admitted by the synchronized manifest profile"
+    )]
+    all_chains: bool,
+
+    #[arg(
+        long,
+        help = "ingest, interpret, project, verify, live, recompute-flags, or all"
     )]
     phase: String,
 
@@ -217,6 +243,37 @@ struct RewindArgs {
     ancestor_hash: String,
 }
 
+#[derive(Clone, Debug, Args)]
+struct InspectArgs {
+    #[arg(long, env = "BIGNAME_DATABASE_URL")]
+    database_url: String,
+
+    #[command(subcommand)]
+    window: InspectWindow,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+enum InspectWindow {
+    /// Show stored block identities, canonicality labels, and fact counts.
+    BlockCanonicality(InspectRangeArgs),
+    /// Show stored lineage and optional audited header fields.
+    StoredLineage(InspectRangeArgs),
+    /// Show retained raw logs with transaction, receipt, and normalized-event context.
+    RawEvents(InspectRangeArgs),
+}
+
+#[derive(Clone, Debug, Args)]
+struct InspectRangeArgs {
+    #[arg(long)]
+    chain: String,
+
+    #[arg(long)]
+    from_block: i64,
+
+    #[arg(long)]
+    to_block: i64,
+}
+
 pub enum ResolvedCommand {
     InitSchema {
         database_url: String,
@@ -233,7 +290,7 @@ pub enum ResolvedCommand {
         verification_database_url: Option<String>,
         manifests_root: PathBuf,
         instance_id: String,
-        chain: ChainConfig,
+        chains: RedoChains,
         capacity: CapacityConfig,
         timing: TimingConfig,
         phase: RedoPhase,
@@ -245,6 +302,15 @@ pub enum ResolvedCommand {
         chain_id: String,
         ancestor: crate::heads::BlockMarker,
     },
+    Inspect {
+        database_url: String,
+        request: crate::inspect::InspectionRequest,
+    },
+}
+
+pub enum RedoChains {
+    Explicit(Vec<ChainConfig>),
+    All { sources: Vec<SourceConfig> },
 }
 
 impl Cli {
@@ -256,6 +322,7 @@ impl Cli {
             Command::Run(args) => resolve_run(args),
             Command::Redo(args) => resolve_redo(args),
             Command::Rewind(args) => resolve_rewind(args),
+            Command::Inspect(args) => inspect_resolution::resolve(args),
         }
     }
 }
@@ -318,30 +385,33 @@ fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
         .iter()
         .map(|source| parse_source(source))
         .collect::<RunnerResult<Vec<_>>>()?;
-    if sources.iter().any(|source| source.chain_id != args.chain) {
+    if phase.requires_ingest() && sources.is_empty() {
         return Err(RunnerError::new(
             ErrorKind::Configuration,
-            "redo source belongs to a different chain",
+            "ingest or all-phase redo requires at least one --source",
         ));
     }
-    if phase == RedoPhase::Phase(PhaseName::Ingest) && sources.is_empty() {
+    if phase.requires_verify() && args.verification_database_url.is_none() {
         return Err(RunnerError::new(
             ErrorKind::Configuration,
-            "redo ingest requires at least one --source",
+            "verify or all-phase redo requires --verification-database-url backed by a SELECT-only role",
         ));
     }
-    if phase == RedoPhase::Phase(PhaseName::Verify) && args.verification_database_url.is_none() {
-        return Err(RunnerError::new(
-            ErrorKind::Configuration,
-            "verify redo requires --verification-database-url backed by a SELECT-only role",
-        ));
-    }
+    let chains = if args.all_chains {
+        RedoChains::All { sources }
+    } else {
+        RedoChains::Explicit(resolve_explicit_redo_chains(
+            args.chains,
+            sources,
+            phase.requires_ingest(),
+        )?)
+    };
     Ok(ResolvedCommand::Redo {
         database_url: args.connection.database_url,
         verification_database_url: args.verification_database_url,
         manifests_root: args.manifests.manifests_root,
         instance_id: resolve_instance_id(args.connection.instance_id)?,
-        chain: ChainConfig::new(args.chain, sources, false)?,
+        chains,
         capacity: resolve_capacity(args.capacity)?,
         timing: resolve_timing(args.timing)?,
         phase,
@@ -399,7 +469,76 @@ fn parse_redo_phase(value: &str) -> RunnerResult<RedoPhase> {
     if value == "recompute-flags" {
         return Ok(RedoPhase::RecomputeFlags);
     }
+    if value == "all" {
+        return Ok(RedoPhase::All);
+    }
     PhaseName::from_str(value).map(RedoPhase::Phase)
+}
+
+fn resolve_explicit_redo_chains(
+    chain_ids: Vec<String>,
+    sources: Vec<SourceConfig>,
+    require_sources: bool,
+) -> RunnerResult<Vec<ChainConfig>> {
+    let configured = chain_ids.iter().cloned().collect::<BTreeSet<_>>();
+    if configured.len() != chain_ids.len() {
+        return Err(RunnerError::new(
+            ErrorKind::Configuration,
+            "redo configures a chain more than once",
+        ));
+    }
+    let mut by_chain = BTreeMap::<String, Vec<SourceConfig>>::new();
+    for source in sources {
+        if !configured.contains(&source.chain_id) {
+            return Err(RunnerError::new(
+                ErrorKind::Configuration,
+                format!(
+                    "redo source belongs to unconfigured chain {:?}",
+                    source.chain_id
+                ),
+            ));
+        }
+        by_chain
+            .entry(source.chain_id.clone())
+            .or_default()
+            .push(source);
+    }
+    chain_ids
+        .into_iter()
+        .map(|chain_id| {
+            let sources = by_chain.remove(&chain_id).unwrap_or_default();
+            if require_sources && sources.is_empty() {
+                return Err(RunnerError::new(
+                    ErrorKind::Configuration,
+                    format!("ingest or all-phase redo requires a source for chain {chain_id}"),
+                ));
+            }
+            ChainConfig::new(chain_id, sources, false)
+        })
+        .collect()
+}
+
+pub async fn resolve_all_redo_chains(
+    pool: &sqlx::PgPool,
+    sources: Vec<SourceConfig>,
+    require_sources: bool,
+) -> RunnerResult<Vec<ChainConfig>> {
+    let chain_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT chain_id
+         FROM manifest_versions
+         WHERE rollout_status = 'active'
+         ORDER BY chain_id",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| RunnerError::database("failed to list admitted redo chains", error))?;
+    if chain_ids.is_empty() {
+        return Err(RunnerError::new(
+            ErrorKind::Configuration,
+            "all-chains redo found no active manifest chains",
+        ));
+    }
+    resolve_explicit_redo_chains(chain_ids, sources, require_sources)
 }
 
 fn parse_source(specification: &str) -> RunnerResult<SourceConfig> {
@@ -450,67 +589,4 @@ fn invalid_source(reason: &str, specification: &str) -> RunnerError {
         ErrorKind::Configuration,
         format!("invalid source descriptor {descriptor:?}: {reason}"),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn redo_cli_carries_canonical_head_hydration_rpc() {
-        let command = Cli::try_parse_from([
-            "phase-runner",
-            "redo",
-            "--database-url",
-            "postgres://phase-runner.invalid/fresh",
-            "--chain",
-            "ethereum-mainnet",
-            "--phase",
-            "project",
-            "--from-block",
-            "42",
-            "--to-block",
-            "42",
-            "--hydration-rpc",
-            "ethereum-mainnet=http://hydration.invalid",
-        ])
-        .expect("redo hydration RPC option must parse")
-        .resolve()
-        .expect("redo hydration RPC option must resolve");
-
-        match command {
-            ResolvedCommand::Redo {
-                hydration_rpc_urls, ..
-            } => assert_eq!(
-                hydration_rpc_urls.url_for("ethereum-mainnet"),
-                Some("http://hydration.invalid")
-            ),
-            _ => panic!("expected redo command"),
-        }
-    }
-
-    #[test]
-    fn verify_redo_requires_a_separate_verification_database_url() {
-        let command = Cli::try_parse_from([
-            "phase-runner",
-            "redo",
-            "--database-url",
-            "postgres://phase-runner.invalid/fresh",
-            "--chain",
-            "ethereum-mainnet",
-            "--phase",
-            "verify",
-            "--from-block",
-            "42",
-            "--to-block",
-            "42",
-        ])
-        .expect("verify redo without the reader URL must parse before semantic validation");
-        let error = match command.resolve() {
-            Ok(_) => panic!("verify redo must reject a missing verification database URL"),
-            Err(error) => error,
-        };
-        assert_eq!(error.kind(), ErrorKind::Configuration);
-        assert!(error.to_string().contains("SELECT-only role"));
-    }
 }

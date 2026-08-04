@@ -105,7 +105,7 @@ pub(crate) fn require_start(
     mode: &RunMode,
 ) -> RunnerResult<()> {
     require_no_interrupted_redo(rows, chain_id, phase, mode)?;
-    require_compatible_active_phase(rows, chain_id, phase)?;
+    require_compatible_active_phase(rows, chain_id, phase, mode)?;
     require_prerequisite(rows, chain_id, phase)?;
     if phase.writes_derived_data() {
         require_content_hash(rows, chain_id, phase, mode)?;
@@ -164,6 +164,7 @@ fn require_compatible_active_phase(
     rows: &[PhaseStateRow],
     chain_id: &str,
     phase: PhaseName,
+    mode: &RunMode,
 ) -> RunnerResult<()> {
     for row in rows {
         let other: PhaseName = row.phase_name.parse()?;
@@ -174,6 +175,7 @@ fn require_compatible_active_phase(
         if matches!(status, PhaseStatus::Running | PhaseStatus::Paused)
             && !verify_live_work_pair(phase, other)
             && !is_pending_required_downstream_redo(row)
+            && !recompute_can_queue_behind_project_redo(phase, other, mode, row)
         {
             return Err(RunnerError::new(
                 ErrorKind::InvalidTransition,
@@ -184,6 +186,19 @@ fn require_compatible_active_phase(
         }
     }
     Ok(())
+}
+
+fn recompute_can_queue_behind_project_redo(
+    phase: PhaseName,
+    other: PhaseName,
+    mode: &RunMode,
+    row: &PhaseStateRow,
+) -> bool {
+    phase == PhaseName::Interpret
+        && other == PhaseName::Project
+        && matches!(mode, RunMode::RecomputeFlags(_))
+        && row.redo_in_progress
+        && row.redo_mode.as_deref() == Some("redo")
 }
 
 fn verify_live_work_pair(left: PhaseName, right: PhaseName) -> bool {

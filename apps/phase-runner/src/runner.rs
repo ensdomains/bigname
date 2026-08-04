@@ -10,7 +10,7 @@ use crate::{
     error::{ErrorKind, RunnerError, RunnerResult, VERIFICATION_MISMATCH_PREFIX},
     heads::publish_heads,
     ingest_progress,
-    phase::{BlockRange, Phase, PhaseBatchOutcome, PhaseName, PhaseSet, RunMode},
+    phase::{Phase, PhaseBatchOutcome, PhaseName, PhaseSet, RunMode},
     phase_lock::PhaseLock,
     runner_support::{
         Backoff, HeartbeatThrottle, PhaseLoopResult, cancelled_redo_error,
@@ -24,6 +24,8 @@ use crate::{
 mod context;
 #[path = "runner_live_follow.rs"]
 mod live_follow;
+#[path = "runner_operator_redo.rs"]
+mod operator_redo;
 #[path = "runner_required_redo.rs"]
 mod required_redo;
 
@@ -33,6 +35,17 @@ type LiveMismatchReason = Arc<OnceLock<String>>;
 pub enum RedoPhase {
     Phase(PhaseName),
     RecomputeFlags,
+    All,
+}
+
+impl RedoPhase {
+    pub const fn requires_ingest(self) -> bool {
+        matches!(self, Self::Phase(PhaseName::Ingest) | Self::All)
+    }
+
+    pub const fn requires_verify(self) -> bool {
+        matches!(self, Self::Phase(PhaseName::Verify) | Self::All)
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -117,54 +130,6 @@ impl PhaseRunner {
             return self.run_live_follow(chain, cancellation).await;
         }
         self.run_verify_and_live(chain, cancellation).await
-    }
-
-    pub async fn redo(
-        &self,
-        chain: &ChainConfig,
-        selection: RedoPhase,
-        range: BlockRange,
-        cancellation: CancellationToken,
-    ) -> RunnerResult<()> {
-        let phase = match selection {
-            RedoPhase::RecomputeFlags => {
-                return Err(RunnerError::new(
-                    ErrorKind::Configuration,
-                    bigname_interpret::RECOMPUTE_FLAGS_UNAVAILABLE_REASON,
-                ));
-            }
-            RedoPhase::Phase(PhaseName::Live) => {
-                return Err(RunnerError::new(
-                    ErrorKind::Configuration,
-                    "live does not support historical redo",
-                ));
-            }
-            RedoPhase::Phase(phase) => phase,
-        };
-        let mode = RunMode::Redo(range);
-        self.phases
-            .get(phase)
-            .preflight(&chain.chain_id, &chain.sources, &mode)?;
-        self.store.initialize_chain(&chain.chain_id).await?;
-        self.run_phase_with_restart(chain, phase, mode, cancellation.clone())
-            .await?;
-        if phase == PhaseName::Interpret
-            && self.store.status(&chain.chain_id, phase).await?
-                == crate::state::PhaseStatus::Completed
-            && let Some(range) = self
-                .store
-                .required_redo_range(&chain.chain_id, PhaseName::Project)
-                .await?
-        {
-            self.run_phase_with_restart(
-                chain,
-                PhaseName::Project,
-                RunMode::Redo(range),
-                cancellation,
-            )
-            .await?;
-        }
-        Ok(())
     }
 
     async fn run_phase_with_restart(

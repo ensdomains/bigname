@@ -20,11 +20,13 @@ use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     capacity::CapacityGuard,
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
-    error::ErrorKind,
+    error::{ErrorKind, RunnerError},
     interpret_phase::InterpretPhase,
-    phase::{BlockRange, LoopbackPhase, PhaseName, PhaseSet},
+    phase::{BlockRange, LoopbackPhase, Phase, PhaseContext, PhaseFuture, PhaseName, PhaseSet},
+    phase_lock::PhaseLock,
+    project_phase::ProjectPhase,
     runner::{PhaseRunner, RedoPhase},
-    state::{PhaseStore, StartDisposition},
+    state::PhaseStore,
 };
 use serde_json::json;
 use sqlx::{
@@ -1111,6 +1113,94 @@ async fn hostile_resolver_strings_persist_losslessly_and_batch_completes() -> Re
 }
 
 #[tokio::test]
+async fn recompute_scopes_resolver_preimages_through_retained_event_evidence() -> Result<()> {
+    let scratch =
+        ScratchDatabase::create("production_interpret_resolver_preimage_recompute").await?;
+    let chain = "interpret-resolver-preimage-recompute";
+    seed_hostile_resolver_strings(scratch.pool(), chain).await?;
+    let transaction_hash = format!("{chain}-transaction-1");
+    let name = NameChanged {
+        node: B256::repeat_byte(0x32),
+        name: "alice.eth".to_owned(),
+    }
+    .encode_log_data();
+    insert_log(
+        scratch.pool(),
+        chain,
+        &transaction_hash,
+        4,
+        CONTRACT,
+        name.topics(),
+        name.data.as_ref(),
+    )
+    .await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+
+    let alice_hash: String =
+        sqlx::query_scalar("SELECT labelhash FROM label_preimages WHERE decoded_label = 'alice'")
+            .fetch_one(scratch.pool())
+            .await?;
+    let retained_event: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM normalized_events
+             WHERE chain_id = $1
+               AND block_number = 1
+               AND event_kind = 'PreimageObserved'
+               AND after_state ->> 'labelhash' = $2
+         )",
+    )
+    .bind(chain)
+    .bind(&alice_hash)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(retained_event);
+    let represented_by_surface: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM name_surfaces surface,
+                           unnest(surface.labelhashes) AS labels(labelhash)
+             WHERE surface.chain_id = $1 AND labels.labelhash = $2
+         )",
+    )
+    .bind(chain)
+    .bind(&alice_hash)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(!represented_by_surface);
+
+    sqlx::query(
+        "UPDATE label_preimages
+         SET normalizer_version = 'stale-version',
+             normalized_under_version = false,
+             normalization_error = 'stale flag',
+             provenance = jsonb_set(provenance, '{block_number}', '0'::jsonb)
+         WHERE labelhash = $1",
+    )
+    .bind(&alice_hash)
+    .execute(scratch.pool())
+    .await?;
+
+    run_engine(
+        scratch.pool(),
+        chain,
+        1,
+        1,
+        InterpretRunMode::RecomputeFlags,
+    )
+    .await?;
+    let repaired: (String, bool, Option<String>) = sqlx::query_as(
+        "SELECT normalizer_version, normalized_under_version, normalization_error
+         FROM label_preimages WHERE labelhash = $1",
+    )
+    .bind(&alice_hash)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(repaired, (NORMALIZER.into(), true, None));
+
+    run_engine(scratch.pool(), chain, 1, 1, InterpretRunMode::Normal).await?;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn two_hundred_fifty_six_byte_label_completes_as_shadow() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_256_byte_shadow").await?;
     let chain = "interpret-256-byte-shadow";
@@ -1206,7 +1296,8 @@ async fn normalization_collision_keeps_raw_preimages_distinct_and_binds_only_vis
 }
 
 #[tokio::test]
-async fn recompute_flags_is_unavailable_until_binding_reconciliation_exists() -> Result<()> {
+async fn same_class_recompute_updates_flags_without_events_bindings_or_identity_anchors()
+-> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_flags").await?;
     let chain = "interpret-flags";
     seed_fixture(scratch.pool(), chain, &[(1, "alice")]).await?;
@@ -1222,22 +1313,49 @@ async fn recompute_flags_is_unavailable_until_binding_reconciliation_exists() ->
     )
     .execute(scratch.pool())
     .await?;
-    let event_count: i64 = sqlx::query_scalar("SELECT count(*) FROM normalized_events")
+    sqlx::query(
+        "UPDATE name_surfaces
+         SET normalizer_version = 'stale-version'
+         WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    let events_before: Vec<(i64, serde_json::Value, serde_json::Value, String)> = sqlx::query_as(
+        "SELECT normalized_event_id, before_state, after_state, canonicality_state::text
+         FROM normalized_events
+         WHERE chain_id = $1
+         ORDER BY normalized_event_id",
+    )
+    .bind(chain)
+    .fetch_all(scratch.pool())
+    .await?;
+    let surface_anchor_before: (String, i64, serde_json::Value, time::OffsetDateTime) =
+        sqlx::query_as(
+            "SELECT block_hash, block_number, provenance, observed_at
+             FROM name_surfaces WHERE chain_id = $1",
+        )
+        .bind(chain)
         .fetch_one(scratch.pool())
         .await?;
+    let bindings_before: Vec<(Uuid, String, i64, Option<time::OffsetDateTime>, String)> =
+        sqlx::query_as(
+            "SELECT surface_binding_id, block_hash, block_number, active_to,
+                    canonicality_state::text
+             FROM surface_bindings WHERE chain_id = $1 ORDER BY surface_binding_id",
+        )
+        .bind(chain)
+        .fetch_all(scratch.pool())
+        .await?;
 
-    let error = Engine::new(scratch.pool().clone())
-        .run_batch(BatchRequest {
-            chain_id: chain.to_owned(),
-            from_block: 0,
-            to_block: 1,
-            resume_current: None,
-            mode: InterpretRunMode::RecomputeFlags,
-        })
-        .await
-        .expect_err("flag recompute must remain unavailable without binding reconciliation");
-    assert_eq!(error.kind(), bigname_interpret::ErrorKind::Configuration);
-    assert!(error.to_string().contains("binding reconciliation"));
+    run_engine(
+        scratch.pool(),
+        chain,
+        0,
+        1,
+        InterpretRunMode::RecomputeFlags,
+    )
+    .await?;
 
     let flag: (String, bool, Option<String>) = sqlx::query_as(
         "
@@ -1248,11 +1366,269 @@ async fn recompute_flags_is_unavailable_until_binding_reconciliation_exists() ->
     )
     .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(flag.0, "stale-version");
-    let after_count: i64 = sqlx::query_scalar("SELECT count(*) FROM normalized_events")
+    assert_eq!(flag, (NORMALIZER.into(), true, None));
+    let surface_flags: (String, String, serde_json::Value) = sqlx::query_as(
+        "SELECT normalizer_version, visibility_state, normalization_errors
+         FROM name_surfaces WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        surface_flags,
+        (NORMALIZER.into(), "active".into(), json!([]))
+    );
+    let events_after: Vec<(i64, serde_json::Value, serde_json::Value, String)> = sqlx::query_as(
+        "SELECT normalized_event_id, before_state, after_state, canonicality_state::text
+         FROM normalized_events
+         WHERE chain_id = $1
+         ORDER BY normalized_event_id",
+    )
+    .bind(chain)
+    .fetch_all(scratch.pool())
+    .await?;
+    let surface_anchor_after: (String, i64, serde_json::Value, time::OffsetDateTime) =
+        sqlx::query_as(
+            "SELECT block_hash, block_number, provenance, observed_at
+             FROM name_surfaces WHERE chain_id = $1",
+        )
+        .bind(chain)
         .fetch_one(scratch.pool())
         .await?;
-    assert_eq!(event_count, after_count);
+    let bindings_after: Vec<(Uuid, String, i64, Option<time::OffsetDateTime>, String)> =
+        sqlx::query_as(
+            "SELECT surface_binding_id, block_hash, block_number, active_to,
+                    canonicality_state::text
+             FROM surface_bindings WHERE chain_id = $1 ORDER BY surface_binding_id",
+        )
+        .bind(chain)
+        .fetch_all(scratch.pool())
+        .await?;
+    assert_eq!(events_after, events_before);
+    assert_eq!(surface_anchor_after, surface_anchor_before);
+    assert_eq!(bindings_after, bindings_before);
+
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn shadow_to_active_recompute_stamps_redo_then_replay_derives_the_binding() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_flags_shadow_active").await?;
+    let chain = "interpret-flags-shadow-active";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice")]).await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+    sqlx::query(
+        "UPDATE label_preimages
+         SET normalizer_version = 'stale-version',
+             normalized_under_version = false,
+             normalization_error = 'stale flag'
+         WHERE decoded_label = 'alice'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE name_surfaces
+         SET normalizer_version = 'stale-version',
+             visibility_state = 'shadow',
+             normalization_errors = '[{\"error\":\"stale flag\"}]'::jsonb,
+             deactivation_reason = 'normalization_gate',
+             deactivated_at = now()
+         WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query("DELETE FROM surface_bindings WHERE chain_id = $1")
+        .bind(chain)
+        .execute(scratch.pool())
+        .await?;
+    initialize_completed_recompute_extent(scratch.pool(), chain, 1).await?;
+    let runner = recompute_runner(&scratch, chain, "shadow-active-runner")?;
+
+    runner
+        .redo(
+            &chain_config(chain)?,
+            RedoPhase::RecomputeFlags,
+            BlockRange::new(0, 1)?,
+            CancellationToken::new(),
+        )
+        .await?;
+
+    let flags: (String, bool, String) = sqlx::query_as(
+        "SELECT preimage.normalizer_version, preimage.normalized_under_version,
+                surface.visibility_state
+         FROM label_preimages preimage
+         JOIN name_surfaces surface ON surface.chain_id = $1
+         WHERE preimage.decoded_label = 'alice'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(flags, (NORMALIZER.into(), true, "active".into()));
+    let open_bindings: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM surface_bindings
+         WHERE chain_id = $1 AND active_to IS NULL
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(open_bindings, 0, "recompute must not fabricate the binding");
+    assert_transition_redo(scratch.pool(), chain, 1).await?;
+
+    runner
+        .redo(
+            &chain_config(chain)?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    let supported: (i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(DISTINCT resource_id)
+         FROM surface_bindings
+         WHERE chain_id = $1 AND active_to IS NULL
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(supported, (1, 1));
+    assert_no_interpret_project_redo(scratch.pool(), chain).await?;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn active_to_shadow_recompute_stamps_redo_then_replay_retracts_the_binding() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_flags_active_shadow").await?;
+    let chain = "interpret-flags-active-shadow";
+    seed_fixture(scratch.pool(), chain, &[(1, "Alice")]).await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+    let expected_surface_flags: (String, String, serde_json::Value, Option<String>) =
+        sqlx::query_as(
+            "SELECT normalizer_version, visibility_state, normalization_errors,
+                    deactivation_reason
+             FROM name_surfaces WHERE chain_id = $1",
+        )
+        .bind(chain)
+        .fetch_one(scratch.pool())
+        .await?;
+    sqlx::query(
+        "UPDATE label_preimages
+         SET normalizer_version = 'stale-version',
+             normalized_under_version = true,
+             normalization_error = NULL
+         WHERE decoded_label = 'Alice'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE name_surfaces
+         SET normalizer_version = 'stale-version',
+             visibility_state = 'active',
+             normalization_errors = '[]'::jsonb,
+             deactivation_reason = NULL,
+             deactivated_at = NULL
+         WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    let (logical_name_id, resource_id): (String, Uuid) = sqlx::query_as(
+        "SELECT surface.logical_name_id, resource.resource_id
+         FROM name_surfaces surface
+         JOIN resources resource ON resource.chain_id = surface.chain_id
+         WHERE surface.chain_id = $1
+         LIMIT 1",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    let stale_binding_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO surface_bindings (
+             surface_binding_id, logical_name_id, resource_id, binding_kind,
+             active_from, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1, $2, $3, 'declared_registry_path', to_timestamp(1),
+                   $4, $5, 1, 'canonical')",
+    )
+    .bind(stale_binding_id)
+    .bind(logical_name_id)
+    .bind(resource_id)
+    .bind(chain)
+    .bind(block_hash(chain, 1))
+    .execute(scratch.pool())
+    .await?;
+    initialize_completed_recompute_extent(scratch.pool(), chain, 1).await?;
+    let runner = recompute_runner(&scratch, chain, "active-shadow-runner")?;
+
+    runner
+        .redo(
+            &chain_config(chain)?,
+            RedoPhase::RecomputeFlags,
+            BlockRange::new(0, 1)?,
+            CancellationToken::new(),
+        )
+        .await?;
+
+    let flags: (String, bool, String) = sqlx::query_as(
+        "SELECT preimage.normalizer_version, preimage.normalized_under_version,
+                surface.visibility_state
+         FROM label_preimages preimage
+         JOIN name_surfaces surface ON surface.chain_id = $1
+         WHERE preimage.decoded_label = 'Alice'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(flags, (NORMALIZER.into(), false, "shadow".into()));
+    let recomputed_surface_flags: (String, String, serde_json::Value, Option<String>) =
+        sqlx::query_as(
+            "SELECT normalizer_version, visibility_state, normalization_errors,
+                    deactivation_reason
+             FROM name_surfaces WHERE chain_id = $1",
+        )
+        .bind(chain)
+        .fetch_one(scratch.pool())
+        .await?;
+    assert_eq!(recomputed_surface_flags, expected_surface_flags);
+    let binding_before_replay: (bool, String) = sqlx::query_as(
+        "SELECT active_to IS NULL, canonicality_state::text
+         FROM surface_bindings WHERE surface_binding_id = $1",
+    )
+    .bind(stale_binding_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(binding_before_replay, (true, "canonical".into()));
+    assert_transition_redo(scratch.pool(), chain, 1).await?;
+
+    runner
+        .redo(
+            &chain_config(chain)?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    let binding_after_replay: String = sqlx::query_scalar(
+        "SELECT canonicality_state::text
+         FROM surface_bindings WHERE surface_binding_id = $1",
+    )
+    .bind(stale_binding_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(binding_after_replay, "orphaned");
+    let readable_open_bindings: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM surface_bindings
+         WHERE chain_id = $1 AND active_to IS NULL
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(readable_open_bindings, 0);
+    assert_no_interpret_project_redo(scratch.pool(), chain).await?;
     scratch.cleanup().await
 }
 
@@ -1365,35 +1741,29 @@ async fn normal_mode_rejects_stored_normalizer_state_drift() -> Result<()> {
 }
 
 #[tokio::test]
-async fn unavailable_recompute_flags_does_not_claim_a_redo_session() -> Result<()> {
+async fn interrupted_recompute_resumes_without_stranding_a_marker() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_flags_redo_state").await?;
     let chain = "interpret-flags-redo-state";
     seed_fixture(scratch.pool(), chain, &[(1, "alice"), (2, "bob")]).await?;
-    let store = PhaseStore::new(scratch.runner().pool().clone());
-    store.initialize_chain(chain).await?;
-    seed_completed_phase_extent(scratch.pool(), chain, INTERPRETER_CONTENT_HASH).await?;
+    run_engine(scratch.pool(), chain, 0, 2, InterpretRunMode::Normal).await?;
+    initialize_completed_recompute_extent(scratch.pool(), chain, 2).await?;
     sqlx::query(
-        "UPDATE chain_phase_state
-         SET phase_status = 'completed',
-             current_block_number = 2,
-             current_block_hash = $2,
-             target_block_number = 2,
-             target_block_hash = $2,
-             input_content_hash = $3,
-             started_at = now(),
-             finished_at = now()
-         WHERE chain_id = $1 AND phase_name = 'project'",
+        "UPDATE label_preimages
+         SET normalizer_version = 'stale-version',
+             normalized_under_version = false,
+             normalization_error = 'stale flag'
+         WHERE decoded_label = 'alice'",
     )
-    .bind(chain)
-    .bind(block_hash(chain, 2))
-    .bind(INTERPRETER_CONTENT_HASH)
     .execute(scratch.pool())
     .await?;
-    let phases = PhaseSet::with_ingest_and_interpret(
+    let phases = PhaseSet::with_ingest_interpret_and_project(
         Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
-        Arc::new(InterpretPhase::new(scratch.runner().pool().clone())),
+        Arc::new(InterruptAfterRecomputePhase {
+            engine: Engine::new(scratch.pool().clone()),
+        }),
+        Arc::new(ProjectPhase::new(scratch.pool().clone())),
     )?;
-    let runner = PhaseRunner::new(
+    let interrupted_runner = PhaseRunner::new(
         scratch.runner(),
         phases,
         CapacityGuard::system(CapacityConfig::default()),
@@ -1401,7 +1771,7 @@ async fn unavailable_recompute_flags_does_not_claim_a_redo_session() -> Result<(
         test_timing(),
     )?;
 
-    let error = runner
+    let error = interrupted_runner
         .redo(
             &chain_config(chain)?,
             RedoPhase::RecomputeFlags,
@@ -1409,29 +1779,433 @@ async fn unavailable_recompute_flags_does_not_claim_a_redo_session() -> Result<(
             CancellationToken::new(),
         )
         .await
-        .expect_err("the unavailable mode must stop before claiming redo state");
-    assert_eq!(error.kind(), ErrorKind::Configuration);
-    assert!(error.to_string().contains("binding reconciliation"));
+        .expect_err("the test interpret phase must interrupt recompute after its write");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error
+            .to_string()
+            .contains("injected recompute interruption")
+    );
 
-    let state: (String, bool, Option<String>) = sqlx::query_as(
-        "SELECT phase_status, redo_in_progress, last_error
+    let interrupted: (String, bool, String, i64, i64, bool) = sqlx::query_as(
+        "SELECT phase_status, redo_in_progress, redo_mode,
+                redo_from_block_number, redo_to_block_number,
+                last_error LIKE 'required downstream redo%'
          FROM chain_phase_state
          WHERE chain_id = $1 AND phase_name = 'interpret'",
     )
     .bind(chain)
     .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(state, ("completed".to_owned(), false, None));
     assert_eq!(
-        store
-            .start_phase(
-                chain,
-                PhaseName::Interpret,
-                &phase_runner::phase::RunMode::Normal
-            )
-            .await?,
-        StartDisposition::AlreadyCompleted
+        interrupted,
+        (
+            "running".into(),
+            true,
+            "recompute_flags".into(),
+            0,
+            2,
+            false,
+        )
     );
+    let body_committed: (String, bool) = sqlx::query_as(
+        "SELECT normalizer_version, normalized_under_version
+         FROM label_preimages WHERE decoded_label = 'alice'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(body_committed, (NORMALIZER.into(), true));
+
+    recompute_runner(&scratch, chain, "interpret-flags-resume-runner")?
+        .redo(
+            &chain_config(chain)?,
+            RedoPhase::RecomputeFlags,
+            BlockRange::new(0, 2)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert_no_interpret_project_redo(scratch.pool(), chain).await?;
+    let repaired: (String, bool, Option<String>) = sqlx::query_as(
+        "SELECT normalizer_version, normalized_under_version, normalization_error
+         FROM label_preimages WHERE decoded_label = 'alice'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(repaired, (NORMALIZER.into(), true, None));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn recompute_holds_the_project_lock_through_interpret_completion() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_flags_project_lock").await?;
+    let chain = "interpret-flags-project-lock";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice")]).await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+    initialize_completed_recompute_extent(scratch.pool(), chain, 1).await?;
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let phases = PhaseSet::with_ingest_interpret_and_project(
+        Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+        Arc::new(BlockingInterpretPhase {
+            inner: InterpretPhase::new(scratch.pool().clone()),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        }),
+        Arc::new(ProjectPhase::new(scratch.pool().clone())),
+    )?;
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "interpret-flags-project-lock-runner",
+        test_timing(),
+    )?;
+    let configured_chain = chain_config(chain)?;
+    let task = tokio::spawn(async move {
+        runner
+            .redo(
+                &configured_chain,
+                RedoPhase::RecomputeFlags,
+                BlockRange::new(0, 1).expect("fixed range"),
+                CancellationToken::new(),
+            )
+            .await
+    });
+    entered.notified().await;
+
+    let lock_attempt =
+        PhaseLock::acquire(scratch.writer_connect_options(), chain, PhaseName::Project).await;
+    let Err(error) = lock_attempt else {
+        panic!("project lock must remain held until interpret recompute finishes");
+    };
+    assert_eq!(error.kind(), ErrorKind::LockHeld);
+
+    release.notify_one();
+    task.await??;
+    assert_no_interpret_project_redo(scratch.pool(), chain).await?;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn recompute_widens_but_does_not_absorb_a_pending_operator_project_redo() -> Result<()> {
+    assert_pending_project_redo_survives(
+        "production_interpret_flags_pending_project",
+        "interpret-flags-pending-project",
+        Some("operator project redo interrupted"),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn recompute_preserves_a_pending_operator_project_redo_with_no_error() -> Result<()> {
+    assert_pending_project_redo_survives(
+        "production_interpret_flags_pending_project_null",
+        "interpret-flags-pending-project-null",
+        None,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn recompute_preserves_a_pending_system_project_redo() -> Result<()> {
+    assert_pending_project_redo_survives(
+        "production_interpret_flags_pending_system_project",
+        "interpret-flags-pending-system-project",
+        Some("required downstream redo: pre-existing projection repair"),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn recompute_resumes_its_own_queued_project_refresh() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_flags_queued_refresh").await?;
+    let chain = "interpret-flags-queued-refresh";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice"), (2, "bob")]).await?;
+    run_engine(scratch.pool(), chain, 0, 2, InterpretRunMode::Normal).await?;
+    initialize_completed_recompute_extent(scratch.pool(), chain, 2).await?;
+    sqlx::query(
+        "UPDATE label_preimages
+         SET normalizer_version = 'stale-version',
+             normalized_under_version = false,
+             normalization_error = 'stale flag'
+         WHERE decoded_label = 'alice'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running',
+             redo_in_progress = true,
+             redo_mode = 'redo',
+             redo_previous_phase_status = 'completed',
+             redo_previous_last_error = NULL,
+             redo_previous_started_at = started_at,
+             redo_previous_finished_at = finished_at,
+             redo_from_block_number = 0,
+             redo_to_block_number = 2,
+             last_error = 'required downstream redo: recompute-flags scoped projection refresh',
+             started_at = now(),
+             finished_at = NULL,
+             updated_at = now()
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+
+    recompute_runner(&scratch, chain, "interpret-flags-queued-refresh-runner")?
+        .redo(
+            &chain_config(chain)?,
+            RedoPhase::RecomputeFlags,
+            BlockRange::new(0, 2)?,
+            CancellationToken::new(),
+        )
+        .await?;
+
+    assert_no_interpret_project_redo(scratch.pool(), chain).await?;
+    let repaired: (String, bool) = sqlx::query_as(
+        "SELECT normalizer_version, normalized_under_version
+         FROM label_preimages WHERE decoded_label = 'alice'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(repaired, (NORMALIZER.into(), true));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn failed_recompute_project_refresh_retains_ownership_and_resumes() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_flags_failed_refresh").await?;
+    let chain = "interpret-flags-failed-refresh";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice")]).await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+    initialize_completed_recompute_extent(scratch.pool(), chain, 1).await?;
+    let phases = PhaseSet::with_ingest_interpret_and_project(
+        Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+        Arc::new(InterpretPhase::new(scratch.pool().clone())),
+        Arc::new(FailProjectOncePhase {
+            inner: ProjectPhase::new(scratch.pool().clone()),
+            attempts: AtomicUsize::new(0),
+        }),
+    )?;
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "interpret-flags-failed-refresh-runner",
+        test_timing(),
+    )?;
+
+    let error = runner
+        .redo(
+            &chain_config(chain)?,
+            RedoPhase::RecomputeFlags,
+            BlockRange::new(0, 1)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the first scoped project refresh must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("injected project refresh failure")
+    );
+    let failed_owner: Option<String> = sqlx::query_scalar(
+        "SELECT last_error FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'project' AND redo_in_progress",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(
+        failed_owner
+            .as_deref()
+            .is_some_and(|message| message.contains("recompute-flags scoped projection refresh"))
+    );
+
+    runner
+        .redo(
+            &chain_config(chain)?,
+            RedoPhase::RecomputeFlags,
+            BlockRange::new(0, 1)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert_no_interpret_project_redo(scratch.pool(), chain).await?;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn project_refresh_handoff_keeps_a_durable_recompute_marker() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_flags_project_handoff").await?;
+    let chain = "interpret-flags-project-handoff";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice")]).await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+    initialize_completed_recompute_extent(scratch.pool(), chain, 1).await?;
+    let cancellation = CancellationToken::new();
+    let phases = PhaseSet::with_ingest_interpret_and_project(
+        Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+        Arc::new(InterpretPhase::new(scratch.pool().clone())),
+        Arc::new(CancelAfterProjectPhase {
+            inner: ProjectPhase::new(scratch.pool().clone()),
+            cancellation: cancellation.clone(),
+        }),
+    )?;
+    let interrupted_runner = PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "interpret-flags-project-handoff-runner",
+        test_timing(),
+    )?;
+
+    interrupted_runner
+        .redo(
+            &chain_config(chain)?,
+            RedoPhase::RecomputeFlags,
+            BlockRange::new(0, 1)?,
+            cancellation,
+        )
+        .await
+        .expect_err("cancellation after Project must stop before Interpret");
+    let durable_marker: Option<(String, String)> = sqlx::query_as(
+        "SELECT redo_mode, last_error FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'project' AND redo_in_progress",
+    )
+    .bind(chain)
+    .fetch_optional(scratch.pool())
+    .await?;
+    assert_eq!(
+        durable_marker,
+        Some((
+            "redo".into(),
+            "recompute-flags project refresh complete; interpret flags pending".into(),
+        ))
+    );
+
+    let ordinary_project_error = recompute_runner(
+        &scratch,
+        chain,
+        "interpret-flags-project-handoff-ordinary-project",
+    )?
+    .redo(
+        &chain_config(chain)?,
+        RedoPhase::Phase(PhaseName::Project),
+        BlockRange::new(0, 1)?,
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("ordinary Project redo must not consume the recompute handoff marker");
+    assert!(
+        ordinary_project_error
+            .to_string()
+            .contains("--phase recompute-flags --from-block 0 --to-block 1")
+    );
+    let marker_after_ordinary_project: Option<(String, String)> = sqlx::query_as(
+        "SELECT redo_mode, last_error FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'project' AND redo_in_progress",
+    )
+    .bind(chain)
+    .fetch_optional(scratch.pool())
+    .await?;
+    assert_eq!(marker_after_ordinary_project, durable_marker);
+
+    recompute_runner(&scratch, chain, "interpret-flags-project-handoff-resume")?
+        .redo(
+            &chain_config(chain)?,
+            RedoPhase::RecomputeFlags,
+            BlockRange::new(0, 1)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert_no_interpret_project_redo(scratch.pool(), chain).await?;
+    scratch.cleanup().await
+}
+
+async fn assert_pending_project_redo_survives(
+    database_name: &str,
+    chain: &str,
+    operator_error: Option<&str>,
+) -> Result<()> {
+    let scratch = ScratchDatabase::create(database_name).await?;
+    seed_fixture(scratch.pool(), chain, &[(1, "alice"), (2, "bob")]).await?;
+    run_engine(scratch.pool(), chain, 0, 2, InterpretRunMode::Normal).await?;
+    initialize_completed_recompute_extent(scratch.pool(), chain, 2).await?;
+    sqlx::query(
+        "UPDATE label_preimages
+         SET normalizer_version = 'stale-version',
+             normalized_under_version = false,
+             normalization_error = 'stale flag'
+         WHERE decoded_label = 'alice'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running',
+             redo_in_progress = true,
+             redo_mode = 'redo',
+             redo_previous_phase_status = 'completed',
+             redo_previous_last_error = NULL,
+             redo_previous_started_at = started_at,
+             redo_previous_finished_at = finished_at,
+             redo_from_block_number = 1,
+             redo_to_block_number = 1,
+             last_error = $2,
+             started_at = now(),
+             finished_at = NULL,
+             updated_at = now()
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain)
+    .bind(operator_error)
+    .execute(scratch.pool())
+    .await?;
+
+    recompute_runner(&scratch, chain, "interpret-flags-pending-project-runner")?
+        .redo(
+            &chain_config(chain)?,
+            RedoPhase::RecomputeFlags,
+            BlockRange::new(0, 2)?,
+            CancellationToken::new(),
+        )
+        .await?;
+
+    let project: (String, bool, String, i64, i64, Option<String>) = sqlx::query_as(
+        "SELECT phase_status, redo_in_progress, redo_mode,
+                redo_from_block_number, redo_to_block_number, last_error
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        project,
+        (
+            "running".into(),
+            true,
+            "redo".into(),
+            0,
+            2,
+            operator_error.map(str::to_owned),
+        )
+    );
+    let interpret_pending: bool = sqlx::query_scalar(
+        "SELECT redo_in_progress FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(!interpret_pending);
+    let repaired: (String, bool) = sqlx::query_as(
+        "SELECT normalizer_version, normalized_under_version
+         FROM label_preimages WHERE decoded_label = 'alice'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(repaired, (NORMALIZER.into(), true));
     scratch.cleanup().await
 }
 
@@ -4522,6 +5296,186 @@ async fn seed_completed_phase_extent_at(
     .bind(head_hash)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+async fn initialize_completed_recompute_extent(
+    pool: &PgPool,
+    chain_id: &str,
+    head: i64,
+) -> Result<()> {
+    let store = PhaseStore::new(pool.clone());
+    store.initialize_chain(chain_id).await?;
+    seed_completed_phase_extent_at(pool, chain_id, head, INTERPRETER_CONTENT_HASH).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'completed',
+             current_block_number = $2,
+             current_block_hash = $3,
+             target_block_number = $2,
+             target_block_hash = $3,
+             input_content_hash = $4,
+             started_at = now(),
+             finished_at = now()
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain_id)
+    .bind(head)
+    .bind(block_hash(chain_id, head))
+    .bind(INTERPRETER_CONTENT_HASH)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+struct InterruptAfterRecomputePhase {
+    engine: Engine,
+}
+
+impl Phase for InterruptAfterRecomputePhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Interpret
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            let range = context.mode.range().ok_or_else(|| {
+                RunnerError::data_integrity("injected recompute phase requires a bounded range")
+            })?;
+            self.engine
+                .run_batch(BatchRequest {
+                    chain_id: context.chain_id,
+                    from_block: range.from,
+                    to_block: range.to,
+                    resume_current: context.resume.current.map(|marker| Marker {
+                        number: marker.number,
+                        hash: marker.hash,
+                    }),
+                    mode: InterpretRunMode::RecomputeFlags,
+                })
+                .await
+                .map_err(|error| RunnerError::new(ErrorKind::DataIntegrity, error.to_string()))?;
+            Err(RunnerError::data_integrity(
+                "injected recompute interruption after the interpret write committed",
+            ))
+        })
+    }
+}
+
+struct BlockingInterpretPhase {
+    inner: InterpretPhase,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl Phase for BlockingInterpretPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Interpret
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            let outcome = self.inner.run_batch(context).await?;
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(outcome)
+        })
+    }
+}
+
+struct FailProjectOncePhase {
+    inner: ProjectPhase,
+    attempts: AtomicUsize,
+}
+
+impl Phase for FailProjectOncePhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Project
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(RunnerError::data_integrity(
+                    "injected project refresh failure",
+                ));
+            }
+            self.inner.run_batch(context).await
+        })
+    }
+}
+
+struct CancelAfterProjectPhase {
+    inner: ProjectPhase,
+    cancellation: CancellationToken,
+}
+
+impl Phase for CancelAfterProjectPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Project
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            let outcome = self.inner.run_batch(context).await?;
+            self.cancellation.cancel();
+            Ok(outcome)
+        })
+    }
+}
+
+fn recompute_runner(
+    scratch: &ScratchDatabase,
+    _chain_id: &str,
+    instance_id: &str,
+) -> Result<PhaseRunner> {
+    Ok(PhaseRunner::new(
+        scratch.runner(),
+        PhaseSet::with_ingest_interpret_and_project(
+            Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+            Arc::new(InterpretPhase::new(scratch.pool().clone())),
+            Arc::new(ProjectPhase::new(scratch.pool().clone())),
+        )?,
+        CapacityGuard::system(CapacityConfig::default()),
+        instance_id,
+        test_timing(),
+    )?)
+}
+
+async fn assert_transition_redo(pool: &PgPool, chain_id: &str, from: i64) -> Result<()> {
+    let markers: Vec<(String, String, i64, i64, bool)> = sqlx::query_as(
+        "SELECT phase_name, redo_mode, redo_from_block_number, redo_to_block_number,
+                last_error LIKE 'required downstream redo%'
+         FROM chain_phase_state
+         WHERE chain_id = $1
+           AND phase_name IN ('interpret', 'project')
+           AND redo_in_progress
+         ORDER BY phase_name",
+    )
+    .bind(chain_id)
+    .fetch_all(pool)
+    .await?;
+    assert_eq!(
+        markers,
+        vec![
+            ("interpret".into(), "redo".into(), from, from, true),
+            ("project".into(), "redo".into(), from, from, true),
+        ]
+    );
+    Ok(())
+}
+
+async fn assert_no_interpret_project_redo(pool: &PgPool, chain_id: &str) -> Result<()> {
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM chain_phase_state
+         WHERE chain_id = $1
+           AND phase_name IN ('interpret', 'project')
+           AND redo_in_progress",
+    )
+    .bind(chain_id)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(pending, 0);
     Ok(())
 }
 
