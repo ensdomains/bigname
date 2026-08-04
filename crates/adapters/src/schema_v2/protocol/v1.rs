@@ -60,6 +60,12 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
                     .get("authority_key")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned),
+                event.after_state.get("registrant")?.as_str()?.to_owned(),
+                event
+                    .raw_fact_ref
+                    .get("emitting_address")?
+                    .as_str()?
+                    .to_owned(),
             ))
         })
         .collect::<Vec<_>>();
@@ -72,6 +78,8 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
         log_index,
         namehash,
         authority_key,
+        registrant,
+        registration_emitter,
     ) in registrations
     {
         let pending_positions = output
@@ -108,11 +116,11 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
             })
             .filter_map(|event| event.resource_id)
             .collect::<std::collections::BTreeSet<_>>();
-        let last_owner_log = output
+        let owner_positions = output
             .normalized_events
             .iter()
-            .filter(|event| {
-                is_pending_setup(
+            .filter_map(|event| {
+                (is_pending_setup(
                     event,
                     &namespace,
                     &block_hash,
@@ -123,37 +131,91 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
                     .after_state
                     .get("source_event")
                     .and_then(serde_json::Value::as_str)
-                    == Some("NewOwner")
+                    == Some("NewOwner"))
+                .then(|| {
+                    Some((
+                        event_position(event)?,
+                        event.after_state.get("owner")?.as_str()?.to_owned(),
+                    ))
+                })
+                .flatten()
             })
-            .filter_map(|event| event.log_index)
-            .max();
-        let mut superseded_owner_positions = std::collections::BTreeSet::new();
-        if let Some(last_owner_log) = last_owner_log {
-            superseded_owner_positions.extend(output.normalized_events.iter().filter_map(
-                |event| {
-                    (is_pending_setup(
-                        event,
-                        &namespace,
-                        &block_hash,
-                        &transaction_hash,
-                        log_index,
-                        &namehash,
-                    ) && event
-                        .after_state
-                        .get("source_event")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("NewOwner")
-                        && event.log_index.is_some_and(|index| index < last_owner_log))
-                    .then(|| event_position(event))
-                    .flatten()
-                },
-            ));
-        }
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let last_owner_position = owner_positions.keys().next_back().copied();
+        // A legacy controller first registers the name to `address(this)`, then replaces that
+        // registry owner before emitting its own NameRegistered event. Matching the intermediate
+        // owner to that event's emitter distinguishes the controller artifact from a real owner.
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L294 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L296 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L301 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L303 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L333 @ ens_v1@91c966f)
+        let transient_owner_positions = owner_positions
+            .iter()
+            .filter(|(position, owner)| {
+                Some(**position) != last_owner_position
+                    && !owner.eq_ignore_ascii_case(&registrant)
+                    && owner.eq_ignore_ascii_case(&registration_emitter)
+                    && output.normalized_events.iter().any(|event| {
+                        event_position(event) == Some(**position)
+                            && is_resource_permission_grant(event, owner)
+                            && event.resource_id.is_some_and(|resource| {
+                                stale_registry_resources.contains(&resource)
+                            })
+                    })
+            })
+            .map(|(position, _)| *position)
+            .collect::<std::collections::BTreeSet<_>>();
+        let predecessor_owner_positions = owner_positions
+            .keys()
+            .filter(|position| {
+                Some(**position) != last_owner_position
+                    && !transient_owner_positions.contains(position)
+            })
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let transient_owners = transient_owner_positions
+            .iter()
+            .filter_map(|position| owner_positions.get(position))
+            .map(|owner| owner.to_ascii_lowercase())
+            .collect::<std::collections::BTreeSet<_>>();
         output.normalized_events.retain(|event| {
-            event_position(event)
-                .is_none_or(|position| !superseded_owner_positions.contains(&position))
+            let position = event_position(event);
+            let references_stale_registry_resource = event
+                .resource_id
+                .is_some_and(|resource| stale_registry_resources.contains(&resource));
+            let transient_permission = event.event_kind == "PermissionChanged"
+                && references_stale_registry_resource
+                && position.is_some_and(|position| pending_positions.contains(&position))
+                && transient_owners
+                    .iter()
+                    .any(|owner| permission_subject_is(event, owner));
+            !(transient_permission
+                || event.event_kind != "PermissionChanged"
+                    && references_stale_registry_resource
+                    && position
+                        .is_some_and(|position| transient_owner_positions.contains(&position)))
         });
         for event in output.normalized_events.iter_mut().filter(|event| {
+            concerns_predecessor_epoch(
+                event,
+                &registrant,
+                &stale_registry_resources,
+                &predecessor_owner_positions,
+            )
+        }) {
+            event.logical_name_id = Some(logical_name_id.clone());
+            refresh_interpreter_state_key(event);
+        }
+        for event in output.normalized_events.iter_mut().filter(|event| {
+            if concerns_predecessor_epoch(
+                event,
+                &registrant,
+                &stale_registry_resources,
+                &predecessor_owner_positions,
+            ) {
+                return false;
+            }
             let targets_registration = is_pending_setup(
                 event,
                 &namespace,
@@ -221,6 +283,45 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
                 || retained_resource_references.contains(&resource.resource_id)
         });
     }
+}
+
+fn concerns_predecessor_epoch(
+    event: &NormalizedEvent,
+    registrant: &str,
+    stale_registry_resources: &std::collections::BTreeSet<uuid::Uuid>,
+    predecessor_owner_positions: &std::collections::BTreeSet<(i64, i64, i64)>,
+) -> bool {
+    if event_position(event).is_some_and(|position| predecessor_owner_positions.contains(&position))
+    {
+        return true;
+    }
+    event.event_kind == "PermissionChanged"
+        && event
+            .resource_id
+            .is_some_and(|resource| stale_registry_resources.contains(&resource))
+        && (event
+            .after_state
+            .get("revocation_source")
+            .is_some_and(|source| !source.is_null())
+            || !permission_subject_is(event, registrant))
+}
+
+fn permission_subject_is(event: &NormalizedEvent, subject: &str) -> bool {
+    event
+        .after_state
+        .get("subject")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(subject))
+}
+
+fn is_resource_permission_grant(event: &NormalizedEvent, subject: &str) -> bool {
+    event.event_kind == "PermissionChanged"
+        && permission_subject_is(event, subject)
+        && event.after_state["scope"]["kind"] == "resource"
+        && event
+            .after_state
+            .get("grant_source")
+            .is_some_and(|source| !source.is_null())
 }
 
 fn retarget_permission_authority(state: &mut serde_json::Value, authority_key: &str) {

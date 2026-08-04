@@ -11,10 +11,13 @@ use std::{
 
 use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bigname_ingest::load_watch_filter;
 use bigname_interpret::{
     BatchRequest, Engine, ErrorKind as InterpretErrorKind, Marker, RunMode as InterpretRunMode,
+};
+use bigname_project::{
+    BatchRequest as ProjectBatchRequest, Engine as ProjectEngine, RunMode as ProjectRunMode,
 };
 use phase_runner::{
     INTERPRETER_CONTENT_HASH,
@@ -44,6 +47,9 @@ const REGISTRY: &str = "0x0000000000000000000000000000000000000046";
 const DISCOVERED_RESOLVER: &str = "0x0000000000000000000000000000000000000044";
 const ANNOUNCED_REGISTRY: &str = "0x0000000000000000000000000000000000000045";
 const SENDER: &str = "0x0000000000000000000000000000000000000043";
+const PRIOR_REGISTRY_OWNER: &str = "0x0000000000000000000000000000000000000048";
+const REGISTRANT: &str = "0x0000000000000000000000000000000000000049";
+const REMINTED_REGISTRY_OWNER: &str = "0x000000000000000000000000000000000000004a";
 const NORMALIZER: &str = "ensip15@ens-normalize-0.1.1";
 type DiscoveryEpochRow = (i64, Option<i64>, bool, Option<String>, Option<String>);
 
@@ -174,7 +180,8 @@ async fn same_transaction_registry_permission_writes_with_registration_resource(
     )
     .bind(chain)
     .fetch_one(scratch.pool())
-    .await?;
+    .await
+    .context("registration resource was not written")?;
     let registry_permissions: Vec<(Uuid, serde_json::Value, String)> = sqlx::query_as(
         "SELECT resource_id, after_state, raw_fact_ref ->> 'interpreter_state_key'
          FROM normalized_events
@@ -218,6 +225,152 @@ async fn same_transaction_registry_permission_writes_with_registration_resource(
         assert!(saw_authority_source);
     }
     scratch.cleanup().await
+}
+
+#[derive(Clone, Copy)]
+enum PriorOwnerRegistrationFlow {
+    LegacyTwoOwnerChanges,
+    ModernSingleOwnerChange,
+}
+
+#[tokio::test]
+async fn legacy_prior_owner_revocation_writes_and_projects_on_its_registry_epoch() -> Result<()> {
+    assert_prior_owner_revocation_writes_and_projects(
+        "production_interpret_legacy_prior_owner",
+        "interpret-legacy-prior-owner",
+        PriorOwnerRegistrationFlow::LegacyTwoOwnerChanges,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn modern_prior_owner_revocation_writes_and_projects_on_its_registry_epoch() -> Result<()> {
+    assert_prior_owner_revocation_writes_and_projects(
+        "production_interpret_modern_prior_owner",
+        "interpret-modern-prior-owner",
+        PriorOwnerRegistrationFlow::ModernSingleOwnerChange,
+    )
+    .await
+}
+
+async fn assert_prior_owner_revocation_writes_and_projects(
+    database_name: &str,
+    chain: &str,
+    flow: PriorOwnerRegistrationFlow,
+) -> Result<()> {
+    let scratch = ScratchDatabase::create(database_name).await?;
+    seed_prior_owner_registration_fixture(scratch.pool(), chain, flow).await?;
+
+    run_engine(scratch.pool(), chain, 0, 2, InterpretRunMode::Normal).await?;
+    run_project(scratch.pool(), chain, 2, 0, 2).await?;
+
+    let registrar_resource: Uuid = sqlx::query_scalar(
+        "SELECT resource_id FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'RegistrationGranted'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    let registry_resource: Uuid = sqlx::query_scalar(
+        "SELECT resource_id FROM normalized_events
+         WHERE chain_id = $1
+           AND source_family = 'ens_v1_registry_l1'
+           AND event_kind = 'PermissionChanged'
+           AND after_state ->> 'subject' = $2
+           AND block_number = 1",
+    )
+    .bind(chain)
+    .bind(PRIOR_REGISTRY_OWNER)
+    .fetch_one(scratch.pool())
+    .await
+    .context("prior owner's registry permission was not written")?;
+    assert_ne!(registry_resource, registrar_resource);
+    let retained_resource: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM resources
+             WHERE chain_id = $1 AND resource_id = $2
+         )",
+    )
+    .bind(chain)
+    .bind(registry_resource)
+    .fetch_one(scratch.pool())
+    .await
+    .context("retained registry resource row was not readable")?;
+    assert!(retained_resource);
+
+    assert_prior_owner_is_revoked(scratch.pool(), chain, registry_resource).await?;
+    assert_registrar_epoch_permission(scratch.pool(), registrar_resource).await?;
+
+    run_engine(scratch.pool(), chain, 3, 3, InterpretRunMode::Normal).await?;
+    run_project(scratch.pool(), chain, 3, 3, 3).await?;
+    assert_prior_owner_is_revoked(scratch.pool(), chain, registry_resource).await?;
+    let reminted_owner_powers: serde_json::Value = sqlx::query_scalar(
+        "SELECT effective_powers FROM permissions_current
+         WHERE resource_id = $1 AND subject = lower($2) AND scope = 'resource'",
+    )
+    .bind(registry_resource)
+    .bind(REMINTED_REGISTRY_OWNER)
+    .fetch_one(scratch.pool())
+    .await
+    .context("reminted registry owner permission was not projected")?;
+    assert_eq!(reminted_owner_powers, json!(["resource_control"]));
+
+    scratch.cleanup().await
+}
+
+async fn assert_registrar_epoch_permission(pool: &PgPool, registrar_resource: Uuid) -> Result<()> {
+    let permission: (serde_json::Value, serde_json::Value) = sqlx::query_as(
+        "SELECT effective_powers, grant_source
+         FROM permissions_current
+         WHERE resource_id = $1 AND subject = lower($2) AND scope = 'resource'",
+    )
+    .bind(registrar_resource)
+    .bind(REGISTRANT)
+    .fetch_one(pool)
+    .await
+    .context("registrar permission was not projected")?;
+    assert_eq!(permission.0, json!(["resource_control"]));
+    assert_eq!(permission.1["authority_kind"], "registrar");
+    Ok(())
+}
+
+async fn assert_prior_owner_is_revoked(
+    pool: &PgPool,
+    chain_id: &str,
+    registry_resource: Uuid,
+) -> Result<()> {
+    let latest_history: (serde_json::Value, serde_json::Value) = sqlx::query_as(
+        "SELECT after_state -> 'effective_powers', after_state -> 'revocation_source'
+         FROM normalized_events
+         WHERE chain_id = $1
+           AND resource_id = $2
+           AND event_kind = 'PermissionChanged'
+           AND after_state ->> 'subject' = $3
+           AND after_state -> 'scope' ->> 'kind' = 'resource'
+         ORDER BY block_number DESC, transaction_index DESC, log_index DESC,
+                  normalized_event_id DESC
+         LIMIT 1",
+    )
+    .bind(chain_id)
+    .bind(registry_resource)
+    .bind(PRIOR_REGISTRY_OWNER)
+    .fetch_one(pool)
+    .await
+    .context("prior owner permission history was not written")?;
+    assert_eq!(latest_history.0, json!([]));
+    assert_eq!(latest_history.1["authority_kind"], "registry_only");
+    let stale_active_row: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM permissions_current
+             WHERE resource_id = $1 AND subject = lower($2) AND scope = 'resource'
+         )",
+    )
+    .bind(registry_resource)
+    .bind(PRIOR_REGISTRY_OWNER)
+    .fetch_one(pool)
+    .await?;
+    assert!(!stale_active_row);
+    Ok(())
 }
 
 #[tokio::test]
@@ -3811,6 +3964,28 @@ async fn run_engine(
     Ok(())
 }
 
+async fn run_project(
+    pool: &PgPool,
+    chain_id: &str,
+    target_block: i64,
+    affected_from_block: i64,
+    affected_to_block: i64,
+) -> Result<()> {
+    let outcome = ProjectEngine::new(pool.clone())
+        .run_batch(ProjectBatchRequest {
+            chain_id: chain_id.to_owned(),
+            target_block,
+            affected_from_block,
+            affected_to_block,
+            resume_current: None,
+            mode: ProjectRunMode::Normal,
+        })
+        .await?;
+    assert!(outcome.complete);
+    assert_eq!(outcome.current, outcome.target);
+    Ok(())
+}
+
 async fn seed_discovery_fixture(pool: &PgPool, chain_id: &str) -> Result<()> {
     for block in 0..=1 {
         sqlx::query(
@@ -5215,6 +5390,216 @@ async fn seed_same_transaction_registration_fixture(pool: &PgPool, chain_id: &st
         encoded.data.as_ref(),
     )
     .await
+}
+
+async fn seed_prior_owner_registration_fixture(
+    pool: &PgPool,
+    chain_id: &str,
+    flow: PriorOwnerRegistrationFlow,
+) -> Result<()> {
+    seed_fixture(pool, chain_id, &[(2, "alice")]).await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number, block_timestamp,
+             canonicality_state
+         )
+         VALUES ($1, $2, $3, 3, to_timestamp(3), 'canonical')",
+    )
+    .bind(chain_id)
+    .bind(block_hash(chain_id, 3))
+    .bind(block_hash(chain_id, 2))
+    .execute(pool)
+    .await?;
+
+    let registration_log_index = match flow {
+        PriorOwnerRegistrationFlow::LegacyTwoOwnerChanges => 2,
+        PriorOwnerRegistrationFlow::ModernSingleOwnerChange => 1,
+    };
+    let registration = NameRegistered {
+        name: "alice".to_owned(),
+        label: B256::from(keccak256(b"alice")),
+        owner: REGISTRANT.parse()?,
+        expires: U256::from(1_000_002_u64),
+    }
+    .encode_log_data();
+    let registration_topics = registration
+        .topics()
+        .iter()
+        .map(|topic| format!("{topic:#x}"))
+        .collect::<Vec<_>>();
+    sqlx::query(
+        "UPDATE raw_logs
+         SET log_index = $2, topics = $3, data = $4
+         WHERE chain_id = $1 AND block_number = 2",
+    )
+    .bind(chain_id)
+    .bind(registration_log_index)
+    .bind(registration_topics)
+    .bind(registration.data.to_vec())
+    .execute(pool)
+    .await?;
+
+    let contract_instance_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO contract_instances VALUES ($1, $2, 'contract', '{}'::jsonb, now())")
+        .bind(contract_instance_id)
+        .bind(chain_id)
+        .execute(pool)
+        .await?;
+    let payload = json!({
+        "manifest_version": 1,
+        "namespace": "ens",
+        "source_family": "ens_v1_registry_l1",
+        "chain": chain_id,
+        "deployment_epoch": "fixture",
+        "rollout_status": "active",
+        "normalizer_version": NORMALIZER,
+        "capability_flags": {},
+        "roots": [],
+        "contracts": [{
+            "role": "registry",
+            "address": REGISTRY,
+            "proxy_kind": "none",
+            "implementation": null,
+            "start_block": 0
+        }],
+        "discovery_rules": [],
+        "abi": { "events": [{
+            "name": "NewOwner",
+            "fragment": "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+            "emitter_roles": ["registry"],
+            "normalized_events": [
+                "SubregistryChanged",
+                "AuthorityTransferred",
+                "PermissionChanged",
+                "SurfaceUnbound",
+                "SurfaceBound",
+                "AuthorityEpochChanged",
+                "ResolverChanged"
+            ]
+        }], "calls": [] }
+    });
+    let manifest_id = insert_manifest(
+        pool,
+        chain_id,
+        "ens_v1_registry_l1",
+        &format!("tests/{chain_id}-registry.toml"),
+        payload,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO manifest_contract_instances (
+             manifest_id, chain_id, declaration_kind, declaration_name,
+             contract_instance_id, declared_address, role, proxy_kind, start_block_number
+         )
+         VALUES ($1, $2, 'contract', 'registry', $3, $4, 'registry', 'none', 0)",
+    )
+    .bind(manifest_id)
+    .bind(chain_id)
+    .bind(contract_instance_id)
+    .bind(REGISTRY)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO contract_instance_addresses (
+             contract_instance_id, chain_id, address, active_from_block_number,
+             source_manifest_id, provenance
+         )
+         VALUES ($1, $2, $3, 0, $4, '{}'::jsonb)",
+    )
+    .bind(contract_instance_id)
+    .bind(chain_id)
+    .bind(REGISTRY)
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+
+    let owner_change = |owner: &str| -> Result<alloy_primitives::LogData> {
+        Ok(NewOwner {
+            node: raw_namehash(&[b"eth"]),
+            label: B256::from(keccak256(b"alice")),
+            owner: owner.parse()?,
+        }
+        .encode_log_data())
+    };
+    insert_registry_transaction(pool, chain_id, 1, "prior-owner").await?;
+    let prior_owner = owner_change(PRIOR_REGISTRY_OWNER)?;
+    insert_log_at(
+        pool,
+        chain_id,
+        1,
+        &format!("{chain_id}-prior-owner"),
+        0,
+        REGISTRY,
+        prior_owner.topics(),
+        prior_owner.data.as_ref(),
+    )
+    .await?;
+    let registration_transaction = format!("{chain_id}-transaction-2");
+    if matches!(flow, PriorOwnerRegistrationFlow::LegacyTwoOwnerChanges) {
+        let transient_owner = owner_change(CONTRACT)?;
+        insert_log_at(
+            pool,
+            chain_id,
+            2,
+            &registration_transaction,
+            0,
+            REGISTRY,
+            transient_owner.topics(),
+            transient_owner.data.as_ref(),
+        )
+        .await?;
+    }
+    let registrant = owner_change(REGISTRANT)?;
+    insert_log_at(
+        pool,
+        chain_id,
+        2,
+        &registration_transaction,
+        registration_log_index - 1,
+        REGISTRY,
+        registrant.topics(),
+        registrant.data.as_ref(),
+    )
+    .await?;
+
+    insert_registry_transaction(pool, chain_id, 3, "reminted-owner").await?;
+    let reminted_owner = owner_change(REMINTED_REGISTRY_OWNER)?;
+    insert_log_at(
+        pool,
+        chain_id,
+        3,
+        &format!("{chain_id}-reminted-owner"),
+        0,
+        REGISTRY,
+        reminted_owner.topics(),
+        reminted_owner.data.as_ref(),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn insert_registry_transaction(
+    pool: &PgPool,
+    chain_id: &str,
+    block_number: i64,
+    suffix: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO raw_transactions (
+             chain_id, block_hash, block_number, transaction_hash, transaction_index,
+             from_address, to_address
+         )
+         VALUES ($1, $2, $3, $4, 0, $5, $6)",
+    )
+    .bind(chain_id)
+    .bind(block_hash(chain_id, block_number))
+    .bind(block_number)
+    .bind(format!("{chain_id}-{suffix}"))
+    .bind(SENDER)
+    .bind(REGISTRY)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn seed_fixture_with_timestamps(
