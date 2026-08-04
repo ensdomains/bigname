@@ -24,6 +24,7 @@ use phase_runner::{
     capacity::CapacityGuard,
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
     error::{ErrorKind, RunnerError},
+    heads::{BlockMarker, HeadMarkers, publish_heads},
     interpret_phase::InterpretPhase,
     phase::{BlockRange, LoopbackPhase, Phase, PhaseContext, PhaseFuture, PhaseName, PhaseSet},
     phase_lock::PhaseLock,
@@ -4048,6 +4049,119 @@ async fn prior_state_ignores_events_whose_lineage_is_no_longer_live() -> Result<
         ",
     )
     .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(prior_registrant, None);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn orphaning_epoch_forces_full_cached_dependency_revalidation() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_prior_epoch").await?;
+    let chain = "interpret-prior-epoch";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice"), (1001, "alice")]).await?;
+    let stable_boundary = BlockMarker::new(999, block_hash(chain, 999))?;
+    publish_heads(
+        scratch.pool(),
+        chain,
+        &HeadMarkers {
+            latest: BlockMarker::new(1001, block_hash(chain, 1001))?,
+            safe: Some(stable_boundary.clone()),
+            finalized: None,
+        },
+    )
+    .await?;
+
+    let engine = Engine::new(scratch.pool().clone());
+    let first = engine
+        .run_batch(BatchRequest {
+            chain_id: chain.to_owned(),
+            from_block: 0,
+            to_block: 1001,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    assert!(!first.complete);
+    assert_eq!(first.current.number, 499);
+
+    let second = engine
+        .run_batch(BatchRequest {
+            chain_id: chain.to_owned(),
+            from_block: 0,
+            to_block: 1001,
+            resume_current: Some(first.current),
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    assert!(!second.complete);
+    assert_eq!(second.current.number, 999);
+
+    let replacement_1000 = format!("{chain}-replacement-1000");
+    sqlx::query(
+        "
+        INSERT INTO chain_lineage (
+            chain_id, block_hash, parent_hash, block_number, block_timestamp,
+            canonicality_state
+        )
+        VALUES ($1, $2, $3, 1000, to_timestamp(1000), 'observed')
+        ",
+    )
+    .bind(chain)
+    .bind(&replacement_1000)
+    .bind(&stable_boundary.hash)
+    .execute(scratch.pool())
+    .await?;
+    insert_orphaned_registration_with_parent(
+        scratch.pool(),
+        chain,
+        1001,
+        "alice",
+        &replacement_1000,
+    )
+    .await?;
+    let replacement_1001 = format!("{chain}-orphan-1001");
+    publish_heads(
+        scratch.pool(),
+        chain,
+        &HeadMarkers {
+            latest: BlockMarker::new(1001, &replacement_1001)?,
+            safe: Some(stable_boundary.clone()),
+            finalized: None,
+        },
+    )
+    .await?;
+    let epoch_after_orphaning: i64 =
+        sqlx::query_scalar("SELECT lineage_orphaning_epoch FROM chain_heads WHERE chain_id = $1")
+            .bind(chain)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(epoch_after_orphaning, 1);
+
+    insert_orphaned_registration(scratch.pool(), chain, 1, "bob").await?;
+    switch_live_lineage(scratch.pool(), chain, &format!("{chain}-orphan-1")).await?;
+
+    let third = engine
+        .run_batch(BatchRequest {
+            chain_id: chain.to_owned(),
+            from_block: 0,
+            to_block: 1001,
+            resume_current: Some(second.current),
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    assert!(third.complete);
+    let prior_registrant: Option<String> = sqlx::query_scalar(
+        "
+        SELECT before_state ->> 'registrant'
+        FROM normalized_events
+        WHERE chain_id = $1
+          AND block_hash = $2
+          AND event_kind = 'RegistrationGranted'
+        ",
+    )
+    .bind(chain)
+    .bind(replacement_1001)
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(prior_registrant, None);

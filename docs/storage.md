@@ -238,6 +238,7 @@ Rules:
 - projection rebuilds read rows that are `canonical`, `safe`, or `finalized` by default; history and audit tools may opt into `observed` and `orphaned` rows
 - normal phase targets use only that readable path. An `observed` suffix written before head publication is intake staging, not a downstream target
 - safe and finalized checkpoint promotion is monotonic per chain
+- `chain_heads.lineage_orphaning_epoch` is the per-chain [lineage orphaning epoch](glossary.md#lineage-orphaning-epoch). It increases only when head publication moves previously readable lineage to `orphaned`; ordinary head advancement and checkpoint promotion preserve it
 
 ## Reorg and redo boundary
 
@@ -248,6 +249,8 @@ ranges only from displaced rows that had already been readable. Higher observed
 rows remain staging until a later provider snapshot proves or displaces them.
 Raw facts remain immutable; interpretation selects them
 by joining against readable lineage. In the same head-publication transaction,
+the runner increases the lineage orphaning epoch when it orphans a displaced
+readable suffix, and
 storage removes rows from retained `public.execution_cache_outcomes` whose block
 dependencies are orphaned in `bigname_phase.chain_lineage`. Their durable
 execution traces and steps remain in `public`; later canonical recovery does
@@ -377,7 +380,7 @@ The resolver-profile queue, journal, and reconciliation tables remain migration-
 
 Schema-v2 `interpret` is the sole current writer of identity rows, discovery output, and normalized events from retained chain facts. Normal execution advances only through the completed ingest boundary. A redo selects one inclusive finite block range and reconstructs it chronologically from the admitted raw facts and manifest state.
 
-Interpretation loads the prior state needed before the range, keeps the compact fold across physical batches, and writes identity, discovery, and normalized events in one transaction per batch after revalidating lineage. Stable identity fields remain conflict checked. Redo may replace only the selected derived range and uses explicit orphan/re-anchor behavior rather than the deleted old-schema upsert, field-repair, canonicality-supersession, closure-proof, or adapter-checkpoint machinery.
+Interpretation loads the prior state needed before the range and keeps the compact fold across physical batches. When the lineage orphaning epoch is unchanged, the next load checks only block anchors newly retained by the preceding fold. When the epoch changes, it checks every retained anchor once and reloads prior state if any anchor is no longer readable. The write transaction still locks and revalidates the resume marker plus every current batch block before writing identity, discovery, and normalized events, so an orphaning concurrent with interpretation cannot commit stale derived state. Stable identity fields remain conflict checked. Redo uses the same loader and may replace only the selected derived range; it uses explicit orphan/re-anchor behavior rather than the deleted old-schema upsert, field-repair, canonicality-supersession, closure-proof, or adapter-checkpoint machinery.
 
 The old `normalized_replay_*` cursor and checkpoint tables are not interpret progress. They have no writer in this source tree. Selected reads remain solely because the unported worker uses them when deciding projection readiness and raw staging compaction.
 

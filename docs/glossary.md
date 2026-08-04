@@ -229,6 +229,12 @@ trail used by old-runtime stored-lineage coverage and adapter checkpoint reuse.
 The migration-owned database objects remain, but their Rust consumers were
 deleted in Stage B.
 
+**Lineage orphaning epoch** — the per-chain counter on the current head row
+that increases whenever head publication moves previously readable blocks to
+`orphaned`. Interpretation uses an unchanged value to reuse prior-state
+lineage checks; a changed value requires every retained prior-state block
+anchor to be checked again.
+
 **Normalized event** — the append-only, interpret-phase record of one semantic
 protocol transition, carrying identity, provenance, chain position, and
 before/after state. The event stream, not raw logs, is what projections

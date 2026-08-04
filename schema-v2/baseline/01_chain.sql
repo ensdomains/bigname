@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS chain_heads (
     safe_block_number bigint,
     finalized_block_hash text,
     finalized_block_number bigint,
+    lineage_orphaning_epoch bigint NOT NULL DEFAULT 0,
     updated_at timestamptz NOT NULL DEFAULT now(),
     FOREIGN KEY (chain_id, latest_block_hash, latest_block_number)
         REFERENCES chain_lineage (chain_id, block_hash, block_number),
@@ -78,6 +79,8 @@ CREATE TABLE IF NOT EXISTS chain_heads (
     CHECK (latest_block_number >= 0),
     CHECK ((safe_block_hash IS NULL) = (safe_block_number IS NULL)),
     CHECK ((finalized_block_hash IS NULL) = (finalized_block_number IS NULL)),
+    CONSTRAINT chain_heads_lineage_orphaning_epoch_check
+        CHECK (lineage_orphaning_epoch >= 0),
     CHECK (safe_block_number IS NULL OR safe_block_number <= latest_block_number),
     CHECK (
         finalized_block_number IS NULL
@@ -322,5 +325,7 @@ COMMENT ON COLUMN chain_heads.finalized_block_hash IS
     'This value identifies the finalized block.';
 COMMENT ON COLUMN chain_heads.finalized_block_number IS
     'This value is the finalized block height.';
+COMMENT ON COLUMN chain_heads.lineage_orphaning_epoch IS
+    'This value increases whenever head publication orphans readable lineage for this chain.';
 COMMENT ON COLUMN chain_heads.updated_at IS
     'This time records the last marker change.';

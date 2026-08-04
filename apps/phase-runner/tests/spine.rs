@@ -1401,6 +1401,12 @@ async fn head_publication_atomically_replaces_a_readable_fork() -> Result<()> {
         },
     )
     .await?;
+    let initial_orphaning_epoch: i64 =
+        sqlx::query_scalar("SELECT lineage_orphaning_epoch FROM chain_heads WHERE chain_id = $1")
+            .bind(chain_id)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(initial_orphaning_epoch, 0);
     for (number, hash, parent) in [
         (1_i64, "head-fork-new-1", format!("{chain_id}-block-0")),
         (2_i64, "head-fork-new-2", "head-fork-new-1".to_owned()),
@@ -1436,6 +1442,29 @@ async fn head_publication_atomically_replaces_a_readable_fork() -> Result<()> {
         },
     )
     .await?;
+
+    let orphaning_epoch: i64 =
+        sqlx::query_scalar("SELECT lineage_orphaning_epoch FROM chain_heads WHERE chain_id = $1")
+            .bind(chain_id)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(orphaning_epoch, 1);
+    publish_heads(
+        scratch.pool(),
+        chain_id,
+        &HeadMarkers {
+            latest: BlockMarker::new(2, "head-fork-new-2")?,
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?;
+    let unchanged_orphaning_epoch: i64 =
+        sqlx::query_scalar("SELECT lineage_orphaning_epoch FROM chain_heads WHERE chain_id = $1")
+            .bind(chain_id)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(unchanged_orphaning_epoch, 1);
 
     let states: Vec<(String, String)> = sqlx::query_as(
         "

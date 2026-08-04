@@ -1,3 +1,5 @@
+mod persist;
+
 use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::error::{ErrorKind, RunnerError, RunnerResult};
@@ -189,7 +191,7 @@ pub async fn publish_heads(pool: &PgPool, chain_id: &str, heads: &HeadMarkers) -
         .map(|(_, hash)| hash.as_str())
         .collect::<Vec<_>>();
 
-    let orphaned_from = replace_readable_path(
+    let (orphaned_from, previous_orphaning_epoch) = replace_readable_path(
         &mut transaction,
         chain_id,
         &hashes,
@@ -197,6 +199,14 @@ pub async fn publish_heads(pool: &PgPool, chain_id: &str, heads: &HeadMarkers) -
         heads.latest.number,
     )
     .await?;
+    let orphaned_readable_lineage = orphaned_from.is_some();
+    let lineage_orphaning_epoch = previous_orphaning_epoch
+        .checked_add(if orphaned_readable_lineage { 1 } else { 0 })
+        .ok_or_else(|| {
+            RunnerError::data_integrity(format!(
+                "lineage orphaning epoch overflow for chain {chain_id}"
+            ))
+        })?;
     if let Some(from) = orphaned_from {
         crate::redo_stamp::stamp_orphaned_suffix(&mut transaction, chain_id, from).await?;
     }
@@ -218,38 +228,14 @@ pub async fn publish_heads(pool: &PgPool, chain_id: &str, heads: &HeadMarkers) -
         ))
     })?;
 
-    sqlx::query(
-        "
-        INSERT INTO chain_heads (
-            chain_id,
-            latest_block_hash,
-            latest_block_number,
-            safe_block_hash,
-            safe_block_number,
-            finalized_block_hash,
-            finalized_block_number
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        ON CONFLICT (chain_id) DO UPDATE
-        SET latest_block_hash = EXCLUDED.latest_block_hash,
-            latest_block_number = EXCLUDED.latest_block_number,
-            safe_block_hash = EXCLUDED.safe_block_hash,
-            safe_block_number = EXCLUDED.safe_block_number,
-            finalized_block_hash = EXCLUDED.finalized_block_hash,
-            finalized_block_number = EXCLUDED.finalized_block_number,
-            updated_at = now()
-        ",
+    persist::markers(
+        &mut transaction,
+        chain_id,
+        heads,
+        lineage_orphaning_epoch,
+        orphaned_readable_lineage,
     )
-    .bind(chain_id)
-    .bind(&heads.latest.hash)
-    .bind(heads.latest.number)
-    .bind(heads.safe.as_ref().map(|marker| marker.hash.as_str()))
-    .bind(heads.safe.as_ref().map(|marker| marker.number))
-    .bind(heads.finalized.as_ref().map(|marker| marker.hash.as_str()))
-    .bind(heads.finalized.as_ref().map(|marker| marker.number))
-    .execute(&mut *transaction)
-    .await
-    .map_err(|error| head_write_error("publish head markers", chain_id, error))?;
+    .await?;
 
     transaction.commit().await.map_err(|error| {
         RunnerError::transient(format!(
@@ -264,12 +250,14 @@ async fn replace_readable_path(
     hashes: &[&str],
     path_floor: i64,
     path_ceiling: i64,
-) -> RunnerResult<Option<i64>> {
-    sqlx::query("DELETE FROM chain_heads WHERE chain_id = $1")
-        .bind(chain_id)
-        .execute(&mut **transaction)
-        .await
-        .map_err(|error| head_write_error("lock current head markers", chain_id, error))?;
+) -> RunnerResult<(Option<i64>, i64)> {
+    let previous_orphaning_epoch: Option<i64> = sqlx::query_scalar(
+        "DELETE FROM chain_heads WHERE chain_id = $1 RETURNING lineage_orphaning_epoch",
+    )
+    .bind(chain_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|error| head_write_error("lock current head markers", chain_id, error))?;
     let conflicting_finalized: Option<(i64, String)> = sqlx::query_as(
         "
         SELECT block_number, block_hash
@@ -313,7 +301,10 @@ async fn replace_readable_path(
     .map_err(|error| head_write_error("orphan displaced readable path", chain_id, error))?;
     crate::head_observed::orphan_displaced(transaction, chain_id, hashes, path_floor, path_ceiling)
         .await?;
-    Ok(orphaned.into_iter().min())
+    Ok((
+        orphaned.into_iter().min(),
+        previous_orphaning_epoch.unwrap_or(0),
+    ))
 }
 
 async fn load_latest_path(
