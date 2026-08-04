@@ -371,6 +371,11 @@ same current joins and readability filters as the page, and `has_more` compares
 against that live count on the one-row first-page path. Relation sets that need
 post-filtering retain `total_count=null`; feed and detail profiles use the same
 count and pagination semantics.
+For a name with multiple relation rows, a readable row admits the name and the
+returned `is_primary` is computed from the current name and primary-name claim
+even when a different primary-matching relation row is unreadable; the former
+page query omitted that name while its sidecar count included it, creating a
+page/count self-inconsistency.
 
 ## Error Model
 
