@@ -8,15 +8,18 @@ use bigname_storage::{RecordInventoryCurrentRow, SelectedSnapshot, SnapshotSelec
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{
-    AppState, ExecutionOutcome, PartialCompactHits, ResolutionVerifiedOutcomeLookup,
-    handler_resolution_on_demand::{
-        ResolutionVerifiedOutcomeOrigin, VerifiedOutcomeExecutionOptions,
-        load_or_execute_resolution_verified_outcome,
-    },
+use crate::AppState;
+use crate::v2::support::{
+    PartialCompactHits, ResolutionRecordKey, ResolutionVerifiedOutcomeLookup,
     load_name_current_for_selected_snapshot, load_supported_record_inventory_current_for_snapshot,
     lookup_resolution_verified_outcome, map_internal_api_error, normalize_inferred_route_name,
     parse_resolution_record_key, snapshot_selection_api_error,
+};
+use bigname_storage::ExecutionOutcome;
+
+use super::support::resolution_on_demand::{
+    ResolutionVerifiedOutcomeOrigin, VerifiedOutcomeExecutionOptions,
+    load_or_execute_resolution_verified_outcome,
 };
 
 use super::{
@@ -234,7 +237,7 @@ pub(crate) async fn load_verified_record_lookup(
     state: &AppState,
     row: &bigname_storage::NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,
-    records: &[crate::ResolutionRecordKey],
+    records: &[ResolutionRecordKey],
     selected_snapshot: &SelectedSnapshot,
 ) -> V2Result<Option<VerifiedRecordLookup>> {
     load_verified_record_lookup_for_resource(
@@ -252,7 +255,7 @@ pub(crate) async fn load_verified_record_lookup_for_resource(
     state: &AppState,
     row: &bigname_storage::NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,
-    records: &[crate::ResolutionRecordKey],
+    records: &[ResolutionRecordKey],
     selected_snapshot: &SelectedSnapshot,
     resource: SnapshotReadResource,
 ) -> V2Result<Option<VerifiedRecordLookup>> {
@@ -272,7 +275,7 @@ pub(crate) async fn load_ephemeral_verified_record_lookup(
     state: &AppState,
     row: &bigname_storage::NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,
-    records: &[crate::ResolutionRecordKey],
+    records: &[ResolutionRecordKey],
     selected_snapshot: &SelectedSnapshot,
 ) -> V2Result<Option<VerifiedRecordLookup>> {
     load_verified_record_lookup_with_persistence(
@@ -291,7 +294,7 @@ pub(crate) async fn load_persisted_verified_record_lookup(
     state: &AppState,
     row: &bigname_storage::NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,
-    records: &[crate::ResolutionRecordKey],
+    records: &[ResolutionRecordKey],
     selected_snapshot: &SelectedSnapshot,
 ) -> V2Result<Option<VerifiedRecordLookup>> {
     if records.is_empty() {
@@ -329,7 +332,7 @@ async fn load_verified_record_lookup_with_persistence(
     state: &AppState,
     row: &bigname_storage::NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,
-    records: &[crate::ResolutionRecordKey],
+    records: &[ResolutionRecordKey],
     selected_snapshot: &SelectedSnapshot,
     persist_execution: bool,
     resource: SnapshotReadResource,
@@ -367,9 +370,7 @@ async fn load_verified_record_lookup_with_persistence(
     }
 }
 
-pub(crate) fn parse_record_keys(
-    keys: Option<&str>,
-) -> V2Result<Option<Vec<crate::ResolutionRecordKey>>> {
+pub(crate) fn parse_record_keys(keys: Option<&str>) -> V2Result<Option<Vec<ResolutionRecordKey>>> {
     let Some(keys) = keys.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };

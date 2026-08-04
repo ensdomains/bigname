@@ -6,6 +6,7 @@ use axum::{
 };
 use tracing::error;
 
+use super::support::{load_reverse_identity_records_live, load_reverse_identity_records_page_live};
 use crate::AppState;
 
 use super::{
@@ -214,7 +215,7 @@ async fn render_storage_exact_reverse_lookup_results(
         .filter(|input| !requires_relation_post_filter(input.relation.as_ref()))
         .collect::<Vec<_>>();
     let storage_inputs = deduped_reverse_storage_inputs(storage_exact_inputs.iter().copied());
-    let groups = bigname_storage::load_reverse_identity_records(&state.pool, &storage_inputs)
+    let groups = load_reverse_identity_records_live(&state.pool, &storage_inputs)
         .await
         .map_err(|load_error| {
             error!(
@@ -287,7 +288,7 @@ async fn load_exact_relation_reverse_page(
             page_size: scan_size as i64,
             cursor: cursor.clone(),
         };
-        let mut groups = bigname_storage::load_reverse_identity_records(
+        let mut groups = load_reverse_identity_records_page_live(
             &state.pool,
             std::slice::from_ref(&storage_input),
         )

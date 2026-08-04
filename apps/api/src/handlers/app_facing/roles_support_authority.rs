@@ -21,7 +21,11 @@ async fn compact_roles_support_for_resource(
 
     Ok(match summary.map(|summary| summary.coverage.status()) {
         Some(bigname_storage::PermissionCoverageStatus::Full) => CompactRolesSupport::Supported,
-        Some(bigname_storage::PermissionCoverageStatus::Partial) | None => {
+        Some(
+            bigname_storage::PermissionCoverageStatus::Partial
+            | bigname_storage::PermissionCoverageStatus::Projected,
+        )
+        | None => {
             CompactRolesSupport::ResourceAuthorityPartial
         }
         Some(bigname_storage::PermissionCoverageStatus::Unsupported) => {

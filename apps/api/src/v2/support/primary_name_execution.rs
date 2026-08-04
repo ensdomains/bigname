@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use super::*;
 
-pub(super) async fn load_primary_name_route_read(
+pub(crate) async fn load_primary_name_route_read(
     state: &AppState,
     address: &str,
     namespace: &str,
@@ -28,14 +28,15 @@ pub(super) async fn load_primary_name_route_read(
     )
     .await?;
     if let Some(persisted_verified) = persisted_verified {
-        lookup_state.on_demand_claim = persisted_verified
-            .route_local_claim
-            .clone()
-            .ok_or_else(|| {
-                ApiError::internal_error(format!(
-                    "persisted route-local primary-name claim missing for address {address}"
-                ))
-            })?;
+        lookup_state.on_demand_claim =
+            persisted_verified
+                .route_local_claim
+                .clone()
+                .ok_or_else(|| {
+                    ApiError::internal_error(format!(
+                        "persisted route-local primary-name claim missing for address {address}"
+                    ))
+                })?;
         if mode.includes_verified() {
             lookup_state.persisted_verified = Some(persisted_verified);
         }
@@ -51,12 +52,8 @@ pub(super) async fn load_primary_name_route_read(
     // normalization-gate behavior before any RPC call.
     let refreshed_lookup_state =
         load_primary_name_lookup_state(&state.pool, address, namespace, coin_type, mode).await?;
-    if !primary_name_route_fallback_is_eligible(
-        namespace,
-        coin_type,
-        mode,
-        &refreshed_lookup_state,
-    ) {
+    if !primary_name_route_fallback_is_eligible(namespace, coin_type, mode, &refreshed_lookup_state)
+    {
         return Ok(PrimaryNameRouteRead {
             lookup_state: refreshed_lookup_state,
             selected_snapshot: None,
@@ -164,7 +161,10 @@ fn primary_name_route_fallback_is_eligible(
 ) -> bool {
     (mode.includes_declared() || mode.includes_verified())
         && bigname_storage::primary_name_fallback::contains(namespace, coin_type)
-        && matches!(lookup_state.tuple_state, PrimaryNameTupleState::TupleMissing)
+        && matches!(
+            lookup_state.tuple_state,
+            PrimaryNameTupleState::TupleMissing
+        )
 }
 
 async fn resolve_ens_primary_name_fallback_snapshot(pool: &PgPool) -> ApiResult<SelectedSnapshot> {
@@ -268,14 +268,15 @@ async fn persist_route_local_primary_name_execution(
             "persisted route-local verified primary-name outcome missing for address {address}"
         )));
     };
-    lookup_state.on_demand_claim = persisted_verified
-        .route_local_claim
-        .clone()
-        .ok_or_else(|| {
-            ApiError::internal_error(format!(
-                "persisted route-local primary-name claim missing for address {address}"
-            ))
-        })?;
+    lookup_state.on_demand_claim =
+        persisted_verified
+            .route_local_claim
+            .clone()
+            .ok_or_else(|| {
+                ApiError::internal_error(format!(
+                    "persisted route-local primary-name claim missing for address {address}"
+                ))
+            })?;
     lookup_state.persisted_verified = Some(persisted_verified);
     Ok(true)
 }
@@ -286,9 +287,7 @@ fn extend_primary_name_execution_evidence(
 ) {
     target.contracts_called.extend(source.contracts_called);
     target.gateway_digests.extend(source.gateway_digests);
-    target
-        .ccip_step_payloads
-        .extend(source.ccip_step_payloads);
+    target.ccip_step_payloads.extend(source.ccip_step_payloads);
 }
 
 fn route_local_claim_for_persistence(
@@ -305,12 +304,12 @@ fn route_local_claim_for_persistence(
         OnDemandPrimaryNameClaimState::NotFound => {
             Ok(bigname_execution::RouteLocalEnsPrimaryNameClaim::NotFound)
         }
-        OnDemandPrimaryNameClaimState::InvalidName(claim) => {
-            Ok(bigname_execution::RouteLocalEnsPrimaryNameClaim::InvalidName {
+        OnDemandPrimaryNameClaimState::InvalidName(claim) => Ok(
+            bigname_execution::RouteLocalEnsPrimaryNameClaim::InvalidName {
                 raw_name: claim.raw_name.clone(),
                 resolver_address: claim.resolver_address.clone(),
-            })
-        }
+            },
+        ),
         OnDemandPrimaryNameClaimState::Unavailable => Ok(
             bigname_execution::RouteLocalEnsPrimaryNameClaim::ExecutionFailed {
                 failure_reason: "resolver_call_failed".to_owned(),
@@ -330,18 +329,18 @@ async fn load_ens_execution_manifest_versions(pool: &PgPool) -> ApiResult<JsonVa
         bigname_storage::primary_name_fallback::CHAIN_ID,
         "ens_v1",
     )
-        .await
-        .map_err(|load_error| {
-            error!(
-                service = "api",
-                namespace = bigname_storage::primary_name_fallback::NAMESPACE,
-                error = ?load_error,
-                "failed to load ENS execution manifest versions for primary-name persistence"
-            );
-            ApiError::internal_error(
-                "failed to load ENS execution manifest versions for primary-name verification",
-            )
-        })?;
+    .await
+    .map_err(|load_error| {
+        error!(
+            service = "api",
+            namespace = bigname_storage::primary_name_fallback::NAMESPACE,
+            error = ?load_error,
+            "failed to load ENS execution manifest versions for primary-name persistence"
+        );
+        ApiError::internal_error(
+            "failed to load ENS execution manifest versions for primary-name verification",
+        )
+    })?;
     let Some(manifest) = manifest else {
         return Err(ApiError {
             status: StatusCode::CONFLICT,

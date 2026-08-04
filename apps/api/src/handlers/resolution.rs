@@ -3,7 +3,7 @@ use super::*;
 include!("resolution_explain.rs");
 
 #[cfg(test)]
-pub(crate) use super::record_inventory_chain_positions_match_selected_snapshot;
+pub(super) use super::record_inventory_chain_positions_match_selected_snapshot;
 
 pub(super) async fn name_profile(
     Path(name): Path<String>,

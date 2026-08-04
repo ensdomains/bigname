@@ -11,9 +11,13 @@ use bigname_storage::{
 use serde::{Deserialize, Serialize};
 use sqlx::types::time::{OffsetDateTime, UtcOffset};
 
-use crate::{AppState, ExactNameSnapshotSelector, normalize_inferred_route_name};
+use crate::AppState;
 
 use super::cursor::{cursor_value, invalid_cursor_error};
+use super::support::{
+    ExactNameSnapshotSelector, exact_name_snapshot_scope, normalize_inferred_route_name,
+    resource_ids_for_name,
+};
 use super::{
     AtSelector, CursorPayload, Envelope, HistoryEventType, HistoryScope, Meta, Page,
     QueryParamAllowlist, StrictQueryParams, V2Error, V2Result, api_error_to_v2, decode,
@@ -89,7 +93,7 @@ pub(crate) async fn get_history(
     let resource_ids = if matches!(params.scope, HistoryScope::Name) {
         Vec::new()
     } else {
-        crate::resource_ids_for_name(&state.pool, &parent.logical_name_id)
+        resource_ids_for_name(&state.pool, &parent.logical_name_id)
             .await
             .map_err(api_error_to_v2)?
     };
@@ -286,7 +290,7 @@ pub(crate) async fn v2_exact_name_snapshot_scope_with_resolution_auxiliary(
         .map(ExactNameSnapshotSelector::from_at)
         .unwrap_or_default();
 
-    crate::exact_name_snapshot_scope(
+    exact_name_snapshot_scope(
         &state.pool,
         namespace,
         selector,

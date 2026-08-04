@@ -41,7 +41,7 @@ fn roles_and_permissions_handlers_do_not_read_adapter_resource_identity_for_publ
         );
     }
 
-    let publication_gate = include_str!("../handlers/permissions_support.rs");
+    let publication_gate = include_str!("../v2/support/permissions_support.rs");
     assert!(
         publication_gate.contains("permissions_current_publication"),
         "permission-backed API reads must use the projection-owned publication artifact"

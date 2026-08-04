@@ -2,39 +2,32 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use axum::{
     Json, Router,
     extract::{Path, Query, State, rejection::QueryRejection},
     http::StatusCode,
+    response::Html,
     routing::{get, post},
 };
 use bigname_manifests::{NamespaceManifestSnapshot, load_namespace_manifest_snapshot};
 use bigname_storage::{
-    AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentDedupe, ChainPositions,
-    ChildrenCurrentRow, EventHistoryAddressFilter, EventHistoryFilter, ExecutionCacheKey,
-    ExecutionOutcome, ExecutionTrace, HistoryEvent, HistoryScope, HistorySummary,
-    HistorySummaryMode, NameCurrentRow, PermissionScope, PermissionsCurrentRow,
-    PrimaryNameClaimStatus, PrimaryNameCurrentRow, RecordInventoryCurrentRow, ResolverCurrentRow,
-    SelectedSnapshot, SnapshotAt, SnapshotConsistency, SnapshotPositionRequirement,
-    SnapshotProjectionRead, SnapshotSelectionError, SnapshotSelectionErrorKind,
-    SnapshotSelectionScope, SnapshotSelectorInput, SurfaceBindingKind,
+    AddressNameCurrentEntry, AddressNameRelation, ChildrenCurrentRow, EventHistoryAddressFilter,
+    EventHistoryFilter, ExecutionOutcome, ExecutionTrace, HistoryEvent, HistoryScope,
+    HistorySummary, NameCurrentRow, PermissionScope, PermissionsCurrentRow, PrimaryNameClaimStatus,
+    PrimaryNameCurrentRow, RecordInventoryCurrentRow, ResolverCurrentRow, SelectedSnapshot,
     VERIFIED_PRIMARY_NAME_INVALIDATION_KEY, VERIFIED_PRIMARY_NAME_LOOKUP_KEY,
-    VERIFIED_PRIMARY_NAME_REQUEST_TYPE, load_address_history_page, load_chain_checkpoint,
-    load_event_history_page, load_execution_outcome, load_execution_trace,
-    load_execution_trace_from_connection, load_name_current, load_name_current_for_snapshot,
-    load_name_history_page, load_name_surface, load_primary_name_current_snapshot,
-    load_record_inventory_current, load_record_inventory_current_for_snapshot,
-    load_resolver_current, load_resource, load_resource_history_page,
-    load_surface_bindings_by_logical_name_id, load_surface_bindings_by_resource_id,
-    parse_rfc3339_utc_timestamp, resolve_exact_name_snapshot_selection,
+    load_address_history_page, load_event_history_page, load_execution_trace, load_name_current,
+    load_name_history_page, load_name_surface, load_resolver_current, load_resource,
+    load_resource_history_page, parse_rfc3339_utc_timestamp,
 };
 use clap::Parser;
 use serde_json::{Map as JsonMap, json};
 use sqlx::{
-    PgConnection, PgPool, Row,
+    PgPool, Row,
     types::{JsonValue, Uuid, time::OffsetDateTime},
 };
+use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -46,117 +39,12 @@ mod metrics;
 mod pagination;
 mod query;
 #[cfg(test)]
-mod replay {
-    pub(crate) use super::replay_staging as staging;
-}
+#[path = "test_projection_support.rs"]
+mod test_projection_support;
 #[cfg(test)]
-#[allow(dead_code)]
-#[path = "../../worker/src/replay/staging.rs"]
-pub(crate) mod replay_staging;
-#[cfg(test)]
-mod projection_apply {
-    use anyhow::{Context, Result};
-    use serde_json::Value;
-    use sqlx::{Postgres, Transaction};
-
-    #[derive(Clone, Copy)]
-    pub(crate) enum CompletedProjectionSourceRange<'a> {
-        Through(&'a Value),
-        Full,
-    }
-
-    #[derive(Clone, Copy)]
-    pub(crate) struct ProjectionStagingInputWatermark {
-        pub(crate) normalized_change_id: i64,
-        pub(crate) direct_invalidation_revision: i64,
-        pub(crate) permissions_resource_revision: i64,
-    }
-
-    pub(crate) async fn capture_projection_staging_input_watermark_in_transaction(
-        transaction: &mut Transaction<'_, Postgres>,
-    ) -> Result<ProjectionStagingInputWatermark> {
-        let normalized_change_id = sqlx::query_scalar::<_, i64>(
-            "SELECT public.capture_projection_normalized_event_change_watermark()",
-        )
-        .fetch_one(&mut **transaction)
-        .await
-        .context("failed to capture complete normalized-event projection change watermark")?;
-        let permissions_resource_revision = sqlx::query_scalar::<_, i64>(
-            "SELECT public.capture_projection_permissions_resource_input_watermark()",
-        )
-        .fetch_one(&mut **transaction)
-        .await
-        .context("failed to capture complete permissions resource-input watermark")?;
-        let direct_invalidation_revision = sqlx::query_scalar::<_, i64>(
-            "SELECT public.capture_projection_direct_invalidation_watermark()",
-        )
-        .fetch_one(&mut **transaction)
-        .await
-        .context("failed to capture complete direct projection invalidation watermark")?;
-        Ok(ProjectionStagingInputWatermark {
-            normalized_change_id,
-            direct_invalidation_revision,
-            permissions_resource_revision,
-        })
-    }
-
-    pub(crate) async fn completed_projection_sources_changed(
-        transaction: &mut Transaction<'_, Postgres>,
-        projection: &str,
-        lower: ProjectionStagingInputWatermark,
-        upper: ProjectionStagingInputWatermark,
-        completed_range: CompletedProjectionSourceRange<'_>,
-    ) -> Result<bool> {
-        if let CompletedProjectionSourceRange::Through(last_source_key) = completed_range {
-            let _ = last_source_key;
-        }
-        if upper.normalized_change_id <= lower.normalized_change_id
-            && upper.direct_invalidation_revision <= lower.direct_invalidation_revision
-            && upper.permissions_resource_revision <= lower.permissions_resource_revision
-        {
-            return Ok(false);
-        }
-        sqlx::query_scalar::<_, bool>(
-            r#"
-            SELECT EXISTS (
-                SELECT 1
-                FROM projection_normalized_event_changes
-                WHERE change_id > $1
-                  AND change_id <= $2
-            )
-            OR EXISTS (
-                SELECT 1
-                FROM projection_direct_invalidation_revisions
-                WHERE projection = $3
-                  AND revision > $4
-                  AND revision <= $5
-            )
-            OR (
-                $3 = 'permissions_current'
-                AND EXISTS (
-                    SELECT 1
-                    FROM projection_permissions_resource_input_revisions
-                    WHERE revision > $6
-                      AND revision <= $7
-                )
-            )
-            "#,
-        )
-        .bind(lower.normalized_change_id)
-        .bind(upper.normalized_change_id)
-        .bind(projection)
-        .bind(lower.direct_invalidation_revision)
-        .bind(upper.direct_invalidation_revision)
-        .bind(lower.permissions_resource_revision)
-        .bind(upper.permissions_resource_revision)
-        .fetch_one(&mut **transaction)
-        .await
-        .context("failed to conservatively fence API fixture projection staging")
-    }
-}
+pub(crate) use test_projection_support::{projection_apply, replay};
 mod routes;
 mod state;
-mod status_freshness;
 mod types;
 mod v2;
 
@@ -169,16 +57,18 @@ use crate::{
         MAX_PAGE_SIZE, PaginationRequest,
     },
     query::{
-        AddressHistoryQuery, AddressNamesIncludeOptions, AddressNamesQuery, ChildrenQuery,
-        EventsQuery, ExactNameSnapshotQuery, HistoryQuery, MetaMode, NameProfileQuery,
-        NameRecordsQuery, NameRolesQuery, NamesQuery, PermissionsQuery, PrimaryNameQuery,
-        ResolutionExecutionExplainQuery, ResolutionMode, ResolutionRecordKey,
-        ResolverOverviewQuery, ResourceLookupQuery, ResponseView, RolesQuery,
+        AddressHistoryQuery, AddressNamesQuery, ChildrenQuery, EventsQuery, ExactNameSnapshotQuery,
+        HistoryQuery, MetaMode, NameProfileQuery, NameRecordsQuery, NameRolesQuery, NamesQuery,
+        PermissionsQuery, PrimaryNameQuery, ResolutionExecutionExplainQuery, ResolverOverviewQuery,
+        ResourceLookupQuery, ResponseView, RolesQuery,
     },
     routes::API_ROUTE_DEFINITIONS,
     state::AppState,
     types::*,
 };
+
+#[cfg(test)]
+use bigname_storage::{ChainPositions, SnapshotConsistency, VERIFIED_PRIMARY_NAME_REQUEST_TYPE};
 
 #[cfg(test)]
 use crate::errors::ErrorResponse;
@@ -205,6 +95,174 @@ async fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+async fn serve(args: ServeArgs) -> Result<()> {
+    args.bounds.validate()?;
+    let chain_rpc_urls = args.effective_chain_rpc_urls()?;
+    let pool = bigname_storage::connect_with_application_name_and_statement_timeout(
+        &args.database,
+        "bigname-api",
+        args.bounds.db_statement_timeout(),
+    )
+    .await?;
+    let health_pool = bigname_storage::connect_reserved_readiness_pool(
+        &args.database,
+        "bigname-api-health",
+        HEALTH_DATABASE_CHECK_TIMEOUT,
+    )
+    .await?;
+    let expected_status_chain_ids = bigname_storage::load_expected_status_chain_ids(&pool).await?;
+    let missing_status_rpc_chains = v2::support::status_freshness::missing_status_rpc_chains(
+        &expected_status_chain_ids,
+        &chain_rpc_urls,
+    );
+    if !missing_status_rpc_chains.is_empty() {
+        warn!(
+            service = "api",
+            configuration = "BIGNAME_API_CHAIN_RPC_URLS",
+            missing_chain_ids = ?missing_status_rpc_chains,
+            expected_chain_ids = ?expected_status_chain_ids,
+            "status network-head RPC configuration is incomplete; indexing status remains fail-closed for the named chains"
+        );
+    }
+    ensure!(
+        args.heartbeat_max_age_secs > 0,
+        "BIGNAME_API_HEARTBEAT_MAX_AGE_SECS must be greater than zero"
+    );
+    ensure!(
+        args.indexer_chain_heartbeat_max_age_secs > 0,
+        "BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS must be greater than zero"
+    );
+    ensure!(
+        args.worker_rebuild_phase_max_age_secs > 0,
+        "BIGNAME_API_WORKER_REBUILD_PHASE_MAX_AGE_SECS must be greater than zero"
+    );
+    let status_freshness_config = v2::support::status_freshness::StatusFreshnessConfig::new(
+        args.status_provider_timeout_ms,
+        args.status_provider_refresh_secs,
+        args.status_provider_cache_ttl_secs,
+        args.status_max_block_lag,
+        args.status_max_lag_secs,
+    )?;
+    let state = AppState::new(pool, chain_rpc_urls)
+        .with_heartbeat_max_age_secs(args.heartbeat_max_age_secs)
+        .with_indexer_chain_heartbeat_max_age_secs(args.indexer_chain_heartbeat_max_age_secs)
+        .with_worker_rebuild_phase_max_age_secs(args.worker_rebuild_phase_max_age_secs)
+        .with_status_freshness_config(status_freshness_config);
+    state
+        .status_freshness
+        .spawn_refresh(state.chain_rpc_urls.clone());
+    warm_compact_records_route_sql_path(&state, args.database.max_connections)
+        .await
+        .context("failed to warm compact records route SQL path")?;
+    let router = app_router_with_bounds(state, health_pool, &args.bounds);
+    let listener = tokio::net::TcpListener::bind(args.bind_addr)
+        .await
+        .context("failed to bind the API listener")?;
+    let metrics_server = metrics::bind(args.metrics_bind_addr).await?;
+
+    info!(
+        service = "api",
+        bind_addr = %args.bind_addr,
+        metrics_bind_addr = %args.metrics_bind_addr,
+        version = SOFTWARE_VERSION,
+        build_sha = BUILD_SHA,
+        schema_migration_version = bigname_storage::latest_migration_version(),
+        projection_replay_version = bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION,
+        permissions_current_publication_version = bigname_storage::PERMISSIONS_CURRENT_PUBLICATION_VERSION,
+        request_timeout_ms = args.bounds.request_timeout_ms,
+        db_statement_timeout_ms = args.bounds.db_statement_timeout_ms,
+        health_database_check_timeout_ms = HEALTH_DATABASE_CHECK_TIMEOUT.as_millis(),
+        health_database_reserved_connections = 1,
+        max_in_flight = args.bounds.max_in_flight,
+        health_max_in_flight = args.bounds.health_max_in_flight,
+        verified_execution_max_in_flight = args.bounds.verified_execution_max_in_flight,
+        rpc_connect_timeout_ms = args.rpc_connect_timeout_ms,
+        rpc_timeout_ms = args.rpc_timeout_ms,
+        verified_rate_limit_per_second = args.bounds.verified_rate_limit_per_second,
+        verified_rate_limit_burst = args.bounds.verified_rate_limit_burst,
+        verified_rate_limit_max_clients = args.bounds.verified_rate_limit_max_clients,
+        trust_x_forwarded_for = args.bounds.trust_x_forwarded_for,
+        "API booted"
+    );
+
+    let _metrics_task = tokio::spawn(async move {
+        if let Err(error) = metrics_server.serve().await {
+            tracing::error!(
+                service = "api",
+                error = %format!("{error:#}"),
+                "metrics listener exited"
+            );
+        }
+    });
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal("api"))
+    .await
+    .context("API server exited unexpectedly")
+}
+
+#[cfg(test)]
+pub(crate) fn app_router(state: AppState) -> Router {
+    let health_pool = state.pool.clone();
+    app_router_with_bounds(state, health_pool, &ApiBoundsConfig::default())
+}
+
+#[cfg(test)]
+pub(crate) fn app_router_with_health_pool(state: AppState, health_pool: PgPool) -> Router {
+    app_router_with_bounds(state, health_pool, &ApiBoundsConfig::default())
+}
+
+fn app_router_with_bounds(
+    state: AppState,
+    health_pool: PgPool,
+    bounds: &ApiBoundsConfig,
+) -> Router {
+    let bounded_router = API_ROUTE_DEFINITIONS
+        .iter()
+        .copied()
+        .filter(|route| !route.bypasses_global_load_shed())
+        .fold(Router::new(), |router, route| route.register(router))
+        .route("/", get(openapi_docs))
+        .route("/openapi.json", get(openapi_json))
+        .route("/docs", get(openapi_docs))
+        .route("/docs/", get(openapi_docs))
+        .merge(v2::router())
+        .with_state(state.clone())
+        .merge(graphql::graphql_routes(state.clone()));
+    let health_router = API_ROUTE_DEFINITIONS
+        .iter()
+        .copied()
+        .filter(|route| route.bypasses_global_load_shed())
+        .fold(Router::new(), |router, route| route.register(router))
+        .layer(axum::Extension(HealthDatabasePool(health_pool)))
+        .with_state(state);
+    // The API is read-only public data served cross-origin to browser clients (the ENS Manager
+    // dev build, deployed on a different origin). Permissive CORS — wildcard origin, no
+    // credentials — lets the browser read responses and answers the GraphQL POST preflight.
+    // This is not access control: the endpoint is unauthenticated and reachable regardless;
+    // CORS only governs whether browser JS on another origin may read the response.
+    // Request bounds wrap CORS so even preflight responses pass through the family-wide backstop;
+    // bound errors add the same wildcard origin header directly. Health uses reserved admission
+    // outside the global ceiling and retains the request-timeout backstop.
+    let cors = CorsLayer::permissive();
+    bounds::apply_request_bounds(
+        bounded_router.layer(cors.clone()),
+        health_router.layer(cors),
+        bounds,
+    )
+    .layer(axum::middleware::from_fn(metrics::track_http_request))
+}
+
+async fn openapi_json() -> Json<JsonValue> {
+    Json(openapi_document())
+}
+
+async fn openapi_docs() -> Html<&'static str> {
+    Html(OPENAPI_DOCS_HTML)
 }
 
 include!("openapi.rs");

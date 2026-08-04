@@ -2,6 +2,13 @@
 
 Date: 2026-05-19
 
+Stage C1 scope note (2026-08-04): the measurements below cover the legacy v1
+identity sidecars. They do not measure the `/v2/lookup` live joins and live
+`COUNT(DISTINCT ...)` introduced by the Stage C1 absorb pass, so they are not
+evidence that the v2 query meets the feed latency target. Re-run the feed
+benchmark against a representative deployment-sized projection database before
+the v2 route replaces the v1 route at cutover.
+
 Environment:
 
 - API/Postgres host-local measurement via `http://127.0.0.1:3000`.

@@ -5,7 +5,8 @@ use axum::{
 use bigname_storage::NameCurrentRow;
 use serde_json::{Value as JsonValue, json};
 
-use crate::{AppState, responses::build_name_authority_control_explain_declared_state};
+use crate::AppState;
+use crate::v2::support::build_name_authority_control_explain_declared_state;
 
 use super::{
     DiagnosticNameQueryParams, Envelope, V2Result, bind_diagnostic_path_name, diagnostic_envelope,

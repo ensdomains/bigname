@@ -7,11 +7,14 @@ use bigname_storage::{BASENAMES_NAMESPACE, PrimaryNameClaimStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{
-    AppState, OnDemandPrimaryNameClaimState, OnDemandPrimaryNameVerificationState,
-    PrimaryNameLookupState, PrimaryNameTupleState,
-};
+use crate::AppState;
 
+use super::support::{
+    OnDemandPrimaryNameClaimState, OnDemandPrimaryNameVerificationState, PrimaryNameLookupState,
+    PrimaryNameTupleState, ResolutionMode, load_primary_name_route_read, parse_evm_address,
+    parse_primary_name_coin_type, parse_primary_name_namespace,
+    primary_name_claim_not_normalized_result, projected_primary_name_claim_is_not_normalized,
+};
 use super::{
     Envelope, RawQueryParams, Source, Status, V2Error, V2Result, api_error_to_v2,
     load_served_head_meta, shared_product_reason, snapshot_meta,
@@ -101,11 +104,9 @@ impl TryFrom<RawQueryParams> for PrimaryNameQueryParams {
         }
 
         Ok(Self {
-            namespace: crate::parse_primary_name_namespace(
-                raw.namespace.as_deref().or(Some("ens")),
-            )
-            .map_err(api_error_to_v2)?,
-            coin_type: crate::parse_primary_name_coin_type(raw.coin_type.as_deref().or(Some("60")))
+            namespace: parse_primary_name_namespace(raw.namespace.as_deref().or(Some("ens")))
+                .map_err(api_error_to_v2)?,
+            coin_type: parse_primary_name_coin_type(raw.coin_type.as_deref().or(Some("60")))
                 .map_err(api_error_to_v2)?,
             source: parse_primary_name_source(raw.source.as_deref())?,
         })
@@ -117,11 +118,11 @@ impl PrimaryNameSourceSelection {
         matches!(self, Self::Both | Self::Verified)
     }
 
-    pub(crate) const fn resolution_mode(self) -> crate::ResolutionMode {
+    pub(crate) const fn resolution_mode(self) -> ResolutionMode {
         match self {
-            Self::Both => crate::ResolutionMode::Both,
-            Self::Indexed => crate::ResolutionMode::Declared,
-            Self::Verified => crate::ResolutionMode::Verified,
+            Self::Both => ResolutionMode::Both,
+            Self::Indexed => ResolutionMode::Declared,
+            Self::Verified => ResolutionMode::Verified,
         }
     }
 
@@ -139,18 +140,13 @@ pub(crate) async fn get_primary_name(
     params: PrimaryNameQueryParams,
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<PrimaryName>>> {
-    let address = crate::parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
+    let address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let mode = params.source.resolution_mode();
     let coin_type = primary_name_coin_type_number(&params.coin_type)?;
-    let read = crate::load_primary_name_route_read(
-        &state,
-        &address,
-        &params.namespace,
-        &params.coin_type,
-        mode,
-    )
-    .await
-    .map_err(api_error_to_v2)?;
+    let read =
+        load_primary_name_route_read(&state, &address, &params.namespace, &params.coin_type, mode)
+            .await
+            .map_err(api_error_to_v2)?;
 
     let lookup_state = read.lookup_state;
 
@@ -224,7 +220,7 @@ fn persisted_verified_answer_is_served(
     lookup_state: &PrimaryNameLookupState,
 ) -> bool {
     source.includes_verified()
-        && !crate::projected_primary_name_claim_is_not_normalized(lookup_state)
+        && !projected_primary_name_claim_is_not_normalized(lookup_state)
         && lookup_state.persisted_verified.is_some()
 }
 
@@ -273,10 +269,10 @@ fn build_verified_answer(
     namespace: &str,
     lookup_state: &PrimaryNameLookupState,
 ) -> V2Result<VerifiedAnswer> {
-    if crate::projected_primary_name_claim_is_not_normalized(lookup_state) {
+    if projected_primary_name_claim_is_not_normalized(lookup_state) {
         return Ok(VerifiedAnswer {
             answer: verified_answer_from_value(
-                &crate::primary_name_claim_not_normalized_result(),
+                &primary_name_claim_not_normalized_result(),
                 lookup_state,
             )?,
             outcome_exists: true,
@@ -305,7 +301,7 @@ fn build_verified_answer(
         PrimaryNameTupleState::TupleMissing => {
             let on_demand_verified = match &lookup_state.on_demand_verified {
                 OnDemandPrimaryNameVerificationState::ClaimNotNormalized => {
-                    Some(crate::primary_name_claim_not_normalized_result())
+                    Some(primary_name_claim_not_normalized_result())
                 }
                 OnDemandPrimaryNameVerificationState::Verified(on_demand_verified) => {
                     Some(on_demand_verified.clone())

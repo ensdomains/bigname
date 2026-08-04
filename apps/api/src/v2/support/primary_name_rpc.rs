@@ -1,16 +1,16 @@
 use super::*;
 
-pub(super) struct OnDemandPrimaryNameClaimRead {
-    pub(super) claim: OnDemandPrimaryNameClaimState,
-    pub(super) evidence: bigname_execution::OnDemandEnsPrimaryNameExecutionEvidence,
+pub(crate) struct OnDemandPrimaryNameClaimRead {
+    pub(crate) claim: OnDemandPrimaryNameClaimState,
+    pub(crate) evidence: bigname_execution::OnDemandEnsPrimaryNameExecutionEvidence,
 }
 
-pub(super) struct OnDemandPrimaryNameVerificationRead {
-    pub(super) verification: OnDemandPrimaryNameVerificationState,
-    pub(super) evidence: bigname_execution::OnDemandEnsPrimaryNameExecutionEvidence,
+pub(crate) struct OnDemandPrimaryNameVerificationRead {
+    pub(crate) verification: OnDemandPrimaryNameVerificationState,
+    pub(crate) evidence: bigname_execution::OnDemandEnsPrimaryNameExecutionEvidence,
 }
 
-pub(super) async fn load_on_demand_primary_name_claim(
+pub(crate) async fn load_on_demand_primary_name_claim(
     state: &AppState,
     address: &str,
     namespace: &str,
@@ -103,7 +103,7 @@ pub(super) async fn load_on_demand_primary_name_claim(
     })
 }
 
-pub(super) async fn load_on_demand_primary_name_verification(
+pub(crate) async fn load_on_demand_primary_name_verification(
     state: &AppState,
     address: &str,
     namespace: &str,
@@ -210,8 +210,6 @@ fn transient_primary_name_transport_error(address: &str) -> ApiError {
     ApiError {
         status: StatusCode::CONFLICT,
         code: "stale",
-        message: format!(
-            "verified primary-name execution must be retried for address {address}"
-        ),
+        message: format!("verified primary-name execution must be retried for address {address}"),
     }
 }

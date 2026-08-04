@@ -1,11 +1,11 @@
 use super::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct PermissionsCurrentReadToken {
+pub(crate) struct PermissionsCurrentReadToken {
     data_revision: i64,
 }
 
-pub(super) async fn begin_permissions_current_read(
+pub(crate) async fn begin_permissions_current_read(
     pool: &PgPool,
     route: &'static str,
 ) -> ApiResult<PermissionsCurrentReadToken> {
@@ -35,7 +35,7 @@ pub(super) async fn begin_permissions_current_read(
         .ok_or_else(incompatible_permission_publication)
 }
 
-pub(super) async fn finish_permissions_current_read(
+pub(crate) async fn finish_permissions_current_read(
     pool: &PgPool,
     route: &'static str,
     token: PermissionsCurrentReadToken,

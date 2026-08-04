@@ -60,7 +60,9 @@ pub(crate) fn permission_support_for_resources(
             let resource_support = match summaries.get(resource_id) {
                 Some(summary) => match summary.coverage.status() {
                     PermissionCoverageStatus::Full => PermissionSupport::Full,
-                    PermissionCoverageStatus::Partial => PermissionSupport::Unknown,
+                    PermissionCoverageStatus::Partial | PermissionCoverageStatus::Projected => {
+                        PermissionSupport::Unknown
+                    }
                     PermissionCoverageStatus::Unsupported => PermissionSupport::WrapperUnsupported,
                 },
                 None => PermissionSupport::Unknown,

@@ -9,9 +9,10 @@ use bigname_storage::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{AppState, normalize_inferred_route_name};
+use crate::AppState;
 
 use super::cursor::{cursor_value, invalid_cursor_error};
+use super::support::normalize_inferred_route_name;
 use super::{
     CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, RegistrationStatus,
     StrictQueryParams, V2Error, V2Result, decode, encode, name_record::name_registration_fields,

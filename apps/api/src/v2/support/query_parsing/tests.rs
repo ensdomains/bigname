@@ -16,30 +16,26 @@ fn normalize_address_uses_alloy_for_standard_hex_without_tightening_fallbacks() 
 
 #[test]
 fn parse_primary_name_address_keeps_existing_validation_boundary() {
-    let parsed =
-        match parse_primary_name_address(" 0X00000000000C2E074eC69A0dFb2997BA6C7d2E1E ") {
-            Ok(parsed) => parsed,
-            Err(_) => panic!("standard address should parse"),
-        };
-    assert_eq!(
-        parsed,
-        "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e"
-    );
+    let parsed = match parse_primary_name_address(" 0X00000000000C2E074eC69A0dFb2997BA6C7d2E1E ") {
+        Ok(parsed) => parsed,
+        Err(_) => panic!("standard address should parse"),
+    };
+    assert_eq!(parsed, "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e");
     assert!(parse_primary_name_address("0xABC").is_err());
     assert!(parse_primary_name_address("00000000000000000000000000000000000000AA").is_err());
 }
 
 #[test]
 fn primary_name_coin_type_is_canonicalized_at_parse_boundary() {
-    assert_eq!(
-        must_parse(parse_primary_name_coin_type(Some("060"))),
-        "60"
-    );
+    assert_eq!(must_parse(parse_primary_name_coin_type(Some("060"))), "60");
 }
 
 #[test]
 fn empty_optional_enum_values_use_route_defaults() {
-    assert_eq!(must_parse(parse_history_scope(Some(""))), HistoryScope::Both);
+    assert_eq!(
+        must_parse(parse_history_scope(Some(""))),
+        HistoryScope::Both
+    );
     assert_eq!(
         must_parse(parse_resolution_mode(Some(""))),
         ResolutionMode::Declared
@@ -70,11 +66,9 @@ fn exact_name_path_names_reject_non_normalized_or_unnormalizable_input() {
 
 #[test]
 fn resolution_record_keys_reject_overflowing_addr_coin_type() {
-    let error = parse_resolution_record_keys(
-        Some("addr:18446744073709551616"),
-        ResolutionMode::Verified,
-    )
-    .expect_err("overflowing coin_type selectors must be invalid input");
+    let error =
+        parse_resolution_record_keys(Some("addr:18446744073709551616"), ResolutionMode::Verified)
+            .expect_err("overflowing coin_type selectors must be invalid input");
 
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
     assert_eq!(error.code, "invalid_input");
@@ -87,7 +81,10 @@ fn resolution_record_keys_canonicalize_addr_coin_type_before_dedupe() {
 
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
     assert_eq!(error.code, "invalid_input");
-    assert_eq!(error.message, "records must not contain duplicate selectors");
+    assert_eq!(
+        error.message,
+        "records must not contain duplicate selectors"
+    );
 }
 
 #[test]

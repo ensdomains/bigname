@@ -415,6 +415,169 @@ async fn v2_lookup_reverse_detail_paginates_after_head_advance() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_lookup_reverse_counts_live_rows_instead_of_the_legacy_sidecar() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+
+    let poisoned = sqlx::query(
+        r#"
+        UPDATE address_names_current_identity_counts
+        SET total_count = 999
+        WHERE address = $1
+          AND roles = 'both'
+        "#,
+    )
+    .bind(address)
+    .execute(&database.pool)
+    .await?;
+    assert_eq!(poisoned.rows_affected(), 1);
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({
+            "profile": "detail",
+            "inputs": [{
+                "id": "addr",
+                "address": address,
+                "page_size": 1
+            }]
+        }),
+    )
+    .await?;
+
+    assert_eq!(payload["data"][0]["page"]["total_count"], json!(2));
+    assert_eq!(payload["data"][0]["page"]["has_more"], json!(true));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_lookup_reverse_page_and_count_include_primary_when_matching_relation_is_unreadable()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let logical_name_id = "ens:membership-edge.eth";
+    let normalized_name = "membership-edge.eth";
+    let readable_resource_id = Uuid::from_u128(0x5a0221);
+    let readable_token_lineage_id = Uuid::from_u128(0x5a0222);
+    let readable_surface_binding_id = Uuid::from_u128(0x5a0223);
+
+    seed_identity_name(
+        &database,
+        logical_name_id,
+        "Membership Edge.eth",
+        normalized_name,
+        "namehash:membership-edge.eth",
+        readable_resource_id,
+        readable_token_lineage_id,
+        readable_surface_binding_id,
+        address,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        46,
+    )
+    .await?;
+
+    // The primary-matching manager relation is unreadable, while the owner relation for the same
+    // current name remains readable and therefore owns page membership.
+    let unreadable_resource_id = Uuid::from_u128(0x5a0231);
+    let unreadable_token_lineage_id = Uuid::from_u128(0x5a0232);
+    let unreadable_surface_binding_id = Uuid::from_u128(0x5a0233);
+    bigname_storage::upsert_token_lineages(
+        &database.pool,
+        &[address_name_token_lineage(
+            unreadable_token_lineage_id,
+            "0xresource",
+            99,
+        )],
+    )
+    .await?;
+    bigname_storage::upsert_resources(
+        &database.pool,
+        &[address_name_resource(
+            unreadable_resource_id,
+            Some(unreadable_token_lineage_id),
+            "0xresource",
+            99,
+        )],
+    )
+    .await?;
+    let mut unreadable_binding = surface_binding(
+        unreadable_surface_binding_id,
+        logical_name_id,
+        unreadable_resource_id,
+        timestamp(1_717_171_700),
+    );
+    unreadable_binding.canonicality_state = CanonicalityState::Orphaned;
+    bigname_storage::upsert_surface_bindings(&database.pool, &[unreadable_binding]).await?;
+    bigname_storage::upsert_address_names_current_rows(
+        &database.pool,
+        &[address_name_current_row(
+            address,
+            logical_name_id,
+            bigname_storage::AddressNameRelation::EffectiveController,
+            "Membership Edge.eth",
+            normalized_name,
+            "namehash:membership-edge.eth",
+            unreadable_surface_binding_id,
+            unreadable_resource_id,
+            Some(unreadable_token_lineage_id),
+            47,
+        )],
+    )
+    .await?;
+
+    bigname_storage::upsert_primary_name_current_snapshots(
+        &database.pool,
+        &[bigname_storage::PrimaryNameCurrentSnapshot {
+            row: bigname_storage::PrimaryNameCurrentRow {
+                address: address.to_owned(),
+                namespace: "ens".to_owned(),
+                coin_type: "60".to_owned(),
+                claim_status: bigname_storage::PrimaryNameClaimStatus::Success,
+                raw_claim_name: None,
+                claim_provenance: json!({"source": "v2_lookup_membership_edge_test"}),
+            },
+            normalized_claim_name: Some(normalized_name.to_owned()),
+            claim_name_is_normalized: true,
+        }],
+    )
+    .await?;
+    seed_v2_lookup_base_head(&database).await?;
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({
+            "profile": "detail",
+            "inputs": [{
+                "id": "membership-edge",
+                "address": address
+            }]
+        }),
+    )
+    .await?;
+
+    let records = payload["data"][0]["records"]
+        .as_array()
+        .expect("reverse lookup records must be an array");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["name"], json!(normalized_name));
+    assert_eq!(records[0]["is_primary"], json!(true));
+    assert_eq!(records[0]["relations"], json!(["owner"]));
+    assert_eq!(payload["data"][0]["page"]["total_count"], json!(1));
+    assert_eq!(
+        payload["data"][0]["page"]["total_count"].as_u64(),
+        Some(records.len() as u64),
+        "page membership and live count must agree"
+    );
+    assert_eq!(payload["data"][0]["page"]["has_more"], json!(false));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_lookup_omits_chain_with_missing_head_hash() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database
@@ -771,6 +934,8 @@ async fn v2_lookup_rejects_unmapped_pipeline_reason_values() -> Result<()> {
 #[tokio::test]
 async fn v2_lookup_reverse_relation_filters_owner_and_registrant_exactly() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
+    let (_count_guard, count_calls) =
+        crate::v2::support::identity_facade_count_test_hooks::install(&database.pool).await?;
     let address = "0x0000000000000000000000000000000000000abc";
     seed_identity_name(
         &database,
@@ -837,6 +1002,11 @@ async fn v2_lookup_reverse_relation_filters_owner_and_registrant_exactly() -> Re
         json!(["registrant"])
     );
     assert_eq!(registrant["data"][0]["page"]["total_count"], Value::Null);
+    assert_eq!(
+        count_calls.count(),
+        0,
+        "post-filtered reverse lookups must not execute a discarded live count"
+    );
 
     database.cleanup().await?;
     Ok(())

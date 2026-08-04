@@ -4,7 +4,7 @@ use bigname_storage::{
 };
 use sqlx::PgPool;
 
-use crate::{
+use crate::v2::support::{
     load_record_inventory_current_matching_selected_snapshot,
     load_supported_record_inventory_current_for_snapshot,
 };

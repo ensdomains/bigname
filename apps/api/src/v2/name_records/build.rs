@@ -4,7 +4,7 @@ use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow};
 use serde_json::Value;
 use tracing::error;
 
-use crate::{ResolutionRecordKey, build_resolution_verified_state};
+use crate::v2::support::{ResolutionRecordKey, build_resolution_verified_state};
 
 use super::super::{
     PRODUCT_PIPELINE_TERMS, Source, Status, V2Error, V2Result, contains_boundary_vocabulary,

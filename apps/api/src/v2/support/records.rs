@@ -1,39 +1,39 @@
 use super::*;
 
-use super::handler_resolution_on_demand::{
+use super::resolution_on_demand::{
     VerifiedOutcomeExecutionOptions, load_or_execute_resolution_verified_outcome,
 };
 
-pub(super) struct ResolutionRecordsRead {
-    pub(super) row: NameCurrentRow,
-    pub(super) mode: ResolutionMode,
-    pub(super) records: Vec<ResolutionRecordKey>,
-    pub(super) selected_snapshot: SelectedSnapshot,
-    pub(super) record_inventory_current: Option<RecordInventoryCurrentRow>,
-    pub(super) persisted_verified_outcome: Option<ExecutionOutcome>,
+pub(crate) struct ResolutionRecordsRead {
+    pub(crate) row: NameCurrentRow,
+    pub(crate) mode: ResolutionMode,
+    pub(crate) records: Vec<ResolutionRecordKey>,
+    pub(crate) selected_snapshot: SelectedSnapshot,
+    pub(crate) record_inventory_current: Option<RecordInventoryCurrentRow>,
+    pub(crate) persisted_verified_outcome: Option<ExecutionOutcome>,
 }
 
-pub(super) struct CompactRecordsRead {
-    pub(super) row: NameCurrentRow,
-    pub(super) records: Vec<ResolutionRecordKey>,
-    pub(super) record_inventory_current: Option<RecordInventoryCurrentRow>,
-    pub(super) value_source: CompactNameRecordsValueSource,
-    pub(super) verified_outcome: Option<ExecutionOutcome>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct NormalizedRouteNameInput {
-    pub(super) namespace: &'static str,
-    pub(super) normalized_name: String,
-    pub(super) corrected_input_normalization: bool,
+pub(crate) struct CompactRecordsRead {
+    pub(crate) row: NameCurrentRow,
+    pub(crate) records: Vec<ResolutionRecordKey>,
+    pub(crate) record_inventory_current: Option<RecordInventoryCurrentRow>,
+    pub(crate) value_source: CompactNameRecordsValueSource,
+    pub(crate) verified_outcome: Option<ExecutionOutcome>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct RouteNameNormalizationError {
-    pub(super) message: String,
+pub(crate) struct NormalizedRouteNameInput {
+    pub(crate) namespace: &'static str,
+    pub(crate) normalized_name: String,
+    pub(crate) corrected_input_normalization: bool,
 }
 
-pub(super) fn infer_resolution_namespace(name: &str) -> &'static str {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RouteNameNormalizationError {
+    pub(crate) message: String,
+}
+
+pub(crate) fn infer_resolution_namespace(name: &str) -> &'static str {
     if name == "base.eth" {
         return bigname_storage::ENS_NAMESPACE;
     }
@@ -48,7 +48,7 @@ pub(super) fn infer_resolution_namespace(name: &str) -> &'static str {
     }
 }
 
-pub(super) fn normalize_inferred_route_name(
+pub(crate) fn normalize_inferred_route_name(
     name: &str,
 ) -> Result<NormalizedRouteNameInput, RouteNameNormalizationError> {
     if name.is_empty() {
@@ -70,7 +70,7 @@ pub(super) fn normalize_inferred_route_name(
     })
 }
 
-pub(super) fn route_name_normalization_api_error(error: RouteNameNormalizationError) -> ApiError {
+pub(crate) fn route_name_normalization_api_error(error: RouteNameNormalizationError) -> ApiError {
     ApiError {
         status: StatusCode::BAD_REQUEST,
         code: "invalid_input",
@@ -78,7 +78,7 @@ pub(super) fn route_name_normalization_api_error(error: RouteNameNormalizationEr
     }
 }
 
-pub(super) async fn load_name_profile_records_read(
+pub(crate) async fn load_name_profile_records_read(
     state: &AppState,
     namespace: &str,
     name: &str,
@@ -99,7 +99,9 @@ pub(super) async fn load_name_profile_records_read(
     } = load_exact_name_read_for_route(
         pool,
         ExactNameReadRequest::new(namespace, name, ExactNameSnapshotSelector::from(&query))
-            .include_resolution_auxiliary(namespace == BASENAMES_NAMESPACE && mode.includes_verified()),
+            .include_resolution_auxiliary(
+                namespace == BASENAMES_NAMESPACE && mode.includes_verified(),
+            ),
     )
     .await?;
 
@@ -223,7 +225,7 @@ fn profile_record_keys_from_names<'a>(
         .collect()
 }
 
-pub(super) async fn load_compact_records_read(
+pub(crate) async fn load_compact_records_read(
     state: &AppState,
     namespace: &str,
     name: &str,
@@ -275,17 +277,17 @@ pub(super) async fn load_compact_records_read(
     };
     let requested_records =
         compact_name_records_requested_records(record_inventory_current.as_ref(), &request);
-    let value_source =
-        if is_wildcard_candidate && request.mode != CompactNameRecordsMode::Declared {
-            CompactNameRecordsValueSource::Verified
-        } else {
-            compact_name_records_value_source(
-                &row,
-                record_inventory_current.as_ref(),
-                &requested_records,
-                &request,
-            )
-        };
+    let value_source = if is_wildcard_candidate && request.mode != CompactNameRecordsMode::Declared
+    {
+        CompactNameRecordsValueSource::Verified
+    } else {
+        compact_name_records_value_source(
+            &row,
+            record_inventory_current.as_ref(),
+            &requested_records,
+            &request,
+        )
+    };
     let verified_outcome = load_compact_records_verified_outcome(
         state,
         &row,
@@ -323,7 +325,7 @@ async fn load_resolution_record_inventory_current_for_snapshot(
     .await
 }
 
-pub(super) async fn load_record_inventory_current_for_route_snapshot(
+pub(crate) async fn load_record_inventory_current_for_route_snapshot(
     pool: &PgPool,
     row: &NameCurrentRow,
     includes_verified: bool,
@@ -361,8 +363,7 @@ pub(super) async fn load_record_inventory_current_for_route_snapshot(
                 return Ok(Some(record_inventory_row));
             }
 
-            if includes_verified && resolution_verified_support_boundary(row, None).is_none()
-            {
+            if includes_verified && resolution_verified_support_boundary(row, None).is_none() {
                 return Ok(None);
             }
 

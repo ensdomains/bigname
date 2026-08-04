@@ -337,7 +337,7 @@ mod tests {
     use sqlx::types::{Uuid, time::OffsetDateTime};
 
     use super::persisted_outcome_covers_records;
-    use crate::query::ResolutionRecordKey;
+    use crate::v2::support::ResolutionRecordKey;
 
     fn record(record_key: &str) -> ResolutionRecordKey {
         ResolutionRecordKey {

@@ -178,9 +178,13 @@ Rules:
 - Top-level `page` appears on collection routes only. Per-input pagination on
   `POST /v2/lookup` and the nested resolver-overview `bound_names` collection
   use the same object inside their containing result/object.
-- `total_count` is nullable. It is populated where a precomputed count makes
-  it cheap or where a route explicitly documents `include=total_count`. Routes
-  must not run unconditional full counts on the request path to fill it.
+- `total_count` is nullable. Reverse address results from `POST /v2/lookup`
+  populate it by counting the same readable current name/address rows used by
+  the page query when the requested relation set maps directly to a stored role
+  group. Relation sets that require post-filtering retain `total_count=null`.
+  Other routes populate it only where a precomputed count makes it cheap or
+  where they explicitly document `include=total_count`; they must not otherwise
+  run unconditional full counts on the request path.
 - `meta` is always present. Single-resource routes that read chain-derived state
   include `meta.as_of` and `meta.as_of_token` when they can attribute at least
   one served snapshot-pinned chain position. Top-level collection routes omit
@@ -361,6 +365,17 @@ single-resource responses with nested pagination where documented.
 
 Every collection uses `cursor`, `next_cursor`, `page_size`, nullable
 `total_count`, and `has_more`. Default `page_size` is 50; maximum is 200.
+For reverse address inputs to `POST /v2/lookup` whose relation set maps directly
+to a stored role group, `total_count` is the exact distinct-name count from the
+same current joins and readability filters as the page, and `has_more` compares
+against that live count on the one-row first-page path. Relation sets that need
+post-filtering retain `total_count=null`; feed and detail profiles use the same
+count and pagination semantics.
+For a name with multiple relation rows, a readable row admits the name and the
+returned `is_primary` is computed from the current name and primary-name claim
+even when a different primary-matching relation row is unreadable; the former
+page query omitted that name while its sidecar count included it, creating a
+page/count self-inconsistency.
 
 ## Error Model
 

@@ -9,9 +9,10 @@ use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow, SelectedSnapsho
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-use crate::{
-    AppState, ResolutionRecordKey, load_supported_record_inventory_current_for_snapshot,
-    responses::{build_record_cache_section_for_name, build_record_inventory_section_for_name},
+use crate::AppState;
+use crate::v2::support::{
+    ResolutionRecordKey, build_record_cache_section_for_name,
+    build_record_inventory_section_for_name, load_supported_record_inventory_current_for_snapshot,
     snapshot_selection_api_error,
 };
 

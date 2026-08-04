@@ -249,6 +249,24 @@ fn permission_resource_coverage_json_boundary_accepts_typed_partial_and_unsuppor
 }
 
 #[test]
+fn permission_resource_coverage_decoder_does_not_upgrade_schema_v2_derivation_wording() {
+    let decoded = serde_json::from_value::<ResourcePermissionCoverage>(json!({
+        "status": "projected",
+        "exhaustiveness": "not_asserted",
+        "source_classes_considered": ["permissions_current"],
+        "enumeration_basis": "resource_permissions",
+        "unsupported_reason": null,
+    }))
+    .unwrap();
+
+    assert_eq!(decoded.status(), PermissionCoverageStatus::Projected);
+    assert_eq!(
+        decoded.exhaustiveness(),
+        PermissionCoverageExhaustiveness::NotAsserted
+    );
+}
+
+#[test]
 fn permission_resource_coverage_json_boundary_rejects_inconsistent_combinations() {
     let inconsistent = [
         json!({

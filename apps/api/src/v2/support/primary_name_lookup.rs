@@ -8,12 +8,12 @@ pub(crate) mod test_hooks;
 #[path = "primary_name_lookup/trace_reference.rs"]
 mod trace_reference;
 
-pub(super) enum PrimaryNameVerifiedReadbackFence<'a> {
+pub(crate) enum PrimaryNameVerifiedReadbackFence<'a> {
     ProjectedClaim,
     RouteLocalFallback(&'a SelectedSnapshot),
 }
 
-pub(super) async fn load_primary_name_lookup_state(
+pub(crate) async fn load_primary_name_lookup_state(
     pool: &PgPool,
     address: &str,
     namespace: &str,
@@ -79,7 +79,7 @@ pub(super) async fn load_primary_name_lookup_state(
     }
 }
 
-pub(super) fn primary_name_projection_unavailable(load_error: &anyhow::Error) -> bool {
+pub(crate) fn primary_name_projection_unavailable(load_error: &anyhow::Error) -> bool {
     load_error.chain().any(|cause| {
         cause
             .downcast_ref::<sqlx::Error>()
@@ -92,7 +92,7 @@ pub(super) fn primary_name_projection_unavailable(load_error: &anyhow::Error) ->
     })
 }
 
-pub(super) fn canonical_primary_name_coin_type(coin_type: &str) -> ApiResult<String> {
+pub(crate) fn canonical_primary_name_coin_type(coin_type: &str) -> ApiResult<String> {
     bigname_storage::canonical_addr_coin_type(coin_type).ok_or_else(|| ApiError {
         status: StatusCode::BAD_REQUEST,
         code: "invalid_input",
@@ -100,7 +100,7 @@ pub(super) fn canonical_primary_name_coin_type(coin_type: &str) -> ApiResult<Str
     })
 }
 
-pub(super) async fn load_persisted_primary_name_verified_readback_from_connection(
+pub(crate) async fn load_persisted_primary_name_verified_readback_from_connection(
     connection: &mut PgConnection,
     address: &str,
     namespace: &str,
@@ -381,10 +381,7 @@ pub(super) async fn load_persisted_primary_name_verified_readback_from_connectio
                 "persisted verified primary-name trace metadata mismatch for address {address}"
             ))
         })?;
-        let (route_local_claim, forward_call_attempted) = match (
-            &fence,
-            route_local_execution,
-        ) {
+        let (route_local_claim, forward_call_attempted) = match (&fence, route_local_execution) {
             (PrimaryNameVerifiedReadbackFence::ProjectedClaim, None) => (None, false),
             (PrimaryNameVerifiedReadbackFence::ProjectedClaim, Some(_)) => continue,
             (PrimaryNameVerifiedReadbackFence::RouteLocalFallback(_), None) => continue,
@@ -468,7 +465,7 @@ fn on_demand_claim_from_persisted_route_local_execution(
     }
 }
 
-pub(super) fn primary_name_verified_request_key(
+pub(crate) fn primary_name_verified_request_key(
     namespace: &str,
     address: &str,
     coin_type: &str,

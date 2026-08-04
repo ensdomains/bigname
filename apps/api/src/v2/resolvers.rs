@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::error;
 
+use super::support::parse_evm_address;
 use crate::AppState;
 
 #[path = "resolvers/bound_names_cursor.rs"]
@@ -118,8 +119,7 @@ pub(crate) async fn get_resolver(
 ) -> V2Result<Json<Envelope<ResolverOverview>>> {
     let params = params.into_inner();
     let (numeric_chain_id, chain_id_slug) = parse_numeric_chain_id(&chain_id)?;
-    let normalized_address =
-        crate::parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
+    let normalized_address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let include = resolver_overview_include(&params.include)?;
 
     let row = bigname_storage::load_resolver_current(

@@ -18,7 +18,7 @@ use crate::{
 use super::responses::{OpenApiOperationExt, openapi_json_get_operation};
 
 impl ApiRouteDefinition {
-    pub(super) fn register(self, router: Router<AppState>) -> Router<AppState> {
+    pub(crate) fn register(self, router: Router<AppState>) -> Router<AppState> {
         match self.method {
             ApiRouteMethod::Get => self.register_get(router),
             ApiRouteMethod::Post => self.register_post(router),
