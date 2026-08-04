@@ -231,6 +231,46 @@ async fn same_transaction_registry_permission_writes_with_registration_resource(
 }
 
 #[tokio::test]
+async fn legacy_register_with_config_midflow_record_writes_with_registration_identity() -> Result<()>
+{
+    let scratch =
+        ScratchDatabase::create("production_interpret_legacy_register_with_config").await?;
+    let chain = "interpret-legacy-register-with-config";
+    let node = seed_legacy_register_with_config_fixture(scratch.pool(), chain).await?;
+
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+
+    let registration: (String, Uuid) = sqlx::query_as(
+        "SELECT logical_name_id, resource_id
+         FROM normalized_events
+         WHERE chain_id = $1
+           AND source_family = 'ens_v1_registrar_l1'
+           AND event_kind = 'RegistrationGranted'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await
+    .context("registration identity was not written")?;
+    let record: (Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT logical_name_id, resource_id
+         FROM normalized_events
+         WHERE chain_id = $1
+           AND source_family = 'ens_v1_resolver_l1'
+           AND event_kind = 'RecordChanged'
+           AND log_index = 1",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await
+    .context("mid-flow address record was not written")?;
+
+    assert_eq!(registration.0, format!("ens:{node:#x}"));
+    assert_eq!(record.0.as_deref(), Some(registration.0.as_str()));
+    assert_eq!(record.1, Some(registration.1));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn reverse_node_resolver_event_writes_without_unmaterialized_surface_reference() -> Result<()>
 {
     let scratch = ScratchDatabase::create("production_interpret_reverse_node_resolver").await?;
@@ -5573,6 +5613,99 @@ async fn seed_same_transaction_registration_fixture(pool: &PgPool, chain_id: &st
         encoded.data.as_ref(),
     )
     .await
+}
+
+async fn seed_legacy_register_with_config_fixture(pool: &PgPool, chain_id: &str) -> Result<B256> {
+    seed_same_transaction_registration_fixture(pool, chain_id).await?;
+
+    let resolver_payload = json!({
+        "manifest_version": 1,
+        "namespace": "ens",
+        "source_family": "ens_v1_resolver_l1",
+        "chain": chain_id,
+        "deployment_epoch": "fixture",
+        "rollout_status": "active",
+        "normalizer_version": NORMALIZER,
+        "capability_flags": {},
+        "roots": [],
+        "contracts": [],
+        "discovery_rules": [],
+        "abi": { "events": [{
+            "name": "AddrChanged",
+            "fragment": "event AddrChanged(bytes32 indexed node, address a)",
+            "emitter_roles": [],
+            "normalized_events": ["RecordChanged"]
+        }], "calls": [] }
+    });
+    insert_manifest(
+        pool,
+        chain_id,
+        "ens_v1_resolver_l1",
+        &format!("tests/{chain_id}-resolver.toml"),
+        resolver_payload,
+    )
+    .await?;
+
+    let label = "alice";
+    let labelhash = B256::from(keccak256(label.as_bytes()));
+    let node = raw_namehash(&[label.as_bytes(), b"eth"]);
+    let registration = NameRegistered {
+        name: label.to_owned(),
+        label: labelhash,
+        owner: REGISTRANT.parse()?,
+        expires: U256::from(1_000_001u64),
+    }
+    .encode_log_data();
+    let registration_topics = registration
+        .topics()
+        .iter()
+        .map(|topic| format!("{topic:#x}"))
+        .collect::<Vec<_>>();
+    sqlx::query(
+        "UPDATE raw_logs
+         SET log_index = 3, topics = $3, data = $4
+         WHERE chain_id = $1 AND emitting_address = $2",
+    )
+    .bind(chain_id)
+    .bind(CONTRACT)
+    .bind(registration_topics)
+    .bind(registration.data.to_vec())
+    .execute(pool)
+    .await?;
+
+    let transaction_hash = format!("{chain_id}-transaction-1");
+    let address_record = AddrChanged {
+        node,
+        a: REGISTRANT.parse()?,
+    }
+    .encode_log_data();
+    insert_log(
+        pool,
+        chain_id,
+        &transaction_hash,
+        1,
+        DISCOVERED_RESOLVER,
+        address_record.topics(),
+        address_record.data.as_ref(),
+    )
+    .await?;
+    let final_owner = NewOwner {
+        node: raw_namehash(&[b"eth"]),
+        label: labelhash,
+        owner: REGISTRANT.parse()?,
+    }
+    .encode_log_data();
+    insert_log(
+        pool,
+        chain_id,
+        &transaction_hash,
+        2,
+        REGISTRY,
+        final_owner.topics(),
+        final_owner.data.as_ref(),
+    )
+    .await?;
+    Ok(node)
 }
 
 async fn seed_reverse_node_resolver_burst_fixture(pool: &PgPool, chain_id: &str) -> Result<B256> {

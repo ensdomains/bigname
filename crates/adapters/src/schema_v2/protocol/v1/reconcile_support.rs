@@ -40,7 +40,7 @@ pub(super) fn is_pending_resolver_setup(
     transaction_hash: &str,
     registration_log_index: i64,
     namehash: &str,
-    last_ownership_setup_log_index: Option<i64>,
+    first_ownership_setup_log_index: Option<i64>,
     stale_registry_resources: &BTreeSet<Uuid>,
 ) -> bool {
     matches!(
@@ -49,7 +49,7 @@ pub(super) fn is_pending_resolver_setup(
     ) && event
         .resource_id
         .is_none_or(|resource| stale_registry_resources.contains(&resource))
-        && last_ownership_setup_log_index.is_some_and(|setup_log_index| {
+        && first_ownership_setup_log_index.is_some_and(|setup_log_index| {
             event
                 .log_index
                 .is_some_and(|event_log_index| event_log_index > setup_log_index)

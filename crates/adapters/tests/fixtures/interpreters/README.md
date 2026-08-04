@@ -1,6 +1,6 @@
 # Interpreter fixtures
 
-`raw-events.json` contains 15 bounded raw-log cases. Each case runs in a new
+`raw-events.json` contains 19 bounded raw-log cases. Each case runs in a new
 migrated database so its block, transaction, and log positions remain
 unchanged. `expected-outputs.json` records every
 [normalized event](../../../../../docs/glossary.md) and every row in the
@@ -58,6 +58,19 @@ The four B2 discovery-semantics additions exercise:
   (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddrResolver.sol:L6 @ ens_v1@91c966f);
 - the standard proxy `Upgraded` event as contract-scoped history
   (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/interfaces/IERC1967.sol:L13 @ basenames@1809bbc).
+
+The four PR #301 reconciliation additions exercise a Basenames registration
+over a preceding registry owner, an ENS registration born wrapped, a reverse
+claim followed by a resolver name record without a materialized forward
+[name surface](../../../../../docs/glossary.md), and the legacy mainnet
+controller's `registerWithConfig` ordering. The last case
+commits one mid-flow `RecordChanged`, the final `NewOwner`-derived
+`SubregistryChanged`, `AuthorityTransferred`, and `PermissionChanged`, and the
+five `NameRegistered` lifecycle events. All nine retained events reference the
+same materialized surface and registration resource; the temporary-controller
+ownership events are absent
+(upstream: .refs/ens_subgraph/subgraph.yaml:L145 @ ens_subgraph@723f1b6)
+(upstream: .refs/ens_v1/deployments/mainnet/solcInputs/40ce5451dce8f428cafdaca8fb82d91d.json:L158 @ ens_v1@91c966f).
 
 The fixture metadata carries the full pinned upstream citations. The harness
 also asserts the required event kinds, the renewal's non-empty before-state,

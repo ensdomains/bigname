@@ -3088,6 +3088,111 @@ fn resolver_record_before_registration_setup_retains_predecessor_resource() -> a
 }
 
 #[test]
+fn legacy_register_with_config_midflow_record_uses_registration_resource() -> anyhow::Result<()> {
+    const REGISTRY: &str = "0x0000000000000000000000000000000000000043";
+    const RESOLVER: &str = "0x0000000000000000000000000000000000000044";
+    const REGISTRATION_CONTROLLER: &str = "0x0000000000000000000000000000000000000045";
+    const REGISTRANT: &str = "0x0000000000000000000000000000000000000046";
+
+    let label = "alice";
+    let labelhash = keccak256(label.as_bytes());
+    let parent_node = super::common::namehash(&["eth".to_owned()]).parse::<B256>()?;
+    let node = super::common::namehash(&[label.to_owned(), "eth".to_owned()]).parse::<B256>()?;
+    let owner_change = |owner: &str| -> anyhow::Result<_> {
+        Ok(v1_registry::NewOwner {
+            node: parent_node,
+            label: labelhash,
+            owner: owner.parse()?,
+        }
+        .encode_log_data())
+    };
+    let mut registry_admission = admission(96, "registry");
+    registry_admission.address = REGISTRY.to_owned();
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![
+            manifest(
+                96,
+                "ens_v1_registry_l1",
+                "NewOwner",
+                "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+                &["registry"],
+                &["SubregistryChanged", "AuthorityTransferred"],
+            ),
+            manifest(
+                97,
+                "ens_v1_resolver_l1",
+                "AddrChanged",
+                "event AddrChanged(bytes32 indexed node, address a)",
+                &[],
+                &["RecordChanged"],
+            ),
+            manifest(
+                98,
+                "ens_v1_registrar_l1",
+                "NameRegistered",
+                "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+                &["registrar"],
+                &["RegistrationGranted"],
+            ),
+        ],
+        discovery_rules: Vec::new(),
+        admissions: vec![registry_admission, admission(98, "registrar")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            raw_at(owner_change(REGISTRATION_CONTROLLER)?, 1, 0, REGISTRY),
+            raw_at(
+                resolver::AddrChanged {
+                    node,
+                    a: REGISTRANT.parse()?,
+                }
+                .encode_log_data(),
+                1,
+                1,
+                RESOLVER,
+            ),
+            raw_at(owner_change(REGISTRANT)?, 1, 2, REGISTRY),
+            raw_at(
+                NameRegistered {
+                    name: label.to_owned(),
+                    label: labelhash,
+                    owner: REGISTRANT.parse()?,
+                    expires: U256::from(42),
+                }
+                .encode_log_data(),
+                1,
+                3,
+                CONTRACT,
+            ),
+        ],
+    })?;
+    let registration = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RegistrationGranted")
+        .expect("registration event");
+    let record = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RecordChanged")
+        .expect("mid-flow resolver record");
+
+    assert_eq!(record.logical_name_id, registration.logical_name_id);
+    assert_eq!(
+        record.logical_name_id.as_deref(),
+        Some(format!("ens:{node:#x}").as_str())
+    );
+    assert_eq!(record.resource_id, registration.resource_id);
+    assert_batch_referential_integrity(
+        &output,
+        &std::collections::BTreeSet::new(),
+        &std::collections::BTreeSet::new(),
+    )?;
+    Ok(())
+}
+
+#[test]
 fn reconciled_resolver_burst_preserves_intra_selector_before_state() -> anyhow::Result<()> {
     const REGISTRY: &str = "0x0000000000000000000000000000000000000043";
     const RESOLVER: &str = "0x0000000000000000000000000000000000000044";

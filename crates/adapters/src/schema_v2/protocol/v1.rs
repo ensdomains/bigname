@@ -109,7 +109,12 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
         registration_emitter,
     ) in registrations
     {
-        let last_ownership_setup_log_index = output
+        // The legacy mainnet controller's `registerWithConfig` first registers to the
+        // controller, writes resolver configuration, and only then reclaims to the user.
+        // Resolver retargeting must therefore begin after the first ownership setup.
+        // (upstream: .refs/ens_subgraph/subgraph.yaml:L145 @ ens_subgraph@723f1b6)
+        // (upstream: .refs/ens_v1/deployments/mainnet/solcInputs/40ce5451dce8f428cafdaca8fb82d91d.json:L158 @ ens_v1@91c966f)
+        let first_ownership_setup_log_index = output
             .normalized_events
             .iter()
             .filter(|event| {
@@ -123,7 +128,7 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
                 )
             })
             .filter_map(|event| event.log_index)
-            .max();
+            .min();
         let pending_positions = output
             .normalized_events
             .iter()
@@ -302,7 +307,7 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
                 &transaction_hash,
                 log_index,
                 &namehash,
-                last_ownership_setup_log_index,
+                first_ownership_setup_log_index,
                 &stale_registry_resources,
             );
             let references_pending_resource = event_position(event)
