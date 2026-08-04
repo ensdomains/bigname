@@ -1650,20 +1650,36 @@ async fn two_hundred_fifty_six_byte_label_completes_as_shadow() -> Result<()> {
     scratch.cleanup().await
 }
 
+#[tokio::test]
+async fn three_kib_label_persists_by_labelhash_and_completes_as_shadow() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_3k_label_shadow").await?;
+    let chain = "interpret-3k-label-shadow";
+    let label = (0_u64..48)
+        .map(|chunk| format!("{:x}", keccak256(chunk.to_be_bytes())))
+        .collect::<String>();
+    assert_eq!(label.len(), 3 * 1024);
+    seed_fixture(scratch.pool(), chain, &[(1, &label)]).await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+
+    assert_hostile_label(scratch.pool(), label.as_bytes(), Some(&label)).await?;
+    scratch.cleanup().await
+}
+
 async fn assert_hostile_label(
     pool: &PgPool,
     raw_label: &[u8],
     decoded_label: Option<&str>,
 ) -> Result<()> {
+    let labelhash = format!("{:#x}", keccak256(raw_label));
     let stored: (Vec<u8>, Option<String>, bool, bool) = sqlx::query_as(
         "
         SELECT raw_label, decoded_label, normalized_under_version,
                normalization_error IS NOT NULL
         FROM label_preimages
-        WHERE raw_label = $1
+        WHERE labelhash = $1
         ",
     )
-    .bind(raw_label)
+    .bind(labelhash)
     .fetch_one(pool)
     .await?;
     assert_eq!(stored.0, raw_label);

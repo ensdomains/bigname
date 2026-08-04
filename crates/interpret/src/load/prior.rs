@@ -43,6 +43,13 @@ pub(super) async fn events(
                    row_number() OVER (
                        PARTITION BY
                            event.raw_fact_ref ? '{INTERPRETER_STATE_KEY}',
+                           public.digest(
+                               COALESCE(
+                                   event.raw_fact_ref ->> '{INTERPRETER_STATE_KEY}',
+                                   event.event_identity
+                               ),
+                               'sha256'
+                           ),
                            COALESCE(
                                event.raw_fact_ref ->> '{INTERPRETER_STATE_KEY}',
                                event.event_identity

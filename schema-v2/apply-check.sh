@@ -131,6 +131,7 @@ DECLARE
     forbidden_projection_publication_tables text;
     raw_table_without_hash_key text;
     missing_behavioral_constraints text;
+    unbounded_btree_columns text;
 BEGIN
     WITH expected(table_name) AS (
         VALUES
@@ -578,6 +579,7 @@ BEGIN
                   AND indexname =
                       'normalized_events_interpreter_state_history_idx'
                   AND indexdef LIKE '%raw_fact_ref%interpreter_state_key%'
+                  AND indexdef LIKE '%digest%sha256%'
                   AND indexdef LIKE '%canonicality_state%'
             )
         UNION ALL
@@ -711,6 +713,58 @@ BEGIN
             'missing schema-v2 behavioral constraints: %',
             missing_behavioral_constraints;
     END IF;
+
+    WITH unbounded_input(table_name, column_name) AS (
+        VALUES
+            ('label_preimages', 'raw_label'),
+            ('label_preimages', 'decoded_label'),
+            ('ens_names', 'name'),
+            ('name_surfaces', 'raw_name'),
+            ('name_surfaces', 'raw_labels'),
+            ('name_surfaces', 'dns_encoded_name'),
+            ('name_surfaces', 'normalization_errors'),
+            ('normalized_events', 'before_state'),
+            ('normalized_events', 'after_state'),
+            ('name_current', 'raw_name'),
+            ('children_current', 'raw_name'),
+            ('children_current', 'decoded_name'),
+            ('children_current', 'raw_label'),
+            ('children_current', 'decoded_label'),
+            ('record_inventory_current', 'selectors'),
+            ('record_inventory_current', 'unsupported_families'),
+            ('record_inventory_current', 'last_change'),
+            ('record_inventory_current', 'entries'),
+            ('address_names_current', 'raw_name'),
+            ('primary_names_current', 'raw_claim_name'),
+            ('resolution_divergences', 'request_kind')
+    )
+    SELECT string_agg(
+        format('%I.%I in %I', input.table_name, input.column_name, index.oid::regclass),
+        ', '
+        ORDER BY input.table_name, input.column_name, index.relname
+    )
+    INTO unbounded_btree_columns
+    FROM unbounded_input input
+    JOIN pg_namespace namespace
+      ON namespace.nspname = current_schema()
+    JOIN pg_class relation
+      ON relation.relnamespace = namespace.oid
+     AND relation.relname = input.table_name
+    JOIN pg_attribute attribute
+      ON attribute.attrelid = relation.oid
+     AND attribute.attname = input.column_name
+    JOIN pg_index indexed
+      ON indexed.indrelid = relation.oid
+     AND attribute.attnum = ANY(indexed.indkey::smallint[])
+    JOIN pg_class index ON index.oid = indexed.indexrelid
+    JOIN pg_am access_method ON access_method.oid = index.relam
+    WHERE access_method.amname = 'btree';
+
+    IF unbounded_btree_columns IS NOT NULL THEN
+        RAISE EXCEPTION
+            'unbounded externally controlled columns remain in btree indexes: %',
+            unbounded_btree_columns;
+    END IF;
 END
 $$;
 
@@ -729,7 +783,17 @@ DECLARE
     divergence_guard_xmin text;
     divergence_write_status text;
     divergence_count bigint;
+    oversized_text text;
+    oversized_bytes bytea;
 BEGIN
+    SELECT string_agg(md5(chunk::text), '' ORDER BY chunk)
+    INTO oversized_text
+    FROM generate_series(1, 96) AS chunks(chunk);
+    oversized_bytes := convert_to(oversized_text, 'UTF8');
+    IF octet_length(oversized_bytes) <= 2704 THEN
+        RAISE EXCEPTION 'oversized-input probe did not exceed the btree row limit';
+    END IF;
+
     INSERT INTO chain_lineage (
         chain_id,
         block_hash,
@@ -2091,6 +2155,40 @@ BEGIN
             'guarded divergence write did not store both answers and anchor';
     END IF;
 
+    SELECT write_resolution_divergence(
+        '00000000-0000-0000-0000-000000000011',
+        'schema-v2-lookup-guard',
+        divergence_guard_xmin,
+        'schema-v2-check:namehash-0',
+        'schema-v2-check',
+        'resolver-address-oversized',
+        oversized_text,
+        '{
+            "resolver": {
+                "chain_id": "schema-v2-check",
+                "block_hash": "block-0",
+                "block_number": 0,
+                "timestamp": "2026-01-01T00:00:00Z"
+            }
+        }'::jsonb,
+        '{"status": "not_found"}'::jsonb,
+        '{"status": "success", "value": "oversized"}'::jsonb,
+        false
+    ) INTO divergence_write_status;
+
+    IF divergence_write_status <> 'written'
+        OR NOT EXISTS (
+            SELECT 1
+            FROM resolution_divergences
+            WHERE resolver_address = 'resolver-address-oversized'
+              AND request_kind_hash = public.digest(oversized_text, 'sha256')
+              AND request_kind = oversized_text
+        )
+    THEN
+        RAISE EXCEPTION
+            'oversized divergence request was not findable by its bounded digest';
+    END IF;
+
     SELECT count(*)
     INTO divergence_count
     FROM resolution_divergences;
@@ -3415,6 +3513,269 @@ BEGIN
                 RAISE;
             END IF;
     END;
+
+    INSERT INTO label_preimages (
+        labelhash,
+        raw_label,
+        decoded_label,
+        normalizer_version,
+        normalized_under_version,
+        normalization_error,
+        source_kind,
+        source_priority
+    )
+    VALUES (
+        'labelhash-oversized',
+        oversized_bytes,
+        oversized_text,
+        'check',
+        false,
+        'normalization failed',
+        'schema-check',
+        0
+    );
+
+    INSERT INTO normalized_events (
+        event_identity,
+        namespace,
+        event_kind,
+        source_family,
+        manifest_version,
+        chain_id,
+        block_number,
+        block_hash,
+        raw_fact_ref,
+        derivation_kind,
+        canonicality_state
+    )
+    VALUES (
+        'event-oversized-interpreter-state-key',
+        'schema-v2-check',
+        'RecordChanged',
+        'schema-check',
+        1,
+        'schema-v2-check',
+        0,
+        'block-0',
+        jsonb_build_object(
+            'interpreter_state_key', oversized_text,
+            'state_scope', oversized_text
+        ),
+        'raw_log_preimage_observation',
+        'canonical'
+    );
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM normalized_events
+        WHERE chain_id = 'schema-v2-check'
+          AND public.digest(
+              COALESCE(
+                  raw_fact_ref ->> 'interpreter_state_key',
+                  event_identity
+              ),
+              'sha256'
+          ) = public.digest(oversized_text, 'sha256')
+          AND raw_fact_ref ->> 'interpreter_state_key' = oversized_text
+    ) THEN
+        RAISE EXCEPTION
+            'oversized interpreter state key was not findable by its bounded digest';
+    END IF;
+
+    INSERT INTO ens_names (hash, name)
+    VALUES ('hash-oversized', oversized_text);
+
+    INSERT INTO name_surfaces (
+        logical_name_id,
+        namespace,
+        raw_name,
+        raw_labels,
+        dns_encoded_name,
+        namehash,
+        labelhashes,
+        normalizer_version,
+        visibility_state,
+        chain_id,
+        block_hash,
+        block_number,
+        canonicality_state
+    )
+    VALUES (
+        'schema-v2-check:namehash-oversized',
+        'schema-v2-check',
+        oversized_text,
+        ARRAY[oversized_text],
+        decode('', 'hex'),
+        'namehash-oversized',
+        ARRAY['labelhash-oversized'],
+        'check',
+        'active',
+        'schema-v2-check',
+        'block-0',
+        0,
+        'canonical'
+    );
+
+    INSERT INTO surface_bindings (
+        surface_binding_id,
+        logical_name_id,
+        resource_id,
+        binding_kind,
+        active_from,
+        chain_id,
+        block_hash,
+        block_number,
+        canonicality_state
+    )
+    VALUES (
+        '00000000-0000-0000-0000-000000000029',
+        'schema-v2-check:namehash-oversized',
+        '00000000-0000-0000-0000-000000000011',
+        'declared_registry_path',
+        '2026-01-01 00:00:00+00',
+        'schema-v2-check',
+        'block-0',
+        0,
+        'canonical'
+    );
+
+    INSERT INTO name_current (
+        logical_name_id,
+        namespace,
+        raw_name,
+        namehash,
+        surface_binding_id,
+        resource_id,
+        binding_kind,
+        support_status,
+        manifest_version
+    )
+    VALUES (
+        'schema-v2-check:namehash-oversized',
+        'schema-v2-check',
+        oversized_text,
+        'namehash-oversized',
+        '00000000-0000-0000-0000-000000000029',
+        '00000000-0000-0000-0000-000000000011',
+        'declared_registry_path',
+        'supported',
+        1
+    );
+
+    INSERT INTO children_current (
+        parent_logical_name_id,
+        child_logical_name_id,
+        namespace,
+        raw_name,
+        decoded_name,
+        raw_label,
+        decoded_label,
+        namehash,
+        labelhash,
+        manifest_version
+    )
+    VALUES (
+        'schema-v2-check:namehash-0',
+        'schema-v2-check:namehash-oversized-child',
+        'schema-v2-check',
+        oversized_bytes,
+        oversized_text,
+        oversized_bytes,
+        oversized_text,
+        'namehash-oversized-child',
+        'labelhash-oversized-child',
+        1
+    );
+
+    INSERT INTO address_names_current (
+        address,
+        logical_name_id,
+        relation,
+        namespace,
+        raw_name,
+        namehash,
+        surface_binding_id,
+        resource_id,
+        binding_kind,
+        support_status,
+        manifest_version
+    )
+    VALUES (
+        'address-oversized',
+        'schema-v2-check:namehash-oversized',
+        'registrant',
+        'schema-v2-check',
+        oversized_text,
+        'namehash-oversized',
+        '00000000-0000-0000-0000-000000000029',
+        '00000000-0000-0000-0000-000000000011',
+        'declared_registry_path',
+        'supported',
+        1
+    );
+
+    INSERT INTO primary_names_current (
+        address,
+        coin_type,
+        namespace,
+        claim_status,
+        raw_claim_name,
+        claim_name_is_normalized
+    )
+    VALUES (
+        'primary-oversized',
+        '60',
+        'schema-v2-check',
+        'success',
+        oversized_text,
+        false
+    );
+
+    IF NOT EXISTS (
+        SELECT 1 FROM label_preimages
+        WHERE labelhash = 'labelhash-oversized' AND raw_label = oversized_bytes
+    ) OR NOT EXISTS (
+        SELECT 1 FROM ens_names
+        WHERE hash = 'hash-oversized' AND name = oversized_text
+    ) OR NOT EXISTS (
+        SELECT 1 FROM name_surfaces
+        WHERE namespace = 'schema-v2-check'
+          AND visibility_state = 'active'
+          AND namehash = 'namehash-oversized'
+          AND raw_name = oversized_text
+    ) OR NOT EXISTS (
+        SELECT 1 FROM name_current
+        WHERE namespace = 'schema-v2-check'
+          AND namehash = 'namehash-oversized'
+          AND logical_name_id = 'schema-v2-check:namehash-oversized'
+          AND raw_name = oversized_text
+    ) OR NOT EXISTS (
+        SELECT 1 FROM children_current
+        WHERE parent_logical_name_id = 'schema-v2-check:namehash-0'
+          AND surface_class = 'declared'
+          AND namehash = 'namehash-oversized-child'
+          AND child_logical_name_id = 'schema-v2-check:namehash-oversized-child'
+          AND raw_name = oversized_bytes
+          AND raw_label = oversized_bytes
+    ) OR NOT EXISTS (
+        SELECT 1 FROM address_names_current
+        WHERE lower(address) = 'address-oversized'
+          AND relation = 'registrant'
+          AND namespace = 'schema-v2-check'
+          AND namehash = 'namehash-oversized'
+          AND logical_name_id = 'schema-v2-check:namehash-oversized'
+          AND raw_name = oversized_text
+    ) OR NOT EXISTS (
+        SELECT 1 FROM primary_names_current
+        WHERE namespace = 'schema-v2-check'
+          AND coin_type = '60'
+          AND address = 'primary-oversized'
+          AND claim_status = 'success'
+          AND raw_claim_name = oversized_text
+    ) THEN
+        RAISE EXCEPTION
+            'oversized input was not findable through every bounded lookup path';
+    END IF;
 
     INSERT INTO primary_names_current (
         address,

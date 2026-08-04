@@ -4,6 +4,9 @@ CREATE TABLE IF NOT EXISTS resolution_divergences (
     resolver_chain_id text NOT NULL,
     resolver_address text NOT NULL,
     request_kind text NOT NULL,
+    request_kind_hash bytea GENERATED ALWAYS AS (
+        public.digest(request_kind, 'sha256')
+    ) STORED,
     observed_positions jsonb NOT NULL,
     indexed_result jsonb NOT NULL,
     live_result jsonb NOT NULL,
@@ -14,7 +17,7 @@ CREATE TABLE IF NOT EXISTS resolution_divergences (
         logical_name_id,
         resolver_chain_id,
         resolver_address,
-        request_kind,
+        request_kind_hash,
         observed_positions
     ),
     CHECK (btrim(resolver_chain_id) <> ''),
@@ -45,9 +48,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS resolution_divergences_one_active_request_idx
         logical_name_id,
         resolver_chain_id,
         lower(resolver_address),
-        request_kind
+        request_kind_hash
     )
     WHERE cleared_at IS NULL;
+
+COMMENT ON INDEX resolution_divergences_one_active_request_idx IS
+    'This bounded btree uses SHA-256 of the unbounded request key; writes retain and compare the original key so a digest collision fails closed.';
 
 -- Authorized by simplification-build-plan-20260730.md § B6, lines 100-104.
 -- The compared projection row is locked until the caller's transaction ends.
@@ -128,6 +134,8 @@ BEGIN
         WHERE logical_name_id = requested_logical_name_id
           AND resolver_chain_id = requested_resolver_chain_id
           AND lower(resolver_address) = lower(requested_resolver_address)
+          AND request_kind_hash =
+              public.digest(requested_record_key, 'sha256')
           AND request_kind = requested_record_key
           AND cleared_at IS NULL;
         IF FOUND THEN
@@ -141,9 +149,25 @@ BEGIN
     WHERE logical_name_id = requested_logical_name_id
       AND resolver_chain_id = requested_resolver_chain_id
       AND lower(resolver_address) = lower(requested_resolver_address)
+      AND request_kind_hash =
+          public.digest(requested_record_key, 'sha256')
       AND request_kind = requested_record_key
       AND observed_positions <> compared_positions
       AND cleared_at IS NULL;
+
+    IF EXISTS (
+        SELECT 1
+        FROM resolution_divergences
+        WHERE logical_name_id = requested_logical_name_id
+          AND resolver_chain_id = requested_resolver_chain_id
+          AND lower(resolver_address) = lower(requested_resolver_address)
+          AND request_kind_hash =
+              public.digest(requested_record_key, 'sha256')
+          AND request_kind <> requested_record_key
+    ) THEN
+        RAISE EXCEPTION 'resolution divergence request-key hash collision'
+            USING ERRCODE = '23514';
+    END IF;
 
     INSERT INTO resolution_divergences (
         logical_name_id,
@@ -162,20 +186,20 @@ BEGIN
         indexed_answer,
         live_answer
     )
-    ON CONFLICT (
-        logical_name_id,
-        resolver_chain_id,
-        resolver_address,
-        request_kind,
-        observed_positions
-    ) DO UPDATE
+    ON CONFLICT ON CONSTRAINT resolution_divergences_pkey DO UPDATE
     SET indexed_result = EXCLUDED.indexed_result,
         live_result = EXCLUDED.live_result,
         last_observed_at = GREATEST(
             resolution_divergences.last_observed_at,
             statement_timestamp()
         ),
-        cleared_at = NULL;
+        cleared_at = NULL
+    WHERE resolution_divergences.request_kind = EXCLUDED.request_kind;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'resolution divergence request-key hash collision'
+            USING ERRCODE = '23514';
+    END IF;
 
     RETURN 'written';
 END
@@ -323,7 +347,9 @@ COMMENT ON COLUMN resolution_divergences.resolver_chain_id IS
 COMMENT ON COLUMN resolution_divergences.resolver_address IS
     'This value is the resolver address.';
 COMMENT ON COLUMN resolution_divergences.request_kind IS
-    'This value identifies the requested record.';
+    'This unbounded value identifies the requested record and is retained for exact equality checks.';
+COMMENT ON COLUMN resolution_divergences.request_kind_hash IS
+    'This fixed-width SHA-256 digest is the btree lookup key for request_kind; exact request_kind comparison makes digest collisions fail closed.';
 COMMENT ON COLUMN resolution_divergences.observed_positions IS
     'This ChainPositions object identifies the compared canonical blocks.';
 COMMENT ON COLUMN resolution_divergences.indexed_result IS

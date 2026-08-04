@@ -1,4 +1,5 @@
 CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA public;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
 
 CREATE TABLE IF NOT EXISTS contract_instances (
     contract_instance_id uuid PRIMARY KEY,
@@ -236,7 +237,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS name_surfaces_hash_idx
     ON name_surfaces (namespace, namehash);
 
 CREATE INDEX IF NOT EXISTS name_surfaces_visibility_idx
-    ON name_surfaces (namespace, visibility_state, raw_name);
+    ON name_surfaces (namespace, visibility_state, namehash);
 
 CREATE INDEX IF NOT EXISTS name_surfaces_block_idx
     ON name_surfaces (chain_id, block_hash);
@@ -472,6 +473,9 @@ COMMENT ON COLUMN name_surfaces.observed_at IS
     'This time records the stored observation.';
 COMMENT ON COLUMN name_surfaces.inserted_at IS
     'This time records row creation.';
+
+COMMENT ON INDEX name_surfaces_visibility_idx IS
+    'This bounded index filters surfaces by namespace and visibility using the name hash. Verbatim names are unbounded chain input and are sorted after filtering when needed.';
 
 COMMENT ON TABLE surface_bindings IS
     'This table stores time ranges between names and authority objects.';
