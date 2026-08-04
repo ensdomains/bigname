@@ -5478,6 +5478,180 @@
           "token_lineage_id": "6ea5a99b-f464-530d-821f-ce0a320fb64c"
         }
       ]
+    },
+    {
+      "id": "ens_reverse_resolver_burst_without_surface",
+      "normalized_events": [
+        {
+          "namespace": "ens",
+          "logical_name_id": null,
+          "resource_id": "597b967c-7952-59c5-a64a-e89d150498a6",
+          "event_kind": "SubregistryChanged",
+          "source_family": "ens_v1_registry_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 190,
+          "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
+          "raw_fact_ref": {
+            "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
+            "block_number": 190,
+            "chain_id": "ethereum-mainnet"
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "canonical",
+          "before_state": {},
+          "after_state": {
+            "source_event": "NewOwner",
+            "child_node": "0x19e798729483c8dd1c93223c8c568fac7f64fc6d6ed33b20f51cae2fbbb65f4d"
+          }
+        },
+        {
+          "namespace": "ens",
+          "logical_name_id": null,
+          "resource_id": "597b967c-7952-59c5-a64a-e89d150498a6",
+          "event_kind": "AuthorityTransferred",
+          "source_family": "ens_v1_registry_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 190,
+          "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
+          "raw_fact_ref": {
+            "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
+            "block_number": 190,
+            "chain_id": "ethereum-mainnet"
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "canonical",
+          "before_state": {},
+          "after_state": {"source_event": "NewOwner"}
+        },
+        {
+          "namespace": "ens",
+          "logical_name_id": null,
+          "resource_id": "597b967c-7952-59c5-a64a-e89d150498a6",
+          "event_kind": "PermissionChanged",
+          "source_family": "ens_v1_registry_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 190,
+          "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
+          "raw_fact_ref": {
+            "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
+            "block_number": 190,
+            "chain_id": "ethereum-mainnet"
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "canonical",
+          "before_state": {},
+          "after_state": {
+            "subject": "0x0000000000000000000000000000000000002aaa"
+          }
+        },
+        {
+          "namespace": "ens",
+          "logical_name_id": null,
+          "resource_id": null,
+          "event_kind": "ReverseChanged",
+          "source_family": "ens_v1_reverse_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 2,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 190,
+          "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
+          "raw_fact_ref": {
+            "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
+            "block_number": 190,
+            "chain_id": "ethereum-mainnet"
+          },
+          "derivation_kind": "ens_v1_reverse_claim",
+          "canonicality_state": "canonical",
+          "before_state": {},
+          "after_state": {"source_event": "ReverseClaimed"}
+        },
+        {
+          "namespace": "ens",
+          "logical_name_id": null,
+          "resource_id": null,
+          "event_kind": "RecordChanged",
+          "source_family": "ens_v1_resolver_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 3,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 190,
+          "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
+          "raw_fact_ref": {
+            "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
+            "block_number": 190,
+            "chain_id": "ethereum-mainnet"
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "canonical",
+          "before_state": {},
+          "after_state": {
+            "source_event": "NameChanged",
+            "node": "0x19e798729483c8dd1c93223c8c568fac7f64fc6d6ed33b20f51cae2fbbb65f4d",
+            "raw_name": "alice.eth"
+          }
+        },
+        {
+          "namespace": "ens",
+          "logical_name_id": null,
+          "resource_id": null,
+          "event_kind": "PreimageObserved",
+          "source_family": "ens_v1_resolver_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 3,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 190,
+          "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
+          "raw_fact_ref": {
+            "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
+            "block_number": 190,
+            "chain_id": "ethereum-mainnet"
+          },
+          "derivation_kind": "raw_log_preimage_observation",
+          "canonicality_state": "canonical",
+          "before_state": {},
+          "after_state": {"decoded_label": "alice"}
+        },
+        {
+          "namespace": "ens",
+          "logical_name_id": null,
+          "resource_id": null,
+          "event_kind": "PreimageObserved",
+          "source_family": "ens_v1_resolver_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 3,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 190,
+          "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
+          "raw_fact_ref": {
+            "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
+            "block_number": 190,
+            "chain_id": "ethereum-mainnet"
+          },
+          "derivation_kind": "raw_log_preimage_observation",
+          "canonicality_state": "canonical",
+          "before_state": {},
+          "after_state": {"decoded_label": "eth"}
+        }
+      ],
+      "name_surfaces": [],
+      "surface_bindings": [],
+      "resources": [
+        {
+          "resource_id": "597b967c-7952-59c5-a64a-e89d150498a6",
+          "token_lineage_id": null,
+          "chain_id": "ethereum-mainnet",
+          "block_hash": "0xe3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
+          "block_number": 190,
+          "canonicality_state": "canonical"
+        }
+      ],
+      "token_lineages": []
     }
   ]
 }

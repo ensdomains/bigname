@@ -73,7 +73,9 @@ sol! {
         string key,
         string value
     );
+    event AddrChanged(bytes32 indexed node, address a);
     event NameChanged(bytes32 indexed node, string name);
+    event ReverseClaimed(address indexed addr, bytes32 indexed node);
     event RegistryCreated();
     event NameWrapped(
         bytes32 indexed node,
@@ -225,6 +227,89 @@ async fn same_transaction_registry_permission_writes_with_registration_resource(
         }
         assert!(saw_authority_source);
     }
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn reverse_node_resolver_event_writes_without_unmaterialized_surface_reference() -> Result<()>
+{
+    let scratch = ScratchDatabase::create("production_interpret_reverse_node_resolver").await?;
+    let chain = "interpret-reverse-node-resolver";
+    let reverse_node = seed_reverse_node_resolver_burst_fixture(scratch.pool(), chain).await?;
+
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+
+    let reverse_records: Vec<(String, Option<String>, Option<Uuid>, serde_json::Value)> =
+        sqlx::query_as(
+            "SELECT event_kind, logical_name_id, resource_id, after_state
+             FROM normalized_events
+             WHERE chain_id = $1
+               AND source_family = 'ens_v1_resolver_l1'
+               AND after_state ->> 'node' = $2
+             ORDER BY log_index, normalized_event_id",
+        )
+        .bind(chain)
+        .bind(format!("{reverse_node:#x}"))
+        .fetch_all(scratch.pool())
+        .await?;
+    assert_eq!(reverse_records.len(), 1);
+    assert_eq!(reverse_records[0].0, "RecordChanged");
+    assert_eq!(reverse_records[0].3["source_event"], "NameChanged");
+    assert_eq!(reverse_records[0].3["raw_name"], "alice.eth");
+    assert_eq!(reverse_records[0].1, None);
+    assert_eq!(reverse_records[0].2, None);
+
+    let reverse_surface_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM name_surfaces WHERE logical_name_id = $1")
+            .bind(format!("ens:{reverse_node:#x}"))
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(reverse_surface_count, 0);
+    let registration_resource: Uuid = sqlx::query_scalar(
+        "SELECT resource_id
+         FROM normalized_events
+         WHERE chain_id = $1
+           AND source_family = 'ens_v1_registrar_l1'
+           AND event_kind = 'RegistrationGranted'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    let forward_logical_name_id = format!("ens:{:#x}", raw_namehash(&[b"alice", b"eth"]));
+    let forward_records: Vec<(String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT logical_name_id, resource_id
+         FROM normalized_events
+         WHERE chain_id = $1
+           AND source_family = 'ens_v1_resolver_l1'
+           AND event_kind = 'RecordChanged'
+           AND after_state ->> 'node' = $2
+         ORDER BY log_index",
+    )
+    .bind(chain)
+    .bind(format!("{:#x}", raw_namehash(&[b"alice", b"eth"])))
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(forward_records.len(), 2);
+    assert!(
+        forward_records
+            .iter()
+            .all(|(logical_name_id, resource_id)| {
+                logical_name_id == &forward_logical_name_id
+                    && *resource_id == Some(registration_resource)
+            })
+    );
+    let reverse_claims: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events
+         WHERE chain_id = $1
+           AND source_family = 'ens_v1_reverse_l1'
+           AND event_kind = 'ReverseChanged'
+           AND logical_name_id IS NULL
+           AND resource_id IS NULL",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(reverse_claims, 1);
     scratch.cleanup().await
 }
 
@@ -5488,6 +5573,216 @@ async fn seed_same_transaction_registration_fixture(pool: &PgPool, chain_id: &st
         encoded.data.as_ref(),
     )
     .await
+}
+
+async fn seed_reverse_node_resolver_burst_fixture(pool: &PgPool, chain_id: &str) -> Result<B256> {
+    const RESOLVER: &str = "0x0000000000000000000000000000000000000051";
+    const REVERSE_REGISTRAR: &str = "0x0000000000000000000000000000000000000052";
+
+    seed_same_transaction_registration_fixture(pool, chain_id).await?;
+    sqlx::query(
+        "UPDATE raw_logs
+         SET log_index = 7
+         WHERE chain_id = $1 AND emitting_address = $2",
+    )
+    .bind(chain_id)
+    .bind(CONTRACT)
+    .execute(pool)
+    .await?;
+
+    let resolver_payload = json!({
+        "manifest_version": 1,
+        "namespace": "ens",
+        "source_family": "ens_v1_resolver_l1",
+        "chain": chain_id,
+        "deployment_epoch": "fixture",
+        "rollout_status": "active",
+        "normalizer_version": NORMALIZER,
+        "capability_flags": {},
+        "roots": [],
+        "contracts": [],
+        "discovery_rules": [],
+        "abi": { "events": [
+            {
+                "name": "AddrChanged",
+                "fragment": "event AddrChanged(bytes32 indexed node, address a)",
+                "emitter_roles": [],
+                "normalized_events": ["RecordChanged"]
+            },
+            {
+                "name": "TextChanged",
+                "fragment": "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+                "emitter_roles": [],
+                "normalized_events": ["RecordChanged"]
+            },
+            {
+                "name": "NameChanged",
+                "fragment": "event NameChanged(bytes32 indexed node, string name)",
+                "emitter_roles": [],
+                "normalized_events": ["RecordChanged"]
+            }
+        ], "calls": [] }
+    });
+    insert_manifest(
+        pool,
+        chain_id,
+        "ens_v1_resolver_l1",
+        &format!("tests/{chain_id}-resolver.toml"),
+        resolver_payload,
+    )
+    .await?;
+
+    let reverse_payload = json!({
+        "manifest_version": 1,
+        "namespace": "ens",
+        "source_family": "ens_v1_reverse_l1",
+        "chain": chain_id,
+        "deployment_epoch": "fixture",
+        "rollout_status": "active",
+        "normalizer_version": NORMALIZER,
+        "capability_flags": {},
+        "roots": [],
+        "contracts": [{
+            "role": "reverse_registrar",
+            "address": REVERSE_REGISTRAR,
+            "proxy_kind": "none",
+            "implementation": null,
+            "start_block": 0
+        }],
+        "discovery_rules": [],
+        "abi": { "events": [{
+            "name": "ReverseClaimed",
+            "fragment": "event ReverseClaimed(address indexed addr, bytes32 indexed node)",
+            "emitter_roles": ["reverse_registrar"],
+            "normalized_events": ["ReverseChanged"]
+        }], "calls": [] }
+    });
+    let reverse_manifest_id = insert_manifest(
+        pool,
+        chain_id,
+        "ens_v1_reverse_l1",
+        &format!("tests/{chain_id}-reverse.toml"),
+        reverse_payload,
+    )
+    .await?;
+    let reverse_instance_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO contract_instances VALUES ($1, $2, 'contract', '{}'::jsonb, now())")
+        .bind(reverse_instance_id)
+        .bind(chain_id)
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO manifest_contract_instances (
+             manifest_id, chain_id, declaration_kind, declaration_name,
+             contract_instance_id, declared_address, role, proxy_kind, start_block_number
+         )
+         VALUES ($1, $2, 'contract', 'reverse_registrar', $3, $4,
+                 'reverse_registrar', 'none', 0)",
+    )
+    .bind(reverse_manifest_id)
+    .bind(chain_id)
+    .bind(reverse_instance_id)
+    .bind(REVERSE_REGISTRAR)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO contract_instance_addresses (
+             contract_instance_id, chain_id, address, active_from_block_number,
+             source_manifest_id, provenance
+         )
+         VALUES ($1, $2, $3, 0, $4, '{}'::jsonb)",
+    )
+    .bind(reverse_instance_id)
+    .bind(chain_id)
+    .bind(REVERSE_REGISTRAR)
+    .bind(reverse_manifest_id)
+    .execute(pool)
+    .await?;
+
+    let transaction_hash = format!("{chain_id}-transaction-1");
+    let forward_node = raw_namehash(&[b"alice", b"eth"]);
+    let addr_record = AddrChanged {
+        node: forward_node,
+        a: REGISTRANT.parse()?,
+    }
+    .encode_log_data();
+    insert_log(
+        pool,
+        chain_id,
+        &transaction_hash,
+        1,
+        RESOLVER,
+        addr_record.topics(),
+        addr_record.data.as_ref(),
+    )
+    .await?;
+    let text_record = TextChanged {
+        node: forward_node,
+        indexedKey: keccak256(b"avatar"),
+        key: "avatar".to_owned(),
+        value: "ipfs://avatar".to_owned(),
+    }
+    .encode_log_data();
+    insert_log(
+        pool,
+        chain_id,
+        &transaction_hash,
+        2,
+        RESOLVER,
+        text_record.topics(),
+        text_record.data.as_ref(),
+    )
+    .await?;
+
+    let reverse_label = SENDER.trim_start_matches("0x");
+    let reverse_node = raw_namehash(&[reverse_label.as_bytes(), b"addr", b"reverse"]);
+    let reverse_owner = NewOwner {
+        node: raw_namehash(&[b"addr", b"reverse"]),
+        label: keccak256(reverse_label.as_bytes()),
+        owner: SENDER.parse()?,
+    }
+    .encode_log_data();
+    insert_log(
+        pool,
+        chain_id,
+        &transaction_hash,
+        3,
+        REGISTRY,
+        reverse_owner.topics(),
+        reverse_owner.data.as_ref(),
+    )
+    .await?;
+    let reverse_claim = ReverseClaimed {
+        addr: SENDER.parse()?,
+        node: reverse_node,
+    }
+    .encode_log_data();
+    insert_log(
+        pool,
+        chain_id,
+        &transaction_hash,
+        4,
+        REVERSE_REGISTRAR,
+        reverse_claim.topics(),
+        reverse_claim.data.as_ref(),
+    )
+    .await?;
+    let reverse_name = NameChanged {
+        node: reverse_node,
+        name: "alice.eth".to_owned(),
+    }
+    .encode_log_data();
+    insert_log(
+        pool,
+        chain_id,
+        &transaction_hash,
+        5,
+        RESOLVER,
+        reverse_name.topics(),
+        reverse_name.data.as_ref(),
+    )
+    .await?;
+    Ok(reverse_node)
 }
 
 async fn seed_prior_owner_registration_fixture(

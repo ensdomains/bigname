@@ -12,6 +12,7 @@ const CONTRACT: &str = "0x0000000000000000000000000000000000000042";
 sol! {
     event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires);
     event NameRenewed(string name, bytes32 indexed label, uint256 expires);
+    event ReverseClaimed(address indexed addr, bytes32 indexed node);
     event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry);
     event NameUnwrapped(bytes32 indexed node, address owner);
     event ExpiryExtended(bytes32 indexed node, uint64 expiry);
@@ -802,6 +803,103 @@ fn normalization_changed_v1_label_remains_shadow_after_registry_authority_transi
         event.event_kind != "SurfaceBound"
             || event.logical_name_id.as_deref() != Some(logical_name_id.as_str())
     }));
+    Ok(())
+}
+
+#[test]
+fn resolver_event_on_materialized_shadow_surface_keeps_identity() -> anyhow::Result<()> {
+    const RESOLVER: &str = "0x0000000000000000000000000000000000000073";
+
+    let raw_label = b"Alice".to_vec();
+    let labelhash = keccak256(&raw_label);
+    let node = super::common::namehash_raw([raw_label.as_slice(), b"eth"].into_iter());
+    let first = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            74,
+            "ens_v1_registrar_l1",
+            "NameRegistered",
+            "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+            &["registrar"],
+            &["RegistrationGranted"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(74, "registrar")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw_at(
+            NameRegistered {
+                name: "Alice".to_owned(),
+                label: labelhash,
+                owner: CONTRACT.parse()?,
+                expires: U256::from(42),
+            }
+            .encode_log_data(),
+            1,
+            0,
+            CONTRACT,
+        )],
+    })?;
+    let shadow = first
+        .name_surfaces
+        .iter()
+        .find(|surface| surface.namehash == node)
+        .expect("normalization-changed shadow surface");
+    assert_eq!(shadow.visibility_state, "shadow");
+    let registration_resource = first
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RegistrationGranted")
+        .and_then(|event| event.resource_id)
+        .expect("registration resource");
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            75,
+            "ens_v1_resolver_l1",
+            "AddrChanged",
+            "event AddrChanged(bytes32 indexed node, address a)",
+            &[],
+            &["RecordChanged"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: Vec::new(),
+        prior_events: first.normalized_events.iter().map(prior_event).collect(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw_at(
+            resolver::AddrChanged {
+                node: node.parse()?,
+                a: CONTRACT.parse()?,
+            }
+            .encode_log_data(),
+            2,
+            0,
+            RESOLVER,
+        )],
+    })?;
+    let record = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RecordChanged")
+        .expect("resolver record");
+    assert_eq!(
+        record.logical_name_id.as_deref(),
+        Some(shadow.logical_name_id.as_str())
+    );
+    assert_eq!(record.resource_id, Some(registration_resource));
+    assert_batch_referential_integrity(
+        &output,
+        &first
+            .resources
+            .iter()
+            .map(|resource| (resource.chain_id.clone(), resource.resource_id))
+            .collect(),
+        &first
+            .name_surfaces
+            .iter()
+            .map(|surface| (surface.chain_id.clone(), surface.logical_name_id.clone()))
+            .collect(),
+    )?;
     Ok(())
 }
 
@@ -2296,6 +2394,7 @@ fn born_wrapped_unwrap_revokes_the_name_wrapper_registration_grant() -> anyhow::
     const CONTROLLER: &str = "0x0000000000000000000000000000000000000045";
     const NAME_WRAPPER: &str = "0x0000000000000000000000000000000000000046";
     const USER: &str = "0x0000000000000000000000000000000000000047";
+    const RESOLVER: &str = "0x0000000000000000000000000000000000000048";
 
     let labelhash = keccak256(b"alice");
     let node = super::common::namehash(&["alice".to_owned(), "eth".to_owned()]);
@@ -2376,6 +2475,14 @@ fn born_wrapped_unwrap_revokes_the_name_wrapper_registration_grant() -> anyhow::
                 ),
             ],
         ),
+        manifest(
+            43,
+            "ens_v1_resolver_l1",
+            "AddrChanged",
+            "event AddrChanged(bytes32 indexed node, address a)",
+            &[],
+            &["RecordChanged"],
+        ),
     ];
     let admissions = vec![
         registry_admission,
@@ -2416,6 +2523,16 @@ fn born_wrapped_unwrap_revokes_the_name_wrapper_registration_grant() -> anyhow::
                 NAME_WRAPPER,
             ),
             raw_at(
+                resolver::AddrChanged {
+                    node: node.parse()?,
+                    a: USER.parse()?,
+                }
+                .encode_log_data(),
+                1,
+                2,
+                RESOLVER,
+            ),
+            raw_at(
                 NameRegistered {
                     name: "alice".to_owned(),
                     label: labelhash,
@@ -2424,7 +2541,7 @@ fn born_wrapped_unwrap_revokes_the_name_wrapper_registration_grant() -> anyhow::
                 }
                 .encode_log_data(),
                 1,
-                2,
+                3,
                 CONTROLLER,
             ),
         ],
@@ -2481,6 +2598,22 @@ fn born_wrapped_unwrap_revokes_the_name_wrapper_registration_grant() -> anyhow::
         .find(|event| event.event_kind == "RegistrationGranted")
         .and_then(|event| event.resource_id)
         .expect("registration resource");
+    let wrapper_resource = registered
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.source_family == "ens_v1_wrapper_l1"
+                && event.event_kind == "TokenControlTransferred"
+        })
+        .and_then(|event| event.resource_id)
+        .expect("wrapper resource");
+    let wrapped_record = registered
+        .normalized_events
+        .iter()
+        .find(|event| event.source_family == "ens_v1_resolver_l1")
+        .expect("born-wrapped resolver record");
+    assert_eq!(wrapped_record.resource_id, Some(wrapper_resource));
+    assert_ne!(wrapped_record.resource_id, Some(registrar_resource));
     assert!(
         registered.normalized_events.iter().all(|event| {
             event.event_kind != "SurfaceBound" || event.resource_id != Some(registrar_resource)
@@ -2621,7 +2754,11 @@ fn registration_to_the_controller_discards_the_transient_registry_self_grant() -
             .collect::<std::collections::BTreeSet<_>>(),
         std::collections::BTreeSet::from([registrar_resource])
     );
-    assert_batch_resource_referential_integrity(&output, &std::collections::BTreeSet::new())?;
+    assert_batch_referential_integrity(
+        &output,
+        &std::collections::BTreeSet::new(),
+        &std::collections::BTreeSet::new(),
+    )?;
     Ok(())
 }
 
@@ -2797,7 +2934,280 @@ fn same_batch_prior_reference_retains_the_registry_only_resource() -> anyhow::Re
             || event.resource_id.is_none()
             || event.resource_id == Some(registrar_resource)
     }));
-    assert_batch_resource_referential_integrity(&output, &std::collections::BTreeSet::new())?;
+    assert_batch_referential_integrity(
+        &output,
+        &std::collections::BTreeSet::new(),
+        &std::collections::BTreeSet::new(),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn resolver_record_before_registration_setup_retains_predecessor_resource() -> anyhow::Result<()> {
+    const REGISTRY: &str = "0x0000000000000000000000000000000000000043";
+    const RESOLVER: &str = "0x0000000000000000000000000000000000000044";
+    const PRIOR_OWNER: &str = "0x0000000000000000000000000000000000000046";
+    const REGISTRANT: &str = "0x0000000000000000000000000000000000000047";
+
+    let label = "alice";
+    let labelhash = keccak256(label.as_bytes());
+    let parent_node = super::common::namehash(&["eth".to_owned()]).parse::<B256>()?;
+    let node = super::common::namehash(&[label.to_owned(), "eth".to_owned()]).parse::<B256>()?;
+    let owner_change = |owner: &str| -> anyhow::Result<_> {
+        Ok(v1_registry::NewOwner {
+            node: parent_node,
+            label: labelhash,
+            owner: owner.parse()?,
+        }
+        .encode_log_data())
+    };
+    let mut registry_admission = admission(36, "registry");
+    registry_admission.address = REGISTRY.to_owned();
+    let manifests = vec![
+        manifest(
+            36,
+            "ens_v1_registry_l1",
+            "NewOwner",
+            "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+            &["registry"],
+            &["SubregistryChanged", "AuthorityTransferred"],
+        ),
+        manifest(
+            37,
+            "ens_v1_resolver_l1",
+            "AddrChanged",
+            "event AddrChanged(bytes32 indexed node, address a)",
+            &[],
+            &["RecordChanged"],
+        ),
+        manifest(
+            38,
+            "ens_v1_registrar_l1",
+            "NameRegistered",
+            "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+            &["registrar"],
+            &["RegistrationGranted"],
+        ),
+    ];
+    let admissions = vec![registry_admission, admission(38, "registrar")];
+    let seed = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: manifests.clone(),
+        discovery_rules: Vec::new(),
+        admissions: admissions.clone(),
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            raw_at_transaction(owner_change(PRIOR_OWNER)?, 1, 0, 0, REGISTRY),
+            raw_at_transaction(
+                NameRegistered {
+                    name: label.to_owned(),
+                    label: labelhash,
+                    owner: PRIOR_OWNER.parse()?,
+                    expires: U256::from(21),
+                }
+                .encode_log_data(),
+                1,
+                0,
+                1,
+                CONTRACT,
+            ),
+        ],
+    })?;
+    let predecessor_resource = seed
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RegistrationGranted")
+        .and_then(|event| event.resource_id)
+        .expect("predecessor registry resource");
+
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests,
+        discovery_rules: Vec::new(),
+        admissions,
+        prior_events: seed.normalized_events.iter().map(prior_event).collect(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            raw_at_transaction(
+                resolver::AddrChanged {
+                    node,
+                    a: PRIOR_OWNER.parse()?,
+                }
+                .encode_log_data(),
+                2,
+                0,
+                0,
+                RESOLVER,
+            ),
+            raw_at_transaction(owner_change(REGISTRANT)?, 2, 0, 1, REGISTRY),
+            raw_at_transaction(
+                NameRegistered {
+                    name: label.to_owned(),
+                    label: labelhash,
+                    owner: REGISTRANT.parse()?,
+                    expires: U256::from(42),
+                }
+                .encode_log_data(),
+                2,
+                0,
+                2,
+                CONTRACT,
+            ),
+        ],
+    })?;
+    let record_resource = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RecordChanged")
+        .and_then(|event| event.resource_id)
+        .expect("resolver record resource");
+    let registration_resource = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RegistrationGranted")
+        .and_then(|event| event.resource_id)
+        .expect("registration resource");
+
+    assert_eq!(record_resource, predecessor_resource);
+    assert_ne!(record_resource, registration_resource);
+    assert_batch_referential_integrity(
+        &output,
+        &seed
+            .resources
+            .iter()
+            .map(|resource| (resource.chain_id.clone(), resource.resource_id))
+            .collect(),
+        &seed
+            .name_surfaces
+            .iter()
+            .map(|surface| (surface.chain_id.clone(), surface.logical_name_id.clone()))
+            .collect(),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn reconciled_resolver_burst_preserves_intra_selector_before_state() -> anyhow::Result<()> {
+    const REGISTRY: &str = "0x0000000000000000000000000000000000000043";
+    const RESOLVER: &str = "0x0000000000000000000000000000000000000044";
+    const FIRST_ADDRESS: &str = "0x0000000000000000000000000000000000000045";
+    const SECOND_ADDRESS: &str = "0x0000000000000000000000000000000000000046";
+    const THIRD_ADDRESS: &str = "0x0000000000000000000000000000000000000047";
+
+    let label = "alice";
+    let labelhash = keccak256(label.as_bytes());
+    let parent_node = super::common::namehash(&["eth".to_owned()]).parse::<B256>()?;
+    let node = super::common::namehash(&[label.to_owned(), "eth".to_owned()]).parse::<B256>()?;
+    let mut registry_admission = admission(93, "registry");
+    registry_admission.address = REGISTRY.to_owned();
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![
+            manifest(
+                93,
+                "ens_v1_registry_l1",
+                "NewOwner",
+                "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+                &["registry"],
+                &["SubregistryChanged", "AuthorityTransferred"],
+            ),
+            manifest(
+                94,
+                "ens_v1_resolver_l1",
+                "AddrChanged",
+                "event AddrChanged(bytes32 indexed node, address a)",
+                &[],
+                &["RecordChanged"],
+            ),
+            manifest(
+                95,
+                "ens_v1_registrar_l1",
+                "NameRegistered",
+                "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+                &["registrar"],
+                &["RegistrationGranted"],
+            ),
+        ],
+        discovery_rules: Vec::new(),
+        admissions: vec![registry_admission, admission(95, "registrar")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            raw_at(
+                v1_registry::NewOwner {
+                    node: parent_node,
+                    label: labelhash,
+                    owner: CONTRACT.parse()?,
+                }
+                .encode_log_data(),
+                1,
+                0,
+                REGISTRY,
+            ),
+            raw_at(
+                resolver::AddrChanged {
+                    node,
+                    a: FIRST_ADDRESS.parse()?,
+                }
+                .encode_log_data(),
+                1,
+                1,
+                RESOLVER,
+            ),
+            raw_at(
+                resolver::AddrChanged {
+                    node,
+                    a: SECOND_ADDRESS.parse()?,
+                }
+                .encode_log_data(),
+                1,
+                2,
+                RESOLVER,
+            ),
+            raw_at(
+                NameRegistered {
+                    name: label.to_owned(),
+                    label: labelhash,
+                    owner: CONTRACT.parse()?,
+                    expires: U256::from(42),
+                }
+                .encode_log_data(),
+                1,
+                3,
+                CONTRACT,
+            ),
+            raw_at(
+                resolver::AddrChanged {
+                    node,
+                    a: THIRD_ADDRESS.parse()?,
+                }
+                .encode_log_data(),
+                1,
+                4,
+                RESOLVER,
+            ),
+        ],
+    })?;
+    let registration_resource = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RegistrationGranted")
+        .and_then(|event| event.resource_id)
+        .expect("registration resource");
+    let records = output
+        .normalized_events
+        .iter()
+        .filter(|event| event.event_kind == "RecordChanged")
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 3);
+    assert!(records.iter().all(|event| {
+        event.logical_name_id.as_deref() == Some(format!("ens:{node:#x}").as_str())
+            && event.resource_id == Some(registration_resource)
+    }));
+    assert_eq!(records[0].before_state, json!({}));
+    assert_eq!(records[1].before_state, records[0].after_state);
+    assert_eq!(records[2].before_state, records[1].after_state);
     Ok(())
 }
 
@@ -3013,7 +3423,11 @@ fn assert_registration_preserves_the_prior_registry_owner_revocation(
             "the transient registration controller's self grant and revoke must not survive"
         );
     }
-    assert_batch_resource_referential_integrity(&output, &std::collections::BTreeSet::new())?;
+    assert_batch_referential_integrity(
+        &output,
+        &std::collections::BTreeSet::new(),
+        &std::collections::BTreeSet::new(),
+    )?;
     Ok(())
 }
 
@@ -3122,7 +3536,11 @@ fn same_transaction_reconciliation_leaves_an_unrelated_registry_change_untouched
             .iter()
             .any(|resource| resource.resource_id == unrelated_resource)
     );
-    assert_batch_resource_referential_integrity(&output, &std::collections::BTreeSet::new())?;
+    assert_batch_referential_integrity(
+        &output,
+        &std::collections::BTreeSet::new(),
+        &std::collections::BTreeSet::new(),
+    )?;
     Ok(())
 }
 
@@ -3218,7 +3636,11 @@ fn assert_same_transaction_controller_setup(
             raw_at(registration, 1, 3, CONTRACT),
         ],
     })?;
-    assert_batch_resource_referential_integrity(&output, &std::collections::BTreeSet::new())?;
+    assert_batch_referential_integrity(
+        &output,
+        &std::collections::BTreeSet::new(),
+        &std::collections::BTreeSet::new(),
+    )?;
 
     let registration_event = output
         .normalized_events
@@ -5300,6 +5722,189 @@ fn legacy_text_changed_without_value_uses_its_three_argument_decoder() -> anyhow
     assert_eq!(event.after_state["record_key"], "text:avatar");
     assert_eq!(event.after_state["selector_key"], "avatar");
     assert!(event.after_state.get("value").is_none());
+    Ok(())
+}
+
+#[test]
+fn ens_reverse_node_resolver_events_are_state_keyed_without_surface_identity() -> anyhow::Result<()>
+{
+    assert_reverse_node_resolver_events_are_state_keyed(
+        "ens",
+        "ens_v1_registry_l1",
+        "ens_v1_resolver_l1",
+        "ens_v1_reverse_l1",
+        &["addr", "reverse"],
+    )
+}
+
+#[test]
+fn basenames_reverse_node_resolver_events_are_state_keyed_without_surface_identity()
+-> anyhow::Result<()> {
+    assert_reverse_node_resolver_events_are_state_keyed(
+        "basenames",
+        "basenames_base_registry",
+        "basenames_base_resolver",
+        "basenames_base_primary",
+        &["80002105", "reverse"],
+    )
+}
+
+fn assert_reverse_node_resolver_events_are_state_keyed(
+    namespace: &str,
+    registry_family: &str,
+    resolver_family: &str,
+    primary_family: &str,
+    reverse_suffix: &[&str],
+) -> anyhow::Result<()> {
+    const REGISTRY_ADDRESS: &str = "0x0000000000000000000000000000000000000043";
+    const RESOLVER_ADDRESS: &str = "0x0000000000000000000000000000000000000044";
+
+    let reverse_label = CONTRACT.trim_start_matches("0x");
+    let reverse_suffix = reverse_suffix
+        .iter()
+        .map(|label| (*label).to_owned())
+        .collect::<Vec<_>>();
+    let reverse_labels = std::iter::once(reverse_label.to_owned())
+        .chain(reverse_suffix.iter().cloned())
+        .collect::<Vec<_>>();
+    let reverse_node = super::common::namehash(&reverse_labels).parse::<B256>()?;
+    let reverse_parent = super::common::namehash(&reverse_suffix).parse::<B256>()?;
+    let registry_log = v1_registry::NewOwner {
+        node: reverse_parent,
+        label: keccak256(reverse_label.as_bytes()),
+        owner: CONTRACT.parse()?,
+    }
+    .encode_log_data();
+    let name_log = resolver_name::NameChanged {
+        node: reverse_node,
+        name: "alice.eth".to_owned(),
+    }
+    .encode_log_data();
+    let text_log = resolver_strings::TextChanged {
+        node: reverse_node,
+        indexedKey: keccak256(b"avatar"),
+        key: "avatar".to_owned(),
+        value: "ipfs://avatar".to_owned(),
+    }
+    .encode_log_data();
+
+    let (primary_manifest, primary_log) = if primary_family == "ens_v1_reverse_l1" {
+        (
+            manifest_with_events(
+                92,
+                namespace,
+                primary_family,
+                &[(
+                    "ReverseClaimed",
+                    "event ReverseClaimed(address indexed addr, bytes32 indexed node)",
+                    &["reverse_registrar"],
+                    &["ReverseChanged"],
+                )],
+            ),
+            ReverseClaimed {
+                addr: CONTRACT.parse()?,
+                node: reverse_node,
+            }
+            .encode_log_data(),
+        )
+    } else {
+        (
+            manifest_with_events(
+                92,
+                namespace,
+                primary_family,
+                &[(
+                    "NameForAddrChanged",
+                    "event NameForAddrChanged(address indexed addr, string name)",
+                    &["reverse_registrar"],
+                    &["ReverseChanged", "RecordChanged"],
+                )],
+            ),
+            resolver_strings::NameForAddrChanged {
+                addr: CONTRACT.parse()?,
+                name: "alice.base.eth".to_owned(),
+            }
+            .encode_log_data(),
+        )
+    };
+    let mut registry_admission = admission(90, "registry");
+    registry_admission.address = REGISTRY_ADDRESS.to_owned();
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![
+            manifest_with_events(
+                90,
+                namespace,
+                registry_family,
+                &[(
+                    "NewOwner",
+                    "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+                    &["registry"],
+                    &["SubregistryChanged", "AuthorityTransferred"],
+                )],
+            ),
+            manifest_with_events(
+                91,
+                namespace,
+                resolver_family,
+                &[
+                    (
+                        "NameChanged",
+                        "event NameChanged(bytes32 indexed node, string name)",
+                        &[],
+                        &["RecordChanged"],
+                    ),
+                    (
+                        "TextChanged",
+                        "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+                        &[],
+                        &["RecordChanged"],
+                    ),
+                ],
+            ),
+            primary_manifest,
+        ],
+        discovery_rules: Vec::new(),
+        admissions: vec![registry_admission, admission(92, "reverse_registrar")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            raw_at(registry_log, 1, 0, REGISTRY_ADDRESS),
+            raw_at(primary_log, 1, 1, CONTRACT),
+            raw_at(name_log, 1, 2, RESOLVER_ADDRESS),
+            raw_at(text_log, 1, 3, RESOLVER_ADDRESS),
+        ],
+    })?;
+
+    assert!(
+        output.name_surfaces.is_empty(),
+        "reverse-node activity and primary claims must not materialize exact-name surfaces"
+    );
+    let resolver_events = output
+        .normalized_events
+        .iter()
+        .filter(|event| event.source_family == resolver_family)
+        .filter(|event| event.event_kind == "RecordChanged")
+        .collect::<Vec<_>>();
+    assert_eq!(resolver_events.len(), 2);
+    assert!(resolver_events.iter().any(|event| {
+        event.after_state["source_event"] == "NameChanged"
+            && event.after_state["raw_name"] == "alice.eth"
+    }));
+    assert!(resolver_events.iter().any(|event| {
+        event.after_state["source_event"] == "TextChanged"
+            && event.after_state["record_key"] == "text:avatar"
+    }));
+    assert!(
+        resolver_events
+            .iter()
+            .all(|event| { event.logical_name_id.is_none() && event.resource_id.is_none() })
+    );
+    assert_batch_referential_integrity(
+        &output,
+        &std::collections::BTreeSet::new(),
+        &std::collections::BTreeSet::new(),
+    )?;
     Ok(())
 }
 
@@ -7519,9 +8124,10 @@ fn interpret_test_batch(mut input: BatchInput) -> anyhow::Result<BatchOutput> {
     super::interpret_schema_v2_batch(input)
 }
 
-fn assert_batch_resource_referential_integrity(
+fn assert_batch_referential_integrity(
     output: &BatchOutput,
     persisted_resources: &std::collections::BTreeSet<(String, Uuid)>,
+    persisted_surfaces: &std::collections::BTreeSet<(String, String)>,
 ) -> anyhow::Result<()> {
     let available_resources = output
         .resources
@@ -7540,12 +8146,37 @@ fn assert_batch_resource_referential_integrity(
             );
         }
     }
+    let available_surfaces = output
+        .name_surfaces
+        .iter()
+        .map(|surface| (surface.chain_id.clone(), surface.logical_name_id.clone()))
+        .chain(persisted_surfaces.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>();
+    for event in &output.normalized_events {
+        if let Some(logical_name_id) = event.logical_name_id.as_ref() {
+            anyhow::ensure!(
+                available_surfaces.contains(&(event.chain_id.clone(), logical_name_id.clone())),
+                "normalized event {} references logical name {} on chain {} without a batch or persisted name surface row",
+                event.event_identity,
+                logical_name_id,
+                event.chain_id,
+            );
+        }
+    }
     for binding in &output.surface_bindings {
         anyhow::ensure!(
             available_resources.contains(&(binding.chain_id.clone(), binding.resource_id)),
             "surface binding {} references resource {} on chain {} without a batch or persisted resource row",
             binding.surface_binding_id,
             binding.resource_id,
+            binding.chain_id,
+        );
+        anyhow::ensure!(
+            available_surfaces
+                .contains(&(binding.chain_id.clone(), binding.logical_name_id.clone(),)),
+            "surface binding {} references logical name {} on chain {} without a batch or persisted name surface row",
+            binding.surface_binding_id,
+            binding.logical_name_id,
             binding.chain_id,
         );
     }

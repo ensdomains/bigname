@@ -28,6 +28,8 @@ pub(super) fn materialize(
 ) -> anyhow::Result<()> {
     let raw_provenance = provenance(raw, &selected.event.name, selected.source.manifest_id);
     let transition_time = event_time(raw);
+    let v1_surface = selected.source.source_family.starts_with("ens_v1_")
+        || selected.source.source_family.starts_with("basenames_");
     let mut shadow_names = interpreted
         .names
         .iter()
@@ -177,6 +179,9 @@ pub(super) fn materialize(
     let mut represented = BTreeSet::<Vec<u8>>::new();
     for name in &interpreted.names {
         let logical_name_id = format!("{}:{}", selected.source.namespace, name.namehash);
+        if v1_surface {
+            state.observe_v1_surface(&selected.source.namespace, &name.namehash);
+        }
         let flags = name
             .labels
             .iter()
@@ -287,6 +292,9 @@ pub(super) fn materialize(
     for name in &interpreted.shadow_names {
         represented.extend(name.raw_labels.iter().cloned());
         let logical_name_id = format!("{}:{}", selected.source.namespace, name.namehash);
+        if v1_surface {
+            state.observe_v1_surface(&selected.source.namespace, &name.namehash);
+        }
         let decoded_labels = name
             .raw_labels
             .iter()

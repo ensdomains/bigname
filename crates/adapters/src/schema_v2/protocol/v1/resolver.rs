@@ -395,6 +395,7 @@ pub(super) fn interpret(
     let mut output = single_event(kind, None, None, after);
     if let Some(linked) = affected_node
         .as_deref()
+        .filter(|node| state.v1_surface_materialized(&selected.source.namespace, node))
         .and_then(|node| state.v1_name(&selected.source.namespace, node))
     {
         output.events[0].logical_name_id = Some(linked.logical_name_id);

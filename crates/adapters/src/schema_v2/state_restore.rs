@@ -182,6 +182,12 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
     {
         return;
     }
+    if event.event_kind == "PreimageObserved"
+        && event.logical_name_id.is_some()
+        && let Some(namehash) = event.after_state.get("namehash").and_then(Value::as_str)
+    {
+        state.observe_v1_surface(&event.namespace, namehash);
+    }
     let source_event = event
         .after_state
         .get("source_event")

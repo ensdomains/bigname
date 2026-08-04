@@ -8,6 +8,9 @@ use super::{model::PriorEventInput, state_key::interpreter_state_key};
 #[path = "state_topology.rs"]
 mod topology;
 
+#[path = "state_surfaces.rs"]
+mod surfaces;
+
 #[derive(Clone, Debug)]
 pub(super) struct V1NameState {
     pub logical_name_id: String,
@@ -45,6 +48,7 @@ pub(super) struct State {
     v1_registry_owners: BTreeMap<String, String>,
     v1_resolvers: BTreeMap<String, String>,
     v1_migrated_nodes: std::collections::BTreeSet<String>,
+    v1_materialized_surfaces: BTreeSet<String>,
     known_surfaces: BTreeSet<String>,
     active_resources: BTreeMap<String, Uuid>,
     v2_tokens: BTreeMap<String, V2TokenState>,
@@ -78,6 +82,7 @@ impl State {
             v1_registry_owners: BTreeMap::new(),
             v1_resolvers: BTreeMap::new(),
             v1_migrated_nodes: std::collections::BTreeSet::new(),
+            v1_materialized_surfaces: BTreeSet::new(),
             known_surfaces: BTreeSet::new(),
             active_resources: BTreeMap::new(),
             v2_tokens: BTreeMap::new(),
