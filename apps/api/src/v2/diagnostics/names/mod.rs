@@ -3,7 +3,8 @@ use bigname_storage::{NameCurrentRow, SelectedSnapshot};
 use serde::Deserialize;
 use serde_json::{Map, Value as JsonValue};
 
-use crate::{AppState, load_name_current_for_selected_snapshot, normalize_inferred_route_name};
+use crate::AppState;
+use crate::v2::support::{load_name_current_for_selected_snapshot, normalize_inferred_route_name};
 
 use super::super::{
     Envelope, QueryParams, RawQueryParams, SnapshotReadResource, V2Error, V2Result,

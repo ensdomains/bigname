@@ -20,15 +20,10 @@ mod handler_health;
 mod handler_history;
 #[path = "handlers/namespaces.rs"]
 mod handler_namespaces;
-#[path = "handlers/permissions_support.rs"]
-mod handler_permissions_support;
 #[path = "handlers/primary_names.rs"]
 mod handler_primary_names;
 #[path = "handlers/resolution.rs"]
 mod handler_resolution;
-#[path = "handlers/resolution_on_demand.rs"]
-mod handler_resolution_on_demand;
-
 use self::{
     handler_app_facing_events::events,
     handler_app_facing_identity::{identity_lookup, public_status},
@@ -44,9 +39,9 @@ use self::{
     handler_health::{HEALTH_DATABASE_CHECK_TIMEOUT, HealthDatabasePool, health},
     handler_history::{address_history, name_history, resource_history},
     handler_namespaces::{namespace_manifests, namespace_metadata},
-    handler_permissions_support::{
-        begin_permissions_current_read, finish_permissions_current_read,
-    },
     handler_primary_names::primary_names,
     handler_resolution::{explain_resolution_execution_current, name_profile},
 };
+
+use crate::v2::support::permissions_support as handler_permissions_support;
+use handler_permissions_support::{begin_permissions_current_read, finish_permissions_current_read};

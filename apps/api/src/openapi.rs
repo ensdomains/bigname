@@ -15,11 +15,7 @@ mod openapi {
         include!("openapi/server.rs");
     }
 
-    #[cfg(test)]
-    pub(super) use server::{app_router, app_router_with_health_pool, openapi_document};
-    pub(super) use server::{render_openapi_document, serve};
+    pub(super) use server::{OPENAPI_DOCS_HTML, openapi_document, render_openapi_document};
 }
 
-#[cfg(test)]
-use openapi::{app_router, openapi_document};
-use openapi::{render_openapi_document, serve};
+use openapi::{OPENAPI_DOCS_HTML, openapi_document, render_openapi_document};

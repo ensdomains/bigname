@@ -271,50 +271,6 @@ pub(crate) fn build_resolution_execution_explain_response(
     })
 }
 
-pub(crate) fn build_resolution_execution_diagnostic_data(
-    row: &NameCurrentRow,
-    records: &[ResolutionRecordKey],
-    trace: &ExecutionTrace,
-    outcome: &ExecutionOutcome,
-) -> Result<JsonValue> {
-    let verified_state =
-        build_resolution_execution_explain_verified_state(row, records, trace, outcome)?;
-    let mut data = verified_state
-        .get("execution")
-        .cloned()
-        .context("persisted execution diagnostic must include execution summary")?;
-    if !data.is_object() {
-        bail!("persisted execution diagnostic execution summary must be an object");
-    }
-    let mut verified_queries = verified_state
-        .get("verified_queries")
-        .cloned()
-        .context("persisted execution diagnostic must include verified_queries")?;
-    normalize_execution_diagnostic_verified_query_statuses(&mut verified_queries);
-    insert_value_field(&mut data, "verified_queries", verified_queries);
-    Ok(data)
-}
-
-fn normalize_execution_diagnostic_verified_query_statuses(queries: &mut JsonValue) {
-    for query in queries.as_array_mut().into_iter().flatten() {
-        let Some(object) = query.as_object_mut() else {
-            continue;
-        };
-        let Some(status) = object.get("status").and_then(JsonValue::as_str) else {
-            continue;
-        };
-        let status = match status {
-            "success" => "ok",
-            "execution_failed" => "failed",
-            "ok" | "not_found" | "invalid_name" | "mismatch" | "unsupported" | "stale"
-            | "failed" => status,
-            _ => "failed",
-        }
-        .to_owned();
-        object.insert("status".to_owned(), JsonValue::String(status));
-    }
-}
-
 fn build_primary_name_response(
     address: String,
     namespace: String,
@@ -485,24 +441,6 @@ fn primary_name_verified_result(namespace: &str, lookup_state: &PrimaryNameLooku
             primary_name_unsupported_result("verified primary-name entrypoint is not yet supported")
         }
     }
-}
-
-fn projected_primary_name_claim_is_not_normalized(
-    lookup_state: &PrimaryNameLookupState,
-) -> bool {
-    matches!(
-        lookup_state.tuple_state,
-        PrimaryNameTupleState::TuplePresent(ref row)
-            if row.claim_status == PrimaryNameClaimStatus::Success
-                && !lookup_state.claim_name_is_normalized
-    )
-}
-
-fn primary_name_claim_not_normalized_result() -> JsonValue {
-    json!({
-        "status": "invalid_name",
-        "failure_reason": bigname_execution::VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON,
-    })
 }
 
 fn primary_name_not_found_result() -> JsonValue {

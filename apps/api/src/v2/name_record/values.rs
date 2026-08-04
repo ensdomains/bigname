@@ -2,11 +2,11 @@ use bigname_storage::{NameCurrentRow, SelectedSnapshot};
 use serde_json::Value;
 use sqlx::types::time::OffsetDateTime;
 
-use crate::{
+use crate::v2::support::{
     direct_json_field, record_json_path, record_json_string_at_paths,
     record_network_from_chain_positions,
-    v2::{chains::slug_to_numeric, format_timestamp},
 };
+use crate::v2::{chains::slug_to_numeric, format_timestamp};
 
 pub(super) fn json_chain_id(value: &Value) -> Option<u64> {
     match value {

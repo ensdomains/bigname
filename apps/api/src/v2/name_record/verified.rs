@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow, SelectedSnapshot};
 
-use crate::{AppState, PROFILE_FALLBACK_RECORD_KEYS, ResolutionRecordKey};
+use crate::AppState;
+use crate::v2::support::{
+    PROFILE_FALLBACK_RECORD_KEYS, ResolutionRecordKey, parse_resolution_record_key,
+};
 
 use super::super::{
     SnapshotReadResource, Source, Status, V2Result, default_requested_records,
@@ -134,7 +137,7 @@ fn profile_fallback_requested_records() -> Vec<ResolutionRecordKey> {
     PROFILE_FALLBACK_RECORD_KEYS
         .iter()
         .map(|record_key| {
-            crate::parse_resolution_record_key(record_key)
+            parse_resolution_record_key(record_key)
                 .expect("profile fallback record selector must be valid")
         })
         .collect()

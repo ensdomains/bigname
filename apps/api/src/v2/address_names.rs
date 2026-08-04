@@ -17,6 +17,10 @@ use super::cursor::invalid_cursor_error;
 use super::permission_support::{
     apply_role_summary_support_meta, permission_read_error_to_v2, permission_support_for_resources,
 };
+use super::support::parse_evm_address;
+use super::support::permissions_support::{
+    begin_permissions_current_read, finish_permissions_current_read,
+};
 use super::{
     AddressNamesDedupe, AddressNamesSort, Envelope, Meta, Page, QueryParamAllowlist,
     RegistrationStatus, Relation, RelationSet, SortOrder, StrictQueryParams, V2Error, V2Result,
@@ -100,8 +104,7 @@ pub(crate) async fn get_address_names(
 ) -> V2Result<Json<Envelope<Vec<AddressName>>>> {
     let params = params.into_inner();
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
-    let normalized_address =
-        crate::parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
+    let normalized_address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let namespace_filter = params.namespace.clone();
     let include_role_summary = address_names_include_role_summary(&params.include)?;
     let storage_relations = params
@@ -117,7 +120,7 @@ pub(crate) async fn get_address_names(
 
     let permission_read = if include_role_summary {
         Some(
-            crate::begin_permissions_current_read(
+            begin_permissions_current_read(
                 &state.pool,
                 "/v2/addresses/{address}/names?include=role_summary",
             )
@@ -287,7 +290,7 @@ pub(crate) async fn get_address_names(
         meta,
     });
     if let Some(permission_read) = permission_read {
-        crate::finish_permissions_current_read(
+        finish_permissions_current_read(
             &state.pool,
             "/v2/addresses/{address}/names?include=role_summary",
             permission_read,

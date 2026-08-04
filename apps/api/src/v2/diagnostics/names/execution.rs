@@ -7,8 +7,10 @@ use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use tracing::error;
 
-use crate::{
-    AppState, build_resolution_execution_cache_key, build_resolution_execution_diagnostic_data,
+use crate::AppState;
+use crate::v2::support::{
+    ResolutionRecordKey, build_resolution_execution_cache_key,
+    build_resolution_execution_diagnostic_data,
     load_record_inventory_current_matching_selected_snapshot,
     load_supported_record_inventory_current_for_snapshot, parse_resolution_record_key,
     resolution_execution_cache_lookup_records, resolution_verified_support_boundary,
@@ -330,7 +332,7 @@ fn remove_redundant_logical_name_id_from_name_ref(
     Ok(())
 }
 
-fn parse_execution_keys(keys: Option<&str>) -> V2Result<Vec<crate::ResolutionRecordKey>> {
+fn parse_execution_keys(keys: Option<&str>) -> V2Result<Vec<ResolutionRecordKey>> {
     let Some(keys) = keys.map(str::trim).filter(|value| !value.is_empty()) else {
         return Err(V2Error::invalid_input("keys is required"));
     };

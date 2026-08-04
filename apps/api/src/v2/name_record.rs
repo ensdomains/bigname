@@ -6,14 +6,14 @@ use bigname_storage::{BASENAMES_NAMESPACE, NameCurrentRow, RecordInventoryCurren
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{
-    AppState, V2_RECORD_UNSUPPORTED_FIELD_NAMES, direct_json_field,
-    load_name_current_for_selected_snapshot, map_internal_api_error, normalize_inferred_route_name,
-    record_addresses_from_entries, record_content_hash_from_entries,
-    record_text_records_from_entries, record_unsupported_fields, record_value_string_from_entry,
-    snapshot_selection_api_error,
-};
+use crate::AppState;
 
+use super::support::{
+    V2_RECORD_UNSUPPORTED_FIELD_NAMES, direct_json_field, load_name_current_for_selected_snapshot,
+    map_internal_api_error, normalize_inferred_route_name, record_addresses_from_entries,
+    record_content_hash_from_entries, record_text_records_from_entries, record_unsupported_fields,
+    record_value_string_from_entry, snapshot_selection_api_error,
+};
 use super::{
     Envelope, Meta, QueryParamAllowlist, RequestSource, SnapshotReadResource, StrictQueryParams,
     V2Error, V2Result, api_error_to_v2_for_resource, resolve_v2_snapshot_for, snapshot_meta,

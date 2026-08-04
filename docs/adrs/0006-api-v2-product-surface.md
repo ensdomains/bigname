@@ -264,10 +264,13 @@ Rules:
 - `page` appears on collections only and is identical everywhere, including
   partner-1's `total_count` and `has_more`. Per-input pagination on
   `POST /v2/lookup` uses this same object inside each result.
-- `total_count` is nullable. It is populated where an indexed count sidecar
-  makes it cheap (the reverse-lookup count path) or where the caller opts in
-  via `include=total_count`; routes must not run unconditional full counts on
-  the request path to fill it.
+- `total_count` is nullable. Reverse address results from `POST /v2/lookup`
+  populate it with an exact distinct-name count over the same readable current
+  joins as the page query when the requested relation set maps directly to a
+  stored role group. Relation sets that require post-filtering retain
+  `total_count=null`. Other routes populate it only where a precomputed count
+  makes it cheap or where the caller opts in via `include=total_count`; they
+  must not otherwise run unconditional full counts on the request path.
 - `meta` is always present: `as_of` and `as_of_token` on single-resource routes
   that read snapshot-pinned chain-derived state. Top-level latest-state
   collections omit both. Control-plane routes (`/v2/status`,
@@ -546,8 +549,11 @@ Positive:
   `data`/`page`/`meta` contract once. The partner record shape and the app
   profile shape become the same object.
 - The partner path is the front door (`POST /v2/lookup`), not a side-route
-  exception, and its proven latency characteristics are unaffected (the
-  feed-profile read path and sidecars do not change).
+  exception. Feed and detail keep one record shape and identical pagination
+  fields; directly grouped reverse lookup derives its exact count from the same
+  current rows and readability rules as its page instead of a separately
+  maintained count. Relation sets that need post-filtering retain their nullable
+  count behavior.
 - Pipeline internals stop leaking: product DTOs carry no projection, manifest,
   or lineage vocabulary; diagnostics routes own all of it explicitly.
 - Contract rot is eliminated structurally: no reserved parameters, no

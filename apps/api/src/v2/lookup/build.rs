@@ -3,16 +3,16 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 
 use super::{cursor::reverse_identity_is_primary, dto::LookupRecord};
-use crate::{
+use crate::v2::support::{
     V2_RECORD_UNSUPPORTED_FIELD_NAMES, direct_json_field, record_addresses_from_entries,
     record_content_hash_from_entries, record_text_records_from_entries, record_unsupported_fields,
-    v2::{
-        Relation, Status, V2Result,
-        name_record::{
-            self, chain_id_from_positions, json_string_at_paths, network_from_parts, string_field,
-        },
-        shared_product_reason,
+};
+use crate::v2::{
+    Relation, Status, V2Result,
+    name_record::{
+        self, chain_id_from_positions, json_string_at_paths, network_from_parts, string_field,
     },
+    shared_product_reason,
 };
 
 const MISSING_UNSUPPORTED_REASON: &str = "unsupported_reason_missing";

@@ -6,12 +6,13 @@ use super::{
         LookupAddressInput, LookupNameInput, LookupRequest, LookupResultInput, NormalizationInfo,
     },
 };
-use crate::{
-    normalize_inferred_route_name, parse_evm_address,
-    v2::{
-        DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, Relation, RelationSet, V2Error, V2Result,
-        api_error_to_v2, decode, encode, parse_relation_set_param,
-    },
+use crate::v2::support::{
+    RouteNameNormalizationError, normalize_inferred_route_name, parse_evm_address,
+    parse_primary_name_coin_type,
+};
+use crate::v2::{
+    DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, Relation, RelationSet, V2Error, V2Result, api_error_to_v2,
+    decode, encode, parse_relation_set_param,
 };
 
 const DEFAULT_LOOKUP_BATCH_LIMIT: usize = 1000;
@@ -102,7 +103,7 @@ pub(super) fn parse_address_input(
     let id = optional_id(input.id.as_deref())?;
     let address = parse_evm_address(&input.address, "address").map_err(api_error_to_v2)?;
     let coin_type = input.coin_type.unwrap_or(60);
-    let coin_type = crate::parse_primary_name_coin_type(Some(&coin_type.to_string()))
+    let coin_type = parse_primary_name_coin_type(Some(&coin_type.to_string()))
         .map_err(api_error_to_v2)?
         .parse::<u64>()
         .map_err(|_| V2Error::invalid_input("coin_type must fit in an unsigned 64-bit integer"))?;
@@ -247,7 +248,7 @@ fn optional_id(value: Option<&str>) -> V2Result<Option<String>> {
 fn parse_identity_name_lookup_with_namespace(
     name: &str,
     namespace: Option<&str>,
-) -> Result<IdentityNameLookup, crate::RouteNameNormalizationError> {
+) -> Result<IdentityNameLookup, RouteNameNormalizationError> {
     let parsed = normalize_inferred_route_name(name)?;
     let namespace = namespace.unwrap_or(parsed.namespace).to_owned();
     Ok(IdentityNameLookup {

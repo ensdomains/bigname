@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use sqlx::types::Uuid;
 
+use super::support::parse_evm_address;
 use super::{
     error::{V2Error, V2Result},
     vocab::{
@@ -236,7 +237,7 @@ fn parse_address(value: Option<String>) -> V2Result<Option<String>> {
         return Ok(None);
     };
 
-    crate::parse_evm_address(&value, "address")
+    parse_evm_address(&value, "address")
         .map(Some)
         .map_err(|error| V2Error::invalid_input(error.message))
 }

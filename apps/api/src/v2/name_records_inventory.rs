@@ -4,9 +4,8 @@ use bigname_storage::RecordInventoryCurrentRow;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::ResolutionRecordKey;
-
 use super::name_record::string_field;
+use super::support::{ResolutionRecordKey, parse_resolution_record_key};
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct RecordInventory {
@@ -103,7 +102,7 @@ pub(super) fn inventory_item_for_record<'a>(
 
 pub(super) fn product_record_from_item(item: &Value) -> Option<ResolutionRecordKey> {
     let record_key = string_field(item.get("record_key"))?;
-    validate_product_record(crate::parse_resolution_record_key(&record_key)?)
+    validate_product_record(parse_resolution_record_key(&record_key)?)
 }
 
 pub(super) fn unsupported_family_reason(

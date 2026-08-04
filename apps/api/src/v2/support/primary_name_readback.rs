@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn manifest_versions_contain_source_family(
+pub(crate) fn manifest_versions_contain_source_family(
     manifest_versions: &JsonValue,
     expected_source_family: &str,
     context: &str,
@@ -25,7 +25,7 @@ pub(super) fn manifest_versions_contain_source_family(
     Ok(false)
 }
 
-pub(super) fn ensure_persisted_primary_name_execution_source_family(
+pub(crate) fn ensure_persisted_primary_name_execution_source_family(
     outcome: &ExecutionOutcome,
     address: &str,
     namespace: &str,
@@ -74,7 +74,7 @@ pub(super) fn ensure_persisted_primary_name_execution_source_family(
     Ok(())
 }
 
-pub(super) fn persisted_verified_primary_name_cache_identity_is_current(
+pub(crate) fn persisted_verified_primary_name_cache_identity_is_current(
     trace: &ExecutionTrace,
     outcome: &ExecutionOutcome,
     address: &str,
@@ -162,7 +162,9 @@ fn trace_cache_identity_matches_outcome(
         return Ok(false);
     }
 
-    let Some(cache_identity) = trace_metadata.get("cache_identity").and_then(JsonValue::as_object)
+    let Some(cache_identity) = trace_metadata
+        .get("cache_identity")
+        .and_then(JsonValue::as_object)
     else {
         warn_cache_miss(trace, address, namespace, coin_type, "trace cache_identity");
         return Ok(false);
@@ -177,7 +179,13 @@ fn trace_cache_identity_matches_outcome(
 
     if trace.manifest_context.get("manifest_versions") != Some(&outcome.cache_key.manifest_versions)
     {
-        warn_cache_miss(trace, address, namespace, coin_type, "trace manifest versions");
+        warn_cache_miss(
+            trace,
+            address,
+            namespace,
+            coin_type,
+            "trace manifest versions",
+        );
         return Ok(false);
     }
 
@@ -206,7 +214,7 @@ fn trace_cache_identity_matches_outcome(
     Ok(true)
 }
 
-pub(super) fn persisted_verified_primary_name_section(
+pub(crate) fn persisted_verified_primary_name_section(
     trace: &ExecutionTrace,
     outcome: &ExecutionOutcome,
     address: &str,
@@ -386,7 +394,7 @@ pub(super) fn persisted_verified_primary_name_section(
     Ok(verified_primary_name)
 }
 
-pub(super) fn extract_persisted_verified_primary_name_section(
+pub(crate) fn extract_persisted_verified_primary_name_section(
     payload: Option<&JsonValue>,
     context: &str,
     namespace: &str,
@@ -459,7 +467,7 @@ pub(super) fn extract_persisted_verified_primary_name_section(
     Ok(Some(JsonValue::Object(section.clone())))
 }
 
-pub(super) fn validate_persisted_verified_primary_name_ref(
+pub(crate) fn validate_persisted_verified_primary_name_ref(
     value: Option<&JsonValue>,
     context: &str,
     expected_namespace: &str,

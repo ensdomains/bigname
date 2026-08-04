@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn resource_ids_for_name(
+pub(crate) async fn resource_ids_for_name(
     pool: &PgPool,
     logical_name_id: &str,
 ) -> ApiResult<Vec<Uuid>> {
@@ -26,7 +26,7 @@ pub(super) async fn resource_ids_for_name(
         .collect())
 }
 
-pub(super) async fn logical_name_ids_for_resource(
+pub(crate) async fn logical_name_ids_for_resource(
     pool: &PgPool,
     resource_id: Uuid,
 ) -> ApiResult<Vec<String>> {
@@ -52,7 +52,7 @@ pub(super) async fn logical_name_ids_for_resource(
         .collect())
 }
 
-pub(super) fn chain_position_key(chain_id: &str) -> String {
+pub(crate) fn chain_position_key(chain_id: &str) -> String {
     match chain_id {
         "ethereum-mainnet" => "ethereum".to_owned(),
         "base-mainnet" => "base".to_owned(),
@@ -60,7 +60,7 @@ pub(super) fn chain_position_key(chain_id: &str) -> String {
     }
 }
 
-pub(super) fn compact_history_summary_mode(meta: MetaMode) -> HistorySummaryMode {
+pub(crate) fn compact_history_summary_mode(meta: MetaMode) -> HistorySummaryMode {
     match meta {
         MetaMode::None => HistorySummaryMode::None,
         MetaMode::Summary => HistorySummaryMode::Count,
@@ -68,7 +68,7 @@ pub(super) fn compact_history_summary_mode(meta: MetaMode) -> HistorySummaryMode
     }
 }
 
-pub(super) fn history_route_summary_mode(view: ResponseView, meta: MetaMode) -> HistorySummaryMode {
+pub(crate) fn history_route_summary_mode(view: ResponseView, meta: MetaMode) -> HistorySummaryMode {
     match view {
         ResponseView::Full => HistorySummaryMode::Full,
         ResponseView::Compact => compact_history_summary_mode(meta),

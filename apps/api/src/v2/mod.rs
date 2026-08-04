@@ -26,6 +26,7 @@ mod snapshots;
 mod status;
 mod strict_query;
 mod subnames;
+pub(crate) mod support;
 mod vocab;
 
 pub(crate) use address_history::get_address_history;

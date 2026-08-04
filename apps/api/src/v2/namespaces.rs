@@ -11,7 +11,8 @@ use bigname_manifests::{
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
-use crate::{AppState, ensure_public_namespace};
+use super::support::ensure_public_namespace;
+use crate::AppState;
 
 use super::{
     Completeness, Envelope, Meta, NoQueryParams, V2Error, V2Result, api_error_to_v2,

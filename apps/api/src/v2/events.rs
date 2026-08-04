@@ -8,9 +8,10 @@ use bigname_storage::{
 use serde::{Deserialize, Serialize};
 use sqlx::types::Uuid;
 
-use crate::{AppState, normalize_inferred_route_name};
+use crate::AppState;
 
 use super::cursor::{cursor_value, invalid_cursor_error};
+use super::support::normalize_inferred_route_name;
 use super::{
     CursorPayload, Envelope, HistoryEventType, Meta, Page, QueryParamAllowlist, QueryParams,
     StrictQueryParams, V2Error, V2Result, decode, encode, format_timestamp, history_event_type,

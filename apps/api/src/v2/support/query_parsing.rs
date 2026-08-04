@@ -3,7 +3,7 @@ use alloy_primitives::{Address, hex};
 
 pub(crate) const MAX_VERIFIED_RECORD_KEYS: usize = 200;
 
-pub(super) fn parse_history_scope(scope: Option<&str>) -> ApiResult<HistoryScope> {
+pub(crate) fn parse_history_scope(scope: Option<&str>) -> ApiResult<HistoryScope> {
     let scope = scope
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -20,7 +20,7 @@ pub(super) fn parse_history_scope(scope: Option<&str>) -> ApiResult<HistoryScope
     }
 }
 
-pub(super) fn parse_resolution_mode(mode: Option<&str>) -> ApiResult<ResolutionMode> {
+pub(crate) fn parse_resolution_mode(mode: Option<&str>) -> ApiResult<ResolutionMode> {
     let mode = mode
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -37,7 +37,7 @@ pub(super) fn parse_resolution_mode(mode: Option<&str>) -> ApiResult<ResolutionM
     }
 }
 
-pub(super) fn parse_response_view(
+pub(crate) fn parse_response_view(
     view: Option<&str>,
     default: ResponseView,
 ) -> ApiResult<ResponseView> {
@@ -56,7 +56,7 @@ pub(super) fn parse_response_view(
     }
 }
 
-pub(super) fn parse_compact_only_response_view(
+pub(crate) fn parse_compact_only_response_view(
     view: Option<&str>,
     full_view_message: &str,
 ) -> ApiResult<()> {
@@ -71,7 +71,7 @@ pub(super) fn parse_compact_only_response_view(
     Ok(())
 }
 
-pub(super) fn parse_meta_mode(meta: Option<&str>, default: MetaMode) -> ApiResult<MetaMode> {
+pub(crate) fn parse_meta_mode(meta: Option<&str>, default: MetaMode) -> ApiResult<MetaMode> {
     let Some(meta) = meta.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(default);
     };
@@ -88,11 +88,11 @@ pub(super) fn parse_meta_mode(meta: Option<&str>, default: MetaMode) -> ApiResul
     }
 }
 
-pub(super) fn parse_primary_name_address(address: &str) -> ApiResult<String> {
+pub(crate) fn parse_primary_name_address(address: &str) -> ApiResult<String> {
     parse_evm_address(address, "address")
 }
 
-pub(super) fn parse_evm_address(address: &str, field: &'static str) -> ApiResult<String> {
+pub(crate) fn parse_evm_address(address: &str, field: &'static str) -> ApiResult<String> {
     if let Some(normalized) = normalize_standard_evm_address(address.trim()) {
         Ok(normalized)
     } else {
@@ -104,13 +104,14 @@ pub(super) fn parse_evm_address(address: &str, field: &'static str) -> ApiResult
     }
 }
 
-pub(super) fn parse_exact_name_path_name(namespace: &str, name: &str) -> ApiResult<String> {
+pub(crate) fn parse_exact_name_path_name(namespace: &str, name: &str) -> ApiResult<String> {
     ensure_public_namespace(namespace)?;
-    let normalized = bigname_domain::normalization::normalize_name(name).map_err(|error| ApiError {
-        status: StatusCode::BAD_REQUEST,
-        code: "invalid_input",
-        message: error.message().to_owned(),
-    })?;
+    let normalized =
+        bigname_domain::normalization::normalize_name(name).map_err(|error| ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: error.message().to_owned(),
+        })?;
     if normalized.normalized_name != name {
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
@@ -122,7 +123,7 @@ pub(super) fn parse_exact_name_path_name(namespace: &str, name: &str) -> ApiResu
     Ok(normalized.normalized_name)
 }
 
-pub(super) fn parse_primary_name_namespace(namespace: Option<&str>) -> ApiResult<String> {
+pub(crate) fn parse_primary_name_namespace(namespace: Option<&str>) -> ApiResult<String> {
     let Some(namespace) = namespace.map(str::trim).filter(|value| !value.is_empty()) else {
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
@@ -135,7 +136,7 @@ pub(super) fn parse_primary_name_namespace(namespace: Option<&str>) -> ApiResult
     Ok(namespace.to_owned())
 }
 
-pub(super) fn parse_primary_name_coin_type(coin_type: Option<&str>) -> ApiResult<String> {
+pub(crate) fn parse_primary_name_coin_type(coin_type: Option<&str>) -> ApiResult<String> {
     let Some(coin_type) = coin_type.map(str::trim).filter(|value| !value.is_empty()) else {
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
@@ -159,7 +160,7 @@ pub(super) fn parse_primary_name_coin_type(coin_type: Option<&str>) -> ApiResult
     })
 }
 
-pub(super) fn parse_resolution_record_keys(
+pub(crate) fn parse_resolution_record_keys(
     records: Option<&str>,
     mode: ResolutionMode,
 ) -> ApiResult<Vec<ResolutionRecordKey>> {
@@ -210,7 +211,7 @@ pub(super) fn parse_resolution_record_keys(
     Ok(parsed)
 }
 
-pub(super) fn parse_resolution_record_key(record_key: &str) -> Option<ResolutionRecordKey> {
+pub(crate) fn parse_resolution_record_key(record_key: &str) -> Option<ResolutionRecordKey> {
     if record_key.is_empty()
         || record_key
             .chars()
@@ -251,14 +252,14 @@ pub(super) fn parse_resolution_record_key(record_key: &str) -> Option<Resolution
     }
 }
 
-pub(super) fn parse_permissions_subject(subject: Option<&str>) -> Option<String> {
+pub(crate) fn parse_permissions_subject(subject: Option<&str>) -> Option<String> {
     subject
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
 }
 
-pub(super) fn parse_permission_scope_filter(
+pub(crate) fn parse_permission_scope_filter(
     scope: Option<&str>,
 ) -> ApiResult<Option<PermissionScope>> {
     let Some(scope) = scope.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -322,12 +323,12 @@ pub(super) fn parse_permission_scope_filter(
         .map(Some)
 }
 
-pub(super) fn parse_children_query(query: &ChildrenQuery) -> ApiResult<bool> {
+pub(crate) fn parse_children_query(query: &ChildrenQuery) -> ApiResult<bool> {
     parse_children_surface_classes(query.surface_classes.as_deref())?;
     parse_children_include_counts(query.include.as_deref())
 }
 
-pub(super) fn parse_address_names_namespace(namespace: Option<&str>) -> ApiResult<Option<String>> {
+pub(crate) fn parse_address_names_namespace(namespace: Option<&str>) -> ApiResult<Option<String>> {
     let Some(namespace) = namespace.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
@@ -343,7 +344,7 @@ pub(super) fn parse_address_names_namespace(namespace: Option<&str>) -> ApiResul
     }
 }
 
-pub(super) fn parse_address_name_relation(
+pub(crate) fn parse_address_name_relation(
     relation: Option<&str>,
 ) -> ApiResult<Option<AddressNameRelation>> {
     match relation.map(str::trim).filter(|value| !value.is_empty()) {
@@ -360,7 +361,7 @@ pub(super) fn parse_address_name_relation(
     }
 }
 
-pub(super) fn parse_address_names_dedupe_by(
+pub(crate) fn parse_address_names_dedupe_by(
     dedupe_by: Option<&str>,
 ) -> ApiResult<AddressNamesCurrentDedupe> {
     let dedupe_by = dedupe_by
@@ -378,7 +379,7 @@ pub(super) fn parse_address_names_dedupe_by(
     }
 }
 
-pub(super) fn parse_address_names_include(
+pub(crate) fn parse_address_names_include(
     include: Option<&str>,
 ) -> ApiResult<AddressNamesIncludeOptions> {
     let mut options = AddressNamesIncludeOptions::default();
@@ -404,7 +405,7 @@ pub(super) fn parse_address_names_include(
     Ok(options)
 }
 
-pub(super) fn parse_children_surface_classes(surface_classes: Option<&str>) -> ApiResult<()> {
+pub(crate) fn parse_children_surface_classes(surface_classes: Option<&str>) -> ApiResult<()> {
     let mut requested_non_declared = false;
 
     for value in surface_classes
@@ -439,7 +440,7 @@ pub(super) fn parse_children_surface_classes(surface_classes: Option<&str>) -> A
     Ok(())
 }
 
-pub(super) fn parse_children_include_counts(include: Option<&str>) -> ApiResult<bool> {
+pub(crate) fn parse_children_include_counts(include: Option<&str>) -> ApiResult<bool> {
     let mut include_counts = false;
 
     for value in include
@@ -463,7 +464,7 @@ pub(super) fn parse_children_include_counts(include: Option<&str>) -> ApiResult<
     Ok(include_counts)
 }
 
-pub(super) fn normalize_address(address: &str) -> String {
+pub(crate) fn normalize_address(address: &str) -> String {
     normalize_standard_evm_address(address).unwrap_or_else(|| address.to_ascii_lowercase())
 }
 
@@ -480,14 +481,14 @@ fn format_prefixed_hex(bytes: impl AsRef<[u8]>) -> String {
     format!("0x{}", hex::encode(bytes))
 }
 
-pub(super) fn address_names_dedupe_label(dedupe_by: AddressNamesCurrentDedupe) -> &'static str {
+pub(crate) fn address_names_dedupe_label(dedupe_by: AddressNamesCurrentDedupe) -> &'static str {
     match dedupe_by {
         AddressNamesCurrentDedupe::Surface => "surface",
         AddressNamesCurrentDedupe::Resource => "resource",
     }
 }
 
-pub(super) fn ensure_public_namespace(namespace: &str) -> ApiResult<()> {
+pub(crate) fn ensure_public_namespace(namespace: &str) -> ApiResult<()> {
     if PUBLIC_NAMESPACES.contains(&namespace) {
         Ok(())
     } else {
@@ -499,7 +500,7 @@ pub(super) fn ensure_public_namespace(namespace: &str) -> ApiResult<()> {
     }
 }
 
-pub(super) fn collect_unique(values: impl Iterator<Item = String>) -> Vec<String> {
+pub(crate) fn collect_unique(values: impl Iterator<Item = String>) -> Vec<String> {
     values.collect::<BTreeSet<_>>().into_iter().collect()
 }
 

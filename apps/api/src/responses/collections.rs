@@ -430,6 +430,12 @@ fn build_permissions_coverage_from_resource_summary(
     let Some(coverage) = summary.map(|summary| &summary.coverage) else {
         return unknown_permission_authority_coverage();
     };
+    if coverage.status() == bigname_storage::PermissionCoverageStatus::Projected
+        || coverage.exhaustiveness()
+            == bigname_storage::PermissionCoverageExhaustiveness::NotAsserted
+    {
+        return unknown_permission_authority_coverage();
+    }
 
     CoverageResponse {
         status: coverage.status().as_str().to_owned(),

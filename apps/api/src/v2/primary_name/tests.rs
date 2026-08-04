@@ -1,9 +1,9 @@
 use bigname_storage::PrimaryNameCurrentRow;
 use serde_json::json;
 
-use crate::{
-    OnDemandPrimaryNameClaim, OnDemandPrimaryNameInvalidClaim,
-    PersistedPrimaryNameVerifiedReadback, v2::ErrorCode,
+use crate::v2::ErrorCode;
+use crate::v2::support::{
+    OnDemandPrimaryNameClaim, OnDemandPrimaryNameInvalidClaim, PersistedPrimaryNameVerifiedReadback,
 };
 
 use super::*;

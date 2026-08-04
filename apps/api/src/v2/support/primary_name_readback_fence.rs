@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn load_persisted_primary_name_verified_readback(
+pub(crate) async fn load_persisted_primary_name_verified_readback(
     pool: &PgPool,
     address: &str,
     namespace: &str,
@@ -29,7 +29,7 @@ pub(super) async fn load_persisted_primary_name_verified_readback(
     .await
 }
 
-pub(super) async fn load_persisted_primary_name_route_fallback_readback(
+pub(crate) async fn load_persisted_primary_name_route_fallback_readback(
     pool: &PgPool,
     address: &str,
     namespace: &str,
@@ -58,20 +58,20 @@ pub(super) async fn load_persisted_primary_name_route_fallback_readback(
         namespace,
         coin_type,
     )
-        .await
-        .map_err(|load_error| {
-            error!(
-                service = "api",
-                address = %address,
-                namespace = %namespace,
-                coin_type = %coin_type,
-                error = ?load_error,
-                "failed to lock route-local primary-name readback tuple"
-            );
-            ApiError::internal_error(format!(
-                "failed to load persisted verified primary-name outcome for address {address}"
-            ))
-        })?;
+    .await
+    .map_err(|load_error| {
+        error!(
+            service = "api",
+            address = %address,
+            namespace = %namespace,
+            coin_type = %coin_type,
+            error = ?load_error,
+            "failed to lock route-local primary-name readback tuple"
+        );
+        ApiError::internal_error(format!(
+            "failed to load persisted verified primary-name outcome for address {address}"
+        ))
+    })?;
     let anchor_exists = sqlx::query_scalar::<_, bool>(
         r#"
         SELECT EXISTS (

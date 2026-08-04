@@ -48,6 +48,28 @@ fn unrecognized_permission_summary_coverage_fails_closed() {
     );
 }
 
+#[test]
+fn schema_v2_derivation_coverage_does_not_claim_permission_authority() {
+    let mut summary = permission_current_resource_summary(Uuid::nil(), Some("registrar"));
+    summary.coverage = serde_json::from_value(json!({
+        "status": "projected",
+        "exhaustiveness": "not_asserted",
+        "source_classes_considered": ["permissions_current"],
+        "enumeration_basis": "resource_permissions",
+        "unsupported_reason": null,
+    }))
+    .expect("schema-v2 derivation coverage must decode");
+
+    let coverage = build_permissions_coverage_from_resource_summary(Some(&summary));
+
+    assert_eq!(coverage.status, "partial");
+    assert_eq!(coverage.exhaustiveness, "best_effort");
+    assert_eq!(
+        coverage.unsupported_reason.as_deref(),
+        Some("resource_permission_authority_not_projected")
+    );
+}
+
 #[tokio::test]
 async fn get_name_history_returns_canonical_only_rows_with_provenance_and_coverage() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

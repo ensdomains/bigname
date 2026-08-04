@@ -102,7 +102,7 @@ async fn healthz_returns_ready_within_probe_window_when_request_pool_is_exhauste
     let started = tokio::time::Instant::now();
     let response = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        openapi::app_router_with_health_pool(state, health_pool.clone()).oneshot(
+        app_router_with_health_pool(state, health_pool.clone()).oneshot(
             Request::builder()
                 .uri("/healthz")
                 .body(Body::empty())
@@ -147,7 +147,7 @@ async fn healthz_reports_degraded_within_probe_window_when_health_pool_is_exhaus
     let started = tokio::time::Instant::now();
     let response = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        openapi::app_router_with_health_pool(database.app_state(), health_pool.clone()).oneshot(
+        app_router_with_health_pool(database.app_state(), health_pool.clone()).oneshot(
             Request::builder()
                 .uri("/healthz")
                 .body(Body::empty())

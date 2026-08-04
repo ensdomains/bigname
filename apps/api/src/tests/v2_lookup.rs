@@ -415,6 +415,45 @@ async fn v2_lookup_reverse_detail_paginates_after_head_advance() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_lookup_reverse_counts_live_rows_instead_of_the_legacy_sidecar() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+
+    let poisoned = sqlx::query(
+        r#"
+        UPDATE address_names_current_identity_counts
+        SET total_count = 999
+        WHERE address = $1
+          AND roles = 'both'
+        "#,
+    )
+    .bind(address)
+    .execute(&database.pool)
+    .await?;
+    assert_eq!(poisoned.rows_affected(), 1);
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({
+            "profile": "detail",
+            "inputs": [{
+                "id": "addr",
+                "address": address,
+                "page_size": 1
+            }]
+        }),
+    )
+    .await?;
+
+    assert_eq!(payload["data"][0]["page"]["total_count"], json!(2));
+    assert_eq!(payload["data"][0]["page"]["has_more"], json!(true));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_lookup_omits_chain_with_missing_head_hash() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database
@@ -771,6 +810,8 @@ async fn v2_lookup_rejects_unmapped_pipeline_reason_values() -> Result<()> {
 #[tokio::test]
 async fn v2_lookup_reverse_relation_filters_owner_and_registrant_exactly() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
+    let (_count_guard, count_calls) =
+        crate::v2::support::identity_facade_count_test_hooks::install(&database.pool).await?;
     let address = "0x0000000000000000000000000000000000000abc";
     seed_identity_name(
         &database,
@@ -837,6 +878,11 @@ async fn v2_lookup_reverse_relation_filters_owner_and_registrant_exactly() -> Re
         json!(["registrant"])
     );
     assert_eq!(registrant["data"][0]["page"]["total_count"], Value::Null);
+    assert_eq!(
+        count_calls.count(),
+        0,
+        "post-filtered reverse lookups must not execute a discarded live count"
+    );
 
     database.cleanup().await?;
     Ok(())

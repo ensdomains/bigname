@@ -42,6 +42,7 @@ pub enum PermissionCoverageStatus {
     Full,
     Partial,
     Unsupported,
+    Projected,
 }
 
 impl PermissionCoverageStatus {
@@ -50,6 +51,7 @@ impl PermissionCoverageStatus {
             Self::Full => "full",
             Self::Partial => "partial",
             Self::Unsupported => "unsupported",
+            Self::Projected => "projected",
         }
     }
 }
@@ -60,6 +62,7 @@ pub enum PermissionCoverageExhaustiveness {
     Authoritative,
     BestEffort,
     NotApplicable,
+    NotAsserted,
 }
 
 impl PermissionCoverageExhaustiveness {
@@ -68,6 +71,7 @@ impl PermissionCoverageExhaustiveness {
             Self::Authoritative => "authoritative",
             Self::BestEffort => "best_effort",
             Self::NotApplicable => "not_applicable",
+            Self::NotAsserted => "not_asserted",
         }
     }
 }
@@ -95,8 +99,8 @@ impl PermissionCoverageUnsupportedReason {
 /// Typed coverage vocabulary persisted by the permission resource summary.
 ///
 /// JSONB remains the storage representation, but construction and decoding are constrained to
-/// the three documented coverage states. Unknown wire strings fail decoding instead of silently
-/// downgrading a public response.
+/// the documented legacy coverage states plus the schema-v2 derivation-only state. Unknown wire
+/// strings fail decoding instead of silently downgrading a public response.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ResourcePermissionCoverage {
     status: PermissionCoverageStatus,
@@ -186,6 +190,10 @@ impl ResourcePermissionCoverage {
                 Some(
                     PermissionCoverageUnsupportedReason::Ensv1WrapperHolderPermissionsNotProjected
                 )
+            ) | (
+                PermissionCoverageStatus::Projected,
+                PermissionCoverageExhaustiveness::NotAsserted,
+                None
             )
         );
         if !supported_combination {

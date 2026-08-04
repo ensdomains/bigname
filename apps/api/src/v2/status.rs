@@ -4,6 +4,9 @@ use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
+#[cfg(test)]
+use super::support::status_freshness::NetworkHeadStatus;
+use super::support::status_freshness::{NetworkHeadComparison, StatusReadiness, status_readiness};
 use crate::AppState;
 
 use super::{
@@ -98,7 +101,7 @@ fn status_chain_key(storage_chain_id: &str) -> V2Result<String> {
 
 fn build_chain_status(
     row: &bigname_storage::IndexingStatusChainRow,
-    network_head: crate::status_freshness::NetworkHeadComparison,
+    network_head: NetworkHeadComparison,
 ) -> ChainStatus {
     let lag_blocks = row
         .canonical_block
@@ -136,17 +139,12 @@ fn chain_status(
     latest_block: Option<i64>,
     indexed_block: Option<i64>,
     lag_blocks: Option<i64>,
-    network_head: &crate::status_freshness::NetworkHeadComparison,
+    network_head: &NetworkHeadComparison,
 ) -> OpsStatus {
-    match crate::status_freshness::status_readiness(
-        latest_block,
-        indexed_block,
-        lag_blocks,
-        network_head,
-    ) {
-        crate::status_freshness::StatusReadiness::Ready => OpsStatus::Ready,
-        crate::status_freshness::StatusReadiness::Degraded => OpsStatus::Degraded,
-        crate::status_freshness::StatusReadiness::Stale => OpsStatus::Stale,
+    match status_readiness(latest_block, indexed_block, lag_blocks, network_head) {
+        StatusReadiness::Ready => OpsStatus::Ready,
+        StatusReadiness::Degraded => OpsStatus::Degraded,
+        StatusReadiness::Stale => OpsStatus::Stale,
     }
 }
 
@@ -305,8 +303,8 @@ mod tests {
         );
         let status = build_chain_status(
             &row,
-            crate::status_freshness::NetworkHeadComparison {
-                status: crate::status_freshness::NetworkHeadStatus::Fresh,
+            NetworkHeadComparison {
+                status: NetworkHeadStatus::Fresh,
                 block: Some(99),
                 observed_at: None,
                 age_seconds: Some(0),
