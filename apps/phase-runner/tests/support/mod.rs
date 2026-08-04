@@ -73,7 +73,8 @@ impl ScratchDatabase {
                      NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT
                      NOREPLICATION NOBYPASSRLS;
              EXCEPTION
-                 WHEN duplicate_object THEN NULL;
+                 -- Concurrent CREATE ROLE can surface 23505 at the catalog index; either error means the role exists.
+                 WHEN duplicate_object OR unique_violation THEN NULL;
              END
              $test_role$",
         )
