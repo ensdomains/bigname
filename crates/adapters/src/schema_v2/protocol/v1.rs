@@ -46,6 +46,15 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
         .normalized_events
         .iter()
         .filter(|event| event.event_kind == "RegistrationGranted")
+        // A first-seen renewal also synthesizes RegistrationGranted for persistence, but only
+        // NameRegistered is a same-transaction registration setup.
+        .filter(|event| {
+            event
+                .after_state
+                .get("source_event")
+                .and_then(serde_json::Value::as_str)
+                == Some("NameRegistered")
+        })
         .filter_map(|event| {
             let registrant = event
                 .after_state
@@ -275,6 +284,8 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
         }) {
             event.logical_name_id = Some(logical_name_id.clone());
             event.resource_id = Some(resource_id);
+            // Retargeting intentionally records the authority established by NameRegistered, not
+            // the authority present when the earlier setup log was emitted.
             event.before_state = serde_json::json!({});
             if let Some(authority_key) = authority_key.as_deref() {
                 retarget_permission_authority(&mut event.after_state, authority_key);

@@ -1355,6 +1355,493 @@ fn first_seen_renewal_synthesizes_the_retained_registration_anchor() -> anyhow::
 }
 
 #[test]
+fn synthetic_renewal_grant_restore_matches_live_registry_authority() -> anyhow::Result<()> {
+    assert_registration_grant_restore_matches_live(false)
+}
+
+#[test]
+fn registration_grant_restore_matches_live_registrar_authority() -> anyhow::Result<()> {
+    assert_registration_grant_restore_matches_live(true)
+}
+
+#[test]
+fn same_transaction_synthetic_renewal_restore_matches_live_registry_authority() -> anyhow::Result<()>
+{
+    const REGISTRY: &str = "0x0000000000000000000000000000000000000043";
+
+    let label = "same-transaction-renewal";
+    let labelhash = keccak256(label.as_bytes());
+    let parent_node = super::common::namehash(&["eth".to_owned()]).parse::<B256>()?;
+    let node = super::common::namehash(&[label.to_owned(), "eth".to_owned()]);
+    let registry_owner = "0x0000000000000000000000000000000000000007";
+    let mut registry_admission = admission(62, "registry");
+    registry_admission.address = REGISTRY.to_owned();
+    let manifests = vec![
+        manifest_with_events(
+            62,
+            "ens",
+            "ens_v1_registry_l1",
+            &[
+                (
+                    "NewOwner",
+                    "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+                    &["registry"],
+                    &["SubregistryChanged", "AuthorityTransferred"],
+                ),
+                (
+                    "NewResolver",
+                    "event NewResolver(bytes32 indexed node, address resolver)",
+                    &["registry"],
+                    &["ResolverChanged"],
+                ),
+            ],
+        ),
+        manifest(
+            63,
+            "ens_v1_registrar_l1",
+            "NameRenewed",
+            "event NameRenewed(string name, bytes32 indexed label, uint256 expires)",
+            &["registrar"],
+            &["RegistrationGranted"],
+        ),
+    ];
+    let admissions = vec![registry_admission, admission(63, "registrar")];
+    let first = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: manifests.clone(),
+        discovery_rules: Vec::new(),
+        admissions: admissions.clone(),
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            raw_at_transaction(
+                v1_registry::NewOwner {
+                    node: parent_node,
+                    label: labelhash,
+                    owner: registry_owner.parse()?,
+                }
+                .encode_log_data(),
+                1,
+                0,
+                0,
+                REGISTRY,
+            ),
+            raw_at_transaction(
+                NameRenewed {
+                    name: label.to_owned(),
+                    label: labelhash,
+                    expires: U256::from(42),
+                }
+                .encode_log_data(),
+                1,
+                0,
+                1,
+                CONTRACT,
+            ),
+            raw_at_transaction(
+                v1_registry::NewResolver {
+                    node: node.parse()?,
+                    resolver: CONTRACT.parse()?,
+                }
+                .encode_log_data(),
+                1,
+                1,
+                2,
+                REGISTRY,
+            ),
+        ],
+    })?;
+    let live_resource = first
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "ResolverChanged"
+                && event.after_state["source_event"] == "NewResolver"
+        })
+        .and_then(|event| event.resource_id)
+        .expect("live resolver resource");
+    let prior_events = seam::fold_prior_events(
+        Vec::new(),
+        &first.normalized_events,
+        &[RawBlockInput {
+            chain_id: CHAIN.to_owned(),
+            block_hash: "block-1".to_owned(),
+            block_number: 1,
+            block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1),
+            canonicality_state: "canonical".to_owned(),
+        }],
+    )?;
+    let restored = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests,
+        discovery_rules: Vec::new(),
+        admissions,
+        prior_events,
+        blocks: Vec::new(),
+        raw_logs: vec![raw_at(
+            v1_registry::NewResolver {
+                node: node.parse()?,
+                resolver: registry_owner.parse()?,
+            }
+            .encode_log_data(),
+            2,
+            0,
+            REGISTRY,
+        )],
+    })?;
+    let restored_resource = restored
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "ResolverChanged"
+                && event.after_state["source_event"] == "NewResolver"
+        })
+        .and_then(|event| event.resource_id)
+        .expect("restored resolver resource");
+
+    assert_eq!(
+        restored_resource, live_resource,
+        "compacted restore must preserve the registry-only authority selected live",
+    );
+    Ok(())
+}
+
+#[test]
+fn compacted_set_owner_convergence_restore_matches_live_registrar_authority() -> anyhow::Result<()>
+{
+    const REGISTRY: &str = "0x0000000000000000000000000000000000000043";
+    const USER: &str = "0x0000000000000000000000000000000000000047";
+    const DIVERGED_OWNER: &str = "0x0000000000000000000000000000000000000048";
+
+    let label = "compacted-convergence";
+    let labelhash = keccak256(label.as_bytes());
+    let parent_node = super::common::namehash(&["eth".to_owned()]).parse::<B256>()?;
+    let node = super::common::namehash(&[label.to_owned(), "eth".to_owned()]);
+    let mut registry_admission = admission(64, "registry");
+    registry_admission.address = REGISTRY.to_owned();
+    let manifests = vec![
+        manifest_with_events(
+            64,
+            "ens",
+            "ens_v1_registry_l1",
+            &[
+                (
+                    "NewOwner",
+                    "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+                    &["registry"],
+                    &["SubregistryChanged", "AuthorityTransferred"],
+                ),
+                (
+                    "Transfer",
+                    "event Transfer(bytes32 indexed node, address owner)",
+                    &["registry"],
+                    &["AuthorityTransferred"],
+                ),
+                (
+                    "NewResolver",
+                    "event NewResolver(bytes32 indexed node, address resolver)",
+                    &["registry"],
+                    &["ResolverChanged"],
+                ),
+            ],
+        ),
+        manifest(
+            65,
+            "ens_v1_registrar_l1",
+            "NameRegistered",
+            "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+            &["registrar"],
+            &["RegistrationGranted"],
+        ),
+    ];
+    let admissions = vec![registry_admission, admission(65, "registrar")];
+    let block = |block_number| RawBlockInput {
+        chain_id: CHAIN.to_owned(),
+        block_hash: format!("block-{block_number}"),
+        block_number,
+        block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(block_number),
+        canonicality_state: "canonical".to_owned(),
+    };
+    let registered = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: manifests.clone(),
+        discovery_rules: Vec::new(),
+        admissions: admissions.clone(),
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            raw_at_transaction(
+                v1_registry::NewOwner {
+                    node: parent_node,
+                    label: labelhash,
+                    owner: CONTRACT.parse()?,
+                }
+                .encode_log_data(),
+                1,
+                0,
+                0,
+                REGISTRY,
+            ),
+            raw_at_transaction(
+                v1_registry::Transfer {
+                    node: node.parse()?,
+                    owner: USER.parse()?,
+                }
+                .encode_log_data(),
+                1,
+                0,
+                1,
+                REGISTRY,
+            ),
+            raw_at_transaction(
+                NameRegistered {
+                    name: label.to_owned(),
+                    label: labelhash,
+                    owner: USER.parse()?,
+                    expires: U256::from(42),
+                }
+                .encode_log_data(),
+                1,
+                0,
+                2,
+                CONTRACT,
+            ),
+        ],
+    })?;
+    let registrar_resource = registered
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RegistrationGranted")
+        .and_then(|event| event.resource_id)
+        .expect("registrar resource");
+    let registered_prior =
+        seam::fold_prior_events(Vec::new(), &registered.normalized_events, &[block(1)])?;
+    let diverged = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: manifests.clone(),
+        discovery_rules: Vec::new(),
+        admissions: admissions.clone(),
+        prior_events: registered_prior.clone(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw_at(
+            v1_registry::Transfer {
+                node: node.parse()?,
+                owner: DIVERGED_OWNER.parse()?,
+            }
+            .encode_log_data(),
+            2,
+            0,
+            REGISTRY,
+        )],
+    })?;
+    let diverged_prior =
+        seam::fold_prior_events(registered_prior, &diverged.normalized_events, &[block(2)])?;
+    let converged = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: manifests.clone(),
+        discovery_rules: Vec::new(),
+        admissions: admissions.clone(),
+        prior_events: diverged_prior.clone(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw_at(
+            v1_registry::Transfer {
+                node: node.parse()?,
+                owner: USER.parse()?,
+            }
+            .encode_log_data(),
+            3,
+            0,
+            REGISTRY,
+        )],
+    })?;
+    assert!(converged.normalized_events.iter().any(|event| {
+        event.event_kind == "SurfaceBound" && event.resource_id == Some(registrar_resource)
+    }));
+    let compacted =
+        seam::fold_prior_events(diverged_prior, &converged.normalized_events, &[block(3)])?;
+    let restored = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests,
+        discovery_rules: Vec::new(),
+        admissions,
+        prior_events: compacted,
+        blocks: Vec::new(),
+        raw_logs: vec![raw_at(
+            v1_registry::NewResolver {
+                node: node.parse()?,
+                resolver: USER.parse()?,
+            }
+            .encode_log_data(),
+            4,
+            0,
+            REGISTRY,
+        )],
+    })?;
+    let restored_resource = restored
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "ResolverChanged"
+                && event.after_state["source_event"] == "NewResolver"
+        })
+        .and_then(|event| event.resource_id)
+        .expect("restored resolver resource");
+
+    assert_eq!(
+        restored_resource, registrar_resource,
+        "compacted convergence must restore the live registrar authority",
+    );
+    Ok(())
+}
+
+fn assert_registration_grant_restore_matches_live(registration: bool) -> anyhow::Result<()> {
+    let label = if registration {
+        "registered-restore"
+    } else {
+        "renewed-restore"
+    };
+    let labelhash = keccak256(label.as_bytes());
+    let namehash = super::common::namehash(&[label.to_owned(), "eth".to_owned()]);
+    let registry_resource =
+        super::common::stable_uuid(&format!("resource:registry-only:{CHAIN}:{namehash}"));
+    let registry_owner = "0x0000000000000000000000000000000000000007";
+    let registrant = "0x0000000000000000000000000000000000000008";
+    let registry_prior = PriorEventInput {
+        retained_state_key: format!("registry-prior:{namehash}"),
+        chain_id: CHAIN.to_owned(),
+        namespace: "ens".to_owned(),
+        logical_name_id: Some(format!("ens:{namehash}")),
+        resource_id: Some(registry_resource),
+        event_kind: "AuthorityTransferred".to_owned(),
+        source_family: "ens_v1_registry_l1".to_owned(),
+        manifest_version: 1,
+        source_manifest_id: None,
+        state_scope: Some(format!("registry:{namehash}")),
+        block_timestamp: Some(OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1)),
+        after_state: json!({
+            "source_event":"NewOwner",
+            "child_node":namehash,
+            "labelhash":format!("{labelhash:#x}"),
+            "owner":registry_owner,
+            "authority_kind":"registry_only",
+            "authority_key":format!("registry-only:{CHAIN}:{namehash}"),
+        }),
+    };
+    let (manifest, raw) = if registration {
+        (
+            manifest(
+                61,
+                "ens_v1_registrar_l1",
+                "NameRegistered",
+                "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+                &["registrar"],
+                &["RegistrationGranted"],
+            ),
+            raw_at(
+                NameRegistered {
+                    name: label.to_owned(),
+                    label: labelhash,
+                    owner: registrant.parse()?,
+                    expires: U256::from(42),
+                }
+                .encode_log_data(),
+                2,
+                0,
+                CONTRACT,
+            ),
+        )
+    } else {
+        (
+            manifest(
+                61,
+                "ens_v1_registrar_l1",
+                "NameRenewed",
+                "event NameRenewed(string name, bytes32 indexed label, uint256 expires)",
+                &["registrar"],
+                &["RegistrationGranted"],
+            ),
+            raw_at(
+                NameRenewed {
+                    name: label.to_owned(),
+                    label: labelhash,
+                    expires: U256::from(42),
+                }
+                .encode_log_data(),
+                2,
+                0,
+                CONTRACT,
+            ),
+        )
+    };
+    let catalog =
+        super::catalog::Catalog::new(vec![manifest], Vec::new(), vec![admission(61, "registrar")])?;
+    let selected = catalog.select(&raw)?.expect("selected registrar event");
+    let mut live_state = super::state::State::new(vec![registry_prior.clone()], Vec::new());
+    let interpreted = super::protocol::interpret(&selected, &raw, &mut live_state)?;
+    let grant = interpreted
+        .events
+        .into_iter()
+        .find(|event| event.event_kind == "RegistrationGranted")
+        .expect("registration grant");
+    let restored_grant = PriorEventInput {
+        retained_state_key: format!("registration-grant:{namehash}"),
+        chain_id: CHAIN.to_owned(),
+        namespace: selected.source.namespace.clone(),
+        logical_name_id: grant.logical_name_id,
+        resource_id: grant.resource_id,
+        event_kind: grant.event_kind,
+        source_family: selected.source.source_family.clone(),
+        manifest_version: selected.source.manifest_version,
+        source_manifest_id: Some(selected.source.manifest_id),
+        state_scope: Some(grant.state_scope),
+        block_timestamp: Some(raw.block_timestamp),
+        after_state: grant.after_state,
+    };
+    let restored_state = super::state::State::new(vec![registry_prior, restored_grant], Vec::new());
+
+    assert_eq!(
+        v1_state_snapshot(live_state.v1_name("ens", &namehash)),
+        v1_state_snapshot(restored_state.v1_name("ens", &namehash)),
+        "restored current authority must match live processing",
+    );
+    assert_eq!(
+        v1_state_snapshot(live_state.v1_registrar("ens", &namehash)),
+        v1_state_snapshot(restored_state.v1_registrar("ens", &namehash)),
+        "restored registrar anchor must match live processing",
+    );
+    let expected_family = if registration {
+        "ens_v1_registrar_l1"
+    } else {
+        "ens_v1_registry_l1"
+    };
+    assert_eq!(
+        live_state
+            .v1_name("ens", &namehash)
+            .expect("live current authority")
+            .authority_source_family,
+        expected_family,
+    );
+    Ok(())
+}
+
+fn v1_state_snapshot(state: Option<super::state::V1NameState>) -> serde_json::Value {
+    state.map_or(serde_json::Value::Null, |state| {
+        json!({
+            "logical_name_id":state.logical_name_id,
+            "surface_known":state.surface_known,
+            "resource_id":state.resource_id,
+            "token_lineage_id":state.token_lineage_id,
+            "authority_source_family":state.authority_source_family,
+            "source_manifest_id":state.source_manifest_id,
+            "labelhash":state.labelhash,
+            "expiry":state.expiry,
+            "owner":state.owner,
+            "authority_key":state.authority_key,
+        })
+    })
+}
+
+#[test]
 fn registry_created_emits_the_ruled_self_edge() -> anyhow::Result<()> {
     let encoded = RegistryCreated {}.encode_log_data();
     let output = interpret_test_batch(BatchInput {
@@ -2170,7 +2657,7 @@ fn incomplete_registration_event(
 fn registration_without_registrant_cannot_silently_skip_reconciliation() {
     let mut output = BatchOutput {
         normalized_events: vec![incomplete_registration_event(
-            json!({}),
+            json!({"source_event":"NameRegistered"}),
             json!({"emitting_address":"0x0000000000000000000000000000000000000001"}),
         )],
         ..BatchOutput::default()
@@ -2183,7 +2670,10 @@ fn registration_without_registrant_cannot_silently_skip_reconciliation() {
 fn registration_without_emitter_cannot_silently_skip_reconciliation() {
     let mut output = BatchOutput {
         normalized_events: vec![incomplete_registration_event(
-            json!({"registrant":"0x0000000000000000000000000000000000000001"}),
+            json!({
+                "source_event":"NameRegistered",
+                "registrant":"0x0000000000000000000000000000000000000001",
+            }),
             json!({}),
         )],
         ..BatchOutput::default()

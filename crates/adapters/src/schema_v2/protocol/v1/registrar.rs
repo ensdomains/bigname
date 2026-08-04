@@ -345,14 +345,11 @@ fn name_event(
         "labelhash".to_owned(),
         Value::String(format!("{explicit_labelhash:#x}")),
     );
-    after_object.insert(
-        "token_lineage_id".to_owned(),
-        Value::String(token_lineage_id.to_string()),
-    );
-    if !after_object.contains_key("registrant")
-        && let Some(owner) = owner
-    {
-        after_object.insert("registrant".to_owned(), Value::String(owner));
+    after_object.insert("token_lineage_id".to_owned(), json!(token_lineage_id));
+    if let Some(owner) = owner.as_ref() {
+        after_object
+            .entry("registrant")
+            .or_insert_with(|| json!(owner));
     }
     if let Some(authority_key) = retained_authority_key.as_ref() {
         after_object.insert(
@@ -388,6 +385,8 @@ fn name_event(
             .iter_mut()
             .find(|event| event.event_kind == "RegistrationGranted")
         {
+            // Retain the live owner because compacted registry facts can restore after this anchor.
+            grant.after_state["authority_owner"] = json!(owner);
             grant.explicit_before = Some(json!({
                 "authority_kind":previous_active.as_ref().map(super::registry::authority_kind),
                 "registrant":prior_registrar.as_ref().and_then(|state| state.owner.clone()),
