@@ -50,13 +50,21 @@ pub(crate) async fn batch_input(
             InterpretError::database("failed to configure interpret input snapshot", error)
         })?;
     validate_snapshot_resume_marker(&mut transaction, chain_id, resume_marker).await?;
+    let orphaning_epoch = cache::orphaning_epoch(&mut transaction, chain_id).await?;
     let prior_snapshot = match prior_snapshot {
-        Some(snapshot)
-            if cache::dependencies_are_live(&mut transaction, chain_id, &snapshot).await? =>
-        {
-            snapshot
+        Some(snapshot) => {
+            match cache::revalidate(&mut transaction, chain_id, snapshot, orphaning_epoch).await? {
+                Some(snapshot) => snapshot,
+                None => cache::freshly_loaded(
+                    prior::events(&mut transaction, chain_id, from_block).await?,
+                    orphaning_epoch,
+                ),
+            }
         }
-        _ => prior::events(&mut transaction, chain_id, from_block).await?,
+        None => cache::freshly_loaded(
+            prior::events(&mut transaction, chain_id, from_block).await?,
+            orphaning_epoch,
+        ),
     };
     let manifests = load_manifests(&mut transaction, chain_id).await?;
     if manifests.is_empty() {

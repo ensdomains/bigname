@@ -261,8 +261,7 @@ BEGIN
 
     -- Add exact exceptions only after maintainer authorization.
     WITH maintainer_authorized_allowlist(table_name, column_name) AS (
-        SELECT NULL::text, NULL::text
-        WHERE FALSE
+        VALUES ('chain_heads', 'lineage_orphaning_epoch')
     )
     SELECT string_agg(
         format('%I.%I', actual.table_name, actual.column_name),
@@ -484,6 +483,26 @@ BEGIN
                   AND tgname =
                       'chain_lineage_enforce_canonicality_transition'
                   AND NOT tgisinternal
+            )
+        UNION ALL
+        SELECT
+            'chain heads carry a nonnegative lineage orphaning epoch',
+            EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'chain_heads'
+                  AND column_name = 'lineage_orphaning_epoch'
+                  AND data_type = 'bigint'
+                  AND is_nullable = 'NO'
+                  AND column_default IN ('0', '0::bigint')
+            )
+            AND EXISTS (
+                SELECT 1
+                FROM pg_constraint
+                WHERE conrelid = 'chain_heads'::regclass
+                  AND conname = 'chain_heads_lineage_orphaning_epoch_check'
+                  AND contype = 'c'
             )
         UNION ALL
         SELECT
@@ -1085,6 +1104,28 @@ BEGIN
         'jump-block-1',
         1
     );
+
+    IF (
+        SELECT lineage_orphaning_epoch
+        FROM chain_heads
+        WHERE chain_id = 'schema-v2-checkpoint-jump'
+    ) <> 0 THEN
+        RAISE EXCEPTION 'chain head orphaning epoch did not start at zero';
+    END IF;
+
+    BEGIN
+        UPDATE chain_heads
+        SET lineage_orphaning_epoch = -1
+        WHERE chain_id = 'schema-v2-checkpoint-jump';
+        RAISE EXCEPTION 'chain head accepted a negative orphaning epoch';
+    EXCEPTION
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "chain_heads_lineage_orphaning_epoch_check"%'
+            THEN
+                RAISE;
+            END IF;
+    END;
 
     IF (
         SELECT array_agg(

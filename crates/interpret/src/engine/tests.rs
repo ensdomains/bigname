@@ -7,6 +7,8 @@ fn empty_snapshot() -> PriorSnapshot {
     PriorSnapshot {
         events: Vec::new(),
         dependencies: BTreeMap::new(),
+        validated_orphaning_epoch: 0,
+        pending_dependencies: Default::default(),
     }
 }
 

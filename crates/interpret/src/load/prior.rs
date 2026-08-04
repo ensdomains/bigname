@@ -147,5 +147,7 @@ pub(super) async fn events(
     Ok(PriorSnapshot {
         events,
         dependencies,
+        validated_orphaning_epoch: 0,
+        pending_dependencies: Default::default(),
     })
 }
