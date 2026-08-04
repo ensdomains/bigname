@@ -1,4 +1,4 @@
-use bigname_execution::ChainRpcUrls;
+use bigname_lookup::ChainRpcUrls;
 use serde_json::{Map, Value, json};
 use sqlx::PgPool;
 

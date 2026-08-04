@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use bigname_domain::normalization::normalize_name;
-use bigname_execution::{
+use bigname_lookup::{
     ChainRpcUrls, EnsReverseNameMulticallBlock, EnsReverseNameMulticallRequest,
     EnsReverseNameMulticallResult, MULTICALL3_ADDRESS, execute_ens_reverse_name_multicall,
 };

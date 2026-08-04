@@ -132,8 +132,11 @@ Rust writers, readers, and checkpoint-promotion path were deleted in Stage B.
 says: indexed onchain events, plus the documented hydration of event-silent
 contracts from pinned calls (see Hydration, Event-silent). *Verified* state is
 what actually executing resolution (e.g. through the ENS Universal Resolver)
-returns, persisted with a full execution trace. The two are never merged;
-`mode`/`source` selects which a route returns.
+returns. The retained v1 API persists verified outcomes with full execution
+traces until Stage C; its schema-v2 successor returns the live result without
+caching it and persists only a direct-answer disagreement in the
+[resolution divergence ledger](#resolution-divergence-ledger). The two are
+never merged; `mode`/`source` selects which a route returns.
 
 **Deployment epoch** (`deployment_epoch`) — the manifest label naming which
 protocol deployment generation a source family belongs to (for example
@@ -296,6 +299,13 @@ canonical normalized observations, but does not assert exhaustive history or
 event-to-call parity. Unknown or mismatched resolvers are explicitly
 unsupported. See [source manifests](manifests.md#required-fields).
 
+**Resolution divergence ledger** — the schema-v2 audit table that records only
+when a direct, hash-pinned resolution answer disagrees with the exact indexed
+record entry used for comparison. It is not a result cache: agreement writes
+nothing, wildcard resolution without an exact comparison row writes nothing,
+and any answer that used CCIP-read is never stored. A write succeeds only while
+the compared projection row and its canonical block lineage remain unchanged.
+
 **Resource** (backing resource, `resource_id`) — the authority object behind a
 name: a registry entry, registrar lease, wrapper position, or ENSv2 EAC
 resource
@@ -345,18 +355,20 @@ still-live lease — resumes that anchor's prior lineage, but not after release
 or across mismatched holder/controller authority: a name that fully lapses and
 is re-registered mints a new lineage.
 
-**Verified execution / execution trace** — running actual resolution calls and
-persisting a durable step-by-step audit record (entrypoint, calls, CCIP steps,
-proofs, result). Traces are permanent except for the bounded ENS/60
-missing-tuple retention rule in [`storage.md`](storage.md#execution-storage);
-otherwise only cache reusability expires. A
-persisted outcome is reused only while its request tuple, selected chain
-positions, manifest versions, topology boundary, and record boundary still
-match; reorgs and manifest, resolver, topology, record, or primary-claim
-changes evict affected entries. A verified-primary route-local result for an
-absent projection tuple has no projected topology or record identity; its two
-execution-cache boundary fields explicitly carry the selected checkpoint
-instead.
+**Verified execution / execution trace** — verified execution runs actual
+resolution calls. An execution trace is the retained v1 subsystem's durable
+step-by-step audit record (entrypoint, calls, CCIP steps, proofs, result).
+Those traces are permanent except for the bounded ENS/60 missing-tuple
+retention rule in [`storage.md`](storage.md#execution-storage); otherwise only
+legacy cache reusability expires. A retained v1 outcome is reused only while
+its request tuple, selected chain positions, manifest versions, topology
+boundary, and record boundary still match; reorgs and manifest, resolver,
+topology, record, or primary-claim changes evict affected entries. A
+verified-primary route-local result for an absent projection tuple has no
+projected topology or record identity; its two execution-cache boundary fields
+explicitly carry the selected checkpoint instead. The schema-v2 successor
+creates neither traces nor reusable outcomes; its only durable execution-side
+output is the resolution divergence ledger.
 
 **Walking skeleton** — the standard XP term for a minimal end-to-end path
 proving all layers connect. In this repo it names the first e2e scenario

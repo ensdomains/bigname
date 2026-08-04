@@ -149,14 +149,17 @@ For ENSv2, `resource_id` keys by `(chain_id, registry_contract_instance_id, upst
 | `manifest_alert_*` | worker audit | Manifest-drift and proxy observations; not admission truth. |
 | `service_loop_heartbeats` | worker | Current worker liveness. The API still reads retained old-indexer process/chain rows until its readiness port. |
 | `execution_*` | execution worker; documented API cache-miss persistence | Durable traces, steps, cache outcomes, and invalidation records. |
+| `resolution_divergences` | schema-v2 lookup engine, triggered by its future Stage C API caller | Rows in the [resolution divergence ledger](glossary.md#resolution-divergence-ledger): direct live/indexed disagreements only. The compared exact `record_inventory_current` row is guarded through commit; CCIP answers are excluded. |
 | `backfill_*` | no current writer | Immutable migration-era jobs and ranges; storage retains read-only worker inspection. |
 | `normalized_replay_*` | no current writer | Migration-era replay/checkpoint state. The worker still reads selected cursors for projection readiness and raw staging compaction. |
 | `base_normalized_rederive_*`, resolver-profile queues/journals/reconciliation, retained-history/coverage/frontier tables, startup adapter checkpoints | no current writer | Stranded transitional schema retained only because migrations are immutable. These rows are not current admission, readiness, replay, or repair authority. |
 | `name_surface_normalization_repair_findings` | no current writer | Historical audit rows from the deleted indexer repair command. |
 
-The API is otherwise read-only over projections and execution output, except for
-its documented on-demand verified-resolution persistence path. It does not gain
-a raw-fact or legacy operational-table fallback.
+The retained API is otherwise read-only over projections and execution output,
+except for its documented legacy on-demand verified-resolution persistence
+path. At the Stage C cutover, that exception narrows to the schema-v2
+divergence-ledger write described below. Neither path grants a raw-fact or
+legacy operational-table fallback.
 
 The worker continues to update its process and named rebuild-phase heartbeat
 rows at bounded projection progress points. Existing API readiness code also
@@ -508,6 +511,27 @@ If the selected positions are valid but no eligible projection or persisted exec
 
 ## Execution storage
 
+The schema-v2 successor has no execution cache, durable trace, revalidation
+state, or persisted request-validation state. For direct and alias paths, it
+reads the exact `record_inventory_current` row identified by the projected
+record-version boundary's `resource_id`, compares each direct hash-pinned
+answer with that row's exact record entry, and calls
+`write_resolution_divergence` only for a disagreement. A supported wildcard
+lookup can execute without an exact inventory row; it then has no comparison
+target and performs no ledger write or clear rather than comparing the request
+with its wildcard ancestor's inventory. The function takes the inventory
+primary key plus the `xmin` observed during the read, locks that row, and
+rejects a changed or removed row. Before inserting a disagreement or clearing
+one after restored agreement, it also locks every observed canonical-lineage
+row; a reorged observation rejects the mutation. Active divergence anchors are
+automatically cleared by a later reorg. CCIP participation short-circuits
+before the guard and any ledger write or clear.
+This narrow write is authorized by
+[`simplification-build-plan-20260730.md` § B6](../simplification-build-plan-20260730.md#stage-b--port-the-keep-set).
+
+The remaining execution tables and rules in this section describe the legacy
+crate and retained v1 API until Stage C.
+
 Inline in Postgres for small payloads:
 
 - request metadata
@@ -643,8 +667,10 @@ Worker-owned, read-only operational tooling reads storage audit helpers and rend
   projection rows.
 - Projection workers own current read models, replay staging, apply cursors,
   invalidation journals, and worker heartbeats.
-- Execution workers own traces, steps, and normal cache outcomes, with the
-  documented API on-demand verified-resolution cache-miss exception.
+- Legacy execution workers own traces, steps, and normal cache outcomes, with
+  the retained v1 API on-demand verified-resolution cache-miss exception until
+  Stage C. The schema-v2 lookup engine owns only guarded divergence-ledger
+  writes; its future API caller remains otherwise read-only.
 - The API reads projections and execution output. It has no general raw-fact or
   legacy operational-table fallback; explicit audit endpoints remain the only
   documented exception.

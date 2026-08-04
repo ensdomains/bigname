@@ -21,7 +21,7 @@ bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The 
 - Schema-v2 interpret writes identity rows, discovery edges, and normalized
   events. Adapters provide interpretation behavior and do not write projection
   rows.
-- API code reads projections and execution output only, except explicit audit endpoints and documented on-demand verified-resolution cache-miss writes through execution persistence.
+- API code reads projections and execution output only, except explicit audit endpoints, the retained v1 on-demand verified-resolution cache-miss write until Stage C, and the schema-v2 [resolution divergence ledger](docs/glossary.md#resolution-divergence-ledger) write after cutover.
 - Execution code uses declared topology and manifests, not adapter internals.
 - Manifest and discovery code decides what is authoritative.
 - Raw facts are immutable. Projections are rebuildable. Canonicality is explicit. Execution artifacts are durable. Unsupported behavior must be explicit.

@@ -142,7 +142,32 @@ decoding round-trips to them. A later preimage upgrades the same child row.
 
 ## Live/indexed resolution differences
 
-`resolution_divergences` stores a row only when a live resolver answer differs from the indexed answer at the recorded positions, and it keeps at most one unresolved row for each exact name, resolver, and request. Lookup execution pins each involved chain to its newest processed block, so every recorded divergence position identifies an ingested block. Every active row must identify that block in `chain_lineage` with the same chain, hash, height, and timestamp and with readable canonicality; the strict position trigger remains required. The API execution path writes and clears rows; a chain canonicality change also clears every active row that observed the affected block. This reorg auto-clear rule was maintainer-ratified on 2026-07-31. Position validation locks those lineage rows through commit, so a concurrent canonicality change cannot miss an uncommitted API insert. Projection support logic and operators read the rows. The [no-outcome-cache decision](../simplification-audit-20260730.md#maintainer-question-list-consolidated-for-decision) authorizes this table as the only durable execution-adjacent store.
+`resolution_divergences` stores a row only when a live resolver answer differs
+from the exact indexed `record_inventory_current.entries` answer selected by
+the projected record boundary's `resource_id`. It keeps at most one unresolved
+row for each exact name, resolver, and record key. A wildcard lookup with no
+exact inventory comparison executes without ledger persistence and never
+compares the request with its wildcard ancestor's inventory. Lookup execution
+pins the authoritative name chain to its newest processed block. For
+Basenames, it also uses the timestamp-aligned Ethereum auxiliary position
+already stored on that `name_current` row. Every recorded divergence position
+therefore identifies an ingested block. Every active row must identify that
+block in `chain_lineage` with the same chain, hash, height, and timestamp and
+with readable canonicality; the strict position trigger remains required. The
+guarded writer locks the compared inventory row and accepts a mutation only
+while its `xmin` is unchanged from the read. Before inserting a disagreement or
+clearing one after restored agreement, it also locks every observed canonical
+lineage row and rejects a reorged observation. It refuses CCIP-participating
+results before the guard or any mutation. A later chain canonicality change
+clears every active row that observed the affected block. This reorg auto-clear
+rule was maintainer-ratified on 2026-07-31. Position validation locks those
+lineage rows through commit, so a concurrent canonicality change cannot miss
+an uncommitted lookup insert. Projection support logic and operators read the
+rows. The
+[B6 lookup-engine rule](../simplification-build-plan-20260730.md#stage-b--port-the-keep-set)
+and
+[no-outcome-cache decision](../simplification-audit-20260730.md#maintainer-question-list-consolidated-for-decision)
+authorize this table as the only durable execution-adjacent store.
 
 ## Ingest cursors and phase state
 

@@ -49,6 +49,138 @@ CREATE UNIQUE INDEX IF NOT EXISTS resolution_divergences_one_active_request_idx
     )
     WHERE cleared_at IS NULL;
 
+-- Authorized by simplification-build-plan-20260730.md § B6, lines 100-104.
+-- The compared projection row is locked until the caller's transaction ends.
+CREATE OR REPLACE FUNCTION write_resolution_divergence(
+    compared_resource_id uuid,
+    compared_boundary_key text,
+    compared_row_xmin text,
+    requested_logical_name_id text,
+    requested_resolver_chain_id text,
+    requested_resolver_address text,
+    requested_record_key text,
+    compared_positions jsonb,
+    indexed_answer jsonb,
+    live_answer jsonb,
+    used_ccip_read boolean
+)
+RETURNS text
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    position_slot text;
+    position_value jsonb;
+BEGIN
+    IF used_ccip_read THEN
+        RETURN 'ccip_skipped';
+    END IF;
+
+    PERFORM 1
+    FROM record_inventory_current
+    WHERE resource_id = compared_resource_id
+      AND record_version_boundary_key = compared_boundary_key
+      AND xmin::text = compared_row_xmin
+    FOR SHARE;
+
+    IF NOT FOUND THEN
+        RETURN 'guard_rejected';
+    END IF;
+
+    IF jsonb_typeof(compared_positions) IS DISTINCT FROM 'object'
+        OR compared_positions = '{}'::jsonb
+    THEN
+        RETURN 'guard_rejected';
+    END IF;
+
+    FOR position_slot, position_value IN
+        SELECT key, value
+        FROM jsonb_each(compared_positions)
+        ORDER BY key
+    LOOP
+        BEGIN
+            PERFORM 1
+            FROM chain_lineage
+            WHERE chain_id = position_value ->> 'chain_id'
+              AND block_hash = position_value ->> 'block_hash'
+              AND block_number =
+                  (position_value ->> 'block_number')::bigint
+              AND block_timestamp =
+                  (position_value ->> 'timestamp')::timestamptz
+              AND canonicality_state IN (
+                  'canonical',
+                  'safe',
+                  'finalized'
+              )
+            FOR SHARE;
+        EXCEPTION
+            WHEN data_exception THEN
+                RETURN 'guard_rejected';
+        END;
+
+        IF NOT FOUND THEN
+            RETURN 'guard_rejected';
+        END IF;
+    END LOOP;
+
+    IF indexed_answer = live_answer THEN
+        UPDATE resolution_divergences
+        SET cleared_at = GREATEST(statement_timestamp(), last_observed_at)
+        WHERE logical_name_id = requested_logical_name_id
+          AND resolver_chain_id = requested_resolver_chain_id
+          AND lower(resolver_address) = lower(requested_resolver_address)
+          AND request_kind = requested_record_key
+          AND cleared_at IS NULL;
+        IF FOUND THEN
+            RETURN 'cleared';
+        END IF;
+        RETURN 'agreement';
+    END IF;
+
+    UPDATE resolution_divergences
+    SET cleared_at = GREATEST(statement_timestamp(), last_observed_at)
+    WHERE logical_name_id = requested_logical_name_id
+      AND resolver_chain_id = requested_resolver_chain_id
+      AND lower(resolver_address) = lower(requested_resolver_address)
+      AND request_kind = requested_record_key
+      AND observed_positions <> compared_positions
+      AND cleared_at IS NULL;
+
+    INSERT INTO resolution_divergences (
+        logical_name_id,
+        resolver_chain_id,
+        resolver_address,
+        request_kind,
+        observed_positions,
+        indexed_result,
+        live_result
+    ) VALUES (
+        requested_logical_name_id,
+        requested_resolver_chain_id,
+        lower(requested_resolver_address),
+        requested_record_key,
+        compared_positions,
+        indexed_answer,
+        live_answer
+    )
+    ON CONFLICT (
+        logical_name_id,
+        resolver_chain_id,
+        resolver_address,
+        request_kind,
+        observed_positions
+    ) DO UPDATE
+    SET indexed_result = EXCLUDED.indexed_result,
+        live_result = EXCLUDED.live_result,
+        last_observed_at = GREATEST(
+            resolution_divergences.last_observed_at,
+            statement_timestamp()
+        ),
+        cleared_at = NULL;
+
+    RETURN 'written';
+END
+$$;
+
 CREATE OR REPLACE FUNCTION validate_resolution_divergence_positions()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -204,3 +336,7 @@ COMMENT ON COLUMN resolution_divergences.last_observed_at IS
     'This time records the latest disagreement.';
 COMMENT ON COLUMN resolution_divergences.cleared_at IS
     'This time records agreement restoration.';
+COMMENT ON FUNCTION write_resolution_divergence(
+    uuid, text, text, text, text, text, text, jsonb, jsonb, jsonb, boolean
+) IS
+    'Mutates direct-resolution disagreements only while the compared inventory row and observed canonical lineage are unchanged.';
