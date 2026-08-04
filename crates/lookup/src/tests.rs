@@ -30,6 +30,7 @@ const BASE_HASH: &str = "0x22222222222222222222222222222222222222222222222222222
 const UNIVERSAL_RESOLVER: &str = "0xeeeeeeee14d718c2b47d9923deab1335e144eeee";
 const ENS_REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
 const BASE_L1_RESOLVER: &str = "0xde9049636f4a1dfe0a64d1bfe3155c0a14c54f31";
+const REPLACEMENT_UNIVERSAL_RESOLVER: &str = "0x2000000000000000000000000000000000000002";
 const INDEXED_VALUE: &str = "https://indexed.example";
 const LIVE_VALUE: &str = "https://live.example";
 
@@ -169,6 +170,135 @@ async fn disagreement_writes_one_ledger_row_with_answers_and_anchor() -> AnyResu
     let requests = join_rpc(rpc_handle).await?;
     assert_hash_pinned(&requests, ETHEREUM_HASH);
     Ok(())
+}
+
+#[tokio::test]
+async fn stable_projection_row_executes_at_caught_up_head() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(
+        INDEXED_VALUE,
+    ))])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    advance_head_and_project(fixture.pool()).await?;
+
+    let response = run_lookup(&fixture, &rpc_url).await?;
+    assert_eq!(response.records[0].ledger_action, LedgerAction::None);
+    assert_eq!(response.records[0].value, Some(json!(INDEXED_VALUE)));
+    assert_eq!(response.observed_positions["ethereum"]["block_number"], 10);
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_hash_pinned(&requests, ETHEREUM_LATER_HASH);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stable_projection_divergence_keeps_the_rows_actual_anchor() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    advance_head_and_project(fixture.pool()).await?;
+
+    let response = run_lookup(&fixture, &rpc_url).await?;
+    assert_eq!(response.records[0].ledger_action, LedgerAction::Written);
+    let positions: Value = sqlx::query_scalar(
+        "SELECT observed_positions FROM resolution_divergences WHERE cleared_at IS NULL",
+    )
+    .fetch_one(fixture.pool())
+    .await?;
+    assert_eq!(positions["ethereum"]["block_number"], 10);
+    assert_eq!(positions["ethereum"]["block_hash"], ETHEREUM_HASH);
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_hash_pinned(&requests, ETHEREUM_LATER_HASH);
+    Ok(())
+}
+
+#[tokio::test]
+async fn lookup_is_stale_while_project_cursor_lags_the_head() -> AnyResult<()> {
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    advance_head(fixture.pool()).await?;
+
+    let error = lookup_engine(fixture.pool(), "http://127.0.0.1:1")?
+        .lookup(lookup_request(&fixture.logical_name_id)?)
+        .await
+        .expect_err("lookup must wait for project to publish the newest processed head");
+    assert_eq!(error.kind(), ErrorKind::Stale);
+    fixture.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn divergence_shape_check_violation_is_non_retryable() -> AnyResult<()> {
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let answer = json!({ "status": "not_found" });
+    let error = sqlx::query(
+        r#"
+        INSERT INTO resolution_divergences (
+            logical_name_id, resolver_chain_id, resolver_address, request_kind,
+            observed_positions, indexed_result, live_result
+        ) VALUES ($1, $2, $3, 'text:url', $4, $5, $5)
+        "#,
+    )
+    .bind(&fixture.logical_name_id)
+    .bind(ETHEREUM)
+    .bind("0x1000000000000000000000000000000000000001")
+    .bind(observed_position(10, ETHEREUM_HASH, "2026-08-03T00:00:00Z"))
+    .bind(answer)
+    .execute(fixture.pool())
+    .await
+    .expect_err("equal answers must violate the divergence table shape");
+    let error = crate::store::divergence_write_error(error);
+    assert_eq!(error.kind(), ErrorKind::Database);
+
+    fixture.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn active_divergence_uniqueness_violation_is_concurrent_state() -> AnyResult<()> {
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage
+            (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         VALUES ($1, $2, 9, '2026-08-02T23:59:59Z', 'canonical')",
+    )
+    .bind(ETHEREUM)
+    .bind(ETHEREUM_PRIOR_HASH)
+    .execute(fixture.pool())
+    .await?;
+    for positions in [
+        observed_position(10, ETHEREUM_HASH, "2026-08-03T00:00:00Z"),
+        observed_position(9, ETHEREUM_PRIOR_HASH, "2026-08-02T23:59:59Z"),
+    ] {
+        let result = sqlx::query(
+            r#"
+            INSERT INTO resolution_divergences (
+                logical_name_id, resolver_chain_id, resolver_address, request_kind,
+                observed_positions, indexed_result, live_result
+            ) VALUES (
+                $1, $2, $3, 'text:url', $4,
+                '{"status":"success","value":"indexed"}'::jsonb,
+                '{"status":"success","value":"live"}'::jsonb
+            )
+            "#,
+        )
+        .bind(&fixture.logical_name_id)
+        .bind(ETHEREUM)
+        .bind("0x1000000000000000000000000000000000000001")
+        .bind(positions)
+        .execute(fixture.pool())
+        .await;
+        if let Err(error) = result {
+            let error = crate::store::divergence_write_error(error);
+            assert_eq!(error.kind(), ErrorKind::ConcurrentState);
+            fixture.cleanup().await?;
+            return Ok(());
+        }
+    }
+    bail!("two active same-request divergences at different heads were accepted")
 }
 
 #[tokio::test]
@@ -342,6 +472,30 @@ async fn row_unchanged_guard_rejects_two_session_projection_modification() -> An
         .await;
 
     let error = result.expect_err("stale projection token must reject the ledger write");
+    assert_eq!(error.kind(), ErrorKind::ConcurrentState);
+    assert_eq!(ledger_count(&pool).await?, 0);
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn head_change_between_read_and_commit_rejects_the_lookup() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let pool = fixture.pool().clone();
+    let logical_name_id = fixture.logical_name_id.clone();
+    let head_pool = pool.clone();
+    let result = lookup_engine(&pool, &rpc_url)?
+        .lookup_with_before_persist(lookup_request(&logical_name_id)?, move || async move {
+            advance_head(&head_pool)
+                .await
+                .expect("second session must advance the readable head");
+        })
+        .await;
+
+    let error = result.expect_err("lookup must revalidate the execution head through commit");
     assert_eq!(error.kind(), ErrorKind::ConcurrentState);
     assert_eq!(ledger_count(&pool).await?, 0);
     fixture.cleanup().await?;
@@ -526,6 +680,55 @@ async fn successful_ccip_result_is_never_persisted() -> AnyResult<()> {
 }
 
 #[tokio::test]
+async fn mixed_ccip_and_direct_batch_persists_only_the_direct_disagreement() -> AnyResult<()> {
+    let (gateway_url, gateway_handle) = spawn_gateway(vec![0xca, 0xfe]).await?;
+    let offchain_data = encode_offchain_lookup_for_test(
+        Address::from_str(BASE_L1_RESOLVER)?,
+        vec![gateway_url],
+        vec![0x12, 0x34],
+        [0x01, 0x02, 0x03, 0x04],
+        vec![0xab],
+    );
+    let (rpc_url, rpc_handle) = spawn_mixed_ccip_rpc(offchain_data).await?;
+    let fixture = setup_fixture(FixtureKind::Basenames, INDEXED_VALUE).await?;
+    let request = LookupRequest::new(&fixture.logical_name_id, ["avatar", "text:url"])?;
+
+    let response = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(request)
+        .await?;
+    let avatar = response
+        .records
+        .iter()
+        .find(|record| record.record_key == "avatar")
+        .context("mixed lookup omitted avatar")?;
+    assert!(avatar.ccip_read);
+    assert_eq!(avatar.ledger_action, LedgerAction::SkippedCcip);
+    let url = response
+        .records
+        .iter()
+        .find(|record| record.record_key == "text:url")
+        .context("mixed lookup omitted text:url")?;
+    assert!(!url.ccip_read);
+    assert_eq!(url.value, Some(json!(LIVE_VALUE)));
+    assert_eq!(url.ledger_action, LedgerAction::Written);
+    let request_kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT request_kind FROM resolution_divergences WHERE cleared_at IS NULL",
+    )
+    .fetch_all(fixture.pool())
+    .await?;
+    assert_eq!(request_kinds, vec!["text:url"]);
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(requests.len(), 3);
+    assert_hash_pinned(&requests, ETHEREUM_HASH);
+    gateway_handle
+        .await
+        .context("gateway task was cancelled")??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn ccip_result_bypasses_a_concurrent_inventory_change() -> AnyResult<()> {
     let (gateway_url, gateway_handle) = spawn_gateway(vec![0xca, 0xfe]).await?;
     let sender = Address::from_str(BASE_L1_RESOLVER)?;
@@ -658,6 +861,60 @@ async fn basenames_v1_execution_manifest_is_not_authority() -> AnyResult<()> {
         .expect_err("Basenames execution manifest v1 must not execute");
     assert_eq!(error.kind(), ErrorKind::Unsupported);
     fixture.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn manifest_entrypoint_prefers_the_highest_started_role_declaration() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(
+        INDEXED_VALUE,
+    ))])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let manifest_id: i64 = sqlx::query_scalar(
+        "SELECT manifest_id FROM manifest_versions WHERE source_family = 'ens_execution'",
+    )
+    .fetch_one(fixture.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE manifest_contract_instances
+         SET start_block_number = 1
+         WHERE manifest_id = $1 AND role = 'universal_resolver'",
+    )
+    .bind(manifest_id)
+    .execute(fixture.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO contract_instances
+            (contract_instance_id, chain_id, contract_kind)
+         VALUES ('00000000-0000-0000-0000-000000000105'::uuid, $1, 'contract')",
+    )
+    .bind(ETHEREUM)
+    .execute(fixture.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO manifest_contract_instances
+            (manifest_id, chain_id, declaration_kind, declaration_name,
+             contract_instance_id, declared_address, role, proxy_kind,
+             start_block_number)
+         VALUES ($1, $2, 'contract', 'replacement_universal_resolver',
+                 '00000000-0000-0000-0000-000000000105'::uuid, $3,
+                 'universal_resolver', 'none', 9)",
+    )
+    .bind(manifest_id)
+    .bind(ETHEREUM)
+    .bind(REPLACEMENT_UNIVERSAL_RESOLVER)
+    .execute(fixture.pool())
+    .await?;
+
+    let response = run_lookup(&fixture, &rpc_url).await?;
+    assert_eq!(response.entrypoint_address, REPLACEMENT_UNIVERSAL_RESOLVER);
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(
+        requests[0]["params"][0]["to"],
+        REPLACEMENT_UNIVERSAL_RESOLVER
+    );
     Ok(())
 }
 
@@ -1139,6 +1396,7 @@ async fn seed_heads(pool: &PgPool, kind: FixtureKind) -> AnyResult<()> {
     .bind(ETHEREUM_HASH)
     .execute(pool)
     .await?;
+    seed_project_state(pool, ETHEREUM, ETHEREUM_HASH).await?;
     if matches!(kind, FixtureKind::Basenames) {
         sqlx::query(
             "INSERT INTO chain_lineage
@@ -1157,7 +1415,59 @@ async fn seed_heads(pool: &PgPool, kind: FixtureKind) -> AnyResult<()> {
         .bind(BASE_HASH)
         .execute(pool)
         .await?;
+        seed_project_state(pool, BASE, BASE_HASH).await?;
     }
+    Ok(())
+}
+
+async fn seed_project_state(pool: &PgPool, chain_id: &str, block_hash: &str) -> AnyResult<()> {
+    sqlx::query(
+        "INSERT INTO chain_phase_state
+            (chain_id, phase_name, phase_status, current_block_number, current_block_hash,
+             target_block_number, target_block_hash, started_at, finished_at)
+         VALUES ($1, 'project', 'completed', 10, $2, 10, $2, now(), now())",
+    )
+    .bind(chain_id)
+    .bind(block_hash)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn advance_head(pool: &PgPool) -> AnyResult<()> {
+    sqlx::query(
+        "INSERT INTO chain_lineage
+            (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         VALUES ($1, $2, 11, '2026-08-03T00:00:01Z', 'canonical')",
+    )
+    .bind(ETHEREUM)
+    .bind(ETHEREUM_LATER_HASH)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE chain_heads
+         SET latest_block_hash = $2, latest_block_number = 11
+         WHERE chain_id = $1",
+    )
+    .bind(ETHEREUM)
+    .bind(ETHEREUM_LATER_HASH)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn advance_head_and_project(pool: &PgPool) -> AnyResult<()> {
+    advance_head(pool).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET current_block_number = 11, current_block_hash = $2,
+             target_block_number = 11, target_block_hash = $2
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(ETHEREUM)
+    .bind(ETHEREUM_LATER_HASH)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -1329,6 +1639,17 @@ fn encoded_text_result(value: &str) -> Value {
     Value::String(hex_string(&universal_result))
 }
 
+fn observed_position(block_number: i64, block_hash: &str, timestamp: &str) -> Value {
+    json!({
+        "ethereum": {
+            "chain_id": ETHEREUM,
+            "block_number": block_number,
+            "block_hash": block_hash,
+            "timestamp": timestamp,
+        }
+    })
+}
+
 fn encoded_basenames_text_result(value: &str) -> Value {
     let record_result = (value.to_owned(),).abi_encode_params();
     let l1_resolver_result = (Bytes::from(record_result),).abi_encode_params();
@@ -1351,6 +1672,36 @@ async fn spawn_mock_rpc(
         for response in responses {
             let (mut socket, _) = listener.accept().await?;
             requests.push(read_http_json_body(&mut socket).await?);
+            write_rpc_response(&mut socket, response).await?;
+        }
+        Ok(requests)
+    });
+    Ok((url, handle))
+}
+
+async fn spawn_mixed_ccip_rpc(
+    offchain_data: String,
+) -> AnyResult<(String, JoinHandle<AnyResult<Vec<Value>>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        let mut requests = Vec::with_capacity(3);
+        for _ in 0..3 {
+            let (mut socket, _) = listener.accept().await?;
+            let request = read_http_json_body(&mut socket).await?;
+            let calldata = request["params"][0]["data"].as_str().unwrap_or_default();
+            let response = if calldata.contains("617661746172") {
+                RpcResponse::Error {
+                    code: 3,
+                    message: "execution reverted".to_owned(),
+                    data: Value::String(offchain_data.clone()),
+                }
+            } else if calldata.contains("75726c") {
+                RpcResponse::Result(encoded_basenames_text_result(LIVE_VALUE))
+            } else {
+                RpcResponse::Result(encoded_basenames_text_result("ipfs://ccip-avatar"))
+            };
+            requests.push(request);
             write_rpc_response(&mut socket, response).await?;
         }
         Ok(requests)

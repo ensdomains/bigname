@@ -11,6 +11,8 @@ use crate::{
     rpc::{ChainRpcUrls, JsonRpcHttpClient},
 };
 
+/// Deterministic Multicall3 deployment used by the retained ENS batch helper
+/// (upstream: .refs/ens_v1/deploy/utils/shared/00_deploy_multicall.ts:L4 @ ens_v1@91c966f).
 pub const MULTICALL3_ADDRESS: &str = "0xcA11bde05977b3631167028862bE2a173976CA11";
 
 mod abi {

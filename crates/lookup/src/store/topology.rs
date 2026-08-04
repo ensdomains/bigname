@@ -4,8 +4,6 @@ use crate::{
     BASE_MAINNET_CHAIN_ID, BASENAMES_NAMESPACE, ETHEREUM_MAINNET_CHAIN_ID, LookupError, Result,
 };
 
-const BASENAMES_L1_RESOLVER_ADDRESS: &str = "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31";
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ExecutionPathClass {
     EnsDirectOrAlias,
@@ -137,10 +135,11 @@ fn transport_matches_basenames(topology: &Value) -> bool {
     transport.get("source_chain_id").and_then(Value::as_str) == Some(BASE_MAINNET_CHAIN_ID)
         && transport.get("target_chain_id").and_then(Value::as_str)
             == Some(ETHEREUM_MAINNET_CHAIN_ID)
+        // The store compares this value with the selected execution manifest.
         && transport
             .get("contract_address")
             .and_then(Value::as_str)
-            .is_some_and(|value| value.eq_ignore_ascii_case(BASENAMES_L1_RESOLVER_ADDRESS))
+            .is_some_and(|value| !value.trim().is_empty())
 }
 
 fn unsupported(message: &'static str) -> LookupError {

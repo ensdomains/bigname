@@ -41,34 +41,82 @@ pub(super) fn position_for_chain(positions: &Value, chain_id: &str) -> Result<Pr
     Ok(position)
 }
 
-pub(super) fn ensure_at_head(
-    table: &str,
-    position: &ProjectedPosition,
+pub(super) async fn ensure_project_at_head(
+    transaction: &mut Transaction<'_, Postgres>,
     head: &HeadRow,
 ) -> Result<()> {
-    if position.block_number != head.block_number || position.block_hash != head.block_hash {
+    let caught_up: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM chain_phase_state
+            WHERE chain_id = $1
+              AND phase_name = 'project'
+              AND current_block_number = $2
+              AND current_block_hash = $3
+        )
+        "#,
+    )
+    .bind(&head.chain_id)
+    .bind(head.block_number)
+    .bind(&head.block_hash)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(database("validate project publication head"))?;
+    if !caught_up {
         return Err(LookupError::stale(format!(
-            "{table} is not published at the newest processed {} block",
+            "projected state has not reached the newest processed {} block",
             head.chain_id
         )));
     }
     Ok(())
 }
 
-pub(super) fn ensure_inventory_at_head(
+pub(super) async fn inventory_position(
+    transaction: &mut Transaction<'_, Postgres>,
     table: &str,
     positions: &Value,
-    head: &HeadRow,
-) -> Result<()> {
-    let number = positions.get("target_block_number").and_then(Value::as_i64);
-    let hash = positions.get("target_block_hash").and_then(Value::as_str);
-    if number != Some(head.block_number) || hash != Some(head.block_hash.as_str()) {
-        return Err(LookupError::stale(format!(
-            "{table} is not published at the newest processed {} block",
-            head.chain_id
-        )));
-    }
-    Ok(())
+    chain_id: &str,
+) -> Result<ProjectedPosition> {
+    let block_number = positions
+        .get("target_block_number")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| LookupError::stale(format!("{table} has no target block number")))?;
+    let block_hash = positions
+        .get("target_block_hash")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| LookupError::stale(format!("{table} has no target block hash")))?;
+    let timestamp: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT to_char(
+            block_timestamp AT TIME ZONE 'UTC',
+            'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+        )
+        FROM chain_lineage
+        WHERE chain_id = $1
+          AND block_hash = $2
+          AND block_number = $3
+          AND canonicality_state IN ('canonical', 'safe', 'finalized')
+        "#,
+    )
+    .bind(chain_id)
+    .bind(block_hash)
+    .bind(block_number)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(database("validate indexed comparison position"))?;
+    let timestamp = timestamp.ok_or_else(|| {
+        LookupError::stale(format!(
+            "{table} target is not readable canonical {chain_id} lineage"
+        ))
+    })?;
+    Ok(ProjectedPosition {
+        chain_id: chain_id.to_owned(),
+        block_hash: block_hash.to_owned(),
+        block_number,
+        timestamp,
+    })
 }
 
 pub(super) async fn ensure_canonical(

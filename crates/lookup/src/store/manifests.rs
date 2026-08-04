@@ -56,6 +56,9 @@ pub(super) async fn load_entrypoint(
               OR ($5 AND manifest.manifest_payload -> 'capability_flags'
                   -> 'verified_resolution' ->> 'status' = 'shadow')
           )
+        ORDER BY declaration.start_block_number DESC NULLS LAST,
+                 declaration.declaration_name ASC,
+                 declaration.manifest_contract_instance_id ASC
         LIMIT 1
         "#,
     )

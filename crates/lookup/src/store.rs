@@ -15,6 +15,8 @@ mod positions;
 mod topology;
 #[cfg(test)]
 pub(crate) use indexed::answer as indexed_answer;
+#[cfg(test)]
+pub(crate) use persistence::divergence_write_error;
 pub(crate) use persistence::persist_comparisons;
 
 #[derive(Clone, Debug)]
@@ -27,6 +29,7 @@ pub(crate) struct LookupSnapshot {
     pub resolver_address: String,
     pub entrypoint_chain_id: String,
     pub entrypoint_address: String,
+    pub authoritative_head: ExecutionBlock,
     pub execution_block: ExecutionBlock,
     pub follow_ccip: bool,
     pub result_abi: ResolutionResultAbi,
@@ -132,25 +135,43 @@ pub(crate) async fn load_snapshot(
         Some(load_inventory(&mut transaction, boundary_resource_id, boundary).await?)
     };
     let resolver_head = load_head(&mut transaction, &resolver_chain_id).await?;
+    positions::ensure_project_at_head(&mut transaction, &resolver_head).await?;
     let resolver_position =
         positions::position_for_chain(&name.chain_positions, &resolver_chain_id)?;
     positions::ensure_canonical(&mut transaction, &resolver_position).await?;
-    positions::ensure_at_head("name_current", &resolver_position, &resolver_head)?;
-    if let Some(inventory) = &inventory {
-        positions::ensure_inventory_at_head(
+    let comparison_position = if let Some(inventory) = &inventory {
+        positions::inventory_position(
+            &mut transaction,
             "record_inventory_current",
             &inventory.chain_positions,
-            &resolver_head,
-        )?;
-    }
+            &resolver_chain_id,
+        )
+        .await?
+    } else {
+        resolver_position.clone()
+    };
 
     let entrypoint = entrypoint_authority(&name.namespace, topology, &resolver_chain_id)?;
+    let authoritative_head = ExecutionBlock {
+        chain_id: resolver_head.chain_id,
+        block_number: resolver_head.block_number,
+        block_hash: resolver_head.block_hash,
+    };
     let execution_position = if entrypoint.chain_id == resolver_position.chain_id {
         resolver_position.clone()
     } else {
         let position = positions::position_for_chain(&name.chain_positions, entrypoint.chain_id)?;
         positions::ensure_canonical(&mut transaction, &position).await?;
         position
+    };
+    let execution_block = if entrypoint.chain_id == resolver_position.chain_id {
+        authoritative_head.clone()
+    } else {
+        ExecutionBlock {
+            chain_id: execution_position.chain_id.clone(),
+            block_number: execution_position.block_number,
+            block_hash: execution_position.block_hash.clone(),
+        }
     };
     let entrypoint_address = manifests::load_entrypoint(
         &mut transaction,
@@ -160,7 +181,7 @@ pub(crate) async fn load_snapshot(
             chain_id: entrypoint.chain_id,
             role: entrypoint.role,
             allow_shadow: entrypoint.allow_shadow,
-            execution_block_number: execution_position.block_number,
+            execution_block_number: execution_block.block_number,
             required_manifest_version: entrypoint.required_manifest_version,
             require_resolution_capability: true,
         },
@@ -179,7 +200,7 @@ pub(crate) async fn load_snapshot(
         .map_err(database("commit lookup read"))?;
 
     let observed_positions =
-        positions::observed_positions(&resolver_position, &execution_position)?;
+        positions::observed_positions(&comparison_position, &execution_position)?;
     Ok(LookupSnapshot {
         logical_name_id: name.logical_name_id,
         name: name.raw_name,
@@ -191,11 +212,8 @@ pub(crate) async fn load_snapshot(
         resolver_address: resolver_address.to_ascii_lowercase(),
         entrypoint_chain_id: entrypoint.chain_id.to_owned(),
         entrypoint_address: entrypoint_address.to_ascii_lowercase(),
-        execution_block: ExecutionBlock {
-            chain_id: execution_position.chain_id,
-            block_number: execution_position.block_number,
-            block_hash: execution_position.block_hash,
-        },
+        authoritative_head,
+        execution_block,
         follow_ccip: entrypoint.follow_ccip,
         result_abi: entrypoint.result_abi,
         observed_positions,

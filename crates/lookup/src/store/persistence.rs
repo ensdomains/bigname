@@ -14,20 +14,29 @@ pub(crate) async fn persist_comparisons(
     for result in results.iter_mut().filter(|result| result.ccip_read) {
         result.ledger_action = LedgerAction::SkippedCcip;
     }
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(database("start divergence write"))?;
+    lock_authoritative_head(&mut transaction, snapshot).await?;
     let Some(comparison) = snapshot.comparison.as_ref() else {
+        transaction
+            .commit()
+            .await
+            .map_err(database("commit lookup head revalidation"))?;
         return Ok(());
     };
     if !results
         .iter()
         .any(|result| !result.ccip_read && result.status.is_comparable())
     {
+        transaction
+            .commit()
+            .await
+            .map_err(database("commit lookup head revalidation"))?;
         return Ok(());
     }
 
-    let mut transaction = pool
-        .begin()
-        .await
-        .map_err(database("start divergence write"))?;
     let locked_xmin: Option<String> = sqlx::query_scalar(
         r#"
         SELECT xmin::text
@@ -54,6 +63,32 @@ pub(crate) async fn persist_comparisons(
         persist_result(&mut transaction, snapshot, comparison, result).await?;
     }
     transaction.commit().await.map_err(divergence_write_error)?;
+    Ok(())
+}
+
+async fn lock_authoritative_head(
+    transaction: &mut Transaction<'_, Postgres>,
+    snapshot: &LookupSnapshot,
+) -> Result<()> {
+    let unchanged: Option<i64> = sqlx::query_scalar(
+        "SELECT latest_block_number
+         FROM chain_heads
+         WHERE chain_id = $1
+           AND latest_block_number = $2
+           AND latest_block_hash = $3
+         FOR SHARE",
+    )
+    .bind(&snapshot.authoritative_head.chain_id)
+    .bind(snapshot.authoritative_head.block_number)
+    .bind(&snapshot.authoritative_head.block_hash)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(database("revalidate lookup execution head"))?;
+    if unchanged.is_none() {
+        return Err(LookupError::concurrent_state(
+            "canonical head changed while live lookup was running",
+        ));
+    }
     Ok(())
 }
 
@@ -114,13 +149,29 @@ async fn persist_result(
     Ok(())
 }
 
-fn divergence_write_error(error: sqlx::Error) -> LookupError {
-    if let sqlx::Error::Database(database) = &error
-        && matches!(database.code().as_deref(), Some("23503") | Some("23514"))
-    {
-        return LookupError::concurrent_state(format!(
-            "canonical lookup state changed before divergence commit: {database}"
-        ));
+pub(crate) fn divergence_write_error(error: sqlx::Error) -> LookupError {
+    if let sqlx::Error::Database(database_error) = &error {
+        match database_error.code().as_deref() {
+            Some("23503") => {
+                return LookupError::concurrent_state(format!(
+                    "canonical lookup state changed before divergence commit: {database_error}"
+                ));
+            }
+            Some("23505")
+                if database_error.constraint()
+                    == Some("resolution_divergences_one_active_request_idx") =>
+            {
+                return LookupError::concurrent_state(format!(
+                    "active lookup state changed before divergence commit: {database_error}"
+                ));
+            }
+            Some("23514") => {
+                return LookupError::database(format!(
+                    "divergence ledger rejected invalid data: {database_error}"
+                ));
+            }
+            _ => {}
+        }
     }
     database("persist resolution divergence")(error)
 }
