@@ -520,8 +520,8 @@ impl PhaseRunner {
                 "cannot redo all phases for chain {chain_id}: a pending {phase} redo must be \
                  completed first; rerun `phase-runner redo --chain {chain_id} --phase \
                  {phase_argument} --from-block {} --to-block {}`, then rerun `phase-runner redo \
-                 --chain {chain_id} --phase all`",
-                range.from, range.to
+                 --chain {chain_id} --phase all --from-block {} --to-block {}`",
+                range.from, range.to, range.from, range.to
             )));
         }
         Ok(())

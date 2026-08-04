@@ -802,6 +802,10 @@ async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() 
         "phase-runner redo --chain redo-all-failed-chain --phase interpret --from-block 0 \
          --to-block 1"
     ));
+    assert!(report.stopped_chains[0].1.to_string().contains(
+        "phase-runner redo --chain redo-all-failed-chain --phase all --from-block 0 \
+         --to-block 1"
+    ));
     assert_eq!(
         *calls.lock().expect("recorded calls lock"),
         [
@@ -861,6 +865,10 @@ async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() 
         "phase-runner redo --chain redo-all-failed-chain --phase interpret --from-block 0 \
          --to-block 1"
     ));
+    assert!(recovery_error.to_string().contains(
+        "phase-runner redo --chain redo-all-failed-chain --phase all --from-block 0 \
+         --to-block 1"
+    ));
     assert!(
         recovery_calls
             .lock()
@@ -879,7 +887,7 @@ async fn all_phase_redo_stops_the_failed_chain_and_continues_remaining_chains() 
         .redo(
             &chain(failed_chain)?,
             RedoPhase::All,
-            BlockRange::new(0, 0)?,
+            BlockRange::new(0, 1)?,
             CancellationToken::new(),
         )
         .await?;

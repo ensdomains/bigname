@@ -174,8 +174,11 @@ the resumable redo marker and its diagnosis;
 rerunning the same command after wipe-and-resync repair resumes the attempt.
 The range end must already be `canonical`, `safe`, or `finalized`; an
 `observed` staging row is rejected before a redo session is claimed.
-Flag recomputation remains unavailable. These preflight refusals and terminal
-verification failures cannot strand unresumable redo state.
+Flag recomputation is supported through `--phase recompute-flags`. Among
+otherwise configured redo requests, only historical `live` redo and an
+unreadable range end are rejected before a redo marker is written. These
+preflight refusals and terminal verification failures cannot strand
+unresumable redo state.
 
 The thin rewind command moves only the published latest head:
 

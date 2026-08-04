@@ -540,10 +540,11 @@ An explicit redo can select one phase or all four in dependency order for one,
 several, or every active-manifest chain; it is not a persisted old-schema
 backfill job. Live follow starts at the completed ingest handoff and only walks
 the current head and a winning-fork gap; it never provides historical coverage.
-Unsupported historical `live` and flag-recomputation requests, and unreadable
-range ends, fail before redo state is written. A deployment
-therefore still needs complete admitted history for ENSv1, ENSv2, and Basenames
-source families. Wildcard and offchain names remain
+`--phase recompute-flags` supports bounded flag recomputation. Among otherwise
+configured redo requests, only historical `live` redo and unreadable range ends
+are rejected before redo state is written. A deployment therefore still needs
+complete admitted history for ENSv1, ENSv2, and Basenames source families.
+Wildcard and offchain names remain
 discovery/observed-answer based rather than exhaustively enumerable.
 
 ## Operations

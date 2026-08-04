@@ -266,15 +266,23 @@ re-anchors stable identities when the winning facts reproduce them. An
 interrupted multi-batch redo remains explicit persisted redo state and must
 resume; its intermediate orphaning is not a completed projection boundary.
 `recompute-flags` is the bounded normalizer-version repair mode. Under the
-Interpret and Project phase locks, it recomputes `label_preimages` and
-`name_surfaces` normalization metadata with the current normalizer, then uses
-the existing scoped Project machinery to refresh
-`primary_names_current.claim_name_is_normalized`. A name that remains active or
-remains shadow takes this flags-only path: normalized events, identity anchors,
-and surface bindings are not re-derived. A name whose visibility class changes
-is enumerated and reported to the operator, and its affected chain range is
-merged into the standard Interpret redo and required Project continuation. The
-recompute path never fabricates, reopens, closes, or retracts a surface binding.
+Interpret and Project phase locks, it first uses the existing scoped Project
+machinery to refresh `primary_names_current.claim_name_is_normalized`, then
+recomputes `label_preimages` and `name_surfaces` normalization metadata with the
+current normalizer; correctness does not depend on this order because Project
+derives claim normalization with the current normalizer when it builds the
+projection. A name that remains active or remains shadow takes this flags-only
+path: normalized events, identity anchors, and surface bindings are not
+re-derived. A name whose visibility class changes is enumerated and reported to
+the operator, and its affected chain range is merged into the standard Interpret
+redo and required Project continuation. The recompute path never fabricates,
+reopens, closes, or retracts a surface binding. After a shadow-to-active
+recompute commits, the surface has active visibility while its bindings and
+projections remain at the pre-transition class until the stamped Interpret and
+Project redo runs. The API serves the conservative pre-transition projection
+state in that window, and the stamped markers block normal Interpret work. The
+operator must run the stamped redo to make transitions visible; until then,
+affected names serve their pre-transition state.
 An interrupted recompute retains its resumable marker. Its own queued scoped
 Project refresh is distinguishable and resumable. After that refresh completes,
 the Project marker remains in a distinct "Interpret flags pending" state until

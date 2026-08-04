@@ -172,10 +172,15 @@ under the current normalizer and refreshes the scoped primary-name projection.
 Names that remain active or remain shadow complete without replay. Names that
 cross between active and shadow are reported and merged into the ordinary
 Interpret and Project redo markers; only that replay path may create or retract
-their bindings. On completion the command writes one JSON object to standard
-output with the same-class and transition counts plus every stamped phase range;
-this report does not depend on `RUST_LOG`. An interrupted recompute resumes from
-its durable marker; the
+their bindings. After a shadow-to-active recompute commits, the surface has
+active visibility while bindings and projections remain at their pre-transition
+class. The API serves that conservative pre-transition projection state, and
+the stamped markers block normal Interpret work. Run the stamped redo to make
+transitions visible; until then, affected names serve their pre-transition
+state. On completion the command writes one JSON object to standard output with
+the same-class and transition counts plus every stamped phase range; this report
+does not depend on `RUST_LOG`. An interrupted recompute resumes from its durable
+marker; the
 scoped Project refresh marker created by the command is likewise distinguishable
 and resumable. A completed scoped refresh stays marked as "Interpret flags
 pending" until Interpret completion clears or replaces it atomically, so a
