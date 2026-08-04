@@ -290,10 +290,18 @@ fn name_event(
             new_registrar_identity(selected, raw, &format!("{explicit_labelhash:#x}"))
         });
     let expiry = after.get("expiry").and_then(Value::as_i64);
-    let owner = after
+    let event_registrant = after
         .get("registrant")
         .and_then(Value::as_str)
-        .map(str::to_owned)
+        .map(str::to_owned);
+    // The wrapper registers itself first; the controller's later event names the wrapped user.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L297 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
+    let owner = registration
+        .then(|| state.v1_registry_owner(&selected.source.namespace, &raw_namehash))
+        .flatten()
+        .filter(|owner| !owner.eq_ignore_ascii_case(ZERO_ADDRESS))
+        .or_else(|| event_registrant.clone())
         .or_else(|| existing.as_ref().and_then(|state| state.owner.clone()))
         .or_else(|| synthetic_grant.then(|| ZERO_ADDRESS.to_owned()));
     let retained_authority_key = authority_key.clone().or_else(|| {
@@ -301,10 +309,12 @@ fn name_event(
             .as_ref()
             .and_then(|state| state.authority_key.clone())
     });
-    let make_current = registration
-        || state
-            .v1_name(&selected.source.namespace, &raw_namehash)
-            .is_none_or(|current| current.authority_source_family == selected.source.source_family);
+    let make_current = state
+        .v1_name(&selected.source.namespace, &raw_namehash)
+        .is_none_or(|current| {
+            let same_family = current.authority_source_family == selected.source.source_family;
+            current.authority_source_family != "ens_v1_wrapper_l1" && (registration || same_family)
+        });
     state.observe_v1_registrar(
         &selected.source.namespace,
         &raw_namehash,
@@ -339,7 +349,9 @@ fn name_event(
         "token_lineage_id".to_owned(),
         Value::String(token_lineage_id.to_string()),
     );
-    if let Some(owner) = owner {
+    if !after_object.contains_key("registrant")
+        && let Some(owner) = owner
+    {
         after_object.insert("registrant".to_owned(), Value::String(owner));
     }
     if let Some(authority_key) = retained_authority_key.as_ref() {

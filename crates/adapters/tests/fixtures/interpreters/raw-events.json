@@ -1204,6 +1204,124 @@
           "data": "0x0000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000006b49d2000000000000000000000000000000000000000000000000000000000000000005616c696365000000000000000000000000000000000000000000000000000000"
         }
       ]
+    },
+    {
+      "id": "ens_wrapped_registration_routes_incoming_owner_to_registration_epoch",
+      "runner": "unwrapped_authority",
+      "upstream_citations": [
+        "(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L297 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L300 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)",
+        "(upstream: .refs/ens_subgraph/subgraph.yaml:L170 @ ens_subgraph@723f1b6)",
+        "(upstream: .refs/ens_subgraph/subgraph.yaml:L187 @ ens_subgraph@723f1b6)"
+      ],
+      "manifests": [
+        {
+          "namespace": "ens",
+          "source_family": "ens_v1_registry_l1",
+          "chain": "ethereum-mainnet",
+          "deployment_epoch": "ens_v1",
+          "file_path": "manifests/mainnet/ethereum/ens/ens_v1_registry_l1/v3.toml",
+          "declaration_name": "registry",
+          "role": "registry",
+          "address": "0x00000000000000000000000000000000000040bb",
+          "contract_instance_id": "00000000-0000-0000-0000-000000000011"
+        },
+        {
+          "namespace": "ens",
+          "source_family": "ens_v1_registrar_l1",
+          "chain": "ethereum-mainnet",
+          "deployment_epoch": "ens_v1",
+          "file_path": "manifests/mainnet/ethereum/ens/ens_v1_registrar_l1/v1.toml",
+          "declaration_name": "wrapped_registrar_controller",
+          "role": "wrapped_registrar_controller",
+          "address": "0x00000000000000000000000000000000000040aa",
+          "contract_instance_id": "00000000-0000-0000-0000-000000000012"
+        },
+        {
+          "namespace": "ens",
+          "source_family": "ens_v1_wrapper_l1",
+          "chain": "ethereum-mainnet",
+          "deployment_epoch": "ens_v1",
+          "file_path": "manifests/mainnet/ethereum/ens/ens_v1_wrapper_l1/v1.toml",
+          "declaration_name": "name_wrapper",
+          "role": "name_wrapper",
+          "address": "0xd4416b13d2b3a9abae7acd5d6c2bbdbe25686401",
+          "contract_instance_id": "00000000-0000-0000-0000-000000000013"
+        }
+      ],
+      "blocks": [
+        {
+          "chain": "ethereum-mainnet",
+          "hash": "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+          "parent_hash": null,
+          "number": 181,
+          "timestamp": 1700000181
+        }
+      ],
+      "logs": [
+        {
+          "chain": "ethereum-mainnet",
+          "block_hash": "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+          "block_number": 181,
+          "transaction_hash": "0xe1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1",
+          "transaction_index": 0,
+          "log_index": 0,
+          "emitting_address": "0x00000000000000000000000000000000000040bb",
+          "topics": [
+            "0xce0457fe73731f824cc272376169235128c118b49d344817417c6d108d155e82",
+            "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae",
+            "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501"
+          ],
+          "data": "0x0000000000000000000000000000000000000000000000000000000000004011"
+        },
+        {
+          "chain": "ethereum-mainnet",
+          "block_hash": "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+          "block_number": 181,
+          "transaction_hash": "0xe2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
+          "transaction_index": 1,
+          "log_index": 0,
+          "emitting_address": "0x00000000000000000000000000000000000040bb",
+          "topics": [
+            "0xce0457fe73731f824cc272376169235128c118b49d344817417c6d108d155e82",
+            "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae",
+            "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501"
+          ],
+          "data": "0x000000000000000000000000d4416b13d2b3a9abae7acd5d6c2bbdbe25686401"
+        },
+        {
+          "chain": "ethereum-mainnet",
+          "block_hash": "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+          "block_number": 181,
+          "transaction_hash": "0xe2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
+          "transaction_index": 1,
+          "log_index": 1,
+          "emitting_address": "0xd4416b13d2b3a9abae7acd5d6c2bbdbe25686401",
+          "topics": [
+            "0x8ce7013e8abebc55c3890a68f5a27c67c3f7efa64e584de5fb22363c606fd340",
+            "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec"
+          ],
+          "data": "0x000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000040330000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000006b49d200000000000000000000000000000000000000000000000000000000000000000b05616c6963650365746800000000000000000000000000000000000000000000"
+        },
+        {
+          "chain": "ethereum-mainnet",
+          "block_hash": "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+          "block_number": 181,
+          "transaction_hash": "0xe2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
+          "transaction_index": 1,
+          "log_index": 2,
+          "emitting_address": "0x00000000000000000000000000000000000040aa",
+          "topics": [
+            "0x69e37f151eb98a09618ddaa80c8cfaf1ce5996867c489f45b555b412271ebf27",
+            "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
+            "0x0000000000000000000000000000000000000000000000000000000000004033"
+          ],
+          "data": "0x000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000006b49d2000000000000000000000000000000000000000000000000000000000000000005616c696365000000000000000000000000000000000000000000000000000000"
+        }
+      ]
     }
   ]
 }

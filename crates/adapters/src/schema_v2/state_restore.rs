@@ -359,6 +359,22 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
             ) else {
                 return;
             };
+            let registrar_owner = state
+                .v1_registry_owner(&event.namespace, namehash)
+                .filter(|owner| {
+                    !owner.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
+                })
+                .or_else(|| {
+                    event
+                        .after_state
+                        .get("registrant")
+                        .or_else(|| event.after_state.get("owner"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                });
+            let make_current = state
+                .v1_name(&event.namespace, namehash)
+                .is_none_or(|current| current.authority_source_family != "ens_v1_wrapper_l1");
             state.observe_v1_registrar(
                 &event.namespace,
                 namehash,
@@ -378,18 +394,13 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
                     .and_then(Value::as_str)
                     .map(str::to_owned),
                 expiry,
-                event
-                    .after_state
-                    .get("registrant")
-                    .or_else(|| event.after_state.get("owner"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
+                registrar_owner,
                 event
                     .after_state
                     .get("authority_key")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
-                true,
+                make_current,
             );
         }
         Some("NameRenewed") if event.event_kind == "RegistrationRenewed" => {

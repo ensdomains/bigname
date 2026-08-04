@@ -50,6 +50,7 @@ const SENDER: &str = "0x0000000000000000000000000000000000000043";
 const PRIOR_REGISTRY_OWNER: &str = "0x0000000000000000000000000000000000000048";
 const REGISTRANT: &str = "0x0000000000000000000000000000000000000049";
 const REMINTED_REGISTRY_OWNER: &str = "0x000000000000000000000000000000000000004a";
+const WRAPPED_REGISTRY_OWNER: &str = "0x000000000000000000000000000000000000004b";
 const NORMALIZER: &str = "ensip15@ens-normalize-0.1.1";
 type DiscoveryEpochRow = (i64, Option<i64>, bool, Option<String>, Option<String>);
 
@@ -239,6 +240,7 @@ async fn legacy_prior_owner_revocation_writes_and_projects_on_its_registry_epoch
         "production_interpret_legacy_prior_owner",
         "interpret-legacy-prior-owner",
         PriorOwnerRegistrationFlow::LegacyTwoOwnerChanges,
+        REGISTRANT,
     )
     .await
 }
@@ -249,6 +251,29 @@ async fn modern_prior_owner_revocation_writes_and_projects_on_its_registry_epoch
         "production_interpret_modern_prior_owner",
         "interpret-modern-prior-owner",
         PriorOwnerRegistrationFlow::ModernSingleOwnerChange,
+        REGISTRANT,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn legacy_wrapped_owner_grant_writes_and_projects_on_the_registration_epoch() -> Result<()> {
+    assert_prior_owner_revocation_writes_and_projects(
+        "production_interpret_legacy_wrapped_owner",
+        "interpret-legacy-wrapped-owner",
+        PriorOwnerRegistrationFlow::LegacyTwoOwnerChanges,
+        WRAPPED_REGISTRY_OWNER,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn modern_wrapped_owner_grant_writes_and_projects_on_the_registration_epoch() -> Result<()> {
+    assert_prior_owner_revocation_writes_and_projects(
+        "production_interpret_modern_wrapped_owner",
+        "interpret-modern-wrapped-owner",
+        PriorOwnerRegistrationFlow::ModernSingleOwnerChange,
+        WRAPPED_REGISTRY_OWNER,
     )
     .await
 }
@@ -257,9 +282,11 @@ async fn assert_prior_owner_revocation_writes_and_projects(
     database_name: &str,
     chain: &str,
     flow: PriorOwnerRegistrationFlow,
+    final_registry_owner: &str,
 ) -> Result<()> {
     let scratch = ScratchDatabase::create(database_name).await?;
-    seed_prior_owner_registration_fixture(scratch.pool(), chain, flow).await?;
+    seed_prior_owner_registration_fixture(scratch.pool(), chain, flow, final_registry_owner)
+        .await?;
 
     run_engine(scratch.pool(), chain, 0, 2, InterpretRunMode::Normal).await?;
     run_project(scratch.pool(), chain, 2, 0, 2).await?;
@@ -300,22 +327,93 @@ async fn assert_prior_owner_revocation_writes_and_projects(
 
     assert_prior_owner_is_revoked(scratch.pool(), chain, registry_resource).await?;
     assert_registrar_epoch_permission(scratch.pool(), registrar_resource).await?;
+    if final_registry_owner == WRAPPED_REGISTRY_OWNER {
+        assert_wrapped_owner_is_on_registration_epoch(
+            scratch.pool(),
+            chain,
+            registrar_resource,
+            registry_resource,
+        )
+        .await?;
+    }
 
     run_engine(scratch.pool(), chain, 3, 3, InterpretRunMode::Normal).await?;
     run_project(scratch.pool(), chain, 3, 3, 3).await?;
     assert_prior_owner_is_revoked(scratch.pool(), chain, registry_resource).await?;
-    let reminted_owner_powers: serde_json::Value = sqlx::query_scalar(
-        "SELECT effective_powers FROM permissions_current
-         WHERE resource_id = $1 AND subject = lower($2) AND scope = 'resource'",
-    )
-    .bind(registry_resource)
-    .bind(REMINTED_REGISTRY_OWNER)
-    .fetch_one(scratch.pool())
-    .await
-    .context("reminted registry owner permission was not projected")?;
-    assert_eq!(reminted_owner_powers, json!(["resource_control"]));
+    if final_registry_owner == WRAPPED_REGISTRY_OWNER {
+        assert_wrapped_owner_is_on_registration_epoch(
+            scratch.pool(),
+            chain,
+            registrar_resource,
+            registry_resource,
+        )
+        .await?;
+    } else {
+        let reminted_owner_powers: serde_json::Value = sqlx::query_scalar(
+            "SELECT effective_powers FROM permissions_current
+             WHERE resource_id = $1 AND subject = lower($2) AND scope = 'resource'",
+        )
+        .bind(registry_resource)
+        .bind(REMINTED_REGISTRY_OWNER)
+        .fetch_one(scratch.pool())
+        .await
+        .context("reminted registry owner permission was not projected")?;
+        assert_eq!(reminted_owner_powers, json!(["resource_control"]));
+    }
 
     scratch.cleanup().await
+}
+
+async fn assert_wrapped_owner_is_on_registration_epoch(
+    pool: &PgPool,
+    chain_id: &str,
+    registrar_resource: Uuid,
+    registry_resource: Uuid,
+) -> Result<()> {
+    let permission: (serde_json::Value, serde_json::Value) = sqlx::query_as(
+        "SELECT effective_powers, grant_source
+         FROM permissions_current
+         WHERE resource_id = $1 AND subject = lower($2) AND scope = 'resource'",
+    )
+    .bind(registrar_resource)
+    .bind(WRAPPED_REGISTRY_OWNER)
+    .fetch_one(pool)
+    .await
+    .context("wrapped registry owner permission was not projected on the registrar resource")?;
+    assert_eq!(permission.0, json!(["resource_control"]));
+    assert_eq!(permission.1["authority_kind"], "registrar");
+    let stale_active_row: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM permissions_current
+             WHERE resource_id = $1 AND subject = lower($2) AND scope = 'resource'
+         )",
+    )
+    .bind(registry_resource)
+    .bind(WRAPPED_REGISTRY_OWNER)
+    .fetch_one(pool)
+    .await?;
+    assert!(!stale_active_row);
+    let wrapper_resource: Uuid = sqlx::query_scalar(
+        "SELECT resource_id FROM normalized_events
+         WHERE chain_id = $1
+           AND source_family = 'ens_v1_wrapper_l1'
+           AND event_kind = 'SurfaceBound'",
+    )
+    .bind(chain_id)
+    .fetch_one(pool)
+    .await
+    .context("wrapped registration did not write a wrapper surface event")?;
+    assert_ne!(wrapper_resource, registrar_resource);
+    let active_resource: Uuid = sqlx::query_scalar(
+        "SELECT resource_id FROM surface_bindings
+         WHERE chain_id = $1 AND active_to IS NULL AND canonicality_state = 'canonical'",
+    )
+    .bind(chain_id)
+    .fetch_one(pool)
+    .await
+    .context("wrapped registration has no active surface binding")?;
+    assert_eq!(active_resource, wrapper_resource);
+    Ok(())
 }
 
 async fn assert_registrar_epoch_permission(pool: &PgPool, registrar_resource: Uuid) -> Result<()> {
@@ -5396,6 +5494,7 @@ async fn seed_prior_owner_registration_fixture(
     pool: &PgPool,
     chain_id: &str,
     flow: PriorOwnerRegistrationFlow,
+    final_registry_owner: &str,
 ) -> Result<()> {
     seed_fixture(pool, chain_id, &[(2, "alice")]).await?;
     sqlx::query(
@@ -5411,10 +5510,11 @@ async fn seed_prior_owner_registration_fixture(
     .execute(pool)
     .await?;
 
+    let wrapped = final_registry_owner == WRAPPED_REGISTRY_OWNER;
     let registration_log_index = match flow {
         PriorOwnerRegistrationFlow::LegacyTwoOwnerChanges => 2,
         PriorOwnerRegistrationFlow::ModernSingleOwnerChange => 1,
-    };
+    } + i64::from(wrapped);
     let registration = NameRegistered {
         name: "alice".to_owned(),
         label: B256::from(keccak256(b"alice")),
@@ -5512,6 +5612,9 @@ async fn seed_prior_owner_registration_fixture(
     .bind(manifest_id)
     .execute(pool)
     .await?;
+    if wrapped {
+        insert_name_wrapper_manifest(pool, chain_id).await?;
+    }
 
     let owner_change = |owner: &str| -> Result<alloy_primitives::LogData> {
         Ok(NewOwner {
@@ -5549,18 +5652,39 @@ async fn seed_prior_owner_registration_fixture(
         )
         .await?;
     }
-    let registrant = owner_change(REGISTRANT)?;
+    let incoming_owner = owner_change(final_registry_owner)?;
     insert_log_at(
         pool,
         chain_id,
         2,
         &registration_transaction,
-        registration_log_index - 1,
+        registration_log_index - 1 - i64::from(wrapped),
         REGISTRY,
-        registrant.topics(),
-        registrant.data.as_ref(),
+        incoming_owner.topics(),
+        incoming_owner.data.as_ref(),
     )
     .await?;
+    if wrapped {
+        let name_wrapped = NameWrapped {
+            node: raw_namehash(&[b"alice", b"eth"]),
+            name: b"\x05alice\x03eth\0".to_vec().into(),
+            owner: REGISTRANT.parse()?,
+            fuses: 1,
+            expiry: 1_000_002,
+        }
+        .encode_log_data();
+        insert_log_at(
+            pool,
+            chain_id,
+            2,
+            &registration_transaction,
+            registration_log_index - 1,
+            WRAPPED_REGISTRY_OWNER,
+            name_wrapped.topics(),
+            name_wrapped.data.as_ref(),
+        )
+        .await?;
+    }
 
     insert_registry_transaction(pool, chain_id, 3, "reminted-owner").await?;
     let reminted_owner = owner_change(REMINTED_REGISTRY_OWNER)?;
@@ -5574,6 +5698,84 @@ async fn seed_prior_owner_registration_fixture(
         reminted_owner.topics(),
         reminted_owner.data.as_ref(),
     )
+    .await?;
+    Ok(())
+}
+
+async fn insert_name_wrapper_manifest(pool: &PgPool, chain_id: &str) -> Result<()> {
+    let payload = json!({
+        "manifest_version": 1,
+        "namespace": "ens",
+        "source_family": "ens_v1_wrapper_l1",
+        "chain": chain_id,
+        "deployment_epoch": "fixture",
+        "rollout_status": "active",
+        "normalizer_version": NORMALIZER,
+        "capability_flags": {},
+        "roots": [],
+        "contracts": [{
+            "role": "name_wrapper",
+            "address": WRAPPED_REGISTRY_OWNER,
+            "proxy_kind": "none",
+            "implementation": null,
+            "start_block": 0
+        }],
+        "discovery_rules": [],
+        "abi": { "events": [{
+            "name": "NameWrapped",
+            "fragment": "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)",
+            "emitter_roles": ["name_wrapper"],
+            "normalized_events": [
+                "TokenControlTransferred",
+                "ExpiryChanged",
+                "PermissionScopeChanged",
+                "SurfaceUnbound",
+                "SurfaceBound",
+                "AuthorityEpochChanged",
+                "ResolverChanged",
+                "PreimageObserved"
+            ]
+        }], "calls": [] }
+    });
+    let manifest_id = insert_manifest(
+        pool,
+        chain_id,
+        "ens_v1_wrapper_l1",
+        &format!("tests/{chain_id}-wrapper.toml"),
+        payload,
+    )
+    .await?;
+    let contract_instance_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO contract_instances VALUES ($1, $2, 'contract', '{}'::jsonb, now())")
+        .bind(contract_instance_id)
+        .bind(chain_id)
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO manifest_contract_instances (
+             manifest_id, chain_id, declaration_kind, declaration_name,
+             contract_instance_id, declared_address, role, proxy_kind, start_block_number
+         )
+         VALUES ($1, $2, 'contract', 'name_wrapper', $3, $4, 'name_wrapper', 'none', 0)",
+    )
+    .bind(manifest_id)
+    .bind(chain_id)
+    .bind(contract_instance_id)
+    .bind(WRAPPED_REGISTRY_OWNER)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO contract_instance_addresses (
+             contract_instance_id, chain_id, address, active_from_block_number,
+             source_manifest_id, provenance
+         )
+         VALUES ($1, $2, $3, 0, $4, '{}'::jsonb)",
+    )
+    .bind(contract_instance_id)
+    .bind(chain_id)
+    .bind(WRAPPED_REGISTRY_OWNER)
+    .bind(manifest_id)
+    .execute(pool)
     .await?;
     Ok(())
 }

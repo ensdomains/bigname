@@ -1,5 +1,10 @@
 pub(super) mod permissions;
 mod v1;
+
+#[cfg(test)]
+pub(super) fn reconcile_same_transaction_setups_for_test(output: &mut super::model::BatchOutput) {
+    v1::reconcile_same_transaction_setups(output);
+}
 mod v2_registry;
 mod v2_resolver;
 

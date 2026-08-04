@@ -47,6 +47,25 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
         .iter()
         .filter(|event| event.event_kind == "RegistrationGranted")
         .filter_map(|event| {
+            let registrant = event
+                .after_state
+                .get("registrant")
+                .and_then(serde_json::Value::as_str);
+            let registration_emitter = event
+                .raw_fact_ref
+                .get("emitting_address")
+                .and_then(serde_json::Value::as_str);
+            debug_assert!(
+                registrant.is_some(),
+                "RegistrationGranted event {} must carry after_state.registrant for same-transaction reconciliation",
+                event.event_identity,
+            );
+            debug_assert!(
+                registration_emitter.is_some(),
+                "RegistrationGranted event {} must carry raw_fact_ref.emitting_address for same-transaction reconciliation",
+                event.event_identity,
+            );
+            registrant?;
             Some((
                 event.namespace.clone(),
                 event.logical_name_id.clone()?,
@@ -60,12 +79,7 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
                     .get("authority_key")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned),
-                event.after_state.get("registrant")?.as_str()?.to_owned(),
-                event
-                    .raw_fact_ref
-                    .get("emitting_address")?
-                    .as_str()?
-                    .to_owned(),
+                registration_emitter?.to_owned(),
             ))
         })
         .collect::<Vec<_>>();
@@ -78,7 +92,6 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
         log_index,
         namehash,
         authority_key,
-        registrant,
         registration_emitter,
     ) in registrations
     {
@@ -142,19 +155,26 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
             })
             .collect::<std::collections::BTreeMap<_, _>>();
         let last_owner_position = owner_positions.keys().next_back().copied();
-        // A legacy controller first registers the name to `address(this)`, then replaces that
-        // registry owner before emitting its own NameRegistered event. Matching the intermediate
-        // owner to that event's emitter distinguishes the controller artifact from a real owner.
+        // Transient controller artifact removal considers only pending registry NewOwner logs.
+        // Its canonical admitted case is the retired controller stream: BaseRegistrar's reclaim
+        // path emits that shape through setSubnodeOwner.
+        // (upstream: .refs/ens_subgraph/subgraph.yaml:L145 @ ens_subgraph@723f1b6)
+        // (upstream: .refs/ens_subgraph/subgraph.yaml:L148 @ ens_subgraph@723f1b6)
+        // (upstream: .refs/ens_subgraph/subgraph.yaml:L162 @ ens_subgraph@723f1b6)
+        // (upstream: .refs/ens_subgraph/subgraph.yaml:L165 @ ens_subgraph@723f1b6)
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L174 @ ens_v1@91c966f)
+        // The current controller's resolver path uses setRecord, whose ownership write emits
+        // Transfer rather than NewOwner, so it cannot fire this trigger.
         // (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L294 @ ens_v1@91c966f)
-        // (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L296 @ ens_v1@91c966f)
         // (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L301 @ ens_v1@91c966f)
-        // (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L303 @ ens_v1@91c966f)
-        // (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L333 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L33 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L39 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L68 @ ens_v1@91c966f)
         let transient_owner_positions = owner_positions
             .iter()
             .filter(|(position, owner)| {
                 Some(**position) != last_owner_position
-                    && !owner.eq_ignore_ascii_case(&registrant)
                     && owner.eq_ignore_ascii_case(&registration_emitter)
                     && output.normalized_events.iter().any(|event| {
                         event_position(event) == Some(**position)
@@ -166,6 +186,8 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
             })
             .map(|(position, _)| *position)
             .collect::<std::collections::BTreeSet<_>>();
+        // A false transient match requires a non-canonical admitted emitter to be the real prior
+        // owner and perform an ownership round trip inside its own registration transaction.
         let predecessor_owner_positions = owner_positions
             .keys()
             .filter(|position| {
@@ -196,12 +218,32 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
                     && position
                         .is_some_and(|position| transient_owner_positions.contains(&position)))
         });
+        let setup_revocations = output
+            .normalized_events
+            .iter()
+            .filter_map(|event| {
+                let position = event_position(event)?;
+                let resource_id = event.resource_id?;
+                if !pending_positions.contains(&position)
+                    || !is_permission_revocation(event)
+                    || !stale_registry_resources.contains(&resource_id)
+                {
+                    return None;
+                }
+                Some(PermissionRevocation {
+                    resource_id,
+                    subject: permission_subject(event)?.to_owned(),
+                    scope: event.after_state.get("scope")?.clone(),
+                    position,
+                })
+            })
+            .collect::<Vec<_>>();
         for event in output.normalized_events.iter_mut().filter(|event| {
             concerns_predecessor_epoch(
                 event,
-                &registrant,
                 &stale_registry_resources,
                 &predecessor_owner_positions,
+                &setup_revocations,
             )
         }) {
             event.logical_name_id = Some(logical_name_id.clone());
@@ -210,9 +252,9 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
         for event in output.normalized_events.iter_mut().filter(|event| {
             if concerns_predecessor_epoch(
                 event,
-                &registrant,
                 &stale_registry_resources,
                 &predecessor_owner_positions,
+                &setup_revocations,
             ) {
                 return false;
             }
@@ -285,33 +327,65 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
     }
 }
 
+struct PermissionRevocation {
+    resource_id: uuid::Uuid,
+    subject: String,
+    scope: serde_json::Value,
+    position: (i64, i64, i64),
+}
+
 fn concerns_predecessor_epoch(
     event: &NormalizedEvent,
-    registrant: &str,
     stale_registry_resources: &std::collections::BTreeSet<uuid::Uuid>,
     predecessor_owner_positions: &std::collections::BTreeSet<(i64, i64, i64)>,
+    setup_revocations: &[PermissionRevocation],
 ) -> bool {
-    if event_position(event).is_some_and(|position| predecessor_owner_positions.contains(&position))
-    {
+    if event.event_kind != "PermissionChanged" {
+        return event_position(event)
+            .is_some_and(|position| predecessor_owner_positions.contains(&position));
+    }
+    let Some(resource_id) = event
+        .resource_id
+        .filter(|resource| stale_registry_resources.contains(resource))
+    else {
+        return false;
+    };
+    if is_permission_revocation(event) {
         return true;
     }
+    let (Some(position), Some(subject), Some(scope)) = (
+        event_position(event),
+        permission_subject(event),
+        event.after_state.get("scope"),
+    ) else {
+        return false;
+    };
+    event
+        .after_state
+        .get("grant_source")
+        .is_some_and(|source| !source.is_null())
+        && setup_revocations.iter().any(|revocation| {
+            revocation.resource_id == resource_id
+                && revocation.subject.eq_ignore_ascii_case(subject)
+                && &revocation.scope == scope
+                && revocation.position > position
+        })
+}
+
+fn is_permission_revocation(event: &NormalizedEvent) -> bool {
     event.event_kind == "PermissionChanged"
         && event
-            .resource_id
-            .is_some_and(|resource| stale_registry_resources.contains(&resource))
-        && (event
             .after_state
             .get("revocation_source")
             .is_some_and(|source| !source.is_null())
-            || !permission_subject_is(event, registrant))
+}
+
+fn permission_subject(event: &NormalizedEvent) -> Option<&str> {
+    event.after_state.get("subject")?.as_str()
 }
 
 fn permission_subject_is(event: &NormalizedEvent, subject: &str) -> bool {
-    event
-        .after_state
-        .get("subject")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(subject))
+    permission_subject(event).is_some_and(|candidate| candidate.eq_ignore_ascii_case(subject))
 }
 
 fn is_resource_permission_grant(event: &NormalizedEvent, subject: &str) -> bool {
