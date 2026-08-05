@@ -29,7 +29,6 @@ fn builder_returns_indexed_then_verified_answers_for_both_sources() {
             },
             "failure_reason": "resolved_target_mismatch"
         })),
-        persisted_verified: None,
     };
 
     let response = build_primary_name(
@@ -70,7 +69,6 @@ fn builder_narrows_answers_to_requested_source() {
         claim_name_is_normalized: false,
         on_demand_claim: OnDemandPrimaryNameClaimState::NotFound,
         on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
-        persisted_verified: None,
     };
 
     let indexed = build_primary_name(
@@ -113,7 +111,6 @@ fn builder_keeps_completed_reverse_timeout_as_in_band_failure() {
             "status": "execution_failed",
             "failure_reason": "resolver_call_failed"
         })),
-        persisted_verified: None,
     };
 
     let response = build_primary_name(
@@ -157,7 +154,6 @@ fn builder_maps_non_normalized_claims_to_reasoned_not_found() {
                     resolver_address: "0x0000000000000000000000000000000000000def".to_owned(),
                 }),
                 on_demand_verified: OnDemandPrimaryNameVerificationState::ClaimNotNormalized,
-                persisted_verified: None,
             },
             "claim_not_normalized",
         ),
@@ -173,7 +169,6 @@ fn builder_maps_non_normalized_claims_to_reasoned_not_found() {
                     },
                 ),
                 on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
-                persisted_verified: None,
             },
             "claim_name_not_normalizable",
         ),
@@ -222,7 +217,6 @@ fn builder_keeps_indexed_non_normalized_claim_declared_only() {
         claim_name_is_normalized: false,
         on_demand_claim: OnDemandPrimaryNameClaimState::NotAttempted,
         on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
-        persisted_verified: None,
     };
 
     let response = build_primary_name(
@@ -258,7 +252,6 @@ fn builder_keeps_unnormalizable_live_claim_out_of_indexed_answer() {
             },
         ),
         on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
-        persisted_verified: None,
     };
 
     let response = build_primary_name(
@@ -295,7 +288,6 @@ fn verified_primary_name_unsupported_reason_is_required_and_mapped() {
         claim_name_is_normalized: false,
         on_demand_claim: OnDemandPrimaryNameClaimState::NotAttempted,
         on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
-        persisted_verified: None,
     };
 
     let missing = verified_answer_from_value(
@@ -333,7 +325,6 @@ fn verified_primary_name_rejects_unmapped_pipeline_reason() {
         claim_name_is_normalized: false,
         on_demand_claim: OnDemandPrimaryNameClaimState::NotAttempted,
         on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
-        persisted_verified: None,
     };
 
     let error = verified_answer_from_value(

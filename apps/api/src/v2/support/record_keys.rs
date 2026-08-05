@@ -6,10 +6,6 @@ pub(crate) enum ResolutionMode {
 }
 
 impl ResolutionMode {
-    pub(crate) fn includes_declared(self) -> bool {
-        matches!(self, Self::Declared | Self::Both)
-    }
-
     pub(crate) fn includes_verified(self) -> bool {
         matches!(self, Self::Verified | Self::Both)
     }

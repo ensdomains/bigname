@@ -12,10 +12,6 @@ Runs the local rollback smoke gate:
   - no-network sanity, when requested
   - local pinned upstream refs
   - checked-in migrations twice, proving idempotence after rollback
-  - checked-in OpenAPI artifact drift
-  - conformance owner OpenAPI smoke guard
-  - focused capability cutover evidence guard
-  - focused dynamic resolver profile conformance guard
   - live manifest-drift audit
   - runtime watch-plan inspection
   - prebuilt local API binary
@@ -123,7 +119,6 @@ if [ -n "${CARGO_BUILD_TARGET:-}" ]; then
 else
   api_bin="${target_dir}/debug/bigname-api"
 fi
-openapi_tmp="$(mktemp -t bigname-rollback-openapi.XXXXXX)"
 health_body_tmp="$(mktemp -t bigname-rollback-health.XXXXXX)"
 api_log_tmp="$(mktemp -t bigname-rollback-api.XXXXXX.log)"
 
@@ -132,34 +127,13 @@ cleanup() {
     kill "$api_pid" 2>/dev/null || true
     wait "$api_pid" 2>/dev/null || true
   fi
-  rm -f "$openapi_tmp" "$health_body_tmp" "$api_log_tmp"
+  rm -f "$health_body_tmp" "$api_log_tmp"
 }
 trap cleanup EXIT INT TERM
-
-run_openapi_drift_check() {
-  log "checking OpenAPI artifact drift"
-  cargo run "${cargo_args[@]}" -p bigname-api -- print-openapi > "$openapi_tmp"
-  diff -u docs/api-v1.openapi.json "$openapi_tmp"
-}
 
 run_pinned_refs_check() {
   log "checking local pinned upstream refs"
   scripts/sync-refs --check
-}
-
-run_conformance_owner_smoke_gate() {
-  log "checking conformance owner OpenAPI smoke guard"
-  cargo test "${cargo_args[@]}" --manifest-path tests/conformance/Cargo.toml openapi
-}
-
-run_capability_cutover_evidence_gate() {
-  log "checking capability cutover evidence guard"
-  cargo test "${cargo_args[@]}" --manifest-path tests/conformance/Cargo.toml capability_cutover_evidence
-}
-
-run_dynamic_resolver_profile_gate() {
-  log "checking dynamic resolver profile conformance guard"
-  cargo test "${cargo_args[@]}" --manifest-path tests/conformance/Cargo.toml dynamic_resolver_profile -- --nocapture
 }
 
 run_migrations() {
@@ -235,17 +209,12 @@ run_readiness_check() {
 }
 
 require_command cargo
-require_command diff
 require_command grep
 require_command seq
 assert_no_network_mode
 run_pinned_refs_check
 run_migrations "applying checked-in migrations"
 run_migrations "re-applying checked-in migrations for rollback idempotence"
-run_openapi_drift_check
-run_conformance_owner_smoke_gate
-run_capability_cutover_evidence_gate
-run_dynamic_resolver_profile_gate
 run_manifest_drift_audit_gate
 run_watch_plan_inspection_gate
 build_api_for_readiness

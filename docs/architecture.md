@@ -1,8 +1,8 @@
 # Architecture
 
-bigname is a versioned, replayable indexing and read platform for ENS (v1 and v2) and Basenames. It exposes a native `v1` REST contract — not a legacy-subgraph parity layer — that answers point-in-time, provenance-tagged questions about names, addresses, resolvers, primary names, and verified resolution.
+bigname is a versioned, replayable indexing and read platform for ENS (v1 and v2) and Basenames. It serves the native `v2` REST contract, a narrow GraphQL compatibility surface, and operator health.
 
-This document defines the model. Wire format lives in [`api-v1.md`](api-v1.md); persistence in [`storage.md`](storage.md); manifests, intake, projections, and execution in their own files. Implementation sequencing and parallel-work boundaries live under [`internal/`](internal/).
+This document defines the model. Wire format lives in [`api-v2.md`](api-v2.md) and [`api-v2-routes.md`](api-v2-routes.md); persistence in [`storage.md`](storage.md); manifests, intake, projections, and execution in their own files. Implementation sequencing and parallel-work boundaries live under [`internal/`](internal/).
 
 ## Objectives
 
@@ -14,7 +14,8 @@ For any supported name or address, every answer must be:
 - explicit about provenance, coverage, finality, and consistency
 - safe under chain reorgs and source-graph expansion
 
-Every answer carries `declared_state`, `verified_state` (where applicable), `provenance`, `coverage`, `chain_positions`, `consistency`, and `last_updated`.
+REST answers use the v2 `data`/`page`/`meta` envelope and report unsupported,
+partial, stale, or failed results explicitly.
 
 ## Public namespaces
 
@@ -32,21 +33,17 @@ Namespace assignment is driven by an internal `NamespaceRegistry` with versioned
 
 Conflicts reject canonical [admission](glossary.md); namespace assignment happens before `logical_name_id` is minted. [Deployment profile](glossary.md) is separate from namespace: deployment profiles select the admitted chain set (mainnet, post-audit Sepolia), not a different namespace product. One runtime answers under one deployment profile at a time.
 
-## Public read contract
+## Read contract
 
-`v1` resource families: `Namespace`, `Name`, `Address`, `Resolver`, `Resolution`, `PrimaryName`, `Permissions`, `History`, `Explain`, `SourceManifest`, `Coverage`. `Registration` is a sub-document of `Name`.
-
-Routes accept some combination of: `namespace`, `name`, `address`, `coin_type`, `at`, `chain_positions`, `consistency=head|safe|finalized`, `mode=declared|verified|both`, `include`, and pagination. `at` selects a timestamp; `chain_positions` pins per-chain `(block_number, block_hash, timestamp)`. The two are mutually exclusive — supplying both rejects with `invalid_input`.
-
-Coverage statuses: `full`, `partial`, `observed_only`, `unsupported`, `stale`. Exhaustiveness: `authoritative`, `best_effort`, `observed_only`, `non_enumerable`, `not_applicable`.
-
-Per-result `ResultStatus` for mixed routes: `success`, `not_found`, `mismatch`, `unsupported`, `invalid_name`, `execution_failed`. `unsupported_reason` is required when status is `unsupported`; only `success` guarantees a concrete value.
-
-Breaking semantic changes mean `v2`. The `v1` contract does not preserve ENSv1 subgraph entity names, ENSNode shapes, or GraphQL field-level parity.
+The served REST families are lookup, status, name, address, permission, search,
+event, resolver, namespace, and diagnostic routes under `/v2`. Their parameters,
+result vocabulary, snapshot behavior, and pagination rules are defined in
+[`api-v2-routes.md`](api-v2-routes.md). The deleted v1 REST shapes are not a
+compatibility layer for this contract.
 
 ### Subgraph-compatible GraphQL surface
 
-Alongside the REST contract, bigname also serves a narrow, deliberately scoped subgraph-compatible read surface at `POST /graphql`. It is **not** general subgraph parity: it implements only the documented compatibility operations — `domain`, `domains`, `registrationConnection`, `domainConnection` — over the existing `name_current` and `record_inventory_current` [projections](glossary.md). The native `v1` REST surface above remains the primary read contract; the GraphQL surface is a compatibility adapter, not a consumer-replacement declaration. Wire details live in [`api-v1.md`](api-v1.md#subgraph-compatible-graphql-endpoint).
+Alongside the REST contract, bigname serves a narrow, deliberately scoped subgraph-compatible read surface at `POST /graphql`. It is **not** general subgraph parity: it implements only `domain`, `domains`, `registrationConnection`, and `domainConnection` over the existing `name_current` and `record_inventory_current` [projections](glossary.md). The GraphQL surface is a compatibility adapter, not a consumer-replacement declaration.
 
 ## Identity model
 
@@ -394,19 +391,22 @@ Other ENS classes (non-alias ancestor-selected, linked-subregistry ancestor-sele
 
 Basenames supports the exact-surface transport-assisted direct path through active `basenames_execution` v2 at the L1 Resolver. Other Basenames verified [path classes](glossary.md) return selector-local `unsupported`.[^bn-readme-l69][^bn-readme-l70][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
 
-Retained v1 verified answers persist an `ExecutionTrace`. V2 verified name and
-record routes execute through the schema-v2 lookup engine without a durable
-trace or reusable outcome. A guarded direct live/indexed disagreement may
+Legacy execution artifacts remain available to diagnostics and worker code,
+but no v1 route serves them. V2 verified name and record routes execute through
+the schema-v2 lookup engine without a durable trace or reusable outcome. A
+guarded direct live/indexed disagreement may
 create or replace an active
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) row;
 restored agreement may clear the matching active row.
-`ExplainResolution` remains a v1 view over persisted execution.
 
 ## Permissions
 
 Permissions are first-class projections and explain views. Track grants by scope (root, registry, resource, resolver, record manager/operator, migration-derived, transport-derived). Each grant records source, revocation source, inheritance path, transfer behavior, scope, and effective powers.
 
-Public reads expose `effective_powers` directly so callers don't reconstruct authority from raw role bitmaps. The first declared-state route is resource-centric: `GET /v1/resources/{resource_id}/permissions`. Name-, address-, and resolver-centric views summarize or filter the same resource-anchored truth.
+Public reads expose effective powers directly so callers do not reconstruct
+authority from raw role bitmaps. `GET /v2/permissions` is the current
+resource-anchored permission collection; name- and address-centric views
+summarize or filter the same truth.
 
 For ENSv1 wrapper-backed resources, the current projection publishes no wrapper-holder subject grant derived from fuse state. Fuse changes remain available as `PermissionScopeChanged` history, but wrapper-resource permission and name-role reads may be empty. Internal projection inputs for a registrar name wrapped after registration can retain stale pre-wrap control facets; public exact-name reads do not publish those facets as effective control and instead return an explicit unsupported control summary for every current wrapper resource.[^v1-iname-l10][^v1-nw-l421][^v1-nw-l427][^v1-nw-l637][^v1-nw-l666][^v1-nw-l676][^v1-nw-l723][^v1-nw-l827][^v1-nw-l1023][^v1-nw-l132] An empty permission result therefore does not prove that active fuses were applied to an otherwise complete published grant set.
 
@@ -417,11 +417,11 @@ Required indexes: by resource, by account, by resolver; permission history by re
 ## Primary and reverse names
 
 The primary-name projection is address- and `coin_type`-centric, not just a
-reverse-record projection. Unless a sentence explicitly says v2, the
-persistence, cache, fallback, and provenance rules in this section describe
-the retained v1 execution plane.
+reverse-record projection. The public-schema persistence, cache, fallback, and
+provenance rules below describe legacy worker and storage artifacts retained
+until slice 3; no v1 API route serves them.
 
-That retained v1 plane persists `claimed_primary_name`,
+That retained legacy plane persists `claimed_primary_name`,
 `verified_primary_name`, `reverse_namespace`, `coin_type`, `resolver`,
 provenance, and coverage.
 
@@ -443,7 +443,7 @@ unsupported; its indexed response remains Base-scoped.
 
 Verified-primary cache identity is `request_type=verified_primary_name` with key `{namespace}:{normalized_address}:{coin_type}`. Materialized results are fenced by the matching `primary_names_current` row. The route-local ENS/60 exception is fenced by that exact row remaining absent and by an exact selected-checkpoint match; its topology and record dependency fields carry the explicit selected checkpoint rather than fabricated projected name/resource identities. Route-local and materialized traces do not satisfy each other's readback fence.
 
-Retained v1 section-local provenance:
+Retained legacy section-local provenance, not currently served:
 
 - `claimed_primary_name.provenance` is exact-tuple declared-only provenance from the requested row, optionally with projection-owned legacy reverse-resolver hydration metadata, or route-local `ens_reverse_rpc` resolver provenance for the ENS/60 on-demand fallback. No `execution_trace_id`.
 - `verified_primary_name.provenance` (when present) is `{execution_trace_id, manifest_versions}` for persisted readback and must equal the top-level `execution_trace_id`, including persisted ENS/60 fallback results. The v1 fallback also exposes the selected positions through `chain_positions`.
@@ -495,7 +495,7 @@ Three thin views over already-projected truth, each scoped to the same exact-nam
 
 - `surface-binding` — current `SurfaceBinding` plus exact-name history head pointers
 - `authority-control` — same `authority` and `control` summaries as the exact-name route
-- `coverage` — the same `Coverage` object returned inline by `GET /v1/names/{namespace}/{name}`
+- `coverage` — the projection coverage facts exposed by the v2 name coverage diagnostic
 
 None of these introduces a separate truth system or ledger.
 
@@ -508,11 +508,10 @@ Coverage is contractual.
 - Wildcard and offchain name classes are not globally enumerable.
 - Record inventory is `best_effort` unless a resolver family enumerates explicitly or there's a source-specific index.
 - Child enumeration is authoritative only for declared direct children unless the caller opts into other surface classes.
-- Primary-name route-level coverage is `partial`, with
+- V2 primary-name route-level coverage is `partial`, with
   `exhaustiveness=non_enumerable` and
-  `enumeration_basis=primary_name_lookup`, for the retained v1 persisted
-  classes and for v2 ENS/60 fresh verification. Other v2 verified tuples are
-  explicit `unsupported`.
+  `enumeration_basis=primary_name_lookup` for ENS/60 fresh verification. Other
+  v2 verified tuples are explicit `unsupported`.
 
 Every response carries `coverage.status`, `coverage.exhaustiveness`, `coverage.source_classes_considered`, `coverage.unsupported_reason`, `coverage.enumeration_basis`.
 
@@ -523,9 +522,10 @@ Default verified entrypoints:
 - ENS: `ens_execution` at the official Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`.[^ens-docs-univ][^v1-aur-l90][^v1-aur-l106]
 - Basenames: active `basenames_execution` v2 at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` supports only the exact-surface transport-assisted direct path; other Basenames verified path classes stay `unsupported`.[^bn-readme-l22][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
 
-The retained v1 execution engine supports onchain calls, wildcard resolution,
-alias-aware execution, nested CCIP-Read, batch/multicall, proof and verification
-persistence. Its verified answers carry `ExecutionTrace` and cache identity.
+The legacy execution engine retained for worker use supports onchain calls,
+wildcard resolution, alias-aware execution, nested CCIP-Read, batch/multicall,
+proof and verification persistence. Its artifacts carry `ExecutionTrace` and
+cache identity, but no v1 API route serves them.
 
 The v2 lookup engine executes afresh at the schema-v2 current readable position.
 It has no trace or cache identity. It may compare a direct record answer with
@@ -625,7 +625,7 @@ Live manifest drift / proxy upgrade alerting is a worker-owned operational loop.
 
 ## Implementation shape
 
-Rust modular monolith. PostgreSQL is the hot indexed/replay store for durable replay facts, projections, retained payload metadata, and execution artifacts. Workers handle ingestion, projection, replay, execution. The public `v1` API is read-only over projections and execution output. A standalone Rust conformance package checks protocol and consumer-capability behavior.
+Rust modular monolith. PostgreSQL is the hot indexed/replay store for durable replay facts, projections, retained payload metadata, and execution artifacts. Workers handle ingestion, projection, replay, and retained execution work. The API serves v2 projection and lookup reads, GraphQL compatibility reads, health, and diagnostic readback.
 
 Repository layout:
 
@@ -633,16 +633,15 @@ Repository layout:
 - `crates/domain`, `crates/storage`, `crates/manifests`, `crates/adapters`,
   `crates/ingest`, `crates/interpret`, `crates/execution`,
   `crates/test-support`
-- `tests/conformance`
 
 ## Test matrix
 
 This is a protocol-risk inventory, not a claim that the e2e suite covers every
-row. `tests/conformance` owns public route-contract permutations. `tests/e2e`
-is current contract-to-schema-v2 pipeline evidence: pinned contracts run on
+row. API crate tests own the v2 and GraphQL route behavior. `tests/e2e` is
+current contract-to-schema-v2 pipeline evidence: pinned contracts run on
 Anvil, the production `phase-runner` ingests or consumes immutable raw facts,
 and scenarios assert normalized events, phase state, and projections directly.
-The suite does not start the retained v1 API, so it is not public HTTP evidence.
+The suite does not start the API, so it is not public HTTP evidence.
 Its exact runnable, retired, and deferred inventory is maintained in
 [`tests/e2e/README.md`](../tests/e2e/README.md) and the expanded
 [coverage ledger](internal/e2e-testing-plan.md).
@@ -659,10 +658,8 @@ Operational: reorg across authority events, reorg across verified execution cach
 
 End-to-end cases validate every schema-v2 layer material to their claim: raw
 facts, normalized events, projections, and, once a contract-backed caller
-exists, execution traces or public API output. The current suite stops before
-the v1 API and does not replace conformance coverage of the documented route
-surface. Public lookup/explain integration remains explicitly deferred to the
-C2/C3 cutover.
+exists, execution output or public API output. The current suite stops before
+the API; route behavior remains owned by API crate tests.
 
 ## Open decisions
 

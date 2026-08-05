@@ -20,7 +20,7 @@ const DEFAULT_DOMAINS_PAGE_SIZE: u64 = 100;
 /// Ceiling for client-supplied `first`, matching the REST surface's `MAX_PAGE_SIZE` so the public
 /// GraphQL path cannot request an unbounded page. Larger values are clamped silently so
 /// subgraph-shaped callers do not receive a GraphQL error for oversized windows.
-const MAX_DOMAINS_PAGE_SIZE: u64 = crate::pagination::MAX_PAGE_SIZE;
+const MAX_DOMAINS_PAGE_SIZE: u64 = crate::v2::MAX_PAGE_SIZE;
 /// Ceiling for client-supplied `skip`, so a hostile deep offset cannot force Postgres to scan an
 /// arbitrary prefix of the filtered set.
 const MAX_DOMAINS_SKIP: u64 = 1_000_000;

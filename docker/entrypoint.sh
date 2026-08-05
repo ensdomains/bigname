@@ -30,10 +30,6 @@ case "$command" in
     shift
     exec bigname-worker migrate "$@"
     ;;
-  print-openapi)
-    shift
-    exec bigname-api print-openapi "$@"
-    ;;
   bigname-api | phase-runner | bigname-worker)
     exec "$@"
     ;;

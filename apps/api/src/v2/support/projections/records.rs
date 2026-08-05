@@ -31,16 +31,6 @@ pub(super) fn build_record_cache_section_for_name(
     unsupported_section(unsupported_reason)
 }
 
-#[cfg(test)]
-pub(super) fn build_record_cache_section(
-    row: Option<&RecordInventoryCurrentRow>,
-    records: &[ResolutionRecordKey],
-    unsupported_reason: &str,
-) -> JsonValue {
-    row.map(|row| build_record_cache_state(row, records))
-        .unwrap_or_else(|| unsupported_section(unsupported_reason))
-}
-
 fn build_record_inventory_state(row: &RecordInventoryCurrentRow) -> JsonValue {
     let mut record_inventory = empty_object();
     insert_value_field(

@@ -9,9 +9,10 @@ usage() {
 Usage: scripts/public-edge-smoke [--start-caddy] [--no-network]
 
 Checks the public Caddy allowlist against a running bigname API:
-  - allowed documentation helpers, v1 REST, GraphQL POST, and browser preflight requests
-  - denied v2, GraphiQL, and unknown-path requests
-  - direct internal success for every denied route that exists in the API
+  - direct internal success for v2, GraphQL, and health routes
+  - removed v1 and documentation-helper routes return 404 internally and publicly
+  - the pre-C3 edge still denies v2, GraphiQL, health, and unknown paths
+  - GraphQL POST and its browser preflight remain allowed
 
 Browser preflights use the deployed ENS Manager origin, https://app.ens.dev.
 
@@ -261,25 +262,25 @@ assert_preflight_headers() {
   assert_last_header "$label" '^access-control-allow-headers:[[:space:]]*(\*|.*content-type.*)$'
 }
 
-v1_lookup_body='{"profile":"feed","namespace":"public","inputs":[]}'
 v2_lookup_body='{"profile":"feed","namespace":"public","inputs":[]}'
 graphql_body='{"query":"{ __typename }"}'
 diagnostic_path='/v2/diagnostics/namespaces/ens/manifests'
 unknown_path='/public-edge-smoke-unknown'
 manager_origin='https://app.ens.dev'
 
-log "proving denied API routes exist on the internal listener"
+log "checking the surviving internal API surface"
 assert_status internal-health "$expected_health_status" GET "${internal_api_url}/healthz" ''
 assert_status internal-v2-status 200 GET "${internal_api_url}/v2/status" ''
 assert_status internal-v2-lookup 200 POST "${internal_api_url}/v2/lookup" "$v2_lookup_body"
 assert_status internal-v2-diagnostic 200 GET "${internal_api_url}${diagnostic_path}" ''
 assert_status internal-graphiql 200 GET "${internal_api_url}/graphql" ''
-assert_status internal-v1-read-preflight 200 OPTIONS "${internal_api_url}/v1/status" '' \
+assert_status internal-v1-read-preflight 404 OPTIONS "${internal_api_url}/v1/status" '' \
   --header "origin: ${manager_origin}" \
   --header 'access-control-request-method: GET' \
   --header 'access-control-request-headers: content-type'
-assert_preflight_headers internal-v1-read-preflight GET
-assert_status internal-v1-wrong-method 405 POST "${internal_api_url}/v1/status" ''
+assert_status internal-v1-wrong-method 404 POST "${internal_api_url}/v1/status" ''
+assert_status internal-docs 404 GET "${internal_api_url}/docs" ''
+assert_status internal-openapi 404 GET "${internal_api_url}/openapi.json" ''
 assert_status internal-unknown 404 GET "${internal_api_url}${unknown_path}" ''
 request_timeout_secs=10
 
@@ -309,32 +310,19 @@ if [ "$start_caddy" -eq 1 ]; then
 
   for _attempt in $(seq 1 30); do
     request caddy-readiness GET "${public_edge_url}/" '' 2>/dev/null || true
-    if [ "$last_status" = "200" ]; then
+    if [ "$last_status" = "404" ]; then
       break
     fi
     sleep 1
   done
-  if [ "$last_status" != "200" ]; then
+  if [ "$last_status" != "404" ]; then
     show_last_response
     fail "Caddy did not become ready at ${public_edge_url}"
   fi
 fi
 
-log "checking allowed public requests"
-assert_status public-root 200 GET "${public_edge_url}/" ''
-assert_status public-docs 200 GET "${public_edge_url}/docs" ''
-assert_status public-docs-slash 200 GET "${public_edge_url}/docs/" ''
-assert_status public-docs-head 200 HEAD "${public_edge_url}/docs" ''
-assert_status public-openapi 200 GET "${public_edge_url}/openapi.json" ''
-assert_status public-v1-get 200 GET "${public_edge_url}/v1/namespaces/ens" ''
-assert_status public-v1-head 200 HEAD "${public_edge_url}/v1/namespaces/ens" ''
-assert_status public-v1-lookup 200 POST "${public_edge_url}/v1/identity:lookup" "$v1_lookup_body"
+log "checking the surviving public GraphQL request"
 assert_status public-graphql 200 POST "${public_edge_url}/graphql" "$graphql_body"
-assert_status public-v1-preflight 200 OPTIONS "${public_edge_url}/v1/identity:lookup" '' \
-  --header "origin: ${manager_origin}" \
-  --header 'access-control-request-method: POST' \
-  --header 'access-control-request-headers: content-type'
-assert_preflight_headers public-v1-preflight
 assert_status public-graphql-preflight 200 OPTIONS "${public_edge_url}/graphql" '' \
   --header "origin: ${manager_origin}" \
   --header 'access-control-request-method: POST' \
@@ -342,6 +330,19 @@ assert_status public-graphql-preflight 200 OPTIONS "${public_edge_url}/graphql" 
 assert_preflight_headers public-graphql-preflight
 
 log "checking public default-deny behavior"
+assert_status public-root 404 GET "${public_edge_url}/" ''
+assert_status public-docs 404 GET "${public_edge_url}/docs" ''
+assert_status public-docs-slash 404 GET "${public_edge_url}/docs/" ''
+assert_status public-docs-head 404 HEAD "${public_edge_url}/docs" ''
+assert_status public-openapi 404 GET "${public_edge_url}/openapi.json" ''
+assert_status public-v1-get 404 GET "${public_edge_url}/v1/namespaces/ens" ''
+assert_status public-v1-head 404 HEAD "${public_edge_url}/v1/namespaces/ens" ''
+assert_status public-v1-lookup 404 POST "${public_edge_url}/v1/identity:lookup" \
+  '{"profile":"feed","namespace":"public","inputs":[]}'
+assert_status public-v1-preflight 404 OPTIONS "${public_edge_url}/v1/identity:lookup" '' \
+  --header "origin: ${manager_origin}" \
+  --header 'access-control-request-method: POST' \
+  --header 'access-control-request-headers: content-type'
 assert_status public-health 404 GET "${public_edge_url}/healthz" ''
 assert_status public-v2-status 404 GET "${public_edge_url}/v2/status" ''
 assert_status public-v2-lookup 404 POST "${public_edge_url}/v2/lookup" "$v2_lookup_body"

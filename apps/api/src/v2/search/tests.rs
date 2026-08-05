@@ -532,10 +532,7 @@ impl SearchDatabase {
     }
 
     fn app_state(&self) -> crate::AppState {
-        crate::AppState::new(
-            self.pool().clone(),
-            bigname_execution::ChainRpcUrls::default(),
-        )
+        crate::AppState::new(self.pool().clone(), bigname_lookup::ChainRpcUrls::default())
     }
 
     async fn cleanup(self) -> Result<()> {

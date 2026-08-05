@@ -2,7 +2,7 @@
 //!
 //! Serves the minimal four-operation subset (`domain`, `domains`, `registrationConnection`,
 //! `domainConnection`) over the existing `bigname_storage` reads, preserving the subgraph field
-//! shapes documented in `docs/api-v1.md`.
+//! shapes exercised by the committed GraphQL schema fixture and API tests.
 //! Resolver record fields (`texts`/`contentHash`/`addresses`) are served from the name's
 //! `record_inventory_current` projection (text selector keys, retained addr/contenthash values).
 

@@ -1,5 +1,3 @@
-use super::topology::{build_resolution_resolver_hop, projected_resolution_resolver_path};
-
 pub(super) fn build_resolution_execution_summary(
     row: &NameCurrentRow,
     trace: &ExecutionTrace,
@@ -57,6 +55,40 @@ pub(super) fn build_resolution_execution_summary(
     );
 
     Ok(execution)
+}
+
+fn projected_resolution_resolver_path(summary: &JsonValue) -> Option<JsonValue> {
+    bigname_storage::projected_resolution_topology(summary).and_then(|topology| {
+        provenance_field(&topology, "resolver_path")
+            .filter(|value| value.is_array())
+            .cloned()
+    })
+}
+
+fn build_resolution_resolver_hop(
+    row: &NameCurrentRow,
+    chain_id: Option<String>,
+    address: Option<String>,
+    latest_event_kind: Option<String>,
+) -> JsonValue {
+    let mut hop = empty_object();
+    insert_string_field(&mut hop, "logical_name_id", row.logical_name_id.clone());
+    insert_string_field(&mut hop, "namespace", row.namespace.clone());
+    insert_string_field(&mut hop, "normalized_name", row.normalized_name.clone());
+    insert_string_field(
+        &mut hop,
+        "canonical_display_name",
+        row.canonical_display_name.clone(),
+    );
+    insert_optional_string_field(
+        &mut hop,
+        "resource_id",
+        row.resource_id.map(|value| value.to_string()),
+    );
+    insert_nullable_string_field(&mut hop, "chain_id", chain_id);
+    insert_nullable_string_field(&mut hop, "address", address);
+    insert_nullable_string_field(&mut hop, "latest_event_kind", latest_event_kind);
+    hop
 }
 
 fn build_resolution_selected_entrypoint(trace: &ExecutionTrace) -> JsonValue {

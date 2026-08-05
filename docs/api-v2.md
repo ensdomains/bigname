@@ -2,9 +2,8 @@
 
 Development-time contract for the API surface accepted in
 [ADR 0006](adrs/0006-api-v2-product-surface.md). Per-route reference lives in
-[`api-v2-routes.md`](api-v2-routes.md). The generated OpenAPI document is not
-part of this docs-only rollout step; it is generated from the route table in
-the implementation step.
+[`api-v2-routes.md`](api-v2-routes.md). This surface has no generated OpenAPI
+artifact.
 
 ## Contract Principles
 
@@ -22,15 +21,10 @@ the implementation step.
 
 ## Versioning
 
-`v2` is a development designation only. The new surface is built under `/v2`
-alongside the frozen `v1`, passes the one-time parity gate, and then ships as
-the re-baselined `v1`: old `v1` routes are deleted and the `/v2` prefix is
-renamed to `/v1` in the same release. No permanent `/v2` prefix ships as the
-public contract.
-
-Until that switch, `docs/api-v1.md` and `docs/api-v1-routes.md` are frozen
-except for corrections. These `api-v2` docs are the development-time contract
-that step 3 implements.
+The binary serves this contract under `/v2`; the old v1 REST surface has been
+deleted. The production edge does not expose `/v2` until the maintainer-gated
+C3 edge flip. These docs define the currently served internal REST contract,
+not the public-edge rollout state.
 
 ## Naming Dictionary
 
@@ -493,8 +487,8 @@ Rules:
   connect-phase timeouts, DNS failures, TLS failures, connection resets, and
   other transport failures return whole-request `500 internal_error`. Neither
   result is persisted by the v2 serving path.
-- Every route has a whole-request deadline. `/healthz`, `/v1/status`, and
-  `/v2/status` retain that deadline as their final backstop. `/healthz` bypasses
+- Every route has a whole-request deadline. `/healthz` and `/v2/status` retain
+  that deadline as their final backstop. `/healthz` bypasses
   the process-wide concurrency limiter and load shedding, uses a reserved
   one-connection database pool with a two-second check limit, and has a small
   independent health ceiling. HTTP-concurrency saturation and request-pool

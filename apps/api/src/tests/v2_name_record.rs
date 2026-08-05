@@ -3135,7 +3135,7 @@ fn resolution_universal_resolver_addr60_response(address: &str) -> Value {
     json!(format!(
         "0x{}{}{}{}",
         resolution_left_pad_hex("40", 64),
-        resolution_padded_address_hex(bigname_execution::ENS_UNIVERSAL_RESOLVER_ADDRESS),
+        resolution_padded_address_hex("0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"),
         resolution_left_pad_hex("20", 64),
         resolution_padded_address_hex(address),
     ))
