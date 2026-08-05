@@ -614,13 +614,13 @@ async fn get_name_history_resource_scope_preserves_rebound_resources() -> Result
     let old_resource_id = Uuid::from_u128(0xa120);
     let current_resource_id = Uuid::from_u128(0xa121);
 
-    bigname_storage::upsert_name_surfaces(&database.pool, &[name_surface(logical_name_id)]).await?;
-    bigname_storage::upsert_resources(
+    upsert_test_name_surfaces(&database.pool, &[name_surface(logical_name_id)]).await?;
+    upsert_test_resources(
         &database.pool,
         &[resource(old_resource_id), resource(current_resource_id)],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[
             SurfaceBinding {
@@ -1159,7 +1159,7 @@ async fn get_resource_history_surface_scope_preserves_multiple_bound_surfaces() 
     let primary_logical_name_id = "ens:alice.eth";
     let alias_logical_name_id = "ens:alice-base.eth";
 
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             name_surface(primary_logical_name_id),
@@ -1167,8 +1167,8 @@ async fn get_resource_history_surface_scope_preserves_multiple_bound_surfaces() 
         ],
     )
     .await?;
-    bigname_storage::upsert_resources(&database.pool, &[resource(resource_id)]).await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_resources(&database.pool, &[resource(resource_id)]).await?;
+    upsert_test_surface_bindings(
         &database.pool,
         &[
             surface_binding(
@@ -1348,7 +1348,7 @@ async fn get_address_history_composes_current_and_historical_matches() -> Result
         ],
     )
     .await?;
-    bigname_storage::upsert_token_lineages(
+    upsert_test_token_lineages(
         &database.pool,
         &[
             address_name_token_lineage(current_token_lineage_id, "0x540", 540),
@@ -1356,7 +1356,7 @@ async fn get_address_history_composes_current_and_historical_matches() -> Result
         ],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[
             address_name_resource(
@@ -1375,7 +1375,7 @@ async fn get_address_history_composes_current_and_historical_matches() -> Result
         ],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             collection_name_surface("ens:current.eth", "current.eth", "node:current.eth", 540),
@@ -1388,7 +1388,7 @@ async fn get_address_history_composes_current_and_historical_matches() -> Result
         ],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[
             address_name_surface_binding(
@@ -1797,7 +1797,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
         ],
     )
     .await?;
-    bigname_storage::upsert_token_lineages(
+    upsert_test_token_lineages(
         &database.pool,
         &[TokenLineage {
             chain_id: "ethereum-sepolia".to_owned(),
@@ -1807,7 +1807,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
         }],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[
             Resource {
@@ -1848,7 +1848,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
         ],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             collection_name_surface(
@@ -1890,7 +1890,7 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
         ],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[SurfaceBinding {
             chain_id: "ethereum-sepolia".to_owned(),
@@ -2505,7 +2505,7 @@ async fn get_basenames_history_routes_read_back_canonical_rows() -> Result<()> {
         ],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[
             Resource {
@@ -2523,7 +2523,7 @@ async fn get_basenames_history_routes_read_back_canonical_rows() -> Result<()> {
         ],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             collection_name_surface(
@@ -2541,7 +2541,7 @@ async fn get_basenames_history_routes_read_back_canonical_rows() -> Result<()> {
         ],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[SurfaceBinding {
             chain_id: "base-mainnet".to_owned(),
@@ -2808,7 +2808,7 @@ async fn get_address_history_honors_scope_and_relation_filters() -> Result<()> {
         ],
     )
     .await?;
-    bigname_storage::upsert_token_lineages(
+    upsert_test_token_lineages(
         &database.pool,
         &[address_name_token_lineage(
             current_token_lineage_id,
@@ -2817,7 +2817,7 @@ async fn get_address_history_honors_scope_and_relation_filters() -> Result<()> {
         )],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[
             address_name_resource(
@@ -2830,7 +2830,7 @@ async fn get_address_history_honors_scope_and_relation_filters() -> Result<()> {
         ],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[collection_name_surface(
             "ens:current-controller.eth",
@@ -2840,7 +2840,7 @@ async fn get_address_history_honors_scope_and_relation_filters() -> Result<()> {
         )],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[address_name_surface_binding(
             current_surface_binding_id,
@@ -3037,7 +3037,7 @@ async fn get_resource_permissions_returns_declared_state_collection() -> Result<
     let filtered_subject = "0x0000000000000000000000000000000000000abc";
     let other_subject = "0x0000000000000000000000000000000000000def";
 
-    bigname_storage::upsert_resources(&database.pool, &[resource(resource_id)]).await?;
+    upsert_test_resources(&database.pool, &[resource(resource_id)]).await?;
     bigname_storage::upsert_permissions_current_rows(
         &database.pool,
         &[
@@ -3261,7 +3261,7 @@ async fn get_resource_permissions_honors_subject_and_scope_filters() -> Result<(
     let resolver_scope_filter =
         "resolver:ethereum-mainnet:0x0000000000000000000000000000000000000bbb";
 
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[resource(resource_id), resource(other_resource_id)],
     )

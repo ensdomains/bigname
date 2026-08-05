@@ -1197,7 +1197,7 @@
                 format!("failed to upsert replay profile-gated {branch} raw blocks")
             })?;
 
-            bigname_storage::upsert_name_surfaces(
+            upsert_test_name_surfaces(
                 &database.pool,
                 &[NameSurface {
                     logical_name_id: logical_name_id.to_owned(),
@@ -1222,7 +1222,7 @@
             .with_context(|| {
                 format!("failed to upsert replay profile-gated {branch} name surface")
             })?;
-            bigname_storage::upsert_token_lineages(
+            upsert_test_token_lineages(
                 &database.pool,
                 &[TokenLineage {
                     token_lineage_id,
@@ -1237,7 +1237,7 @@
             .with_context(|| {
                 format!("failed to upsert replay profile-gated {branch} token lineage")
             })?;
-            bigname_storage::upsert_resources(
+            upsert_test_resources(
                 &database.pool,
                 &[Resource {
                     resource_id,
@@ -1253,7 +1253,7 @@
             .with_context(|| {
                 format!("failed to upsert replay profile-gated {branch} resource")
             })?;
-            bigname_storage::upsert_surface_bindings(
+            upsert_test_surface_bindings(
                 &database.pool,
                 &[SurfaceBinding {
                     surface_binding_id,

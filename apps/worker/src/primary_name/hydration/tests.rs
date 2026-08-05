@@ -2447,6 +2447,24 @@ async fn insert_successful_direct_call_with_identity(
 ) -> Result<()> {
     sqlx::query(
         r#"
+        INSERT INTO chain_lineage (
+            chain_id, block_hash, block_number, block_timestamp, canonicality_state
+        )
+        VALUES ($1, $2, $3, $4, 'canonical'::canonicality_state)
+        ON CONFLICT (chain_id, block_hash) DO NOTHING
+        "#,
+    )
+    .bind(ETHEREUM_MAINNET_CHAIN_ID)
+    .bind(block_hash)
+    .bind(block_number)
+    .bind(
+        OffsetDateTime::from_unix_timestamp(1_700_000_000 + block_number)
+            .context("direct-call fixture timestamp must be valid")?,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
         INSERT INTO raw_transactions (
             chain_id,
             block_hash,
@@ -2528,7 +2546,7 @@ async fn delete_raw_direct_call_staging(pool: &PgPool) -> Result<()> {
 async fn orphan_event_silent_call_observation(pool: &PgPool, block_hash: &str) -> Result<()> {
     sqlx::query(
         r#"
-        UPDATE event_silent_resolver_call_observations
+        UPDATE chain_lineage
         SET canonicality_state = 'orphaned'::canonicality_state
         WHERE chain_id = $1
           AND block_hash = $2

@@ -16,6 +16,13 @@ const NAME_SURFACE_PRIORITY: i32 = 90;
 const ENS_RAINBOW_PRIORITY: i32 = 10;
 const IMPORT_BATCH_SIZE: i64 = 10_000;
 
+mod invalidations;
+
+use invalidations::{
+    enqueue_children_invalidations_for_existing_label_preimages,
+    enqueue_children_invalidations_for_labelhashes,
+};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LabelPreimage {
     pub labelhash: String,
@@ -345,148 +352,6 @@ pub async fn import_label_preimages_from_ens_names_table(
         enqueue_children_invalidations_for_existing_label_preimages(pool).await?;
 
     Ok(summary)
-}
-
-pub(super) async fn enqueue_children_invalidations_for_existing_label_preimages(
-    pool: &PgPool,
-) -> Result<u64> {
-    sqlx::query(
-        r#"
-        WITH candidate_keys AS (
-            SELECT DISTINCT
-                'children_current'::TEXT AS projection,
-                parent.logical_name_id AS projection_key,
-                jsonb_build_object('parent_logical_name_id', parent.logical_name_id) AS key_payload
-            FROM label_preimages preimage
-            JOIN normalized_events ne
-              ON lower(ne.after_state ->> 'labelhash') = preimage.labelhash
-            JOIN name_surfaces parent
-              ON parent.namehash = ne.after_state ->> 'parent_node'
-             AND parent.namespace = ne.namespace
-             AND parent.chain_id = ne.chain_id
-             AND parent.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-             )
-            WHERE ne.event_kind = 'SubregistryChanged'
-              AND ne.derivation_kind = 'ens_v1_subregistry_changed'
-              AND ne.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
-              AND ne.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
-              AND ne.after_state ->> 'parent_node' IS NOT NULL
-              AND ne.after_state ->> 'child_node' IS NOT NULL
-              AND ne.after_state ->> 'labelhash' IS NOT NULL
-        )
-        INSERT INTO projection_invalidations (
-            projection,
-            projection_key,
-            key_payload,
-            invalidated_at,
-            last_changed_at
-        )
-        SELECT
-            projection,
-            projection_key,
-            key_payload,
-            now(),
-            now()
-        FROM candidate_keys
-        ON CONFLICT (projection, projection_key)
-        DO UPDATE SET
-            key_payload = EXCLUDED.key_payload,
-            generation = projection_invalidations.generation + 1,
-            invalidated_at = EXCLUDED.invalidated_at,
-            last_changed_at = EXCLUDED.last_changed_at,
-            claim_token = NULL,
-            claimed_at = NULL,
-            last_failure_reason = NULL,
-            last_failure_at = NULL
-        "#,
-    )
-    .execute(pool)
-    .await
-    .context("failed to enqueue children_current invalidations for existing label preimages")
-    .map(|result| result.rows_affected())
-}
-
-async fn enqueue_children_invalidations_for_labelhashes(
-    transaction: &mut Transaction<'_, Postgres>,
-    labelhashes: &[String],
-) -> Result<u64> {
-    if labelhashes.is_empty() {
-        return Ok(0);
-    }
-
-    sqlx::query(
-        r#"
-        WITH changed_labelhashes AS (
-            SELECT DISTINCT lower(labelhash) AS labelhash
-            FROM unnest($1::TEXT[]) AS input(labelhash)
-        ),
-        candidate_keys AS (
-            SELECT DISTINCT
-                'children_current'::TEXT AS projection,
-                parent.logical_name_id AS projection_key,
-                jsonb_build_object('parent_logical_name_id', parent.logical_name_id) AS key_payload
-            FROM changed_labelhashes changed
-            JOIN normalized_events ne
-              ON lower(ne.after_state ->> 'labelhash') = changed.labelhash
-            JOIN name_surfaces parent
-              ON parent.namehash = ne.after_state ->> 'parent_node'
-             AND parent.namespace = ne.namespace
-             AND parent.chain_id = ne.chain_id
-             AND parent.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-             )
-            WHERE ne.event_kind = 'SubregistryChanged'
-              AND ne.derivation_kind = 'ens_v1_subregistry_changed'
-              AND ne.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
-              AND ne.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
-              AND ne.after_state ->> 'parent_node' IS NOT NULL
-              AND ne.after_state ->> 'child_node' IS NOT NULL
-              AND ne.after_state ->> 'labelhash' IS NOT NULL
-        )
-        INSERT INTO projection_invalidations (
-            projection,
-            projection_key,
-            key_payload,
-            invalidated_at,
-            last_changed_at
-        )
-        SELECT
-            projection,
-            projection_key,
-            key_payload,
-            now(),
-            now()
-        FROM candidate_keys
-        ON CONFLICT (projection, projection_key)
-        DO UPDATE SET
-            key_payload = EXCLUDED.key_payload,
-            generation = projection_invalidations.generation + 1,
-            invalidated_at = EXCLUDED.invalidated_at,
-            last_changed_at = EXCLUDED.last_changed_at,
-            claim_token = NULL,
-            claimed_at = NULL,
-            last_failure_reason = NULL,
-            last_failure_at = NULL
-        "#,
-    )
-    .bind(labelhashes)
-    .execute(&mut **transaction)
-    .await
-    .context("failed to enqueue children_current invalidations for label preimages")
-    .map(|result| result.rows_affected())
 }
 
 #[cfg(any(test, feature = "test-support"))]

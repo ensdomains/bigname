@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
 use sqlx::{PgPool, Postgres, QueryBuilder, postgres::PgRow, types::time::OffsetDateTime};
 
-use super::{NameCurrentRow, decode_name_current_row};
+use super::{
+    DEFAULT_NAME_CURRENT_LINEAGE_JOINS, DEFAULT_NAME_CURRENT_READ_FILTER, NameCurrentRow,
+    decode_name_current_row,
+};
 use crate::{
     AddressNameRelation,
     projection_helpers::{checked_page_limit_i64_from_usize, checked_page_size_usize},
@@ -117,40 +120,13 @@ pub struct NameCurrentListPage {
     pub total_count: Option<u64>,
 }
 
-const DEFAULT_NAME_CURRENT_LIST_READ_FILTER: &str = r#"
-  AND surface.canonicality_state IN (
+const DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER: &str = r#"
+  AND membership_surface.canonicality_state IN (
       'canonical'::canonicality_state,
       'safe'::canonicality_state,
       'finalized'::canonicality_state
   )
-  AND (
-      nc.surface_binding_id IS NULL
-      OR (
-          resource.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-          AND binding.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-          AND binding.active_to IS NULL
-          AND (
-              nc.token_lineage_id IS NULL
-              OR token_lineage.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
-          )
-      )
-  )
-"#;
-
-const DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER: &str = r#"
-  AND membership_surface.canonicality_state IN (
+  AND membership_surface_lineage.canonicality_state IN (
       'canonical'::canonicality_state,
       'safe'::canonicality_state,
       'finalized'::canonicality_state
@@ -160,7 +136,17 @@ const DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER: &str = r#"
       'safe'::canonicality_state,
       'finalized'::canonicality_state
   )
+  AND membership_resource_lineage.canonicality_state IN (
+      'canonical'::canonicality_state,
+      'safe'::canonicality_state,
+      'finalized'::canonicality_state
+  )
   AND membership_binding.canonicality_state IN (
+      'canonical'::canonicality_state,
+      'safe'::canonicality_state,
+      'finalized'::canonicality_state
+  )
+  AND membership_binding_lineage.canonicality_state IN (
       'canonical'::canonicality_state,
       'safe'::canonicality_state,
       'finalized'::canonicality_state
@@ -168,10 +154,17 @@ const DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER: &str = r#"
   AND membership_binding.active_to IS NULL
   AND (
       anc.token_lineage_id IS NULL
-      OR membership_token_lineage.canonicality_state IN (
-          'canonical'::canonicality_state,
-          'safe'::canonicality_state,
-          'finalized'::canonicality_state
+      OR (
+          membership_token_lineage.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND membership_token_lineage_lineage.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
       )
   )
 "#;
@@ -445,7 +438,7 @@ fn push_filtered_name_current_cte<'a>(
     push_json_timestamp_expr(builder, &["history", "created_at"]);
     builder.push(
         r#",
-                    surface_block.block_timestamp
+                    surface_lineage.block_timestamp
                 ) AS created_at,
                 COALESCE(
                     "#,
@@ -473,9 +466,6 @@ fn push_filtered_name_current_cte<'a>(
             FROM name_current nc
             JOIN name_surfaces surface
               ON surface.logical_name_id = nc.logical_name_id
-            LEFT JOIN chain_lineage surface_block
-              ON surface_block.chain_id = surface.chain_id
-             AND surface_block.block_hash = surface.block_hash
             LEFT JOIN resources resource
               ON resource.resource_id = nc.resource_id
             LEFT JOIN surface_bindings binding
@@ -484,6 +474,7 @@ fn push_filtered_name_current_cte<'a>(
               ON token_lineage.token_lineage_id = nc.token_lineage_id
         "#,
     );
+    builder.push(DEFAULT_NAME_CURRENT_LINEAGE_JOINS);
     if filter.address.is_some() {
         builder.push(
             r#"
@@ -493,7 +484,7 @@ fn push_filtered_name_current_cte<'a>(
         );
     }
     builder.push(" WHERE TRUE ");
-    builder.push(DEFAULT_NAME_CURRENT_LIST_READ_FILTER);
+    builder.push(DEFAULT_NAME_CURRENT_READ_FILTER);
     push_name_current_filter_predicates(builder, filter);
     builder.push(")");
 }
@@ -516,6 +507,18 @@ fn push_address_membership_cte<'a>(
               ON membership_binding.surface_binding_id = anc.surface_binding_id
             LEFT JOIN token_lineages membership_token_lineage
               ON membership_token_lineage.token_lineage_id = anc.token_lineage_id
+            JOIN chain_lineage membership_surface_lineage
+              ON membership_surface_lineage.chain_id = membership_surface.chain_id
+             AND membership_surface_lineage.block_hash = membership_surface.block_hash
+            JOIN chain_lineage membership_resource_lineage
+              ON membership_resource_lineage.chain_id = membership_resource.chain_id
+             AND membership_resource_lineage.block_hash = membership_resource.block_hash
+            JOIN chain_lineage membership_binding_lineage
+              ON membership_binding_lineage.chain_id = membership_binding.chain_id
+             AND membership_binding_lineage.block_hash = membership_binding.block_hash
+            LEFT JOIN chain_lineage membership_token_lineage_lineage
+              ON membership_token_lineage_lineage.chain_id = membership_token_lineage.chain_id
+             AND membership_token_lineage_lineage.block_hash = membership_token_lineage.block_hash
             WHERE "#,
     );
     match address_filter.addresses.as_ref() {

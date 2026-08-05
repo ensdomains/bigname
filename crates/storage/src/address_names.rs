@@ -1,4 +1,5 @@
 mod address_replacement;
+mod canonicality;
 mod collapse;
 mod count;
 mod decode;

@@ -420,6 +420,14 @@ async fn load_text_hydration_rows(
         JOIN LATERAL (
             SELECT ne.chain_id, ne.after_state
             FROM normalized_events ne
+            JOIN chain_lineage event_lineage
+              ON event_lineage.chain_id = ne.chain_id
+             AND event_lineage.block_hash = ne.block_hash
+             AND event_lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+             )
             WHERE ne.resource_id = candidate_rows.resource_id
               AND ne.logical_name_id = candidate_rows.logical_name_id
               AND ne.event_kind = $6

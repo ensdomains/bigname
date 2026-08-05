@@ -9,7 +9,15 @@ use crate::address_names::{
     load_address_names_current_including_noncanonical_for_relations,
 };
 
-use super::{HistoryScope, decoders::decode_address_history_anchor, selectors::HistorySelector};
+use super::{
+    HistoryScope,
+    decoders::decode_address_history_anchor,
+    selectors::HistorySelector,
+    source::{
+        push_history_canonicality_filter, push_history_lineage_join,
+        push_readable_anchored_row_filter,
+    },
+};
 
 pub(super) const ENS_V1_AUTHORITY_DERIVATION_KIND: &str = "ens_v1_unwrapped_authority";
 pub(super) const ENS_V2_REGISTRY_DERIVATION_KIND: &str = "ens_v2_registry_resource_surface";
@@ -119,9 +127,13 @@ async fn load_historical_address_history_matches(
         FROM normalized_events ne
         LEFT JOIN resources r
           ON r.resource_id = ne.resource_id
-        WHERE ne.derivation_kind IN (
+        LEFT JOIN chain_lineage resource_lineage
+          ON resource_lineage.chain_id = r.chain_id
+         AND resource_lineage.block_hash = r.block_hash
         "#,
     );
+    push_history_lineage_join(&mut builder);
+    builder.push(" WHERE ne.derivation_kind IN (");
     let mut separated = builder.separated(", ");
     for derivation_kind in ADDRESS_HISTORY_MATCH_DERIVATION_KINDS {
         separated.push_bind(*derivation_kind);
@@ -133,16 +145,11 @@ async fn load_historical_address_history_matches(
     }
     separated.push_unseparated(")");
 
+    push_history_canonicality_filter(&mut builder, canonical_only);
     if canonical_only {
-        builder.push(
-            r#"
-            AND ne.canonicality_state IN (
-                'canonical'::canonicality_state,
-                'safe'::canonicality_state,
-                'finalized'::canonicality_state
-            )
-            "#,
-        );
+        builder.push(" AND (ne.resource_id IS NULL OR (TRUE ");
+        push_readable_anchored_row_filter(&mut builder, "r", "resource_lineage");
+        builder.push("))");
     }
 
     if let Some(namespace) = namespace {

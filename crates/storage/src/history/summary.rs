@@ -5,6 +5,7 @@ use sqlx::{PgConnection, Postgres, QueryBuilder};
 use super::{
     EventHistoryReadFilter, HistoryChainPositionSample, HistorySummary, HistorySummaryMode,
     paging::{push_history_filters, push_history_order_terms},
+    source::push_history_source,
 };
 
 pub(super) async fn load_history_summary(
@@ -44,10 +45,9 @@ async fn load_history_total_count(
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT COUNT(*)::BIGINT AS total_count
-        FROM normalized_events ne
-        WHERE TRUE
         "#,
     );
+    push_history_source(&mut builder, false);
     push_history_filters(&mut builder, filter, canonical_only);
 
     let total_count = builder
@@ -135,13 +135,9 @@ async fn load_history_full_summary(
                 )
             )[1] AS execution_trace_id,
             MAX(rb.block_timestamp) AS last_updated
-        FROM normalized_events ne
-        LEFT JOIN chain_lineage rb
-          ON rb.chain_id = ne.chain_id
-         AND rb.block_hash = ne.block_hash
-        WHERE TRUE
         "#,
     );
+    push_history_source(&mut builder, false);
     push_history_filters(&mut builder, filter, canonical_only);
 
     let row = builder
@@ -180,11 +176,12 @@ async fn load_history_chain_position_samples(
             ne.block_number,
             ne.block_hash,
             rb.block_timestamp
-        FROM normalized_events ne
-        JOIN chain_lineage rb
-          ON rb.chain_id = ne.chain_id
-         AND rb.block_hash = ne.block_hash
-        WHERE ne.chain_id IS NOT NULL
+        "#,
+    );
+    push_history_source(&mut builder, false);
+    builder.push(
+        r#"
+          AND ne.chain_id IS NOT NULL
           AND ne.block_number IS NOT NULL
           AND ne.block_hash IS NOT NULL
           AND rb.block_timestamp IS NOT NULL

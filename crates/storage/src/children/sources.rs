@@ -34,32 +34,55 @@ pub(super) fn canonical_declared_child_sources_query<'a>(
         .unwrap_or((None, None, None));
     sqlx::query(
         r#"
-        WITH target_v1_child_nodes AS (
+        WITH readable_lineage AS (
+            SELECT chain_id, block_hash
+            FROM chain_lineage
+            WHERE canonicality_state IN (
+                'canonical'::canonicality_state,
+                'safe'::canonicality_state,
+                'finalized'::canonicality_state
+            )
+        ),
+        readable_events AS (
+            SELECT ne.*
+            FROM normalized_events ne
+            JOIN readable_lineage lineage
+              ON lineage.chain_id = ne.chain_id
+             AND lineage.block_hash = ne.block_hash
+            WHERE ne.canonicality_state IN (
+                'canonical'::canonicality_state,
+                'safe'::canonicality_state,
+                'finalized'::canonicality_state
+            )
+        ),
+        readable_surfaces AS (
+            SELECT surface.*
+            FROM name_surfaces surface
+            JOIN readable_lineage lineage
+              ON lineage.chain_id = surface.chain_id
+             AND lineage.block_hash = surface.block_hash
+            WHERE surface.canonicality_state IN (
+                'canonical'::canonicality_state,
+                'safe'::canonicality_state,
+                'finalized'::canonicality_state
+            )
+        ),
+        target_v1_child_nodes AS (
             SELECT DISTINCT
                 candidate_ne.namespace,
                 candidate_ne.chain_id,
                 candidate_ne.after_state ->> 'child_node' AS child_node
-            FROM normalized_events candidate_ne
-            JOIN name_surfaces candidate_parent
+            FROM readable_events candidate_ne
+            JOIN readable_surfaces candidate_parent
               ON candidate_parent.namehash = candidate_ne.after_state ->> 'parent_node'
             WHERE $5::TEXT IS NOT NULL
               AND candidate_ne.event_kind = $1
               AND candidate_ne.derivation_kind = $2
               AND candidate_ne.source_family IN ($3, $4)
-              AND candidate_ne.canonicality_state IN (
-                    'canonical'::canonicality_state,
-                    'safe'::canonicality_state,
-                    'finalized'::canonicality_state
-              )
               AND candidate_ne.after_state ->> 'child_node' IS NOT NULL
               AND candidate_parent.logical_name_id = $5
               AND candidate_parent.namespace = candidate_ne.namespace
               AND candidate_parent.chain_id = candidate_ne.chain_id
-              AND candidate_parent.canonicality_state IN (
-                    'canonical'::canonicality_state,
-                    'safe'::canonicality_state,
-                    'finalized'::canonicality_state
-              )
         ),
         ranked_v1_sources AS (
             SELECT
@@ -125,18 +148,13 @@ pub(super) fn canonical_declared_child_sources_query<'a>(
                         ne.log_index DESC,
                         ne.normalized_event_id DESC
                 ) AS current_child_rank
-            FROM normalized_events ne
-            JOIN name_surfaces parent
+            FROM readable_events ne
+            JOIN readable_surfaces parent
               ON parent.namehash = ne.after_state ->> 'parent_node'
-            LEFT JOIN name_surfaces child
+            LEFT JOIN readable_surfaces child
               ON child.namehash = ne.after_state ->> 'child_node'
              AND child.namespace = ne.namespace
              AND child.chain_id = ne.chain_id
-             AND child.canonicality_state IN (
-                    'canonical'::canonicality_state,
-                    'safe'::canonicality_state,
-                    'finalized'::canonicality_state
-              )
             LEFT JOIN label_preimages label_preimage
               ON label_preimage.labelhash = lower(ne.after_state ->> 'labelhash')
             WHERE ne.event_kind = $1
@@ -144,11 +162,6 @@ pub(super) fn canonical_declared_child_sources_query<'a>(
               AND ne.source_family IN ($3, $4)
               AND parent.namespace = ne.namespace
               AND parent.chain_id = ne.chain_id
-              AND ne.canonicality_state IN (
-                    'canonical'::canonicality_state,
-                    'safe'::canonicality_state,
-                    'finalized'::canonicality_state
-              )
               AND ne.after_state ->> 'labelhash' IS NOT NULL
               AND ne.after_state ->> 'child_node' IS NOT NULL
               AND (
@@ -160,11 +173,6 @@ pub(super) fn canonical_declared_child_sources_query<'a>(
                           AND target.chain_id = ne.chain_id
                           AND target.child_node = ne.after_state ->> 'child_node'
                     )
-              )
-              AND parent.canonicality_state IN (
-                    'canonical'::canonicality_state,
-                    'safe'::canonicality_state,
-                    'finalized'::canonicality_state
               )
         ),
         current_v1_sources AS (
@@ -221,18 +229,13 @@ pub(super) fn canonical_declared_child_sources_query<'a>(
                         ne.log_index DESC,
                         ne.normalized_event_id DESC
                 ) AS current_rank
-            FROM normalized_events ne
+            FROM readable_events ne
             WHERE ne.event_kind = $6
               AND ne.derivation_kind = $7
               AND ne.source_family IN ($8, $9)
               AND ne.logical_name_id IS NOT NULL
               AND ne.after_state ->> 'from_contract_instance_id' IS NOT NULL
               AND ($5::TEXT IS NULL OR ne.logical_name_id = $5)
-              AND ne.canonicality_state IN (
-                    'canonical'::canonicality_state,
-                    'safe'::canonicality_state,
-                    'finalized'::canonicality_state
-              )
         ),
         ensv2_current_subregistries AS (
             SELECT *
@@ -263,16 +266,11 @@ pub(super) fn canonical_declared_child_sources_query<'a>(
                         ne.log_index DESC,
                         ne.normalized_event_id DESC
                 ) AS current_rank
-            FROM normalized_events ne
+            FROM readable_events ne
             WHERE ne.event_kind = $10
               AND ne.derivation_kind = $7
               AND ne.source_family IN ($8, $9)
               AND ne.after_state ->> 'registry_contract_instance_id' IS NOT NULL
-              AND ne.canonicality_state IN (
-                    'canonical'::canonicality_state,
-                    'safe'::canonicality_state,
-                    'finalized'::canonicality_state
-              )
         ),
         ensv2_current_parent_events AS (
             SELECT *
@@ -304,17 +302,12 @@ pub(super) fn canonical_declared_child_sources_query<'a>(
                         ne.log_index DESC,
                         ne.normalized_event_id DESC
                 ) AS current_rank
-            FROM normalized_events ne
+            FROM readable_events ne
             WHERE ne.event_kind IN ($11, $12, $13)
               AND ne.derivation_kind = $7
               AND ne.source_family IN ($8, $9)
               AND ne.logical_name_id IS NOT NULL
               AND ne.after_state ->> 'registry_contract_instance_id' IS NOT NULL
-              AND ne.canonicality_state IN (
-                    'canonical'::canonicality_state,
-                    'safe'::canonicality_state,
-                    'finalized'::canonicality_state
-              )
         ),
         ensv2_current_child_events AS (
             SELECT *
@@ -357,7 +350,7 @@ pub(super) fn canonical_declared_child_sources_query<'a>(
                 ) AS raw_fact_refs,
                 composite_manifest.manifest_versions
             FROM ensv2_current_subregistries subregistry
-            JOIN name_surfaces parent
+            JOIN readable_surfaces parent
               ON parent.logical_name_id = subregistry.parent_logical_name_id
             JOIN ensv2_current_parent_events parent_event
               ON parent_event.registry_contract_instance_id = subregistry.to_contract_instance_id
@@ -366,7 +359,7 @@ pub(super) fn canonical_declared_child_sources_query<'a>(
             JOIN ensv2_current_child_events child_event
               ON child_event.registry_contract_instance_id = subregistry.to_contract_instance_id
              AND child_event.registry_contract_instance_id = parent_event.registry_contract_instance_id
-            JOIN name_surfaces child
+            JOIN readable_surfaces child
               ON child.logical_name_id = child_event.child_logical_name_id
             CROSS JOIN LATERAL (
                 SELECT *
@@ -470,16 +463,6 @@ pub(super) fn canonical_declared_child_sources_query<'a>(
               AND parent.chain_id = subregistry.chain_id
               AND parent.chain_id = parent_event.chain_id
               AND child.chain_id = child_event.chain_id
-              AND parent.canonicality_state IN (
-                    'canonical'::canonicality_state,
-                    'safe'::canonicality_state,
-                    'finalized'::canonicality_state
-              )
-              AND child.canonicality_state IN (
-                    'canonical'::canonicality_state,
-                    'safe'::canonicality_state,
-                    'finalized'::canonicality_state
-              )
               AND child.normalized_name <> parent.normalized_name
               AND right(child.normalized_name, length(parent.normalized_name) + 1) = concat('.', parent.normalized_name)
               AND array_length(string_to_array(child.normalized_name, '.'), 1)

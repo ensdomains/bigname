@@ -1734,6 +1734,20 @@ async fn primary_name_repair_invalidations_delete_old_tuple_and_rebuild_new_tupl
 
     sqlx::query(
         r#"
+        INSERT INTO chain_lineage (
+            chain_id, block_hash, block_number, block_timestamp, canonicality_state
+        )
+        VALUES (
+            'base-mainnet', '0xbase100', 100, now(), 'canonical'::canonicality_state
+        )
+        "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to seed primary-name repair lineage")?;
+
+    sqlx::query(
+        r#"
         INSERT INTO normalized_events (
             event_identity,
             namespace,

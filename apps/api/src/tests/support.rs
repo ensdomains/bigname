@@ -304,6 +304,9 @@ impl TestDatabase {
                         canonical_display_name TEXT NOT NULL,
                         normalized_name TEXT NOT NULL,
                         namehash TEXT NOT NULL,
+                        chain_id TEXT NOT NULL DEFAULT 'ethereum-mainnet',
+                        block_hash TEXT NOT NULL DEFAULT '0xsurface',
+                        block_number BIGINT NOT NULL DEFAULT 20999998,
                         canonicality_state canonicality_state NOT NULL DEFAULT 'finalized',
                         CHECK (logical_name_id = namespace || ':' || normalized_name)
                     )
@@ -316,6 +319,9 @@ impl TestDatabase {
                 r#"
                     CREATE TABLE resources (
                         resource_id UUID PRIMARY KEY,
+                        chain_id TEXT NOT NULL DEFAULT 'ethereum-mainnet',
+                        block_hash TEXT NOT NULL DEFAULT '0xresource',
+                        block_number BIGINT NOT NULL DEFAULT 21000001,
                         canonicality_state canonicality_state NOT NULL DEFAULT 'finalized'
                     )
                     "#,
@@ -327,6 +333,9 @@ impl TestDatabase {
                 r#"
                     CREATE TABLE token_lineages (
                         token_lineage_id UUID PRIMARY KEY,
+                        chain_id TEXT NOT NULL DEFAULT 'ethereum-mainnet',
+                        block_hash TEXT NOT NULL DEFAULT '0xlineage',
+                        block_number BIGINT NOT NULL DEFAULT 21000000,
                         canonicality_state canonicality_state NOT NULL DEFAULT 'finalized'
                     )
                     "#,
@@ -342,6 +351,9 @@ impl TestDatabase {
                         resource_id UUID NOT NULL REFERENCES resources (resource_id),
                         binding_kind TEXT NOT NULL,
                         active_to TIMESTAMPTZ,
+                        chain_id TEXT NOT NULL DEFAULT 'ethereum-mainnet',
+                        block_hash TEXT NOT NULL DEFAULT '0xbinding',
+                        block_number BIGINT NOT NULL DEFAULT 21000003,
                         canonicality_state canonicality_state NOT NULL DEFAULT 'finalized',
                         CHECK (
                             binding_kind IN (
@@ -579,13 +591,13 @@ impl TestDatabase {
         resource_id: Uuid,
         surface_binding_id: Uuid,
     ) -> Result<()> {
-        bigname_storage::upsert_name_surfaces(&self.pool, &[name_surface(logical_name_id)])
+        upsert_test_name_surfaces(&self.pool, &[name_surface(logical_name_id)])
             .await
             .context("failed to upsert name surface for history API test")?;
-        bigname_storage::upsert_resources(&self.pool, &[resource(resource_id)])
+        upsert_test_resources(&self.pool, &[resource(resource_id)])
             .await
             .context("failed to upsert resource for history API test")?;
-        bigname_storage::upsert_surface_bindings(
+        upsert_test_surface_bindings(
             &self.pool,
             &[surface_binding(
                 surface_binding_id,
@@ -689,6 +701,37 @@ impl TestDatabase {
         token_lineage_id: Uuid,
         surface_binding_id: Uuid,
     ) -> Result<()> {
+        seed_readable_lineage_anchors(
+            &self.pool,
+            [
+                (
+                    "ethereum-mainnet",
+                    "0xlineage",
+                    21_000_000,
+                    CanonicalityState::Finalized,
+                ),
+                (
+                    "ethereum-mainnet",
+                    "0xresource",
+                    21_000_001,
+                    CanonicalityState::Finalized,
+                ),
+                (
+                    "ethereum-mainnet",
+                    "0xsurface",
+                    20_999_998,
+                    CanonicalityState::Finalized,
+                ),
+                (
+                    "ethereum-mainnet",
+                    "0xbinding",
+                    21_000_003,
+                    CanonicalityState::Finalized,
+                ),
+            ],
+        )
+        .await?;
+
         sqlx::query(
             r#"
                 INSERT INTO name_surfaces (
@@ -760,8 +803,8 @@ impl TestDatabase {
             ],
         )
         .await?;
-        bigname_storage::upsert_name_surfaces(&self.pool, &[name_surface(logical_name_id)]).await?;
-        bigname_storage::upsert_token_lineages(
+        upsert_test_name_surfaces(&self.pool, &[name_surface(logical_name_id)]).await?;
+        upsert_test_token_lineages(
             &self.pool,
             &[address_name_token_lineage(
                 token_lineage_id,
@@ -770,7 +813,7 @@ impl TestDatabase {
             )],
         )
         .await?;
-        bigname_storage::upsert_resources(
+        upsert_test_resources(
             &self.pool,
             &[address_name_resource(
                 resource_id,
@@ -780,7 +823,7 @@ impl TestDatabase {
             )],
         )
         .await?;
-        bigname_storage::upsert_surface_bindings(
+        upsert_test_surface_bindings(
             &self.pool,
             &[surface_binding(
                 surface_binding_id,
@@ -1207,7 +1250,7 @@ impl TestDatabase {
         )
         .await
         .context("failed to upsert raw blocks for basenames exact-name API test")?;
-        bigname_storage::upsert_name_surfaces(
+        upsert_test_name_surfaces(
             &self.pool,
             &[NameSurface {
                 logical_name_id: logical_name_id.to_owned(),
@@ -1230,7 +1273,7 @@ impl TestDatabase {
         )
         .await
         .context("failed to upsert basenames name surface for API test")?;
-        bigname_storage::upsert_token_lineages(
+        upsert_test_token_lineages(
             &self.pool,
             &[TokenLineage {
                 token_lineage_id,
@@ -1243,7 +1286,7 @@ impl TestDatabase {
         )
         .await
         .context("failed to upsert basenames token lineage for API test")?;
-        bigname_storage::upsert_resources(
+        upsert_test_resources(
             &self.pool,
             &[Resource {
                 resource_id,
@@ -1257,7 +1300,7 @@ impl TestDatabase {
         )
         .await
         .context("failed to upsert basenames resource for API test")?;
-        bigname_storage::upsert_surface_bindings(
+        upsert_test_surface_bindings(
             &self.pool,
             &[SurfaceBinding {
                 surface_binding_id,
@@ -1390,7 +1433,7 @@ impl TestDatabase {
         )
         .await
         .context("failed to upsert raw blocks for Basenames control-vector API test")?;
-        bigname_storage::upsert_name_surfaces(
+        upsert_test_name_surfaces(
             &self.pool,
             &[NameSurface {
                 logical_name_id: logical_name_id.to_owned(),
@@ -1413,7 +1456,7 @@ impl TestDatabase {
         )
         .await
         .context("failed to upsert Basenames control-vector surface for API test")?;
-        bigname_storage::upsert_token_lineages(
+        upsert_test_token_lineages(
             &self.pool,
             &[TokenLineage {
                 token_lineage_id,
@@ -1426,7 +1469,7 @@ impl TestDatabase {
         )
         .await
         .context("failed to upsert Basenames control-vector token lineage for API test")?;
-        bigname_storage::upsert_resources(
+        upsert_test_resources(
             &self.pool,
             &[Resource {
                 resource_id,
@@ -1440,7 +1483,7 @@ impl TestDatabase {
         )
         .await
         .context("failed to upsert Basenames control-vector resource for API test")?;
-        bigname_storage::upsert_surface_bindings(
+        upsert_test_surface_bindings(
             &self.pool,
             &[SurfaceBinding {
                 surface_binding_id,
@@ -1736,7 +1779,7 @@ impl TestDatabase {
         )
         .await
         .context("failed to upsert raw blocks for ENSv2 address-name API test")?;
-        bigname_storage::upsert_name_surfaces(
+        upsert_test_name_surfaces(
             &self.pool,
             &[NameSurface {
                 logical_name_id: logical_name_id.to_owned(),
@@ -1759,7 +1802,7 @@ impl TestDatabase {
         )
         .await
         .context("failed to upsert ENSv2 address-name surface for API test")?;
-        bigname_storage::upsert_token_lineages(
+        upsert_test_token_lineages(
             &self.pool,
             &[TokenLineage {
                 token_lineage_id,
@@ -1772,7 +1815,7 @@ impl TestDatabase {
         )
         .await
         .context("failed to upsert ENSv2 address-name token lineage for API test")?;
-        bigname_storage::upsert_resources(
+        upsert_test_resources(
             &self.pool,
             &[Resource {
                 resource_id,
@@ -1789,7 +1832,7 @@ impl TestDatabase {
         )
         .await
         .context("failed to upsert ENSv2 address-name resource for API test")?;
-        bigname_storage::upsert_surface_bindings(
+        upsert_test_surface_bindings(
             &self.pool,
             &[SurfaceBinding {
                 surface_binding_id,
@@ -2206,6 +2249,124 @@ async fn assert_invalid_cursor_request(state: AppState, uri: impl Into<String>) 
 
 fn timestamp(seconds: i64) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(seconds).expect("test timestamp must be valid")
+}
+
+async fn seed_readable_lineage_anchors<'a>(
+    pool: &PgPool,
+    anchors: impl IntoIterator<Item = (&'a str, &'a str, i64, CanonicalityState)>,
+) -> Result<()> {
+    for (chain_id, block_hash, block_number, canonicality_state) in anchors {
+        if !matches!(
+            canonicality_state,
+            CanonicalityState::Canonical
+                | CanonicalityState::Safe
+                | CanonicalityState::Finalized
+        ) {
+            continue;
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO chain_lineage (
+                chain_id,
+                block_hash,
+                block_number,
+                block_timestamp,
+                canonicality_state
+            )
+            VALUES ($1, $2, $3, $4, $5::canonicality_state)
+            ON CONFLICT (chain_id, block_hash) DO NOTHING
+            "#,
+        )
+        .bind(chain_id)
+        .bind(block_hash)
+        .bind(block_number)
+        .bind(timestamp(1_700_000_000 + block_number))
+        .bind(canonicality_state.as_str())
+        .execute(pool)
+        .await
+        .with_context(|| {
+            format!("failed to seed readable lineage for {chain_id} block {block_hash}")
+        })?;
+    }
+
+    Ok(())
+}
+
+async fn upsert_test_token_lineages(
+    pool: &PgPool,
+    token_lineages: &[TokenLineage],
+) -> Result<Vec<TokenLineage>> {
+    seed_readable_lineage_anchors(
+        pool,
+        token_lineages.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+                row.canonicality_state,
+            )
+        }),
+    )
+    .await?;
+    bigname_storage::upsert_token_lineages(pool, token_lineages).await
+}
+
+async fn upsert_test_resources(
+    pool: &PgPool,
+    resources: &[Resource],
+) -> Result<Vec<Resource>> {
+    seed_readable_lineage_anchors(
+        pool,
+        resources.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+                row.canonicality_state,
+            )
+        }),
+    )
+    .await?;
+    bigname_storage::upsert_resources(pool, resources).await
+}
+
+async fn upsert_test_name_surfaces(
+    pool: &PgPool,
+    name_surfaces: &[NameSurface],
+) -> Result<Vec<NameSurface>> {
+    seed_readable_lineage_anchors(
+        pool,
+        name_surfaces.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+                row.canonicality_state,
+            )
+        }),
+    )
+    .await?;
+    bigname_storage::upsert_name_surfaces(pool, name_surfaces).await
+}
+
+async fn upsert_test_surface_bindings(
+    pool: &PgPool,
+    bindings: &[SurfaceBinding],
+) -> Result<Vec<SurfaceBinding>> {
+    seed_readable_lineage_anchors(
+        pool,
+        bindings.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+                row.canonicality_state,
+            )
+        }),
+    )
+    .await?;
+    bigname_storage::upsert_surface_bindings(pool, bindings).await
 }
 
 fn primary_name_reverse_changed_event(

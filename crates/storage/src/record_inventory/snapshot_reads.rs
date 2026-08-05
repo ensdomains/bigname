@@ -21,6 +21,11 @@ pub(super) const DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER: &str = r#"
       'safe'::canonicality_state,
       'finalized'::canonicality_state
   )
+  AND resource_lineage.canonicality_state IN (
+      'canonical'::canonicality_state,
+      'safe'::canonicality_state,
+      'finalized'::canonicality_state
+  )
 "#;
 
 /// Load one record-inventory projection row by resource and exact version boundary.
@@ -59,6 +64,9 @@ pub async fn load_record_inventory_current(
         FROM record_inventory_current ric
         JOIN resources resource
           ON resource.resource_id = ric.resource_id
+        JOIN chain_lineage resource_lineage
+          ON resource_lineage.chain_id = resource.chain_id
+         AND resource_lineage.block_hash = resource.block_hash
         WHERE ric.resource_id = $1
           AND ric.record_version_boundary_key = $2
         {DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER}
@@ -163,6 +171,9 @@ pub async fn load_record_inventory_current_batch(
         FROM record_inventory_current ric
         JOIN resources resource
           ON resource.resource_id = ric.resource_id
+        JOIN chain_lineage resource_lineage
+          ON resource_lineage.chain_id = resource.chain_id
+         AND resource_lineage.block_hash = resource.block_hash
         WHERE (ric.resource_id, ric.record_version_boundary_key) IN (
             SELECT * FROM unnest($1::uuid[], $2::text[])
         )
@@ -482,10 +493,18 @@ async fn record_inventory_has_newer_projection_inputs(
         SELECT EXISTS (
             SELECT 1
             FROM normalized_events ne
+            JOIN chain_lineage ne_lineage
+              ON ne_lineage.chain_id = ne.chain_id
+             AND ne_lineage.block_hash = ne.block_hash
             WHERE ne.chain_id = $1
               AND ne.block_number > $2
               AND ne.block_number <= $3
               AND ne.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+              AND ne_lineage.canonicality_state IN (
                   'canonical'::canonicality_state,
                   'safe'::canonicality_state,
                   'finalized'::canonicality_state

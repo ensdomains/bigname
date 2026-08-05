@@ -28,7 +28,23 @@ pub(super) fn stream_target_resource_ids_after(
                   'canonical'::canonicality_state,
                   'safe'::canonicality_state,
                   'finalized'::canonicality_state
-              )
+             )
+            JOIN chain_lineage event_lineage
+              ON event_lineage.chain_id = ne.chain_id
+             AND event_lineage.block_hash = ne.block_hash
+             AND event_lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+             )
+            JOIN chain_lineage resource_lineage
+              ON resource_lineage.chain_id = resource.chain_id
+             AND resource_lineage.block_hash = resource.block_hash
+             AND resource_lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+             )
             WHERE (
                   ne.event_kind IN ($1, $2, $3, $4)
                   OR (
@@ -47,6 +63,14 @@ pub(super) fn stream_target_resource_ids_after(
 
             SELECT resource.resource_id
             FROM resources resource
+            JOIN chain_lineage resource_lineage
+              ON resource_lineage.chain_id = resource.chain_id
+             AND resource_lineage.block_hash = resource.block_hash
+             AND resource_lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+             )
             WHERE resource.canonicality_state IN (
                       'canonical'::canonicality_state,
                       'safe'::canonicality_state,
@@ -113,6 +137,11 @@ pub(super) async fn load_resource_projection_context(
               'safe'::canonicality_state,
               'finalized'::canonicality_state
           )
+          AND lineage.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
         "#,
     )
     .bind(resource_id)
@@ -151,7 +180,15 @@ pub(super) async fn load_permission_events(
               'canonical'::canonicality_state,
               'safe'::canonicality_state,
               'finalized'::canonicality_state
-          )
+         )
+        JOIN chain_lineage resource_lineage
+          ON resource_lineage.chain_id = resource.chain_id
+         AND resource_lineage.block_hash = resource.block_hash
+         AND resource_lineage.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+         )
         LEFT JOIN chain_lineage rb
           ON rb.chain_id = ne.chain_id
          AND rb.block_hash = ne.block_hash
@@ -164,6 +201,10 @@ pub(super) async fn load_permission_events(
           )
           AND ne.resource_id = $9
           AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+          AND (
+              ne.block_hash IS NULL
+              OR rb.canonicality_state {CANONICAL_STATE_FILTER}
+          )
         ORDER BY
             ne.block_number ASC NULLS FIRST,
             ne.log_index ASC NULLS FIRST,

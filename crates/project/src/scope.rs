@@ -465,17 +465,34 @@ async fn include_alias_and_wildcard_scope(
          FROM name_surfaces scoped
          JOIN project_scope_names scope
            ON scope.logical_name_id = scoped.logical_name_id
+         JOIN chain_lineage scoped_lineage
+           ON scoped_lineage.chain_id = scoped.chain_id
+          AND scoped_lineage.block_hash = scoped.block_hash
+          AND scoped_lineage.block_number = scoped.block_number
          JOIN surface_bindings binding
            ON binding.logical_name_id = scoped.logical_name_id
           AND binding.binding_kind = 'observed_wildcard_path'
+         JOIN chain_lineage binding_lineage
+           ON binding_lineage.chain_id = binding.chain_id
+          AND binding_lineage.block_hash = binding.block_hash
+          AND binding_lineage.block_number = binding.block_number
          JOIN name_surfaces ancestor
            ON ancestor.chain_id = scoped.chain_id
           AND ancestor.namespace = scoped.namespace
           AND scoped.raw_name LIKE '%.' || ancestor.raw_name
           AND ancestor.raw_name <> ''
+         JOIN chain_lineage ancestor_lineage
+           ON ancestor_lineage.chain_id = ancestor.chain_id
+          AND ancestor_lineage.block_hash = ancestor.block_hash
+          AND ancestor_lineage.block_number = ancestor.block_number
          WHERE scoped.chain_id = $1
            AND binding.block_number <= $2
+           AND scoped.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND scoped_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
            AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND binding_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND ancestor.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND ancestor_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
            AND binding.active_from < (
                SELECT block_timestamp + interval '1 second' FROM chain_lineage
                WHERE chain_id = $1 AND block_hash = $3 AND block_number = $2

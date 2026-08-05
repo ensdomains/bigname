@@ -38,6 +38,14 @@ pub(super) fn stream_primary_name_rebuild_inputs_after<'a>(
                 ne.after_state->>'coin_type' AS coin_type,
                 COALESCE(ne.after_state->'claim_provenance', '{}'::jsonb) AS claim_provenance
             FROM normalized_events ne
+            JOIN chain_lineage lineage
+              ON lineage.chain_id = ne.chain_id
+             AND lineage.block_hash = ne.block_hash
+             AND lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+             )
             WHERE ne.event_kind = $1
               AND ne.canonicality_state IN (
                   'canonical'::canonicality_state,
@@ -70,6 +78,14 @@ pub(super) fn stream_primary_name_rebuild_inputs_after<'a>(
                 ne.after_state->>'raw_name' AS raw_name,
                 ne.after_state->'primary_claim_source' AS primary_claim_source
             FROM normalized_events ne
+            JOIN chain_lineage lineage
+              ON lineage.chain_id = ne.chain_id
+             AND lineage.block_hash = ne.block_hash
+             AND lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+             )
             WHERE ne.event_kind = 'RecordChanged'
               AND ne.canonicality_state IN (
                   'canonical'::canonicality_state,
@@ -142,6 +158,10 @@ pub(super) async fn load_reverse_claim_tuple(
             ne.after_state->>'coin_type' AS coin_type,
             COALESCE(ne.after_state->'claim_provenance', '{{}}'::jsonb) AS claim_provenance
         FROM normalized_events ne
+        JOIN chain_lineage lineage
+          ON lineage.chain_id = ne.chain_id
+         AND lineage.block_hash = ne.block_hash
+         AND lineage.canonicality_state {CANONICAL_STATE_FILTER}
         WHERE ne.event_kind = $1
           AND ne.canonicality_state {CANONICAL_STATE_FILTER}
           AND COALESCE(ne.after_state->>'namespace', ne.namespace) = $2
@@ -189,6 +209,10 @@ pub(super) async fn load_latest_name_claim_observation(
             ne.after_state->>'raw_name' AS raw_name,
             ne.after_state->'primary_claim_source' AS primary_claim_source
         FROM normalized_events ne
+        JOIN chain_lineage lineage
+          ON lineage.chain_id = ne.chain_id
+         AND lineage.block_hash = ne.block_hash
+         AND lineage.canonicality_state {CANONICAL_STATE_FILTER}
         WHERE ne.event_kind = 'RecordChanged'
           AND ne.canonicality_state {CANONICAL_STATE_FILTER}
           AND ne.logical_name_id IS NULL

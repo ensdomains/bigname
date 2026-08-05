@@ -108,10 +108,14 @@ fn target_resolver_page_query() -> String {
     format!(
         r#"
         WITH current_bindings AS (
-            SELECT logical_name_id, resource_id
-            FROM surface_bindings
-            WHERE active_to IS NULL
-              AND canonicality_state {CANONICAL_STATE_FILTER}
+            SELECT sb.logical_name_id, sb.resource_id
+            FROM surface_bindings sb
+            JOIN chain_lineage binding_lineage
+              ON binding_lineage.chain_id = sb.chain_id
+             AND binding_lineage.block_hash = sb.block_hash
+             AND binding_lineage.canonicality_state {CANONICAL_STATE_FILTER}
+            WHERE sb.active_to IS NULL
+              AND sb.canonicality_state {CANONICAL_STATE_FILTER}
         ),
         latest_resolver_events AS (
             SELECT DISTINCT ON (ne.logical_name_id, ne.resource_id)
@@ -121,6 +125,10 @@ fn target_resolver_page_query() -> String {
                 ne.source_family,
                 LOWER(ne.after_state->>'resolver') AS resolver_address
             FROM normalized_events ne
+            JOIN chain_lineage event_lineage
+              ON event_lineage.chain_id = ne.chain_id
+             AND event_lineage.block_hash = ne.block_hash
+             AND event_lineage.canonicality_state {CANONICAL_STATE_FILTER}
             WHERE ne.event_kind = $1
               AND ne.logical_name_id IS NOT NULL
               AND ne.resource_id IS NOT NULL
@@ -171,6 +179,10 @@ fn target_resolver_page_query() -> String {
                 LOWER(ne.after_state->>'resolver') AS resolver_address,
                 ne.source_family
             FROM normalized_events ne
+            JOIN chain_lineage event_lineage
+              ON event_lineage.chain_id = ne.chain_id
+             AND event_lineage.block_hash = ne.block_hash
+             AND event_lineage.canonicality_state {CANONICAL_STATE_FILTER}
             WHERE ne.event_kind = $2
               AND ne.chain_id IS NOT NULL
               AND ne.after_state->>'resolver' IS NOT NULL
@@ -223,6 +235,10 @@ pub(super) async fn load_current_bindings(
                 ne.logical_name_id,
                 ne.resource_id
             FROM normalized_events ne
+            JOIN chain_lineage event_lineage
+              ON event_lineage.chain_id = ne.chain_id
+             AND event_lineage.block_hash = ne.block_hash
+             AND event_lineage.canonicality_state {CANONICAL_STATE_FILTER}
             WHERE ne.event_kind = $1
               AND ne.logical_name_id IS NOT NULL
               AND ne.resource_id IS NOT NULL
@@ -256,9 +272,24 @@ pub(super) async fn load_current_bindings(
          AND sb.resource_id = candidate.resource_id
          AND sb.active_to IS NULL
          AND sb.canonicality_state {CANONICAL_STATE_FILTER}
+        INNER JOIN chain_lineage binding_lineage
+          ON binding_lineage.chain_id = sb.chain_id
+         AND binding_lineage.block_hash = sb.block_hash
+         AND binding_lineage.canonicality_state {CANONICAL_STATE_FILTER}
+        INNER JOIN resources r
+          ON r.resource_id = sb.resource_id
+         AND r.canonicality_state {CANONICAL_STATE_FILTER}
+        INNER JOIN chain_lineage resource_lineage
+          ON resource_lineage.chain_id = r.chain_id
+         AND resource_lineage.block_hash = r.block_hash
+         AND resource_lineage.canonicality_state {CANONICAL_STATE_FILTER}
         INNER JOIN name_surfaces ns
           ON ns.logical_name_id = candidate.logical_name_id
          AND ns.canonicality_state {CANONICAL_STATE_FILTER}
+        INNER JOIN chain_lineage surface_lineage
+          ON surface_lineage.chain_id = ns.chain_id
+         AND surface_lineage.block_hash = ns.block_hash
+         AND surface_lineage.canonicality_state {CANONICAL_STATE_FILTER}
         CROSS JOIN LATERAL (
             SELECT
                 ne.normalized_event_id,
@@ -281,6 +312,7 @@ pub(super) async fn load_current_bindings(
               AND ne.resource_id = candidate.resource_id
               AND ne.chain_id = $2
               AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+              AND rb.canonicality_state {CANONICAL_STATE_FILTER}
             ORDER BY
                 ne.block_number DESC NULLS LAST,
                 ne.log_index DESC NULLS LAST,
@@ -344,6 +376,10 @@ pub(super) async fn count_current_binding_candidate_pairs(
                 ne.logical_name_id,
                 ne.resource_id
             FROM normalized_events ne
+            JOIN chain_lineage event_lineage
+              ON event_lineage.chain_id = ne.chain_id
+             AND event_lineage.block_hash = ne.block_hash
+             AND event_lineage.canonicality_state {CANONICAL_STATE_FILTER}
             WHERE ne.event_kind = $1
               AND ne.logical_name_id IS NOT NULL
               AND ne.resource_id IS NOT NULL
@@ -362,13 +398,32 @@ pub(super) async fn count_current_binding_candidate_pairs(
              AND sb.resource_id = candidate.resource_id
              AND sb.active_to IS NULL
              AND sb.canonicality_state {CANONICAL_STATE_FILTER}
+            INNER JOIN chain_lineage binding_lineage
+              ON binding_lineage.chain_id = sb.chain_id
+             AND binding_lineage.block_hash = sb.block_hash
+             AND binding_lineage.canonicality_state {CANONICAL_STATE_FILTER}
+            INNER JOIN resources r
+              ON r.resource_id = sb.resource_id
+             AND r.canonicality_state {CANONICAL_STATE_FILTER}
+            INNER JOIN chain_lineage resource_lineage
+              ON resource_lineage.chain_id = r.chain_id
+             AND resource_lineage.block_hash = r.block_hash
+             AND resource_lineage.canonicality_state {CANONICAL_STATE_FILTER}
             INNER JOIN name_surfaces ns
               ON ns.logical_name_id = candidate.logical_name_id
              AND ns.canonicality_state {CANONICAL_STATE_FILTER}
+            INNER JOIN chain_lineage surface_lineage
+              ON surface_lineage.chain_id = ns.chain_id
+             AND surface_lineage.block_hash = ns.block_hash
+             AND surface_lineage.canonicality_state {CANONICAL_STATE_FILTER}
             CROSS JOIN LATERAL (
                 SELECT
                     LOWER(ne.after_state->>'resolver') AS resolver_address
                 FROM normalized_events ne
+                JOIN chain_lineage event_lineage
+                  ON event_lineage.chain_id = ne.chain_id
+                 AND event_lineage.block_hash = ne.block_hash
+                 AND event_lineage.canonicality_state {CANONICAL_STATE_FILTER}
                 WHERE ne.event_kind = $1
                   AND ne.logical_name_id = candidate.logical_name_id
                   AND ne.resource_id = candidate.resource_id
@@ -446,6 +501,7 @@ pub(super) async fn load_alias_events(
         WHERE ne.event_kind = $1
           AND ne.chain_id = $2
           AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+          AND rb.canonicality_state {CANONICAL_STATE_FILTER}
           AND LOWER(ne.after_state->>'resolver') = $3
         ORDER BY
             ne.after_state->>'from_dns_encoded_name',

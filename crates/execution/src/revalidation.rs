@@ -12,15 +12,21 @@ use crate::persistence::PersistEnsExactNameVerifiedResolutionRequest;
 use crate::validation::extract_requested_selectors;
 use crate::{BASENAMES_NAMESPACE, ENS_NAMESPACE};
 
-use storage::{
-    load_name_current_for_revalidation, load_supported_record_inventory_current_for_revalidation,
-};
+#[cfg(not(test))]
+use storage::load_name_current_for_revalidation;
+#[cfg(test)]
+pub(crate) use storage::load_name_current_for_revalidation;
+use storage::load_supported_record_inventory_current_for_revalidation;
 use topology::{
     build_resolution_topology_for_revalidation, ensure_storage_supported_boundary_matches_request,
 };
 
 #[cfg(test)]
-pub(crate) use positions::build_requested_chain_positions_from_projection;
+pub(crate) use positions::{
+    build_requested_chain_positions_from_projection,
+    ensure_requested_positions_are_eligible_for_projection,
+    ensure_requested_positions_are_eligible_for_record_inventory_projection,
+};
 
 pub(crate) async fn revalidate_supported_resolution_persistence_from_storage(
     transaction: &mut Transaction<'_, Postgres>,

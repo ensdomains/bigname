@@ -24,7 +24,23 @@ pub(super) fn stream_target_resource_ids_after(
               'canonical'::canonicality_state,
               'safe'::canonicality_state,
               'finalized'::canonicality_state
-          )
+         )
+        JOIN chain_lineage event_lineage
+          ON event_lineage.chain_id = ne.chain_id
+         AND event_lineage.block_hash = ne.block_hash
+         AND event_lineage.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+         )
+        JOIN chain_lineage resource_lineage
+          ON resource_lineage.chain_id = resource.chain_id
+         AND resource_lineage.block_hash = resource.block_hash
+         AND resource_lineage.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+         )
         WHERE ne.derivation_kind = ANY($1::TEXT[])
           AND ne.event_kind IN ($2, $3, $4)
           AND (ne.event_kind <> $4 OR ne.namespace = ANY($5::TEXT[]))
@@ -147,7 +163,15 @@ async fn load_resource_relevant_events(
               'canonical'::canonicality_state,
               'safe'::canonicality_state,
               'finalized'::canonicality_state
-          )
+         )
+        JOIN chain_lineage resource_lineage
+          ON resource_lineage.chain_id = resource.chain_id
+         AND resource_lineage.block_hash = resource.block_hash
+         AND resource_lineage.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+         )
         LEFT JOIN chain_lineage rb
           ON rb.chain_id = ne.chain_id
          AND rb.block_hash = ne.block_hash
@@ -164,6 +188,7 @@ async fn load_resource_relevant_events(
           AND ne.block_number IS NOT NULL
           AND ne.block_hash IS NOT NULL
           AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+          AND rb.canonicality_state {CANONICAL_STATE_FILTER}
         ORDER BY
             ne.block_number ASC,
             ne.log_index ASC NULLS FIRST,
@@ -223,7 +248,15 @@ async fn load_logical_name_resolver_events(
               'canonical'::canonicality_state,
               'safe'::canonicality_state,
               'finalized'::canonicality_state
-          )
+         )
+        JOIN chain_lineage resource_lineage
+          ON resource_lineage.chain_id = resource.chain_id
+         AND resource_lineage.block_hash = resource.block_hash
+         AND resource_lineage.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+         )
         LEFT JOIN chain_lineage rb
           ON rb.chain_id = ne.chain_id
          AND rb.block_hash = ne.block_hash
@@ -249,6 +282,7 @@ async fn load_logical_name_resolver_events(
           AND ne.block_number IS NOT NULL
           AND ne.block_hash IS NOT NULL
           AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+          AND rb.canonicality_state {CANONICAL_STATE_FILTER}
         ORDER BY
             ne.block_number ASC,
             ne.log_index ASC NULLS FIRST,

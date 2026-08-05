@@ -2366,6 +2366,20 @@ async fn load_invalidation_payload(
 }
 
 async fn insert_resource(database: &TestDatabase, resource_id: Uuid) -> Result<()> {
+    let block_hash = format!("0x{}", resource_id.simple());
+    sqlx::query(
+        r#"
+        INSERT INTO chain_lineage (
+            chain_id, block_hash, block_number, block_timestamp, canonicality_state
+        )
+        VALUES ('ethereum-mainnet', $1, 1, now(), 'finalized'::canonicality_state)
+        ON CONFLICT (chain_id, block_hash) DO NOTHING
+        "#,
+    )
+    .bind(&block_hash)
+    .execute(database.pool())
+    .await
+    .context("failed to insert projection apply test resource lineage")?;
     sqlx::query(
         r#"
         INSERT INTO resources (
@@ -2385,7 +2399,7 @@ async fn insert_resource(database: &TestDatabase, resource_id: Uuid) -> Result<(
         "#,
     )
     .bind(resource_id)
-    .bind(format!("0x{}", resource_id.simple()))
+    .bind(block_hash)
     .execute(database.pool())
     .await
     .context("failed to insert projection apply test resource")?;
@@ -2397,6 +2411,20 @@ async fn insert_name_surface(
     logical_name_id: &str,
     normalized_name: &str,
 ) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO chain_lineage (
+            chain_id, block_hash, block_number, block_timestamp, canonicality_state
+        )
+        VALUES (
+            'ethereum-mainnet', '0xsurface', 1, now(), 'finalized'::canonicality_state
+        )
+        ON CONFLICT (chain_id, block_hash) DO NOTHING
+        "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert projection apply test name-surface lineage")?;
     sqlx::query(
         r#"
         INSERT INTO name_surfaces (
@@ -2537,6 +2565,26 @@ struct EventSeed<'a> {
 }
 
 async fn insert_event(database: &TestDatabase, event: EventSeed<'_>) -> Result<()> {
+    if let (Some(chain_id), Some(block_number), Some(block_hash)) =
+        (event.chain_id, event.block_number, event.block_hash)
+    {
+        sqlx::query(
+            r#"
+            INSERT INTO chain_lineage (
+                chain_id, block_hash, block_number, block_timestamp, canonicality_state
+            )
+            VALUES ($1, $2, $3, $4, 'canonical'::canonicality_state)
+            ON CONFLICT (chain_id, block_hash) DO NOTHING
+            "#,
+        )
+        .bind(chain_id)
+        .bind(block_hash)
+        .bind(block_number)
+        .bind(event.observed_at)
+        .execute(database.pool())
+        .await
+        .with_context(|| format!("failed to insert lineage for {}", event.event_identity))?;
+    }
     sqlx::query(
         r#"
         INSERT INTO normalized_events (

@@ -440,7 +440,7 @@ async fn v2_permissions_empty_resource_fails_closed_from_typed_support_summary()
         .seed_default_ens_snapshot_selector_position()
         .await?;
     let resource_id = Uuid::from_u128(0xe400);
-    bigname_storage::upsert_resources(&database.pool, &[resource(resource_id)]).await?;
+    upsert_test_resources(&database.pool, &[resource(resource_id)]).await?;
     mark_permissions_current_projection_ready(&database).await?;
     let uri = format!("/v2/permissions?registration_id={resource_id}");
 
@@ -546,7 +546,7 @@ async fn seed_v2_permissions_fixture(database: &TestDatabase) -> Result<()> {
             }),
         ))
         .await?;
-    bigname_storage::upsert_resources(&database.pool, &[resource(stale_resource_id)]).await?;
+    upsert_test_resources(&database.pool, &[resource(stale_resource_id)]).await?;
 
     let mut current_row = permission_current_row(
         current_resource_id,

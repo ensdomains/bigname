@@ -97,6 +97,46 @@ pub async fn insert_normalized_event_fixtures(
 
         sqlx::query(
             r#"
+            INSERT INTO chain_lineage (
+                chain_id,
+                block_hash,
+                block_number,
+                block_timestamp,
+                canonicality_state
+            )
+            SELECT DISTINCT
+                input.chain_id,
+                input.block_hash,
+                input.block_number,
+                COALESCE(
+                    existing_lineage.block_timestamp,
+                    TIMESTAMPTZ '2000-01-01 00:00:00+00'
+                        + input.block_number * INTERVAL '1 second'
+                ),
+                input.canonicality_state::canonicality_state
+            FROM unnest(
+                $1::TEXT[], $2::BIGINT[], $3::TEXT[], $4::TEXT[]
+            ) AS input(chain_id, block_number, block_hash, canonicality_state)
+            LEFT JOIN chain_lineage existing_lineage
+              ON existing_lineage.chain_id = input.chain_id
+             AND existing_lineage.block_hash = input.block_hash
+            WHERE input.chain_id IS NOT NULL
+              AND input.block_number IS NOT NULL
+              AND input.block_hash IS NOT NULL
+              AND input.canonicality_state IN ('canonical', 'safe', 'finalized')
+            ON CONFLICT (chain_id, block_hash) DO NOTHING
+            "#,
+        )
+        .bind(&chain_ids)
+        .bind(&block_numbers)
+        .bind(&block_hashes)
+        .bind(&canonicality_states)
+        .execute(&mut *transaction)
+        .await
+        .context("failed to insert normalized-event fixture lineage")?;
+
+        sqlx::query(
+            r#"
             INSERT INTO normalized_events (
                 event_identity, namespace, logical_name_id, resource_id, event_kind,
                 source_family, manifest_version, source_manifest_id, chain_id, block_number,

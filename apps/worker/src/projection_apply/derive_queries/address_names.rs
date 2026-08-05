@@ -1,5 +1,14 @@
 pub(super) const ADDRESS_NAMES_CURRENT_INVALIDATIONS_PREFIX: &str = r#"
-WITH changed_events AS (
+WITH readable_lineage AS (
+    SELECT chain_id, block_hash
+    FROM chain_lineage
+    WHERE canonicality_state IN (
+        'canonical'::canonicality_state,
+        'safe'::canonicality_state,
+        'finalized'::canonicality_state
+    )
+),
+changed_events AS (
     SELECT ne.*, change.change_id, change.changed_at
     FROM projection_normalized_event_changes change
     JOIN normalized_events ne
@@ -118,6 +127,9 @@ candidate_keys AS (
          'safe'::canonicality_state,
          'finalized'::canonicality_state
      )
+    JOIN readable_lineage permission_lineage
+      ON permission_lineage.chain_id = permission.chain_id
+     AND permission_lineage.block_hash = permission.block_hash
     CROSS JOIN LATERAL (
         VALUES
             (permission.after_state ->> 'subject', permission.after_state -> 'scope'),
@@ -149,6 +161,9 @@ candidate_keys AS (
     FROM resource_permission_changed_names changed
     JOIN normalized_events ne
       ON ne.logical_name_id = changed.logical_name_id
+    JOIN readable_lineage event_lineage
+      ON event_lineage.chain_id = ne.chain_id
+     AND event_lineage.block_hash = ne.block_hash
     CROSS JOIN LATERAL (
         VALUES
             (ne.after_state ->> 'registrant'),
@@ -178,6 +193,9 @@ candidate_keys AS (
     FROM resource_permission_changed_names changed
     JOIN normalized_events ne
       ON ne.logical_name_id = changed.logical_name_id
+    JOIN readable_lineage event_lineage
+      ON event_lineage.chain_id = ne.chain_id
+     AND event_lineage.block_hash = ne.block_hash
     CROSS JOIN LATERAL (
         VALUES (ne.after_state ->> 'owner')
     ) AS fallback(address)

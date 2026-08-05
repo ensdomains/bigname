@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use sqlx::PgPool;
 
 use super::{
-    DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER, DEFAULT_IDENTITY_NAME_CURRENT_READ_FILTER,
+    DEFAULT_ADDRESS_NAMES_CURRENT_LINEAGE_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
+    DEFAULT_IDENTITY_NAME_CURRENT_LINEAGE_JOINS, DEFAULT_IDENTITY_NAME_CURRENT_READ_FILTER,
     ReverseIdentityStorageInput, reverse_rows::ReverseIdentityPageRow,
 };
 
@@ -121,6 +122,7 @@ pub(super) async fn load_reverse_identity_page_rows(
                               ON binding.surface_binding_id = anc.surface_binding_id
                             LEFT JOIN token_lineages token_lineage
                               ON token_lineage.token_lineage_id = anc.token_lineage_id
+                            {DEFAULT_ADDRESS_NAMES_CURRENT_LINEAGE_JOINS}
                             JOIN name_current identity_nc
                               ON identity_nc.logical_name_id = anc.logical_name_id
                             JOIN name_surfaces identity_nc_surface
@@ -131,6 +133,7 @@ pub(super) async fn load_reverse_identity_page_rows(
                               ON identity_nc_binding.surface_binding_id = identity_nc.surface_binding_id
                             LEFT JOIN token_lineages identity_nc_token_lineage
                               ON identity_nc_token_lineage.token_lineage_id = identity_nc.token_lineage_id
+                            {DEFAULT_IDENTITY_NAME_CURRENT_LINEAGE_JOINS}
                             WHERE pnc.address = requested.address
                               AND pnc.coin_type = requested.coin_type
                               AND pnc.claim_status = 'success'
@@ -166,6 +169,7 @@ pub(super) async fn load_reverse_identity_page_rows(
                               ON binding.surface_binding_id = anc.surface_binding_id
                             LEFT JOIN token_lineages token_lineage
                               ON token_lineage.token_lineage_id = anc.token_lineage_id
+                            {DEFAULT_ADDRESS_NAMES_CURRENT_LINEAGE_JOINS}
                             JOIN name_current identity_nc
                               ON identity_nc.logical_name_id = anc.logical_name_id
                             JOIN name_surfaces identity_nc_surface
@@ -176,6 +180,7 @@ pub(super) async fn load_reverse_identity_page_rows(
                               ON identity_nc_binding.surface_binding_id = identity_nc.surface_binding_id
                             LEFT JOIN token_lineages identity_nc_token_lineage
                               ON identity_nc_token_lineage.token_lineage_id = identity_nc.token_lineage_id
+                            {DEFAULT_IDENTITY_NAME_CURRENT_LINEAGE_JOINS}
                             LEFT JOIN primary_names_current pnc
                               ON pnc.address = requested.address
                              AND pnc.coin_type = requested.coin_type
@@ -206,6 +211,7 @@ pub(super) async fn load_reverse_identity_page_rows(
                               ON binding.surface_binding_id = anc.surface_binding_id
                             LEFT JOIN token_lineages token_lineage
                               ON token_lineage.token_lineage_id = anc.token_lineage_id
+                            {DEFAULT_ADDRESS_NAMES_CURRENT_LINEAGE_JOINS}
                             JOIN name_current identity_nc
                               ON identity_nc.logical_name_id = anc.logical_name_id
                             JOIN name_surfaces identity_nc_surface
@@ -216,6 +222,7 @@ pub(super) async fn load_reverse_identity_page_rows(
                               ON identity_nc_binding.surface_binding_id = identity_nc.surface_binding_id
                             LEFT JOIN token_lineages identity_nc_token_lineage
                               ON identity_nc_token_lineage.token_lineage_id = identity_nc.token_lineage_id
+                            {DEFAULT_IDENTITY_NAME_CURRENT_LINEAGE_JOINS}
                             LEFT JOIN primary_names_current pnc
                               ON pnc.address = requested.address
                              AND pnc.coin_type = requested.coin_type
@@ -246,6 +253,7 @@ pub(super) async fn load_reverse_identity_page_rows(
                               ON binding.surface_binding_id = anc.surface_binding_id
                             LEFT JOIN token_lineages token_lineage
                               ON token_lineage.token_lineage_id = anc.token_lineage_id
+                            {DEFAULT_ADDRESS_NAMES_CURRENT_LINEAGE_JOINS}
                             JOIN name_current identity_nc
                               ON identity_nc.logical_name_id = anc.logical_name_id
                             JOIN name_surfaces identity_nc_surface
@@ -256,6 +264,7 @@ pub(super) async fn load_reverse_identity_page_rows(
                               ON identity_nc_binding.surface_binding_id = identity_nc.surface_binding_id
                             LEFT JOIN token_lineages identity_nc_token_lineage
                               ON identity_nc_token_lineage.token_lineage_id = identity_nc.token_lineage_id
+                            {DEFAULT_IDENTITY_NAME_CURRENT_LINEAGE_JOINS}
                             LEFT JOIN primary_names_current pnc
                               ON pnc.address = requested.address
                              AND pnc.coin_type = requested.coin_type

@@ -90,6 +90,7 @@ pub(super) async fn load_canonical_name_surfaces_after(
           ON rb.chain_id = ns.chain_id
          AND rb.block_hash = ns.block_hash
         WHERE ns.canonicality_state {CANONICAL_STATE_FILTER}
+          AND rb.canonicality_state {CANONICAL_STATE_FILTER}
           AND ($1::TEXT IS NULL OR ns.logical_name_id > $1)
         ORDER BY ns.logical_name_id
         LIMIT $2
@@ -127,6 +128,7 @@ pub(super) async fn load_canonical_name_surface(
          AND rb.block_hash = ns.block_hash
         WHERE ns.logical_name_id = $1
           AND ns.canonicality_state {CANONICAL_STATE_FILTER}
+          AND rb.canonicality_state {CANONICAL_STATE_FILTER}
         "#
     ))
     .bind(logical_name_id)
@@ -168,9 +170,25 @@ pub(super) async fn load_current_binding_context(
         LEFT JOIN chain_lineage rb
           ON rb.chain_id = sb.chain_id
          AND rb.block_hash = sb.block_hash
+        JOIN chain_lineage resource_lineage
+          ON resource_lineage.chain_id = r.chain_id
+         AND resource_lineage.block_hash = r.block_hash
+         AND resource_lineage.canonicality_state {CANONICAL_STATE_FILTER}
+        LEFT JOIN chain_lineage token_lineage_lineage
+          ON token_lineage_lineage.chain_id = tl.chain_id
+         AND token_lineage_lineage.block_hash = tl.block_hash
+         AND token_lineage_lineage.canonicality_state {CANONICAL_STATE_FILTER}
         WHERE sb.logical_name_id = $1
           AND sb.active_to IS NULL
           AND sb.canonicality_state {CANONICAL_STATE_FILTER}
+          AND rb.canonicality_state {CANONICAL_STATE_FILTER}
+          AND (
+              r.token_lineage_id IS NULL
+              OR (
+                  tl.token_lineage_id IS NOT NULL
+                  AND token_lineage_lineage.block_hash IS NOT NULL
+              )
+          )
         ORDER BY sb.active_from DESC, sb.surface_binding_id DESC
         LIMIT 1
         "#
@@ -249,6 +267,10 @@ pub(super) async fn load_relevant_events(
                   OR ne.resource_id = $6
               )
               AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+              AND (
+                  ne.block_hash IS NULL
+                  OR rb.canonicality_state {CANONICAL_STATE_FILTER}
+              )
             ORDER BY
                 ne.block_number NULLS FIRST,
                 CASE
@@ -311,6 +333,10 @@ pub(super) async fn load_relevant_events(
                   OR ne.resource_id = $5
               )
               AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+              AND (
+                  ne.block_hash IS NULL
+                  OR rb.canonicality_state {CANONICAL_STATE_FILTER}
+              )
             ORDER BY
                 ne.block_number NULLS FIRST,
                 CASE

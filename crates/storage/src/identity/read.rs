@@ -6,8 +6,18 @@ use uuid::Uuid;
 
 use super::types::{NameSurface, Resource, SurfaceBinding, TokenLineage};
 
+const DEFAULT_IDENTITY_LINEAGE_JOIN: &str = r#"
+  JOIN chain_lineage identity_lineage
+    ON identity_lineage.chain_id = identity_row.chain_id AND identity_lineage.block_hash = identity_row.block_hash
+"#;
+
 const DEFAULT_IDENTITY_READ_FILTER: &str = r#"
-  AND canonicality_state IN (
+  AND identity_row.canonicality_state IN (
+      'canonical'::canonicality_state,
+      'safe'::canonicality_state,
+      'finalized'::canonicality_state
+  )
+  AND identity_lineage.canonicality_state IN (
       'canonical'::canonicality_state,
       'safe'::canonicality_state,
       'finalized'::canonicality_state
@@ -63,26 +73,28 @@ pub async fn load_name_surfaces_by_logical_name_ids(
     let rows = sqlx::query(&format!(
         r#"
         SELECT
-            logical_name_id,
-            namespace,
-            input_name,
-            canonical_display_name,
-            normalized_name,
-            dns_encoded_name,
-            namehash,
-            labelhashes,
-            normalizer_version,
-            normalization_warnings,
-            normalization_errors,
-            chain_id,
-            block_hash,
-            block_number,
-            provenance,
-            canonicality_state::TEXT AS canonicality_state
-        FROM name_surfaces
-        WHERE logical_name_id = ANY($1)
+            identity_row.logical_name_id,
+            identity_row.namespace,
+            identity_row.input_name,
+            identity_row.canonical_display_name,
+            identity_row.normalized_name,
+            identity_row.dns_encoded_name,
+            identity_row.namehash,
+            identity_row.labelhashes,
+            identity_row.normalizer_version,
+            identity_row.normalization_warnings,
+            identity_row.normalization_errors,
+            identity_row.chain_id,
+            identity_row.block_hash,
+            identity_row.block_number,
+            identity_row.provenance,
+            identity_row.canonicality_state::TEXT AS canonicality_state
+        FROM name_surfaces identity_row
+        {}
+        WHERE identity_row.logical_name_id = ANY($1)
         {}
         "#,
+        identity_lineage_join(false),
         identity_read_filter(false),
     ))
     .bind(logical_name_ids)
@@ -167,17 +179,19 @@ where
     let row = sqlx::query(&format!(
         r#"
         SELECT
-            token_lineage_id,
-            chain_id,
-            block_hash,
-            block_number,
-            provenance,
-            canonicality_state::TEXT AS canonicality_state
-        FROM token_lineages
-        WHERE token_lineage_id = $1
+            identity_row.token_lineage_id,
+            identity_row.chain_id,
+            identity_row.block_hash,
+            identity_row.block_number,
+            identity_row.provenance,
+            identity_row.canonicality_state::TEXT AS canonicality_state
+        FROM token_lineages identity_row
+        {}
+        WHERE identity_row.token_lineage_id = $1
         {}
         {}
         "#,
+        identity_lineage_join(include_noncanonical),
         identity_read_filter(include_noncanonical),
         lock_clause,
     ))
@@ -202,18 +216,20 @@ where
     let row = sqlx::query(&format!(
         r#"
         SELECT
-            resource_id,
-            token_lineage_id,
-            chain_id,
-            block_hash,
-            block_number,
-            provenance,
-            canonicality_state::TEXT AS canonicality_state
-        FROM resources
-        WHERE resource_id = $1
+            identity_row.resource_id,
+            identity_row.token_lineage_id,
+            identity_row.chain_id,
+            identity_row.block_hash,
+            identity_row.block_number,
+            identity_row.provenance,
+            identity_row.canonicality_state::TEXT AS canonicality_state
+        FROM resources identity_row
+        {}
+        WHERE identity_row.resource_id = $1
         {}
         {}
         "#,
+        identity_lineage_join(include_noncanonical),
         identity_read_filter(include_noncanonical),
         lock_clause,
     ))
@@ -238,27 +254,29 @@ where
     let row = sqlx::query(&format!(
         r#"
         SELECT
-            logical_name_id,
-            namespace,
-            input_name,
-            canonical_display_name,
-            normalized_name,
-            dns_encoded_name,
-            namehash,
-            labelhashes,
-            normalizer_version,
-            normalization_warnings,
-            normalization_errors,
-            chain_id,
-            block_hash,
-            block_number,
-            provenance,
-            canonicality_state::TEXT AS canonicality_state
-        FROM name_surfaces
-        WHERE logical_name_id = $1
+            identity_row.logical_name_id,
+            identity_row.namespace,
+            identity_row.input_name,
+            identity_row.canonical_display_name,
+            identity_row.normalized_name,
+            identity_row.dns_encoded_name,
+            identity_row.namehash,
+            identity_row.labelhashes,
+            identity_row.normalizer_version,
+            identity_row.normalization_warnings,
+            identity_row.normalization_errors,
+            identity_row.chain_id,
+            identity_row.block_hash,
+            identity_row.block_number,
+            identity_row.provenance,
+            identity_row.canonicality_state::TEXT AS canonicality_state
+        FROM name_surfaces identity_row
+        {}
+        WHERE identity_row.logical_name_id = $1
         {}
         {}
         "#,
+        identity_lineage_join(include_noncanonical),
         identity_read_filter(include_noncanonical),
         lock_clause,
     ))
@@ -283,22 +301,24 @@ where
     let row = sqlx::query(&format!(
         r#"
         SELECT
-            surface_binding_id,
-            logical_name_id,
-            resource_id,
-            binding_kind,
-            active_from,
-            active_to,
-            chain_id,
-            block_hash,
-            block_number,
-            provenance,
-            canonicality_state::TEXT AS canonicality_state
-        FROM surface_bindings
-        WHERE surface_binding_id = $1
+            identity_row.surface_binding_id,
+            identity_row.logical_name_id,
+            identity_row.resource_id,
+            identity_row.binding_kind,
+            identity_row.active_from,
+            identity_row.active_to,
+            identity_row.chain_id,
+            identity_row.block_hash,
+            identity_row.block_number,
+            identity_row.provenance,
+            identity_row.canonicality_state::TEXT AS canonicality_state
+        FROM surface_bindings identity_row
+        {}
+        WHERE identity_row.surface_binding_id = $1
         {}
         {}
         "#,
+        identity_lineage_join(include_noncanonical),
         identity_read_filter(include_noncanonical),
         lock_clause,
     ))
@@ -321,22 +341,26 @@ where
     let rows = sqlx::query(&format!(
         r#"
         SELECT
-            surface_binding_id,
-            logical_name_id,
-            resource_id,
-            binding_kind,
-            active_from,
-            active_to,
-            chain_id,
-            block_hash,
-            block_number,
-            provenance,
-            canonicality_state::TEXT AS canonicality_state
-        FROM surface_bindings
-        WHERE logical_name_id = $1
+            identity_row.surface_binding_id,
+            identity_row.logical_name_id,
+            identity_row.resource_id,
+            identity_row.binding_kind,
+            identity_row.active_from,
+            identity_row.active_to,
+            identity_row.chain_id,
+            identity_row.block_hash,
+            identity_row.block_number,
+            identity_row.provenance,
+            identity_row.canonicality_state::TEXT AS canonicality_state
+        FROM surface_bindings identity_row
         {}
-        ORDER BY active_from, active_to NULLS LAST, surface_binding_id
+        WHERE identity_row.logical_name_id = $1
+        {}
+        ORDER BY identity_row.active_from,
+                 identity_row.active_to NULLS LAST,
+                 identity_row.surface_binding_id
         "#,
+        identity_lineage_join(include_noncanonical),
         identity_read_filter(include_noncanonical),
     ))
     .bind(logical_name_id)
@@ -360,22 +384,27 @@ where
     let rows = sqlx::query(&format!(
         r#"
         SELECT
-            surface_binding_id,
-            logical_name_id,
-            resource_id,
-            binding_kind,
-            active_from,
-            active_to,
-            chain_id,
-            block_hash,
-            block_number,
-            provenance,
-            canonicality_state::TEXT AS canonicality_state
-        FROM surface_bindings
-        WHERE resource_id = $1
+            identity_row.surface_binding_id,
+            identity_row.logical_name_id,
+            identity_row.resource_id,
+            identity_row.binding_kind,
+            identity_row.active_from,
+            identity_row.active_to,
+            identity_row.chain_id,
+            identity_row.block_hash,
+            identity_row.block_number,
+            identity_row.provenance,
+            identity_row.canonicality_state::TEXT AS canonicality_state
+        FROM surface_bindings identity_row
         {}
-        ORDER BY active_from, active_to NULLS LAST, logical_name_id, surface_binding_id
+        WHERE identity_row.resource_id = $1
+        {}
+        ORDER BY identity_row.active_from,
+                 identity_row.active_to NULLS LAST,
+                 identity_row.logical_name_id,
+                 identity_row.surface_binding_id
         "#,
+        identity_lineage_join(include_noncanonical),
         identity_read_filter(include_noncanonical),
     ))
     .bind(resource_id)
@@ -394,8 +423,20 @@ fn identity_read_filter(include_noncanonical: bool) -> &'static str {
     }
 }
 
+fn identity_lineage_join(include_noncanonical: bool) -> &'static str {
+    if include_noncanonical {
+        ""
+    } else {
+        DEFAULT_IDENTITY_LINEAGE_JOIN
+    }
+}
+
 fn row_lock_clause(lock_for_update: bool) -> &'static str {
-    if lock_for_update { "FOR UPDATE" } else { "" }
+    if lock_for_update {
+        "FOR UPDATE OF identity_row"
+    } else {
+        ""
+    }
 }
 
 pub(super) fn decode_token_lineage(row: PgRow) -> Result<TokenLineage> {

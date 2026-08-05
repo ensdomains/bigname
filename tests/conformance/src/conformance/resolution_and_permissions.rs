@@ -5242,7 +5242,7 @@ async fn resolver_overview_contract_reads_ensv2_summary_without_expanding_permis
             surface_binding_id,
         )
         .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[ens_v2_resource(
             other_resource_id,
@@ -5534,7 +5534,7 @@ async fn resource_permissions_contract_returns_rows_with_shared_collection_envel
     let filtered_subject = "0x0000000000000000000000000000000000000abc";
     let other_subject = "0x0000000000000000000000000000000000000def";
 
-    bigname_storage::upsert_resources(&database.pool, &[resource(resource_id)])
+    upsert_test_resources(&database.pool, &[resource(resource_id)])
         .await
         .context("failed to upsert resource for permissions conformance")?;
     bigname_storage::upsert_permissions_current_rows(
@@ -5925,7 +5925,7 @@ async fn resource_permissions_contract_reads_ensv2_resource_and_resolver_scopes(
     let subject = "0x0000000000000000000000000000000000000abc";
     let resolver_address = "0x0000000000000000000000000000000000000aaa";
 
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[ens_v2_resource(
             resource_id,
@@ -6076,7 +6076,7 @@ async fn resource_permissions_contract_honors_subject_and_scope_filters() -> Res
     let resource_id = Uuid::from_u128(0xa301);
     let shared_subject = "0x0000000000000000000000000000000000000abc";
 
-    bigname_storage::upsert_resources(&database.pool, &[resource(resource_id)])
+    upsert_test_resources(&database.pool, &[resource(resource_id)])
         .await
         .context("failed to upsert resource for permissions filter conformance")?;
     bigname_storage::upsert_permissions_current_rows(

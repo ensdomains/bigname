@@ -40,6 +40,18 @@ pub(super) async fn load_wildcard_source_context(
         JOIN resources r
           ON r.resource_id = sb.resource_id
          AND r.canonicality_state {CANONICAL_STATE_FILTER}
+        JOIN chain_lineage surface_lineage
+          ON surface_lineage.chain_id = ns.chain_id
+         AND surface_lineage.block_hash = ns.block_hash
+         AND surface_lineage.canonicality_state {CANONICAL_STATE_FILTER}
+        JOIN chain_lineage binding_lineage
+          ON binding_lineage.chain_id = sb.chain_id
+         AND binding_lineage.block_hash = sb.block_hash
+         AND binding_lineage.canonicality_state {CANONICAL_STATE_FILTER}
+        JOIN chain_lineage resource_lineage
+          ON resource_lineage.chain_id = r.chain_id
+         AND resource_lineage.block_hash = r.block_hash
+         AND resource_lineage.canonicality_state {CANONICAL_STATE_FILTER}
         WHERE ns.namespace = $1
           AND ns.logical_name_id <> $2
           AND ns.canonicality_state {CANONICAL_STATE_FILTER}
@@ -149,6 +161,10 @@ async fn load_wildcard_source_events(
           AND ne.resource_id = $3
           AND ne.event_kind = ANY($4::TEXT[])
           AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+          AND (
+              ne.block_hash IS NULL
+              OR rb.canonicality_state {CANONICAL_STATE_FILTER}
+          )
         ORDER BY
             ne.block_number DESC NULLS LAST,
             COALESCE(ne.log_index, -1) DESC,

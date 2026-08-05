@@ -2,6 +2,7 @@ mod address_matches;
 mod decoders;
 mod paging;
 mod selectors;
+mod source;
 mod summary;
 
 use std::collections::BTreeSet;

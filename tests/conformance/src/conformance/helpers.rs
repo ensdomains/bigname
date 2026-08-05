@@ -2,6 +2,130 @@ fn timestamp(seconds: i64) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(seconds).expect("conformance timestamp must be valid")
 }
 
+async fn seed_readable_lineage_anchors<'a>(
+    pool: &PgPool,
+    anchors: impl IntoIterator<Item = (&'a str, &'a str, i64, CanonicalityState)>,
+) -> Result<()> {
+    for (chain_id, block_hash, block_number, canonicality_state) in anchors {
+        if !matches!(
+            canonicality_state,
+            CanonicalityState::Canonical
+                | CanonicalityState::Safe
+                | CanonicalityState::Finalized
+        ) {
+            continue;
+        }
+
+        let timestamp_base = if chain_id == ENSV2_CHAIN_ID {
+            1_717_190_000
+        } else {
+            1_700_000_000
+        };
+
+        sqlx::query(
+            r#"
+            INSERT INTO chain_lineage (
+                chain_id,
+                block_hash,
+                block_number,
+                block_timestamp,
+                canonicality_state
+            )
+            VALUES ($1, $2, $3, $4, $5::canonicality_state)
+            ON CONFLICT (chain_id, block_hash) DO NOTHING
+            "#,
+        )
+        .bind(chain_id)
+        .bind(block_hash)
+        .bind(block_number)
+        .bind(timestamp(timestamp_base + block_number))
+        .bind(canonicality_state.as_str())
+        .execute(pool)
+        .await
+        .with_context(|| {
+            format!("failed to seed readable lineage for {chain_id} block {block_hash}")
+        })?;
+    }
+
+    Ok(())
+}
+
+async fn upsert_test_token_lineages(
+    pool: &PgPool,
+    token_lineages: &[TokenLineage],
+) -> Result<Vec<TokenLineage>> {
+    seed_readable_lineage_anchors(
+        pool,
+        token_lineages.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+                row.canonicality_state,
+            )
+        }),
+    )
+    .await?;
+    bigname_storage::upsert_token_lineages(pool, token_lineages).await
+}
+
+async fn upsert_test_resources(
+    pool: &PgPool,
+    resources: &[Resource],
+) -> Result<Vec<Resource>> {
+    seed_readable_lineage_anchors(
+        pool,
+        resources.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+                row.canonicality_state,
+            )
+        }),
+    )
+    .await?;
+    bigname_storage::upsert_resources(pool, resources).await
+}
+
+async fn upsert_test_name_surfaces(
+    pool: &PgPool,
+    name_surfaces: &[NameSurface],
+) -> Result<Vec<NameSurface>> {
+    seed_readable_lineage_anchors(
+        pool,
+        name_surfaces.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+                row.canonicality_state,
+            )
+        }),
+    )
+    .await?;
+    bigname_storage::upsert_name_surfaces(pool, name_surfaces).await
+}
+
+async fn upsert_test_surface_bindings(
+    pool: &PgPool,
+    bindings: &[SurfaceBinding],
+) -> Result<Vec<SurfaceBinding>> {
+    seed_readable_lineage_anchors(
+        pool,
+        bindings.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+                row.canonicality_state,
+            )
+        }),
+    )
+    .await?;
+    bigname_storage::upsert_surface_bindings(pool, bindings).await
+}
+
 const BASENAMES_L2_RESOLVER_PROFILE_CODE_HASH: &str =
     "0x1111111111111111111111111111111111111111111111111111111111111111";
 const BASENAMES_UNSUPPORTED_RESOLVER_PROFILE_CODE_HASH: &str =
@@ -137,7 +261,7 @@ async fn seed_basenames_exact_name_rebuild_inputs(
         ],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[NameSurface {
             logical_name_id: logical_name_id.to_owned(),
@@ -159,7 +283,7 @@ async fn seed_basenames_exact_name_rebuild_inputs(
         }],
     )
     .await?;
-    bigname_storage::upsert_token_lineages(
+    upsert_test_token_lineages(
         &database.pool,
         &[TokenLineage {
             token_lineage_id,
@@ -171,7 +295,7 @@ async fn seed_basenames_exact_name_rebuild_inputs(
         }],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[Resource {
             resource_id,
@@ -184,7 +308,7 @@ async fn seed_basenames_exact_name_rebuild_inputs(
         }],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[SurfaceBinding {
             surface_binding_id,
@@ -428,7 +552,7 @@ async fn seed_basenames_control_vector_rebuild_inputs(
         ],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[NameSurface {
             logical_name_id: logical_name_id.to_owned(),
@@ -450,7 +574,7 @@ async fn seed_basenames_control_vector_rebuild_inputs(
         }],
     )
     .await?;
-    bigname_storage::upsert_token_lineages(
+    upsert_test_token_lineages(
         &database.pool,
         &[TokenLineage {
             token_lineage_id,
@@ -462,7 +586,7 @@ async fn seed_basenames_control_vector_rebuild_inputs(
         }],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[Resource {
             resource_id,
@@ -475,7 +599,7 @@ async fn seed_basenames_control_vector_rebuild_inputs(
         }],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[SurfaceBinding {
             surface_binding_id,
@@ -2121,22 +2245,22 @@ impl EnsV2HistoryFixture {
             .context("failed to upsert ENSv2 history fixture raw blocks")?;
 
         let token_lineages = self.token_lineages();
-        bigname_storage::upsert_token_lineages(&database.pool, &token_lineages)
+        upsert_test_token_lineages(&database.pool, &token_lineages)
             .await
             .context("failed to upsert ENSv2 history fixture token lineages")?;
 
         let resources = self.resources();
-        bigname_storage::upsert_resources(&database.pool, &resources)
+        upsert_test_resources(&database.pool, &resources)
             .await
             .context("failed to upsert ENSv2 history fixture resources")?;
 
         let name_surfaces = self.name_surfaces();
-        bigname_storage::upsert_name_surfaces(&database.pool, &name_surfaces)
+        upsert_test_name_surfaces(&database.pool, &name_surfaces)
             .await
             .context("failed to upsert ENSv2 history fixture name surfaces")?;
 
         let surface_bindings = self.surface_bindings();
-        bigname_storage::upsert_surface_bindings(&database.pool, &surface_bindings)
+        upsert_test_surface_bindings(&database.pool, &surface_bindings)
             .await
             .context("failed to upsert ENSv2 history fixture surface bindings")?;
 
@@ -2531,10 +2655,10 @@ impl EnsV2DeclaredChildFixture {
     }
 
     async fn seed(&self, database: &HarnessDatabase) -> Result<()> {
-        bigname_storage::upsert_name_surfaces(&database.pool, &self.name_surfaces())
+        upsert_test_name_surfaces(&database.pool, &self.name_surfaces())
             .await
             .context("failed to upsert ENSv2 child fixture name surfaces")?;
-        bigname_storage::upsert_resources(&database.pool, &self.resources())
+        upsert_test_resources(&database.pool, &self.resources())
             .await
             .context("failed to upsert ENSv2 child fixture resources")?;
         seed_ens_v2_event_fixture_inputs(&database.pool, &self.normalized_events())
@@ -2685,7 +2809,7 @@ async fn seed_ens_v2_address_name_rebuild_inputs(
     )
     .await
     .context("failed to upsert raw blocks for ENSv2 address-name conformance")?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[NameSurface {
             logical_name_id: logical_name_id.to_owned(),
@@ -2708,7 +2832,7 @@ async fn seed_ens_v2_address_name_rebuild_inputs(
     )
     .await
     .context("failed to upsert ENSv2 address-name surface for conformance")?;
-    bigname_storage::upsert_token_lineages(
+    upsert_test_token_lineages(
         &database.pool,
         &[TokenLineage {
             token_lineage_id,
@@ -2721,7 +2845,7 @@ async fn seed_ens_v2_address_name_rebuild_inputs(
     )
     .await
     .context("failed to upsert ENSv2 address-name token lineage for conformance")?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
                 &database.pool,
                 &[Resource {
                     resource_id,
@@ -2738,7 +2862,7 @@ async fn seed_ens_v2_address_name_rebuild_inputs(
             )
             .await
             .context("failed to upsert ENSv2 address-name resource for conformance")?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[SurfaceBinding {
             surface_binding_id,
@@ -4491,8 +4615,8 @@ async fn seed_supported_alias_only_rebuild_inputs(
         ],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(&database.pool, &[name_surface(logical_name_id)]).await?;
-    bigname_storage::upsert_token_lineages(
+    upsert_test_name_surfaces(&database.pool, &[name_surface(logical_name_id)]).await?;
+    upsert_test_token_lineages(
         &database.pool,
         &[address_name_token_lineage(
             token_lineage_id,
@@ -4501,7 +4625,7 @@ async fn seed_supported_alias_only_rebuild_inputs(
         )],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[address_name_resource(
             resource_id,
@@ -4511,7 +4635,7 @@ async fn seed_supported_alias_only_rebuild_inputs(
         )],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[SurfaceBinding {
             surface_binding_id,
@@ -4637,7 +4761,7 @@ async fn seed_supported_wildcard_rebuild_inputs(
         ],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             name_surface(logical_name_id),
@@ -4662,7 +4786,7 @@ async fn seed_supported_wildcard_rebuild_inputs(
         ],
     )
     .await?;
-    bigname_storage::upsert_token_lineages(
+    upsert_test_token_lineages(
         &database.pool,
         &[
             address_name_token_lineage(token_lineage_id, "0xresource", 99),
@@ -4670,7 +4794,7 @@ async fn seed_supported_wildcard_rebuild_inputs(
         ],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[
             address_name_resource(resource_id, Some(token_lineage_id), "0xresource", 99),
@@ -4683,7 +4807,7 @@ async fn seed_supported_wildcard_rebuild_inputs(
         ],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[
             SurfaceBinding {
@@ -4799,7 +4923,7 @@ async fn seed_supported_basenames_rebuild_inputs(
         ],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[NameSurface {
             logical_name_id: logical_name_id.to_owned(),
@@ -4821,7 +4945,7 @@ async fn seed_supported_basenames_rebuild_inputs(
         }],
     )
     .await?;
-    bigname_storage::upsert_token_lineages(
+    upsert_test_token_lineages(
         &database.pool,
         &[TokenLineage {
             token_lineage_id,
@@ -4833,7 +4957,7 @@ async fn seed_supported_basenames_rebuild_inputs(
         }],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[Resource {
             resource_id,
@@ -4846,7 +4970,7 @@ async fn seed_supported_basenames_rebuild_inputs(
         }],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[SurfaceBinding {
             surface_binding_id,

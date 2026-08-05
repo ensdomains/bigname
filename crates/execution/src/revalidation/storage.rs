@@ -162,7 +162,7 @@ fn record_version_boundary_has_pointer(record_version_boundary: &Value) -> bool 
     bigname_storage::record_version_boundary_has_pointer(record_version_boundary)
 }
 
-pub(super) async fn load_name_current_for_revalidation(
+pub(crate) async fn load_name_current_for_revalidation(
     transaction: &mut Transaction<'_, Postgres>,
     logical_name_id: &str,
 ) -> Result<Option<NameCurrentRow>> {
@@ -194,8 +194,25 @@ pub(super) async fn load_name_current_for_revalidation(
           ON binding.surface_binding_id = nc.surface_binding_id
         LEFT JOIN token_lineages token_lineage
           ON token_lineage.token_lineage_id = nc.token_lineage_id
+        JOIN chain_lineage surface_lineage
+          ON surface_lineage.chain_id = surface.chain_id
+         AND surface_lineage.block_hash = surface.block_hash
+        LEFT JOIN chain_lineage resource_lineage
+          ON resource_lineage.chain_id = resource.chain_id
+         AND resource_lineage.block_hash = resource.block_hash
+        LEFT JOIN chain_lineage binding_lineage
+          ON binding_lineage.chain_id = binding.chain_id
+         AND binding_lineage.block_hash = binding.block_hash
+        LEFT JOIN chain_lineage token_lineage_lineage
+          ON token_lineage_lineage.chain_id = token_lineage.chain_id
+         AND token_lineage_lineage.block_hash = token_lineage.block_hash
         WHERE nc.logical_name_id = $1
           AND surface.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND surface_lineage.canonicality_state IN (
               'canonical'::canonicality_state,
               'safe'::canonicality_state,
               'finalized'::canonicality_state
@@ -208,17 +225,34 @@ pub(super) async fn load_name_current_for_revalidation(
                       'safe'::canonicality_state,
                       'finalized'::canonicality_state
                   )
+                  AND resource_lineage.canonicality_state IN (
+                      'canonical'::canonicality_state,
+                      'safe'::canonicality_state,
+                      'finalized'::canonicality_state
+                  )
                   AND binding.canonicality_state IN (
+                      'canonical'::canonicality_state,
+                      'safe'::canonicality_state,
+                      'finalized'::canonicality_state
+                  )
+                  AND binding_lineage.canonicality_state IN (
                       'canonical'::canonicality_state,
                       'safe'::canonicality_state,
                       'finalized'::canonicality_state
                   )
                   AND (
                       nc.token_lineage_id IS NULL
-                      OR token_lineage.canonicality_state IN (
-                          'canonical'::canonicality_state,
-                          'safe'::canonicality_state,
-                          'finalized'::canonicality_state
+                      OR (
+                          token_lineage.canonicality_state IN (
+                              'canonical'::canonicality_state,
+                              'safe'::canonicality_state,
+                              'finalized'::canonicality_state
+                          )
+                          AND token_lineage_lineage.canonicality_state IN (
+                              'canonical'::canonicality_state,
+                              'safe'::canonicality_state,
+                              'finalized'::canonicality_state
+                          )
                       )
                   )
               )
@@ -289,9 +323,17 @@ async fn load_record_inventory_current_for_revalidation(
         FROM record_inventory_current ric
         JOIN resources resource
           ON resource.resource_id = ric.resource_id
+        JOIN chain_lineage resource_lineage
+          ON resource_lineage.chain_id = resource.chain_id
+         AND resource_lineage.block_hash = resource.block_hash
         WHERE ric.resource_id = $1
           AND ric.record_version_boundary = $2::JSONB
           AND resource.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND resource_lineage.canonicality_state IN (
               'canonical'::canonicality_state,
               'safe'::canonicality_state,
               'finalized'::canonicality_state

@@ -35,6 +35,14 @@ pub(super) async fn load_legacy_reverse_resolver_edge_hydration_candidates(
                 ne.log_index,
                 ne.normalized_event_id
             FROM normalized_events ne
+            JOIN chain_lineage event_lineage
+              ON event_lineage.chain_id = ne.chain_id
+             AND event_lineage.block_hash = ne.block_hash
+             AND event_lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+             )
             CROSS JOIN LATERAL (
                 SELECT COALESCE(
                     ne.after_state->'primary_claim_source'->>'reverse_node',
@@ -81,6 +89,14 @@ pub(super) async fn load_legacy_reverse_resolver_edge_hydration_candidates(
         reverse_claim_nodes AS (
             SELECT DISTINCT LOWER(ne.after_state->>'reverse_node') AS reverse_node
             FROM normalized_events ne
+            JOIN chain_lineage event_lineage
+              ON event_lineage.chain_id = ne.chain_id
+             AND event_lineage.block_hash = ne.block_hash
+             AND event_lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+             )
             JOIN chain_positions
               ON chain_positions.chain_id = ne.chain_id
             WHERE ne.event_kind = $2
@@ -109,6 +125,14 @@ pub(super) async fn load_legacy_reverse_resolver_edge_hydration_candidates(
                 esc.transaction_hash AS latest_successful_call_transaction_hash,
                 esc.transaction_index AS latest_successful_call_transaction_index
             FROM event_silent_resolver_call_observations esc
+            JOIN chain_lineage observation_lineage
+              ON observation_lineage.chain_id = esc.chain_id
+             AND observation_lineage.block_hash = esc.block_hash
+             AND observation_lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+             )
             JOIN chain_positions
               ON chain_positions.chain_id = esc.chain_id
              AND esc.block_number <= chain_positions.hydration_block_number

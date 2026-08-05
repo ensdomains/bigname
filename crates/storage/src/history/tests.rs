@@ -7,7 +7,7 @@ use std::{
 use anyhow::Result;
 use serde_json::json;
 use sqlx::{
-    PgPool,
+    PgPool, Postgres, QueryBuilder,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 
@@ -15,8 +15,11 @@ use super::*;
 use crate::{
     AddressNameCurrentRow, AddressNameRelation, NameSurface, NormalizedEvent, RawBlock, Resource,
     SurfaceBinding, SurfaceBindingKind, TokenLineage, default_database_url,
-    insert_normalized_event_fixtures, upsert_address_names_current_rows, upsert_name_surfaces,
-    upsert_raw_blocks, upsert_resources, upsert_surface_bindings, upsert_token_lineages,
+    insert_normalized_event_fixtures, upsert_address_names_current_rows,
+    upsert_name_surfaces as store_upsert_name_surfaces, upsert_raw_blocks,
+    upsert_resources as store_upsert_resources,
+    upsert_surface_bindings as store_upsert_surface_bindings,
+    upsert_token_lineages as store_upsert_token_lineages,
 };
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -194,6 +197,99 @@ fn surface_binding(
         provenance: json!({"seed": "binding"}),
         canonicality_state: CanonicalityState::Canonical,
     }
+}
+
+async fn seed_readable_lineage<'a>(
+    pool: &PgPool,
+    anchors: impl IntoIterator<Item = (&'a str, &'a str, i64)>,
+) -> Result<()> {
+    let anchors = anchors.into_iter().collect::<Vec<_>>();
+    if anchors.is_empty() {
+        return Ok(());
+    }
+
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "INSERT INTO chain_lineage (\
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state\
+         ) ",
+    );
+    builder.push_values(
+        anchors,
+        |mut separated, (chain_id, block_hash, block_number)| {
+            separated
+                .push_bind(chain_id)
+                .push_bind(block_hash)
+                .push_bind(block_number)
+                .push_bind(timestamp(1_700_000_000 + block_number))
+                .push("'canonical'::canonicality_state");
+        },
+    );
+    builder.push(" ON CONFLICT (chain_id, block_hash) DO NOTHING");
+    builder.build().execute(pool).await?;
+    Ok(())
+}
+
+async fn upsert_token_lineages(pool: &PgPool, rows: &[TokenLineage]) -> Result<Vec<TokenLineage>> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_token_lineages(pool, rows).await
+}
+
+async fn upsert_resources(pool: &PgPool, rows: &[Resource]) -> Result<Vec<Resource>> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_resources(pool, rows).await
+}
+
+async fn upsert_name_surfaces(pool: &PgPool, rows: &[NameSurface]) -> Result<Vec<NameSurface>> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_name_surfaces(pool, rows).await
+}
+
+async fn upsert_surface_bindings(
+    pool: &PgPool,
+    rows: &[SurfaceBinding],
+) -> Result<Vec<SurfaceBinding>> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_surface_bindings(pool, rows).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -507,6 +603,414 @@ async fn canonical_only_history_excludes_observed_and_orphaned_rows() -> Result<
 }
 
 #[tokio::test]
+async fn canonical_history_requires_readable_lineage_for_anchored_rows() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            raw_block(
+                "ethereum-mainnet",
+                "0xlineage-parent",
+                None,
+                100,
+                1_700_001_100,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0xlineage-losing",
+                Some("0xlineage-parent"),
+                101,
+                1_700_001_101,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0xlineage-winning",
+                Some("0xlineage-parent"),
+                101,
+                1_700_001_102,
+            ),
+        ],
+    )
+    .await?;
+
+    let manifest_event = NormalizedEvent {
+        event_kind: "SourceManifestUpdated".to_owned(),
+        source_family: "ens_v1_registry_l1".to_owned(),
+        derivation_kind: "manifest_sync".to_owned(),
+        ..history_event(
+            "history:lineage:manifest",
+            None,
+            None,
+            Some("ethereum-mainnet"),
+            None,
+            None,
+            None,
+            None,
+            CanonicalityState::Canonical,
+        )
+    };
+    insert_normalized_event_fixtures(
+        database.pool(),
+        &[
+            history_event(
+                "history:lineage:losing",
+                Some("ens:lineage.eth"),
+                None,
+                Some("ethereum-mainnet"),
+                Some(101),
+                Some("0xlineage-losing"),
+                Some("0xlineage-losing-tx"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "history:lineage:winning",
+                Some("ens:lineage.eth"),
+                None,
+                Some("ethereum-mainnet"),
+                Some(101),
+                Some("0xlineage-winning"),
+                Some("0xlineage-winning-tx"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+            manifest_event,
+        ],
+    )
+    .await?;
+
+    sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'orphaned'::canonicality_state
+         WHERE chain_id = 'ethereum-mainnet'
+           AND block_hash = '0xlineage-losing'",
+    )
+    .execute(database.pool())
+    .await?;
+
+    let losing_row_state: String = sqlx::query_scalar(
+        "SELECT canonicality_state::TEXT
+         FROM normalized_events
+         WHERE event_identity = 'history:lineage:losing'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(losing_row_state, "canonical");
+
+    let filter = EventHistoryFilter {
+        namespace: Some("ens".to_owned()),
+        ..EventHistoryFilter::default()
+    };
+    let canonical_page = load_event_history_page(
+        database.pool(),
+        filter.clone(),
+        true,
+        None,
+        10,
+        HistorySummaryMode::Full,
+    )
+    .await?;
+    assert_eq!(
+        canonical_page
+            .rows
+            .iter()
+            .map(|row| row.event_identity.as_str())
+            .collect::<Vec<_>>(),
+        vec!["history:lineage:winning", "history:lineage:manifest"]
+    );
+    let full_summary = canonical_page.summary.as_ref().expect("full summary");
+    assert_eq!(full_summary.total_count, 2);
+    assert_eq!(
+        full_summary.normalized_event_ids,
+        canonical_page
+            .rows
+            .iter()
+            .map(|row| row.normalized_event_id.to_string())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(full_summary.chain_position_samples.len(), 1);
+    assert_eq!(
+        full_summary.chain_position_samples[0].block_hash,
+        "0xlineage-winning"
+    );
+    assert_eq!(full_summary.last_updated, Some(timestamp(1_700_001_102)));
+
+    let count_page = load_event_history_page(
+        database.pool(),
+        filter.clone(),
+        true,
+        None,
+        10,
+        HistorySummaryMode::Count,
+    )
+    .await?;
+    assert_eq!(
+        count_page
+            .summary
+            .as_ref()
+            .expect("count summary")
+            .total_count,
+        2
+    );
+
+    let audit_page = load_event_history_page(
+        database.pool(),
+        filter.clone(),
+        false,
+        None,
+        10,
+        HistorySummaryMode::Count,
+    )
+    .await?;
+    assert_eq!(
+        audit_page
+            .rows
+            .iter()
+            .map(|row| row.event_identity.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "history:lineage:losing",
+            "history:lineage:manifest",
+            "history:lineage:winning",
+        ])
+    );
+    assert_eq!(
+        audit_page
+            .summary
+            .as_ref()
+            .expect("audit summary")
+            .total_count,
+        3
+    );
+
+    let losing_cursor = audit_page
+        .rows
+        .iter()
+        .find(|row| row.event_identity == "history:lineage:losing")
+        .map(|row| HistoryCursor {
+            normalized_event_id: row.normalized_event_id,
+            event_identity: row.event_identity.clone(),
+        })
+        .expect("losing audit row");
+    let cursor_error = load_event_history_page(
+        database.pool(),
+        filter,
+        true,
+        Some(&losing_cursor),
+        10,
+        HistorySummaryMode::None,
+    )
+    .await
+    .expect_err("losing-fork cursor must be rejected by canonical history");
+    assert!(
+        cursor_error
+            .downcast_ref::<InvalidHistoryCursor>()
+            .is_some()
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn canonical_address_history_ignores_losing_fork_anchor_matches() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x00000000000000000000000000000000000000aa";
+    let resource_id = Uuid::from_u128(0xa0f0);
+
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            raw_block(
+                "ethereum-sepolia",
+                "0xaddress-parent",
+                None,
+                200,
+                1_700_002_200,
+            ),
+            raw_block(
+                "ethereum-sepolia",
+                "0xaddress-losing",
+                Some("0xaddress-parent"),
+                201,
+                1_700_002_201,
+            ),
+            raw_block(
+                "ethereum-sepolia",
+                "0xaddress-winning",
+                Some("0xaddress-parent"),
+                201,
+                1_700_002_202,
+            ),
+        ],
+    )
+    .await?;
+
+    insert_normalized_event_fixtures(
+        database.pool(),
+        &[
+            ensv2_registry_event(
+                "history:address-lineage:losing-match",
+                "ens:address-lineage.eth",
+                Some(resource_id),
+                "RegistrationGranted",
+                201,
+                "0xaddress-losing",
+                json!({"registrant": address}),
+                CanonicalityState::Canonical,
+            ),
+            history_event(
+                "history:address-lineage:winning-unrelated",
+                Some("ens:address-lineage.eth"),
+                Some(resource_id),
+                Some("ethereum-sepolia"),
+                Some(201),
+                Some("0xaddress-winning"),
+                Some("0xaddress-winning-tx"),
+                Some(0),
+                CanonicalityState::Canonical,
+            ),
+        ],
+    )
+    .await?;
+
+    sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'orphaned'::canonicality_state
+         WHERE chain_id = 'ethereum-sepolia'
+           AND block_hash = '0xaddress-losing'",
+    )
+    .execute(database.pool())
+    .await?;
+
+    let canonical = load_address_history(
+        database.pool(),
+        address,
+        Some("ens"),
+        Some(AddressNameRelation::Registrant),
+        HistoryScope::Both,
+        true,
+    )
+    .await?;
+    assert!(canonical.is_empty());
+
+    let audit = load_address_history(
+        database.pool(),
+        address,
+        Some("ens"),
+        Some(AddressNameRelation::Registrant),
+        HistoryScope::Both,
+        false,
+    )
+    .await?;
+    assert_eq!(
+        audit
+            .iter()
+            .map(|row| row.event_identity.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "history:address-lineage:losing-match",
+            "history:address-lineage:winning-unrelated",
+        ])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn canonical_address_history_requires_readable_resource_anchor_lineage() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x00000000000000000000000000000000000000bb";
+    let resource_id = Uuid::from_u128(0xa0f1);
+
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            raw_block(
+                "ethereum-sepolia",
+                "0xaddress-resource-losing",
+                None,
+                300,
+                1_700_003_300,
+            ),
+            raw_block(
+                "ethereum-sepolia",
+                "0xaddress-event-winning",
+                None,
+                301,
+                1_700_003_301,
+            ),
+        ],
+    )
+    .await?;
+
+    let mut anchored_resource = resource(resource_id);
+    anchored_resource.chain_id = "ethereum-sepolia".to_owned();
+    anchored_resource.block_hash = "0xaddress-resource-losing".to_owned();
+    anchored_resource.block_number = 300;
+    upsert_resources(database.pool(), &[anchored_resource]).await?;
+    insert_normalized_event_fixtures(
+        database.pool(),
+        &[ensv2_registry_event(
+            "history:address-resource-lineage:match",
+            "ens:address-resource-lineage.eth",
+            Some(resource_id),
+            "RegistrationGranted",
+            301,
+            "0xaddress-event-winning",
+            json!({"registrant": address}),
+            CanonicalityState::Canonical,
+        )],
+    )
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE chain_lineage
+        SET canonicality_state = 'orphaned'::canonicality_state
+        WHERE chain_id = 'ethereum-sepolia'
+          AND block_hash = '0xaddress-resource-losing'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let canonical = load_address_history(
+        database.pool(),
+        address,
+        Some("ens"),
+        Some(AddressNameRelation::Registrant),
+        HistoryScope::Both,
+        true,
+    )
+    .await?;
+    assert!(canonical.is_empty());
+
+    let audit = load_address_history(
+        database.pool(),
+        address,
+        Some("ens"),
+        Some(AddressNameRelation::Registrant),
+        HistoryScope::Both,
+        false,
+    )
+    .await?;
+    assert_eq!(audit.len(), 1);
+    assert_eq!(
+        audit[0].event_identity,
+        "history:address-resource-lineage:match"
+    );
+    let resource_row_local_state: String =
+        sqlx::query_scalar("SELECT canonicality_state::TEXT FROM resources WHERE resource_id = $1")
+            .bind(resource_id)
+            .fetch_one(database.pool())
+            .await?;
+    assert_eq!(resource_row_local_state, "canonical");
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn name_history_scope_uses_logical_name_and_resource_filters() -> Result<()> {
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0xa100);
@@ -678,6 +1182,21 @@ async fn event_history_filter_composes_projection_anchors_and_event_filters() ->
     upsert_raw_blocks(
         database.pool(),
         &[
+            raw_block("ethereum-mainnet", "0xsurface", None, 98, 1_700_000_238),
+            raw_block(
+                "ethereum-mainnet",
+                "0xresource",
+                Some("0xsurface"),
+                99,
+                1_700_000_239,
+            ),
+            raw_block(
+                "ethereum-mainnet",
+                "0xbinding",
+                Some("0xresource"),
+                100,
+                1_700_000_240,
+            ),
             raw_block("ethereum-mainnet", "0x250", None, 250, 1_700_000_250),
             raw_block(
                 "ethereum-mainnet",
@@ -2555,7 +3074,7 @@ async fn history_page_uses_storage_limit_and_keyset_cursor() -> Result<()> {
 }
 
 #[tokio::test]
-async fn history_page_size_one_walk_matches_unpaged_order_across_sort_ties() -> Result<()> {
+async fn history_audit_page_size_one_walk_matches_unpaged_order_across_sort_ties() -> Result<()> {
     let database = TestDatabase::new().await?;
     let logical_name_id = "ens:ties.eth";
     let resource_id = Uuid::from_u128(0xa307);
@@ -2737,7 +3256,7 @@ async fn history_page_size_one_walk_matches_unpaged_order_across_sort_ties() -> 
         logical_name_id,
         &[resource_id],
         HistoryScope::Both,
-        true,
+        false,
     )
     .await?;
     let expected = unpaged
@@ -2773,7 +3292,7 @@ async fn history_page_size_one_walk_matches_unpaged_order_across_sort_ties() -> 
             logical_name_id,
             &[resource_id],
             HistoryScope::Both,
-            true,
+            false,
             cursor.as_ref(),
             1,
             HistorySummaryMode::None,

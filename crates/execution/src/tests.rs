@@ -13,7 +13,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 use sqlx::{
-    ConnectOptions, PgPool, Row,
+    ConnectOptions, PgPool, Postgres, QueryBuilder, Row,
     postgres::{PgConnectOptions, PgPoolOptions},
     types::time::OffsetDateTime,
 };
@@ -28,8 +28,11 @@ use super::primary_name::{
     normalized_verified_primary_name_request_key, validate_verified_primary_request,
 };
 use super::revalidation::{
-    build_requested_chain_positions_from_projection, normalize_alias_detail,
-    normalize_transport_detail, normalize_wildcard_detail, selector_family_and_key,
+    build_requested_chain_positions_from_projection,
+    ensure_requested_positions_are_eligible_for_projection,
+    ensure_requested_positions_are_eligible_for_record_inventory_projection,
+    load_name_current_for_revalidation, normalize_alias_detail, normalize_transport_detail,
+    normalize_wildcard_detail, selector_family_and_key,
 };
 use super::validation::{
     VerifiedQueryStatus, VerifiedQuerySummary, extract_requested_selectors,
@@ -44,9 +47,10 @@ use bigname_storage::{
     SupportedVerifiedResolutionRecordKey as SupportedVerifiedRecordKey, SurfaceBinding,
     SurfaceBindingKind, TokenLineage, default_database_url, upsert_chain_lineage_blocks,
     upsert_execution_outcome, upsert_execution_trace, upsert_name_current_rows,
-    upsert_name_surfaces, upsert_primary_name_current_snapshots,
-    upsert_record_inventory_current_rows, upsert_resources, upsert_surface_bindings,
-    upsert_token_lineages,
+    upsert_name_surfaces as store_upsert_name_surfaces, upsert_primary_name_current_snapshots,
+    upsert_record_inventory_current_rows, upsert_resources as store_upsert_resources,
+    upsert_surface_bindings as store_upsert_surface_bindings,
+    upsert_token_lineages as store_upsert_token_lineages,
 };
 use uuid::Uuid;
 
@@ -718,6 +722,144 @@ fn sync_request_with_rebuilt_name_current(
 
 fn timestamp(seconds: i64) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(seconds).expect("test timestamp must be valid")
+}
+
+fn seeded_lineage_timestamp(block_number: i64) -> OffsetDateTime {
+    timestamp(1_700_000_000 + block_number)
+}
+
+async fn seed_readable_lineage<'a>(
+    pool: &PgPool,
+    anchors: impl IntoIterator<Item = (&'a str, &'a str, i64, CanonicalityState)>,
+) -> Result<()> {
+    let anchors = anchors
+        .into_iter()
+        .filter(|(_, _, _, state)| {
+            matches!(
+                state,
+                CanonicalityState::Canonical
+                    | CanonicalityState::Safe
+                    | CanonicalityState::Finalized
+            )
+        })
+        .collect::<Vec<_>>();
+    if anchors.is_empty() {
+        return Ok(());
+    }
+
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "INSERT INTO chain_lineage (\
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state\
+         ) ",
+    );
+    builder.push_values(
+        anchors,
+        |mut separated, (chain_id, block_hash, block_number, state)| {
+            separated
+                .push_bind(chain_id)
+                .push_bind(block_hash)
+                .push_bind(block_number)
+                .push_bind(seeded_lineage_timestamp(block_number))
+                .push_bind(state.as_str())
+                .push_unseparated("::canonicality_state");
+        },
+    );
+    builder.push(" ON CONFLICT (chain_id, block_hash) DO NOTHING");
+    builder.build().execute(pool).await?;
+    Ok(())
+}
+
+async fn seed_requested_position_lineage(pool: &PgPool, positions: &Value) -> Result<()> {
+    let anchors = positions
+        .as_array()
+        .context("test requested_chain_positions must be an array")?
+        .iter()
+        .map(|position| -> Result<(&str, &str, i64, CanonicalityState)> {
+            Ok((
+                position
+                    .get("chain_id")
+                    .and_then(Value::as_str)
+                    .context("test requested position must include chain_id")?,
+                position
+                    .get("block_hash")
+                    .and_then(Value::as_str)
+                    .context("test requested position must include block_hash")?,
+                position
+                    .get("block_number")
+                    .and_then(Value::as_i64)
+                    .context("test requested position must include block_number")?,
+                CanonicalityState::Canonical,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    seed_readable_lineage(pool, anchors).await
+}
+
+async fn upsert_token_lineages(pool: &PgPool, rows: &[TokenLineage]) -> Result<Vec<TokenLineage>> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+                row.canonicality_state,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_token_lineages(pool, rows).await
+}
+
+async fn upsert_resources(pool: &PgPool, rows: &[Resource]) -> Result<Vec<Resource>> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+                row.canonicality_state,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_resources(pool, rows).await
+}
+
+async fn upsert_name_surfaces(pool: &PgPool, rows: &[NameSurface]) -> Result<Vec<NameSurface>> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+                row.canonicality_state,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_name_surfaces(pool, rows).await
+}
+
+async fn upsert_surface_bindings(
+    pool: &PgPool,
+    rows: &[SurfaceBinding],
+) -> Result<Vec<SurfaceBinding>> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+                row.canonicality_state,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_surface_bindings(pool, rows).await
 }
 
 fn requested_chain_positions() -> Value {
@@ -1415,12 +1557,12 @@ async fn seed_alias_only_name_current_rebuild_inputs(
         ],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_name_surfaces(
         database.pool(),
         &[name_surface_for_request(request, ETHEREUM_MAINNET_CHAIN_ID)],
     )
     .await?;
-    bigname_storage::upsert_token_lineages(
+    upsert_token_lineages(
         database.pool(),
         &[TokenLineage {
             token_lineage_id,
@@ -1432,7 +1574,7 @@ async fn seed_alias_only_name_current_rebuild_inputs(
         }],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_resources(
         database.pool(),
         &[Resource {
             resource_id,
@@ -1445,7 +1587,7 @@ async fn seed_alias_only_name_current_rebuild_inputs(
         }],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_surface_bindings(
         database.pool(),
         &[SurfaceBinding {
             surface_binding_id,
@@ -1599,7 +1741,7 @@ async fn seed_wildcard_name_current_rebuild_inputs(
         ],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_name_surfaces(
         database.pool(),
         &[
             name_surface_for_request(request, ETHEREUM_MAINNET_CHAIN_ID),
@@ -1624,7 +1766,7 @@ async fn seed_wildcard_name_current_rebuild_inputs(
         ],
     )
     .await?;
-    bigname_storage::upsert_token_lineages(
+    upsert_token_lineages(
         database.pool(),
         &[
             TokenLineage {
@@ -1646,7 +1788,7 @@ async fn seed_wildcard_name_current_rebuild_inputs(
         ],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_resources(
         database.pool(),
         &[
             Resource {
@@ -1670,7 +1812,7 @@ async fn seed_wildcard_name_current_rebuild_inputs(
         ],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_surface_bindings(
         database.pool(),
         &[
             SurfaceBinding {
@@ -1939,7 +2081,7 @@ async fn seed_basenames_name_current_rebuild_inputs(
         21_000_100,
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_name_surfaces(
         database.pool(),
         &[NameSurface {
             logical_name_id: logical_name_id.clone(),
@@ -1961,7 +2103,7 @@ async fn seed_basenames_name_current_rebuild_inputs(
         }],
     )
     .await?;
-    bigname_storage::upsert_token_lineages(
+    upsert_token_lineages(
         database.pool(),
         &[TokenLineage {
             token_lineage_id,
@@ -1973,7 +2115,7 @@ async fn seed_basenames_name_current_rebuild_inputs(
         }],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_resources(
         database.pool(),
         &[Resource {
             resource_id,
@@ -1986,7 +2128,7 @@ async fn seed_basenames_name_current_rebuild_inputs(
         }],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_surface_bindings(
         database.pool(),
         &[SurfaceBinding {
             surface_binding_id,
@@ -2159,6 +2301,11 @@ async fn seed_supported_resolution_storage_from_rebuild(
     database: &TestDatabase,
     request: &mut PersistEnsExactNameVerifiedResolutionRequest,
 ) -> Result<()> {
+    seed_requested_position_lineage(
+        database.pool(),
+        &request.outcome.cache_key.requested_chain_positions,
+    )
+    .await?;
     let resource_id = boundary_resource_id(&request.outcome.cache_key.record_version_boundary);
     let token_lineage_id = Uuid::from_u128(resource_id.as_u128() + 1);
     let surface_binding_id = Uuid::from_u128(resource_id.as_u128() + 2);
@@ -2211,6 +2358,11 @@ async fn seed_supported_resolution_storage_from_rebuild(
             format!("rebuilt execution test name_current row missing for {logical_name_id}")
         })?;
     sync_request_with_rebuilt_name_current(request, &row)?;
+    seed_requested_position_lineage(
+        database.pool(),
+        &request.outcome.cache_key.requested_chain_positions,
+    )
+    .await?;
     let record_resource_id =
         boundary_resource_id(&request.outcome.cache_key.record_version_boundary);
     upsert_record_inventory_current_rows(
@@ -2228,6 +2380,11 @@ async fn seed_supported_resolution_storage(
     database: &TestDatabase,
     request: &PersistEnsExactNameVerifiedResolutionRequest,
 ) -> Result<()> {
+    seed_requested_position_lineage(
+        database.pool(),
+        &request.outcome.cache_key.requested_chain_positions,
+    )
+    .await?;
     let resource_id = boundary_resource_id(&request.outcome.cache_key.record_version_boundary);
     let token_lineage_id = Uuid::from_u128(resource_id.as_u128() + 1);
     let surface_binding_id = Uuid::from_u128(resource_id.as_u128() + 2);
@@ -3037,6 +3194,321 @@ async fn persists_successful_direct_path_and_reads_back_storage_identity() -> Re
 }
 
 #[tokio::test]
+async fn persistence_revalidation_ignores_row_local_inputs_on_a_losing_fork() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain_id = ETHEREUM_MAINNET_CHAIN_ID;
+    let projected_hash = "0xrevalidationprojected";
+    let losing_hash = "0xrevalidationlosing";
+    let winning_hash = "0xrevalidationwinning";
+    let logical_name_id = "ens:revalidation-lineage.eth";
+    let resource_id = Uuid::from_u128(0xa701);
+
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            chain_lineage_block(chain_id, projected_hash, 21_700_000, 1_800_000_000),
+            chain_lineage_block(chain_id, losing_hash, 21_700_001, 1_800_000_012),
+            chain_lineage_block(chain_id, winning_hash, 21_700_001, 1_800_000_012),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, resource_id,
+             event_kind, source_family, manifest_version, chain_id,
+             block_number, block_hash, derivation_kind, canonicality_state
+         ) VALUES (
+             'execution-revalidation-losing-event', 'ens', $1, $2,
+             'ResolverChanged', 'ens_v1_registry_l1', 1, $3,
+             21700001, $4, 'execution_revalidation_test',
+             'canonical'::canonicality_state
+         )",
+    )
+    .bind(logical_name_id)
+    .bind(resource_id)
+    .bind(chain_id)
+    .bind(losing_hash)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'orphaned'::canonicality_state
+         WHERE chain_id = $1 AND block_hash = $2",
+    )
+    .bind(chain_id)
+    .bind(losing_hash)
+    .execute(database.pool())
+    .await?;
+
+    let projected_positions = json!({
+        "ethereum": {
+            "chain_id": chain_id,
+            "block_number": 21_700_000,
+            "block_hash": projected_hash,
+            "timestamp": "2027-01-15T08:00:00Z"
+        }
+    });
+    let selected_positions = json!({
+        "ethereum": {
+            "chain_id": chain_id,
+            "block_number": 21_700_001,
+            "block_hash": winning_hash,
+            "timestamp": "2027-01-15T08:00:12Z"
+        }
+    });
+    let row = NameCurrentRow {
+        logical_name_id: logical_name_id.to_owned(),
+        namespace: "ens".to_owned(),
+        canonical_display_name: "revalidation-lineage.eth".to_owned(),
+        normalized_name: "revalidation-lineage.eth".to_owned(),
+        namehash: "namehash:revalidation-lineage.eth".to_owned(),
+        surface_binding_id: None,
+        resource_id: Some(resource_id),
+        token_lineage_id: None,
+        binding_kind: None,
+        declared_summary: json!({}),
+        provenance: json!({}),
+        coverage: json!({}),
+        chain_positions: projected_positions.clone(),
+        canonicality_summary: json!({}),
+        manifest_version: 1,
+        last_recomputed_at: timestamp(1_800_000_000),
+    };
+    let inventory_row = RecordInventoryCurrentRow {
+        resource_id,
+        record_version_boundary: json!({"logical_name_id": logical_name_id}),
+        enumeration_basis: json!({}),
+        selectors: json!([]),
+        explicit_gaps: json!([]),
+        unsupported_families: json!([]),
+        last_change: None,
+        entries: json!([]),
+        provenance: json!({}),
+        coverage: json!({}),
+        chain_positions: projected_positions.clone(),
+        canonicality_summary: json!({}),
+        manifest_version: 1,
+        last_recomputed_at: timestamp(1_800_000_000),
+    };
+    let requested = build_requested_chain_positions_from_projection(&selected_positions)?;
+    let exact_requested = build_requested_chain_positions_from_projection(&projected_positions)?;
+
+    sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'orphaned'::canonicality_state
+         WHERE chain_id = $1 AND block_hash = $2",
+    )
+    .bind(chain_id)
+    .bind(projected_hash)
+    .execute(database.pool())
+    .await?;
+    let mut transaction = database.pool().begin().await?;
+    ensure_requested_positions_are_eligible_for_projection(
+        &mut transaction,
+        &row,
+        &exact_requested,
+        "lineage regression",
+    )
+    .await
+    .expect_err("an exact projected/requested position must reject orphaned lineage");
+    transaction.rollback().await?;
+    let mut transaction = database.pool().begin().await?;
+    ensure_requested_positions_are_eligible_for_record_inventory_projection(
+        &mut transaction,
+        &inventory_row,
+        &exact_requested,
+        false,
+        "lineage regression",
+    )
+    .await
+    .expect_err("an exact inventory/requested position must reject orphaned lineage");
+    transaction.rollback().await?;
+    sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'finalized'::canonicality_state
+         WHERE chain_id = $1 AND block_hash = $2",
+    )
+    .bind(chain_id)
+    .bind(projected_hash)
+    .execute(database.pool())
+    .await?;
+
+    let mut transaction = database.pool().begin().await?;
+    ensure_requested_positions_are_eligible_for_projection(
+        &mut transaction,
+        &row,
+        &requested,
+        "lineage regression",
+    )
+    .await?;
+    ensure_requested_positions_are_eligible_for_record_inventory_projection(
+        &mut transaction,
+        &inventory_row,
+        &requested,
+        false,
+        "lineage regression",
+    )
+    .await?;
+    transaction.rollback().await?;
+
+    sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'canonical'::canonicality_state
+         WHERE chain_id = $1 AND block_hash = $2",
+    )
+    .bind(chain_id)
+    .bind(losing_hash)
+    .execute(database.pool())
+    .await?;
+    let mut transaction = database.pool().begin().await?;
+    ensure_requested_positions_are_eligible_for_projection(
+        &mut transaction,
+        &row,
+        &requested,
+        "lineage regression",
+    )
+    .await
+    .expect_err("readable newer event must veto projection reuse");
+    transaction.rollback().await?;
+    let mut transaction = database.pool().begin().await?;
+    ensure_requested_positions_are_eligible_for_record_inventory_projection(
+        &mut transaction,
+        &inventory_row,
+        &requested,
+        false,
+        "lineage regression",
+    )
+    .await
+    .expect_err("readable newer record event must veto projection reuse");
+    transaction.rollback().await?;
+
+    sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'orphaned'::canonicality_state
+         WHERE chain_id = $1 AND block_hash = $2",
+    )
+    .bind(chain_id)
+    .bind(losing_hash)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET canonicality_state = 'orphaned'::canonicality_state
+         WHERE event_identity = $1",
+    )
+    .bind("execution-revalidation-losing-event")
+    .execute(database.pool())
+    .await?;
+
+    let surface = NameSurface {
+        logical_name_id: logical_name_id.to_owned(),
+        namespace: "ens".to_owned(),
+        input_name: "revalidation-lineage.eth".to_owned(),
+        canonical_display_name: "revalidation-lineage.eth".to_owned(),
+        normalized_name: "revalidation-lineage.eth".to_owned(),
+        dns_encoded_name: b"revalidation-lineage.eth".to_vec(),
+        namehash: "namehash:revalidation-lineage.eth".to_owned(),
+        labelhashes: vec!["labelhash:revalidation-lineage".to_owned()],
+        normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
+        normalization_warnings: json!([]),
+        normalization_errors: json!([]),
+        chain_id: chain_id.to_owned(),
+        block_hash: losing_hash.to_owned(),
+        block_number: 21_700_001,
+        provenance: json!({"source": "execution_revalidation_test"}),
+        canonicality_state: CanonicalityState::Canonical,
+    };
+    let resource = Resource {
+        resource_id,
+        token_lineage_id: None,
+        chain_id: chain_id.to_owned(),
+        block_hash: losing_hash.to_owned(),
+        block_number: 21_700_001,
+        provenance: json!({"source": "execution_revalidation_test"}),
+        canonicality_state: CanonicalityState::Canonical,
+    };
+    let surface_binding_id = Uuid::from_u128(0xa702);
+    let binding = SurfaceBinding {
+        surface_binding_id,
+        logical_name_id: logical_name_id.to_owned(),
+        resource_id,
+        binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+        active_from: timestamp(1_800_000_012),
+        active_to: None,
+        chain_id: chain_id.to_owned(),
+        block_hash: losing_hash.to_owned(),
+        block_number: 21_700_001,
+        provenance: json!({"source": "execution_revalidation_test"}),
+        canonicality_state: CanonicalityState::Canonical,
+    };
+    upsert_name_surfaces(database.pool(), &[surface]).await?;
+    upsert_resources(database.pool(), &[resource]).await?;
+    upsert_surface_bindings(database.pool(), &[binding]).await?;
+    let mut bound_row = row.clone();
+    bound_row.surface_binding_id = Some(surface_binding_id);
+    bound_row.binding_kind = Some(SurfaceBindingKind::DeclaredRegistryPath);
+    upsert_name_current_rows(database.pool(), &[bound_row]).await?;
+
+    let row_local_state: String = sqlx::query_scalar(
+        "SELECT canonicality_state::TEXT
+         FROM surface_bindings
+         WHERE surface_binding_id = $1",
+    )
+    .bind(surface_binding_id)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(row_local_state, "canonical");
+
+    let mut transaction = database.pool().begin().await?;
+    assert_eq!(
+        load_name_current_for_revalidation(&mut transaction, logical_name_id).await?,
+        None,
+        "storage revalidation must not load a projected name whose supporting identity lineage is orphaned"
+    );
+    transaction.rollback().await?;
+
+    let mut transaction = database.pool().begin().await?;
+    ensure_requested_positions_are_eligible_for_projection(
+        &mut transaction,
+        &row,
+        &requested,
+        "lineage regression",
+    )
+    .await?;
+    transaction.rollback().await?;
+
+    sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'canonical'::canonicality_state
+         WHERE chain_id = $1 AND block_hash = $2",
+    )
+    .bind(chain_id)
+    .bind(losing_hash)
+    .execute(database.pool())
+    .await?;
+    let mut transaction = database.pool().begin().await?;
+    assert_eq!(
+        load_name_current_for_revalidation(&mut transaction, logical_name_id)
+            .await?
+            .map(|loaded| loaded.logical_name_id),
+        Some(logical_name_id.to_owned())
+    );
+    transaction.rollback().await?;
+    let mut transaction = database.pool().begin().await?;
+    ensure_requested_positions_are_eligible_for_projection(
+        &mut transaction,
+        &row,
+        &requested,
+        "lineage regression",
+    )
+    .await
+    .expect_err("readable newer binding must veto projection reuse");
+    transaction.rollback().await?;
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn persists_direct_path_for_later_selected_snapshot_without_recursive_ancestry() -> Result<()>
 {
     let database = TestDatabase::new().await?;
@@ -3044,32 +3516,18 @@ async fn persists_direct_path_for_later_selected_snapshot_without_recursive_ance
     seed_supported_resolution_storage(&database, &request).await?;
     upsert_chain_lineage_blocks(
         database.pool(),
-        &[
-            ChainLineageBlock {
-                chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
-                block_hash: "0xabc123".to_owned(),
-                parent_hash: None,
-                block_number: 21_000_000,
-                block_timestamp: timestamp(1_717_171_717),
-                logs_bloom: None,
-                transactions_root: None,
-                receipts_root: None,
-                state_root: None,
-                canonicality_state: CanonicalityState::Finalized,
-            },
-            ChainLineageBlock {
-                chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
-                block_hash: "0xabc124".to_owned(),
-                parent_hash: Some("0xnot-the-projected-parent".to_owned()),
-                block_number: 21_000_001,
-                block_timestamp: timestamp(1_717_171_729),
-                logs_bloom: None,
-                transactions_root: None,
-                receipts_root: None,
-                state_root: None,
-                canonicality_state: CanonicalityState::Canonical,
-            },
-        ],
+        &[ChainLineageBlock {
+            chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+            block_hash: "0xabc124".to_owned(),
+            parent_hash: Some("0xnot-the-projected-parent".to_owned()),
+            block_number: 21_000_001,
+            block_timestamp: seeded_lineage_timestamp(21_000_001),
+            logs_bloom: None,
+            transactions_root: None,
+            receipts_root: None,
+            state_root: None,
+            canonicality_state: CanonicalityState::Canonical,
+        }],
     )
     .await?;
 
@@ -3137,20 +3595,12 @@ async fn persists_direct_path_when_name_projection_is_newer_than_record_inventor
     seed_supported_resolution_storage(&database, &request).await?;
     upsert_chain_lineage_blocks(
         database.pool(),
-        &[
-            chain_lineage_block(
-                ETHEREUM_MAINNET_CHAIN_ID,
-                "0xabc123",
-                21_000_000,
-                1_717_171_717,
-            ),
-            chain_lineage_block(
-                ETHEREUM_MAINNET_CHAIN_ID,
-                "0xabc124",
-                21_000_001,
-                1_717_171_729,
-            ),
-        ],
+        &[chain_lineage_block(
+            ETHEREUM_MAINNET_CHAIN_ID,
+            "0xabc123",
+            21_000_000,
+            1_721_000_000,
+        )],
     )
     .await?;
 

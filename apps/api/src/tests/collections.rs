@@ -64,7 +64,7 @@ async fn get_name_children_compact_default_returns_rows_with_summary_meta() -> R
     let bob_labelhash = labelhash_for_display_name("bob.parent.eth")
         .expect("bob child labelhash must be available");
 
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             collection_name_surface(parent_logical_name_id, "parent.eth", "node:parent.eth", 10),
@@ -211,7 +211,7 @@ async fn get_name_children_compact_returns_unknown_label_rows_without_child_surf
     });
     child_row.owner = Some(owner.to_owned());
 
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[collection_name_surface(
             parent_logical_name_id,
@@ -284,7 +284,7 @@ async fn get_name_children_compact_paginates_unknown_label_rows_without_child_su
         "status": "unknown",
     });
 
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             collection_name_surface(parent_logical_name_id, "parent.eth", "node:parent.eth", 10),
@@ -375,7 +375,7 @@ async fn get_name_children_compact_counts_marks_unknown_label_child_count_unsupp
         "status": "unknown",
     });
 
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[collection_name_surface(
             parent_logical_name_id,
@@ -426,7 +426,7 @@ async fn get_name_children_compact_falls_back_to_surface_labelhash_for_legacy_ro
     );
     child_row.labelhash = None;
 
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             collection_name_surface(parent_logical_name_id, "parent.eth", "node:parent.eth", 10),
@@ -466,7 +466,7 @@ async fn get_name_children_compact_include_counts_returns_row_subname_counts() -
     let parent_logical_name_id = "ens:parent.eth";
     let child_logical_name_id = "ens:alice.parent.eth";
 
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             collection_name_surface(parent_logical_name_id, "parent.eth", "node:parent.eth", 20),
@@ -534,7 +534,7 @@ async fn get_name_children_compact_meta_none_omits_meta() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let parent_logical_name_id = "ens:parent.eth";
 
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             collection_name_surface(parent_logical_name_id, "parent.eth", "node:parent.eth", 30),
@@ -587,7 +587,7 @@ async fn get_name_children_returns_declared_rows_sorted_with_declared_only_cover
     let database = TestDatabase::new_migrated().await?;
     let parent_logical_name_id = "ens:parent.eth";
 
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             collection_name_surface(parent_logical_name_id, "parent.eth", "node:parent.eth", 10),
@@ -813,7 +813,7 @@ async fn get_name_children_defaults_to_first_page_of_fifty_rows() -> Result<()> 
         ));
     }
 
-    bigname_storage::upsert_name_surfaces(&database.pool, &surfaces).await?;
+    upsert_test_name_surfaces(&database.pool, &surfaces).await?;
     bigname_storage::upsert_children_current_rows(&database.pool, &child_rows).await?;
 
     let first_page_response = app_router(database.app_state())
@@ -906,7 +906,7 @@ async fn get_name_children_defaults_to_first_page_of_fifty_rows() -> Result<()> 
 async fn get_name_children_rejects_malformed_wrong_route_filter_and_stale_cursors() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
 
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             collection_name_surface(
@@ -1014,13 +1014,24 @@ async fn get_name_children_rejects_malformed_wrong_route_filter_and_stale_cursor
 
     sqlx::query(
         r#"
-        UPDATE name_surfaces
-        SET canonicality_state = 'observed'::canonicality_state
-        WHERE logical_name_id = 'ens:alpha.cursor-parent.eth'
+        UPDATE chain_lineage lineage
+        SET canonicality_state = 'orphaned'::canonicality_state
+        FROM name_surfaces child
+        WHERE child.logical_name_id = 'ens:alpha.cursor-parent.eth'
+          AND lineage.chain_id = child.chain_id
+          AND lineage.block_hash = child.block_hash
         "#,
     )
     .execute(&database.pool)
     .await?;
+    let row_local_state: String = sqlx::query_scalar(
+        "SELECT canonicality_state::text
+         FROM name_surfaces
+         WHERE logical_name_id = 'ens:alpha.cursor-parent.eth'",
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(row_local_state, "finalized");
     assert_invalid_cursor_request(
         database.app_state(),
         format!("/v1/names/ens/cursor-parent.eth/children?page_size=1&cursor={cursor}"),
@@ -1037,7 +1048,7 @@ async fn get_name_children_returns_ensv2_declared_children_without_widening_rout
     let database = TestDatabase::new_migrated().await?;
     let parent_logical_name_id = "ens:subregistry.eth";
 
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             collection_name_surface(
@@ -1163,7 +1174,7 @@ async fn get_name_children_include_counts_returns_declared_subname_count() -> Re
     let database = TestDatabase::new_migrated().await?;
     let parent_logical_name_id = "ens:parent.eth";
 
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             collection_name_surface(parent_logical_name_id, "parent.eth", "node:parent.eth", 20),
@@ -1230,7 +1241,7 @@ async fn get_name_children_returns_basenames_rows_from_base_authority() -> Resul
     let database = TestDatabase::new_migrated().await?;
     let parent_logical_name_id = "basenames:base.eth";
 
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             collection_name_surface(parent_logical_name_id, "base.eth", "node:base.eth", 40),
@@ -1362,7 +1373,7 @@ async fn get_name_children_returns_basenames_rows_from_base_authority() -> Resul
 async fn get_name_children_rejects_non_declared_surface_classes() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
 
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[collection_name_surface(
             "ens:parent.eth",
@@ -1549,7 +1560,7 @@ async fn get_address_names_returns_surface_first_rows_sorted_with_stable_relatio
         ],
     )
     .await?;
-    bigname_storage::upsert_token_lineages(
+    upsert_test_token_lineages(
         &database.pool,
         &[
             address_name_token_lineage(alpha_token_lineage_id, "0xalpha", 11),
@@ -1557,7 +1568,7 @@ async fn get_address_names_returns_surface_first_rows_sorted_with_stable_relatio
         ],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[
             address_name_resource(
@@ -1570,7 +1581,7 @@ async fn get_address_names_returns_surface_first_rows_sorted_with_stable_relatio
         ],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             collection_name_surface("ens:beta.eth", "beta.eth", "node:beta.eth", 12),
@@ -1578,7 +1589,7 @@ async fn get_address_names_returns_surface_first_rows_sorted_with_stable_relatio
         ],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[
             address_name_surface_binding(
@@ -1824,7 +1835,7 @@ async fn get_address_names_rejects_malformed_wrong_route_filter_and_stale_cursor
         ],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[
             address_name_resource(alpha_resource_id, None, "0xaddress-cursor-alpha", 131),
@@ -1832,7 +1843,7 @@ async fn get_address_names_rejects_malformed_wrong_route_filter_and_stale_cursor
         ],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             collection_name_surface("ens:cursor-alpha.eth", "cursor-alpha.eth", "node:ca", 131),
@@ -1840,7 +1851,7 @@ async fn get_address_names_rejects_malformed_wrong_route_filter_and_stale_cursor
         ],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[
             address_name_surface_binding(
@@ -1973,7 +1984,7 @@ async fn get_address_names_honors_namespace_and_relation_filters() -> Result<()>
         ],
     )
     .await?;
-    bigname_storage::upsert_token_lineages(
+    upsert_test_token_lineages(
         &database.pool,
         &[address_name_token_lineage(
             ens_token_lineage_id,
@@ -1982,7 +1993,7 @@ async fn get_address_names_honors_namespace_and_relation_filters() -> Result<()>
         )],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[
             address_name_resource(ens_resource_id, Some(ens_token_lineage_id), "0xens", 21),
@@ -1990,7 +2001,7 @@ async fn get_address_names_honors_namespace_and_relation_filters() -> Result<()>
         ],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             collection_name_surface("ens:alice.eth", "alice.eth", "node:alice.eth", 21),
@@ -2003,7 +2014,7 @@ async fn get_address_names_honors_namespace_and_relation_filters() -> Result<()>
         ],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[
             address_name_surface_binding(
@@ -2105,7 +2116,7 @@ async fn get_address_names_dedupe_by_resource_changes_grouping_only() -> Result<
         )],
     )
     .await?;
-    bigname_storage::upsert_token_lineages(
+    upsert_test_token_lineages(
         &database.pool,
         &[address_name_token_lineage(
             shared_token_lineage_id,
@@ -2114,7 +2125,7 @@ async fn get_address_names_dedupe_by_resource_changes_grouping_only() -> Result<
         )],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[address_name_resource(
             shared_resource_id,
@@ -2124,7 +2135,7 @@ async fn get_address_names_dedupe_by_resource_changes_grouping_only() -> Result<
         )],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             collection_name_surface("ens:beta.eth", "beta.eth", "node:beta.eth", 31),
@@ -2132,7 +2143,7 @@ async fn get_address_names_dedupe_by_resource_changes_grouping_only() -> Result<
         ],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[
             address_name_surface_binding(
@@ -2264,7 +2275,7 @@ async fn get_address_names_returns_basenames_base_authority_relation_facets() ->
         )],
     )
     .await?;
-    bigname_storage::upsert_token_lineages(
+    upsert_test_token_lineages(
         &database.pool,
         &[address_name_token_lineage(
             token_lineage_id,
@@ -2273,7 +2284,7 @@ async fn get_address_names_returns_basenames_base_authority_relation_facets() ->
         )],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[address_name_resource(
             resource_id,
@@ -2283,7 +2294,7 @@ async fn get_address_names_returns_basenames_base_authority_relation_facets() ->
         )],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[collection_name_surface(
             "basenames:alice.base.eth",
@@ -2293,7 +2304,7 @@ async fn get_address_names_returns_basenames_base_authority_relation_facets() ->
         )],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[address_name_surface_binding(
             surface_binding_id,
@@ -2528,12 +2539,12 @@ async fn get_address_names_include_role_summary_adds_projection_backed_expansion
         ],
     )
     .await?;
-    bigname_storage::upsert_token_lineages(
+    upsert_test_token_lineages(
         &database.pool,
         &[address_name_token_lineage(token_lineage_id, "0xalpha", 61)],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[address_name_resource(
             resource_id,
@@ -2543,7 +2554,7 @@ async fn get_address_names_include_role_summary_adds_projection_backed_expansion
         )],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             collection_name_surface("ens:alpha.eth", "alpha.eth", "node:alpha.eth", 61),
@@ -2562,7 +2573,7 @@ async fn get_address_names_include_role_summary_adds_projection_backed_expansion
         ],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[address_name_surface_binding(
             surface_binding_id,
@@ -2849,7 +2860,7 @@ async fn get_address_names_include_role_summary_paginates_with_batched_expansion
         ],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[
             address_name_resource(alpha_resource_id, None, "0xrole-alpha", 91),
@@ -2857,7 +2868,7 @@ async fn get_address_names_include_role_summary_paginates_with_batched_expansion
         ],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             collection_name_surface("ens:alpha.eth", "alpha.eth", "node:alpha.eth", 91),
@@ -2871,7 +2882,7 @@ async fn get_address_names_include_role_summary_paginates_with_batched_expansion
         ],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[
             address_name_surface_binding(
@@ -3249,7 +3260,7 @@ async fn get_address_names_include_role_summary_reads_ensv2_projection_outputs_w
     name_row.manifest_version = 11;
     database.insert_name_current_row(name_row).await?;
 
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             collection_name_surface(
@@ -3773,7 +3784,7 @@ async fn resource_permissions_rejects_keyed_publication_interleaved_between_summ
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let resource_id = Uuid::from_u128(0xa389);
-    bigname_storage::upsert_resources(&database.pool, &[resource(resource_id)]).await?;
+    upsert_test_resources(&database.pool, &[resource(resource_id)]).await?;
 
     let initial_row = permission_current_row(
         resource_id,
@@ -3881,7 +3892,7 @@ async fn get_resource_permissions_keyset_pagination_preserves_full_filter_summar
     let first_subject = "0x0000000000000000000000000000000000000a01";
     let second_subject = "0x0000000000000000000000000000000000000b02";
 
-    bigname_storage::upsert_resources(&database.pool, &[resource(resource_id)]).await?;
+    upsert_test_resources(&database.pool, &[resource(resource_id)]).await?;
     bigname_storage::upsert_permissions_current_rows(
         &database.pool,
         &[
@@ -4002,7 +4013,7 @@ async fn get_resource_permissions_rejects_malformed_wrong_route_filter_and_stale
     let first_subject = "0x0000000000000000000000000000000000000c11";
     let second_subject = "0x0000000000000000000000000000000000000c22";
 
-    bigname_storage::upsert_resources(&database.pool, &[resource(resource_id)]).await?;
+    upsert_test_resources(&database.pool, &[resource(resource_id)]).await?;
     bigname_storage::upsert_permissions_current_rows(
         &database.pool,
         &[

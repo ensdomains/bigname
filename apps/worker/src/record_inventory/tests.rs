@@ -201,6 +201,31 @@ async fn full_rebuild_projects_current_rows_for_all_target_resources() -> Result
         }])
     );
 
+    sqlx::query(
+        r#"
+        UPDATE chain_lineage
+        SET canonicality_state = 'orphaned'::canonicality_state
+        WHERE chain_id = 'ethereum-mainnet'
+          AND block_hash = '0xrec1001'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    rebuild_record_inventory_current(database.pool(), Some(&resource_a.to_string())).await?;
+    let repaired =
+        load_record_inventory_current(database.pool(), resource_a, &row_a.record_version_boundary)
+            .await?
+            .context("resource_a boundary must survive the losing record fork")?;
+    assert!(repaired.selectors.as_array().is_some_and(Vec::is_empty));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM normalized_events WHERE event_identity = 'res-a-text'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "finalized"
+    );
+
     database.cleanup().await
 }
 
@@ -387,26 +412,26 @@ async fn keyed_rebuild_keeps_visible_rows_when_projection_build_fails() -> Resul
         }],
     )
     .await?;
-    seed_events(
-        database.pool(),
-        &[record_version_changed_event(
-            "missing-block-boundary",
-            "ens:alice.eth",
-            resource_id,
-            100,
-            1100,
-            0,
-        )],
-    )
-    .await?;
+    let mut malformed = record_changed_event(
+        "malformed-record-boundary",
+        "ens:alice.eth",
+        resource_id,
+        "addr:60",
+        "addr",
+        Some("60"),
+        1100,
+        0,
+    );
+    malformed.after_state = Value::Null;
+    seed_events(database.pool(), &[malformed]).await?;
 
     let error = rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string()))
         .await
-        .expect_err("rebuild should fail when the record boundary block is missing");
+        .expect_err("rebuild should fail when a record event is malformed");
     assert!(
         error
             .to_string()
-            .contains("record event must have a chain_lineage timestamp for chain_position")
+            .contains("record event after_state must be an object")
     );
 
     let row = load_record_inventory_current(database.pool(), resource_id, &boundary)
@@ -5755,6 +5780,21 @@ async fn seed_resources(database: &PgPool, resource_ids: &[Uuid]) -> Result<()> 
             canonicality_state: CanonicalityState::Finalized,
         })
         .collect::<Vec<_>>();
+    upsert_chain_lineage_blocks(
+        database,
+        &resources
+            .iter()
+            .map(|resource| {
+                chain_lineage_block(
+                    &resource.chain_id,
+                    &resource.block_hash,
+                    resource.block_number,
+                    1_700_000_000 + resource.block_number,
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
+    .await?;
     upsert_resources(database, &resources).await?;
     Ok(())
 }
@@ -5776,6 +5816,21 @@ async fn seed_basenames_resources(database: &PgPool, resource_ids: &[Uuid]) -> R
             canonicality_state: CanonicalityState::Finalized,
         })
         .collect::<Vec<_>>();
+    upsert_chain_lineage_blocks(
+        database,
+        &resources
+            .iter()
+            .map(|resource| {
+                chain_lineage_block(
+                    &resource.chain_id,
+                    &resource.block_hash,
+                    resource.block_number,
+                    1_700_000_000 + resource.block_number,
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
+    .await?;
     upsert_resources(database, &resources).await?;
     Ok(())
 }

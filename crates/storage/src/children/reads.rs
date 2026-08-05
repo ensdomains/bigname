@@ -7,7 +7,8 @@ use crate::projection_helpers::{
 };
 
 use super::{
-    DECLARED_SURFACE_CLASS, DEFAULT_CHILDREN_CURRENT_READ_FILTER,
+    DECLARED_SURFACE_CLASS, DEFAULT_CHILDREN_CURRENT_LINEAGE_JOINS,
+    DEFAULT_CHILDREN_CURRENT_READ_FILTER,
     types::{
         ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCurrentRow,
         ChildrenCurrentSummary,
@@ -71,9 +72,10 @@ pub async fn load_children_current_page(
           ON parent.logical_name_id = cc.parent_logical_name_id
         LEFT JOIN name_surfaces child
           ON child.logical_name_id = cc.child_logical_name_id
-        WHERE cc.parent_logical_name_id =
         "#,
     );
+    builder.push(DEFAULT_CHILDREN_CURRENT_LINEAGE_JOINS);
+    builder.push(" WHERE cc.parent_logical_name_id = ");
     builder.push_bind(parent_logical_name_id);
     builder.push(" AND cc.surface_class = ");
     builder.push_bind(DECLARED_SURFACE_CLASS);
@@ -154,10 +156,17 @@ pub async fn load_children_current_summaries(
                   AND (
                       child.logical_name_id IS NULL
                       OR cc.provenance #>> '{label,source}' = 'label_preimage'
-                      OR child.canonicality_state IN (
-                          'canonical'::canonicality_state,
-                          'safe'::canonicality_state,
-                          'finalized'::canonicality_state
+                      OR (
+                          child.canonicality_state IN (
+                              'canonical'::canonicality_state,
+                              'safe'::canonicality_state,
+                              'finalized'::canonicality_state
+                          )
+                          AND child_lineage.canonicality_state IN (
+                              'canonical'::canonicality_state,
+                              'safe'::canonicality_state,
+                              'finalized'::canonicality_state
+                          )
                       )
                   )
             )::BIGINT AS child_count,
@@ -170,10 +179,17 @@ pub async fn load_children_current_summaries(
                       AND (
                           child.logical_name_id IS NULL
                           OR cc.provenance #>> '{label,source}' = 'label_preimage'
-                          OR child.canonicality_state IN (
-                              'canonical'::canonicality_state,
-                              'safe'::canonicality_state,
-                              'finalized'::canonicality_state
+                          OR (
+                              child.canonicality_state IN (
+                                  'canonical'::canonicality_state,
+                                  'safe'::canonicality_state,
+                                  'finalized'::canonicality_state
+                              )
+                              AND child_lineage.canonicality_state IN (
+                                  'canonical'::canonicality_state,
+                                  'safe'::canonicality_state,
+                                  'finalized'::canonicality_state
+                              )
                           )
                       )
                 ),
@@ -188,10 +204,17 @@ pub async fn load_children_current_summaries(
                       AND (
                           child.logical_name_id IS NULL
                           OR cc.provenance #>> '{label,source}' = 'label_preimage'
-                          OR child.canonicality_state IN (
-                              'canonical'::canonicality_state,
-                              'safe'::canonicality_state,
-                              'finalized'::canonicality_state
+                          OR (
+                              child.canonicality_state IN (
+                                  'canonical'::canonicality_state,
+                                  'safe'::canonicality_state,
+                                  'finalized'::canonicality_state
+                              )
+                              AND child_lineage.canonicality_state IN (
+                                  'canonical'::canonicality_state,
+                                  'safe'::canonicality_state,
+                                  'finalized'::canonicality_state
+                              )
                           )
                       )
                 ),
@@ -206,10 +229,17 @@ pub async fn load_children_current_summaries(
                       AND (
                           child.logical_name_id IS NULL
                           OR cc.provenance #>> '{label,source}' = 'label_preimage'
-                          OR child.canonicality_state IN (
-                              'canonical'::canonicality_state,
-                              'safe'::canonicality_state,
-                              'finalized'::canonicality_state
+                          OR (
+                              child.canonicality_state IN (
+                                  'canonical'::canonicality_state,
+                                  'safe'::canonicality_state,
+                                  'finalized'::canonicality_state
+                              )
+                              AND child_lineage.canonicality_state IN (
+                                  'canonical'::canonicality_state,
+                                  'safe'::canonicality_state,
+                                  'finalized'::canonicality_state
+                              )
                           )
                       )
                 ),
@@ -220,10 +250,17 @@ pub async fn load_children_current_summaries(
                   AND (
                       child.logical_name_id IS NULL
                       OR cc.provenance #>> '{label,source}' = 'label_preimage'
-                      OR child.canonicality_state IN (
-                          'canonical'::canonicality_state,
-                          'safe'::canonicality_state,
-                          'finalized'::canonicality_state
+                      OR (
+                          child.canonicality_state IN (
+                              'canonical'::canonicality_state,
+                              'safe'::canonicality_state,
+                              'finalized'::canonicality_state
+                          )
+                          AND child_lineage.canonicality_state IN (
+                              'canonical'::canonicality_state,
+                              'safe'::canonicality_state,
+                              'finalized'::canonicality_state
+                          )
                       )
                   )
             )
@@ -236,12 +273,24 @@ pub async fn load_children_current_summaries(
                 'safe'::canonicality_state,
                 'finalized'::canonicality_state
          )
+        LEFT JOIN chain_lineage parent_lineage
+          ON parent_lineage.chain_id = parent.chain_id
+         AND parent_lineage.block_hash = parent.block_hash
+         AND parent_lineage.canonicality_state IN (
+                'canonical'::canonicality_state,
+                'safe'::canonicality_state,
+                'finalized'::canonicality_state
+         )
         LEFT JOIN children_current cc
           ON cc.parent_logical_name_id = requested.parent_logical_name_id
          AND cc.surface_class = $2
          AND parent.logical_name_id IS NOT NULL
+         AND parent_lineage.block_hash IS NOT NULL
         LEFT JOIN name_surfaces child
           ON child.logical_name_id = cc.child_logical_name_id
+        LEFT JOIN chain_lineage child_lineage
+          ON child_lineage.chain_id = child.chain_id
+         AND child_lineage.block_hash = child.block_hash
         GROUP BY
             requested.ordinal,
             requested.parent_logical_name_id
@@ -269,6 +318,11 @@ async fn load_children_current_internal(
     } else {
         DEFAULT_CHILDREN_CURRENT_READ_FILTER
     };
+    let lineage_joins = if include_noncanonical {
+        ""
+    } else {
+        DEFAULT_CHILDREN_CURRENT_LINEAGE_JOINS
+    };
 
     let query = format!(
         r#"
@@ -293,6 +347,7 @@ async fn load_children_current_internal(
           ON parent.logical_name_id = cc.parent_logical_name_id
         LEFT JOIN name_surfaces child
           ON child.logical_name_id = cc.child_logical_name_id
+        {lineage_joins}
         WHERE cc.parent_logical_name_id = $1
           AND cc.surface_class = $2
         {read_filter}

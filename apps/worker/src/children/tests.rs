@@ -120,6 +120,32 @@ async fn rebuilds_declared_children_for_one_parent() -> Result<()> {
     assert_eq!(rows[1].child_logical_name_id, "ens:carol.parent.eth");
     assert_eq!(rows[1].last_recomputed_at, timestamp(1_717_172_102));
 
+    sqlx::query(
+        r#"
+        UPDATE chain_lineage
+        SET canonicality_state = 'orphaned'::canonicality_state
+        WHERE chain_id = 'ethereum-mainnet'
+          AND block_hash = '0xblock64'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    rebuild_children_current(database.pool(), Some(parent)).await?;
+    let rows = load_children_current(database.pool(), parent).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].child_logical_name_id, "ens:carol.parent.eth");
+    let row_local_state: String = sqlx::query_scalar(
+        r#"
+        SELECT canonicality_state::TEXT
+        FROM normalized_events
+        WHERE event_identity = 'alice-active'
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(row_local_state, "finalized");
+
     database.cleanup().await
 }
 
@@ -465,28 +491,27 @@ async fn keyed_rebuild_keeps_visible_rows_when_rebuild_sources_fail() -> Result<
         }],
     )
     .await?;
-    seed_subregistry_events(
-        database.pool(),
-        &[subregistry_event(
-            "ens",
-            "alice-active",
-            "node:parent.eth",
-            "node:alice.parent.eth",
-            110,
-            0,
-            false,
-            true,
-        )],
-    )
-    .await?;
+    let mut malformed_source = subregistry_event(
+        "ens",
+        "alice-active",
+        "node:parent.eth",
+        "node:alice.parent.eth",
+        110,
+        0,
+        false,
+        true,
+    );
+    malformed_source.transaction_hash = None;
+    malformed_source.log_index = None;
+    seed_subregistry_events(database.pool(), &[malformed_source]).await?;
 
     let error = rebuild_children_current(database.pool(), Some(parent))
         .await
-        .expect_err("rebuild should fail when the source block is missing");
+        .expect_err("rebuild should fail when the source event is malformed");
     assert!(
         error
             .to_string()
-            .contains("missing raw block for child source alice-active")
+            .contains("declared child source is missing transaction_hash")
     );
 
     let rows = load_children_current(database.pool(), parent).await?;
@@ -918,11 +943,60 @@ async fn seed_raw_logs(pool: &PgPool, logs: &[RawLog]) -> Result<()> {
 }
 
 async fn seed_name_surfaces(pool: &PgPool, surfaces: &[NameSurface]) -> Result<()> {
+    for surface in surfaces {
+        sqlx::query(
+            r#"
+            INSERT INTO chain_lineage (
+                chain_id,
+                block_hash,
+                block_number,
+                block_timestamp,
+                canonicality_state
+            )
+            VALUES ($1, $2, $3, $4, 'finalized'::canonicality_state)
+            ON CONFLICT (chain_id, block_hash) DO NOTHING
+            "#,
+        )
+        .bind(&surface.chain_id)
+        .bind(&surface.block_hash)
+        .bind(surface.block_number)
+        .bind(timestamp(1_717_172_000 + surface.block_number))
+        .execute(pool)
+        .await?;
+    }
     upsert_name_surfaces(pool, surfaces).await?;
     Ok(())
 }
 
 async fn seed_subregistry_events(pool: &PgPool, events: &[NormalizedEvent]) -> Result<()> {
+    for event in events {
+        let (Some(chain_id), Some(block_hash), Some(block_number)) = (
+            event.chain_id.as_deref(),
+            event.block_hash.as_deref(),
+            event.block_number,
+        ) else {
+            continue;
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO chain_lineage (
+                chain_id,
+                block_hash,
+                block_number,
+                block_timestamp,
+                canonicality_state
+            )
+            VALUES ($1, $2, $3, $4, 'finalized'::canonicality_state)
+            ON CONFLICT (chain_id, block_hash) DO NOTHING
+            "#,
+        )
+        .bind(chain_id)
+        .bind(block_hash)
+        .bind(block_number)
+        .bind(timestamp(1_717_172_000 + block_number))
+        .execute(pool)
+        .await?;
+    }
     insert_normalized_event_fixtures(pool, events).await?;
     Ok(())
 }

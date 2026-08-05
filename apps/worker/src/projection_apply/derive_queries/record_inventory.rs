@@ -1,5 +1,14 @@
 pub(super) const RECORD_INVENTORY_CURRENT_INVALIDATIONS_PREFIX: &str = r#"
-WITH changed_events AS (
+WITH readable_lineage AS (
+    SELECT chain_id, block_hash
+    FROM chain_lineage
+    WHERE canonicality_state IN (
+        'canonical'::canonicality_state,
+        'safe'::canonicality_state,
+        'finalized'::canonicality_state
+    )
+),
+changed_events AS (
     SELECT ne.*, change.change_id, change.changed_at
     FROM projection_normalized_event_changes change
     JOIN normalized_events ne
@@ -45,6 +54,12 @@ target_resource_events AS (
           'safe'::canonicality_state,
           'finalized'::canonicality_state
       )
+    JOIN readable_lineage target_lineage
+      ON target_lineage.chain_id = target.chain_id
+     AND target_lineage.block_hash = target.block_hash
+    JOIN readable_lineage resource_lineage
+      ON resource_lineage.chain_id = resource.chain_id
+     AND resource_lineage.block_hash = resource.block_hash
     WHERE target.derivation_kind IN (
         'ens_v1_unwrapped_authority',
         'ens_v2_registry_resource_surface',

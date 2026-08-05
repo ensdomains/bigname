@@ -6,12 +6,14 @@ use sqlx::{PgPool, postgres::PgRow};
 use uuid::Uuid;
 
 use crate::{
-    address_names::AddressNameRelation, name_current::DEFAULT_NAME_CURRENT_READ_FILTER,
+    address_names::AddressNameRelation,
+    name_current::{DEFAULT_NAME_CURRENT_LINEAGE_JOINS, DEFAULT_NAME_CURRENT_READ_FILTER},
     record_inventory::record_version_boundary_storage_key,
 };
 
 use super::{
-    DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER, DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER,
+    DEFAULT_ADDRESS_NAMES_CURRENT_LINEAGE_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
+    DEFAULT_RECORD_INVENTORY_CURRENT_LINEAGE_JOIN, DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER,
     IdentityAddressRelationRow, IdentityNameCurrentRow, IdentityNameRecordRow,
     IdentityRecordInventoryRow, dedupe_in_order,
 };
@@ -180,6 +182,7 @@ async fn load_identity_name_current_rows(
           ON binding.surface_binding_id = nc.surface_binding_id
         LEFT JOIN token_lineages token_lineage
           ON token_lineage.token_lineage_id = nc.token_lineage_id
+        {DEFAULT_NAME_CURRENT_LINEAGE_JOINS}
         WHERE nc.logical_name_id = ANY($1::TEXT[])
         {DEFAULT_NAME_CURRENT_READ_FILTER}
         ORDER BY nc.logical_name_id
@@ -260,6 +263,7 @@ async fn load_record_inventory_current_by_requests(
              AND ric.record_version_boundary_key = requested.record_version_boundary_key
             JOIN resources resource
               ON resource.resource_id = ric.resource_id
+            {DEFAULT_RECORD_INVENTORY_CURRENT_LINEAGE_JOIN}
             WHERE TRUE
             {DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER}
             "#,
@@ -301,6 +305,7 @@ async fn load_record_inventory_current_by_requests(
         FROM record_inventory_current ric
         JOIN resources resource
           ON resource.resource_id = ric.resource_id
+        {DEFAULT_RECORD_INVENTORY_CURRENT_LINEAGE_JOIN}
         WHERE ric.resource_id = ANY($1::UUID[])
         {DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER}
         ORDER BY ric.resource_id::TEXT, ric.record_version_boundary_key
@@ -360,6 +365,7 @@ async fn load_identity_address_relations_by_logical_names(
           ON binding.surface_binding_id = anc.surface_binding_id
         LEFT JOIN token_lineages token_lineage
           ON token_lineage.token_lineage_id = anc.token_lineage_id
+        {DEFAULT_ADDRESS_NAMES_CURRENT_LINEAGE_JOINS}
         WHERE anc.logical_name_id = ANY($1::TEXT[])
         {DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER}
         ORDER BY

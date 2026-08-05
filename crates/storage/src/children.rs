@@ -41,15 +41,36 @@ const DEFAULT_CHILDREN_CURRENT_READ_FILTER: &str = r#"
       'safe'::canonicality_state,
       'finalized'::canonicality_state
   )
+  AND parent_lineage.canonicality_state IN (
+      'canonical'::canonicality_state,
+      'safe'::canonicality_state,
+      'finalized'::canonicality_state
+  )
   AND (
       child.logical_name_id IS NULL
       OR cc.provenance #>> '{label,source}' = 'label_preimage'
-      OR child.canonicality_state IN (
-          'canonical'::canonicality_state,
-          'safe'::canonicality_state,
-          'finalized'::canonicality_state
+      OR (
+          child.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND child_lineage.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
       )
   )
+"#;
+
+const DEFAULT_CHILDREN_CURRENT_LINEAGE_JOINS: &str = r#"
+  JOIN chain_lineage parent_lineage
+    ON parent_lineage.chain_id = parent.chain_id
+   AND parent_lineage.block_hash = parent.block_hash
+  LEFT JOIN chain_lineage child_lineage
+    ON child_lineage.chain_id = child.chain_id
+   AND child_lineage.block_hash = child.block_hash
 "#;
 
 #[cfg(test)]

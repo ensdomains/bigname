@@ -52,7 +52,7 @@ async fn seed_graphql_compat_fixture(database: &TestDatabase) -> Result<()> {
     let bob_res = Uuid::from_u128(0x6_b002);
     let bob_sb = Uuid::from_u128(0x6_b003);
 
-    bigname_storage::upsert_token_lineages(
+    upsert_test_token_lineages(
         &database.pool,
         &[
             address_name_token_lineage(alice_tl, "0xtl-alice", 411),
@@ -60,7 +60,7 @@ async fn seed_graphql_compat_fixture(database: &TestDatabase) -> Result<()> {
         ],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[
             address_name_resource(alice_res, Some(alice_tl), "0xres-alice", 411),
@@ -68,7 +68,7 @@ async fn seed_graphql_compat_fixture(database: &TestDatabase) -> Result<()> {
         ],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             // `collection_name_surface` derives the surface `normalized_name` from this arg, and
@@ -79,7 +79,7 @@ async fn seed_graphql_compat_fixture(database: &TestDatabase) -> Result<()> {
         ],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[
             address_name_surface_binding(alice_sb, "ens:alice.eth", alice_res, "0xsb-alice", 411, 1_717_174_011),
@@ -163,7 +163,7 @@ async fn seed_graphql_compat_fixture(database: &TestDatabase) -> Result<()> {
 /// Two extra names under `GRAPHQL_FALLBACK_HOLDER` exercising the degenerate summary shapes the
 /// compatibility fixture never hits: carol has no declared owner (only a registrant — the middle leg
 /// of the non-null `owner` fallback) and a real expiry; dave has no owner, registrant, expiry, or
-/// created_at at all (zero-address fallback, epoch `createdAt`, NULL-ranked expiry sort).
+/// declared created_at at all (zero-address fallback, epoch `createdAt`, NULL-ranked expiry sort).
 async fn seed_graphql_fallback_fixture(database: &TestDatabase) -> Result<()> {
     let carol_tl = Uuid::from_u128(0x6_c001);
     let carol_res = Uuid::from_u128(0x6_c002);
@@ -172,7 +172,7 @@ async fn seed_graphql_fallback_fixture(database: &TestDatabase) -> Result<()> {
     let dave_res = Uuid::from_u128(0x6_d002);
     let dave_sb = Uuid::from_u128(0x6_d003);
 
-    bigname_storage::upsert_token_lineages(
+    upsert_test_token_lineages(
         &database.pool,
         &[
             address_name_token_lineage(carol_tl, "0xtl-carol", 413),
@@ -180,7 +180,7 @@ async fn seed_graphql_fallback_fixture(database: &TestDatabase) -> Result<()> {
         ],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[
             address_name_resource(carol_res, Some(carol_tl), "0xres-carol", 413),
@@ -188,7 +188,7 @@ async fn seed_graphql_fallback_fixture(database: &TestDatabase) -> Result<()> {
         ],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             collection_name_surface("ens:carol.eth", "carol.eth", GRAPHQL_CAROL_NAMEHASH, 413),
@@ -196,7 +196,7 @@ async fn seed_graphql_fallback_fixture(database: &TestDatabase) -> Result<()> {
         ],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[
             address_name_surface_binding(carol_sb, "ens:carol.eth", carol_res, "0xsb-carol", 413, 1_717_174_013),
@@ -287,6 +287,18 @@ async fn seed_graphql_fallback_fixture(database: &TestDatabase) -> Result<()> {
             }),
         ))
         .await?;
+    sqlx::query(
+        r#"
+        UPDATE chain_lineage lineage
+        SET block_timestamp = '1970-01-01T00:00:00Z'::timestamptz
+        FROM name_surfaces surface
+        WHERE surface.logical_name_id = 'ens:dave.eth'
+          AND lineage.chain_id = surface.chain_id
+          AND lineage.block_hash = surface.block_hash
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
     Ok(())
 }
 
@@ -574,22 +586,22 @@ async fn seed_erin_sepolia_record_fixture(database: &TestDatabase) -> Result<()>
     let erin_res = Uuid::from_u128(0x6_e002);
     let erin_sb = Uuid::from_u128(0x6_e003);
 
-    bigname_storage::upsert_token_lineages(
+    upsert_test_token_lineages(
         &database.pool,
         &[address_name_token_lineage(erin_tl, "0xtl-erin", 415)],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[address_name_resource(erin_res, Some(erin_tl), "0xres-erin", 415)],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[collection_name_surface("ens:erin.eth", "erin.eth", "0xe417", 415)],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[address_name_surface_binding(erin_sb, "ens:erin.eth", erin_res, "0xsb-erin", 415, 1_717_174_015)],
     )
