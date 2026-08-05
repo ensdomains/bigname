@@ -1,79 +1,40 @@
 #![recursion_limit = "256"]
 
-use std::collections::{BTreeMap, BTreeSet};
-
-use anyhow::{Context, Result, bail, ensure};
-use axum::{
-    Json, Router,
-    extract::{Path, Query, State, rejection::QueryRejection},
-    http::StatusCode,
-    response::Html,
-    routing::{get, post},
-};
-use bigname_manifests::{NamespaceManifestSnapshot, load_namespace_manifest_snapshot};
-use bigname_storage::{
-    AddressNameCurrentEntry, AddressNameRelation, ChildrenCurrentRow, EventHistoryAddressFilter,
-    EventHistoryFilter, ExecutionOutcome, ExecutionTrace, HistoryEvent, HistoryScope,
-    HistorySummary, NameCurrentRow, PermissionScope, PermissionsCurrentRow, PrimaryNameClaimStatus,
-    PrimaryNameCurrentRow, RecordInventoryCurrentRow, ResolverCurrentRow, SelectedSnapshot,
-    VERIFIED_PRIMARY_NAME_INVALIDATION_KEY, VERIFIED_PRIMARY_NAME_LOOKUP_KEY,
-    load_address_history_page, load_event_history_page, load_execution_trace, load_name_current,
-    load_name_history_page, load_name_surface, load_resolver_current, load_resource,
-    load_resource_history_page, parse_rfc3339_utc_timestamp,
-};
+use anyhow::{Context, Result, ensure};
+use axum::{Router, routing::get};
 use clap::Parser;
-use serde_json::{Map as JsonMap, json};
-use sqlx::{
-    PgPool, Row,
-    types::{JsonValue, Uuid, time::OffsetDateTime},
-};
+use sqlx::PgPool;
 use tower_http::cors::CorsLayer;
-use tracing::{error, info, warn};
-use tracing_subscriber::EnvFilter;
+use tracing::{info, warn};
+
+#[cfg(test)]
+use crate::errors::ErrorResponse;
+#[cfg(test)]
+use axum::http::StatusCode;
+#[cfg(test)]
+use bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE;
+#[cfg(test)]
+use std::collections::BTreeMap;
 
 mod bounds;
 mod cli;
 mod errors;
 mod graphql;
+mod health;
 mod metrics;
-mod pagination;
-mod query;
-#[cfg(test)]
-#[path = "test_projection_support.rs"]
-mod test_projection_support;
-#[cfg(test)]
-pub(crate) use test_projection_support::{projection_apply, replay};
-mod routes;
+#[path = "support/service.rs"]
+mod service;
 mod state;
-mod types;
 mod v2;
 
 use crate::{
     bounds::ApiBoundsConfig,
     cli::*,
-    errors::{ApiError, ApiResult},
-    pagination::{
-        CURSOR_VERSION, CursorEnvelope, CursorSpec, DEFAULT_PAGE_SIZE, HistoryPageResponse,
-        MAX_PAGE_SIZE, PaginationRequest,
-    },
-    query::{
-        AddressHistoryQuery, AddressNamesQuery, ChildrenQuery, EventsQuery, ExactNameSnapshotQuery,
-        HistoryQuery, MetaMode, NameProfileQuery, NameRecordsQuery, NameRolesQuery, NamesQuery,
-        PermissionsQuery, PrimaryNameQuery, ResolutionExecutionExplainQuery, ResolverOverviewQuery,
-        ResourceLookupQuery, ResponseView, RolesQuery,
-    },
-    routes::API_ROUTE_DEFINITIONS,
+    errors::ApiError,
+    health::{HEALTH_DATABASE_CHECK_TIMEOUT, HealthDatabasePool, health},
+    service::{init_tracing, shutdown_signal},
     state::AppState,
-    types::*,
 };
-
-#[cfg(test)]
-use bigname_storage::{ChainPositions, SnapshotConsistency, VERIFIED_PRIMARY_NAME_REQUEST_TYPE};
-
-#[cfg(test)]
-use crate::errors::ErrorResponse;
-#[cfg(test)]
-use axum::response::Response;
 
 pub(crate) const PUBLIC_NAMESPACES: &[&str] = &["ens", "basenames"];
 pub(crate) const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -81,8 +42,8 @@ pub(crate) const BUILD_SHA: &str = match option_env!("BIGNAME_BUILD_SHA") {
     Some(build_sha) => build_sha,
     None => "unknown",
 };
+#[cfg(test)]
 const VERIFIED_RESOLUTION_REQUEST_TYPE: &str = "verified_resolution";
-
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
@@ -90,16 +51,11 @@ async fn main() -> Result<()> {
             init_tracing("bigname-api");
             serve(*args).await
         }
-        Command::PrintOpenapi => {
-            print!("{}", render_openapi_document());
-            Ok(())
-        }
     }
 }
 
 async fn serve(args: ServeArgs) -> Result<()> {
     args.bounds.validate()?;
-    let legacy_execution_rpc_urls = args.effective_chain_rpc_urls()?;
     let chain_rpc_urls = args.effective_lookup_chain_rpc_urls()?;
     let pool = bigname_storage::connect_with_application_name_and_statement_timeout(
         &args.database,
@@ -152,18 +108,14 @@ async fn serve(args: ServeArgs) -> Result<()> {
         args.status_max_block_lag,
         args.status_max_lag_secs,
     )?;
-    let state =
-        AppState::new_with_rpc_urls(pool, lookup_pool, chain_rpc_urls, legacy_execution_rpc_urls)
-            .with_heartbeat_max_age_secs(args.heartbeat_max_age_secs)
-            .with_indexer_chain_heartbeat_max_age_secs(args.indexer_chain_heartbeat_max_age_secs)
-            .with_worker_rebuild_phase_max_age_secs(args.worker_rebuild_phase_max_age_secs)
-            .with_status_freshness_config(status_freshness_config);
+    let state = AppState::new_with_rpc_urls(pool, lookup_pool, chain_rpc_urls)
+        .with_heartbeat_max_age_secs(args.heartbeat_max_age_secs)
+        .with_indexer_chain_heartbeat_max_age_secs(args.indexer_chain_heartbeat_max_age_secs)
+        .with_worker_rebuild_phase_max_age_secs(args.worker_rebuild_phase_max_age_secs)
+        .with_status_freshness_config(status_freshness_config);
     state
         .status_freshness
         .spawn_refresh(state.lookup_chain_rpc_urls.clone());
-    warm_compact_records_route_sql_path(&state, args.database.max_connections)
-        .await
-        .context("failed to warm compact records route SQL path")?;
     let router = app_router_with_bounds(state, health_pool, &args.bounds);
     let listener = tokio::net::TcpListener::bind(args.bind_addr)
         .await
@@ -229,23 +181,13 @@ fn app_router_with_bounds(
     health_pool: PgPool,
     bounds: &ApiBoundsConfig,
 ) -> Router {
-    let bounded_router = API_ROUTE_DEFINITIONS
-        .iter()
-        .copied()
-        .filter(|route| !route.bypasses_global_load_shed())
-        .fold(Router::new(), |router, route| route.register(router))
-        .route("/", get(openapi_docs))
-        .route("/openapi.json", get(openapi_json))
-        .route("/docs", get(openapi_docs))
-        .route("/docs/", get(openapi_docs))
-        .merge(v2::router())
+    let bounded_router = v2::router()
         .with_state(state.clone())
-        .merge(graphql::graphql_routes(state.clone()));
-    let health_router = API_ROUTE_DEFINITIONS
-        .iter()
-        .copied()
-        .filter(|route| route.bypasses_global_load_shed())
-        .fold(Router::new(), |router, route| route.register(router))
+        .merge(graphql::graphql_routes(state.clone()))
+        .route_layer(CorsLayer::permissive());
+    let health_router = Router::new()
+        .route("/healthz", get(health))
+        .route_layer(CorsLayer::permissive())
         .layer(axum::Extension(HealthDatabasePool(health_pool)))
         .with_state(state);
     // The API is read-only public data served cross-origin to browser clients (the ENS Manager
@@ -256,30 +198,9 @@ fn app_router_with_bounds(
     // Request bounds wrap CORS so even preflight responses pass through the family-wide backstop;
     // bound errors add the same wildcard origin header directly. Health uses reserved admission
     // outside the global ceiling and retains the request-timeout backstop.
-    let cors = CorsLayer::permissive();
-    bounds::apply_request_bounds(
-        bounded_router.layer(cors.clone()),
-        health_router.layer(cors),
-        bounds,
-    )
-    .layer(axum::middleware::from_fn(metrics::track_http_request))
+    bounds::apply_request_bounds(bounded_router, health_router, bounds)
+        .layer(axum::middleware::from_fn(metrics::track_http_request))
 }
-
-async fn openapi_json() -> Json<JsonValue> {
-    Json(openapi_document())
-}
-
-async fn openapi_docs() -> Html<&'static str> {
-    Html(OPENAPI_DOCS_HTML)
-}
-
-include!("openapi.rs");
-
-include!("handlers.rs");
-
-include!("responses.rs");
-
-include!("support.rs");
 
 #[cfg(test)]
 mod tests;

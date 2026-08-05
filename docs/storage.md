@@ -155,19 +155,18 @@ For ENSv2, `resource_id` keys by `(chain_id, registry_contract_instance_id, upst
 | `public.projection_*`, `public.*_current`, replay staging and apply cursors | worker and storage triggers | Surviving legacy public-schema read models, rebuild/apply progress, and invalidation journals until Stage C. |
 | `manifest_alert_*` | worker audit | Manifest-drift and proxy observations; not admission truth. |
 | `service_loop_heartbeats` | worker | Current worker liveness. The API still reads retained old-indexer process/chain rows until its readiness port. |
-| `execution_*` | legacy execution worker; retained v1 API cache-miss persistence | Durable traces, steps, cache outcomes, and invalidation records. V2 serving paths do not write this family after their lookup-engine cutover. |
+| `execution_*` | legacy execution worker | Durable traces, steps, cache outcomes, and invalidation records retained for worker use and diagnostic readback. API serving paths do not write this family. |
 | `resolution_divergences` | schema-v2 lookup engine, including v2 verified product reads and the Tier-3 diagnostics records route | Rows in the [resolution divergence ledger](glossary.md#resolution-divergence-ledger): active rows represent direct live/indexed disagreements only, and restored agreement may clear a matching row. The compared exact `record_inventory_current` row is guarded through commit; CCIP answers are excluded. |
 | `backfill_*` | no current writer | Immutable migration-era jobs and ranges; storage retains read-only worker inspection. |
 | `normalized_replay_*` | no current writer | Migration-era replay/checkpoint state. The worker still reads selected cursors for projection readiness and raw staging compaction. |
 | `base_normalized_rederive_*`, resolver-profile queues/journals/reconciliation, retained-history/coverage/frontier tables, startup adapter checkpoints | no current writer | Stranded transitional schema retained only because migrations are immutable. These rows are not current admission, readiness, replay, or repair authority. |
 | `name_surface_normalization_repair_findings` | no current writer | Historical audit rows from the deleted indexer repair command. |
 
-The API is otherwise read-only over projections and execution output. Retained
-v1 routes keep their documented legacy on-demand verified-resolution
-persistence path. V2 verified record routes instead use the schema-v2 lookup
-engine and may perform only the divergence-ledger write described below; v2
-primary-name verification performs no serving-path write. Neither path grants
-a raw-fact or legacy operational-table fallback.
+The API is otherwise read-only over projections and execution output. V2
+verified record routes use the schema-v2 lookup engine and may perform only the
+divergence-ledger write described below; v2 primary-name verification performs
+no serving-path write. Neither path grants a raw-fact or legacy
+operational-table fallback.
 
 The worker continues to update its process and named rebuild-phase heartbeat
 rows at bounded projection progress points. Existing API readiness code also
@@ -666,7 +665,7 @@ This narrow write is authorized by
 [`simplification-build-plan-20260730.md` § B6](../simplification-build-plan-20260730.md#stage-b--port-the-keep-set).
 
 The remaining execution tables and rules in this section describe the legacy
-crate and retained v1 API only.
+crate and retained storage only. No v1 API route serves them.
 
 Inline in Postgres for small payloads:
 
@@ -733,7 +732,7 @@ exclusive database-scoped maintenance advisory lock while tuple operations join
 that maintenance boundary in shared mode, avoiding an unbounded set of tuple
 locks during a rebuild.
 
-The retained v1 execution code first joins that tuple and replacement advisory
+The retained legacy execution code first joins that tuple and replacement advisory
 fence, then invokes the fixed-`search_path`, security-definer
 `bigname_lock_primary_name_anchor` function. The function row-locks and returns
 only the requested projection anchor; when no row exists, the earlier advisory
@@ -817,9 +816,8 @@ phase-runner commands.
   projection rows.
 - Projection workers own current read models, replay staging, apply cursors,
   invalidation journals, and worker heartbeats.
-- Legacy execution workers own traces, steps, and normal cache outcomes, with
-  the retained v1 API on-demand verified-resolution cache-miss exception. The
-  schema-v2 lookup engine owns only guarded divergence-ledger writes; its v2 API
+- Legacy execution workers own traces, steps, and normal cache outcomes. The
+  schema-v2 lookup engine owns only guarded divergence-ledger writes; its API
   caller remains otherwise read-only and never writes legacy execution rows.
 - The API reads projections and execution output. It has no general raw-fact or
   legacy operational-table fallback; explicit audit endpoints remain the only

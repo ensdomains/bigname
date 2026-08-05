@@ -207,7 +207,7 @@ mod tests {
             pending_invalidation_count_capped: false,
             dead_letter_count: 2,
         };
-        let chain_rpc_urls = bigname_execution::ChainRpcUrls::from_entries(&[
+        let chain_rpc_urls = bigname_lookup::ChainRpcUrls::from_entries(&[
             "ethereum-mainnet=http://rpc.test".to_owned(),
             "base-mainnet=http://rpc.test".to_owned(),
             "base-sepolia=http://rpc.test".to_owned(),
@@ -282,7 +282,7 @@ mod tests {
                     .parse()
                     .expect("static test database URL must parse"),
             )),
-            bigname_execution::ChainRpcUrls::default(),
+            bigname_lookup::ChainRpcUrls::default(),
         );
 
         let error = build_status_data(&read, &state)

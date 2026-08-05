@@ -12,8 +12,7 @@ pub(crate) async fn load_v2_primary_name_route_read(
         || canonical_primary_name_coin_type(coin_type)? != "60"
     {
         let lookup_state =
-            load_declared_primary_name_lookup_state(&state.pool, address, namespace, coin_type)
-                .await?;
+            load_primary_name_lookup_state(&state.pool, address, namespace, coin_type).await?;
         return Ok(PrimaryNameRouteRead {
             lookup_state,
             selected_snapshot: None,
@@ -39,7 +38,7 @@ pub(crate) async fn load_v2_primary_name_route_read(
         )
         .await?
     } else {
-        load_declared_primary_name_lookup_state(&state.pool, address, namespace, coin_type).await?
+        load_primary_name_lookup_state(&state.pool, address, namespace, coin_type).await?
     };
     apply_primary_name_lookup(&mut lookup_state, namespace, lookup)?;
     let outcome = primary_name_verified_result(namespace, &lookup_state);
@@ -51,26 +50,6 @@ pub(crate) async fn load_v2_primary_name_route_read(
     })
 }
 
-async fn load_declared_primary_name_lookup_state(
-    pool: &PgPool,
-    address: &str,
-    namespace: &str,
-    coin_type: &str,
-) -> ApiResult<PrimaryNameLookupState> {
-    // Declared mode prevents the shared v1 reader from consulting legacy
-    // verified outcomes. V2 always obtains its verified answer separately.
-    let mut lookup_state = load_primary_name_lookup_state(
-        pool,
-        address,
-        namespace,
-        coin_type,
-        ResolutionMode::Declared,
-    )
-    .await?;
-    lookup_state.persisted_verified = None;
-    Ok(lookup_state)
-}
-
 async fn load_mixed_primary_name_lookup_state_at_position(
     pool: &PgPool,
     address: &str,
@@ -79,8 +58,7 @@ async fn load_mixed_primary_name_lookup_state_at_position(
     position: &bigname_lookup::LookupPosition,
 ) -> ApiResult<PrimaryNameLookupState> {
     require_primary_name_projection_position(pool, position).await?;
-    let lookup_state =
-        load_declared_primary_name_lookup_state(pool, address, namespace, coin_type).await?;
+    let lookup_state = load_primary_name_lookup_state(pool, address, namespace, coin_type).await?;
     require_primary_name_projection_position(pool, position).await?;
     Ok(lookup_state)
 }

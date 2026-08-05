@@ -112,6 +112,14 @@ prefix is renamed to `/v1` in the same release. The public API stays at `v1`;
 no permanent `/v2` prefix exists and there is no coexistence or deprecation
 window (see Rollout).
 
+### 2026-08-05 amendment
+
+[PR #311](https://github.com/ensdomains/bigname/pull/311) intentionally diverges
+from that rollout sequence: it deletes the former `/v1` API while retaining the
+`/v2` prefix. The public-edge prefix change is deferred to a separate,
+maintainer-gated rollout, so deletion and prefix replacement do not ship in the
+same release.
+
 ### Naming dictionary (normative)
 
 One name per concept, applied on every `v2` route:

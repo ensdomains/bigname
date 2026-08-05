@@ -1,112 +1,14 @@
 use super::*;
 
-pub(crate) struct ExactNameRead {
-    pub(crate) row: NameCurrentRow,
-    pub(crate) selected_snapshot: SelectedSnapshot,
-}
-
-pub(crate) struct ExactNameInventoryRead {
-    pub(crate) row: NameCurrentRow,
-    pub(crate) record_inventory_current: Option<RecordInventoryCurrentRow>,
-    pub(crate) selected_snapshot: SelectedSnapshot,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct ExactNameReadRequest<'a> {
-    namespace: &'a str,
-    name: &'a str,
-    selector: ExactNameSnapshotSelector<'a>,
-    include_resolution_auxiliary: bool,
-    projection_kind: Option<&'a str>,
-}
-
-impl<'a> ExactNameReadRequest<'a> {
-    pub(crate) fn new(
-        namespace: &'a str,
-        name: &'a str,
-        selector: ExactNameSnapshotSelector<'a>,
-    ) -> Self {
-        Self {
-            namespace,
-            name,
-            selector,
-            include_resolution_auxiliary: false,
-            projection_kind: None,
-        }
-    }
-
-    pub(crate) fn include_resolution_auxiliary(mut self, include: bool) -> Self {
-        self.include_resolution_auxiliary = include;
-        self
-    }
-
-    pub(crate) fn with_projection_kind(mut self, projection_kind: &'a str) -> Self {
-        self.projection_kind = Some(projection_kind);
-        self
-    }
-
-    fn map_internal_error(self, error: ApiError) -> ApiError {
-        let Some(projection_kind) = self.projection_kind else {
-            return error;
-        };
-        map_internal_api_error(
-            error,
-            format!(
-                "failed to load {projection_kind} projection for name {}/{}",
-                self.namespace, self.name
-            ),
-        )
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ExactNameSnapshotSelector<'a> {
     at: Option<&'a str>,
-    chain_positions: Option<&'a str>,
-    consistency: Option<&'a str>,
 }
 
 impl<'a> ExactNameSnapshotSelector<'a> {
     pub(crate) fn from_at(at: &'a str) -> Self {
-        Self {
-            at: Some(at),
-            ..Self::default()
-        }
+        Self { at: Some(at) }
     }
-}
-
-impl<'a> From<&'a ExactNameSnapshotQuery> for ExactNameSnapshotSelector<'a> {
-    fn from(query: &'a ExactNameSnapshotQuery) -> Self {
-        Self {
-            at: query.at.as_deref(),
-            chain_positions: query.chain_positions.as_deref(),
-            consistency: query.consistency.as_deref(),
-        }
-    }
-}
-
-impl<'a> From<&'a NameProfileQuery> for ExactNameSnapshotSelector<'a> {
-    fn from(query: &'a NameProfileQuery) -> Self {
-        Self {
-            at: query.at.as_deref(),
-            chain_positions: query.chain_positions.as_deref(),
-            consistency: query.consistency.as_deref(),
-        }
-    }
-}
-
-pub(crate) async fn resolve_exact_name_selected_snapshot(
-    pool: &PgPool,
-    namespace: &str,
-    selector: ExactNameSnapshotSelector<'_>,
-    include_resolution_auxiliary: bool,
-) -> ApiResult<SelectedSnapshot> {
-    let scope =
-        exact_name_snapshot_scope(pool, namespace, selector, include_resolution_auxiliary).await?;
-    let input = parse_exact_name_snapshot_selector(selector, &scope)?;
-    resolve_exact_name_snapshot_selection(pool, &scope, &input)
-        .await
-        .map_err(snapshot_selection_api_error)
 }
 
 pub(crate) async fn load_name_current_for_selected_snapshot(
@@ -121,71 +23,12 @@ pub(crate) async fn load_name_current_for_selected_snapshot(
         .map_err(snapshot_selection_api_error)?
     {
         SnapshotProjectionRead::Found(row) => Ok(row),
-        SnapshotProjectionRead::NotFound => Err(name_not_found_error(namespace, name)),
+        SnapshotProjectionRead::NotFound => Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: format!("name {name} was not found in namespace {namespace}"),
+        }),
     }
-}
-
-pub(crate) async fn load_exact_name_read(
-    pool: &PgPool,
-    namespace: &str,
-    name: &str,
-    selector: ExactNameSnapshotSelector<'_>,
-    projection_kind: &str,
-) -> ApiResult<ExactNameRead> {
-    load_exact_name_read_for_route(
-        pool,
-        ExactNameReadRequest::new(namespace, name, selector).with_projection_kind(projection_kind),
-    )
-    .await
-}
-
-pub(crate) async fn load_exact_name_read_for_route(
-    pool: &PgPool,
-    request: ExactNameReadRequest<'_>,
-) -> ApiResult<ExactNameRead> {
-    let selected_snapshot = resolve_exact_name_selected_snapshot(
-        pool,
-        request.namespace,
-        request.selector,
-        request.include_resolution_auxiliary,
-    )
-    .await
-    .map_err(|error| request.map_internal_error(error))?;
-    let row = load_name_current_for_selected_snapshot(
-        pool,
-        request.namespace,
-        request.name,
-        &selected_snapshot,
-    )
-    .await
-    .map_err(|error| request.map_internal_error(error))?;
-
-    Ok(ExactNameRead {
-        row,
-        selected_snapshot,
-    })
-}
-
-pub(crate) async fn load_exact_name_inventory_read(
-    pool: &PgPool,
-    namespace: &str,
-    name: &str,
-    selector: ExactNameSnapshotSelector<'_>,
-) -> ApiResult<ExactNameInventoryRead> {
-    let ExactNameRead {
-        row,
-        selected_snapshot,
-    } = load_exact_name_read(pool, namespace, name, selector, "current").await?;
-    let record_inventory_current =
-        load_supported_record_inventory_current_for_snapshot(pool, &row, &selected_snapshot)
-            .await
-            .map_err(snapshot_selection_api_error)?;
-
-    Ok(ExactNameInventoryRead {
-        row,
-        record_inventory_current,
-        selected_snapshot,
-    })
 }
 
 pub(crate) fn map_internal_api_error(error: ApiError, message: impl Into<String>) -> ApiError {
@@ -200,14 +43,6 @@ pub(crate) fn map_internal_api_error(error: ApiError, message: impl Into<String>
         ApiError::internal_error(message)
     } else {
         error
-    }
-}
-
-pub(crate) fn name_not_found_error(namespace: &str, name: &str) -> ApiError {
-    ApiError {
-        status: StatusCode::NOT_FOUND,
-        code: "not_found",
-        message: format!("name {name} was not found in namespace {namespace}"),
     }
 }
 
@@ -244,14 +79,20 @@ pub(crate) async fn exact_name_snapshot_scope(
         .map_err(snapshot_selection_api_error)
 }
 
-pub(crate) async fn ens_snapshot_position_profile(
+async fn ens_snapshot_position_profile(
     pool: &PgPool,
     selector: ExactNameSnapshotSelector<'_>,
 ) -> ApiResult<(&'static str, &'static str)> {
-    if selector_mentions_ens_sepolia_profile(selector) {
+    if selector
+        .at
+        .is_some_and(|value| value.contains("ethereum-sepolia"))
+    {
         return Ok(("ethereum-sepolia", "ethereum-sepolia"));
     }
-    if selector_mentions_ens_mainnet_profile(selector) {
+    if selector
+        .at
+        .is_some_and(|value| value.contains("ethereum-mainnet"))
+    {
         return Ok(("ethereum", "ethereum-mainnet"));
     }
 
@@ -280,74 +121,12 @@ pub(crate) async fn ens_snapshot_position_profile(
     Ok(("ethereum", "ethereum-mainnet"))
 }
 
-pub(crate) fn selector_mentions_ens_sepolia_profile(
-    selector: ExactNameSnapshotSelector<'_>,
-) -> bool {
-    selector
-        .chain_positions
-        .or_else(|| {
-            selector
-                .at
-                .filter(|value| value.trim_start().starts_with('{'))
-        })
-        .is_some_and(|value| value.contains("ethereum-sepolia"))
-}
-
-pub(crate) fn selector_mentions_ens_mainnet_profile(
-    selector: ExactNameSnapshotSelector<'_>,
-) -> bool {
-    selector
-        .chain_positions
-        .or_else(|| {
-            selector
-                .at
-                .filter(|value| value.trim_start().starts_with('{'))
-        })
-        .is_some_and(|value| value.contains("ethereum-mainnet"))
-}
-
-pub(crate) fn parse_exact_name_snapshot_selector(
-    selector: ExactNameSnapshotSelector<'_>,
-    scope: &SnapshotSelectionScope,
-) -> ApiResult<SnapshotSelectorInput> {
-    let consistency = SnapshotConsistency::parse(selector.consistency.map(str::trim))
-        .map_err(snapshot_selection_api_error)?;
-    let at = selector
-        .at
-        .map(str::trim)
-        .map(|value| parse_snapshot_at(value, scope))
-        .transpose()?;
-    let chain_positions = selector
-        .chain_positions
-        .map(str::trim)
-        .map(|value| ChainPositions::parse_explicit_json(value, scope))
-        .transpose()
-        .map_err(snapshot_selection_api_error)?;
-
-    SnapshotSelectorInput::new(at, chain_positions, consistency)
-        .map_err(snapshot_selection_api_error)
-}
-
-pub(crate) fn parse_snapshot_at(
-    value: &str,
-    scope: &SnapshotSelectionScope,
-) -> ApiResult<SnapshotAt> {
-    if value.starts_with('{') {
-        return ChainPositions::parse_explicit_json(value, scope)
-            .map(SnapshotAt::ResolvedPositions)
-            .map_err(snapshot_selection_api_error);
-    }
-
-    parse_rfc3339_utc_timestamp(value)
-        .map(SnapshotAt::Timestamp)
-        .map_err(snapshot_selection_api_error)
-}
-
 pub(crate) fn snapshot_selection_api_error(error: SnapshotSelectionError) -> ApiError {
     let status = match error.kind() {
         SnapshotSelectionErrorKind::InvalidInput => StatusCode::BAD_REQUEST,
-        SnapshotSelectionErrorKind::Conflict => StatusCode::CONFLICT,
-        SnapshotSelectionErrorKind::Stale => StatusCode::CONFLICT,
+        SnapshotSelectionErrorKind::Conflict | SnapshotSelectionErrorKind::Stale => {
+            StatusCode::CONFLICT
+        }
         SnapshotSelectionErrorKind::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
     };
 

@@ -593,10 +593,10 @@ shared `data`/`page`/`meta` envelope and keep pipeline vocabulary out of
 product field names, enum values, and error messages; diagnostics routes are
 the public home for pipeline vocabulary.
 
-The new surface is developed under `/v2` only for implementation and parity
-validation. After the one-time parity gate, it is re-baselined as `v1` in the
-switch release: the old `v1` routes are deleted, `/v2` is renamed to `/v1`,
-and no permanent `/v2` public contract ships.
+The new surface was developed under `/v2` for implementation and parity
+validation. C2 deleted the old `/v1` routes while retaining `/v2`; the public
+edge flip is deferred to C3. This supersedes the earlier rename assumption in
+the historical survey above.
 
 The deferred vocabulary and envelope decisions from ADR 0003 are resolved by
 ADR 0006's normative naming dictionary, envelope rules, route catalog, and

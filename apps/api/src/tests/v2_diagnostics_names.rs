@@ -551,7 +551,7 @@ async fn v2_diagnostics_name_routes_reject_malformed_name() -> Result<()> {
                 .parse()
                 .expect("static test database URL must parse"),
         )),
-        bigname_execution::ChainRpcUrls::default(),
+        bigname_lookup::ChainRpcUrls::default(),
     );
 
     for suffix in ["coverage", "binding", "authority", "records"] {
@@ -582,7 +582,7 @@ async fn v2_diagnostics_name_routes_reject_undocumented_query_params() -> Result
                 .parse()
                 .expect("static test database URL must parse"),
         )),
-        bigname_execution::ChainRpcUrls::default(),
+        bigname_lookup::ChainRpcUrls::default(),
     );
 
     for suffix in ["coverage", "binding", "authority"] {
@@ -652,7 +652,7 @@ async fn v2_diagnostics_name_records_rejects_malformed_duplicate_and_unknown_que
                 .parse()
                 .expect("static test database URL must parse"),
         )),
-        bigname_execution::ChainRpcUrls::default(),
+        bigname_lookup::ChainRpcUrls::default(),
     );
 
     for (uri, expected_message) in [
@@ -731,7 +731,7 @@ async fn v2_diagnostics_name_execution_requires_keys() -> Result<()> {
                 .parse()
                 .expect("static test database URL must parse"),
         )),
-        bigname_execution::ChainRpcUrls::default(),
+        bigname_lookup::ChainRpcUrls::default(),
     );
 
     for uri in [
@@ -770,7 +770,7 @@ async fn v2_diagnostics_name_execution_rejects_malformed_duplicate_and_unknown_q
                 .parse()
                 .expect("static test database URL must parse"),
         )),
-        bigname_execution::ChainRpcUrls::default(),
+        bigname_lookup::ChainRpcUrls::default(),
     );
 
     for (uri, expected_message) in [

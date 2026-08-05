@@ -82,7 +82,7 @@ mod tests {
                     .parse()
                     .expect("static test database URL must parse"),
             )),
-            bigname_execution::ChainRpcUrls::default(),
+            bigname_lookup::ChainRpcUrls::default(),
         );
 
         let response = router()

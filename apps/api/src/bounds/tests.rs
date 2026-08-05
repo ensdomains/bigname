@@ -35,47 +35,8 @@ fn default_config_is_valid_and_keeps_rate_limiting_disabled() {
 }
 
 #[test]
-fn health_is_the_only_route_that_bypasses_global_load_shedding() {
-    let bypass_paths = crate::API_ROUTE_DEFINITIONS
-        .iter()
-        .copied()
-        .filter(|route| route.bypasses_global_load_shed())
-        .map(|route| route.path)
-        .collect::<Vec<_>>();
-
-    assert_eq!(bypass_paths, vec!["/healthz"]);
-}
-
-#[test]
 fn verified_request_classifier_covers_live_execution_modes() {
     let cases = [
-        ("/v1/primary-names/0x01?mode=verified", true),
-        ("/v1/primary-names/0x01", true),
-        ("/v1/primary-names/0x01?mode=declared", true),
-        ("/v1/profiles/names/alice.eth?mode=both", true),
-        ("/v1/profiles/names/alice.eth?mode=%20both%20", true),
-        ("/v1/profiles/names/alice.eth", true),
-        ("/v1/profiles/names/alice.eth?mode=%20%20", false),
-        ("/v1/profiles/names/alice.eth?mode=declared", false),
-        ("/v1/names/ens/alice.eth/records?mode=auto", true),
-        ("/v1/names/ens/alice.eth/records?mode=%20auto%20", true),
-        (
-            "/v1/names/ens/alice.eth/records?mode=auto&include=resolver_address",
-            false,
-        ),
-        (
-            "/v1/names/ens/alice.eth/records?mode=auto&include=known_text_keys",
-            false,
-        ),
-        (
-            "/v1/names/ens/alice.eth/records?mode=auto&include=avatar",
-            true,
-        ),
-        (
-            "/v1/names/ens/alice.eth/records?mode=auto&texts=description",
-            true,
-        ),
-        ("/v1/names/ens/alice.eth/records?mode=declared", false),
         ("/v2/addresses/0x01/primary-name", true),
         ("/v2/addresses/0x01/primary-name?source=", true),
         ("/v2/addresses/0x01/primary-name?source=%20%20", true),
@@ -281,7 +242,6 @@ async fn healthz_remains_ready_while_global_concurrency_is_saturated() {
                     }
                 }),
             )
-            .route("/v1/status", get(|| async { "visible" }))
             .route("/v2/status", get(|| async { "visible" })),
         Router::new().route(
             "/healthz",
@@ -306,17 +266,15 @@ async fn healthz_remains_ready_while_global_concurrency_is_saturated() {
         .expect("health body must read");
     let payload: Value = serde_json::from_slice(&body).expect("health body must be JSON");
     assert_eq!(payload.get("status"), Some(&json!("ready")));
-    for uri in ["/v1/status", "/v2/status"] {
-        let status = app
-            .clone()
-            .oneshot(request(uri))
-            .await
-            .expect("status request must complete");
-        assert_error(status, StatusCode::SERVICE_UNAVAILABLE, "overloaded").await;
-    }
+    let status = app
+        .clone()
+        .oneshot(request("/v2/status"))
+        .await
+        .expect("status request must complete");
+    assert_error(status, StatusCode::SERVICE_UNAVAILABLE, "overloaded").await;
     let unmatched = app
         .clone()
-        .oneshot(request("/v1/not-a-route"))
+        .oneshot(request("/v2/not-a-route"))
         .await
         .expect("unmatched request must complete");
     assert_error(unmatched, StatusCode::SERVICE_UNAVAILABLE, "overloaded").await;
@@ -392,7 +350,7 @@ async fn verified_concurrency_limit_is_separate_from_cheap_requests() {
     let app = apply_request_bounds(
         Router::new()
             .route(
-                "/v1/primary-names/{address}",
+                "/v2/addresses/{address}/primary-name",
                 get({
                     let started = started.clone();
                     let release = release.clone();
@@ -412,12 +370,15 @@ async fn verified_concurrency_limit_is_separate_from_cheap_requests() {
         &config,
     );
 
-    let first = tokio::spawn(app.clone().oneshot(request("/v1/primary-names/0x01")));
+    let first = tokio::spawn(
+        app.clone()
+            .oneshot(request("/v2/addresses/0x01/primary-name")),
+    );
     started.notified().await;
 
     let overloaded = app
         .clone()
-        .oneshot(request("/v1/primary-names/0x02?mode=declared"))
+        .oneshot(request("/v2/addresses/0x02/primary-name?source=verified"))
         .await
         .expect("shed request must complete");
     assert_error(overloaded, StatusCode::SERVICE_UNAVAILABLE, "overloaded").await;
@@ -520,22 +481,17 @@ async fn empty_auto_records_bypass_verified_concurrency_admission() {
         }
     };
     let app = apply_request_bounds(
-        Router::new()
-            .route("/v1/names/{namespace}/{name}/records", get(handler.clone()))
-            .route("/v2/names/{name}/records", get(handler)),
+        Router::new().route("/v2/names/{name}/records", get(handler)),
         Router::new(),
         &config,
     );
 
     let held = tokio::spawn(app.clone().oneshot(request(
-        "/v1/names/ens/alice.eth/records?mode=auto&avatar=true&hold=true",
+        "/v2/names/alice.eth/records?source=auto&keys=avatar&hold=true",
     )));
     started.notified().await;
 
-    for uri in [
-        "/v1/names/ens/alice.eth/records?mode=auto&include=resolver_address",
-        "/v2/names/alice.eth/records?source=auto",
-    ] {
+    for uri in ["/v2/names/alice.eth/records?source=auto"] {
         let response = app
             .clone()
             .oneshot(request(uri))
@@ -568,12 +524,7 @@ async fn empty_auto_records_do_not_consume_verified_rate_limit_tokens() {
     let mut config = test_config();
     config.verified_rate_limit_per_second = 1;
     let app = apply_request_bounds(
-        Router::new()
-            .route(
-                "/v1/names/{namespace}/{name}/records",
-                get(|| async { "ok" }),
-            )
-            .route("/v2/names/{name}/records", get(|| async { "ok" })),
+        Router::new().route("/v2/names/{name}/records", get(|| async { "ok" })),
         Router::new(),
         &config,
     );
@@ -581,16 +532,13 @@ async fn empty_auto_records_do_not_consume_verified_rate_limit_tokens() {
     let first = app
         .clone()
         .oneshot(request(
-            "/v1/names/ens/alice.eth/records?mode=auto&avatar=true",
+            "/v2/names/alice.eth/records?source=auto&keys=avatar",
         ))
         .await
         .expect("first non-empty auto records request must complete");
     assert_eq!(first.status(), StatusCode::OK);
 
-    for uri in [
-        "/v1/names/ens/alice.eth/records?mode=auto&include=resolver_address",
-        "/v2/names/alice.eth/records?source=auto&keys=",
-    ] {
+    for uri in ["/v2/names/alice.eth/records?source=auto&keys="] {
         let response = app
             .clone()
             .oneshot(request(uri))
@@ -618,7 +566,10 @@ async fn enabled_rate_limit_is_per_forwarded_client_ip() {
     config.verified_rate_limit_per_second = 1;
     config.trust_x_forwarded_for = true;
     let app = apply_request_bounds(
-        Router::new().route("/v1/primary-names/{address}", get(|| async { "ok" })),
+        Router::new().route(
+            "/v2/addresses/{address}/primary-name",
+            get(|| async { "ok" }),
+        ),
         Router::new(),
         &config,
     );
@@ -626,7 +577,7 @@ async fn enabled_rate_limit_is_per_forwarded_client_ip() {
     let first = app
         .clone()
         .oneshot(forwarded_request(
-            "/v1/primary-names/0x01?mode=%20verified%20",
+            "/v2/addresses/0x01/primary-name?source=%20verified%20",
             "203.0.113.1",
         ))
         .await
@@ -636,7 +587,7 @@ async fn enabled_rate_limit_is_per_forwarded_client_ip() {
     let limited = app
         .clone()
         .oneshot(forwarded_request(
-            "/v1/primary-names/0x02?mode=verified",
+            "/v2/addresses/0x02/primary-name?source=verified",
             "203.0.113.1",
         ))
         .await
@@ -645,7 +596,7 @@ async fn enabled_rate_limit_is_per_forwarded_client_ip() {
 
     let other_client = app
         .oneshot(forwarded_request(
-            "/v1/primary-names/0x03?mode=verified",
+            "/v2/addresses/0x03/primary-name?source=verified",
             "203.0.113.2",
         ))
         .await

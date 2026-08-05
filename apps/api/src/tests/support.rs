@@ -1,5 +1,4 @@
 use std::{
-    fs,
     str::FromStr,
     sync::{
         Mutex,
@@ -11,14 +10,15 @@ use anyhow::Context;
 use axum::{
     body::{Body, to_bytes},
     http::Request,
+    response::Response,
 };
 use bigname_storage::{
     CanonicalityState, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, ExecutionTraceStep,
     NameSurface, NormalizedEvent, PermissionScope, PermissionsCurrentRow, PrimaryNameClaimStatus,
     PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot, RawBlock, ResolverCurrentRow, Resource,
     SurfaceBinding, SurfaceBindingKind, TokenLineage, default_database_url,
-    load_primary_name_current, upsert_execution_outcome, upsert_execution_trace,
-    insert_normalized_event_fixtures, upsert_primary_name_current_rows,
+    load_primary_name_current, parse_rfc3339_utc_timestamp, upsert_execution_outcome,
+    upsert_execution_trace, upsert_primary_name_current_rows,
     upsert_primary_name_current_snapshots,
 };
 use bigname_test_support::TestDatabaseConfig;
@@ -34,55 +34,6 @@ use tower::ServiceExt;
 
 use super::*;
 
-mod execution {
-    use anyhow::{Context, Result, bail};
-    use bigname_storage::{
-        ExecutionOutcomeInvalidationSummary, VERIFIED_PRIMARY_NAME_REQUEST_TYPE,
-    };
-    use sqlx::{Postgres, Transaction};
-
-    pub async fn invalidate_verified_primary_name_claim_change_in_transaction(
-        transaction: &mut Transaction<'_, Postgres>,
-        namespace: &str,
-        request_key: &str,
-    ) -> Result<ExecutionOutcomeInvalidationSummary> {
-        if namespace.trim().is_empty() {
-            bail!("verified primary-name claim invalidation namespace must not be blank");
-        }
-        if request_key.trim().is_empty() {
-            bail!("verified primary-name claim invalidation request_key must not be blank");
-        }
-        let result = sqlx::query(
-            r#"
-            DELETE FROM execution_cache_outcomes
-            WHERE request_type = $1
-              AND namespace = $2
-              AND request_key = $3
-            "#,
-        )
-        .bind(VERIFIED_PRIMARY_NAME_REQUEST_TYPE)
-        .bind(namespace)
-        .bind(request_key)
-        .execute(&mut **transaction)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to invalidate verified primary-name outcome for namespace {namespace} request_key {request_key}"
-            )
-        })?;
-
-        Ok(ExecutionOutcomeInvalidationSummary {
-            deleted_outcome_count: result.rows_affected(),
-        })
-    }
-}
-
-// The API test build path-includes the worker module, but only exercises the
-// primary-name helpers reachable through API fixtures.
-#[allow(dead_code)]
-#[path = "../../../worker/src/primary_name.rs"]
-mod worker_primary_name;
-
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 static WORKER_CARGO_LOCK: Mutex<()> = Mutex::new(());
 
@@ -92,48 +43,6 @@ struct TestDatabase {
     database_name: String,
 }
 
-struct AuthorityHistorySeed<'a> {
-    event_identity: &'a str,
-    namespace: &'a str,
-    logical_name_id: &'a str,
-    resource_id: Uuid,
-    event_kind: &'a str,
-    block_number: i64,
-    block_hash: &'a str,
-    after_state: Value,
-}
-
-#[derive(Clone, Copy)]
-enum BasenamesControlVectorScenario {
-    NftOnly,
-    ManagementOnly,
-    FullTransfer,
-}
-
-impl BasenamesControlVectorScenario {
-    fn current_token_subject(self) -> &'static str {
-        match self {
-            Self::NftOnly => "0x00000000000000000000000000000000000000c1",
-            Self::ManagementOnly => "0x00000000000000000000000000000000000000a2",
-            Self::FullTransfer => "0x00000000000000000000000000000000000000c3",
-        }
-    }
-
-    fn current_effective_controller(self) -> &'static str {
-        match self {
-            Self::NftOnly => "0x00000000000000000000000000000000000000b1",
-            Self::ManagementOnly => "0x00000000000000000000000000000000000000b2",
-            Self::FullTransfer => "0x00000000000000000000000000000000000000c3",
-        }
-    }
-
-    fn previous_effective_controller(self) -> Option<&'static str> {
-        match self {
-            Self::FullTransfer => Some("0x00000000000000000000000000000000000000b3"),
-            _ => None,
-        }
-    }
-}
 
 impl TestDatabase {
     async fn new(initialize_manifest_schema: bool) -> Result<Self> {
@@ -614,12 +523,14 @@ impl TestDatabase {
             self.pool.clone(),
             self.lookup_pool().await?,
             chain_rpc_urls,
-            bigname_execution::ChainRpcUrls::default(),
         ))
     }
 
     fn app_state(&self) -> AppState {
-        self.app_state_with_chain_rpc_urls(bigname_execution::ChainRpcUrls::default())
+        AppState::new(
+            self.pool.clone(),
+            bigname_lookup::ChainRpcUrls::default(),
+        )
     }
 
     fn database_config(&self, max_connections: u32) -> Result<bigname_storage::DatabaseConfig> {
@@ -633,40 +544,6 @@ impl TestDatabase {
             database_url: Some(options.to_url_lossy().to_string()),
             max_connections,
         })
-    }
-
-    fn app_state_with_chain_rpc_urls(
-        &self,
-        chain_rpc_urls: bigname_execution::ChainRpcUrls,
-    ) -> AppState {
-        AppState::new(self.pool.clone(), chain_rpc_urls)
-    }
-
-    async fn seed_history_binding(
-        &self,
-        logical_name_id: &str,
-        resource_id: Uuid,
-        surface_binding_id: Uuid,
-    ) -> Result<()> {
-        upsert_test_name_surfaces(&self.pool, &[name_surface(logical_name_id)])
-            .await
-            .context("failed to upsert name surface for history API test")?;
-        upsert_test_resources(&self.pool, &[resource(resource_id)])
-            .await
-            .context("failed to upsert resource for history API test")?;
-        upsert_test_surface_bindings(
-            &self.pool,
-            &[surface_binding(
-                surface_binding_id,
-                logical_name_id,
-                resource_id,
-                timestamp(1_700_000_000),
-            )],
-        )
-        .await
-        .context("failed to upsert surface binding for history API test")?;
-
-        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1015,7 +892,7 @@ impl TestDatabase {
         self.seed_default_ens_snapshot_selector_position().await?;
         self.insert_manifest(
             "ens",
-            bigname_execution::ENS_EXECUTION_SOURCE_FAMILY,
+            bigname_lookup::ENS_EXECUTION_SOURCE_FAMILY,
             "ethereum-mainnet",
             "ens_v1",
             1,
@@ -1089,200 +966,6 @@ impl TestDatabase {
             self.seed_snapshot_selector_chain_positions(&row.chain_positions)
                 .await?;
         }
-
-        Ok(())
-    }
-
-    async fn rebuild_address_names_current(&self, address: Option<&str>) -> Result<()> {
-        let database_url = std::env::var("BIGNAME_DATABASE_URL")
-            .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| default_database_url().to_owned());
-        let base_options = PgConnectOptions::from_str(&database_url)
-            .context("failed to parse database URL for API worker address_names rebuild")?;
-        let rebuild_database_url = base_options
-            .database(&self.database_name)
-            .to_url_lossy()
-            .to_string();
-        let address = address.map(str::to_owned);
-        let worker_manifest_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../apps/worker/Cargo.toml");
-
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let _guard = WORKER_CARGO_LOCK
-                .lock()
-                .expect("worker cargo lock must not be poisoned");
-            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-            let mut command = std::process::Command::new(cargo);
-            command
-                .arg("run")
-                .arg("--quiet")
-                .arg("--manifest-path")
-                .arg(worker_manifest_path)
-                .arg("--")
-                .arg("address-names-current")
-                .arg("rebuild")
-                .arg("--database-url")
-                .arg(&rebuild_database_url);
-            if let Some(address) = address.as_deref() {
-                command.arg("--address").arg(address);
-            }
-
-            let output = command.output().with_context(|| {
-                format!(
-                    "failed to invoke worker address_names_current rebuild for {}",
-                    address.as_deref().unwrap_or("all")
-                )
-            })?;
-
-            if !output.status.success() {
-                return Err(anyhow::anyhow!(
-                    "worker address_names_current rebuild failed for {}\nstdout:\n{}\nstderr:\n{}",
-                    address.as_deref().unwrap_or("all"),
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr),
-                ));
-            }
-
-            Ok(())
-        })
-        .await
-        .context("worker address_names_current rebuild task panicked")??;
-
-        Ok(())
-    }
-
-    async fn rebuild_record_inventory_current(&self, resource_id: Uuid) -> Result<()> {
-        let database_url = std::env::var("BIGNAME_DATABASE_URL")
-            .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| default_database_url().to_owned());
-        let base_options = PgConnectOptions::from_str(&database_url)
-            .context("failed to parse database URL for API worker record_inventory rebuild")?;
-        let rebuild_database_url = base_options
-            .database(&self.database_name)
-            .to_url_lossy()
-            .to_string();
-        let resource_id_value = resource_id;
-        let resource_id = resource_id.to_string();
-        let worker_manifest_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../apps/worker/Cargo.toml");
-
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let _guard = WORKER_CARGO_LOCK
-                .lock()
-                .expect("worker cargo lock must not be poisoned");
-            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-            let output = std::process::Command::new(cargo)
-                .arg("run")
-                .arg("--quiet")
-                .arg("--manifest-path")
-                .arg(worker_manifest_path)
-                .arg("--")
-                .arg("record-inventory-current")
-                .arg("rebuild")
-                .arg("--database-url")
-                .arg(&rebuild_database_url)
-                .arg("--resource-id")
-                .arg(&resource_id)
-                .output()
-                .with_context(|| {
-                    format!(
-                        "failed to invoke worker record_inventory_current rebuild for {resource_id}"
-                    )
-                })?;
-
-            if !output.status.success() {
-                return Err(anyhow::anyhow!(
-                    "worker record_inventory_current rebuild failed for {resource_id}\nstdout:\n{}\nstderr:\n{}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr),
-                ));
-            }
-
-            Ok(())
-        })
-        .await
-        .context("worker record_inventory_current rebuild task panicked")??;
-
-        let rows = sqlx::query(
-            r#"
-            SELECT chain_positions
-            FROM record_inventory_current
-            WHERE resource_id = $1
-            "#,
-        )
-        .bind(resource_id_value)
-        .fetch_all(&self.pool)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to load rebuilt record_inventory_current rows for resource_id {resource_id_value}"
-            )
-        })?;
-        for row in rows {
-            let chain_positions = row
-                .try_get::<Value, _>("chain_positions")
-                .context("record_inventory_current row missing chain_positions")?;
-            self.seed_snapshot_selector_chain_positions(&chain_positions)
-                .await?;
-        }
-
-        Ok(())
-    }
-
-    async fn rebuild_permissions_current(&self, resource_id: Option<Uuid>) -> Result<()> {
-        let database_url = std::env::var("BIGNAME_DATABASE_URL")
-            .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| default_database_url().to_owned());
-        let base_options = PgConnectOptions::from_str(&database_url)
-            .context("failed to parse database URL for API worker permissions rebuild")?;
-        let rebuild_database_url = base_options
-            .database(&self.database_name)
-            .to_url_lossy()
-            .to_string();
-        let resource_id = resource_id.map(|value| value.to_string());
-        let worker_manifest_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../apps/worker/Cargo.toml");
-
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let _guard = WORKER_CARGO_LOCK
-                .lock()
-                .expect("worker cargo lock must not be poisoned");
-            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-            let mut command = std::process::Command::new(cargo);
-            command
-                .arg("run")
-                .arg("--quiet")
-                .arg("--manifest-path")
-                .arg(worker_manifest_path)
-                .arg("--")
-                .arg("permissions-current")
-                .arg("rebuild")
-                .arg("--database-url")
-                .arg(&rebuild_database_url);
-            if let Some(resource_id) = resource_id.as_deref() {
-                command.arg("--resource-id").arg(resource_id);
-            }
-
-            let output = command.output().with_context(|| {
-                format!(
-                    "failed to invoke worker permissions_current rebuild for {}",
-                    resource_id.as_deref().unwrap_or("all")
-                )
-            })?;
-
-            if !output.status.success() {
-                return Err(anyhow::anyhow!(
-                    "worker permissions_current rebuild failed for {}\nstdout:\n{}\nstderr:\n{}",
-                    resource_id.as_deref().unwrap_or("all"),
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr),
-                ));
-            }
-
-            Ok(())
-        })
-        .await
-        .context("worker permissions_current rebuild task panicked")??;
 
         Ok(())
     }
@@ -1454,697 +1137,6 @@ impl TestDatabase {
         .context("failed to upsert basenames normalized events for API test")?;
 
         Ok(())
-    }
-
-    async fn seed_basenames_control_vector_rebuild_inputs(
-        &self,
-        logical_name_id: &str,
-        resource_id: Uuid,
-        token_lineage_id: Uuid,
-        surface_binding_id: Uuid,
-        scenario: BasenamesControlVectorScenario,
-    ) -> Result<()> {
-        let normalized_name = logical_name_id
-            .split_once(':')
-            .map(|(_, normalized_name)| normalized_name)
-            .expect("logical_name_id must include namespace");
-
-        bigname_storage::upsert_raw_blocks(
-            &self.pool,
-            &[
-                raw_block("base-mainnet", "0xbase-surface", None, 98, 1_717_181_698),
-                raw_block("base-mainnet", "0xbase-resource", None, 99, 1_717_181_699),
-                raw_block("base-mainnet", "0xbase-binding", None, 100, 1_717_181_700),
-                raw_block("base-mainnet", "0xbase-grant", None, 101, 1_717_181_701),
-                raw_block("base-mainnet", "0xbase-authority", None, 102, 1_717_181_702),
-                raw_block("base-mainnet", "0xbase-token", None, 103, 1_717_181_703),
-                raw_block(
-                    "base-mainnet",
-                    "0xbase-authority-final",
-                    None,
-                    104,
-                    1_717_181_704,
-                ),
-                raw_block("base-mainnet", "0xbase-resolver", None, 105, 1_717_181_705),
-            ],
-        )
-        .await
-        .context("failed to upsert raw blocks for Basenames control-vector API test")?;
-        upsert_test_name_surfaces(
-            &self.pool,
-            &[NameSurface {
-                logical_name_id: logical_name_id.to_owned(),
-                namespace: "basenames".to_owned(),
-                input_name: normalized_name.to_owned(),
-                canonical_display_name: normalized_name.to_owned(),
-                normalized_name: normalized_name.to_owned(),
-                dns_encoded_name: normalized_name.as_bytes().to_vec(),
-                namehash: format!("namehash:{normalized_name}"),
-                labelhashes: vec![format!("labelhash:{normalized_name}")],
-                normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
-                normalization_warnings: json!([]),
-                normalization_errors: json!([]),
-                chain_id: "base-mainnet".to_owned(),
-                block_hash: "0xbase-surface".to_owned(),
-                block_number: 98,
-                provenance: json!({"seed": "basenames_control_vector_surface"}),
-                canonicality_state: CanonicalityState::Canonical,
-            }],
-        )
-        .await
-        .context("failed to upsert Basenames control-vector surface for API test")?;
-        upsert_test_token_lineages(
-            &self.pool,
-            &[TokenLineage {
-                token_lineage_id,
-                chain_id: "base-mainnet".to_owned(),
-                block_hash: "0xbase-resource".to_owned(),
-                block_number: 99,
-                provenance: json!({"seed": "basenames_control_vector_token_lineage"}),
-                canonicality_state: CanonicalityState::Canonical,
-            }],
-        )
-        .await
-        .context("failed to upsert Basenames control-vector token lineage for API test")?;
-        upsert_test_resources(
-            &self.pool,
-            &[Resource {
-                resource_id,
-                token_lineage_id: Some(token_lineage_id),
-                chain_id: "base-mainnet".to_owned(),
-                block_hash: "0xbase-resource".to_owned(),
-                block_number: 99,
-                provenance: json!({"seed": "basenames_control_vector_resource"}),
-                canonicality_state: CanonicalityState::Canonical,
-            }],
-        )
-        .await
-        .context("failed to upsert Basenames control-vector resource for API test")?;
-        upsert_test_surface_bindings(
-            &self.pool,
-            &[SurfaceBinding {
-                surface_binding_id,
-                logical_name_id: logical_name_id.to_owned(),
-                resource_id,
-                binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
-                active_from: timestamp(1_717_181_700),
-                active_to: None,
-                chain_id: "base-mainnet".to_owned(),
-                block_hash: "0xbase-binding".to_owned(),
-                block_number: 100,
-                provenance: json!({"seed": "basenames_control_vector_binding"}),
-                canonicality_state: CanonicalityState::Canonical,
-            }],
-        )
-        .await
-        .context("failed to upsert Basenames control-vector surface binding for API test")?;
-
-        let mut events = vec![NormalizedEvent {
-            event_identity: format!("api-test:{logical_name_id}:grant"),
-            namespace: "basenames".to_owned(),
-            logical_name_id: Some(logical_name_id.to_owned()),
-            resource_id: Some(resource_id),
-            event_kind: "RegistrationGranted".to_owned(),
-            source_family: "basenames_base_registrar".to_owned(),
-            manifest_version: 3,
-            source_manifest_id: None,
-            chain_id: Some("base-mainnet".to_owned()),
-            block_number: Some(101),
-            block_hash: Some("0xbase-grant".to_owned()),
-            transaction_hash: Some(format!("0xtx:{logical_name_id}:grant")),
-            log_index: Some(0),
-            raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("api-test:{logical_name_id}:grant")}),
-            derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-            canonicality_state: CanonicalityState::Canonical,
-            before_state: json!({}),
-            after_state: json!({
-                "authority_kind": "registrar",
-                "authority_key": format!("registrar:base-mainnet:{normalized_name}"),
-                "registrant": match scenario {
-                    BasenamesControlVectorScenario::NftOnly => "0x00000000000000000000000000000000000000a1",
-                    BasenamesControlVectorScenario::ManagementOnly => "0x00000000000000000000000000000000000000a2",
-                    BasenamesControlVectorScenario::FullTransfer => "0x00000000000000000000000000000000000000a3",
-                },
-                "expiry": 1_900_000_000_i64,
-            }),
-        }];
-
-        match scenario {
-            BasenamesControlVectorScenario::NftOnly => {
-                events.push(NormalizedEvent {
-                    event_identity: format!("api-test:{logical_name_id}:authority"),
-                    namespace: "basenames".to_owned(),
-                    logical_name_id: Some(logical_name_id.to_owned()),
-                    resource_id: Some(resource_id),
-                    event_kind: "AuthorityTransferred".to_owned(),
-                    source_family: "basenames_base_registry".to_owned(),
-                    manifest_version: 3,
-                    source_manifest_id: None,
-                    chain_id: Some("base-mainnet".to_owned()),
-                    block_number: Some(102),
-                    block_hash: Some("0xbase-authority".to_owned()),
-                    transaction_hash: Some(format!("0xtx:{logical_name_id}:authority")),
-                    log_index: Some(0),
-                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("api-test:{logical_name_id}:authority")}),
-                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                    canonicality_state: CanonicalityState::Canonical,
-                    before_state: json!({
-                        "owner": "0x00000000000000000000000000000000000000a1",
-                    }),
-                    after_state: json!({
-                        "owner": "0x00000000000000000000000000000000000000b1",
-                    }),
-                });
-                events.push(NormalizedEvent {
-                    event_identity: format!("api-test:{logical_name_id}:token"),
-                    namespace: "basenames".to_owned(),
-                    logical_name_id: Some(logical_name_id.to_owned()),
-                    resource_id: Some(resource_id),
-                    event_kind: "TokenControlTransferred".to_owned(),
-                    source_family: "basenames_base_registrar".to_owned(),
-                    manifest_version: 3,
-                    source_manifest_id: None,
-                    chain_id: Some("base-mainnet".to_owned()),
-                    block_number: Some(103),
-                    block_hash: Some("0xbase-token".to_owned()),
-                    transaction_hash: Some(format!("0xtx:{logical_name_id}:token")),
-                    log_index: Some(0),
-                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("api-test:{logical_name_id}:token")}),
-                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                    canonicality_state: CanonicalityState::Canonical,
-                    before_state: json!({
-                        "from": "0x00000000000000000000000000000000000000a1",
-                    }),
-                    after_state: json!({
-                        "to": "0x00000000000000000000000000000000000000c1",
-                    }),
-                });
-            }
-            BasenamesControlVectorScenario::ManagementOnly => {
-                events.push(NormalizedEvent {
-                    event_identity: format!("api-test:{logical_name_id}:authority"),
-                    namespace: "basenames".to_owned(),
-                    logical_name_id: Some(logical_name_id.to_owned()),
-                    resource_id: Some(resource_id),
-                    event_kind: "AuthorityTransferred".to_owned(),
-                    source_family: "basenames_base_registry".to_owned(),
-                    manifest_version: 3,
-                    source_manifest_id: None,
-                    chain_id: Some("base-mainnet".to_owned()),
-                    block_number: Some(102),
-                    block_hash: Some("0xbase-authority".to_owned()),
-                    transaction_hash: Some(format!("0xtx:{logical_name_id}:authority")),
-                    log_index: Some(0),
-                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("api-test:{logical_name_id}:authority")}),
-                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                    canonicality_state: CanonicalityState::Canonical,
-                    before_state: json!({
-                        "owner": "0x00000000000000000000000000000000000000a2",
-                    }),
-                    after_state: json!({
-                        "owner": "0x00000000000000000000000000000000000000b2",
-                    }),
-                });
-            }
-            BasenamesControlVectorScenario::FullTransfer => {
-                events.push(NormalizedEvent {
-                    event_identity: format!("api-test:{logical_name_id}:authority"),
-                    namespace: "basenames".to_owned(),
-                    logical_name_id: Some(logical_name_id.to_owned()),
-                    resource_id: Some(resource_id),
-                    event_kind: "AuthorityTransferred".to_owned(),
-                    source_family: "basenames_base_registry".to_owned(),
-                    manifest_version: 3,
-                    source_manifest_id: None,
-                    chain_id: Some("base-mainnet".to_owned()),
-                    block_number: Some(102),
-                    block_hash: Some("0xbase-authority".to_owned()),
-                    transaction_hash: Some(format!("0xtx:{logical_name_id}:authority")),
-                    log_index: Some(0),
-                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("api-test:{logical_name_id}:authority")}),
-                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                    canonicality_state: CanonicalityState::Canonical,
-                    before_state: json!({
-                        "owner": "0x00000000000000000000000000000000000000a3",
-                    }),
-                    after_state: json!({
-                        "owner": "0x00000000000000000000000000000000000000b3",
-                    }),
-                });
-                events.push(NormalizedEvent {
-                    event_identity: format!("api-test:{logical_name_id}:token"),
-                    namespace: "basenames".to_owned(),
-                    logical_name_id: Some(logical_name_id.to_owned()),
-                    resource_id: Some(resource_id),
-                    event_kind: "TokenControlTransferred".to_owned(),
-                    source_family: "basenames_base_registrar".to_owned(),
-                    manifest_version: 3,
-                    source_manifest_id: None,
-                    chain_id: Some("base-mainnet".to_owned()),
-                    block_number: Some(103),
-                    block_hash: Some("0xbase-token".to_owned()),
-                    transaction_hash: Some(format!("0xtx:{logical_name_id}:token")),
-                    log_index: Some(0),
-                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("api-test:{logical_name_id}:token")}),
-                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                    canonicality_state: CanonicalityState::Canonical,
-                    before_state: json!({
-                        "from": "0x00000000000000000000000000000000000000a3",
-                    }),
-                    after_state: json!({
-                        "to": "0x00000000000000000000000000000000000000c3",
-                    }),
-                });
-                events.push(NormalizedEvent {
-                    event_identity: format!("api-test:{logical_name_id}:authority-final"),
-                    namespace: "basenames".to_owned(),
-                    logical_name_id: Some(logical_name_id.to_owned()),
-                    resource_id: Some(resource_id),
-                    event_kind: "AuthorityTransferred".to_owned(),
-                    source_family: "basenames_base_registry".to_owned(),
-                    manifest_version: 3,
-                    source_manifest_id: None,
-                    chain_id: Some("base-mainnet".to_owned()),
-                    block_number: Some(104),
-                    block_hash: Some("0xbase-authority-final".to_owned()),
-                    transaction_hash: Some(format!("0xtx:{logical_name_id}:authority-final")),
-                    log_index: Some(0),
-                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("api-test:{logical_name_id}:authority-final")}),
-                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                    canonicality_state: CanonicalityState::Canonical,
-                    before_state: json!({
-                        "owner": "0x00000000000000000000000000000000000000b3",
-                    }),
-                    after_state: json!({
-                        "owner": "0x00000000000000000000000000000000000000c3",
-                    }),
-                });
-            }
-        }
-
-        events.push(NormalizedEvent {
-            event_identity: format!("api-test:{logical_name_id}:resolver"),
-            namespace: "basenames".to_owned(),
-            logical_name_id: Some(logical_name_id.to_owned()),
-            resource_id: Some(resource_id),
-            event_kind: "ResolverChanged".to_owned(),
-            source_family: "basenames_base_resolver".to_owned(),
-            manifest_version: 4,
-            source_manifest_id: None,
-            chain_id: Some("base-mainnet".to_owned()),
-            block_number: Some(105),
-            block_hash: Some("0xbase-resolver".to_owned()),
-            transaction_hash: Some(format!("0xtx:{logical_name_id}:resolver")),
-            log_index: Some(0),
-            raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("api-test:{logical_name_id}:resolver")}),
-            derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-            canonicality_state: CanonicalityState::Canonical,
-            before_state: json!({}),
-            after_state: json!({
-                "resolver": "0x0000000000000000000000000000000000000abc",
-                "namehash": format!("namehash:{normalized_name}"),
-            }),
-        });
-
-        bigname_storage::insert_normalized_event_fixtures(&self.pool, &events)
-            .await
-            .context("failed to upsert Basenames control-vector normalized events for API test")?;
-
-        Ok(())
-    }
-
-    async fn seed_ensv2_address_names_rebuild_inputs(
-        &self,
-        logical_name_id: &str,
-        resource_id: Uuid,
-        token_lineage_id: Uuid,
-        surface_binding_id: Uuid,
-        registrant: &str,
-        controller: &str,
-    ) -> Result<()> {
-        let normalized_name = logical_name_id
-            .split_once(':')
-            .map(|(_, normalized_name)| normalized_name)
-            .expect("logical_name_id must include namespace");
-
-        bigname_storage::upsert_raw_blocks(
-            &self.pool,
-            &[
-                raw_block(
-                    "ethereum-sepolia",
-                    "0xensv2-surface",
-                    None,
-                    201,
-                    1_717_182_201,
-                ),
-                raw_block(
-                    "ethereum-sepolia",
-                    "0xensv2-resource",
-                    None,
-                    202,
-                    1_717_182_202,
-                ),
-                raw_block(
-                    "ethereum-sepolia",
-                    "0xensv2-binding",
-                    None,
-                    203,
-                    1_717_182_203,
-                ),
-                raw_block(
-                    "ethereum-sepolia",
-                    "0xensv2-grant",
-                    None,
-                    204,
-                    1_717_182_204,
-                ),
-                raw_block(
-                    "ethereum-sepolia",
-                    "0xensv2-authority",
-                    None,
-                    205,
-                    1_717_182_205,
-                ),
-                raw_block(
-                    "ethereum-sepolia",
-                    "0xensv2-regen",
-                    None,
-                    206,
-                    1_717_182_206,
-                ),
-            ],
-        )
-        .await
-        .context("failed to upsert raw blocks for ENSv2 address-name API test")?;
-        upsert_test_name_surfaces(
-            &self.pool,
-            &[NameSurface {
-                logical_name_id: logical_name_id.to_owned(),
-                namespace: "ens".to_owned(),
-                input_name: normalized_name.to_owned(),
-                canonical_display_name: normalized_name.to_owned(),
-                normalized_name: normalized_name.to_owned(),
-                dns_encoded_name: normalized_name.as_bytes().to_vec(),
-                namehash: format!("namehash:{normalized_name}"),
-                labelhashes: vec![format!("labelhash:{normalized_name}")],
-                normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
-                normalization_warnings: json!([]),
-                normalization_errors: json!([]),
-                chain_id: "ethereum-sepolia".to_owned(),
-                block_hash: "0xensv2-surface".to_owned(),
-                block_number: 201,
-                provenance: json!({"seed": "ensv2_address_names_surface"}),
-                canonicality_state: CanonicalityState::Finalized,
-            }],
-        )
-        .await
-        .context("failed to upsert ENSv2 address-name surface for API test")?;
-        upsert_test_token_lineages(
-            &self.pool,
-            &[TokenLineage {
-                token_lineage_id,
-                chain_id: "ethereum-sepolia".to_owned(),
-                block_hash: "0xensv2-resource".to_owned(),
-                block_number: 202,
-                provenance: json!({"seed": "ensv2_address_names_token_lineage"}),
-                canonicality_state: CanonicalityState::Finalized,
-            }],
-        )
-        .await
-        .context("failed to upsert ENSv2 address-name token lineage for API test")?;
-        upsert_test_resources(
-            &self.pool,
-            &[Resource {
-                resource_id,
-                token_lineage_id: Some(token_lineage_id),
-                chain_id: "ethereum-sepolia".to_owned(),
-                block_hash: "0xensv2-resource".to_owned(),
-                block_number: 202,
-                provenance: json!({
-                    "seed": "ensv2_address_names_resource",
-                    "upstream_resource": "0x0000000000000000000000000000000000000000000000000000000000000eac",
-                }),
-                canonicality_state: CanonicalityState::Finalized,
-            }],
-        )
-        .await
-        .context("failed to upsert ENSv2 address-name resource for API test")?;
-        upsert_test_surface_bindings(
-            &self.pool,
-            &[SurfaceBinding {
-                surface_binding_id,
-                logical_name_id: logical_name_id.to_owned(),
-                resource_id,
-                binding_kind: SurfaceBindingKind::LinkedSubregistryPath,
-                active_from: timestamp(1_717_182_203),
-                active_to: None,
-                chain_id: "ethereum-sepolia".to_owned(),
-                block_hash: "0xensv2-binding".to_owned(),
-                block_number: 203,
-                provenance: json!({
-                    "seed": "ensv2_address_names_binding",
-                    "binding_kind": "linked_subregistry_path",
-                }),
-                canonicality_state: CanonicalityState::Finalized,
-            }],
-        )
-        .await
-        .context("failed to upsert ENSv2 address-name surface binding for API test")?;
-        bigname_storage::insert_normalized_event_fixtures(
-            &self.pool,
-            &[
-                NormalizedEvent {
-                    event_identity: format!("api-test:{logical_name_id}:ensv2-grant"),
-                    namespace: "ens".to_owned(),
-                    logical_name_id: Some(logical_name_id.to_owned()),
-                    resource_id: Some(resource_id),
-                    event_kind: "RegistrationGranted".to_owned(),
-                    source_family: "ens_v2_registry_l1".to_owned(),
-                    manifest_version: 11,
-                    source_manifest_id: None,
-                    chain_id: Some("ethereum-sepolia".to_owned()),
-                    block_number: Some(204),
-                    block_hash: Some("0xensv2-grant".to_owned()),
-                    transaction_hash: Some(format!("0xtx:{logical_name_id}:ensv2-grant")),
-                    log_index: Some(0),
-                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("api-test:{logical_name_id}:ensv2-grant")}),
-                    derivation_kind: "ens_v2_registry_resource_surface".to_owned(),
-                    canonicality_state: CanonicalityState::Finalized,
-                    before_state: json!({}),
-                    after_state: json!({
-                        "authority_kind": "ens_v2_registry",
-                        "authority_key": format!("ens-v2-registry:ethereum-sepolia:{normalized_name}:0xeac"),
-                        "registrant": registrant,
-                        "expiry": 1_900_000_000_i64,
-                        "upstream_resource": "0x0000000000000000000000000000000000000000000000000000000000000eac",
-                        "status": "registered",
-                    }),
-                },
-                NormalizedEvent {
-                    event_identity: format!("api-test:{logical_name_id}:ensv2-authority"),
-                    namespace: "ens".to_owned(),
-                    logical_name_id: Some(logical_name_id.to_owned()),
-                    resource_id: Some(resource_id),
-                    event_kind: "AuthorityTransferred".to_owned(),
-                    source_family: "ens_v2_registry_l1".to_owned(),
-                    manifest_version: 11,
-                    source_manifest_id: None,
-                    chain_id: Some("ethereum-sepolia".to_owned()),
-                    block_number: Some(205),
-                    block_hash: Some("0xensv2-authority".to_owned()),
-                    transaction_hash: Some(format!("0xtx:{logical_name_id}:ensv2-authority")),
-                    log_index: Some(0),
-                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("api-test:{logical_name_id}:ensv2-authority")}),
-                    derivation_kind: "ens_v2_registry_resource_surface".to_owned(),
-                    canonicality_state: CanonicalityState::Finalized,
-                    before_state: json!({
-                        "owner": registrant,
-                    }),
-                    after_state: json!({
-                        "owner": controller,
-                        "upstream_resource": "0x0000000000000000000000000000000000000000000000000000000000000eac",
-                    }),
-                },
-                NormalizedEvent {
-                    event_identity: format!("api-test:{logical_name_id}:ensv2-regen"),
-                    namespace: "ens".to_owned(),
-                    logical_name_id: Some(logical_name_id.to_owned()),
-                    resource_id: Some(resource_id),
-                    event_kind: "TokenRegenerated".to_owned(),
-                    source_family: "ens_v2_registry_l1".to_owned(),
-                    manifest_version: 11,
-                    source_manifest_id: None,
-                    chain_id: Some("ethereum-sepolia".to_owned()),
-                    block_number: Some(206),
-                    block_hash: Some("0xensv2-regen".to_owned()),
-                    transaction_hash: Some(format!("0xtx:{logical_name_id}:ensv2-regen")),
-                    log_index: Some(0),
-                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": format!("api-test:{logical_name_id}:ensv2-regen")}),
-                    derivation_kind: "ens_v2_registry_resource_surface".to_owned(),
-                    canonicality_state: CanonicalityState::Finalized,
-                    before_state: json!({
-                        "token_id": "0x01",
-                    }),
-                    after_state: json!({
-                        "old_token_id": "0x01",
-                        "new_token_id": "0x02",
-                        "resource_id": resource_id.to_string(),
-                    }),
-                },
-            ],
-        )
-        .await
-        .context("failed to upsert ENSv2 address-name normalized events for API test")?;
-
-        Ok(())
-    }
-
-    async fn seed_basenames_resolution_rebuild_inputs(
-        &self,
-        logical_name_id: &str,
-        resource_id: Uuid,
-        token_lineage_id: Uuid,
-        surface_binding_id: Uuid,
-    ) -> Result<()> {
-        self.seed_basenames_exact_name_rebuild_inputs(
-            logical_name_id,
-            resource_id,
-            token_lineage_id,
-            surface_binding_id,
-        )
-        .await?;
-
-        bigname_storage::insert_normalized_event_fixtures(
-            &self.pool,
-            &[
-                NormalizedEvent {
-                    event_identity: "api-test:basenames:record-version".to_owned(),
-                    namespace: "basenames".to_owned(),
-                    logical_name_id: Some(logical_name_id.to_owned()),
-                    resource_id: Some(resource_id),
-                    event_kind: "RecordVersionChanged".to_owned(),
-                    source_family: "basenames_base_resolver".to_owned(),
-                    manifest_version: 4,
-                    source_manifest_id: None,
-                    chain_id: Some("base-mainnet".to_owned()),
-                    block_number: Some(103),
-                    block_hash: Some("0xbase-resolver".to_owned()),
-                    transaction_hash: Some("0xtxbaseresolver".to_owned()),
-                    log_index: Some(1),
-                    raw_fact_ref: json!({
-                        "kind": "raw_log",
-                        "event_identity": "api-test:basenames:record-version",
-                        "emitting_address": "0x0000000000000000000000000000000000000abc",
-                    }),
-                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                    canonicality_state: CanonicalityState::Canonical,
-                    before_state: json!({
-                        "record_version": 6,
-                    }),
-                    after_state: json!({
-                        "record_version": 7,
-                    }),
-                },
-                NormalizedEvent {
-                    event_identity: "api-test:basenames:addr".to_owned(),
-                    namespace: "basenames".to_owned(),
-                    logical_name_id: Some(logical_name_id.to_owned()),
-                    resource_id: Some(resource_id),
-                    event_kind: "RecordChanged".to_owned(),
-                    source_family: "basenames_base_resolver".to_owned(),
-                    manifest_version: 4,
-                    source_manifest_id: None,
-                    chain_id: Some("base-mainnet".to_owned()),
-                    block_number: Some(103),
-                    block_hash: Some("0xbase-resolver".to_owned()),
-                    transaction_hash: Some("0xtxbaseresolver".to_owned()),
-                    log_index: Some(2),
-                    raw_fact_ref: json!({
-                        "kind": "raw_log",
-                        "event_identity": "api-test:basenames:addr",
-                        "emitting_address": "0x0000000000000000000000000000000000000abc",
-                    }),
-                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                    canonicality_state: CanonicalityState::Canonical,
-                    before_state: json!({}),
-                    after_state: json!({
-                        "record_key": "addr:60",
-                        "record_family": "addr",
-                        "selector_key": "60",
-                    }),
-                },
-                NormalizedEvent {
-                    event_identity: "api-test:basenames:text".to_owned(),
-                    namespace: "basenames".to_owned(),
-                    logical_name_id: Some(logical_name_id.to_owned()),
-                    resource_id: Some(resource_id),
-                    event_kind: "RecordChanged".to_owned(),
-                    source_family: "basenames_base_resolver".to_owned(),
-                    manifest_version: 4,
-                    source_manifest_id: None,
-                    chain_id: Some("base-mainnet".to_owned()),
-                    block_number: Some(103),
-                    block_hash: Some("0xbase-resolver".to_owned()),
-                    transaction_hash: Some("0xtxbaseresolver".to_owned()),
-                    log_index: Some(3),
-                    raw_fact_ref: json!({
-                        "kind": "raw_log",
-                        "event_identity": "api-test:basenames:text",
-                        "emitting_address": "0x0000000000000000000000000000000000000abc",
-                    }),
-                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                    canonicality_state: CanonicalityState::Canonical,
-                    before_state: json!({}),
-                    after_state: json!({
-                        "record_key": "text",
-                        "record_family": "text",
-                        "selector_key": null,
-                    }),
-                },
-            ],
-        )
-        .await
-        .context("failed to upsert basenames resolution events for API test")?;
-
-        Ok(())
-    }
-
-    async fn create_primary_names_current_table(&self) -> Result<()> {
-        sqlx::query(
-            r#"
-                CREATE TABLE primary_names_current (
-                    address TEXT NOT NULL,
-                    namespace TEXT NOT NULL,
-                    coin_type TEXT NOT NULL,
-                    claim_status TEXT NOT NULL,
-                    raw_claim_name TEXT,
-                    normalized_claim_name TEXT,
-                    claim_name_is_normalized BOOLEAN NOT NULL DEFAULT FALSE,
-                    claim_provenance JSONB NOT NULL DEFAULT '{}'::jsonb,
-                    PRIMARY KEY (address, namespace, coin_type)
-                )
-                "#,
-        )
-        .execute(&self.pool)
-        .await
-        .context("failed to create primary_names_current for API tests")?;
-        Ok(())
-    }
-
-    async fn insert_primary_name_current_row(
-        &self,
-        address: &str,
-        namespace: &str,
-        coin_type: &str,
-    ) -> Result<()> {
-        self.insert_primary_name_current_claim_row(
-            address,
-            namespace,
-            coin_type,
-            PrimaryNameClaimStatus::Unsupported,
-            None,
-        )
-        .await
     }
 
     async fn insert_primary_name_current_claim_row(
@@ -2715,70 +1707,6 @@ async fn read_json<T: DeserializeOwned>(response: Response) -> Result<T> {
     serde_json::from_slice(&bytes).context("failed to decode API response JSON")
 }
 
-fn encode_query_value(value: &str) -> String {
-    let mut encoded = String::new();
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(char::from(byte))
-            }
-            _ => {
-                std::fmt::Write::write_fmt(&mut encoded, format_args!("%{byte:02X}"))
-                    .expect("writing to a String cannot fail");
-            }
-        }
-    }
-    encoded
-}
-
-async fn assert_public_invalid_input_response(
-    response: Response,
-    expected_message_fragment: &str,
-) -> Result<()> {
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-    let payload: ErrorResponse = read_json(response).await?;
-    assert_eq!(payload.error.code, "invalid_input");
-    assert!(
-        payload.error.message.contains(expected_message_fragment),
-        "expected invalid_input message to contain {expected_message_fragment:?}, got {:?}",
-        payload.error.message
-    );
-    assert!(payload.error.details.is_empty());
-    Ok(())
-}
-
-fn rewrite_cursor(cursor: &str, rewrite: impl FnOnce(&mut CursorEnvelope)) -> String {
-    let decoded = decode_hex(cursor).expect("pagination cursor must be valid hex");
-    let mut envelope: CursorEnvelope =
-        serde_json::from_slice(&decoded).expect("pagination cursor must decode as JSON");
-    rewrite(&mut envelope);
-    encode_cursor(&envelope)
-}
-
-async fn assert_invalid_cursor_request(state: AppState, uri: impl Into<String>) -> Result<()> {
-    let uri = uri.into();
-    let response = app_router(state)
-        .oneshot(
-            Request::builder()
-                .uri(uri.as_str())
-                .body(Body::empty())
-                .expect("request must build"),
-        )
-        .await
-        .with_context(|| format!("invalid cursor request failed for {uri}"))?;
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let payload: ErrorResponse = read_json(response).await?;
-    assert_eq!(payload.error.code, "invalid_input");
-    assert_eq!(
-        payload.error.message,
-        "cursor must be a valid pagination cursor"
-    );
-    assert!(payload.error.details.is_empty());
-    Ok(())
-}
-
 fn timestamp(seconds: i64) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(seconds).expect("test timestamp must be valid")
 }
@@ -2899,238 +1827,6 @@ async fn upsert_test_surface_bindings(
     )
     .await?;
     bigname_storage::upsert_surface_bindings(pool, bindings).await
-}
-
-fn primary_name_reverse_changed_event(
-    event_identity: &str,
-    address: &str,
-    coin_type: &str,
-    block_number: i64,
-    log_index: i64,
-    canonicality_state: CanonicalityState,
-) -> NormalizedEvent {
-    let normalized_address = address.to_ascii_lowercase();
-    let reverse_label = normalized_address.trim_start_matches("0x").to_owned();
-
-    NormalizedEvent {
-        event_identity: event_identity.to_owned(),
-        namespace: "ens".to_owned(),
-        logical_name_id: None,
-        resource_id: None,
-        event_kind: "ReverseChanged".to_owned(),
-        source_family: "ens_v1_reverse_l1".to_owned(),
-        manifest_version: 1,
-        source_manifest_id: None,
-        chain_id: Some("ethereum-mainnet".to_owned()),
-        block_number: Some(block_number),
-        block_hash: Some(format!("0xblock{block_number:064x}")),
-        transaction_hash: Some(format!("0xtx{block_number:064x}")),
-        log_index: Some(log_index),
-        raw_fact_ref: json!({
-            "kind": "raw_log",
-            "chain_id": "ethereum-mainnet",
-            "block_number": block_number,
-            "log_index": log_index,
-        }),
-        derivation_kind: "ens_v1_reverse_claim".to_owned(),
-        canonicality_state,
-        before_state: json!({}),
-        after_state: json!({
-            "source_event": "ReverseClaimed",
-            "address": normalized_address,
-            "coin_type": coin_type,
-            "namespace": "ens",
-            "reverse_namespace": "ens",
-            "reverse_label": reverse_label,
-            "reverse_name": format!("{reverse_label}.addr.reverse"),
-            "reverse_node": format!("0x{block_number:064x}"),
-            "claim_provenance": {
-                "source_family": "ens_v1_reverse_l1",
-                "contract_role": "reverse_registrar",
-                "contract_instance_id": format!("00000000-0000-0000-0000-{block_number:012x}"),
-                "emitting_address": "0x00000000000000000000000000000000000000ad",
-            },
-        }),
-    }
-}
-
-fn primary_name_reverse_linked_name_event(
-    event_identity: &str,
-    address: &str,
-    coin_type: &str,
-    raw_name: Option<&str>,
-    block_number: i64,
-    log_index: i64,
-    canonicality_state: CanonicalityState,
-) -> NormalizedEvent {
-    let normalized_address = address.to_ascii_lowercase();
-    let reverse_label = normalized_address.trim_start_matches("0x").to_owned();
-    let mut after_state = serde_json::Map::from_iter([
-        ("record_key".to_owned(), json!("name")),
-        ("record_family".to_owned(), json!("name")),
-        ("selector_key".to_owned(), Value::Null),
-        (
-            "primary_claim_source".to_owned(),
-            json!({
-                "address": normalized_address,
-                "namespace": "ens",
-                "coin_type": coin_type,
-                "reverse_name": format!("{reverse_label}.addr.reverse"),
-                "reverse_node": format!("0x{block_number:064x}"),
-                "claim_provenance": {
-                    "source_family": "ens_v1_reverse_l1",
-                    "contract_role": "reverse_registrar",
-                    "contract_instance_id": format!("00000000-0000-0000-0000-{block_number:012x}"),
-                    "emitting_address": "0x00000000000000000000000000000000000000ad",
-                },
-            }),
-        ),
-    ]);
-    if let Some(raw_name) = raw_name {
-        after_state.insert("raw_name".to_owned(), json!(raw_name));
-    }
-
-    NormalizedEvent {
-        event_identity: event_identity.to_owned(),
-        namespace: "ens".to_owned(),
-        logical_name_id: None,
-        resource_id: None,
-        event_kind: "RecordChanged".to_owned(),
-        source_family: "ens_v1_unwrapped_authority".to_owned(),
-        manifest_version: 1,
-        source_manifest_id: None,
-        chain_id: Some("ethereum-mainnet".to_owned()),
-        block_number: Some(block_number),
-        block_hash: Some(format!("0xclaimblock{block_number:064x}")),
-        transaction_hash: Some(format!("0xclaimtx{block_number:064x}")),
-        log_index: Some(log_index),
-        raw_fact_ref: json!({
-            "kind": "raw_log",
-            "chain_id": "ethereum-mainnet",
-            "block_number": block_number,
-            "log_index": log_index,
-        }),
-        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-        canonicality_state,
-        before_state: json!({}),
-        after_state: Value::Object(after_state),
-    }
-}
-
-fn basenames_primary_name_reverse_changed_event(
-    event_identity: &str,
-    address: &str,
-    coin_type: &str,
-    block_number: i64,
-    log_index: i64,
-    canonicality_state: CanonicalityState,
-) -> NormalizedEvent {
-    let normalized_address = address.to_ascii_lowercase();
-    let reverse_label = normalized_address.trim_start_matches("0x").to_owned();
-
-    NormalizedEvent {
-        event_identity: event_identity.to_owned(),
-        namespace: "basenames".to_owned(),
-        logical_name_id: None,
-        resource_id: None,
-        event_kind: "ReverseChanged".to_owned(),
-        source_family: "basenames_base_primary".to_owned(),
-        manifest_version: 1,
-        source_manifest_id: None,
-        chain_id: Some("base-mainnet".to_owned()),
-        block_number: Some(block_number),
-        block_hash: Some(format!("0xbaseblock{block_number:064x}")),
-        transaction_hash: Some(format!("0xbasetx{block_number:064x}")),
-        log_index: Some(log_index),
-        raw_fact_ref: json!({
-            "kind": "raw_log",
-            "chain_id": "base-mainnet",
-            "block_number": block_number,
-            "log_index": log_index,
-        }),
-        derivation_kind: "ens_v1_reverse_claim".to_owned(),
-        canonicality_state,
-        before_state: json!({}),
-        after_state: json!({
-            "source_event": "NameForAddrChanged",
-            "address": normalized_address,
-            "coin_type": coin_type,
-            "namespace": "basenames",
-            "reverse_namespace": "basenames",
-            "reverse_label": reverse_label,
-            "reverse_name": format!("{reverse_label}.80002105.reverse"),
-            "reverse_node": format!("0x{block_number:064x}"),
-            "claim_provenance": {
-                "source_family": "basenames_base_primary",
-                "contract_role": "reverse_registrar",
-                "contract_instance_id": format!("00000000-0000-0000-0000-{block_number:012x}"),
-                "emitting_address": "0x00000000000000000000000000000000000000ad",
-            },
-        }),
-    }
-}
-
-fn basenames_primary_name_reverse_linked_name_event(
-    event_identity: &str,
-    address: &str,
-    coin_type: &str,
-    raw_name: Option<&str>,
-    block_number: i64,
-    log_index: i64,
-    canonicality_state: CanonicalityState,
-) -> NormalizedEvent {
-    let normalized_address = address.to_ascii_lowercase();
-    let reverse_label = normalized_address.trim_start_matches("0x").to_owned();
-    let mut after_state = serde_json::Map::from_iter([
-        ("record_key".to_owned(), json!("name")),
-        ("record_family".to_owned(), json!("name")),
-        ("selector_key".to_owned(), Value::Null),
-        (
-            "primary_claim_source".to_owned(),
-            json!({
-                "address": normalized_address,
-                "namespace": "basenames",
-                "coin_type": coin_type,
-                "reverse_name": format!("{reverse_label}.80002105.reverse"),
-                "reverse_node": format!("0x{block_number:064x}"),
-                "claim_provenance": {
-                    "source_family": "basenames_base_primary",
-                    "contract_role": "reverse_registrar",
-                    "contract_instance_id": format!("00000000-0000-0000-0000-{block_number:012x}"),
-                    "emitting_address": "0x00000000000000000000000000000000000000ad",
-                },
-            }),
-        ),
-    ]);
-    if let Some(raw_name) = raw_name {
-        after_state.insert("raw_name".to_owned(), json!(raw_name));
-    }
-
-    NormalizedEvent {
-        event_identity: event_identity.to_owned(),
-        namespace: "basenames".to_owned(),
-        logical_name_id: None,
-        resource_id: None,
-        event_kind: "RecordChanged".to_owned(),
-        source_family: "basenames_base_resolver".to_owned(),
-        manifest_version: 1,
-        source_manifest_id: None,
-        chain_id: Some("base-mainnet".to_owned()),
-        block_number: Some(block_number),
-        block_hash: Some(format!("0xbaseclaimblock{block_number:064x}")),
-        transaction_hash: Some(format!("0xbaseclaimtx{block_number:064x}")),
-        log_index: Some(log_index),
-        raw_fact_ref: json!({
-            "kind": "raw_log",
-            "chain_id": "base-mainnet",
-            "block_number": block_number,
-            "log_index": log_index,
-        }),
-        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-        canonicality_state,
-        before_state: json!({}),
-        after_state: Value::Object(after_state),
-    }
 }
 
 fn raw_block(
@@ -3265,40 +1961,6 @@ fn history_event(
     }
 }
 
-fn authority_history_event(seed: AuthorityHistorySeed<'_>) -> NormalizedEvent {
-    NormalizedEvent {
-        namespace: seed.namespace.to_owned(),
-        event_kind: seed.event_kind.to_owned(),
-        source_family: "ens_v1_registrar_l1".to_owned(),
-        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-        after_state: seed.after_state,
-        before_state: json!({}),
-        ..history_event(
-            seed.event_identity,
-            Some(seed.logical_name_id),
-            Some(seed.resource_id),
-            Some("ethereum-mainnet"),
-            Some(seed.block_number),
-            Some(seed.block_hash),
-            Some(&format!("0xtx{}", seed.block_number)),
-            Some(0),
-            CanonicalityState::Canonical,
-        )
-    }
-}
-
-fn history_event_identities(payload: &HistoryResponse) -> Vec<&str> {
-    payload
-        .data
-        .iter()
-        .map(|row| {
-            row.get("event_identity")
-                .and_then(Value::as_str)
-                .expect("history row must include event_identity")
-        })
-        .collect()
-}
-
 fn permission_current_row(
     resource_id: Uuid,
     subject: &str,
@@ -3411,20 +2073,6 @@ fn permission_current_resource_summary(
     }
 }
 
-async fn seed_permission_current_resource_summary(
-    database: &TestDatabase,
-    resource_id: Uuid,
-    authority_kind: &str,
-) -> Result<()> {
-    bigname_storage::upsert_permissions_current_resource_summary(
-        &database.pool,
-        &permission_current_resource_summary(resource_id, Some(authority_kind)),
-    )
-    .await?;
-    mark_permissions_current_projection_ready(database).await?;
-    Ok(())
-}
-
 async fn mark_permissions_current_projection_ready(database: &TestDatabase) -> Result<()> {
     sqlx::query(
         r#"
@@ -3445,107 +2093,6 @@ async fn mark_permissions_current_projection_ready(database: &TestDatabase) -> R
     .execute(&database.pool)
     .await?;
     Ok(())
-}
-
-fn permission_subjects(payload: &ResourcePermissionsResponse) -> Vec<&str> {
-    payload
-        .data
-        .iter()
-        .map(|row| {
-            row.get("subject")
-                .and_then(Value::as_str)
-                .expect("permission row must include subject")
-        })
-        .collect()
-}
-
-fn stable_row_strings(rows: &[Value]) -> Vec<String> {
-    rows.iter()
-        .map(|row| serde_json::to_string(row).expect("response rows must serialize"))
-        .collect()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn assert_replay_stable_pagination(
-    base_rows: &[Value],
-    base_page: &HistoryPageResponse,
-    first_rows: &[Value],
-    first_page: &HistoryPageResponse,
-    second_rows: &[Value],
-    second_page: &HistoryPageResponse,
-    replay_rows: &[Value],
-    replay_page: &HistoryPageResponse,
-    expected_sort: &str,
-    expected_unpaged_page_size: u64,
-    expected_paged_page_size: u64,
-) {
-    let base_rows = stable_row_strings(base_rows);
-    let first_rows = stable_row_strings(first_rows);
-    let second_rows = stable_row_strings(second_rows);
-    let replay_rows = stable_row_strings(replay_rows);
-
-    assert_eq!(base_page.cursor, None);
-    assert_eq!(base_page.next_cursor, None);
-    assert_eq!(base_page.page_size, expected_unpaged_page_size);
-    assert_eq!(base_page.sort, expected_sort);
-
-    assert_eq!(first_page.cursor, None);
-    assert_eq!(first_page.page_size, expected_paged_page_size);
-    assert_eq!(first_page.sort, expected_sort);
-
-    let applied_cursor = first_page
-        .next_cursor
-        .clone()
-        .expect("first page must return a cursor for replay assertions");
-
-    assert_eq!(
-        first_rows,
-        base_rows
-            .iter()
-            .take(first_rows.len())
-            .cloned()
-            .collect::<Vec<_>>()
-    );
-
-    assert_eq!(second_page.cursor.as_deref(), Some(applied_cursor.as_str()));
-    assert_eq!(second_page.page_size, expected_paged_page_size);
-    assert_eq!(second_page.sort, expected_sort);
-    assert_eq!(
-        second_rows,
-        base_rows
-            .iter()
-            .skip(first_rows.len())
-            .take(second_rows.len())
-            .cloned()
-            .collect::<Vec<_>>()
-    );
-
-    assert_eq!(replay_page.cursor.as_deref(), Some(applied_cursor.as_str()));
-    assert_eq!(replay_page, second_page);
-    assert_eq!(replay_rows, second_rows);
-}
-
-fn assert_children_collection_metadata_eq(base: &ChildrenResponse, candidate: &ChildrenResponse) {
-    assert_eq!(candidate.declared_state, base.declared_state);
-    assert_eq!(candidate.verified_state, base.verified_state);
-    assert_eq!(candidate.provenance, base.provenance);
-    assert_eq!(candidate.coverage, base.coverage);
-    assert_eq!(candidate.chain_positions, base.chain_positions);
-    assert_eq!(candidate.consistency, base.consistency);
-    assert_eq!(candidate.last_updated, base.last_updated);
-}
-
-fn assert_resource_permissions_collection_metadata_eq(
-    base: &ResourcePermissionsResponse,
-    candidate: &ResourcePermissionsResponse,
-) {
-    assert_eq!(candidate.declared_state, base.declared_state);
-    assert_eq!(candidate.verified_state, base.verified_state);
-    assert_eq!(candidate.provenance, base.provenance);
-    assert_eq!(candidate.coverage, base.coverage);
-    assert_eq!(candidate.chain_positions, base.chain_positions);
-    assert_eq!(candidate.consistency, base.consistency);
-    assert_eq!(candidate.last_updated, base.last_updated);
 }
 
 fn resolver_current_row(chain_id: &str, resolver_address: &str) -> ResolverCurrentRow {
@@ -3773,57 +2320,6 @@ fn exact_name_row(
     }
 }
 
-fn name_current_row_with_current_resolver(
-    mut row: bigname_storage::NameCurrentRow,
-    chain_id: &str,
-    resolver_address: &str,
-) -> bigname_storage::NameCurrentRow {
-    let resolver = row
-        .declared_summary
-        .get_mut("resolver")
-        .and_then(Value::as_object_mut)
-        .expect("name_current fixture must include a resolver summary");
-    resolver.insert("chain_id".to_owned(), json!(chain_id));
-    resolver.insert("address".to_owned(), json!(resolver_address));
-    row
-}
-
-fn basenames_exact_name_control_summary() -> Value {
-    json!({
-        "registrant": "0x00000000000000000000000000000000000000aa",
-        "registry_owner": "0x00000000000000000000000000000000000000bb",
-        "latest_event_kind": "AuthorityTransferred",
-    })
-}
-
-fn basenames_control_vector_control_summary(scenario: BasenamesControlVectorScenario) -> Value {
-    match scenario {
-        BasenamesControlVectorScenario::NftOnly => json!({
-            "registrant": "0x00000000000000000000000000000000000000c1",
-            "registry_owner": "0x00000000000000000000000000000000000000b1",
-            "latest_event_kind": "TokenControlTransferred",
-        }),
-        BasenamesControlVectorScenario::ManagementOnly => json!({
-            "registrant": "0x00000000000000000000000000000000000000a2",
-            "registry_owner": "0x00000000000000000000000000000000000000b2",
-            "latest_event_kind": "AuthorityTransferred",
-        }),
-        BasenamesControlVectorScenario::FullTransfer => json!({
-            "registrant": "0x00000000000000000000000000000000000000c3",
-            "registry_owner": "0x00000000000000000000000000000000000000c3",
-            "latest_event_kind": "AuthorityTransferred",
-        }),
-    }
-}
-
-fn basenames_exact_name_resolver_summary() -> Value {
-    json!({
-        "chain_id": "base-mainnet",
-        "address": "0x0000000000000000000000000000000000000abc",
-        "latest_event_kind": "ResolverChanged",
-    })
-}
-
 fn record_inventory_boundary_with_pointer(
     logical_name_id: &str,
     resource_id: Uuid,
@@ -3952,77 +2448,6 @@ fn record_inventory_current_row(
         }),
         manifest_version: 3,
         last_recomputed_at: timestamp(1_717_171_718),
-    }
-}
-
-fn dynamic_resolver_unsupported_profile_record_inventory_current_row(
-    logical_name_id: &str,
-    resource_id: Uuid,
-) -> bigname_storage::RecordInventoryCurrentRow {
-    bigname_storage::RecordInventoryCurrentRow {
-        resource_id,
-        record_version_boundary: record_inventory_boundary(logical_name_id, resource_id),
-        enumeration_basis: json!({
-            "observed_selectors": false,
-            "capability_declared_families": true,
-            "globally_enumerable": false
-        }),
-        selectors: json!([]),
-        explicit_gaps: json!([
-            {
-                "record_key": "contenthash",
-                "record_family": "contenthash",
-                "selector_key": null,
-                "gap_reason": "not_observed_on_current_resolver"
-            }
-        ]),
-        unsupported_families: json!([
-            {
-                "record_family": "addr",
-                "unsupported_reason": "resolver_family_pending"
-            },
-            {
-                "record_family": "text",
-                "unsupported_reason": "resolver_family_pending"
-            }
-        ]),
-        last_change: Some(json!({
-            "normalized_event_id": 1201,
-            "event_kind": "ResolverChanged",
-            "chain_position": {
-                "chain_id": "ethereum-mainnet",
-                "block_number": 21_000_003,
-                "block_hash": "0xdynamicresolver",
-                "timestamp": "2026-04-17T00:00:04Z"
-            }
-        })),
-        entries: json!([]),
-        provenance: json!({
-            "normalized_event_ids": [1201],
-            "derivation_kind": "record_inventory_current_rebuild"
-        }),
-        coverage: json!({
-            "status": "partial",
-            "exhaustiveness": "best_effort",
-            "enumeration_basis": "declared_record_inventory",
-            "unsupported_reason": "resolver_family_pending"
-        }),
-        chain_positions: json!({
-            "ethereum-mainnet": {
-                "chain_id": "ethereum-mainnet",
-                "block_number": 21_000_003,
-                "block_hash": "0xbinding",
-                "timestamp": "2026-04-17T00:00:03Z"
-            }
-        }),
-        canonicality_summary: json!({
-            "status": "finalized",
-            "chains": {
-                "ethereum-mainnet": "finalized"
-            }
-        }),
-        manifest_version: 7,
-        last_recomputed_at: timestamp(1_717_171_719),
     }
 }
 
@@ -4279,10 +2704,6 @@ fn primary_name_execution_manifest_versions_for_namespace(namespace: &str) -> Va
         }]),
         other => panic!("unsupported primary-name test namespace {other}"),
     }
-}
-
-fn primary_name_execution_manifest_versions() -> Value {
-    primary_name_execution_manifest_versions_for_namespace("ens")
 }
 
 fn primary_name_topology_version_boundary() -> Value {
@@ -4840,4 +3261,494 @@ fn address_name_current_row(
         manifest_version: 3,
         last_recomputed_at: timestamp(1_717_173_000 + block_number),
     }
+}
+
+fn compact_name_declared_summary(
+    owner: &str,
+    registrant: &str,
+    resolver: &str,
+    expiry: i64,
+    registered_at: &str,
+    created_at: &str,
+) -> Value {
+    json!({
+        "registration": {
+            "status": "active",
+            "registrant": registrant,
+            "expiry": expiry,
+            "registered_at": registered_at,
+            "created_at": created_at,
+        },
+        "control": {
+            "registry_owner": owner,
+            "registrant": registrant,
+            "expiry": expiry,
+        },
+        "resolver": {
+            "chain_id": "ethereum-mainnet",
+            "address": resolver,
+            "latest_event_kind": "ResolverChanged",
+        }
+    })
+}
+
+fn compact_records_inventory_current_row(
+    logical_name_id: &str,
+    resource_id: Uuid,
+) -> bigname_storage::RecordInventoryCurrentRow {
+    let mut row = record_inventory_current_row(logical_name_id, resource_id);
+    row.selectors = json!([
+        {
+            "record_key": "addr:0",
+            "record_family": "addr",
+            "selector_key": "0",
+            "cacheable": true,
+        },
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "cacheable": true,
+        },
+        {
+            "record_key": "avatar",
+            "record_family": "avatar",
+            "selector_key": null,
+            "cacheable": true,
+        },
+        {
+            "record_key": "contenthash",
+            "record_family": "contenthash",
+            "selector_key": null,
+            "cacheable": true,
+        },
+        {
+            "record_key": "text:com.twitter",
+            "record_family": "text",
+            "selector_key": "com.twitter",
+            "cacheable": true,
+        },
+    ]);
+    row.explicit_gaps = json!([]);
+    row.entries = json!([
+        {
+            "record_key": "addr:0",
+            "record_family": "addr",
+            "selector_key": "0",
+            "status": "not_found",
+        },
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "status": "success",
+            "value": {
+                "coin_type": "60",
+                "value": "0x0000000000000000000000000000000000000abc",
+            },
+        },
+        {
+            "record_key": "avatar",
+            "record_family": "avatar",
+            "selector_key": null,
+            "status": "success",
+            "value": { "value": "ipfs://avatar" },
+        },
+        {
+            "record_key": "contenthash",
+            "record_family": "contenthash",
+            "selector_key": null,
+            "status": "success",
+            "value": { "value": "ipfs://content" },
+        },
+        {
+            "record_key": "text:com.twitter",
+            "record_family": "text",
+            "selector_key": "com.twitter",
+            "status": "success",
+            "value": {
+                "key": "com.twitter",
+                "value": "@alice",
+            },
+        },
+    ]);
+    row
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_identity_name(
+    database: &TestDatabase,
+    logical_name_id: &str,
+    display_name: &str,
+    normalized_name: &str,
+    namehash: &str,
+    resource_id: Uuid,
+    token_lineage_id: Uuid,
+    surface_binding_id: Uuid,
+    address: &str,
+    relation: bigname_storage::AddressNameRelation,
+    block_number: i64,
+) -> Result<()> {
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(address_name_name_current_row(
+            logical_name_id,
+            display_name,
+            normalized_name,
+            namehash,
+            surface_binding_id,
+            resource_id,
+            Some(token_lineage_id),
+            block_number,
+            compact_name_declared_summary(
+                address,
+                address,
+                address,
+                1_900_000_000,
+                "2026-04-17T00:00:21Z",
+                "2026-04-17T00:00:11Z",
+            ),
+        ))
+        .await?;
+    database
+        .insert_record_inventory_current_row(compact_records_inventory_current_row(
+            logical_name_id,
+            resource_id,
+        ))
+        .await?;
+    bigname_storage::upsert_address_names_current_rows(
+        &database.pool,
+        &[address_name_current_row(
+            address,
+            logical_name_id,
+            relation,
+            display_name,
+            normalized_name,
+            namehash,
+            surface_binding_id,
+            resource_id,
+            Some(token_lineage_id),
+            block_number,
+        )],
+    )
+    .await?;
+    Ok(())
+}
+
+fn basenames_execution_manifest_version() -> Value {
+    json!({
+        "source_family": "basenames_execution",
+        "manifest_version": 2,
+        "chain": "ethereum-mainnet",
+        "deployment_epoch": "basenames_v1",
+    })
+}
+
+fn basenames_dynamic_resolver_record_inventory_boundary(
+    logical_name_id: &str,
+    resource_id: Uuid,
+    normalized_event_id: Option<i64>,
+    event_kind: Option<&str>,
+) -> Value {
+    json!({
+        "logical_name_id": logical_name_id,
+        "resource_id": resource_id.to_string(),
+        "normalized_event_id": normalized_event_id,
+        "event_kind": event_kind,
+        "chain_position": {
+            "chain_id": "base-mainnet",
+            "block_number": 21_000_003,
+            "block_hash": "0xbase-binding",
+            "timestamp": "2026-04-17T00:00:03Z",
+        }
+    })
+}
+
+fn basenames_l2resolver_record_inventory_current_row(
+    logical_name_id: &str,
+    resource_id: Uuid,
+) -> bigname_storage::RecordInventoryCurrentRow {
+    bigname_storage::RecordInventoryCurrentRow {
+        resource_id,
+        record_version_boundary: basenames_dynamic_resolver_record_inventory_boundary(
+            logical_name_id,
+            resource_id,
+            Some(1201),
+            Some("RecordChanged"),
+        ),
+        enumeration_basis: json!({
+            "observed_selectors": true,
+            "capability_declared_families": true,
+            "globally_enumerable": false,
+        }),
+        selectors: json!([{
+            "record_key": "text",
+            "record_family": "text",
+            "selector_key": null,
+            "cacheable": true,
+        }]),
+        explicit_gaps: json!([]),
+        unsupported_families: json!([]),
+        last_change: Some(json!({
+            "normalized_event_id": 1201,
+            "event_kind": "RecordChanged",
+            "chain_position": {
+                "chain_id": "base-mainnet",
+                "block_number": 21_000_003,
+                "block_hash": "0xbase-binding",
+                "timestamp": "2026-04-17T00:00:03Z",
+            }
+        })),
+        entries: json!([{
+            "record_key": "text",
+            "record_family": "text",
+            "selector_key": null,
+            "status": "unsupported",
+            "unsupported_reason": "value_not_retained_in_normalized_events",
+        }]),
+        provenance: json!({
+            "normalized_event_ids": [1201],
+            "derivation_kind": "record_inventory_current_rebuild",
+        }),
+        coverage: json!({
+            "status": "full",
+            "exhaustiveness": "authoritative",
+            "source_classes_considered": [
+                "basenames_base_registry",
+                "basenames_base_resolver",
+            ],
+            "unsupported_reason": null,
+            "enumeration_basis": "declared_record_inventory",
+        }),
+        chain_positions: json!({
+            "base-mainnet": {
+                "chain_id": "base-mainnet",
+                "block_number": 21_000_003,
+                "block_hash": "0xbase-binding",
+                "timestamp": "2026-04-17T00:00:03Z",
+            }
+        }),
+        canonicality_summary: json!({
+            "status": "finalized",
+            "chains": { "base-mainnet": "finalized" }
+        }),
+        manifest_version: 6,
+        last_recomputed_at: timestamp(1_717_171_719),
+    }
+}
+
+fn primary_name_universal_resolver_addr60_response(address: &str) -> Value {
+    json!(format!(
+        "0x{}{}{}{}",
+        primary_name_left_pad_hex("40", 64),
+        primary_name_padded_address_hex("0xa2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_left_pad_hex("20", 64),
+        primary_name_padded_address_hex(address),
+    ))
+}
+
+fn primary_name_reverse_name_response(name: &str) -> Value {
+    let name_hex = name
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let padded_name_hex_len = name_hex.len().next_multiple_of(64);
+    json!(format!(
+        "0x{}{}{}",
+        primary_name_left_pad_hex("20", 64),
+        primary_name_left_pad_hex(&format!("{:x}", name.len()), 64),
+        format!("{name_hex:0<padded_name_hex_len$}"),
+    ))
+}
+
+fn primary_name_padded_address_hex(address: &str) -> String {
+    let stripped = address
+        .strip_prefix("0x")
+        .expect("test address must be 0x-prefixed");
+    assert_eq!(stripped.len(), 40, "test address must be 20 bytes");
+    primary_name_left_pad_hex(stripped, 64)
+}
+
+fn primary_name_left_pad_hex(value: &str, width: usize) -> String {
+    assert!(value.len() <= width, "test hex value must fit padded width");
+    format!("{value:0>width$}")
+}
+
+async fn spawn_primary_name_mock_rpc(
+    responses: Vec<Value>,
+) -> Result<(String, tokio::task::JoinHandle<Result<Vec<Value>>>)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind mock primary-name RPC listener")?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for response in responses {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .context("failed to accept mock primary-name RPC request")?;
+            requests.push(read_primary_name_mock_rpc_request(&mut socket).await?);
+            write_primary_name_mock_rpc_response(&mut socket, response).await?;
+        }
+        Ok(requests)
+    });
+    Ok((url, handle))
+}
+
+async fn spawn_hanging_primary_name_rpc()
+-> Result<(String, tokio::task::JoinHandle<Result<()>>)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind hanging mock primary-name RPC listener")?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        let (mut socket, _) = listener
+            .accept()
+            .await
+            .context("failed to accept hanging mock primary-name RPC request")?;
+        read_primary_name_mock_rpc_request(&mut socket).await?;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        Ok(())
+    });
+    Ok((url, handle))
+}
+
+async fn spawn_primary_name_mock_rpc_with_last_response_gate(
+    responses: Vec<Value>,
+) -> Result<(
+    String,
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<Result<Vec<Value>>>,
+)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind gated mock primary-name RPC listener")?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let (request_reached_tx, request_reached_rx) = tokio::sync::oneshot::channel();
+    let (release_response_tx, release_response_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        let response_count = responses.len();
+        let mut requests = Vec::new();
+        let mut request_reached_tx = Some(request_reached_tx);
+        let mut release_response_rx = Some(release_response_rx);
+        for (index, response) in responses.into_iter().enumerate() {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .context("failed to accept gated mock primary-name RPC request")?;
+            requests.push(read_primary_name_mock_rpc_request(&mut socket).await?);
+            if index + 1 == response_count {
+                request_reached_tx
+                    .take()
+                    .context("gated RPC reached its last request twice")?
+                    .send(())
+                    .map_err(|_| anyhow::anyhow!("gated RPC request receiver dropped"))?;
+                release_response_rx
+                    .take()
+                    .context("gated RPC release receiver missing")?
+                    .await
+                    .context("gated RPC release sender dropped")?;
+            }
+            write_primary_name_mock_rpc_response(&mut socket, response).await?;
+        }
+        Ok(requests)
+    });
+    Ok((url, request_reached_rx, release_response_tx, handle))
+}
+
+async fn read_primary_name_mock_rpc_request(
+    socket: &mut tokio::net::TcpStream,
+) -> Result<Value> {
+    use tokio::io::AsyncReadExt;
+
+    let mut buffer = Vec::new();
+    let mut scratch = [0_u8; 1024];
+    let (body_start, content_length) = loop {
+        let bytes_read = socket
+            .read(&mut scratch)
+            .await
+            .context("failed to read mock primary-name RPC request")?;
+        if bytes_read == 0 {
+            anyhow::bail!("mock primary-name RPC request closed before headers finished");
+        }
+        buffer.extend_from_slice(&scratch[..bytes_read]);
+        if let Some(body_start) = primary_name_mock_header_end(&buffer) {
+            let headers = std::str::from_utf8(&buffer[..body_start])
+                .context("mock primary-name RPC request headers were not utf8")?;
+            break (body_start, primary_name_mock_content_length(headers)?);
+        }
+    };
+    while buffer.len() < body_start + content_length {
+        let bytes_read = socket
+            .read(&mut scratch)
+            .await
+            .context("failed to read mock primary-name RPC request body")?;
+        if bytes_read == 0 {
+            anyhow::bail!("mock primary-name RPC request closed before body finished");
+        }
+        buffer.extend_from_slice(&scratch[..bytes_read]);
+    }
+    serde_json::from_slice(&buffer[body_start..body_start + content_length])
+        .context("failed to parse mock primary-name RPC request body")
+}
+
+fn primary_name_mock_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|position| position + 4)
+}
+
+fn primary_name_mock_content_length(headers: &str) -> Result<usize> {
+    headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>())
+        })
+        .transpose()
+        .context("mock primary-name RPC request content-length was invalid")?
+        .with_context(|| "mock primary-name RPC request did not include content-length")
+}
+
+async fn write_primary_name_mock_rpc_response(
+    socket: &mut tokio::net::TcpStream,
+    result: Value,
+) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": result,
+    })
+    .to_string();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    socket
+        .write_all(response.as_bytes())
+        .await
+        .context("failed to write mock primary-name RPC response")
+}
+
+async fn join_primary_name_mock_rpc_requests(
+    handle: tokio::task::JoinHandle<Result<Vec<Value>>>,
+) -> Result<Vec<Value>> {
+    handle
+        .await
+        .context("mock primary-name RPC task panicked or was cancelled")?
 }

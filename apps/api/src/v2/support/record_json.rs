@@ -18,14 +18,6 @@ pub(crate) const V2_RECORD_UNSUPPORTED_FIELD_NAMES: RecordUnsupportedFieldNames 
         content_hash: Some("content_hash"),
     };
 
-pub(crate) const V1_IDENTITY_RECORD_UNSUPPORTED_FIELD_NAMES: RecordUnsupportedFieldNames =
-    RecordUnsupportedFieldNames {
-        address_map: "coin_type_addresses",
-        primary_address: "primary_address",
-        text_records: "text_records",
-        content_hash: None,
-    };
-
 pub(crate) fn direct_json_field<'a>(value: &'a JsonValue, key: &str) -> Option<&'a JsonValue> {
     value.get(key)
 }

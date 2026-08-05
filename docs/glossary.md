@@ -8,8 +8,8 @@ of re-defining or assuming it.
 
 Two terms are overloaded enough that bare use is discouraged: **promotion**
 (always qualify: checkpoint promotion vs. capability promotion) and **profile**
-(always qualify: deployment profile, resolver profile, exact-name profile, the
-identity route's `profile=` parameter, or the `/v1/profiles/...` route).
+(always qualify: deployment profile, resolver profile, exact-name profile, or
+the `/v2/lookup` `profile=` parameter).
 
 ---
 
@@ -132,9 +132,8 @@ Rust writers, readers, and checkpoint-promotion path were deleted in Stage B.
 says: indexed onchain events, plus the documented hydration of event-silent
 contracts from pinned calls (see Hydration, Event-silent). *Verified* state is
 what actually executing resolution (e.g. through the ENS Universal Resolver)
-returns. The retained v1 API persists verified outcomes with full execution
-traces until Stage C; its schema-v2 successor returns the live result without
-caching it and persists only a direct-answer disagreement in the
+returns. The v2 API returns schema-v2 live verified results without caching
+them and persists only a direct-answer disagreement in the
 [resolution divergence ledger](#resolution-divergence-ledger). The two are
 never merged; `mode`/`source` selects which a route returns.
 
@@ -145,10 +144,9 @@ protocol never mix silently.
 
 **Deployment profile** — the single manifest tree a runtime loads
 (`manifests/mainnet/` or `manifests/sepolia/`), which fixes its chains and
-admitted contracts. One runtime, one profile. "Profile" has four other meanings
-in this repo — see Resolver profile, Exact-name profile, the identity route's
-`profile=` parameter, and the `/v1/profiles/names/{name}` route; always qualify
-which one is meant.
+admitted contracts. One runtime, one profile. "Profile" also means resolver
+profile, exact-name profile, or the `/v2/lookup` `profile=` parameter; always
+qualify which one is meant.
 
 **Derivation kind** — the persisted string naming which adapter pipeline
 produced a normalized event (for example `ens_v1_unwrapped_authority`,
@@ -380,17 +378,18 @@ or across mismatched holder/controller authority: a name that fully lapses and
 is re-registered mints a new lineage.
 
 **Verified execution / execution trace** — verified execution runs actual
-resolution calls. An execution trace is the retained v1 subsystem's durable
-step-by-step audit record (entrypoint, calls, CCIP steps, proofs, result).
+resolution calls. An execution trace is the unserved legacy subsystem's
+durable step-by-step audit record (entrypoint, calls, CCIP steps, proofs,
+result).
 Those traces are permanent except for the bounded ENS/60 missing-tuple
 retention rule in [`storage.md`](storage.md#execution-storage); otherwise only
-legacy cache reusability expires. A retained v1 outcome is reused only while
+legacy cache reusability expires. A retained legacy outcome is reusable only while
 its request tuple, selected chain positions, manifest versions, topology
 boundary, and record boundary still match; reorgs and manifest, resolver,
 topology, record, or primary-claim changes evict affected entries. A
-verified-primary route-local result for an absent projection tuple has no
+legacy verified-primary result for an absent projection tuple has no
 projected topology or record identity; its two execution-cache boundary fields
-explicitly carry the selected checkpoint instead. The schema-v2 successor
+explicitly carry the selected checkpoint instead. The v2 lookup engine
 creates neither traces nor reusable outcomes; its only durable execution-side
 output is the resolution divergence ledger.
 

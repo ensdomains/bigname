@@ -4,18 +4,18 @@
 
 A replayable, auditable indexing and read API for ENS, ENSv2, and Basenames.
 
-bigname turns onchain state from Ethereum and Base into a versioned REST API. Its `v1`
+bigname turns onchain state from Ethereum and Base into a versioned REST API. Its `v2`
 routes cover the supported portions of [exact-name profiles](docs/glossary.md), name and
-address collections, resolver records and overviews, primary names, history, roles, and
-verified record reads; see the [consumer capability matrix](docs/consumer-capabilities.md)
-for the exact boundaries. Partial and unsupported coverage is reported explicitly.
+address collections, resolver records and overviews, primary names, history, permissions,
+and verified record reads; see the [consumer capability matrix](docs/consumer-capabilities.md)
+for the exact boundaries. Partial and unsupported results are reported explicitly.
 [Raw facts](docs/glossary.md) are immutable; [projections](docs/glossary.md) are
-rebuildable; supported on-demand verified record reads are persisted with durable
-[execution traces](docs/glossary.md).
+rebuildable; v2 verified reads use the schema-v2 lookup engine without writing reusable
+outcomes or durable [execution traces](docs/glossary.md).
 
 ## What's here
 
-- `apps/api` — the read API (`/v1/...`, `/healthz`, `/docs`)
+- `apps/api` — the read API (`/v2/...`, `/graphql`, `/healthz`)
 - `apps/phase-runner` — the Stage B phase supervisor; `ingest` and `interpret`
   are implemented, while `project`, `verify`, and `live` remain unavailable
 - `apps/worker` — projections, replay, verified execution, inspection commands
@@ -25,7 +25,6 @@ rebuildable; supported on-demand verified record reads are persisted with durabl
 - `migrations/` — Postgres schema
 - `schema-v2/` — the fresh phase-runner schema baseline
 - `docs/` — how it works
-- `tests/conformance/` — Rust Cargo conformance project (`bigname-supported-read-conformance`), run by CI with `cargo test`
 
 ## Local development
 
@@ -36,7 +35,11 @@ docker compose up -d                       # PostgreSQL
 ./scripts/dev-up                           # boot api + worker
 ```
 
-The API binds to `127.0.0.1:3000` by default. Hit `http://127.0.0.1:3000/docs` for OpenAPI, `/healthz` for readiness. During Stage B, API/worker use the retained `public` schema while a configured phase runner uses `bigname_phase` in the same database. Initialize that namespace once with `cargo phase -- init-schema`; its projections are not yet served by the surviving binaries.
+The API binds to `127.0.0.1:3000` by default. Use `/v2` routes for REST,
+`POST /graphql` for the narrow compatibility surface, and `/healthz` for
+readiness. The API and worker retain the `public` schema while schema-v2 lookup
+reads use `bigname_phase` in the same database. Initialize that namespace once
+with `cargo phase -- init-schema`.
 
 Useful one-shots:
 
@@ -46,8 +49,8 @@ Useful one-shots:
 - `cargo worker -- run`
 - `cargo worker -- migrate`
 
-Set `BIGNAME_API_CHAIN_RPC_URLS` for live verified ENS resolution and the ENS/60
-primary-name on-demand reverse/forward fallback. The old live indexer has been
+Set `BIGNAME_API_CHAIN_RPC_URLS` for schema-v2 verified ENS resolution and
+ENS/60 primary-name lookup. The old live indexer has been
 deleted; the checked-in phase runner is not a complete deployment until the
 project/live port lands. See [`docs/development.md`](docs/development.md).
 
@@ -68,8 +71,8 @@ docker compose --env-file .env.server -f docker-compose.server.yml up -d
 ```
 
 The compose file runs `migrate` once, then leaves `api` and `worker` as
-long-running services. One-shot invocations (`migrate`, `bigname-api
-print-openapi`, `bigname-worker inspect ...`) can be run with `docker run --rm
+long-running services. One-shot invocations (`migrate`,
+`bigname-worker inspect ...`) can be run with `docker run --rm
 ghcr.io/ensdomains/bigname:latest <command>`.
 
 See [`docs/deployment.md`](docs/deployment.md) and [`docs/production.md`](docs/production.md) for the public-edge stack.
@@ -78,7 +81,7 @@ See [`docs/deployment.md`](docs/deployment.md) and [`docs/production.md`](docs/p
 
 Start with [`docs/architecture.md`](docs/architecture.md) for the model — with [`docs/glossary.md`](docs/glossary.md) beside it for any project-specific term — then dive into the area you care about:
 
-- [`docs/api-v1.md`](docs/api-v1.md) — the public read contract; per-route reference in [`docs/api-v1-routes.md`](docs/api-v1-routes.md)
+- [`docs/api-v2.md`](docs/api-v2.md) — the read contract; per-route reference in [`docs/api-v2-routes.md`](docs/api-v2-routes.md)
 - [`docs/storage.md`](docs/storage.md) — schema and write ownership
 - [`docs/manifests.md`](docs/manifests.md) — source manifests and discovery
 - [`docs/chain-intake.md`](docs/chain-intake.md) — block intake, lineage, reorgs, backfill
@@ -95,6 +98,6 @@ Internal planning notes (implementation sequencing, parallel workstreams) live u
 
 - schema-v2 `interpret` writes identity rows, discovery edges, and normalized
   events; adapters provide interpretation behavior, not projection writes
-- the API reads projections and execution output, not raw facts
-- raw facts are immutable; projections are rebuildable; verified answers are durable
+- the API reads projections, schema-v2 lookup output, and diagnostic execution output, not raw facts
+- raw facts are immutable; projections are rebuildable; retained execution artifacts are durable
 - update the relevant doc before changing public semantics, shared IDs, manifest schema, or coverage meaning

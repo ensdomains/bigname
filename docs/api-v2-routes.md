@@ -5,12 +5,12 @@ Per-route reference for the development-time `/v2` surface accepted in
 dictionary, envelope, status vocabulary, finality rules, cursor rules, and
 error shape live in [`api-v2.md`](api-v2.md).
 
-Routes below use the `/v2` development prefix. At the switch, the prefix
-becomes `/v1`; no permanent public `/v2` prefix ships.
+Routes below use the `/v2` prefix. C2 removes the former `/v1` API without
+renaming these routes; the public edge remains a separate C3 change.
 
 `GET /healthz` remains the unversioned operator health contract outside the
-versioned product routes. `GET /`, `GET /docs`, and `GET /openapi.json` remain
-non-contract helpers.
+versioned product routes. `GET /`, `GET /docs`, and `GET /openapi.json` are not
+served.
 
 ## Shared Route Rules
 

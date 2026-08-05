@@ -1,7 +1,6 @@
 use std::{net::SocketAddr, time::Duration};
 
 use anyhow::{Result, ensure};
-use bigname_execution::ChainRpcUrls;
 use bigname_storage::DatabaseConfig;
 use clap::{Args, Parser, Subcommand};
 
@@ -20,7 +19,6 @@ pub(crate) struct Cli {
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
     Serve(Box<ServeArgs>),
-    PrintOpenapi,
 }
 
 #[derive(Args, Debug)]
@@ -74,31 +72,31 @@ pub(crate) struct ServeArgs {
     #[arg(
         long,
         env = "BIGNAME_API_STATUS_PROVIDER_TIMEOUT_MS",
-        default_value_t = crate::status_freshness::DEFAULT_PROVIDER_TIMEOUT_MS
+        default_value_t = crate::v2::support::status_freshness::DEFAULT_PROVIDER_TIMEOUT_MS
     )]
     pub(crate) status_provider_timeout_ms: u64,
     #[arg(
         long,
         env = "BIGNAME_API_STATUS_PROVIDER_REFRESH_SECS",
-        default_value_t = crate::status_freshness::DEFAULT_PROVIDER_REFRESH_SECS
+        default_value_t = crate::v2::support::status_freshness::DEFAULT_PROVIDER_REFRESH_SECS
     )]
     pub(crate) status_provider_refresh_secs: u64,
     #[arg(
         long,
         env = "BIGNAME_API_STATUS_PROVIDER_CACHE_TTL_SECS",
-        default_value_t = crate::status_freshness::DEFAULT_PROVIDER_CACHE_TTL_SECS
+        default_value_t = crate::v2::support::status_freshness::DEFAULT_PROVIDER_CACHE_TTL_SECS
     )]
     pub(crate) status_provider_cache_ttl_secs: u64,
     #[arg(
         long,
         env = "BIGNAME_API_STATUS_MAX_BLOCK_LAG",
-        default_value_t = crate::status_freshness::DEFAULT_MAX_BLOCK_LAG
+        default_value_t = crate::v2::support::status_freshness::DEFAULT_MAX_BLOCK_LAG
     )]
     pub(crate) status_max_block_lag: i64,
     #[arg(
         long,
         env = "BIGNAME_API_STATUS_MAX_LAG_SECS",
-        default_value_t = crate::status_freshness::DEFAULT_MAX_LAG_SECS
+        default_value_t = crate::v2::support::status_freshness::DEFAULT_MAX_LAG_SECS
     )]
     pub(crate) status_max_lag_secs: i64,
     #[command(flatten)]
@@ -106,14 +104,6 @@ pub(crate) struct ServeArgs {
 }
 
 impl ServeArgs {
-    pub(crate) fn effective_chain_rpc_urls(&self) -> Result<ChainRpcUrls> {
-        validate_rpc_timeouts(self.rpc_connect_timeout_ms, self.rpc_timeout_ms)?;
-        ChainRpcUrls::from_entries(&self.chain_rpc_urls)?.with_http_timeouts(
-            Duration::from_millis(self.rpc_connect_timeout_ms),
-            Duration::from_millis(self.rpc_timeout_ms),
-        )
-    }
-
     pub(crate) fn effective_lookup_chain_rpc_urls(&self) -> Result<bigname_lookup::ChainRpcUrls> {
         validate_rpc_timeouts(self.rpc_connect_timeout_ms, self.rpc_timeout_ms)?;
         bigname_lookup::ChainRpcUrls::from_entries(&self.chain_rpc_urls)?.with_http_timeouts(

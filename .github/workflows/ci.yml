@@ -212,55 +212,6 @@ jobs:
       - name: cargo test
         run: cargo test ${{ matrix.packages }} --all-features
 
-  conformance:
-    name: test (conformance)
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: bigname
-          POSTGRES_USER: bigname
-          POSTGRES_PASSWORD: bigname
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U bigname -d bigname"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      BIGNAME_DATABASE_URL: postgres://bigname:bigname@127.0.0.1:5432/bigname
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install pinned Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-
-      - name: Install native build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang libclang-dev
-
-      - name: Set up sccache
-        id: sccache
-        continue-on-error: true
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      - name: Fall back without sccache
-        if: steps.sccache.outcome != 'success'
-        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: cargo test conformance
-        run: cargo test --manifest-path tests/conformance/Cargo.toml --locked
-
   e2e:
     name: test (e2e)
     runs-on: ubuntu-latest
@@ -333,7 +284,6 @@ jobs:
     needs:
       - schema_v2
       - test_shard
-      - conformance
       - e2e
     if: always()
     steps:
@@ -345,10 +295,6 @@ jobs:
           fi
           if [ "${{ needs.test_shard.result }}" != "success" ]; then
             echo "test shards finished with result: ${{ needs.test_shard.result }}"
-            exit 1
-          fi
-          if [ "${{ needs.conformance.result }}" != "success" ]; then
-            echo "conformance finished with result: ${{ needs.conformance.result }}"
             exit 1
           fi
           if [ "${{ needs.e2e.result }}" != "success" ]; then
@@ -396,18 +342,12 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: verify OpenAPI artifact drift
-        run: |
-          cargo run -p bigname-api -- print-openapi > /tmp/api-v1.openapi.json
-          diff -u docs/api-v1.openapi.json /tmp/api-v1.openapi.json
-
       - name: verify migrations
         run: cargo run -p bigname-worker -- migrate
 
       - name: Fetch smoke dependencies
         run: |
           cargo fetch --locked
-          cargo fetch --locked --manifest-path tests/conformance/Cargo.toml
           docker pull caddy:2-alpine
 
       - name: Sync upstream refs

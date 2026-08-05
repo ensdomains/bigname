@@ -1,204 +1,66 @@
 # Consumer Capabilities
 
-This document lists the consumer-facing capabilities the bigname `v1` API serves and the routes that serve them. Identity, coverage, and resolution semantics live in [`architecture.md`](architecture.md); wire format in [`api-v1.md`](api-v1.md).
+This document maps the consumer-facing capabilities served by the bigname API.
+Wire format and route details live in [`api-v2.md`](api-v2.md) and
+[`api-v2-routes.md`](api-v2-routes.md).
 
-## Route sets
+## Served route sets
 
-Use these sets when choosing a public route:
-
-| Set | Routes | Intended consumers |
+| Set | Routes | Intended use |
 | --- | --- | --- |
-| Native slim identity | `POST /v1/identity:lookup`, `GET /v1/status` | partner-1 style feeds, profile aggregation, and shadow comparison. Feed rendering should use `profile=feed`, which is backed by compact count/identity [sidecars](glossary.md). |
-| Canonical product reads | `/v1/names*`, `/v1/profiles/names/*`, `/v1/addresses/{address}/names`, `/v1/primary-names*`, `/v1/resources/{resource_id}/permissions`, `/v1/events` | first-party app, explorer, and public API integrations that want the bigname contract. |
-| Metadata/control plane | `/v1/namespaces/*`, `/v1/manifests/*`, `/healthz` | manifest and namespace reads; API-local process/database readiness separated from aggregate indexer/worker loop-liveness introspection. |
-| Diagnostics/provenance | `/v1/coverage/*`, `/v1/explain/*` | debugging completeness, support, derivation, persisted execution, and audit paths. |
-| Specialist adjuncts | `/v1/roles`, `/v1/names/*/roles`, `/v1/resources/lookup`, `/v1/history/*`, `/v1/resolvers/*/overview` | supported routes for specialist views and narrow adjuncts. Prefer the canonical product reads above when they satisfy the use case. |
+| Lookup | `POST /v2/lookup`, `GET /v2/status` | Batched name/address lookup and indexing readiness. |
+| Product reads | `/v2/names/*`, `/v2/addresses/*`, `/v2/permissions`, `/v2/search`, `/v2/events`, `/v2/resolvers/*`, `/v2/namespaces/*` | Name, record, address, permission, event, resolver, and namespace reads. |
+| Diagnostics | `/v2/diagnostics/*` | Coverage, binding, authority, record, execution, manifest, and event inspection. |
+| GraphQL compatibility | `POST /graphql` | The documented narrow subgraph-compatible operations. |
+| Operator health | `GET /healthz` | API-local process and database readiness. This is not a product route. |
 
-`/healthz` is an internal operator readiness endpoint, not a public consumer
-route. The production Caddy edge does not expose it.
+The v1 REST surface has been removed. In particular,
+`POST /v1/identity:lookup` no longer serves the native identity capability.
+`POST /v2/lookup` owns batched forward and reverse lookup with the v2 envelope;
+it does not preserve the deleted v1 DTOs.
 
-## Capability matrix
+## Capability mapping
 
-| Capability | Example consumer surface | Native `v1` responsibility |
+| Capability | Route owner | Notes |
 | --- | --- | --- |
-| exact name profile | profile pages, record editing, registration views | `Name.registration` + `Resolution` |
-| names owned / controlled by address | dashboards and search flows | `Address.names` |
-| names owned / controlled by address with role summary | dashboard lists | `Address.names` with `include=role_summary` |
-| declared child subnames and counts | subname pages and creation flows | `Name.children` |
-| record inventory for editing | profile and records screens | `Resolution.record_inventory` + `Resolution.record_cache` |
-| verified record reads | profile, send, and address-resolution flows | `Resolution.verified_queries` |
-| name history | profile history pages | `History(scope=both)` |
-| address history across names | address activity views | `Address.history` |
-| role holders for a [resource](glossary.md) | roles pages | `Permissions.by_resource` |
-| role change history | roles history pages | `History(filter=permissions)` |
-| resolver-centric overview | resolver pages | `Resolver` |
-| claimed vs verified primary name | dashboard and profile | `PrimaryName.claimed_primary_name` + `PrimaryName.verified_primary_name` |
-| compact name search and suggestions | dashboard search and explorer search | `GET /v1/names` |
-| compact resolver records | profile records and record panels | `GET /v1/names/{namespace}/{name}/records` |
-| compact events | activity tables | `GET /v1/events` and history routes with `view=compact` |
-| roles by account/resource/name | resolver and role pages | `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles`, `GET /v1/resources/lookup` |
-| compact resolver overview | resolver overview pages | `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` |
-| native slim identity | feed identity, profile aggregation, shadow comparison | `POST /v1/identity:lookup` native DTOs over current projections, with result-level input/normalization and no routine `normalized_name` peer field |
+| Batched forward and reverse lookup | `POST /v2/lookup` | `profile=feed` is the field-budgeted path; `profile=detail` returns the documented full record shape. |
+| Indexing readiness | `GET /v2/status` | Per-chain stored and network-head readiness. |
+| Exact name profile | `GET /v2/names/{name}` | Indexed or verified name and record fields, subject to the route's source rules. |
+| Resolver records | `GET /v2/names/{name}/records` | Key-selected record reads plus inventory metadata. |
+| Direct subnames | `GET /v2/names/{name}/subnames` | Latest-state direct-subname collection. |
+| Name history | `GET /v2/names/{name}/history` | Name, registration, or combined history scope. |
+| Names by address | `GET /v2/addresses/{address}/names` | Owner, manager, and registrant relations with optional expansions. |
+| Primary name | `GET /v2/addresses/{address}/primary-name` | Indexed tuples and verified ENS coin-type 60 lookup as documented. |
+| Address history | `GET /v2/addresses/{address}/history` | Latest-state address-anchored event history. |
+| Permission holders | `GET /v2/permissions` | Current resource-anchored permission rows. |
+| Search | `GET /v2/search` | Name search only; no registration, pricing, or availability workflow. |
+| Events | `GET /v2/events` | Product event collection. |
+| Resolver overview | `GET /v2/resolvers/{chain_id}/{address}` | Resolver metadata and bounded name expansion. |
+| Namespace metadata | `GET /v2/namespaces/{namespace}` | Product-facing namespace and capability metadata. |
+| Pipeline diagnostics | `/v2/diagnostics/*` | Explicit diagnostic tier, separate from product reads. |
 
-## Route mapping by capability
+All top-level v2 collections use the standard `page` object. Latest-state
+collections do not claim a frozen snapshot; point-in-time behavior is limited
+to the routes and selectors documented in [`api-v2-routes.md`](api-v2-routes.md).
 
-| Capability | Route | Notes |
-| --- | --- | --- |
-| exact name profile | `GET /v1/names/{namespace}/{name}`, `GET /v1/profiles/names/{name}`, `GET /v1/names?namespace=...&name=...` | Exact-name lookup suppresses routine route-level provenance; the profile route adds declared topology/cache and verified record results. Coverage is reported at `GET /v1/coverage/{namespace}/{name}`. |
-| names by address | `GET /v1/names?account=...&relation=token_holder|any` with optional `contains=`, `prefix=`, `sort=name|expiry_date|registration_date` | Compact `CompactDomainSummary` rows. Counts use collection metadata where supported. |
-| names by address with role summary | `GET /v1/addresses/{address}/names?include=role_summary` | Additive expansion over the same address-to-surface collection — not a separate route. Adds `role_summary`, `subname_count`, `record_count`, `status`, `expiry`; permission support comes from the [projection](glossary.md)-owned per-resource summary. |
-| declared children | `GET /v1/names/{namespace}/{name}/children?include=counts` | Declared direct-child bucket only. Linked, alias, and wildcard buckets are not enumerated. |
-| record inventory and cache | `GET /v1/profiles/names/{name}` (full profile), `GET /v1/names/{namespace}/{name}/records` (compact) | `record_inventory` defines the stable selector space; `record_cache` is the last-known declared value over that space. The profile route has no `records` query knob: it reads every public declared selector/gap/cache record for the selected snapshot and, for verified/both modes, executes that whole server-derived set. It falls back to `addr:60`, `avatar`, `contenthash`, `text:description`, `text:url`, and `text:email` only when a supported declared inventory exists but its public selector set is empty after non-public selector facts are omitted. Missing, stale, or explicitly unsupported inventory stays unsupported. The compact route defaults to `mode=declared`; callers can opt into `mode=auto`, `verified`, or `both` when they want selector-specific fallback or execution-backed values. |
-| verified record reads | `GET /v1/profiles/names/{name}` `verified_queries`, selector-specific `GET /v1/names/{namespace}/{name}/records`, plus the execution explain route | Verified queries are execution-derived. They do not backfill `record_inventory` or `record_cache` in the same response. |
-| name history | `GET /v1/history/names/{namespace}/{name}` | Canonical [normalized-event](glossary.md) reads with `scope=surface|resource|both`. |
-| address history | `GET /v1/history/addresses/{address}` | Address-anchor composition over the same history contract. |
-| role holders | `GET /v1/resources/{resource_id}/permissions` | One current row per `(resource_id, subject, scope)`, plus projection-owned per-resource support metadata even when the row set is empty. Returns `409 stale` until the compatible permission publication version is present. |
-| role history | `GET /v1/history/resources/{resource_id}` | Permission events filtered out of the same history contract. |
-| resolver overview | `GET /v1/resolvers/{chain_id}/{resolver_address}/overview` | Each compact section (`nodes`, `aliases`, `roles`, `events`) is supported only when a projection owns the fan-in; unsupported sections are `null` and listed in `meta.unsupported_fields`. |
-| primary name | `GET /v1/primary-names/{address}` | Defaults to the ENS coin type 60 app lookup. `claimed_primary_name` is candidate-only; `verified_primary_name` is authoritative only when `success`. Verified success requires the on-chain claim to be ENSIP-15 normalized; a successful projected or on-demand claim whose raw spelling differs from its normalized form returns a reasoned non-verified result with `failure_reason=claim_not_normalized` without forward execution. ENS/60 can otherwise use on-demand reverse RPC and forward `addr:60` verification when the persisted projection has not materialized the tuple; non-default explicit tuple verified readback remains persisted-only. |
-| compact name search | `GET /v1/names?namespace=...&prefix=...` or `contains=...` | Search only — no availability, pricing, or registration workflow semantics. |
-| compact events | `GET /v1/events` and history routes with `view=compact` | Canonical normalized events. Selector-specific record history beyond type filters is not enumerated. |
-| compact roles | `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles`, `GET /v1/resources/lookup` | `RoleRow` exposes opaque `resource_id`, nullable `resource_hex`, nullable projected `role_bitmap`, and effective powers. Wrapper-scoped role collections are explicitly unsupported/non-authoritative; ENSv2 root composition uses the permission projection's root anchor. |
-| native slim identity | `POST /v1/identity:lookup`, `GET /v1/status` | App-facing native surface for partner-1 style indexed reads. `profile=feed` is the compact latency path for feeds and timelines; `profile=detail` preserves full native identity rows. Requirements reference: [`docs/partners/partner-1-indexing-requirements.md`](partners/partner-1-indexing-requirements.md). It does not create partner-specific identity composition and does not widen [source-family](glossary.md) [admission](glossary.md). |
+## Retained storage after v1 removal
 
-Compact defaults suppress full provenance, full coverage, internal projection identifiers, source bookkeeping, and raw normalized-event payloads. Routes may expose route-owned compact provenance or `meta=full` only where their contract says so; compact-only routes keep `view=full` reserved and return `400 invalid_input` for it. `GET /v1/profiles/names/{name}` follows this compact default even though it is the full-profile app path; use `meta=full` or explain/audit surfaces for full envelopes and trace detail.
+The deleted v1 identity route was the sole API reader of the
+`address_names_current_identity_counts` and
+`address_names_current_identity_feed` [sidecars](glossary.md). Their tables,
+indexes, functions, and triggers are intentionally retained, but are orphaned
+from API reads until the slice-3 schema cleanup.
 
-Schema-v2 projection JSON uses `coverage.status = "projected"` and
-`coverage.exhaustiveness = "not_asserted"`. These values report derivation from
-stored canonical inputs, not complete enumeration. Consumers must use the
-separate support status and reason fields to decide whether a setup is
-supported. The retained v1 API continues reading the legacy public schema
-until the Stage C route cutover; this wording change does not re-point a route.
+This slice also retains the worker, the execution crate for worker use, legacy
+storage writers, manifest legacy views, and public-schema tables. Their removal
+or migration belongs to slice 3 and is not evidence that the deleted v1 API is
+still served.
 
-The Stage B6 schema-v2 lookup engine serves the v2 verified name, record, and
-ENS/60 primary-name paths; retained v1 routes remain on the legacy execution
-crate. It reads a supported
-exact name and projected resolver topology only when the project phase's
-published cursor matches the newest processed authoritative block. An
-unchanged name may retain an older canonical projection position; same-chain
-execution still targets the current published head, while cross-chain
-execution uses any timestamp-aligned projected auxiliary position. For direct
-and alias paths, the projected record boundary identifies the exact
-`record_inventory_current` comparison row. A direct live disagreement creates
-or replaces an active row in the small
-[resolution divergence ledger](glossary.md#resolution-divergence-ledger), and
-restored agreement may clear the matching active row, after the engine re-locks
-the exact inventory row it compared and revalidates the published head through
-commit. The ledger cites the projection row's actual canonical
-positions, which can be older than that head. A wildcard lookup without an
-exact inventory comparison still executes live but cannot write or clear a
-divergence; it never substitutes the wildcard ancestor's inventory. Agreement
-creates no divergence, and a CCIP-participating answer never writes or clears
-the ledger. V2 response metadata reports the actual projected cross-chain
-execution position rather than the newer generic auxiliary checkpoint that may
-have been used only to establish the API's selected chain scope. The projected
-position may be older but never newer than that checkpoint; at the same height,
-its block hash must match.
-The successor stores no reusable outcome, request-validation state,
-revalidation state, or durable trace.
-The v2 ENS/60 primary-name path selects the registry and Universal Resolver from
-manifests at the readable Ethereum head, applies the existing raw-claim
-normalization gate before any forward call, and writes neither the record
-divergence ledger nor legacy execution storage. Other v2 verified primary-name
-tuples are unsupported. Retained v1 primary-name behavior is unchanged.
+## Replacement boundary
 
-## Chain synchronization status
-
-Stage C will derive each chain's synchronization status from the schema-v2
-[verification level](glossary.md#verification-level), phase extent, and chain
-heads. This Stage B change supplies that state; it does not add or change an
-API route.
-
-- `quick-synced (provider-trusted)` means Base history was loaded from Coinbase
-  SQL and has not completed an independent comparison through the reported
-  block.
-- `cross-checked (independent provider)` means the Coinbase-loaded part of
-  Base's canonical selected raw logs matches dRPC through the reported
-  finalized block. Its extent cannot pass the Coinbase-to-dRPC ingest seam at
-  block `48,428,000`: later Base facts came from dRPC, so reading them from dRPC
-  again would not be an independent comparison. It does not mean that a Base
-  node checked the data. The cap includes seam block `48,428,000`, which was
-  fetched from both Coinbase and dRPC; its selected stored copy may therefore
-  make that one comparison dRPC-vs-dRPC, and any disagreement still fails
-  closed.
-- `verified (node-checked)` means the canonical selected raw logs match a local
-  node through the reported finalized block. Ethereum earns this label from
-  reth. A dRPC-backed Base verification cannot record this level.
-- `live at block N` reports the separate live-follow position. Live follow can
-  advance while [stored-history verification](glossary.md#stored-history-verification)
-  remains behind the finalized head.
-
-The comparison reports what its source proves. It is not an attestation,
-completeness proof, or claim about blocks above the recorded finalized extent.
-The later `live at block N` position does not inherit the verification level of
-an earlier extent.
-
-`GET /v1/names` keeps the namespace-omitted bridge where an omitted `namespace` spans supported public namespaces. First-party replacement mappings should pass an explicit namespace whenever the app knows it; omitted namespace is not an ENS-only shortcut.
-
-The slim surface removes namespace-inferred `/v1/resolve*` aliases. Canonical name collection, exact-name, records, children, and role routes keep explicit `{namespace}`. The app full-profile fast path is the deliberate namespace-inferred exception: `GET /v1/profiles/names/{name}` normalizes the input, infers the namespace, and returns the inferred namespace on `data.namespace`.
-
-`POST /v1/identity:lookup` uses the same namespace inference rule and reads only current projections plus persisted projection metadata. It is the native slim read surface for partner-style feeds, profile aggregation, and shadow comparison, not a replacement core model. `profile=feed` intentionally narrows reverse responses to one compact identity row per input address and reads precomputed count/identity sidecars, so feed rendering does not pay for full `IdentityRecord` [hydration](glossary.md), live first-row joins, or deep provenance. Production ENSv2 source-family manifests remain outside this slice; the existing ENSv2 rule stays limited to the post-audit Sepolia exact-name profile until production deployment metadata is admitted through the manifest process.
-
-## Coverage notes
-
-- `Address.names` with `include=role_summary` is an additive expansion of the same address-to-surface collection, not a separate route or replacement surface. For a current ENSv1 wrapper resource, the v1 nested summary is explicitly `unsupported` and its `subjects` list is non-authoritative even when empty. Missing or unrecognized projection-owned permission authority metadata reports v1 `partial` with `resource_permission_authority_not_projected`; API reads do not infer support from adapter resource provenance. The transitional v2 expansion carries the same meaning in response metadata: the response is `partial`, `role_summary` is listed in `meta.unsupported_fields`, and the product reason is `wrapper_holder_permissions_not_supported` or, for absent/partial summary metadata, `permission_support_unknown`.
-- Permission-holder wire compatibility is gated by the projection-owned `permissions_current_publication` version. `GET /v1/resources/{resource_id}/permissions`, the compact role routes, `GET /v2/permissions`, and permission-derived `include=role_summary` expansions return `409 stale` when that row is absent or older than the API's required publication version. A full permission rebuild publishes holder rows, per-resource summaries, the version, and a monotonic read-consistency revision atomically; compatible keyed rebuilds advance only that revision and cannot upgrade a missing or old version. Each permission-backed request verifies the revision is unchanged before returning, so an interleaved publication also returns `409 stale` instead of mixing generations. The API treats both fields as schema/publication and request-coherence guards, not freshness: advancing the publication version still requires a successful full worker replay, current operational replay markers, and drained pending permission invalidations. Address-name pages without the permission expansion remain available. Rollback drains public permission reads before an older worker is restored.
-- ENSv1 wrapper-holder role replacement is not promoted as a supported capability. Fuse changes are retained as history, but current wrapper resources may have no holder permission rows. Exact-name `control` is therefore an explicit unsupported section for every current wrapper resource, whether wrapper-born or wrap-existing; wrapper permission pages report unsupported/non-authoritative coverage; name- or resource-qualified compact role pages report unsupported metadata with no authoritative count; and account-only role searches are `partial`/`best_effort`. Transitional v2 resource-bound permission reads report wrapper support as `unsupported`, while address-only permission reads remain `partial` because zero-row wrapper resources cannot appear in the holder-row fan-out. Empty role/permission data must not be interpreted as a complete masked-power answer.
-- `Address.history` is the declared-state address activity read over address-derived surface and resource anchors. It reuses the shared history contract rather than introducing a separate truth system.
-- `GET /v1/profiles/names/{name}` is the app mixed profile route. `record_inventory` defines the known record-selector space; `record_cache` is the declared last-known-value view over that space; `verified_queries` is the server-selected execution answer set.
-- ENSv2 exact-name profile support is capability-promoted only for the post-audit Sepolia [deployment profile](glossary.md) when `ens_v2_registrar_l1` declares `exact_name_profile = "supported"`. That [capability promotion](glossary.md) covers exact-name profile reads from the admitted `ETHRegistry` and `ETHRegistrar`; it does not promote verified resolution, primary names, or history coverage. Resolver projection support is classified independently: the current resolver emitter's latest canonical ERC-1967 `Upgraded` event must match an implementation declared by the active resolver manifest. Unknown or mismatched implementations remain explicitly unsupported.[^v2-ethreg][^v2-ethrc][^v2-iperm-l34][^v2-iethreg-l32]
-- ENSv1 profile-route `record_inventory`, `record_cache`, and resolver overview require ENS Labs PublicResolver-generation profile admission for complete family coverage, latest-only behavior, and event-to-call parity. Retained generic resolver-local events provide observed selector and cache facts while a resolver profile is pending; malformed topic collisions stay raw without contributing to inventory or cache.[^v1-ens-l12][^v1-iaddr][^v1-iaddress][^v1-itext-l5][^v1-itext-l10] Shared PublicResolver targets do not enumerate current-name fan-in in resolver-overview `nodes`, `aliases`, or `events`; unsupported compact sections return `null` and appear in `meta.unsupported_fields` with `resolver_binding_enumeration_not_projected` in `meta.coverage.unsupported_reason`. Exact-name resolver state stays on exact-name routes.
-- The declared resolver-profile gate is separate from profile `verified_queries`. For an already supported verified-resolution path, `resolver_family_pending` declared state stays visible in `record_inventory` and `record_cache` but does not suppress matching persisted Universal Resolver readback.[^v1-ur-l44][^v1-ur-l52]
-- Basenames declared resolver-profile support is `L2Resolver`-compatible only. A discovered Base resolver that is watched but has `pending` or `unsupported` resolver-profile state remains topology-only — profile-route `record_inventory`, profile-route `record_cache`, and resolver overview stay unsupported. This gate is independent of Basenames L1 transport and execution: the Mainnet `L1Resolver`, `basenames_execution`, and any offchain gateway do not satisfy declared resolver-profile support.[^bn-l2resolver-l22][^bn-l2resolver-l182][^bn-l2resolver-l193][^bn-l2resolver-l209][^bn-l2resolver-l225]
-- ENSv1 dynamic resolver-profile admission is profile-exact, not latest-PublicResolver-only. A resolver with `pending` or `unsupported` resolver-profile state may expose only observed selector and cache facts. An admitted legacy generation satisfies only the record/interface families listed for that resolver profile; unsupported sections remain explicit.[^v1-pres-l20][^v1-pres-l31][^v1-resbase-l17]
-- ENSv1 pubkey capability is unadmitted: known PublicResolver-generation profiles classify it as unsupported, while unknown resolver profiles leave it pending. The v1 record inventory does not enumerate pubkey in selectors, gaps, or `unsupported_families`; `PubkeyChanged` remains a raw-only fact and generic resolver-record observation does not promote it to a supported capability.
-- ENSv1 reverse and primary resolver `NameChanged` text is preimage intake only. It can attach already-observed forward-node facts to a human-readable name; it does not create primary-name truth, exact-name authority, or record support without those forward-node facts.[^v1-namech-l10][^v1-namech-l18][^v1-revreg-l129][^v1-revreg-l130]
-- ENSv1 and Basenames child enumeration is node-complete for current registry-derived direct children whose parent surface is known. A labelhash-only child keeps its non-null `labelhash` and `namehash`, while `raw_label`, `decoded_label`, `raw_name`, and `decoded_name` remain null because no verbatim bytes were observed. The bracketed labelhash form is derived for display when the API reads the row; it is never stored as chain data. A later proof-checked on-chain, retained-surface, or rainbow-table label preimage upgrades the same row with verbatim bytes and any exact decoded text without changing exact-name support.[^v1-registry-l45][^v1-registry-l82][^bn-registry-l81][^bn-registry-l120][^bn-registry-l122]
-- `ENSRegistryOld` is admitted as migration-aware input under `ens_v1_registry_l1`. Current-registry `NewOwner` migration, suppression of later old-registry topology for migrated nodes, and the root-resolver exception are honored before any old-registry fact contributes to declared reads. The current-registry subgraph start `9380380` stays current-registry scope only; the old-registry start is `3327417`.[^subgraph-l15][^subgraph-l39][^subgraph-l44][^subgraph-ts-l238][^subgraph-ts-l246]
-- `PrimaryName` is one mixed route. `claimed_primary_name` is the declared claim candidate; `verified_primary_name` is normally the execution-derived verification result. A projected claim can still return the normalization gate as a synthetic pre-readback result. For the ENS/60 missing-tuple fallback, the hash-pinned reverse call and normalization decision are persisted as execution even when that gate prevents a forward call. Verified success requires the on-chain claim to be ENSIP-15 normalized; a successful projected or on-demand claim whose raw spelling differs from its normalized form returns a reasoned non-verified result with `failure_reason=claim_not_normalized` without forward execution. Route-level coverage is `partial` for persisted exact-tuple classes and for the ENS/60 on-demand reverse RPC fallback, including `ens_execution` only when verified mode performs persisted forward verification; unsupported tuples stay explicit.
-- Mixed profile and primary-name results reuse the same `ResultStatus` vocabulary: `success`, `not_found`, `mismatch`, `unsupported`, `invalid_name`, `execution_failed`.
-
-## Explicitly out of scope
-
-The following are direct-chain or app-local services and are not bigname routes: favorites and local services, name availability, registration pricing, direct contract workflows, DNSSEC, app images, faucet, direct reverse checks not backed by a projection.
-
-The following are deferred until projection-backed equality indexes, stable projected fields, or fan-in projections exist: resolved-address listing, `resource_hex` lookup, selector-specific record history beyond event filters, linked/alias/wildcard child buckets, and unprojected resolver fan-in. Unsupported filters or sections return explicit unsupported state, never silent empty results.
-
----
-
-[^v1-ens-l12]: (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f)
-[^v1-iaddr]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddrResolver.sol:L6 @ ens_v1@91c966f)
-[^v1-iaddress]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L6 @ ens_v1@91c966f)
-[^v1-itext-l5]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L5 @ ens_v1@91c966f)
-[^v1-itext-l10]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L10 @ ens_v1@91c966f)
-[^v1-pres-l20]: (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L20 @ ens_v1@91c966f)
-[^v1-pres-l31]: (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L31 @ ens_v1@91c966f)
-[^v1-resbase-l17]: (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L17 @ ens_v1@91c966f)
-[^v1-namech-l10]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L10 @ ens_v1@91c966f)
-[^v1-namech-l18]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L18 @ ens_v1@91c966f)
-[^v1-revreg-l129]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966f)
-[^v1-revreg-l130]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L130 @ ens_v1@91c966f)
-[^v1-registry-l45]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L45 @ ens_v1@91c966f)
-[^v1-registry-l82]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L82 @ ens_v1@91c966f)
-[^v1-ur-l44]: (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L44 @ ens_v1@91c966f)
-[^v1-ur-l52]: (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L52 @ ens_v1@91c966f)
-
-[^bn-l2resolver-l22]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L22 @ basenames@1809bbc)
-[^bn-l2resolver-l182]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L182 @ basenames@1809bbc)
-[^bn-l2resolver-l193]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L193 @ basenames@1809bbc)
-[^bn-l2resolver-l209]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L209 @ basenames@1809bbc)
-[^bn-l2resolver-l225]: (upstream: .refs/basenames/src/L2/L2Resolver.sol:L225 @ basenames@1809bbc)
-[^bn-registry-l81]: (upstream: .refs/basenames/src/L2/Registry.sol:L81 @ basenames@1809bbc)
-[^bn-registry-l120]: (upstream: .refs/basenames/src/L2/Registry.sol:L120 @ basenames@1809bbc)
-[^bn-registry-l122]: (upstream: .refs/basenames/src/L2/Registry.sol:L122 @ basenames@1809bbc)
-
-[^v2-ethreg]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L2 @ ens_v2@48b3e2d)
-[^v2-ethrc]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistrar.json:L2 @ ens_v2@48b3e2d)
-[^v2-iperm-l34]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L38 @ ens_v2@48b3e2d)
-[^v2-iethreg-l32]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@48b3e2d)
-
-[^subgraph-l15]: (upstream: .refs/ens_subgraph/subgraph.yaml:L15 @ ens_subgraph@723f1b6)
-[^subgraph-l39]: (upstream: .refs/ens_subgraph/subgraph.yaml:L39 @ ens_subgraph@723f1b6)
-[^subgraph-l44]: (upstream: .refs/ens_subgraph/subgraph.yaml:L44 @ ens_subgraph@723f1b6)
-[^subgraph-ts-l238]: (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L238 @ ens_subgraph@723f1b6)
-[^subgraph-ts-l246]: (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L246 @ ens_subgraph@723f1b6)
+The v2 route set is the current internal API contract. This document records
+local route ownership only; it does not claim that an external application has
+changed its call sites or that the production public edge exposes v2. The
+checked-in Caddy configuration remains on the pre-C3 routing policy, so the v2
+REST surface is not publicly reachable until the maintainer-gated C3 edge
+flip.

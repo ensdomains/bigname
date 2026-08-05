@@ -1,4 +1,5 @@
 use super::*;
+use tracing_subscriber::EnvFilter;
 
 pub(super) async fn shutdown_signal(service: &'static str) {
     match tokio::signal::ctrl_c().await {

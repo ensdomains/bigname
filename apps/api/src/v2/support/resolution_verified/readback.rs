@@ -1,169 +1,11 @@
 #[path = "readback/record_inventory.rs"]
 mod record_inventory;
 
-pub(super) fn supported_resolution_verified_readback_records(
+fn supported_resolution_verified_readback_records(
     row: &NameCurrentRow,
     records: &[ResolutionRecordKey],
 ) -> Vec<ResolutionRecordKey> {
     bigname_storage::supported_resolution_verified_readback_records(row, records)
-}
-
-// Successful cache hits keep the outcome inline to avoid an extra allocation.
-#[expect(clippy::large_enum_variant)]
-pub(crate) enum ResolutionVerifiedOutcomeLookup {
-    Found(ExecutionOutcome),
-    CacheMiss,
-    NotSupported,
-}
-
-struct ResolutionVerifiedCacheLookupPlan {
-    compact_selector_records: Vec<ResolutionRecordKey>,
-    full_selector_records: Vec<ResolutionRecordKey>,
-}
-
-/// Controls whether incomplete compact cache hits are served or treated as misses.
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub(crate) enum PartialCompactHits {
-    Serve,
-    TreatAsMiss,
-}
-
-impl ResolutionVerifiedCacheLookupPlan {
-    fn new(row: &NameCurrentRow, supported_records: Vec<ResolutionRecordKey>) -> Self {
-        Self {
-            compact_selector_records: resolution_execution_cache_lookup_records(
-                row,
-                &supported_records,
-            ),
-            full_selector_records: supported_records,
-        }
-    }
-
-    fn should_probe_full_selector_fallback(&self) -> bool {
-        self.compact_selector_records != self.full_selector_records
-    }
-}
-
-pub(super) async fn lookup_resolution_verified_outcome(
-    pool: &PgPool,
-    row: &NameCurrentRow,
-    records: &[ResolutionRecordKey],
-    record_inventory_row: Option<&RecordInventoryCurrentRow>,
-    selected_snapshot: &SelectedSnapshot,
-    partial_compact_hits: PartialCompactHits,
-) -> std::result::Result<ResolutionVerifiedOutcomeLookup, SnapshotSelectionError> {
-    if resolution_verified_support_boundary(row, record_inventory_row).is_none() {
-        return Ok(ResolutionVerifiedOutcomeLookup::NotSupported);
-    }
-
-    let supported_records = supported_resolution_verified_readback_records(row, records);
-    if supported_records.is_empty() {
-        return Ok(ResolutionVerifiedOutcomeLookup::NotSupported);
-    }
-    let cache_lookup = ResolutionVerifiedCacheLookupPlan::new(row, supported_records);
-    let outcome = load_resolution_verified_outcome_with_full_selector_fallback(
-        pool,
-        row,
-        record_inventory_row,
-        selected_snapshot,
-        &cache_lookup,
-        partial_compact_hits,
-    )
-    .await?;
-
-    match outcome {
-        Some(outcome) => {
-            validate_loaded_resolution_verified_outcome(row, records, &outcome)?;
-            Ok(ResolutionVerifiedOutcomeLookup::Found(outcome))
-        }
-        None => Ok(ResolutionVerifiedOutcomeLookup::CacheMiss),
-    }
-}
-
-async fn load_resolution_verified_outcome_with_full_selector_fallback(
-    pool: &PgPool,
-    row: &NameCurrentRow,
-    record_inventory_row: Option<&RecordInventoryCurrentRow>,
-    selected_snapshot: &SelectedSnapshot,
-    cache_lookup: &ResolutionVerifiedCacheLookupPlan,
-    partial_compact_hits: PartialCompactHits,
-) -> std::result::Result<Option<ExecutionOutcome>, SnapshotSelectionError> {
-    let compact_outcome = load_resolution_verified_outcome_for_records(
-        pool,
-        row,
-        &cache_lookup.compact_selector_records,
-        record_inventory_row,
-        selected_snapshot,
-        "persisted",
-        "persisted verified resolution outcome",
-    )
-    .await?;
-
-    if let Some(compact_outcome) = compact_outcome {
-        if !cache_lookup.should_probe_full_selector_fallback()
-            || partial_compact_hits == PartialCompactHits::Serve
-            || persisted_outcome_covers_records(&compact_outcome, &cache_lookup.full_selector_records)
-        {
-            return Ok(Some(compact_outcome));
-        }
-    } else if !cache_lookup.should_probe_full_selector_fallback() {
-        return Ok(None);
-    }
-
-    load_resolution_verified_outcome_for_records(
-        pool,
-        row,
-        &cache_lookup.full_selector_records,
-        record_inventory_row,
-        selected_snapshot,
-        "full-selector",
-        "full-selector persisted verified resolution outcome",
-    )
-    .await
-}
-
-fn persisted_outcome_covers_records(
-    outcome: &ExecutionOutcome,
-    records: &[ResolutionRecordKey],
-) -> bool {
-    let Ok(persisted_queries) = persisted_verified_queries_by_record_key(outcome) else {
-        return false;
-    };
-
-    persisted_queries.len() == records.len()
-        && records
-            .iter()
-            .all(|record| persisted_queries.contains_key(&record.record_key))
-}
-
-async fn load_resolution_verified_outcome_for_records(
-    pool: &PgPool,
-    row: &NameCurrentRow,
-    records: &[ResolutionRecordKey],
-    record_inventory_row: Option<&RecordInventoryCurrentRow>,
-    selected_snapshot: &SelectedSnapshot,
-    cache_key_label: &'static str,
-    load_label: &'static str,
-) -> std::result::Result<Option<ExecutionOutcome>, SnapshotSelectionError> {
-    let cache_key = build_resolution_execution_cache_key(
-        row,
-        records,
-        record_inventory_row,
-        selected_snapshot.chain_positions_value(),
-    )
-    .map_err(|error| {
-        SnapshotSelectionError::internal(format!(
-            "failed to derive {cache_key_label} verified resolution cache key for {}: {error}",
-            row.logical_name_id
-        ))
-    })?;
-
-    load_execution_outcome(pool, &cache_key).await.map_err(|error| {
-        SnapshotSelectionError::internal(format!(
-            "failed to load {load_label} for {}: {error}",
-            row.logical_name_id
-        ))
-    })
 }
 
 pub(super) fn validate_loaded_resolution_verified_outcome(
@@ -230,7 +72,7 @@ pub(super) fn reordered_persisted_verified_queries(
     ))
 }
 
-pub(super) fn persisted_verified_queries_by_record_key(
+fn persisted_verified_queries_by_record_key(
     outcome: &ExecutionOutcome,
 ) -> Result<BTreeMap<String, JsonValue>> {
     let outcome_payload = outcome
@@ -255,6 +97,7 @@ pub(super) fn persisted_verified_queries_by_record_key(
 
     Ok(queries_by_record_key)
 }
+
 pub(super) fn build_resolution_execution_cache_key(
     row: &NameCurrentRow,
     records: &[ResolutionRecordKey],
@@ -275,6 +118,7 @@ pub(super) fn resolution_execution_cache_lookup_records(
 ) -> Vec<ResolutionRecordKey> {
     bigname_storage::resolution_execution_cache_lookup_records(row, records)
 }
+
 pub(super) async fn load_supported_record_inventory_current_for_snapshot(
     pool: &PgPool,
     row: &NameCurrentRow,
@@ -286,13 +130,6 @@ pub(super) async fn load_supported_record_inventory_current_for_snapshot(
         selected_snapshot,
     )
     .await
-}
-
-pub(super) async fn load_explicit_unsupported_record_inventory_current(
-    pool: &PgPool,
-    row: &NameCurrentRow,
-) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
-    record_inventory::load_explicit_unsupported_record_inventory_current(pool, row).await
 }
 
 pub(super) async fn load_record_inventory_current_matching_selected_snapshot(
@@ -310,84 +147,9 @@ pub(super) async fn load_record_inventory_current_matching_selected_snapshot(
     .await
 }
 
-#[cfg(test)]
-pub(super) fn record_inventory_chain_positions_match_selected_snapshot(
-    projected: &ChainPositions,
-    selected_snapshot: &SelectedSnapshot,
-    allow_selected_superset: bool,
-) -> bool {
-    record_inventory::record_inventory_chain_positions_match_selected_snapshot(
-        projected,
-        selected_snapshot,
-        allow_selected_superset,
-    )
-}
-
 pub(super) fn resolution_verified_support_boundary(
     row: &NameCurrentRow,
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
 ) -> Option<bigname_storage::VerifiedResolutionSupportBoundary> {
     record_inventory::resolution_verified_support_boundary(row, record_inventory_row)
-}
-
-#[cfg(test)]
-mod tests {
-    use bigname_storage::{ExecutionCacheKey, ExecutionOutcome};
-    use serde_json::{Value as JsonValue, json};
-    use sqlx::types::{Uuid, time::OffsetDateTime};
-
-    use super::persisted_outcome_covers_records;
-    use crate::v2::support::ResolutionRecordKey;
-
-    fn record(record_key: &str) -> ResolutionRecordKey {
-        ResolutionRecordKey {
-            record_key: record_key.to_owned(),
-            record_family: "text".to_owned(),
-            selector_key: Some(record_key.to_owned()),
-        }
-    }
-
-    fn outcome(outcome_payload: JsonValue) -> ExecutionOutcome {
-        ExecutionOutcome {
-            cache_key: ExecutionCacheKey {
-                request_key: "test".to_owned(),
-                requested_chain_positions: json!({}),
-                manifest_versions: json!([]),
-                topology_version_boundary: json!({}),
-                record_version_boundary: json!({}),
-            },
-            execution_trace_id: Uuid::nil(),
-            request_type: "verified_resolution".to_owned(),
-            namespace: "ens".to_owned(),
-            outcome_payload: Some(outcome_payload),
-            failure_payload: None,
-            finished_at: OffsetDateTime::UNIX_EPOCH,
-        }
-    }
-
-    #[test]
-    fn malformed_compact_outcome_does_not_cover_full_selector_fallback() {
-        let malformed = outcome(json!({"verified_queries": "not-an-array"}));
-
-        assert!(!persisted_outcome_covers_records(
-            &malformed,
-            &[record("avatar"), record("text:com.twitter")],
-        ));
-    }
-
-    #[test]
-    fn compact_outcome_selector_superset_does_not_cover_exact_fallback() {
-        let superset = outcome(json!({
-            "verified_queries": [
-                {"record_key": "avatar"},
-                {"record_key": "text:com.twitter"},
-                {"record_key": "text:description"},
-            ],
-        }));
-
-        assert!(!persisted_outcome_covers_records(
-            &superset,
-            &[record("avatar"), record("text:com.twitter")],
-        ));
-    }
 }

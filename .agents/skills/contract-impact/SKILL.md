@@ -11,7 +11,7 @@ Decide whether the work is implementation-only, doc-first semantic, shared-inter
 
 ## Read only what is needed
 
-- API or coverage: `docs/api-v1.md`, `docs/api-v1-routes.md`, `docs/consumer-capabilities.md`
+- API or coverage: `docs/api-v2.md`, `docs/api-v2-routes.md`, `docs/consumer-capabilities.md`
 - Identity or shared IDs: `docs/adrs/0002-surface-resource-identity.md`
 - Storage, migrations, replay: `docs/storage.md`, `docs/projections.md`, `docs/execution.md`
 - Manifests or authority: `docs/manifests.md`

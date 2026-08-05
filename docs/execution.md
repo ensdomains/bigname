@@ -1,23 +1,26 @@
 # Verified execution
 
-Verified execution covers two read paths: explicit record resolution by name,
-and primary-name verification by `(address, coin_type)`. The retained v1 paths
-use the legacy execution crate and its durable traces and reusable outcomes. V2
-uses the schema-v2 lookup engine: record lookups may write only the guarded
+Verified execution covers two served read paths: explicit record resolution by
+name, and primary-name verification by `(address, coin_type)`. Both use the
+schema-v2 lookup engine: record lookups may write only the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger), and
-primary-name lookups write nothing. Both engines consume declared topology and
-manifest state rather than adapter-specific internals. Mixed routes return
+primary-name lookups write nothing. The legacy execution crate, durable traces,
+and reusable outcomes remain for worker-owned processing and persisted
+diagnostics; no served API path invokes that engine. Both engines consume
+declared topology and manifest state rather than adapter-specific internals.
+Mixed routes return
 per-result `ResultStatus` from one shared vocabulary: `success`, `not_found`,
 `mismatch`, `unsupported`, `invalid_name`, `execution_failed`. `mismatch` is
 verified-only; `execution_failed` may also describe a route-local
 claimed-primary-name reverse lookup whose provider failed before a claim could
 be established. Companion docs: [`architecture.md`](architecture.md),
-[`api-v1.md`](api-v1.md), [`api-v2.md`](api-v2.md), and
+[`api-v2.md`](api-v2.md), [`api-v2-routes.md`](api-v2-routes.md), and
 [`storage.md`](storage.md).
 
 ## Resolution flow
 
-A legacy v1 verified resolution request runs:
+The retained legacy execution engine runs the following flow for worker-owned
+processing and historical artifacts; it is not an API serving path:
 
 1. load the declared topology for the requested surface and chain positions
 2. select the namespace's execution entrypoint
@@ -47,22 +50,7 @@ For ENS on Ethereum Mainnet, the entrypoint is `ens_execution` with contract rol
 
 For Basenames on the shipped mainnet [deployment profile](glossary.md), the entrypoint is active `basenames_execution` v2 with contract role `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` for the exact-surface transport-assisted direct-path class only.[^bn-readme-l22][^bn-l1resolver-l13] The same L1 Resolver address is also referenced by `basenames_l1_compat`, but ownership stays split: `basenames_l1_compat` owns transport attribution; `basenames_execution` owns verified-resolution entrypoint selection. Declared exact-name, address-name, and children reads remain on the Base registry/registrar/resolver families. `basenames_base_primary` is claim intake only, sourced from ENSv1's Base `L2ReverseRegistrar` `NameForAddrChanged(address,string)` values.[^bn-readme-l70][^v1-l2rev-base-deploy][^v1-l2rev-event]
 
-### On-demand execution
-
-`GET /v1/profiles/names/{name}` with `mode=verified` or `mode=both` and
-`GET /v1/names/{namespace}/{name}/records` with verified selectors are
-cache-or-live-execute reads for supported Universal Resolver
-selectors.[^v1-iur-l44][^v1-iur-l52] The v1 name-profile route does not accept a
-selector query; it executes every server-derived name-profile selector from
-declared inventory selectors, explicit gaps, and record-cache entries for the
-selected snapshot. If that derived set is non-empty, it is complete for the
-name-profile route. The bounded app name-profile set is used only when a supported
-declared inventory exists but has no declared selector/gap/cache records;
-missing, stale, or unsupported inventory does not trigger defaults. Each v1
-route first looks for matching persisted execution output at the selected
-exact-name snapshot. On miss, the API performs Universal Resolver execution
-against that selected chain position, persists the trace and outcome, and
-returns the persisted outcome in the same response.
+### API lookup execution
 
 `GET /v2/names/{name}?source=verified` and
 `GET /v2/names/{name}/records` with a verified source execute the schema-v2
@@ -78,25 +66,12 @@ legacy trace identity or imply cache reuse.
 
 Live-execution rules:
 
-- the v1 execution target is the exact `ChainPositions` selected by the route
-  before any verified-support check; absent `at` and `chain_positions`, this is
-  `consistency=head` and the latest stored checkpoint for the required chain
-- full resolution and explain/audit execution never retarget to provider
-  latest, a newer checkpoint, or a different snapshot mid-request
 - the API Ethereum RPC provider must be configured
   (`BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<url>`) and able to serve the
-  selected Ethereum block; missing configuration or a JSON-RPC response
-  recognized as unable to serve that block fails closed rather than falling
-  back to declared cache. V1 routes surface that as `409 stale`.
-  Expiration of the provider response deadline after connection instead
-  produces and persists the existing v1 selector-local
-  `execution_failed`/`resolver_call_failed` result, bounded by
-  `BIGNAME_API_RPC_TIMEOUT_MS`. Expiration of the connect deadline, bounded by
-  `BIGNAME_API_RPC_CONNECT_TIMEOUT_MS`, and other transport failures such as
-  DNS resolution, TLS negotiation, or a connection reset abort without
-  persisting a trace or outcome, so a later read retries the provider. The RPC
-  connect deadline must be configured below the response deadline so it wins
-  while the client is still connecting.
+  selected Ethereum block; missing configuration or a selected-block rejection
+  fails closed as `409 stale`. Provider response timeouts remain in-band
+  selector failures. Connect timeouts and other transport failures abort the
+  request as `500 internal_error` without persisting an outcome.
 - v2 lookup requires the schema-v2 project phase to identify the newest
   processed authoritative head and requires that exact position in the
   product snapshot admitted by the API. A cross-chain execution chain must be
@@ -110,31 +85,30 @@ Live-execution rules:
 - unsupported selector families and unsupported verified [path classes](glossary.md) stay
   selector-local `status=unsupported`; on-demand execution does not widen the
   support boundary
-- `GET /v1/explain/resolutions/{namespace}/{name}/execution` is persisted-trace readback only
+- `GET /v2/diagnostics/names/{name}/execution` is persisted-trace readback only
 
-The compact records routes keep the same supported-selector boundary as their
-name-profile routes. V1 executes at the selected legacy snapshot and persists the
-trace and outcome. V2 executes afresh only after the lookup engine admits the
-current schema-v2 readable position. The lookup engine canonicalizes and
+The compact v2 records routes keep the same supported-selector boundary as
+their name-profile routes. They execute afresh only after the lookup engine
+admits the current schema-v2 readable position. The lookup engine canonicalizes and
 deduplicates selectors, returns them in deterministic canonical order, and
 executes at most 16 record calls concurrently within one lookup. A
-selected-block rejection returns `409 stale` in v1 and in-band `status=stale`
-in v2. V1 may persist a completed
-provider-response timeout as `execution_failed`; v2 persists no execution
+selected-block rejection is an in-band `status=stale`; v2 persists no execution
 outcome. A connect-phase timeout or other transport failure aborts before any
-write in either path. V1 surfaces that abort as `409 stale`; v2 aborts the whole
-request with `500 internal_error` rather than relabeling the failure as a
+write. V2 aborts the whole request with `500 internal_error` rather than relabeling the failure as a
 selector-local stale answer or returning a partial `source=auto` result.
 
 ### Namespace inference
 
-For `GET /v1/profiles/names/{name}`, inference happens before step 1 and produces the canonical `{namespace, name}` tuple:
+For `GET /v2/names/{name}` and its nested routes, inference happens before
+lookup and produces the canonical `{namespace, name}` tuple:
 
 - exact `base.eth` resolves as `namespace=ens`
 - `*.base.eth` resolves as `namespace=basenames`
 - other supported ENS names resolve as `namespace=ens`
 
-The inferred namespace selects topology, entrypoint, trace namespace, request key, provenance, and cache identity exactly as if the caller had used the canonical route. Namespace inference and verified support are separate gates: an inferred `namespace=basenames` request never retries as `namespace=ens`.
+The inferred namespace selects projected topology, lookup entrypoint, and
+provenance. Namespace inference and verified support are separate gates: an
+inferred `namespace=basenames` request never retries as `namespace=ens`.
 
 ## Primary-name verification
 
@@ -258,11 +232,11 @@ Execution traces and steps are durable audit artifacts. Reorg-driven cache inval
 
 `bigname-worker inspect execution-trace --execution-trace-id <id> --json` is the worker-owned operational read for one persisted trace. The JSON output is limited to already persisted state: `command`, `execution_trace_id`, request metadata, request type and key, namespace, chain positions, manifest versions, trace status, final value digest, failure reason, finished timestamp, and ordered `steps` entries with index, kind, input digest, output digest, latency, canonicality dependency, and attachment digest metadata.
 
-The command reads `execution_traces`, `execution_steps`, and trace attachment metadata only. It does not execute or re-execute resolution, primary-name verification, CCIP calls, or topology discovery; it does not expose a public `v1` route, raw execution API, raw gateway transcript, or batch trace dump; it does not synthesize topology or resolver/wildcard/alias/transport paths from non-trace storage; it does not mutate cache, projections, manifests, discovery, [watch plans](glossary.md), or [normalized events](glossary.md). The public explain boundary stays intact: `GET /v1/explain/resolutions/{namespace}/{name}/execution` remains the route-local explain view; this command is operational read-only inspection.
+The command reads `execution_traces`, `execution_steps`, and trace attachment metadata only. It does not execute or re-execute resolution, primary-name verification, CCIP calls, or topology discovery; it does not expose a raw execution API, raw gateway transcript, or batch trace dump; it does not synthesize topology or resolver/wildcard/alias/transport paths from non-trace storage; it does not mutate cache, projections, manifests, discovery, [watch plans](glossary.md), or [normalized events](glossary.md). The API's persisted explain boundary stays intact at `GET /v2/diagnostics/names/{name}/execution`; this command is operational read-only inspection.
 
 ## Cache identity and invalidation
 
-Retained v1 outcomes live in `execution_cache_outcomes`, keyed by:
+Retained, unserved legacy outcomes live in `execution_cache_outcomes`, keyed by:
 
 - request key
 - requested chain positions
@@ -281,16 +255,16 @@ it does not fabricate `logical_name_id`, `resource_id`, or normalized-event
 identity. The outer request key continues to identify the exact
 `{namespace}:{normalized_address}:{coin_type}` tuple.
 
-For resolution, the request key includes the normalized explicit selector set so the cache boundary matches `verified_queries`. `addr:<coin_type>` selectors canonicalize digit text to unsigned 64-bit decimal form before selector dedupe and cache-key construction; `addr:060` and `addr:60` are the same execution identity, and digit text outside `u64` fails input validation. This is a bigname cache-identity narrowing relative to upstream resolver `uint256 coinType` APIs `(upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L14 @ ens_v1@91c966f)` `(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L93 @ basenames@1809bbc)`; the divergence is recorded in `docs/upstream.md`. For `GET /v1/profiles/names/{name}`, the resolution request key is built from the inferred namespace, normalized name, and normalized selector set. Namespace inference does not create a separate cache namespace.
+For resolution, the legacy request key includes the normalized explicit selector set so the cache boundary matches `verified_queries`. `addr:<coin_type>` selectors canonicalize digit text to unsigned 64-bit decimal form before selector dedupe and cache-key construction; `addr:060` and `addr:60` are the same execution identity, and digit text outside `u64` fails input validation. This is a bigname cache-identity narrowing relative to upstream resolver `uint256 coinType` APIs `(upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L14 @ ens_v1@91c966f)` `(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L93 @ basenames@1809bbc)`; the divergence is recorded in `docs/upstream.md`. The resolution request key is built from the inferred namespace, normalized name, and normalized selector set. Namespace inference does not create a separate cache namespace.
 
 For verified primary, the request key is the normalized tuple `{namespace}:{normalized_address}:{coin_type}`. Materialized verified-primary results use the matching `primary_names_current(address, coin_type, namespace)` row as their claim-side lookup/invalidation anchor; targeted projection updates, full projection rebuilds, and legacy reverse-resolver hydration writes/deletes invalidate request-matching answers for tuples whose claim row appeared, disappeared, or changed, but claim projection and hydration do not persist verified payloads or trace IDs. The route-local ENS/60 producer is admitted only while that exact row is absent, uses the selected-checkpoint dependency described above instead of a projected version boundary, and is fenced out of route-local readback when a row later appears.
 
-Verified-primary producers persist the full cache identity in `trace.request_metadata.cache_identity` and reject missing or mismatched identity fields rather than normalizing them. Materialized producers fence writes against the current `primary_names_current` claim anchor: the terminal claim status must still match, success or mismatch rows must match the current normalized claim name whenever that claim identity is present on the anchor, and a successful anchor's `claim_name_is_normalized` flag must agree with whether the verified result is `invalid_name/claim_not_normalized`. The ENS/60 route-local producer instead fences persistence and readback on absence of that exact tuple; its readback additionally requires the selected checkpoint to equal the persisted requested position, and route-local traces cannot satisfy materialized readback or vice versa. In both cases, the normalization gate runs before any forward call: a projected non-normalized success bypasses readback, while a route-local non-normalized claim persists a trace with no `call_universal_resolver` step. Verified-primary readback treats cache identity drift as a cache miss, not as a served answer. A persisted outcome is reusable only when its request tuple, requested chain positions, manifest versions, topology version boundary, and record version boundary match the loaded trace's cache-identity metadata and outcome cache key. The public route does not query manifest storage to reinterpret old materialized outcomes; active manifest changes must evict affected outcomes through execution invalidation before readback. On mismatch, supported materialized tuples return the documented verified `not_found`, and unsupported classes remain `unsupported`. Malformed persisted payloads or unreadable storage still fail closed as internal errors. Durable traces and steps are retained even when an outcome is no longer reusable, except for the bounded ENS/60 missing-tuple route retention described in [`storage.md`](storage.md#execution-storage).
+Verified-primary producers persist the full cache identity in `trace.request_metadata.cache_identity` and reject missing or mismatched identity fields rather than normalizing them. Materialized producers fence writes against the current `primary_names_current` claim anchor: the terminal claim status must still match, success or mismatch rows must match the current normalized claim name whenever that claim identity is present on the anchor, and a successful anchor's `claim_name_is_normalized` flag must agree with whether the verified result is `invalid_name/claim_not_normalized`. The retained ENS/60 missing-tuple producer instead fences persistence and readback on absence of that exact tuple; its readback additionally requires the selected checkpoint to equal the persisted requested position, and its traces cannot satisfy materialized readback or vice versa. In both cases, the normalization gate runs before any forward call: a projected non-normalized success bypasses readback, while a non-normalized missing-tuple claim persists a trace with no `call_universal_resolver` step. Persisted-primary readback treats cache identity drift as a cache miss. An outcome is reusable by retained worker code only when its request tuple, requested chain positions, manifest versions, topology version boundary, and record version boundary match the loaded trace's cache-identity metadata and outcome cache key. Active manifest changes must evict affected outcomes through execution invalidation. Durable traces and steps are retained even when an outcome is no longer reusable, except for the bounded ENS/60 missing-tuple retention described in [`storage.md`](storage.md#execution-storage).
 
-V1 route serving applies the current successful-row
-`claim_name_is_normalized=false` gate before persisted readback. V2 applies the
-same raw-claim normalization rule inside each fresh lookup, without consulting
-or writing the legacy cache.
+Legacy persisted-primary readback applies the current successful-row
+`claim_name_is_normalized=false` gate. V2 applies the same raw-claim
+normalization rule inside each fresh lookup, without consulting or writing the
+legacy cache.
 
 Invalidate on:
 
@@ -305,15 +279,15 @@ Reorg invalidation rules: reorg repair invalidates any `execution_cache_outcomes
 
 ## Explain
 
-Every verified answer must be explainable through the selected entrypoint, resolver discovery path, wildcard traversal, alias rewriting, CCIP steps, and the final comparison or returned record value. The shipped explain surface for resolution is `GET /v1/explain/resolutions/{namespace}/{name}/execution`.
+Every persisted verified answer must be explainable through the selected entrypoint, resolver discovery path, wildcard traversal, alias rewriting, CCIP steps, and the final comparison or returned record value. The shipped persisted-execution explain surface is `GET /v2/diagnostics/names/{name}/execution`.
 
-It is keyed by the same current exact surface and explicit selector set as the mixed route, reads the persisted trace and selector-scoped results, and does not re-execute or synthesize from declared topology alone. Top-level provenance and any selector-local provenance anchor to the same persisted `execution_trace_id`. The route surfaces the selected entrypoint, resolver discovery path, wildcard traversal, alias rewriting, and the ordered persisted step summary; CCIP-Read participation appears through persisted step kinds, not a raw gateway transcript. It is published in `docs/api-v1.openapi.json`. The current handler exposes path parameters plus required `records` only.
+It is keyed by the same current exact surface and explicit selector set as the diagnostic request, reads the persisted trace and selector-scoped results, and does not re-execute or synthesize from declared topology alone. Top-level provenance and any selector-local provenance anchor to the same persisted `execution_trace_id`. The route surfaces the selected entrypoint, resolver discovery path, wildcard traversal, alias rewriting, and the ordered persisted step summary; CCIP-Read participation appears through persisted step kinds, not a raw gateway transcript. The handler exposes the name path parameter plus required `keys` and snapshot selectors.
 
-Public explain support stays coupled to the same verified-resolution support boundary as the mixed route; deferred unsupported path classes do not gain a synthetic trace-shaped public contract. For Basenames, the public execution-explain boundary applies only to execution explain; the separate declared exact-name explain routes stay on the Base-side declared read plane.[^bn-readme-l70]
+Diagnostic explain support stays coupled to the retained verified-resolution artifact boundary; deferred unsupported path classes do not gain a synthetic trace-shaped contract. The separate binding and authority diagnostics remain on the declared read plane.[^bn-readme-l70]
 
-## Retained v1 support boundary
+## Retained legacy support boundary
 
-ENS verified resolution on Ethereum Mainnet uses `ens_execution` at the Universal Resolver proxy.[^ens-docs-univ][^v1-aur-l90][^v1-aur-l106] Public verified support covers three exact-surface path classes against the same declared topology snapshot used by the mixed route:
+ENS legacy verified resolution on Ethereum Mainnet uses `ens_execution` at the Universal Resolver proxy.[^ens-docs-univ][^v1-aur-l90][^v1-aur-l106] Its persisted artifacts cover three exact-surface path classes against the same declared topology snapshot:
 
 - **Direct path** — `resolver_path[0].logical_name_id` equals top-level `data.logical_name_id`; `wildcard.source` is `null` with `matched_labels=[]`; `alias.final_target` is `null` with `hops=[]`; all `transport` fields are `null`.
 - **Alias-only non-direct** — same shape, except `alias.final_target` is non-`null` with non-empty `hops`.
@@ -321,7 +295,7 @@ ENS verified resolution on Ethereum Mainnet uses `ens_execution` at the Universa
 
 All three flow through the same persisted execution trace and explain contract: explain surfaces the selected entrypoint, resolver discovery path, ordered persisted steps, and any participating alias or wildcard detail without a second trace family.
 
-ENS requests outside these classes — including non-alias ancestor-selected paths, linked-subregistry ancestor-selected paths, any transport-assisted path, and any request whose persisted execution used CCIP-Read — return selector-local `status=unsupported`. The explain route does not synthesize public traces for them.
+ENS requests outside these classes — including non-alias ancestor-selected paths, linked-subregistry ancestor-selected paths, any transport-assisted path, and any request whose persisted execution used CCIP-Read — remain `unsupported`. The diagnostic explain route does not synthesize traces for them.
 
 Basenames verified resolution on the shipped mainnet deployment profile uses active `basenames_execution` v2 at the L1 Resolver for the exact-surface transport-assisted direct-path class:[^bn-readme-l22][^bn-readme-l69][^bn-readme-l70][^bn-l1resolver-l13]
 
@@ -331,24 +305,10 @@ Basenames verified resolution on the shipped mainnet deployment profile uses act
 - `subregistry_path=[]`
 - `transport.source_chain_id="base-mainnet"`, `transport.target_chain_id="ethereum-mainnet"`, `transport.contract_address="0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31"`
 
-CCIP-participating traces are eligible for that class rather than `unsupported`, because upstream `L1Resolver` initiates `OffchainLookup` for non-`base.eth` requests and completes them through `resolveWithProof`.[^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191] Explain surfaces the resulting persisted CCIP steps without inventing a second trace family. Other Basenames paths remain `unsupported`. The verified-resolution boundary does not widen route-level primary-name coverage beyond the exact-tuple persisted-readback class and does not add manifest flags.
+CCIP-participating traces are eligible for that class rather than `unsupported`, because upstream `L1Resolver` initiates `OffchainLookup` for non-`base.eth` requests and completes them through `resolveWithProof`.[^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191] Diagnostics surface the resulting persisted CCIP steps without inventing a second trace family. Other Basenames paths remain `unsupported`. These retained artifact classes do not widen the v2 lookup engine's route-level support or add manifest flags.
 
-`GET /v1/profiles/names/{name}` does not widen this boundary. Inferred Basenames verified selectors return `unsupported` unless the requested snapshot satisfies the same frozen Basenames class.
-
-V1 ENS and Basenames primary-name coverage is promoted — a [capability
-promotion](glossary.md) — for the exact-tuple persisted-readback class,
-including projection-owned legacy reverse-resolver hydration for configured
-event-silent ENSv1 reverse resolvers. The v1 ENS/60 app fallback is promoted for
-on-demand reverse RPC claim lookup plus persisted forward `addr:60`
-verification. V2 separately admits fresh ENS/60 lookup and no other verified
-primary tuple. Supported classes return `coverage.status=partial` with
-`exhaustiveness=non_enumerable`.
-
-Declared resolver-profile gaps remain requestable and explicit on the declared
-read plane; they do not by themselves make a supported v1 verified-resolution
-path unsupported. Supported Universal Resolver selectors read matching
-persisted output or execute on demand at the selected snapshot, then persist
-and return the outcome.[^v1-iur-l44][^v1-iur-l52]
+V2 admits fresh ENS/60 primary-name lookup and no other verified primary tuple.
+It does not read the retained persisted-primary outcomes.
 
 ---
 

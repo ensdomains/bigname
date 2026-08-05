@@ -6,7 +6,7 @@ bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The 
 
 - You must prove the operating path before you can add guardrails, mutation/regression/legacy compatibility protections, or tests.
 
-- Public-contract docs that constrain agent work: `docs/architecture.md`, `docs/api-v1.md` (plus `docs/api-v1-routes.md`), `docs/storage.md`, `docs/manifests.md`, `docs/consumer-capabilities.md`, `docs/adrs/0001-stack.md`, `docs/adrs/0002-surface-resource-identity.md`.
+- Public-contract docs that constrain agent work: `docs/architecture.md`, `docs/api-v2.md` (plus `docs/api-v2-routes.md`), `docs/storage.md`, `docs/manifests.md`, `docs/consumer-capabilities.md`, `docs/adrs/0001-stack.md`, `docs/adrs/0002-surface-resource-identity.md`.
 - If a task changes public semantics, shared IDs or enums, coverage meaning, manifest schema, workstream ownership, or replacement meaning, update the relevant docs first or in the same change.
 - Prefer cohesive end-to-end slices — a full capability with its tests and wiring, not a commit-sized edge. Do not build disguised legacy API parity or new planning docs unless semantics changed.
 
@@ -22,10 +22,9 @@ bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The 
   events. Adapters provide interpretation behavior and do not write projection
   rows.
 - API code reads projections and execution output only, except explicit audit
-  endpoints, the retained v1 on-demand verified-resolution cache-miss write,
-  and the v2 schema-v2 lookup engine's guarded [resolution divergence
-  ledger](docs/glossary.md#resolution-divergence-ledger) write. V2 serving
-  paths do not write legacy execution traces or cache outcomes.
+  endpoints and the schema-v2 lookup engine's guarded [resolution divergence
+  ledger](docs/glossary.md#resolution-divergence-ledger) write. Serving paths
+  do not write legacy execution traces or cache outcomes.
 - Execution code uses declared topology and manifests, not adapter internals.
 - Manifest and discovery code decides what is authoritative.
 - Raw facts are immutable. Projections are rebuildable. Canonicality is explicit. Execution artifacts are durable. Unsupported behavior must be explicit.

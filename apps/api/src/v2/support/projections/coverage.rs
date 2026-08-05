@@ -1,7 +1,3 @@
-pub(super) fn build_name_coverage(coverage: &JsonValue) -> JsonValue {
-    build_name_coverage_object(coverage)
-}
-
 pub(crate) fn build_name_coverage_declared_state(coverage: &JsonValue) -> JsonValue {
     build_name_coverage_object(coverage)
 }
