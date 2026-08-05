@@ -43,7 +43,7 @@ pub(crate) fn build_requested_chain_positions_from_projection(
     )
 }
 
-pub(super) async fn ensure_requested_positions_are_eligible_for_projection(
+pub(crate) async fn ensure_requested_positions_are_eligible_for_projection(
     transaction: &mut Transaction<'_, Postgres>,
     row: &NameCurrentRow,
     requested_positions: &[RequestedChainPosition],
@@ -56,10 +56,6 @@ pub(super) async fn ensure_requested_positions_are_eligible_for_projection(
                 row.logical_name_id
             )
         })?;
-    if projected_positions == requested_positions {
-        return Ok(());
-    }
-
     let projected_by_chain_id = positions_by_chain_id(
         &projected_positions,
         &format!("{context} projected chain_positions"),
@@ -93,6 +89,15 @@ pub(super) async fn ensure_requested_positions_are_eligible_for_projection(
             if requested_position.block_hash != projected_position.block_hash {
                 bail!(
                     "{context} cache_key.requested_chain_positions does not match projected chain_positions for logical_name_id {} on chain {}",
+                    row.logical_name_id,
+                    chain_id
+                );
+            }
+            if !position_is_canonical_lineage_member(transaction, chain_id, projected_position)
+                .await?
+            {
+                bail!(
+                    "{context} projected chain_positions block is no longer canonical for logical_name_id {} on chain {}",
                     row.logical_name_id,
                     chain_id
                 );
@@ -134,7 +139,7 @@ pub(super) async fn ensure_requested_positions_are_eligible_for_projection(
     Ok(())
 }
 
-pub(super) async fn ensure_requested_positions_are_eligible_for_record_inventory_projection(
+pub(crate) async fn ensure_requested_positions_are_eligible_for_record_inventory_projection(
     transaction: &mut Transaction<'_, Postgres>,
     row: &RecordInventoryCurrentRow,
     requested_positions: &[RequestedChainPosition],
@@ -148,10 +153,6 @@ pub(super) async fn ensure_requested_positions_are_eligible_for_record_inventory
                 row.resource_id
             )
         })?;
-    if projected_positions == requested_positions {
-        return Ok(());
-    }
-
     let projected_by_chain_id = positions_by_chain_id(
         &projected_positions,
         &format!("{context} record_inventory_current chain_positions"),
@@ -195,6 +196,15 @@ pub(super) async fn ensure_requested_positions_are_eligible_for_record_inventory
             if requested_position.block_hash != projected_position.block_hash {
                 bail!(
                     "{context} cache_key.requested_chain_positions does not match record_inventory_current chain_positions for resource_id {} on chain {}",
+                    row.resource_id,
+                    chain_id
+                );
+            }
+            if !position_is_canonical_lineage_member(transaction, chain_id, projected_position)
+                .await?
+            {
+                bail!(
+                    "{context} record_inventory_current chain_positions block is no longer canonical for resource_id {} on chain {}",
                     row.resource_id,
                     chain_id
                 );
@@ -299,10 +309,18 @@ async fn name_current_has_newer_projection_inputs(
         SELECT EXISTS (
             SELECT 1
             FROM normalized_events ne
+            JOIN chain_lineage ne_lineage
+              ON ne_lineage.chain_id = ne.chain_id
+             AND ne_lineage.block_hash = ne.block_hash
             WHERE ne.chain_id = $1
               AND ne.block_number > $2
               AND ne.block_number <= $3
               AND ne.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+              AND ne_lineage.canonicality_state IN (
                   'canonical'::canonicality_state,
                   'safe'::canonicality_state,
                   'finalized'::canonicality_state
@@ -337,11 +355,19 @@ async fn name_current_has_newer_projection_inputs(
         SELECT EXISTS (
             SELECT 1
             FROM surface_bindings sb
+            JOIN chain_lineage sb_lineage
+              ON sb_lineage.chain_id = sb.chain_id
+             AND sb_lineage.block_hash = sb.block_hash
             WHERE sb.logical_name_id = $1
               AND sb.chain_id = $2
               AND sb.block_number > $3
               AND sb.block_number <= $4
               AND sb.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+              AND sb_lineage.canonicality_state IN (
                   'canonical'::canonicality_state,
                   'safe'::canonicality_state,
                   'finalized'::canonicality_state
@@ -377,10 +403,18 @@ async fn record_inventory_has_newer_projection_inputs(
         SELECT EXISTS (
             SELECT 1
             FROM normalized_events ne
+            JOIN chain_lineage ne_lineage
+              ON ne_lineage.chain_id = ne.chain_id
+             AND ne_lineage.block_hash = ne.block_hash
             WHERE ne.chain_id = $1
               AND ne.block_number > $2
               AND ne.block_number <= $3
               AND ne.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+              AND ne_lineage.canonicality_state IN (
                   'canonical'::canonicality_state,
                   'safe'::canonicality_state,
                   'finalized'::canonicality_state

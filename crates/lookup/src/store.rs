@@ -298,6 +298,9 @@ async fn load_name(
          AND binding.binding_kind = name.binding_kind
         LEFT JOIN token_lineages token_lineage
           ON token_lineage.token_lineage_id = name.token_lineage_id
+        LEFT JOIN chain_lineage token_lineage_lineage
+          ON token_lineage_lineage.chain_id = token_lineage.chain_id
+         AND token_lineage_lineage.block_hash = token_lineage.block_hash
         JOIN chain_lineage surface_lineage
           ON surface_lineage.chain_id = surface.chain_id
          AND surface_lineage.block_hash = surface.block_hash
@@ -319,7 +322,10 @@ async fn load_name(
           AND binding.active_to IS NULL
           AND (
               name.token_lineage_id IS NULL
-              OR token_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+              OR (
+                  token_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+                  AND token_lineage_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+              )
           )
           AND surface_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
           AND resource_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
@@ -346,9 +352,13 @@ async fn load_inventory(
         FROM record_inventory_current inventory
         JOIN resources resource
           ON resource.resource_id = inventory.resource_id
+        JOIN chain_lineage resource_lineage
+          ON resource_lineage.chain_id = resource.chain_id
+         AND resource_lineage.block_hash = resource.block_hash
         WHERE inventory.resource_id = $1::uuid
           AND inventory.record_version_boundary = $2
           AND resource.canonicality_state IN ('canonical', 'safe', 'finalized')
+          AND resource_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
         "#,
     )
     .bind(resource_id)

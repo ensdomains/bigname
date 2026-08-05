@@ -120,21 +120,30 @@ async fn seed_resources(database: &TestDatabase, resource_ids: &[Uuid]) -> Resul
             )
         })
         .collect::<Vec<_>>();
+    for resource in &resources {
+        sqlx::query(
+            r#"
+            INSERT INTO chain_lineage (
+                chain_id,
+                block_hash,
+                block_number,
+                block_timestamp,
+                canonicality_state
+            )
+            VALUES ($1, $2, $3, $4, 'canonical'::canonicality_state)
+            ON CONFLICT (chain_id, block_hash) DO NOTHING
+            "#,
+        )
+        .bind(&resource.chain_id)
+        .bind(&resource.block_hash)
+        .bind(resource.block_number)
+        .bind(timestamp(
+            1_717_000_000 + resource.block_number - 21_000_300,
+        ))
+        .execute(database.pool())
+        .await?;
+    }
     upsert_resources(database.pool(), &resources).await?;
-    Ok(())
-}
-
-async fn orphan_resource(database: &TestDatabase, resource_id: Uuid) -> Result<()> {
-    sqlx::query(
-        r#"
-        UPDATE resources
-        SET canonicality_state = 'orphaned'::canonicality_state
-        WHERE resource_id = $1
-        "#,
-    )
-    .bind(resource_id)
-    .execute(database.pool())
-    .await?;
     Ok(())
 }
 
@@ -629,7 +638,7 @@ async fn record_inventory_snapshot_read_allows_projected_auxiliary_chain_positio
             &selected,
         )
         .await?,
-        SnapshotProjectionRead::Found(expected)
+        SnapshotProjectionRead::Found(expected.clone())
     );
 
     database.cleanup().await
@@ -710,6 +719,100 @@ async fn record_inventory_snapshot_read_covers_later_snapshot_until_new_input() 
 }
 
 #[tokio::test]
+async fn record_inventory_snapshot_ignores_row_local_input_on_a_losing_fork() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x7112);
+    let logical_name_id = "ens:lineage-inventory.eth";
+    let losing_hash = "0xrecordinventorylosing";
+    let winning_hash = "0xrecordinventorywinning";
+    seed_resources(&database, &[resource_id]).await?;
+
+    let expected = record_inventory_current_row(
+        resource_id,
+        logical_name_id,
+        Some(924),
+        Some("RecordsChanged"),
+        21_500_021,
+        "0xrecordinventorysnapshot",
+        4,
+    );
+    upsert_record_inventory_current_rows(database.pool(), std::slice::from_ref(&expected)).await?;
+    seed_chain_lineage(
+        &database,
+        "0xrecordinventorysnapshot",
+        21_500_021,
+        "2026-04-18T00:15:00Z",
+    )
+    .await?;
+    seed_chain_lineage(&database, losing_hash, 21_500_022, "2026-04-18T00:15:01Z").await?;
+    seed_chain_lineage(&database, winning_hash, 21_500_022, "2026-04-18T00:15:01Z").await?;
+    seed_record_inventory_input(
+        &database,
+        "record-inventory-losing-input",
+        logical_name_id,
+        resource_id,
+        21_500_022,
+        losing_hash,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'orphaned'::canonicality_state
+         WHERE chain_id = 'ethereum-mainnet' AND block_hash = $1",
+    )
+    .bind(losing_hash)
+    .execute(database.pool())
+    .await?;
+    let row_local_state: String = sqlx::query_scalar(
+        "SELECT canonicality_state::TEXT
+         FROM normalized_events
+         WHERE event_identity = 'record-inventory-losing-input'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(row_local_state, "finalized");
+
+    let selected = ChainPositions::from_value(&json!({
+        "ethereum-mainnet": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_500_022,
+            "block_hash": winning_hash,
+            "timestamp": "2026-04-18T00:15:01Z"
+        }
+    }))?;
+    assert_eq!(
+        load_record_inventory_current_for_snapshot(
+            database.pool(),
+            resource_id,
+            &expected.record_version_boundary,
+            &selected,
+        )
+        .await?,
+        SnapshotProjectionRead::Found(expected.clone())
+    );
+
+    sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'canonical'::canonicality_state
+         WHERE chain_id = 'ethereum-mainnet' AND block_hash = $1",
+    )
+    .bind(losing_hash)
+    .execute(database.pool())
+    .await?;
+    let error = load_record_inventory_current_for_snapshot(
+        database.pool(),
+        resource_id,
+        &expected.record_version_boundary,
+        &selected,
+    )
+    .await
+    .expect_err("readable newer record input must make the projection stale");
+    assert_eq!(error.kind(), SnapshotSelectionErrorKind::Stale);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn record_inventory_current_upsert_replaces_existing_projection_row() -> Result<()> {
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0x7101);
@@ -775,13 +878,14 @@ async fn record_inventory_current_upsert_replaces_existing_projection_row() -> R
 }
 
 #[tokio::test]
-async fn record_inventory_current_excludes_orphaned_resources() -> Result<()> {
+async fn record_inventory_readers_require_readable_resource_lineage() -> Result<()> {
     let database = TestDatabase::new().await?;
-    let resource_id = Uuid::from_u128(0x7108);
-    seed_resources(&database, &[resource_id]).await?;
+    let winning_resource_id = Uuid::from_u128(0x7108);
+    let losing_resource_id = Uuid::from_u128(0x7109);
+    seed_resources(&database, &[winning_resource_id, losing_resource_id]).await?;
 
-    let expected = record_inventory_current_row(
-        resource_id,
+    let winning = record_inventory_current_row(
+        winning_resource_id,
         "ens:alice.eth",
         Some(911),
         Some("RecordsChanged"),
@@ -789,18 +893,78 @@ async fn record_inventory_current_excludes_orphaned_resources() -> Result<()> {
         "0xrecordinventoryk",
         4,
     );
-    upsert_record_inventory_current_rows(database.pool(), std::slice::from_ref(&expected)).await?;
+    let losing = record_inventory_current_row(
+        losing_resource_id,
+        "ens:bob.eth",
+        Some(912),
+        Some("RecordsChanged"),
+        21_500_012,
+        "0xrecordinventoryl",
+        4,
+    );
+    upsert_record_inventory_current_rows(database.pool(), &[winning.clone(), losing.clone()])
+        .await?;
 
-    orphan_resource(&database, resource_id).await?;
+    sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'orphaned'::canonicality_state
+         WHERE chain_id = 'ethereum-mainnet'
+           AND block_hash = '0xrecordinventory01'",
+    )
+    .execute(database.pool())
+    .await?;
+    let row_local_state: String = sqlx::query_scalar(
+        "SELECT canonicality_state::TEXT
+         FROM resources
+         WHERE resource_id = $1",
+    )
+    .bind(losing_resource_id)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(row_local_state, "finalized");
 
     assert_eq!(
         load_record_inventory_current(
             database.pool(),
-            resource_id,
-            &expected.record_version_boundary,
+            losing_resource_id,
+            &losing.record_version_boundary,
         )
         .await?,
         None
+    );
+    assert_eq!(
+        load_record_inventory_current(
+            database.pool(),
+            winning_resource_id,
+            &winning.record_version_boundary,
+        )
+        .await?,
+        Some(winning.clone())
+    );
+    assert_eq!(
+        load_record_inventory_current_batch(
+            database.pool(),
+            &[
+                (losing_resource_id, losing.record_version_boundary.clone()),
+                (winning_resource_id, winning.record_version_boundary.clone(),),
+            ],
+        )
+        .await?,
+        vec![None, Some(winning.clone())]
+    );
+    assert_eq!(
+        count_record_inventory_selectors_by_lookup_keys(
+            database.pool(),
+            &[
+                (losing_resource_id, losing.record_version_boundary),
+                (winning_resource_id, winning.record_version_boundary),
+            ],
+        )
+        .await?,
+        vec![
+            None,
+            Some(winning.selectors.as_array().unwrap().len() as u64)
+        ]
     );
 
     database.cleanup().await

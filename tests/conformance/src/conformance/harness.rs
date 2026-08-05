@@ -516,10 +516,10 @@
                 )
                 .await
                 .context("failed to upsert raw blocks for exact-name conformance")?;
-                bigname_storage::upsert_name_surfaces(&self.pool, &[name_surface(logical_name_id)])
+                upsert_test_name_surfaces(&self.pool, &[name_surface(logical_name_id)])
                     .await
                     .context("failed to upsert name surface for exact-name conformance")?;
-                bigname_storage::upsert_token_lineages(
+                upsert_test_token_lineages(
                     &self.pool,
                     &[bigname_storage::TokenLineage {
                         token_lineage_id,
@@ -532,7 +532,7 @@
                 )
                 .await
                 .context("failed to upsert token lineage for exact-name conformance")?;
-                bigname_storage::upsert_resources(
+                upsert_test_resources(
                     &self.pool,
                     &[Resource {
                         resource_id,
@@ -546,7 +546,7 @@
                 )
                 .await
                 .context("failed to upsert resource for exact-name conformance")?;
-                bigname_storage::upsert_surface_bindings(
+                upsert_test_surface_bindings(
                     &self.pool,
                     &[surface_binding(
                         surface_binding_id,
@@ -662,7 +662,7 @@
                 )
                 .await
                 .context("failed to upsert raw blocks for basenames exact-name conformance")?;
-                bigname_storage::upsert_name_surfaces(
+                upsert_test_name_surfaces(
                     &self.pool,
                     &[NameSurface {
                         logical_name_id: logical_name_id.to_owned(),
@@ -685,7 +685,7 @@
                 )
                 .await
                 .context("failed to upsert basenames name surface for conformance")?;
-                bigname_storage::upsert_token_lineages(
+                upsert_test_token_lineages(
                     &self.pool,
                     &[bigname_storage::TokenLineage {
                         token_lineage_id,
@@ -698,7 +698,7 @@
                 )
                 .await
                 .context("failed to upsert basenames token lineage for conformance")?;
-                bigname_storage::upsert_resources(
+                upsert_test_resources(
                     &self.pool,
                     &[Resource {
                         resource_id,
@@ -712,7 +712,7 @@
                 )
                 .await
                 .context("failed to upsert basenames resource for conformance")?;
-                bigname_storage::upsert_surface_bindings(
+                upsert_test_surface_bindings(
                     &self.pool,
                     &[SurfaceBinding {
                         surface_binding_id,
@@ -1249,13 +1249,13 @@
                 resource_id: Uuid,
                 surface_binding_id: Uuid,
             ) -> Result<()> {
-                bigname_storage::upsert_name_surfaces(&self.pool, &[name_surface(logical_name_id)])
+                upsert_test_name_surfaces(&self.pool, &[name_surface(logical_name_id)])
                     .await
                     .context("failed to upsert name surface for history conformance")?;
-                bigname_storage::upsert_resources(&self.pool, &[resource(resource_id)])
+                upsert_test_resources(&self.pool, &[resource(resource_id)])
                     .await
                     .context("failed to upsert resource for history conformance")?;
-                bigname_storage::upsert_surface_bindings(
+                upsert_test_surface_bindings(
                     &self.pool,
                     &[surface_binding(
                         surface_binding_id,

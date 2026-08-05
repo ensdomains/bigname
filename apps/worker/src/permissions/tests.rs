@@ -217,6 +217,31 @@ async fn keyed_rebuild_keeps_active_rows_and_drops_revoked_rows() -> Result<()> 
         json!(PERMISSIONS_ENUMERATION_BASIS)
     );
 
+    sqlx::query(
+        r#"
+        UPDATE chain_lineage
+        SET canonicality_state = 'orphaned'::canonicality_state
+        WHERE chain_id = 'ethereum-mainnet'
+          AND block_hash = '0xperm0065'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    rebuild_permissions_current(database.pool(), Some(&resource_id.to_string())).await?;
+    assert!(
+        load_permissions_current(database.pool(), resource_id, None, None)
+            .await?
+            .is_empty()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM normalized_events WHERE event_identity = 'grant-resolver'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "finalized"
+    );
+
     database.cleanup().await
 }
 
@@ -1613,8 +1638,32 @@ async fn seed_resources(pool: &PgPool, resource_ids: &[Uuid]) -> Result<()> {
             canonicality_state: CanonicalityState::Finalized,
         })
         .collect::<Vec<_>>();
-    upsert_resources(pool, &resources).await?;
+    upsert_resources_with_lineage(pool, &resources).await?;
     Ok(())
+}
+
+async fn upsert_resources_with_lineage(
+    pool: &PgPool,
+    resources: &[Resource],
+) -> Result<Vec<Resource>> {
+    for resource in resources {
+        sqlx::query(
+            r#"
+            INSERT INTO chain_lineage (
+                chain_id, block_hash, block_number, block_timestamp, canonicality_state
+            )
+            VALUES ($1, $2, $3, $4, 'finalized'::canonicality_state)
+            ON CONFLICT (chain_id, block_hash) DO NOTHING
+            "#,
+        )
+        .bind(&resource.chain_id)
+        .bind(&resource.block_hash)
+        .bind(resource.block_number)
+        .bind(timestamp(1_700_000_000 + resource.block_number))
+        .execute(pool)
+        .await?;
+    }
+    upsert_resources(pool, resources).await
 }
 
 async fn seed_raw_blocks(pool: &PgPool, blocks: &[RawBlock]) -> Result<()> {

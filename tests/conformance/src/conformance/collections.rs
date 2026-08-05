@@ -153,7 +153,7 @@
             let database = HarnessDatabase::new().await?;
             let parent_logical_name_id = "ens:parent.eth";
 
-            bigname_storage::upsert_name_surfaces(
+            upsert_test_name_surfaces(
                 &database.pool,
                 &[
                     collection_name_surface(parent_logical_name_id, "parent.eth", "node:parent.eth", 10),
@@ -427,7 +427,7 @@
             let database = HarnessDatabase::new().await?;
             let parent_logical_name_id = "ens:parent.eth";
 
-            bigname_storage::upsert_name_surfaces(
+            upsert_test_name_surfaces(
                 &database.pool,
                 &[
                     collection_name_surface(parent_logical_name_id, "parent.eth", "node:parent.eth", 20),
@@ -496,7 +496,7 @@
             let database = HarnessDatabase::new().await?;
             let parent_logical_name_id = "basenames:base.eth";
 
-            bigname_storage::upsert_name_surfaces(
+            upsert_test_name_surfaces(
                 &database.pool,
                 &[
                     collection_name_surface(parent_logical_name_id, "base.eth", "node:base.eth", 40),
@@ -627,7 +627,7 @@
         async fn name_children_contract_rejects_non_declared_surface_classes() -> Result<()> {
             let database = HarnessDatabase::new().await?;
 
-            bigname_storage::upsert_name_surfaces(
+            upsert_test_name_surfaces(
                 &database.pool,
                 &[collection_name_surface(
                     "ens:parent.eth",
@@ -675,7 +675,7 @@
             let beta_token_lineage_id = Uuid::from_u128(0x8201);
             let beta_surface_binding_id = Uuid::from_u128(0x8202);
 
-            bigname_storage::upsert_token_lineages(
+            upsert_test_token_lineages(
                 &database.pool,
                 &[
                     address_name_token_lineage(alpha_token_lineage_id, "0xalpha", 11),
@@ -684,7 +684,7 @@
             )
             .await
             .context("failed to upsert token lineages for address-name conformance")?;
-            bigname_storage::upsert_resources(
+            upsert_test_resources(
                 &database.pool,
                 &[
                     address_name_resource(
@@ -698,7 +698,7 @@
             )
             .await
             .context("failed to upsert resources for address-name conformance")?;
-            bigname_storage::upsert_name_surfaces(
+            upsert_test_name_surfaces(
                 &database.pool,
                 &[
                     collection_name_surface("ens:beta.eth", "beta.eth", "node:beta.eth", 12),
@@ -707,7 +707,7 @@
             )
             .await
             .context("failed to upsert name surfaces for address-name conformance")?;
-            bigname_storage::upsert_surface_bindings(
+            upsert_test_surface_bindings(
                 &database.pool,
                 &[
                     address_name_surface_binding(
@@ -900,7 +900,7 @@
             let base_resource_id = Uuid::from_u128(0x8400);
             let base_surface_binding_id = Uuid::from_u128(0x8402);
 
-            bigname_storage::upsert_token_lineages(
+            upsert_test_token_lineages(
                 &database.pool,
                 &[address_name_token_lineage(
                     ens_token_lineage_id,
@@ -910,7 +910,7 @@
             )
             .await
             .context("failed to upsert filtered token lineage for conformance")?;
-            bigname_storage::upsert_resources(
+            upsert_test_resources(
                 &database.pool,
                 &[
                     address_name_resource(ens_resource_id, Some(ens_token_lineage_id), "0xens", 21),
@@ -919,7 +919,7 @@
             )
             .await
             .context("failed to upsert filtered resources for conformance")?;
-            bigname_storage::upsert_name_surfaces(
+            upsert_test_name_surfaces(
                 &database.pool,
                 &[
                     collection_name_surface("ens:alice.eth", "alice.eth", "node:alice.eth", 21),
@@ -933,7 +933,7 @@
             )
             .await
             .context("failed to upsert filtered name surfaces for conformance")?;
-            bigname_storage::upsert_surface_bindings(
+            upsert_test_surface_bindings(
                 &database.pool,
                 &[
                     address_name_surface_binding(
@@ -1026,7 +1026,7 @@
             let alpha_surface_binding_id = Uuid::from_u128(0x8502);
             let beta_surface_binding_id = Uuid::from_u128(0x8503);
 
-            bigname_storage::upsert_token_lineages(
+            upsert_test_token_lineages(
                 &database.pool,
                 &[address_name_token_lineage(
                     shared_token_lineage_id,
@@ -1036,7 +1036,7 @@
             )
             .await
             .context("failed to upsert shared token lineage for conformance")?;
-            bigname_storage::upsert_resources(
+            upsert_test_resources(
                 &database.pool,
                 &[address_name_resource(
                     shared_resource_id,
@@ -1047,7 +1047,7 @@
             )
             .await
             .context("failed to upsert shared resource for conformance")?;
-            bigname_storage::upsert_name_surfaces(
+            upsert_test_name_surfaces(
                 &database.pool,
                 &[
                     collection_name_surface("ens:beta.eth", "beta.eth", "node:beta.eth", 31),
@@ -1056,7 +1056,7 @@
             )
             .await
             .context("failed to upsert shared name surfaces for conformance")?;
-            bigname_storage::upsert_surface_bindings(
+            upsert_test_surface_bindings(
                 &database.pool,
                 &[
                     address_name_surface_binding(
@@ -1179,7 +1179,7 @@
             let token_lineage_id = Uuid::from_u128(0x85a1);
             let surface_binding_id = Uuid::from_u128(0x85a2);
 
-            bigname_storage::upsert_token_lineages(
+            upsert_test_token_lineages(
                 &database.pool,
                 &[address_name_token_lineage(
                     token_lineage_id,
@@ -1189,7 +1189,7 @@
             )
             .await
             .context("failed to upsert basenames token lineage for conformance")?;
-            bigname_storage::upsert_resources(
+            upsert_test_resources(
                 &database.pool,
                 &[address_name_resource(
                     resource_id,
@@ -1200,7 +1200,7 @@
             )
             .await
             .context("failed to upsert basenames resource for conformance")?;
-            bigname_storage::upsert_name_surfaces(
+            upsert_test_name_surfaces(
                 &database.pool,
                 &[collection_name_surface(
                     "basenames:alice.base.eth",
@@ -1211,7 +1211,7 @@
             )
             .await
             .context("failed to upsert basenames surface for conformance")?;
-            bigname_storage::upsert_surface_bindings(
+            upsert_test_surface_bindings(
                 &database.pool,
                 &[address_name_surface_binding(
                     surface_binding_id,
@@ -1440,13 +1440,13 @@
             let subject = "0x0000000000000000000000000000000000000abc";
             let other_subject = "0x0000000000000000000000000000000000000def";
 
-            bigname_storage::upsert_token_lineages(
+            upsert_test_token_lineages(
                 &database.pool,
                 &[address_name_token_lineage(token_lineage_id, "0xalpha", 61)],
             )
             .await
             .context("failed to upsert token lineage for role-summary conformance")?;
-            bigname_storage::upsert_resources(
+            upsert_test_resources(
                 &database.pool,
                 &[address_name_resource(
                     resource_id,
@@ -1457,7 +1457,7 @@
             )
             .await
             .context("failed to upsert resource for role-summary conformance")?;
-            bigname_storage::upsert_name_surfaces(
+            upsert_test_name_surfaces(
                 &database.pool,
                 &[
                     collection_name_surface("ens:alpha.eth", "alpha.eth", "node:alpha.eth", 61),
@@ -1477,7 +1477,7 @@
             )
             .await
             .context("failed to upsert surfaces for role-summary conformance")?;
-            bigname_storage::upsert_surface_bindings(
+            upsert_test_surface_bindings(
                 &database.pool,
                 &[address_name_surface_binding(
                     surface_binding_id,
@@ -1842,7 +1842,7 @@
             name_row.manifest_version = 11;
             database.insert_name_current_row(name_row).await?;
 
-            bigname_storage::upsert_name_surfaces(
+            upsert_test_name_surfaces(
                 &database.pool,
                 &[
                     collection_name_surface(
@@ -2106,7 +2106,7 @@
                 ));
             }
 
-            bigname_storage::upsert_name_surfaces(&database.pool, &surfaces)
+            upsert_test_name_surfaces(&database.pool, &surfaces)
                 .await
                 .context("failed to upsert larger children surfaces for conformance")?;
             bigname_storage::upsert_children_current_rows(&database.pool, &children)
@@ -2173,16 +2173,16 @@
                 149,
             ));
 
-            bigname_storage::upsert_token_lineages(&database.pool, &token_lineages)
+            upsert_test_token_lineages(&database.pool, &token_lineages)
                 .await
                 .context("failed to upsert larger address-name token lineages")?;
-            bigname_storage::upsert_resources(&database.pool, &resources)
+            upsert_test_resources(&database.pool, &resources)
                 .await
                 .context("failed to upsert larger address-name resources")?;
-            bigname_storage::upsert_name_surfaces(&database.pool, &address_surfaces)
+            upsert_test_name_surfaces(&database.pool, &address_surfaces)
                 .await
                 .context("failed to upsert larger address-name surfaces")?;
-            bigname_storage::upsert_surface_bindings(&database.pool, &surface_bindings)
+            upsert_test_surface_bindings(&database.pool, &surface_bindings)
                 .await
                 .context("failed to upsert larger address-name surface bindings")?;
             bigname_storage::upsert_address_names_current_rows(&database.pool, &address_rows)

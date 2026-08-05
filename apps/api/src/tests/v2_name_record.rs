@@ -3635,7 +3635,7 @@ async fn seed_v2_subnames_fixture(database: &TestDatabase) -> Result<()> {
     )
     .await?;
 
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[collection_name_surface(
             "ens:gamma.parent.eth",
@@ -3658,7 +3658,7 @@ async fn seed_v2_subnames_fixture(database: &TestDatabase) -> Result<()> {
         ))
         .await?;
 
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[collection_name_surface(
             "ens:delta.alpha.parent.eth",
@@ -3775,12 +3775,12 @@ async fn seed_v2_subnames_bound_child(
         .into_iter()
         .collect();
 
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[surface],
     )
     .await?;
-    bigname_storage::upsert_token_lineages(
+    upsert_test_token_lineages(
         &database.pool,
         &[address_name_token_lineage(
             token_lineage_id,
@@ -3789,7 +3789,7 @@ async fn seed_v2_subnames_bound_child(
         )],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[address_name_resource(
             resource_id,
@@ -3799,7 +3799,7 @@ async fn seed_v2_subnames_bound_child(
         )],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[address_name_surface_binding(
             surface_binding_id,

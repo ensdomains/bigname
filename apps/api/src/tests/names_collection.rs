@@ -31,7 +31,7 @@ async fn names_collection_returns_compact_projection_rows_with_counts_and_stable
         ],
     )
     .await?;
-    bigname_storage::upsert_token_lineages(
+    upsert_test_token_lineages(
         &database.pool,
         &[
             address_name_token_lineage(alice_token_lineage_id, "0xnames-alice", 411),
@@ -39,7 +39,7 @@ async fn names_collection_returns_compact_projection_rows_with_counts_and_stable
         ],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[
             address_name_resource(
@@ -57,7 +57,7 @@ async fn names_collection_returns_compact_projection_rows_with_counts_and_stable
         ],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             collection_name_surface("ens:alice.eth", "alice.eth", "namehash:alice.eth", 411),
@@ -65,7 +65,7 @@ async fn names_collection_returns_compact_projection_rows_with_counts_and_stable
         ],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[
             address_name_surface_binding(

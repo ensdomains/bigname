@@ -20,7 +20,9 @@ use crate::{
     ReverseIdentityRoles, ReverseIdentityStorageInput, SurfaceBinding, SurfaceBindingKind,
     TokenLineage, default_database_url, load_identity_records_by_names,
     load_reverse_identity_feed_records, load_reverse_identity_records, upsert_name_current_rows,
-    upsert_name_surfaces, upsert_resources, upsert_surface_bindings, upsert_token_lineages,
+    upsert_name_surfaces as store_upsert_name_surfaces, upsert_resources as store_upsert_resources,
+    upsert_surface_bindings as store_upsert_surface_bindings,
+    upsert_token_lineages as store_upsert_token_lineages,
 };
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -183,6 +185,101 @@ fn surface_binding(
     }
 }
 
+async fn seed_lineage_anchor(
+    pool: &PgPool,
+    chain_id: &str,
+    block_hash: &str,
+    block_number: i64,
+    canonicality_state: CanonicalityState,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO chain_lineage (
+            chain_id,
+            block_hash,
+            block_number,
+            block_timestamp,
+            canonicality_state
+        )
+        VALUES ($1, $2, $3, $4, $5::canonicality_state)
+        ON CONFLICT (chain_id, block_hash) DO NOTHING
+        "#,
+    )
+    .bind(chain_id)
+    .bind(block_hash)
+    .bind(block_number)
+    .bind(timestamp(1_717_000_000 + block_number - 21_100_000))
+    .bind(match canonicality_state {
+        CanonicalityState::Observed => "observed",
+        CanonicalityState::Canonical => "canonical",
+        CanonicalityState::Safe => "safe",
+        CanonicalityState::Finalized => "finalized",
+        CanonicalityState::Orphaned => "orphaned",
+    })
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn upsert_token_lineages(pool: &PgPool, rows: &[TokenLineage]) -> Result<Vec<TokenLineage>> {
+    for row in rows {
+        seed_lineage_anchor(
+            pool,
+            &row.chain_id,
+            &row.block_hash,
+            row.block_number,
+            row.canonicality_state,
+        )
+        .await?;
+    }
+    store_upsert_token_lineages(pool, rows).await
+}
+
+async fn upsert_resources(pool: &PgPool, rows: &[Resource]) -> Result<Vec<Resource>> {
+    for row in rows {
+        seed_lineage_anchor(
+            pool,
+            &row.chain_id,
+            &row.block_hash,
+            row.block_number,
+            row.canonicality_state,
+        )
+        .await?;
+    }
+    store_upsert_resources(pool, rows).await
+}
+
+async fn upsert_name_surfaces(pool: &PgPool, rows: &[NameSurface]) -> Result<Vec<NameSurface>> {
+    for row in rows {
+        seed_lineage_anchor(
+            pool,
+            &row.chain_id,
+            &row.block_hash,
+            row.block_number,
+            row.canonicality_state,
+        )
+        .await?;
+    }
+    store_upsert_name_surfaces(pool, rows).await
+}
+
+async fn upsert_surface_bindings(
+    pool: &PgPool,
+    rows: &[SurfaceBinding],
+) -> Result<Vec<SurfaceBinding>> {
+    for row in rows {
+        seed_lineage_anchor(
+            pool,
+            &row.chain_id,
+            &row.block_hash,
+            row.block_number,
+            row.canonicality_state,
+        )
+        .await?;
+    }
+    store_upsert_surface_bindings(pool, rows).await
+}
+
 async fn seed_relation_references(
     database: &TestDatabase,
     logical_name_id: &str,
@@ -192,37 +289,23 @@ async fn seed_relation_references(
     surface_binding_id: Uuid,
     canonicality_state: CanonicalityState,
 ) -> Result<()> {
-    if let Some(token_lineage_id) = token_lineage_id {
-        upsert_token_lineages(
-            database.pool(),
-            &[token_lineage(token_lineage_id, canonicality_state)],
-        )
-        .await?;
+    let token_lineage = token_lineage_id
+        .map(|token_lineage_id| token_lineage(token_lineage_id, canonicality_state));
+    let resource = resource(resource_id, token_lineage_id, canonicality_state);
+    let surface = name_surface(logical_name_id, display_name, canonicality_state);
+    let binding = surface_binding(
+        surface_binding_id,
+        logical_name_id,
+        resource_id,
+        canonicality_state,
+    );
+
+    if token_lineage.is_some() {
+        upsert_token_lineages(database.pool(), token_lineage.as_slice()).await?;
     }
-    upsert_resources(
-        database.pool(),
-        &[resource(resource_id, token_lineage_id, canonicality_state)],
-    )
-    .await?;
-    upsert_name_surfaces(
-        database.pool(),
-        &[name_surface(
-            logical_name_id,
-            display_name,
-            canonicality_state,
-        )],
-    )
-    .await?;
-    upsert_surface_bindings(
-        database.pool(),
-        &[surface_binding(
-            surface_binding_id,
-            logical_name_id,
-            resource_id,
-            canonicality_state,
-        )],
-    )
-    .await?;
+    upsert_resources(database.pool(), &[resource]).await?;
+    upsert_name_surfaces(database.pool(), &[surface]).await?;
+    upsert_surface_bindings(database.pool(), &[binding]).await?;
     Ok(())
 }
 
@@ -801,18 +884,18 @@ async fn address_names_current_upsert_replaces_existing_relation_row() -> Result
 }
 
 #[tokio::test]
-async fn address_names_current_filters_noncanonical_supporting_identity_rows() -> Result<()> {
+async fn address_name_consumers_require_readable_supporting_lineage() -> Result<()> {
     let database = TestDatabase::new().await?;
     let address = "0x0000000000000000000000000000000000000abc";
 
-    let canonical_logical_name_id = "ens:alice.eth";
+    let canonical_logical_name_id = "ens:zed.eth";
     let canonical_token_lineage_id = Uuid::from_u128(0x1101);
     let canonical_resource_id = Uuid::from_u128(0x1201);
     let canonical_surface_binding_id = Uuid::from_u128(0x1301);
     seed_relation_references(
         &database,
         canonical_logical_name_id,
-        "alice.eth",
+        "zed.eth",
         canonical_resource_id,
         Some(canonical_token_lineage_id),
         canonical_surface_binding_id,
@@ -831,14 +914,14 @@ async fn address_names_current_filters_noncanonical_supporting_identity_rows() -
         noncanonical_resource_id,
         Some(noncanonical_token_lineage_id),
         noncanonical_surface_binding_id,
-        CanonicalityState::Orphaned,
+        CanonicalityState::Finalized,
     )
     .await?;
 
     let canonical = address_name_current_row(AddressNameCurrentRowSeed {
         address,
         logical_name_id: canonical_logical_name_id,
-        display_name: "alice.eth",
+        display_name: "zed.eth",
         relation: AddressNameRelation::Registrant,
         surface_binding_id: canonical_surface_binding_id,
         resource_id: canonical_resource_id,
@@ -857,15 +940,113 @@ async fn address_names_current_filters_noncanonical_supporting_identity_rows() -
     });
     upsert_address_names_current_rows(database.pool(), &[canonical.clone(), noncanonical.clone()])
         .await?;
+    let mut canonical_name_current = name_current_row(&canonical);
+    canonical_name_current.coverage = json!({"source": "name_current"});
+    canonical_name_current.chain_positions = json!({"name_current": {"block_hash": "0xname"}});
+    upsert_name_current_rows(
+        database.pool(),
+        &[
+            canonical_name_current.clone(),
+            name_current_row(&noncanonical),
+        ],
+    )
+    .await?;
+    rebuild_address_names_current_identity_sidecars(database.pool()).await?;
+
+    let losing_hashes = vec![
+        format!("0xlineage{}", noncanonical_token_lineage_id.simple()),
+        format!("0xresource{}", noncanonical_resource_id.simple()),
+        "0xsurface:bob.eth".to_owned(),
+        format!("0xbinding{}", noncanonical_surface_binding_id.simple()),
+    ];
+    sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'orphaned'::canonicality_state
+         WHERE chain_id = 'ethereum-mainnet'
+           AND block_hash = ANY($1::TEXT[])",
+    )
+    .bind(&losing_hashes)
+    .execute(database.pool())
+    .await?;
+
+    let row_local_readable_count: i64 = sqlx::query_scalar(
+        "SELECT
+             (SELECT COUNT(*) FROM token_lineages
+              WHERE token_lineage_id = $1 AND canonicality_state = 'finalized')
+           + (SELECT COUNT(*) FROM resources
+              WHERE resource_id = $2 AND canonicality_state = 'finalized')
+           + (SELECT COUNT(*) FROM name_surfaces
+              WHERE logical_name_id = $3 AND canonicality_state = 'finalized')
+           + (SELECT COUNT(*) FROM surface_bindings
+              WHERE surface_binding_id = $4 AND canonicality_state = 'finalized')",
+    )
+    .bind(noncanonical_token_lineage_id)
+    .bind(noncanonical_resource_id)
+    .bind(noncanonical_logical_name_id)
+    .bind(noncanonical_surface_binding_id)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(row_local_readable_count, 4);
 
     assert_eq!(
         load_address_names_current(database.pool(), address, None, None).await?,
         vec![canonical.clone()]
     );
+    let page = load_address_names_current_page(
+        database.pool(),
+        address,
+        Some("ens"),
+        None,
+        AddressNamesCurrentDedupe::Surface,
+        None,
+        10,
+    )
+    .await?;
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].logical_name_id, canonical_logical_name_id);
+
+    let forward = load_identity_records_by_names(
+        database.pool(),
+        &[
+            noncanonical_logical_name_id.to_owned(),
+            canonical_logical_name_id.to_owned(),
+        ],
+    )
+    .await?;
+    assert_eq!(forward.len(), 1);
+    assert_eq!(forward[0].row.logical_name_id, canonical_logical_name_id);
+
+    let reverse = load_reverse_identity_records(
+        database.pool(),
+        &[ReverseIdentityStorageInput {
+            address: address.to_owned(),
+            coin_type: "60".to_owned(),
+            roles: ReverseIdentityRoles::Owned,
+            page_size: 10,
+            cursor: None,
+        }],
+    )
+    .await?;
+    assert_eq!(reverse[0].entries.len(), 1);
+    // The indexed count is replaced by stamped projection redo, which this reader-only
+    // regression intentionally does not run.
+    assert_eq!(reverse[0].total_count, Some(2));
+    assert_eq!(
+        reverse[0].entries[0].name_record.row.logical_name_id,
+        canonical_logical_name_id
+    );
+    assert_eq!(
+        reverse[0].entries[0].name_record.row.coverage,
+        canonical_name_current.coverage
+    );
+    assert_eq!(
+        reverse[0].entries[0].name_record.row.chain_positions,
+        canonical_name_current.chain_positions
+    );
     assert_eq!(
         load_address_names_current_including_noncanonical(database.pool(), address, None, None)
             .await?,
-        vec![canonical, noncanonical]
+        vec![noncanonical, canonical]
     );
 
     database.cleanup().await

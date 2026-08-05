@@ -4,7 +4,10 @@ use uuid::Uuid;
 
 use super::{
     EventHistoryReadFilter, HistoryCursor, HistoryEvent, HistoryPage, HistorySummaryMode,
-    InvalidHistoryCursor, decoders::decode_history_event, selectors::HistorySelector,
+    InvalidHistoryCursor,
+    decoders::decode_history_event,
+    selectors::HistorySelector,
+    source::{push_history_canonicality_filter, push_history_source},
     summary::load_history_summary,
 };
 use crate::projection_helpers::{
@@ -222,20 +225,9 @@ fn push_history_select(builder: &mut QueryBuilder<'_, Postgres>, include_cursor_
                 END,
                 '{}'::jsonb
             ) AS coverage
-        FROM normalized_events ne
         "#,
     );
-    if include_cursor_row {
-        builder.push(" CROSS JOIN history_cursor_row cursor_row ");
-    }
-    builder.push(
-        r#"
-        LEFT JOIN chain_lineage rb
-          ON rb.chain_id = ne.chain_id
-         AND rb.block_hash = ne.block_hash
-        WHERE TRUE
-        "#,
-    );
+    push_history_source(builder, include_cursor_row);
 }
 
 pub(super) fn push_history_filters<'a>(
@@ -268,17 +260,7 @@ pub(super) fn push_history_filters<'a>(
         builder.push_bind(to_block);
     }
 
-    if canonical_only {
-        builder.push(
-            r#"
-            AND ne.canonicality_state IN (
-                'canonical'::canonicality_state,
-                'safe'::canonicality_state,
-                'finalized'::canonicality_state
-            )
-            "#,
-        );
-    }
+    push_history_canonicality_filter(builder, canonical_only);
 }
 
 fn push_history_order(builder: &mut QueryBuilder<'_, Postgres>) {
@@ -309,10 +291,9 @@ async fn ensure_history_cursor_exists(
         r#"
         SELECT EXISTS (
             SELECT 1
-            FROM normalized_events ne
-            WHERE TRUE
         "#,
     );
+    push_history_source(&mut builder, false);
     push_history_filters(&mut builder, filter, canonical_only);
     builder.push(" AND ne.normalized_event_id = ");
     builder.push_bind(cursor.normalized_event_id);

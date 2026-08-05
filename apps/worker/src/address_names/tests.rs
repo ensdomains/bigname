@@ -266,6 +266,139 @@ async fn rebuilds_current_token_holder_and_registry_controller_rows() -> Result<
     assert_eq!(controller_rows[0].logical_name_id, "ens:beta.eth");
     assert_eq!(controller_rows[0].token_lineage_id, None);
 
+    let losing_holder = "0x0000000000000000000000000000000000000bbb";
+    sqlx::query(
+        r#"
+        UPDATE chain_lineage
+        SET canonicality_state = 'orphaned'::canonicality_state
+        WHERE chain_id = 'ethereum-mainnet'
+          AND block_hash = '0xalpha-transfer'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    rebuild_address_names_current(database.pool(), Some(losing_holder)).await?;
+    assert!(
+        load_address_names_current(database.pool(), losing_holder, None, None)
+            .await?
+            .is_empty()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM normalized_events WHERE event_identity = 'worker-address-names:TokenControlTransferred:transfer'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "finalized"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuild_excludes_binding_when_required_token_lineage_is_not_readable() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let binding = IdentityBinding::new(
+        "ens:token-lineage-reorg.eth",
+        "token-lineage-reorg.eth",
+        Some(0x6100),
+        0x6200,
+        0x6300,
+    );
+    let address = "0x0000000000000000000000000000000000000aaa";
+
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xidentity", 610, 1_717_180_610),
+            raw_block("ethereum-mainnet", "0xtoken-losing", 611, 1_717_180_611),
+        ],
+    )
+    .await?;
+    seed_identity(database.pool(), &binding, "0xidentity", 610, 1_717_180_610).await?;
+    sqlx::query(
+        r#"
+        UPDATE token_lineages
+        SET block_hash = '0xtoken-losing', block_number = 611
+        WHERE token_lineage_id = $1
+        "#,
+    )
+    .bind(binding.token_lineage_id)
+    .execute(database.pool())
+    .await?;
+    seed_events(
+        database.pool(),
+        &[authority_event(
+            &binding,
+            "token-lineage-grant",
+            "RegistrationGranted",
+            ENS_V1_REGISTRAR_SOURCE_FAMILY,
+            "0xidentity",
+            610,
+            Some(0),
+            json!({}),
+            json!({
+                "authority_kind": "registrar",
+                "authority_key": "registrar:ethereum-mainnet:7:token-lineage-reorg",
+                "registrant": address,
+            }),
+        )],
+    )
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE chain_lineage
+        SET canonicality_state = 'orphaned'::canonicality_state
+        WHERE chain_id = 'ethereum-mainnet'
+          AND block_hash = '0xtoken-losing'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    rebuild_address_names_current(database.pool(), None).await?;
+    assert!(
+        load_address_names_current(database.pool(), address, None, None)
+            .await?
+            .is_empty()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM token_lineages WHERE token_lineage_id = $1",
+        )
+        .bind(binding.token_lineage_id)
+        .fetch_one(database.pool())
+        .await?,
+        "finalized"
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE chain_lineage
+        SET canonicality_state = 'finalized'::canonicality_state
+        WHERE chain_id = 'ethereum-mainnet'
+          AND block_hash = '0xtoken-losing'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE token_lineages
+        SET canonicality_state = 'orphaned'::canonicality_state
+        WHERE token_lineage_id = $1
+        "#,
+    )
+    .bind(binding.token_lineage_id)
+    .execute(database.pool())
+    .await?;
+    rebuild_address_names_current(database.pool(), None).await?;
+    assert!(
+        load_address_names_current(database.pool(), address, None, None)
+            .await?
+            .is_empty()
+    );
+
     database.cleanup().await
 }
 

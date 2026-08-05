@@ -1422,6 +1422,76 @@ async fn manifest_events_enqueue_manifest_sensitive_projection_keys() -> Result<
 }
 
 #[tokio::test]
+async fn unanchored_events_survive_manifest_invalidation_dependency_queries() -> Result<()> {
+    let database = test_database().await?;
+    let resource_id = Uuid::new_v4();
+
+    insert_resource(&database, resource_id).await?;
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:unanchored-manifest-dependency",
+            namespace: "ens",
+            logical_name_id: Some("ens:unanchored.eth"),
+            resource_id: Some(resource_id),
+            event_kind: "RecordChanged",
+            source_family: "ens_v1_resolver_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: None,
+            block_hash: None,
+            before_state: json!({}),
+            after_state: json!({
+                "record_key": "text:email",
+                "record_family": "text",
+                "selector_key": "email"
+            }),
+            observed_at: timestamp(1_800_000_200),
+        },
+    )
+    .await?;
+    derive_normalized_event_invalidations(database.pool(), 100).await?;
+    sqlx::query("DELETE FROM projection_invalidations")
+        .execute(database.pool())
+        .await
+        .context("failed to clear setup invalidations")?;
+
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:unanchored-manifest-update",
+            namespace: "ens",
+            logical_name_id: None,
+            resource_id: None,
+            event_kind: "SourceManifestUpdated",
+            source_family: "ens_v1_registry_l1",
+            derivation_kind: "manifest_sync",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: None,
+            block_hash: None,
+            before_state: json!({}),
+            after_state: json!({
+                "manifest_version": 2,
+                "normalizer_version": "test"
+            }),
+            observed_at: timestamp(1_800_000_201),
+        },
+    )
+    .await?;
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 1);
+    let invalidations = load_invalidations(&database).await?;
+    assert!(has_key(
+        &invalidations,
+        "record_inventory_current",
+        &resource_id.to_string()
+    ));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn generation_bump_releases_in_flight_claim_for_serialized_reapply() -> Result<()> {
     let database = test_database().await?;
     let resource_id = Uuid::new_v4();
@@ -2366,6 +2436,20 @@ async fn load_invalidation_payload(
 }
 
 async fn insert_resource(database: &TestDatabase, resource_id: Uuid) -> Result<()> {
+    let block_hash = format!("0x{}", resource_id.simple());
+    sqlx::query(
+        r#"
+        INSERT INTO chain_lineage (
+            chain_id, block_hash, block_number, block_timestamp, canonicality_state
+        )
+        VALUES ('ethereum-mainnet', $1, 1, now(), 'finalized'::canonicality_state)
+        ON CONFLICT (chain_id, block_hash) DO NOTHING
+        "#,
+    )
+    .bind(&block_hash)
+    .execute(database.pool())
+    .await
+    .context("failed to insert projection apply test resource lineage")?;
     sqlx::query(
         r#"
         INSERT INTO resources (
@@ -2385,7 +2469,7 @@ async fn insert_resource(database: &TestDatabase, resource_id: Uuid) -> Result<(
         "#,
     )
     .bind(resource_id)
-    .bind(format!("0x{}", resource_id.simple()))
+    .bind(block_hash)
     .execute(database.pool())
     .await
     .context("failed to insert projection apply test resource")?;
@@ -2397,6 +2481,20 @@ async fn insert_name_surface(
     logical_name_id: &str,
     normalized_name: &str,
 ) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO chain_lineage (
+            chain_id, block_hash, block_number, block_timestamp, canonicality_state
+        )
+        VALUES (
+            'ethereum-mainnet', '0xsurface', 1, now(), 'finalized'::canonicality_state
+        )
+        ON CONFLICT (chain_id, block_hash) DO NOTHING
+        "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert projection apply test name-surface lineage")?;
     sqlx::query(
         r#"
         INSERT INTO name_surfaces (
@@ -2537,6 +2635,26 @@ struct EventSeed<'a> {
 }
 
 async fn insert_event(database: &TestDatabase, event: EventSeed<'_>) -> Result<()> {
+    if let (Some(chain_id), Some(block_number), Some(block_hash)) =
+        (event.chain_id, event.block_number, event.block_hash)
+    {
+        sqlx::query(
+            r#"
+            INSERT INTO chain_lineage (
+                chain_id, block_hash, block_number, block_timestamp, canonicality_state
+            )
+            VALUES ($1, $2, $3, $4, 'canonical'::canonicality_state)
+            ON CONFLICT (chain_id, block_hash) DO NOTHING
+            "#,
+        )
+        .bind(chain_id)
+        .bind(block_hash)
+        .bind(block_number)
+        .bind(event.observed_at)
+        .execute(database.pool())
+        .await
+        .with_context(|| format!("failed to insert lineage for {}", event.event_identity))?;
+    }
     sqlx::query(
         r#"
         INSERT INTO normalized_events (

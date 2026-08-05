@@ -1,7 +1,7 @@
 use anyhow::Result;
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::json;
-use sqlx::types::time::OffsetDateTime;
+use sqlx::{PgPool, Postgres, QueryBuilder, types::time::OffsetDateTime};
 use uuid::Uuid;
 
 use super::*;
@@ -10,8 +10,10 @@ use crate::{
     ChainPositions, NameSurface, NormalizedEvent, Resource, SnapshotProjectionRead,
     SnapshotSelectionErrorKind, SurfaceBinding, SurfaceBindingKind, TokenLineage,
     insert_normalized_event_fixtures, upsert_address_names_current_rows,
-    upsert_chain_lineage_blocks, upsert_name_surfaces, upsert_resources, upsert_surface_bindings,
-    upsert_token_lineages,
+    upsert_chain_lineage_blocks, upsert_name_surfaces as store_upsert_name_surfaces,
+    upsert_resources as store_upsert_resources,
+    upsert_surface_bindings as store_upsert_surface_bindings,
+    upsert_token_lineages as store_upsert_token_lineages,
 };
 
 async fn test_database() -> Result<TestDatabase> {
@@ -153,6 +155,99 @@ fn lineage_block(
         state_root: None,
         canonicality_state: CanonicalityState::Finalized,
     }
+}
+
+async fn seed_readable_lineage<'a>(
+    pool: &PgPool,
+    anchors: impl IntoIterator<Item = (&'a str, &'a str, i64)>,
+) -> Result<()> {
+    let anchors = anchors.into_iter().collect::<Vec<_>>();
+    if anchors.is_empty() {
+        return Ok(());
+    }
+
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "INSERT INTO chain_lineage (\
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state\
+         ) ",
+    );
+    builder.push_values(
+        anchors,
+        |mut separated, (chain_id, block_hash, block_number)| {
+            separated
+                .push_bind(chain_id)
+                .push_bind(block_hash)
+                .push_bind(block_number)
+                .push_bind(timestamp(1_776_384_000 + block_number - 21_000_000))
+                .push("'canonical'::canonicality_state");
+        },
+    );
+    builder.push(" ON CONFLICT (chain_id, block_hash) DO NOTHING");
+    builder.build().execute(pool).await?;
+    Ok(())
+}
+
+async fn upsert_token_lineages(pool: &PgPool, rows: &[TokenLineage]) -> Result<Vec<TokenLineage>> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_token_lineages(pool, rows).await
+}
+
+async fn upsert_resources(pool: &PgPool, rows: &[Resource]) -> Result<Vec<Resource>> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_resources(pool, rows).await
+}
+
+async fn upsert_name_surfaces(pool: &PgPool, rows: &[NameSurface]) -> Result<Vec<NameSurface>> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_name_surfaces(pool, rows).await
+}
+
+async fn upsert_surface_bindings(
+    pool: &PgPool,
+    rows: &[SurfaceBinding],
+) -> Result<Vec<SurfaceBinding>> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_surface_bindings(pool, rows).await
 }
 
 async fn seed_binding_references(
@@ -525,6 +620,119 @@ async fn name_current_snapshot_read_covers_later_snapshot_until_new_input() -> R
 }
 
 #[tokio::test]
+async fn name_current_snapshot_ignores_row_local_inputs_on_a_losing_fork() -> Result<()> {
+    let database = test_database().await?;
+    let logical_name_id = "ens:lineage-snapshot.eth";
+    let token_lineage_id = Uuid::from_u128(0x1111);
+    let resource_id = Uuid::from_u128(0x2221);
+    let surface_binding_id = Uuid::from_u128(0x3331);
+    let losing_binding_id = Uuid::from_u128(0x3332);
+    let losing_hash = "0xnamecurrentlosing";
+    let winning_hash = "0xnamecurrentwinning";
+
+    seed_binding_references(
+        &database,
+        logical_name_id,
+        "lineage-snapshot.eth",
+        resource_id,
+        token_lineage_id,
+        surface_binding_id,
+    )
+    .await?;
+    let mut expected = name_current_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    expected.canonical_display_name = "lineage-snapshot.eth".to_owned();
+    expected.normalized_name = "lineage-snapshot.eth".to_owned();
+    expected.namehash = "namehash:lineage-snapshot.eth".to_owned();
+    upsert_name_current_rows(database.pool(), std::slice::from_ref(&expected)).await?;
+
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            lineage_block("0xbinding", None, 21_000_003),
+            lineage_block(losing_hash, Some("0xbinding"), 21_000_004),
+            lineage_block(winning_hash, Some("0xbinding"), 21_000_004),
+        ],
+    )
+    .await?;
+    insert_normalized_event_fixtures(
+        database.pool(),
+        &[normalized_event(
+            logical_name_id,
+            resource_id,
+            losing_hash,
+            21_000_004,
+        )],
+    )
+    .await?;
+    upsert_surface_bindings(
+        database.pool(),
+        &[surface_binding(
+            losing_binding_id,
+            logical_name_id,
+            resource_id,
+            timestamp(1_000),
+            Some(timestamp(2_000)),
+            losing_hash,
+            21_000_004,
+        )],
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'orphaned'::canonicality_state
+         WHERE chain_id = 'ethereum-mainnet' AND block_hash = $1",
+    )
+    .bind(losing_hash)
+    .execute(database.pool())
+    .await?;
+
+    let row_local_readable_count: i64 = sqlx::query_scalar(
+        "SELECT
+             (SELECT COUNT(*) FROM normalized_events
+              WHERE block_hash = $1 AND canonicality_state = 'finalized')
+           + (SELECT COUNT(*) FROM surface_bindings
+              WHERE block_hash = $1 AND canonicality_state = 'finalized')",
+    )
+    .bind(losing_hash)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(row_local_readable_count, 2);
+
+    let selected = ChainPositions::from_value(&json!({
+        "ethereum": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_000_004,
+            "block_hash": winning_hash,
+            "timestamp": "2026-04-17T00:00:04Z"
+        }
+    }))?;
+    assert_eq!(
+        load_name_current_for_snapshot(database.pool(), logical_name_id, &selected).await?,
+        SnapshotProjectionRead::Found(expected)
+    );
+
+    sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'canonical'::canonicality_state
+         WHERE chain_id = 'ethereum-mainnet' AND block_hash = $1",
+    )
+    .bind(losing_hash)
+    .execute(database.pool())
+    .await?;
+    let error = load_name_current_for_snapshot(database.pool(), logical_name_id, &selected)
+        .await
+        .expect_err("readable newer inputs must make the projection stale");
+    assert_eq!(error.kind(), SnapshotSelectionErrorKind::Stale);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn name_current_snapshot_read_allows_projected_auxiliary_chain_positions() -> Result<()> {
     let database = test_database().await?;
     let logical_name_id = "ens:alice.eth";
@@ -580,8 +788,7 @@ async fn name_current_snapshot_read_allows_projected_auxiliary_chain_positions()
 }
 
 #[tokio::test]
-async fn name_current_snapshot_read_rejects_later_snapshot_when_projected_block_is_noncanonical()
--> Result<()> {
+async fn name_current_snapshot_read_hides_row_when_projected_block_is_noncanonical() -> Result<()> {
     let database = test_database().await?;
     let logical_name_id = "ens:alice.eth";
     let token_lineage_id = Uuid::from_u128(0x1120);
@@ -623,6 +830,29 @@ async fn name_current_snapshot_read_rejects_later_snapshot_when_projected_block_
     )
     .execute(database.pool())
     .await?;
+    let row_local_state: String = sqlx::query_scalar(
+        "SELECT canonicality_state::TEXT
+         FROM surface_bindings
+         WHERE surface_binding_id = $1",
+    )
+    .bind(surface_binding_id)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(row_local_state, "finalized");
+    assert_eq!(
+        load_name_current(database.pool(), logical_name_id).await?,
+        None
+    );
+    assert!(
+        load_name_current_by_logical_name_ids(database.pool(), &[logical_name_id.to_owned()])
+            .await?
+            .is_empty()
+    );
+    assert!(
+        load_current_names_by_resource_ids(database.pool(), &[resource_id])
+            .await?
+            .is_empty()
+    );
 
     let later_selected = ChainPositions::from_value(&json!({
         "ethereum": {
@@ -633,10 +863,10 @@ async fn name_current_snapshot_read_rejects_later_snapshot_when_projected_block_
         }
     }))?;
 
-    let error = load_name_current_for_snapshot(database.pool(), logical_name_id, &later_selected)
-        .await
-        .expect_err("later selected snapshot from a noncanonical projection block must be stale");
-    assert_eq!(error.kind(), SnapshotSelectionErrorKind::Stale);
+    assert_eq!(
+        load_name_current_for_snapshot(database.pool(), logical_name_id, &later_selected).await?,
+        SnapshotProjectionRead::NotFound
+    );
 
     database.cleanup().await
 }

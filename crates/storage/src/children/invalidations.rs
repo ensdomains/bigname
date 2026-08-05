@@ -57,6 +57,14 @@ pub(crate) async fn enqueue_children_current_invalidations_for_parent_surfaces(
               ON ne.after_state ->> 'parent_node' = input.namehash
              AND ne.namespace = input.namespace
              AND ne.chain_id = input.chain_id
+            JOIN chain_lineage event_lineage
+              ON event_lineage.chain_id = ne.chain_id
+             AND event_lineage.block_hash = ne.block_hash
+             AND event_lineage.canonicality_state IN (
+                    'canonical'::canonicality_state,
+                    'safe'::canonicality_state,
+                    'finalized'::canonicality_state
+             )
             WHERE ne.event_kind = 'SubregistryChanged'
               AND ne.derivation_kind = 'ens_v1_subregistry_changed'
               AND ne.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
@@ -78,6 +86,14 @@ pub(crate) async fn enqueue_children_current_invalidations_for_parent_surfaces(
               ON ne.logical_name_id = input.logical_name_id
              AND ne.namespace = input.namespace
              AND ne.chain_id = input.chain_id
+            JOIN chain_lineage event_lineage
+              ON event_lineage.chain_id = ne.chain_id
+             AND event_lineage.block_hash = ne.block_hash
+             AND event_lineage.canonicality_state IN (
+                    'canonical'::canonicality_state,
+                    'safe'::canonicality_state,
+                    'finalized'::canonicality_state
+             )
             WHERE ne.event_kind IN ('SubregistryChanged', 'ParentChanged')
               AND ne.canonicality_state IN (
                     'canonical'::canonicality_state,

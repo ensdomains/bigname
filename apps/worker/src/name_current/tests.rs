@@ -251,6 +251,115 @@ async fn rebuilds_first_registration_into_name_current() -> Result<()> {
 }
 
 #[tokio::test]
+async fn rebuild_does_not_treat_unreadable_token_lineage_as_tokenless() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let binding = IdentityBinding::new(
+        "ens:token-lineage-reorg.eth",
+        "token-lineage-reorg.eth",
+        0x6100,
+        0x6200,
+        0x6300,
+    );
+
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block("ethereum-mainnet", "0xgrant", 610, 1_717_171_610),
+            raw_block("ethereum-mainnet", "0xidentity", 611, 1_717_171_611),
+            raw_block("ethereum-mainnet", "0xtoken-losing", 612, 1_717_171_612),
+        ],
+    )
+    .await?;
+    seed_identity(database.pool(), &binding, "0xidentity", 611, 1_717_171_611).await?;
+    sqlx::query(
+        r#"
+        UPDATE token_lineages
+        SET block_hash = '0xtoken-losing', block_number = 612
+        WHERE token_lineage_id = $1
+        "#,
+    )
+    .bind(binding.token_lineage_id)
+    .execute(database.pool())
+    .await?;
+    seed_events(
+        database.pool(),
+        &[authority_event(
+            &binding,
+            "token-lineage-grant",
+            "RegistrationGranted",
+            "0xgrant",
+            610,
+            Some(0),
+            json!({}),
+            json!({
+                "authority_kind": "registrar",
+                "authority_key": "registrar:ethereum-mainnet:7:token-lineage-reorg",
+                "registrant": "0x0000000000000000000000000000000000000aaa",
+                "expiry": 1_800_000_000_i64,
+            }),
+        )],
+    )
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE chain_lineage
+        SET canonicality_state = 'orphaned'::canonicality_state
+        WHERE chain_id = 'ethereum-mainnet'
+          AND block_hash = '0xtoken-losing'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    rebuild_name_current(database.pool(), Some(&binding.logical_name_id)).await?;
+    let lineage_orphaned = load_name_current(database.pool(), &binding.logical_name_id)
+        .await?
+        .context("name surface remains readable when only token lineage is orphaned")?;
+    assert_eq!(lineage_orphaned.surface_binding_id, None);
+    assert_eq!(lineage_orphaned.resource_id, None);
+    assert_eq!(lineage_orphaned.token_lineage_id, None);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM token_lineages WHERE token_lineage_id = $1",
+        )
+        .bind(binding.token_lineage_id)
+        .fetch_one(database.pool())
+        .await?,
+        "finalized"
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE chain_lineage
+        SET canonicality_state = 'finalized'::canonicality_state
+        WHERE chain_id = 'ethereum-mainnet'
+          AND block_hash = '0xtoken-losing'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE token_lineages
+        SET canonicality_state = 'orphaned'::canonicality_state
+        WHERE token_lineage_id = $1
+        "#,
+    )
+    .bind(binding.token_lineage_id)
+    .execute(database.pool())
+    .await?;
+    rebuild_name_current(database.pool(), Some(&binding.logical_name_id)).await?;
+    let row_local_orphaned = load_name_current(database.pool(), &binding.logical_name_id)
+        .await?
+        .context("name surface remains readable when token lineage row is orphaned")?;
+    assert_eq!(row_local_orphaned.surface_binding_id, None);
+    assert_eq!(row_local_orphaned.resource_id, None);
+    assert_eq!(row_local_orphaned.token_lineage_id, None);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rebuild_ignores_suppressed_old_registry_raw_facts_after_migration() -> Result<()> {
     let database = TestDatabase::new().await?;
     let binding = IdentityBinding::new("ens:migrated.eth", "migrated.eth", 0x1110, 0x2220, 0x3330);
@@ -1177,6 +1286,40 @@ async fn rebuild_projects_current_resolver_summary() -> Result<()> {
         })
     );
     assert_eq!(row.coverage["unsupported_reason"], Value::Null);
+
+    let resolver_event_id: i64 = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM normalized_events WHERE event_identity = 'worker-test:ResolverChanged:resolver-change'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE chain_lineage
+        SET canonicality_state = 'orphaned'::canonicality_state
+        WHERE chain_id = 'ethereum-mainnet'
+          AND block_hash = '0xresolver'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    rebuild_name_current(database.pool(), Some(&binding.logical_name_id)).await?;
+    let repaired = load_name_current(database.pool(), &binding.logical_name_id)
+        .await?
+        .context("rebuilt row must survive the losing resolver fork")?;
+    assert!(
+        repaired.provenance["normalized_event_ids"]
+            .as_array()
+            .is_some_and(|ids| !ids.contains(&json!(resolver_event_id)))
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM normalized_events WHERE normalized_event_id = $1",
+        )
+        .bind(resolver_event_id)
+        .fetch_one(database.pool())
+        .await?,
+        "finalized"
+    );
 
     database.cleanup().await
 }
@@ -3410,6 +3553,10 @@ async fn full_rebuild_keeps_visible_rows_when_projection_build_fails() -> Result
         0,
     );
     broken_resolver.chain_id = None;
+    broken_resolver.block_number = None;
+    broken_resolver.block_hash = None;
+    broken_resolver.transaction_hash = None;
+    broken_resolver.log_index = None;
     seed_events(database.pool(), &[broken_resolver]).await?;
 
     let error = rebuild_name_current(database.pool(), None)
@@ -3480,10 +3627,10 @@ async fn keyed_rebuild_keeps_visible_row_when_projection_build_fails() -> Result
             manifest_version: 1,
             source_manifest_id: None,
             chain_id: None,
-            block_number: Some(402),
-            block_hash: Some("0xresolver".to_owned()),
-            transaction_hash: Some("0xtxresolver".to_owned()),
-            log_index: Some(0),
+            block_number: None,
+            block_hash: None,
+            transaction_hash: None,
+            log_index: None,
             raw_fact_ref: json!({
                 "kind": "raw_log",
                 "block_hash": "0xresolver",

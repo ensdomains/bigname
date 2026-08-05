@@ -142,6 +142,77 @@ async fn get_resolution_execution_explain_reports_stale_inventory_as_conflict() 
 }
 
 #[tokio::test]
+async fn verified_inventory_snapshot_match_requires_readable_resource_lineage() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2211);
+    let token_lineage_id = Uuid::from_u128(0x1111);
+    let surface_binding_id = Uuid::from_u128(0x3311);
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    let row = exact_name_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    database.insert_name_current_row(row.clone()).await?;
+    let inventory = record_inventory_current_row(logical_name_id, resource_id);
+    let selected_snapshot = SelectedSnapshot {
+        chain_positions: ChainPositions::from_value(&inventory.chain_positions)?,
+        consistency: SnapshotConsistency::Finalized,
+    };
+    database
+        .insert_record_inventory_current_row(inventory)
+        .await?;
+
+    assert!(
+        crate::v2::support::load_record_inventory_current_matching_selected_snapshot(
+            &database.pool,
+            &row,
+            &selected_snapshot,
+            false,
+        )
+        .await?
+        .is_some()
+    );
+
+    sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'orphaned'::canonicality_state
+         WHERE chain_id = 'ethereum-mainnet' AND block_hash = '0xresource'",
+    )
+    .execute(&database.pool)
+    .await?;
+    let row_local_state: String = sqlx::query_scalar(
+        "SELECT canonicality_state::text FROM resources WHERE resource_id = $1",
+    )
+    .bind(resource_id)
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(row_local_state, "finalized");
+    assert!(
+        crate::v2::support::load_record_inventory_current_matching_selected_snapshot(
+            &database.pool,
+            &row,
+            &selected_snapshot,
+            false,
+        )
+        .await?
+        .is_none()
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_resolution_execution_explain_returns_persisted_verified_state_and_reuses_resolution_envelope_fields()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -901,8 +972,8 @@ async fn seed_supported_alias_only_rebuild_inputs(
         ],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(&database.pool, &[name_surface(logical_name_id)]).await?;
-    bigname_storage::upsert_token_lineages(
+    upsert_test_name_surfaces(&database.pool, &[name_surface(logical_name_id)]).await?;
+    upsert_test_token_lineages(
         &database.pool,
         &[address_name_token_lineage(
             token_lineage_id,
@@ -911,7 +982,7 @@ async fn seed_supported_alias_only_rebuild_inputs(
         )],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[address_name_resource(
             resource_id,
@@ -921,7 +992,7 @@ async fn seed_supported_alias_only_rebuild_inputs(
         )],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[SurfaceBinding {
             surface_binding_id,
@@ -1047,7 +1118,7 @@ async fn seed_supported_wildcard_rebuild_inputs(
         ],
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[
             name_surface(logical_name_id),
@@ -1072,7 +1143,7 @@ async fn seed_supported_wildcard_rebuild_inputs(
         ],
     )
     .await?;
-    bigname_storage::upsert_token_lineages(
+    upsert_test_token_lineages(
         &database.pool,
         &[
             address_name_token_lineage(token_lineage_id, "0xresource", 99),
@@ -1080,7 +1151,7 @@ async fn seed_supported_wildcard_rebuild_inputs(
         ],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[
             address_name_resource(resource_id, Some(token_lineage_id), "0xresource", 99),
@@ -1093,7 +1164,7 @@ async fn seed_supported_wildcard_rebuild_inputs(
         ],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[
             SurfaceBinding {
@@ -1210,7 +1281,7 @@ async fn seed_supported_basenames_rebuild_inputs(
     )
     .await?;
     insert_chain_checkpoint(database, "ethereum-mainnet", "0xbasenamesl1", 21_000_100).await?;
-    bigname_storage::upsert_name_surfaces(
+    upsert_test_name_surfaces(
         &database.pool,
         &[NameSurface {
             logical_name_id: logical_name_id.to_owned(),
@@ -1232,7 +1303,7 @@ async fn seed_supported_basenames_rebuild_inputs(
         }],
     )
     .await?;
-    bigname_storage::upsert_token_lineages(
+    upsert_test_token_lineages(
         &database.pool,
         &[TokenLineage {
             token_lineage_id,
@@ -1244,7 +1315,7 @@ async fn seed_supported_basenames_rebuild_inputs(
         }],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[Resource {
             resource_id,
@@ -1257,7 +1328,7 @@ async fn seed_supported_basenames_rebuild_inputs(
         }],
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(
+    upsert_test_surface_bindings(
         &database.pool,
         &[SurfaceBinding {
             surface_binding_id,

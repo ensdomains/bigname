@@ -454,6 +454,72 @@ async fn v2_lookup_reverse_counts_live_rows_instead_of_the_legacy_sidecar() -> R
 }
 
 #[tokio::test]
+async fn v2_lookup_reverse_page_and_count_require_readable_identity_lineage() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let resource_id = Uuid::from_u128(0x5a0211);
+    seed_identity_name(
+        &database,
+        "ens:lineage.eth",
+        "lineage.eth",
+        "lineage.eth",
+        "namehash:lineage.eth",
+        resource_id,
+        Uuid::from_u128(0x5a0212),
+        Uuid::from_u128(0x5a0213),
+        address,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        46,
+    )
+    .await?;
+    seed_v2_lookup_base_head(&database).await?;
+
+    let readable = v2_lookup_json(
+        &database,
+        json!({
+            "profile": "detail",
+            "inputs": [{"id": "addr", "address": address, "page_size": 10}]
+        }),
+    )
+    .await?;
+    assert_eq!(readable["data"][0]["records"][0]["name"], json!("lineage.eth"));
+    assert_eq!(readable["data"][0]["page"]["total_count"], json!(1));
+
+    sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'orphaned'::canonicality_state
+         WHERE chain_id = 'ethereum-mainnet' AND block_hash = '0xresource'",
+    )
+    .execute(&database.pool)
+    .await?;
+    let row_local_state: String = sqlx::query_scalar(
+        "SELECT canonicality_state::text FROM resources WHERE resource_id = $1",
+    )
+    .bind(resource_id)
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(row_local_state, "finalized");
+
+    let orphaned_response = v2_lookup_response_for_database(
+        &database,
+        "/v2/lookup",
+        json!({
+            "profile": "detail",
+            "inputs": [{"id": "addr", "address": address, "page_size": 10}]
+        }),
+    )
+    .await?;
+    let orphaned_status = orphaned_response.status();
+    let orphaned: Value = read_json(orphaned_response).await?;
+    assert_eq!(orphaned_status, StatusCode::OK, "{orphaned:#}");
+    assert_eq!(orphaned["data"][0]["records"], json!([]));
+    assert_eq!(orphaned["data"][0]["page"]["total_count"], json!(0));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_lookup_reverse_page_and_count_include_primary_when_matching_relation_is_unreadable()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -484,7 +550,7 @@ async fn v2_lookup_reverse_page_and_count_include_primary_when_matching_relation
     let unreadable_resource_id = Uuid::from_u128(0x5a0231);
     let unreadable_token_lineage_id = Uuid::from_u128(0x5a0232);
     let unreadable_surface_binding_id = Uuid::from_u128(0x5a0233);
-    bigname_storage::upsert_token_lineages(
+    upsert_test_token_lineages(
         &database.pool,
         &[address_name_token_lineage(
             unreadable_token_lineage_id,
@@ -493,7 +559,7 @@ async fn v2_lookup_reverse_page_and_count_include_primary_when_matching_relation
         )],
     )
     .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[address_name_resource(
             unreadable_resource_id,
@@ -510,7 +576,7 @@ async fn v2_lookup_reverse_page_and_count_include_primary_when_matching_relation
         timestamp(1_717_171_700),
     );
     unreadable_binding.canonicality_state = CanonicalityState::Orphaned;
-    bigname_storage::upsert_surface_bindings(&database.pool, &[unreadable_binding]).await?;
+    upsert_test_surface_bindings(&database.pool, &[unreadable_binding]).await?;
     bigname_storage::upsert_address_names_current_rows(
         &database.pool,
         &[address_name_current_row(
@@ -1389,16 +1455,16 @@ async fn seed_v2_lookup_relation_scan_fixture(
     bigname_storage::upsert_raw_blocks(&database.pool, &raw_blocks)
         .await
         .context("failed to seed lookup scan raw blocks")?;
-    bigname_storage::upsert_name_surfaces(&database.pool, &surfaces)
+    upsert_test_name_surfaces(&database.pool, &surfaces)
         .await
         .context("failed to seed lookup scan name surfaces")?;
-    bigname_storage::upsert_token_lineages(&database.pool, &token_lineages)
+    upsert_test_token_lineages(&database.pool, &token_lineages)
         .await
         .context("failed to seed lookup scan token lineages")?;
-    bigname_storage::upsert_resources(&database.pool, &resources)
+    upsert_test_resources(&database.pool, &resources)
         .await
         .context("failed to seed lookup scan resources")?;
-    bigname_storage::upsert_surface_bindings(&database.pool, &bindings)
+    upsert_test_surface_bindings(&database.pool, &bindings)
         .await
         .context("failed to seed lookup scan surface bindings")?;
     bigname_storage::upsert_name_current_rows(&database.pool, &name_rows)

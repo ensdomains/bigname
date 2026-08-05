@@ -50,6 +50,9 @@ pub async fn count_record_inventory_selectors_by_lookup_keys(
          AND requested.record_version_boundary_key = ric.record_version_boundary_key
         JOIN resources resource
           ON resource.resource_id = ric.resource_id
+        JOIN chain_lineage resource_lineage
+          ON resource_lineage.chain_id = resource.chain_id
+         AND resource_lineage.block_hash = resource.block_hash
         WHERE TRUE
         {DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER}
         "#

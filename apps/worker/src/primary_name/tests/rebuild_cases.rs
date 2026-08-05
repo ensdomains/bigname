@@ -386,10 +386,15 @@ async fn targeted_rebuild_invalidates_verified_primary_cache_on_claim_create_upd
     .await?;
     sqlx::query(
         r#"
-        UPDATE normalized_events
+        UPDATE chain_lineage lineage
         SET canonicality_state = 'orphaned'::canonicality_state
-        WHERE LOWER(after_state->>'address') = $1
-           OR LOWER(after_state->'primary_claim_source'->>'address') = $1
+        FROM normalized_events event
+        WHERE lineage.chain_id = event.chain_id
+          AND lineage.block_hash = event.block_hash
+          AND (
+              LOWER(event.after_state->>'address') = $1
+              OR LOWER(event.after_state->'primary_claim_source'->>'address') = $1
+          )
         "#,
     )
     .bind(address)

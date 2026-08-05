@@ -34,6 +34,14 @@ pub(crate) async fn load_legacy_reverse_resolver_call_triggers(
             esc.transaction_hash,
             esc.transaction_index
         FROM event_silent_resolver_call_observations esc
+        JOIN chain_lineage observation_lineage
+          ON observation_lineage.chain_id = esc.chain_id
+         AND observation_lineage.block_hash = esc.block_hash
+         AND observation_lineage.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+         )
         JOIN chain_positions
           ON chain_positions.chain_id = esc.chain_id
          AND esc.block_number <= chain_positions.hydration_block_number

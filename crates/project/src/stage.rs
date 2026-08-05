@@ -68,6 +68,10 @@ async fn create_manifests(
                     event.after_state -> 'manifest_payload' AS manifest_payload,
                     event.normalized_event_id AS manifest_event_id
              FROM normalized_events event
+             LEFT JOIN chain_lineage lineage
+               ON lineage.chain_id = event.chain_id
+              AND lineage.block_hash = event.block_hash
+              AND lineage.block_number = event.block_number
              WHERE (
                        event.chain_id = $1
                        OR (
@@ -80,6 +84,10 @@ async fn create_manifests(
                AND event.event_kind = 'SourceManifestUpdated'
                AND event.source_manifest_id IS NOT NULL
                AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND (
+                   event.block_hash IS NULL
+                   OR lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+               )
                AND (event.block_number IS NULL OR event.block_number <= $2)
              ORDER BY event.source_manifest_id, event.normalized_event_id DESC
          )

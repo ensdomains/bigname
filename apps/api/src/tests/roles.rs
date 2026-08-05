@@ -280,7 +280,7 @@ async fn missing_permission_resource_summary_fails_closed_for_roles_and_permissi
     let database = TestDatabase::new_migrated().await?;
     let resource_id = Uuid::from_u128(0xd019);
     let subject = "0x0000000000000000000000000000000000000aaa";
-    bigname_storage::upsert_resources(&database.pool, &[resource(resource_id)]).await?;
+    upsert_test_resources(&database.pool, &[resource(resource_id)]).await?;
     bigname_storage::upsert_permissions_current_rows(
         &database.pool,
         &[permission_current_row(
@@ -341,7 +341,7 @@ async fn non_authoritative_permission_summary_fails_closed_for_roles() -> Result
     let database = TestDatabase::new_migrated().await?;
     let resource_id = Uuid::from_u128(0xd01a);
     let subject = "0x0000000000000000000000000000000000000aaa";
-    bigname_storage::upsert_resources(&database.pool, &[resource(resource_id)]).await?;
+    upsert_test_resources(&database.pool, &[resource(resource_id)]).await?;
     bigname_storage::upsert_permissions_current_rows(
         &database.pool,
         &[permission_current_row(
@@ -409,7 +409,7 @@ async fn roles_filter_by_account_resource_and_name_from_permissions_current() ->
             alice_token_lineage_id,
         ))
         .await?;
-    bigname_storage::upsert_resources(&database.pool, &[resource(beta_resource_id)]).await?;
+    upsert_test_resources(&database.pool, &[resource(beta_resource_id)]).await?;
     bigname_storage::upsert_permissions_current_rows(
         &database.pool,
         &[
@@ -782,7 +782,7 @@ async fn name_roles_precompose_ensv2_root_fallback_permissions() -> Result<()> {
             token_lineage_id,
         ))
         .await?;
-    bigname_storage::upsert_resources(
+    upsert_test_resources(
         &database.pool,
         &[
             ensv2_registry_resource(

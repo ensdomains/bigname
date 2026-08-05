@@ -1,15 +1,17 @@
 use anyhow::Result;
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
-use sqlx::types::time::OffsetDateTime;
+use sqlx::{PgPool, Postgres, QueryBuilder, types::time::OffsetDateTime};
 use uuid::Uuid;
 
 use super::*;
 use crate::{
     AddressNameCurrentRow, AddressNameRelation, CanonicalityState, NameSurface, Resource,
     SurfaceBinding, SurfaceBindingKind, TokenLineage, upsert_address_names_current_rows,
-    upsert_name_current_rows, upsert_name_surfaces, upsert_resources, upsert_surface_bindings,
-    upsert_token_lineages,
+    upsert_name_current_rows, upsert_name_surfaces as store_upsert_name_surfaces,
+    upsert_resources as store_upsert_resources,
+    upsert_surface_bindings as store_upsert_surface_bindings,
+    upsert_token_lineages as store_upsert_token_lineages,
 };
 
 #[test]
@@ -155,6 +157,99 @@ fn surface_binding(
         provenance: json!({"source": "name_current_list_test", "anchor": "binding"}),
         canonicality_state: CanonicalityState::Finalized,
     }
+}
+
+async fn seed_readable_lineage<'a>(
+    pool: &PgPool,
+    anchors: impl IntoIterator<Item = (&'a str, &'a str, i64)>,
+) -> Result<()> {
+    let anchors = anchors.into_iter().collect::<Vec<_>>();
+    if anchors.is_empty() {
+        return Ok(());
+    }
+
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "INSERT INTO chain_lineage (\
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state\
+         ) ",
+    );
+    builder.push_values(
+        anchors,
+        |mut separated, (chain_id, block_hash, block_number)| {
+            separated
+                .push_bind(chain_id)
+                .push_bind(block_hash)
+                .push_bind(block_number)
+                .push_bind(timestamp(1_717_000_000 + block_number - 21_000_000))
+                .push("'canonical'::canonicality_state");
+        },
+    );
+    builder.push(" ON CONFLICT (chain_id, block_hash) DO NOTHING");
+    builder.build().execute(pool).await?;
+    Ok(())
+}
+
+async fn upsert_token_lineages(pool: &PgPool, rows: &[TokenLineage]) -> Result<Vec<TokenLineage>> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_token_lineages(pool, rows).await
+}
+
+async fn upsert_resources(pool: &PgPool, rows: &[Resource]) -> Result<Vec<Resource>> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_resources(pool, rows).await
+}
+
+async fn upsert_name_surfaces(pool: &PgPool, rows: &[NameSurface]) -> Result<Vec<NameSurface>> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_name_surfaces(pool, rows).await
+}
+
+async fn upsert_surface_bindings(
+    pool: &PgPool,
+    rows: &[SurfaceBinding],
+) -> Result<Vec<SurfaceBinding>> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_surface_bindings(pool, rows).await
 }
 
 fn name_current_row(
@@ -430,6 +525,74 @@ async fn by_name_returns_derived_row_and_none_for_unknown() -> Result<()> {
             .is_none(),
         "a namehash string must not match the name column"
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn name_current_list_reads_require_readable_binding_lineage() -> Result<()> {
+    let database = test_database().await?;
+    let winning_refs = refs(0x41);
+    let losing_refs = refs(0x42);
+    seed_name(
+        &database,
+        "ens:alice.eth",
+        "alice.eth",
+        "0xalice",
+        registered_summary("registrar", "0x01"),
+        winning_refs,
+    )
+    .await?;
+    seed_name(
+        &database,
+        "ens:bob.eth",
+        "bob.eth",
+        "0xbob",
+        registered_summary("registrar", "0x02"),
+        losing_refs,
+    )
+    .await?;
+
+    sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'orphaned'::canonicality_state
+         WHERE chain_id = 'ethereum-mainnet' AND block_hash = $1",
+    )
+    .bind(format!("0xbinding{}", losing_refs.surface_binding.simple()))
+    .execute(database.pool())
+    .await?;
+    let row_local_state: String = sqlx::query_scalar(
+        "SELECT canonicality_state::TEXT
+         FROM surface_bindings
+         WHERE surface_binding_id = $1",
+    )
+    .bind(losing_refs.surface_binding)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(row_local_state, "finalized");
+
+    assert!(
+        load_name_current_list_row_by_name(database.pool(), "ens", "bob.eth")
+            .await?
+            .is_none()
+    );
+    assert!(
+        load_name_current_list_row_by_namehash(database.pool(), "0xbob")
+            .await?
+            .is_none()
+    );
+    let page = load_name_current_list_page(
+        database.pool(),
+        &NameCurrentListFilter::default(),
+        NameCurrentListSort::Name,
+        NameCurrentListOrder::Asc,
+        None,
+        10,
+        true,
+    )
+    .await?;
+    assert_eq!(names(&page.rows), vec!["alice.eth"]);
+    assert_eq!(page.total_count, Some(1));
 
     database.cleanup().await
 }

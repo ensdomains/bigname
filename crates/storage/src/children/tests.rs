@@ -11,8 +11,9 @@ use sqlx::{
 use super::*;
 use crate::{
     CanonicalityState, NameSurface, NormalizedEvent, default_database_url,
-    insert_normalized_event_fixtures, label_preimage_from_label, upsert_label_preimages,
-    upsert_name_surfaces,
+    insert_normalized_event_fixtures as store_insert_normalized_event_fixtures,
+    label_preimage_from_label, upsert_label_preimages,
+    upsert_name_surfaces as store_upsert_name_surfaces,
 };
 
 struct TestDatabase {
@@ -143,6 +144,74 @@ fn name_surface_on_chain(
         provenance: json!({"source": "children_current_test", "kind": "surface"}),
         canonicality_state,
     }
+}
+
+async fn upsert_name_surfaces(pool: &PgPool, rows: &[NameSurface]) -> Result<Vec<NameSurface>> {
+    for row in rows {
+        sqlx::query(
+            r#"
+            INSERT INTO chain_lineage (
+                chain_id,
+                block_hash,
+                block_number,
+                block_timestamp,
+                canonicality_state
+            )
+            VALUES ($1, $2, $3, $4, $5::canonicality_state)
+            ON CONFLICT (chain_id, block_hash) DO NOTHING
+            "#,
+        )
+        .bind(&row.chain_id)
+        .bind(&row.block_hash)
+        .bind(row.block_number)
+        .bind(timestamp(1_717_000_000 + row.block_number))
+        .bind(match row.canonicality_state {
+            CanonicalityState::Observed => "observed",
+            CanonicalityState::Canonical => "canonical",
+            CanonicalityState::Safe => "safe",
+            CanonicalityState::Finalized => "finalized",
+            CanonicalityState::Orphaned => "orphaned",
+        })
+        .execute(pool)
+        .await?;
+    }
+    store_upsert_name_surfaces(pool, rows).await
+}
+
+async fn insert_normalized_event_fixtures(
+    pool: &PgPool,
+    events: &[NormalizedEvent],
+) -> Result<Vec<NormalizedEvent>> {
+    for event in events {
+        let (Some(chain_id), Some(block_hash), Some(block_number)) = (
+            event.chain_id.as_deref(),
+            event.block_hash.as_deref(),
+            event.block_number,
+        ) else {
+            continue;
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO chain_lineage (
+                chain_id,
+                block_hash,
+                block_number,
+                block_timestamp,
+                canonicality_state
+            )
+            VALUES ($1, $2, $3, $4, $5::canonicality_state)
+            ON CONFLICT (chain_id, block_hash) DO NOTHING
+            "#,
+        )
+        .bind(chain_id)
+        .bind(block_hash)
+        .bind(block_number)
+        .bind(timestamp(1_717_100_000 + block_number))
+        .bind(event.canonicality_state.as_str())
+        .execute(pool)
+        .await?;
+    }
+    store_insert_normalized_event_fixtures(pool, events).await
 }
 
 fn children_current_row(
@@ -441,6 +510,95 @@ async fn children_current_upserts_and_loads_declared_rows() -> Result<()> {
 
     upsert_children_current_rows(database.pool(), &[expected]).await?;
     assert_eq!(clear_children_current(database.pool()).await?, 1);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn children_current_reads_require_readable_child_lineage() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let parent_logical_name_id = "ens:parent.eth";
+    let winning_logical_name_id = "ens:alice.parent.eth";
+    let losing_logical_name_id = "ens:bob.parent.eth";
+
+    upsert_name_surfaces(
+        database.pool(),
+        &[
+            name_surface(
+                parent_logical_name_id,
+                "parent.eth",
+                "node:parent.eth",
+                10,
+                CanonicalityState::Finalized,
+            ),
+            name_surface(
+                winning_logical_name_id,
+                "alice.parent.eth",
+                "node:alice.parent.eth",
+                11,
+                CanonicalityState::Finalized,
+            ),
+            name_surface(
+                losing_logical_name_id,
+                "bob.parent.eth",
+                "node:bob.parent.eth",
+                12,
+                CanonicalityState::Finalized,
+            ),
+        ],
+    )
+    .await?;
+
+    let winning = children_current_row(
+        parent_logical_name_id,
+        winning_logical_name_id,
+        "alice.parent.eth",
+        "node:alice.parent.eth",
+        11,
+    );
+    let losing = children_current_row(
+        parent_logical_name_id,
+        losing_logical_name_id,
+        "bob.parent.eth",
+        "node:bob.parent.eth",
+        12,
+    );
+    upsert_children_current_rows(database.pool(), &[winning.clone(), losing.clone()]).await?;
+
+    sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'orphaned'::canonicality_state
+         WHERE chain_id = 'ethereum-mainnet' AND block_hash = '0xsurface0c'",
+    )
+    .execute(database.pool())
+    .await?;
+    let row_local_state: String = sqlx::query_scalar(
+        "SELECT canonicality_state::TEXT
+         FROM name_surfaces
+         WHERE logical_name_id = $1",
+    )
+    .bind(losing_logical_name_id)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(row_local_state, "finalized");
+
+    assert_eq!(
+        load_children_current(database.pool(), parent_logical_name_id).await?,
+        vec![winning.clone()]
+    );
+    let page =
+        load_children_current_page(database.pool(), parent_logical_name_id, None, 10).await?;
+    assert_eq!(page.rows, vec![winning.clone()]);
+    assert_eq!(page.summary.child_count, 1);
+    let summaries =
+        load_children_current_summaries(database.pool(), &[parent_logical_name_id.to_owned()])
+            .await?;
+    assert_eq!(summaries[0].child_count, 1);
+    assert_eq!(
+        load_children_current_including_noncanonical(database.pool(), parent_logical_name_id)
+            .await?,
+        vec![winning, losing]
+    );
 
     database.cleanup().await
 }

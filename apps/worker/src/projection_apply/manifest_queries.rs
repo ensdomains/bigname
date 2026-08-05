@@ -1,5 +1,14 @@
 pub(super) const MANIFEST_CURRENT_INVALIDATIONS_PREFIX: &str = r#"
-WITH changed_events AS (
+WITH readable_lineage AS (
+    SELECT chain_id, block_hash
+    FROM chain_lineage
+    WHERE canonicality_state IN (
+        'canonical'::canonicality_state,
+        'safe'::canonicality_state,
+        'finalized'::canonicality_state
+    )
+),
+changed_events AS (
     SELECT ne.*, change.change_id, change.changed_at
     FROM projection_normalized_event_changes change
     JOIN normalized_events ne
@@ -29,7 +38,13 @@ record_inventory_targets AS (
           'canonical'::canonicality_state,
           'safe'::canonicality_state,
           'finalized'::canonicality_state
-      )
+     )
+    LEFT JOIN readable_lineage target_lineage
+      ON target_lineage.chain_id = target.chain_id
+     AND target_lineage.block_hash = target.block_hash
+    LEFT JOIN readable_lineage resource_lineage
+      ON resource_lineage.chain_id = resource.chain_id
+     AND resource_lineage.block_hash = resource.block_hash
     WHERE target.event_kind IN (
           'RecordChanged',
           'RecordVersionChanged',
@@ -42,6 +57,14 @@ record_inventory_targets AS (
           'safe'::canonicality_state,
           'finalized'::canonicality_state
       )
+      AND (
+          target.block_hash IS NULL
+          OR target_lineage.block_hash IS NOT NULL
+      )
+      AND (
+          resource.block_hash IS NULL
+          OR resource_lineage.block_hash IS NOT NULL
+      )
 ),
 resolver_targets AS (
     SELECT DISTINCT
@@ -49,6 +72,9 @@ resolver_targets AS (
         target.chain_id,
         lower(resolver.resolver_address) AS resolver_address
     FROM normalized_events target
+    LEFT JOIN readable_lineage target_lineage
+      ON target_lineage.chain_id = target.chain_id
+     AND target_lineage.block_hash = target.block_hash
     CROSS JOIN LATERAL (
         VALUES
             (target.after_state ->> 'resolver'),
@@ -63,6 +89,10 @@ resolver_targets AS (
           'canonical'::canonicality_state,
           'safe'::canonicality_state,
           'finalized'::canonicality_state
+      )
+      AND (
+          target.block_hash IS NULL
+          OR target_lineage.block_hash IS NOT NULL
       )
 
     UNION
@@ -92,7 +122,12 @@ candidate_keys AS (
           'canonical'::canonicality_state,
           'safe'::canonicality_state,
           'finalized'::canonicality_state
-      )
+     )
+    LEFT JOIN readable_lineage surface_lineage
+      ON surface_lineage.chain_id = ns.chain_id
+     AND surface_lineage.block_hash = ns.block_hash
+    WHERE ns.block_hash IS NULL
+       OR surface_lineage.block_hash IS NOT NULL
 
     UNION ALL
 

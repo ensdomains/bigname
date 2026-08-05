@@ -1,5 +1,14 @@
 pub(super) const RESOLVER_CURRENT_INVALIDATIONS_PREFIX: &str = r#"
-WITH changed_events AS (
+WITH readable_lineage AS (
+    SELECT chain_id, block_hash
+    FROM chain_lineage
+    WHERE canonicality_state IN (
+        'canonical'::canonicality_state,
+        'safe'::canonicality_state,
+        'finalized'::canonicality_state
+    )
+),
+changed_events AS (
     SELECT ne.*, change.change_id, change.changed_at
     FROM projection_normalized_event_changes change
     JOIN normalized_events ne
@@ -76,6 +85,9 @@ candidate_keys AS (
          'safe'::canonicality_state,
          'finalized'::canonicality_state
      )
+    LEFT JOIN readable_lineage permission_lineage
+      ON permission_lineage.chain_id = permission.chain_id
+     AND permission_lineage.block_hash = permission.block_hash
     CROSS JOIN LATERAL (
         VALUES
             (permission.after_state -> 'scope'),
@@ -86,6 +98,10 @@ candidate_keys AS (
       AND (
           ne.after_state -> 'scope' ->> 'kind' = 'resource'
           OR ne.before_state -> 'scope' ->> 'kind' = 'resource'
+      )
+      AND (
+          permission.block_hash IS NULL
+          OR permission_lineage.block_hash IS NOT NULL
       )
       AND scope.scope ->> 'kind' = 'resolver'
       AND scope.scope ->> 'chain_id' IS NOT NULL

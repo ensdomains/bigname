@@ -2,8 +2,10 @@ use anyhow::{Context, Result};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use super::{
+    canonicality::{
+        DEFAULT_ADDRESS_NAMES_CURRENT_LINEAGE_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
+    },
     decode::decode_address_name_current_row,
-    query::DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
     types::{AddressNameCurrentRow, AddressNameRelation},
 };
 
@@ -90,9 +92,12 @@ async fn load_address_names_current_internal(
           ON binding.surface_binding_id = anc.surface_binding_id
         LEFT JOIN token_lineages token_lineage
           ON token_lineage.token_lineage_id = anc.token_lineage_id
-        WHERE anc.address =
         "#,
     );
+    if !include_noncanonical {
+        builder.push(DEFAULT_ADDRESS_NAMES_CURRENT_LINEAGE_JOINS);
+    }
+    builder.push(" WHERE anc.address = ");
     builder.push_bind(address);
 
     if let Some(namespace) = namespace {

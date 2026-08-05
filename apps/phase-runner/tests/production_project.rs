@@ -1021,6 +1021,69 @@ async fn name_current_projects_retained_alias_resolution_topology() -> Result<()
 }
 
 #[tokio::test]
+async fn project_redo_ignores_row_local_readable_wildcard_binding_on_orphaned_lineage() -> Result<()>
+{
+    let scratch = ScratchDatabase::create("production_project_orphaned_wildcard_scope").await?;
+    seed_project_fixture(scratch.pool()).await?;
+
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state
+         ) VALUES ($1, 'project-fixture-losing-block-1', NULL, 1,
+                   to_timestamp(1), 'orphaned')",
+    )
+    .bind(CHAIN)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE surface_bindings
+         SET binding_kind = 'observed_wildcard_path',
+             block_hash = 'project-fixture-losing-block-1'
+         WHERE logical_name_id = 'ens:0xalice'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    sqlx::query(
+        "UPDATE name_current
+         SET raw_name = 'sentinel.eth'
+         WHERE logical_name_id = 'ens:0xeth'",
+    )
+    .execute(scratch.pool())
+    .await?;
+
+    run_project(
+        scratch.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Redo,
+        2,
+        2,
+    )
+    .await?;
+
+    let retained_raw_name: String =
+        sqlx::query_scalar("SELECT raw_name FROM name_current WHERE logical_name_id = 'ens:0xeth'")
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(retained_raw_name, "sentinel.eth");
+    let binding_state: String = sqlx::query_scalar(
+        "SELECT canonicality_state::TEXT
+         FROM surface_bindings
+         WHERE logical_name_id = 'ens:0xalice'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(binding_state, "canonical");
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn alias_projection_keeps_only_latest_state_and_honors_tombstones() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_alias_tombstone").await?;
     seed_basenames_project_fixture(scratch.pool()).await?;

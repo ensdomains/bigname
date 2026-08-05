@@ -15,12 +15,20 @@ pub(super) async fn load_current_bindings_for_address(
 ) -> Result<Vec<CurrentBindingSeed>> {
     let rows = sqlx::query_as::<_, CurrentBindingSeed>(&current_bindings_query(
         r#"
-        WITH affected_names AS (
-            SELECT DISTINCT ne.logical_name_id
+        WITH readable_events AS (
+            SELECT ne.*
             FROM normalized_events ne
+            JOIN chain_lineage lineage
+              ON lineage.chain_id = ne.chain_id
+             AND lineage.block_hash = ne.block_hash
+             AND lineage.canonicality_state {CANONICAL_STATE_FILTER}
+            WHERE ne.canonicality_state {CANONICAL_STATE_FILTER}
+        ),
+        affected_names AS (
+            SELECT DISTINCT ne.logical_name_id
+            FROM readable_events ne
             WHERE ne.logical_name_id IS NOT NULL
               AND ne.event_kind = 'RegistrationGranted'
-              AND ne.canonicality_state {CANONICAL_STATE_FILTER}
               AND ne.after_state ->> 'registrant' IS NOT NULL
               AND ne.after_state ->> 'registrant' <> ''
               AND lower(ne.after_state ->> 'registrant') = $1
@@ -28,10 +36,9 @@ pub(super) async fn load_current_bindings_for_address(
             UNION
 
             SELECT DISTINCT ne.logical_name_id
-            FROM normalized_events ne
+            FROM readable_events ne
             WHERE ne.logical_name_id IS NOT NULL
               AND ne.event_kind = 'TokenControlTransferred'
-              AND ne.canonicality_state {CANONICAL_STATE_FILTER}
               AND ne.after_state ->> 'to' IS NOT NULL
               AND ne.after_state ->> 'to' <> ''
               AND lower(ne.after_state ->> 'to') = $1
@@ -39,10 +46,9 @@ pub(super) async fn load_current_bindings_for_address(
             UNION
 
             SELECT DISTINCT ne.logical_name_id
-            FROM normalized_events ne
+            FROM readable_events ne
             WHERE ne.logical_name_id IS NOT NULL
               AND ne.event_kind = 'AuthorityTransferred'
-              AND ne.canonicality_state {CANONICAL_STATE_FILTER}
               AND ne.after_state ->> 'owner' IS NOT NULL
               AND ne.after_state ->> 'owner' <> ''
               AND lower(ne.after_state ->> 'owner') = $1
@@ -50,10 +56,9 @@ pub(super) async fn load_current_bindings_for_address(
             UNION
 
             SELECT DISTINCT ne.logical_name_id
-            FROM normalized_events ne
+            FROM readable_events ne
             WHERE ne.logical_name_id IS NOT NULL
               AND ne.event_kind = 'PermissionChanged'
-              AND ne.canonicality_state {CANONICAL_STATE_FILTER}
               AND ne.after_state -> 'scope' ->> 'kind' = 'resource'
               AND ne.after_state ->> 'subject' IS NOT NULL
               AND ne.after_state ->> 'subject' <> ''
@@ -130,6 +135,14 @@ fn current_bindings_query(affected_names_sql: &str) -> String {
         LEFT JOIN token_lineages tl
           ON tl.token_lineage_id = r.token_lineage_id
          AND tl.canonicality_state {CANONICAL_STATE_FILTER}
+        JOIN chain_lineage resource_block
+          ON resource_block.chain_id = r.chain_id
+         AND resource_block.block_hash = r.block_hash
+         AND resource_block.canonicality_state {CANONICAL_STATE_FILTER}
+        LEFT JOIN chain_lineage token_lineage_block
+          ON token_lineage_block.chain_id = tl.chain_id
+         AND token_lineage_block.block_hash = tl.block_hash
+         AND token_lineage_block.canonicality_state {CANONICAL_STATE_FILTER}
         LEFT JOIN chain_lineage surface_block
           ON surface_block.chain_id = ns.chain_id
          AND surface_block.block_hash = ns.block_hash
@@ -138,6 +151,15 @@ fn current_bindings_query(affected_names_sql: &str) -> String {
          AND binding_block.block_hash = sb.block_hash
         WHERE sb.active_to IS NULL
           AND sb.canonicality_state {CANONICAL_STATE_FILTER}
+          AND surface_block.canonicality_state {CANONICAL_STATE_FILTER}
+          AND binding_block.canonicality_state {CANONICAL_STATE_FILTER}
+          AND (
+              r.token_lineage_id IS NULL
+              OR (
+                  tl.token_lineage_id IS NOT NULL
+                  AND token_lineage_block.block_hash IS NOT NULL
+              )
+          )
         ORDER BY ns.logical_name_id
         "#
     )
@@ -198,6 +220,22 @@ pub(super) fn stream_current_bindings_after<'a>(
              'safe'::canonicality_state,
              'finalized'::canonicality_state
          )
+        JOIN chain_lineage resource_block
+          ON resource_block.chain_id = r.chain_id
+         AND resource_block.block_hash = r.block_hash
+         AND resource_block.canonicality_state IN (
+             'canonical'::canonicality_state,
+             'safe'::canonicality_state,
+             'finalized'::canonicality_state
+         )
+        LEFT JOIN chain_lineage token_lineage_block
+          ON token_lineage_block.chain_id = tl.chain_id
+         AND token_lineage_block.block_hash = tl.block_hash
+         AND token_lineage_block.canonicality_state IN (
+             'canonical'::canonicality_state,
+             'safe'::canonicality_state,
+             'finalized'::canonicality_state
+         )
         LEFT JOIN chain_lineage surface_block
           ON surface_block.chain_id = ns.chain_id
          AND surface_block.block_hash = ns.block_hash
@@ -209,6 +247,23 @@ pub(super) fn stream_current_bindings_after<'a>(
               'canonical'::canonicality_state,
               'safe'::canonicality_state,
               'finalized'::canonicality_state
+          )
+          AND surface_block.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND binding_block.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND (
+              r.token_lineage_id IS NULL
+              OR (
+                  tl.token_lineage_id IS NOT NULL
+                  AND token_lineage_block.block_hash IS NOT NULL
+              )
           )
           AND (
               $1::TEXT IS NULL
@@ -273,6 +328,10 @@ pub(super) async fn load_relevant_events(
               OR ne.resource_id = $7
           )
           AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+          AND (
+              ne.block_hash IS NULL
+              OR rb.canonicality_state {CANONICAL_STATE_FILTER}
+          )
         ORDER BY
             ne.block_number NULLS FIRST,
             COALESCE(ne.log_index, 2147483647),

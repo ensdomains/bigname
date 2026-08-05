@@ -24,8 +24,3 @@ justification = "Phase 7 allowlist for an oversized production file; future chan
 path = "crates/storage/src/identity/write_fast/name_surface.rs"
 loc = 633
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
-
-[[files]]
-path = "crates/storage/src/label_preimages.rs"
-loc = 641
-justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."

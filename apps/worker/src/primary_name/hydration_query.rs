@@ -38,6 +38,14 @@ pub(super) async fn load_legacy_reverse_hydration_candidates(
                 LOWER(ne.after_state->>'reverse_node') AS reverse_node,
                 COALESCE(ne.after_state->'claim_provenance', '{}'::jsonb) AS claim_provenance
             FROM normalized_events ne
+            JOIN chain_lineage event_lineage
+              ON event_lineage.chain_id = ne.chain_id
+             AND event_lineage.block_hash = ne.block_hash
+             AND event_lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+             )
             JOIN chain_positions
               ON chain_positions.chain_id = ne.chain_id
             WHERE ne.event_kind = $2
@@ -70,6 +78,14 @@ pub(super) async fn load_legacy_reverse_hydration_candidates(
                 LOWER(ne.after_state->>'resolver') AS resolver_address,
                 ne.after_state->'primary_claim_source' AS primary_claim_source
             FROM normalized_events ne
+            JOIN chain_lineage event_lineage
+              ON event_lineage.chain_id = ne.chain_id
+             AND event_lineage.block_hash = ne.block_hash
+             AND event_lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+             )
             JOIN chain_positions
               ON chain_positions.chain_id = ne.chain_id
             WHERE ne.event_kind = $6
@@ -106,6 +122,14 @@ pub(super) async fn load_legacy_reverse_hydration_candidates(
                 ne.after_state->>'raw_name' AS raw_name,
                 ne.after_state->'primary_claim_source' AS primary_claim_source
             FROM normalized_events ne
+            JOIN chain_lineage event_lineage
+              ON event_lineage.chain_id = ne.chain_id
+             AND event_lineage.block_hash = ne.block_hash
+             AND event_lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+             )
             JOIN chain_positions
               ON chain_positions.chain_id = ne.chain_id
             WHERE ne.event_kind = 'RecordChanged'
@@ -147,6 +171,14 @@ pub(super) async fn load_legacy_reverse_hydration_candidates(
                 esc.transaction_hash AS latest_successful_call_transaction_hash,
                 esc.transaction_index AS latest_successful_call_transaction_index
             FROM event_silent_resolver_call_observations esc
+            JOIN chain_lineage observation_lineage
+              ON observation_lineage.chain_id = esc.chain_id
+             AND observation_lineage.block_hash = esc.block_hash
+             AND observation_lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+             )
             JOIN chain_positions
               ON chain_positions.chain_id = esc.chain_id
              AND esc.block_number <= chain_positions.hydration_block_number

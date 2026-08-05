@@ -816,10 +816,10 @@ async fn seed_v2_address_name_storage(
         .collect::<Vec<_>>();
 
     bigname_storage::upsert_raw_blocks(&database.pool, &raw_blocks).await?;
-    bigname_storage::upsert_name_surfaces(&database.pool, &surfaces).await?;
-    bigname_storage::upsert_token_lineages(&database.pool, &token_lineages).await?;
-    bigname_storage::upsert_resources(&database.pool, &resources).await?;
-    bigname_storage::upsert_surface_bindings(&database.pool, &bindings).await?;
+    upsert_test_name_surfaces(&database.pool, &surfaces).await?;
+    upsert_test_token_lineages(&database.pool, &token_lineages).await?;
+    upsert_test_resources(&database.pool, &resources).await?;
+    upsert_test_surface_bindings(&database.pool, &bindings).await?;
     Ok(())
 }
 

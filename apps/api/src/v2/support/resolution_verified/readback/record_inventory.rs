@@ -154,8 +154,16 @@ async fn load_record_inventory_current_matching_selected_snapshot_by_resource(
         FROM record_inventory_current ric
         JOIN resources resource
           ON resource.resource_id = ric.resource_id
+        JOIN chain_lineage resource_lineage
+          ON resource_lineage.chain_id = resource.chain_id
+         AND resource_lineage.block_hash = resource.block_hash
         WHERE ric.resource_id = $1
           AND resource.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+          AND resource_lineage.canonicality_state IN (
               'canonical'::canonicality_state,
               'safe'::canonicality_state,
               'finalized'::canonicality_state

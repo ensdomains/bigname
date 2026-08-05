@@ -4,9 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde_json::json;
-use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::types::time::OffsetDateTime;
+use sqlx::{PgPool, Postgres, QueryBuilder};
 use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
@@ -18,10 +18,14 @@ use super::{
     load_surface_bindings_by_logical_name_id_including_noncanonical,
     load_surface_bindings_by_resource_id,
     load_surface_bindings_by_resource_id_including_noncanonical, load_token_lineage,
-    load_token_lineage_including_noncanonical, upsert_name_surfaces,
-    upsert_name_surfaces_without_snapshots, upsert_resources, upsert_resources_without_snapshots,
-    upsert_surface_bindings, upsert_surface_bindings_without_snapshots, upsert_token_lineages,
-    upsert_token_lineages_without_snapshots,
+    load_token_lineage_including_noncanonical, upsert_name_surfaces as store_upsert_name_surfaces,
+    upsert_name_surfaces_without_snapshots as store_upsert_name_surfaces_without_snapshots,
+    upsert_resources as store_upsert_resources,
+    upsert_resources_without_snapshots as store_upsert_resources_without_snapshots,
+    upsert_surface_bindings as store_upsert_surface_bindings,
+    upsert_surface_bindings_without_snapshots as store_upsert_surface_bindings_without_snapshots,
+    upsert_token_lineages as store_upsert_token_lineages,
+    upsert_token_lineages_without_snapshots as store_upsert_token_lineages_without_snapshots,
 };
 use crate::{CanonicalityState, default_database_url};
 
@@ -207,6 +211,169 @@ fn binding(seed: BindingSeed<'_>) -> SurfaceBinding {
         provenance: json!({"source": seed.source}),
         canonicality_state: seed.canonicality_state,
     }
+}
+
+async fn seed_readable_lineage<'a>(
+    pool: &PgPool,
+    anchors: impl IntoIterator<Item = (&'a str, &'a str, i64)>,
+) -> Result<()> {
+    let anchors = anchors.into_iter().collect::<Vec<_>>();
+    if anchors.is_empty() {
+        return Ok(());
+    }
+
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "INSERT INTO chain_lineage (\
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state\
+         ) ",
+    );
+    builder.push_values(
+        anchors,
+        |mut separated, (chain_id, block_hash, block_number)| {
+            separated
+                .push_bind(chain_id)
+                .push_bind(block_hash)
+                .push_bind(block_number)
+                .push_bind(timestamp(block_number))
+                .push("'canonical'::canonicality_state");
+        },
+    );
+    builder.push(" ON CONFLICT (chain_id, block_hash) DO NOTHING");
+    builder
+        .build()
+        .execute(pool)
+        .await
+        .context("failed to seed readable lineage for identity test rows")?;
+    Ok(())
+}
+
+async fn upsert_token_lineages(pool: &PgPool, rows: &[TokenLineage]) -> Result<Vec<TokenLineage>> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_token_lineages(pool, rows).await
+}
+
+async fn upsert_token_lineages_without_snapshots(
+    pool: &PgPool,
+    rows: &[TokenLineage],
+) -> Result<()> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_token_lineages_without_snapshots(pool, rows).await
+}
+
+async fn upsert_resources(pool: &PgPool, rows: &[Resource]) -> Result<Vec<Resource>> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_resources(pool, rows).await
+}
+
+async fn upsert_resources_without_snapshots(pool: &PgPool, rows: &[Resource]) -> Result<()> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_resources_without_snapshots(pool, rows).await
+}
+
+async fn upsert_name_surfaces(pool: &PgPool, rows: &[NameSurface]) -> Result<Vec<NameSurface>> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_name_surfaces(pool, rows).await
+}
+
+async fn upsert_name_surfaces_without_snapshots(pool: &PgPool, rows: &[NameSurface]) -> Result<()> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_name_surfaces_without_snapshots(pool, rows).await
+}
+
+async fn upsert_surface_bindings(
+    pool: &PgPool,
+    rows: &[SurfaceBinding],
+) -> Result<Vec<SurfaceBinding>> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_surface_bindings(pool, rows).await
+}
+
+async fn upsert_surface_bindings_without_snapshots(
+    pool: &PgPool,
+    rows: &[SurfaceBinding],
+) -> Result<()> {
+    seed_readable_lineage(
+        pool,
+        rows.iter().map(|row| {
+            (
+                row.chain_id.as_str(),
+                row.block_hash.as_str(),
+                row.block_number,
+            )
+        }),
+    )
+    .await?;
+    store_upsert_surface_bindings_without_snapshots(pool, rows).await
 }
 
 async fn identity_count(pool: &PgPool, address: &str, roles: &str) -> Result<i64> {
@@ -1922,6 +2089,238 @@ async fn canonical_only_default_reads_exclude_observed_and_orphaned() -> Result<
         load_surface_bindings_by_resource_id(database.pool(), resource_id)
             .await?
             .is_empty()
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn canonical_identity_reads_require_readable_lineage() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain_id = "chain:identity_lineage";
+    let losing_hash = "0xidentity_lineage_losing";
+    let winning_hash = "0xidentity_lineage_winning";
+    let block_number = 550;
+
+    let losing_token_lineage_id = Uuid::from_u128(0xe250);
+    let winning_token_lineage_id = Uuid::from_u128(0xe251);
+    let losing_resource_id = Uuid::from_u128(0xe252);
+    let winning_resource_id = Uuid::from_u128(0xe253);
+    let losing_binding_id = Uuid::from_u128(0xe254);
+    let winning_binding_id = Uuid::from_u128(0xe255);
+    let losing_name = "ens:identity-lineage-losing.eth";
+    let winning_name = "ens:identity-lineage-winning.eth";
+
+    let mut losing_token_lineage = token_lineage(
+        losing_token_lineage_id,
+        "ens",
+        "identity_lineage",
+        block_number,
+        CanonicalityState::Canonical,
+    );
+    losing_token_lineage.block_hash = losing_hash.to_owned();
+    let mut winning_token_lineage = token_lineage(
+        winning_token_lineage_id,
+        "ens",
+        "identity_lineage",
+        block_number,
+        CanonicalityState::Canonical,
+    );
+    winning_token_lineage.block_hash = winning_hash.to_owned();
+
+    let mut losing_resource = resource(
+        losing_resource_id,
+        Some(losing_token_lineage_id),
+        "ens",
+        "identity_lineage",
+        block_number,
+        CanonicalityState::Canonical,
+    );
+    losing_resource.block_hash = losing_hash.to_owned();
+    let mut winning_resource = resource(
+        winning_resource_id,
+        Some(winning_token_lineage_id),
+        "ens",
+        "identity_lineage",
+        block_number,
+        CanonicalityState::Canonical,
+    );
+    winning_resource.block_hash = winning_hash.to_owned();
+
+    let mut losing_surface = name_surface(
+        losing_name,
+        "identity-lineage-losing.eth",
+        "identity-lineage-losing.eth",
+        "identity_lineage",
+        block_number,
+        CanonicalityState::Canonical,
+    );
+    losing_surface.block_hash = losing_hash.to_owned();
+    let mut winning_surface = name_surface(
+        winning_name,
+        "identity-lineage-winning.eth",
+        "identity-lineage-winning.eth",
+        "identity_lineage",
+        block_number,
+        CanonicalityState::Canonical,
+    );
+    winning_surface.block_hash = winning_hash.to_owned();
+
+    let mut losing_binding = binding(BindingSeed {
+        surface_binding_id: losing_binding_id,
+        logical_name_id: losing_name,
+        resource_id: losing_resource_id,
+        binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+        active_from: timestamp(1_717_172_250),
+        active_to: None,
+        source: "identity_lineage_losing",
+        chain_label: "identity_lineage",
+        block_number,
+        canonicality_state: CanonicalityState::Canonical,
+    });
+    losing_binding.block_hash = losing_hash.to_owned();
+    let mut winning_binding = binding(BindingSeed {
+        surface_binding_id: winning_binding_id,
+        logical_name_id: winning_name,
+        resource_id: winning_resource_id,
+        binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+        active_from: timestamp(1_717_172_251),
+        active_to: None,
+        source: "identity_lineage_winning",
+        chain_label: "identity_lineage",
+        block_number,
+        canonicality_state: CanonicalityState::Canonical,
+    });
+    winning_binding.block_hash = winning_hash.to_owned();
+
+    upsert_token_lineages(
+        database.pool(),
+        &[losing_token_lineage.clone(), winning_token_lineage.clone()],
+    )
+    .await?;
+    upsert_resources(
+        database.pool(),
+        &[losing_resource.clone(), winning_resource.clone()],
+    )
+    .await?;
+    upsert_name_surfaces(
+        database.pool(),
+        &[losing_surface.clone(), winning_surface.clone()],
+    )
+    .await?;
+    upsert_surface_bindings(
+        database.pool(),
+        &[losing_binding.clone(), winning_binding.clone()],
+    )
+    .await?;
+
+    sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'orphaned'::canonicality_state
+         WHERE chain_id = $1 AND block_hash = $2",
+    )
+    .bind(chain_id)
+    .bind(losing_hash)
+    .execute(database.pool())
+    .await?;
+
+    let readable_row_count: i64 = sqlx::query_scalar(
+        "SELECT
+             (SELECT COUNT(*) FROM token_lineages
+              WHERE block_hash = $1 AND canonicality_state = 'canonical')
+           + (SELECT COUNT(*) FROM resources
+              WHERE block_hash = $1 AND canonicality_state = 'canonical')
+           + (SELECT COUNT(*) FROM name_surfaces
+              WHERE block_hash = $1 AND canonicality_state = 'canonical')
+           + (SELECT COUNT(*) FROM surface_bindings
+              WHERE block_hash = $1 AND canonicality_state = 'canonical')",
+    )
+    .bind(losing_hash)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(readable_row_count, 4);
+
+    assert_eq!(
+        load_token_lineage(database.pool(), losing_token_lineage_id).await?,
+        None
+    );
+    assert_eq!(
+        load_token_lineage(database.pool(), winning_token_lineage_id).await?,
+        Some(winning_token_lineage)
+    );
+    assert_eq!(
+        load_resource(database.pool(), losing_resource_id).await?,
+        None
+    );
+    assert_eq!(
+        load_resource(database.pool(), winning_resource_id).await?,
+        Some(winning_resource)
+    );
+    assert_eq!(load_name_surface(database.pool(), losing_name).await?, None);
+    assert_eq!(
+        load_name_surface(database.pool(), winning_name).await?,
+        Some(winning_surface.clone())
+    );
+    assert_eq!(
+        load_name_surfaces_by_logical_name_ids(
+            database.pool(),
+            &[losing_name.to_owned(), winning_name.to_owned()],
+        )
+        .await?,
+        [(winning_name.to_owned(), winning_surface)]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        load_surface_binding(database.pool(), losing_binding_id).await?,
+        None
+    );
+    assert_eq!(
+        load_surface_binding(database.pool(), winning_binding_id).await?,
+        Some(winning_binding)
+    );
+    assert!(
+        load_surface_bindings_by_logical_name_id(database.pool(), losing_name)
+            .await?
+            .is_empty()
+    );
+    assert!(
+        load_surface_bindings_by_resource_id(database.pool(), losing_resource_id)
+            .await?
+            .is_empty()
+    );
+
+    assert_eq!(
+        load_token_lineage_including_noncanonical(database.pool(), losing_token_lineage_id).await?,
+        Some(losing_token_lineage)
+    );
+    assert_eq!(
+        load_resource_including_noncanonical(database.pool(), losing_resource_id).await?,
+        Some(losing_resource)
+    );
+    assert_eq!(
+        load_name_surface_including_noncanonical(database.pool(), losing_name).await?,
+        Some(losing_surface)
+    );
+    assert_eq!(
+        load_surface_binding_including_noncanonical(database.pool(), losing_binding_id).await?,
+        Some(losing_binding.clone())
+    );
+    assert_eq!(
+        load_surface_bindings_by_logical_name_id_including_noncanonical(
+            database.pool(),
+            losing_name,
+        )
+        .await?,
+        vec![losing_binding.clone()]
+    );
+    assert_eq!(
+        load_surface_bindings_by_resource_id_including_noncanonical(
+            database.pool(),
+            losing_resource_id,
+        )
+        .await?,
+        vec![losing_binding]
     );
 
     database.cleanup().await

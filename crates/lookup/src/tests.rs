@@ -408,6 +408,141 @@ async fn closed_surface_binding_is_not_readable() -> AnyResult<()> {
 }
 
 #[tokio::test]
+async fn indexed_inventory_requires_readable_resource_lineage() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(
+        INDEXED_VALUE,
+    ))])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let losing_resource_id = "00000000-0000-0000-0000-000000000109";
+    let losing_hash = "0x9999999999999999999999999999999999999999999999999999999999999999";
+
+    let response = run_lookup(&fixture, &rpc_url).await?;
+    assert_eq!(response.records[0].value, Some(json!(INDEXED_VALUE)));
+
+    sqlx::query(
+        "INSERT INTO chain_lineage
+            (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         VALUES ($1, $2, 10, '2026-08-03T00:00:00Z', 'orphaned')",
+    )
+    .bind(ETHEREUM)
+    .bind(losing_hash)
+    .execute(fixture.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO resources
+            (resource_id, chain_id, block_hash, block_number, canonicality_state)
+         VALUES ($1::uuid, $2, $3, 10, 'canonical')",
+    )
+    .bind(losing_resource_id)
+    .bind(ETHEREUM)
+    .bind(losing_hash)
+    .execute(fixture.pool())
+    .await?;
+
+    let mut boundary: Value =
+        sqlx::query_scalar("SELECT record_version_boundary FROM record_inventory_current LIMIT 1")
+            .fetch_one(fixture.pool())
+            .await?;
+    boundary["resource_id"] = json!(losing_resource_id);
+    sqlx::query(
+        "UPDATE record_inventory_current
+         SET resource_id = $1::uuid,
+             record_version_boundary = $2",
+    )
+    .bind(losing_resource_id)
+    .bind(&boundary)
+    .execute(fixture.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE name_current
+         SET declared_summary = jsonb_set(
+             declared_summary,
+             '{topology,version_boundaries,record_version_boundary}',
+             $1
+         )",
+    )
+    .bind(&boundary)
+    .execute(fixture.pool())
+    .await?;
+    let row_local_state: String = sqlx::query_scalar(
+        "SELECT canonicality_state::text FROM resources WHERE resource_id = $1::uuid",
+    )
+    .bind(losing_resource_id)
+    .fetch_one(fixture.pool())
+    .await?;
+    assert_eq!(row_local_state, "canonical");
+
+    let error = run_lookup(&fixture, &rpc_url)
+        .await
+        .expect_err("orphaned inventory resource lineage must hide its projected record row");
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_hash_pinned(&requests, ETHEREUM_HASH);
+    Ok(())
+}
+
+#[tokio::test]
+async fn lookup_snapshot_requires_readable_token_lineage_lineage() -> AnyResult<()> {
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let token_lineage_id = "00000000-0000-0000-0000-000000000110";
+    let losing_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    crate::store::load_snapshot(fixture.pool(), &lookup_request(&fixture.logical_name_id)?)
+        .await
+        .expect("winning identity anchors must load the lookup snapshot");
+
+    sqlx::query(
+        "INSERT INTO chain_lineage
+            (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         VALUES ($1, $2, 10, '2026-08-03T00:00:00Z', 'orphaned')",
+    )
+    .bind(ETHEREUM)
+    .bind(losing_hash)
+    .execute(fixture.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO token_lineages
+            (token_lineage_id, chain_id, block_hash, block_number, canonicality_state)
+         VALUES ($1::uuid, $2, $3, 10, 'canonical')",
+    )
+    .bind(token_lineage_id)
+    .bind(ETHEREUM)
+    .bind(losing_hash)
+    .execute(fixture.pool())
+    .await?;
+    sqlx::query("UPDATE resources SET token_lineage_id = $1::uuid")
+        .bind(token_lineage_id)
+        .execute(fixture.pool())
+        .await?;
+    sqlx::query("UPDATE name_current SET token_lineage_id = $1::uuid")
+        .bind(token_lineage_id)
+        .execute(fixture.pool())
+        .await?;
+
+    let row_local_state: String = sqlx::query_scalar(
+        "SELECT canonicality_state::text
+         FROM token_lineages
+         WHERE token_lineage_id = $1::uuid",
+    )
+    .bind(token_lineage_id)
+    .fetch_one(fixture.pool())
+    .await?;
+    assert_eq!(row_local_state, "canonical");
+
+    let error =
+        crate::store::load_snapshot(fixture.pool(), &lookup_request(&fixture.logical_name_id)?)
+            .await
+            .expect_err("orphaned token lineage must hide the lookup snapshot");
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+
+    fixture.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn projected_position_timestamp_must_match_canonical_lineage() -> AnyResult<()> {
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
     sqlx::query(

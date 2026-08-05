@@ -7,8 +7,9 @@ use anyhow::{Context, Result};
 use bigname_storage::{
     NameSurface, NormalizedEvent, RawBlock, RawCodeHash, RawLog, Resource, SurfaceBinding,
     default_database_url, insert_normalized_event_fixtures, load_resolver_current,
-    upsert_name_surfaces, upsert_raw_blocks, upsert_raw_code_hashes, upsert_raw_logs,
-    upsert_resolver_current_rows, upsert_resources, upsert_surface_bindings,
+    upsert_name_surfaces as store_upsert_name_surfaces, upsert_raw_blocks, upsert_raw_code_hashes,
+    upsert_raw_logs, upsert_resolver_current_rows, upsert_resources as store_upsert_resources,
+    upsert_surface_bindings as store_upsert_surface_bindings,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
@@ -249,6 +250,45 @@ async fn resolver_current_keyed_rebuild_projects_bindings_permissions_and_unsupp
         json!(101)
     );
     assert_eq!(row.canonicality_summary["status"], json!("finalized"));
+
+    sqlx::query(
+        r#"
+        UPDATE chain_lineage
+        SET canonicality_state = 'orphaned'::canonicality_state
+        WHERE chain_id = 'ethereum-mainnet'
+          AND block_hash = '0xres0100'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let summary = rebuild_resolver_current(
+        database.pool(),
+        Some("ethereum-mainnet"),
+        Some(resolver_address),
+    )
+    .await?;
+    assert_eq!(summary.requested_resolver_count, 1);
+    let row = load_resolver_current(database.pool(), "ethereum-mainnet", resolver_address)
+        .await?
+        .context("permission-backed resolver_current row should remain")?;
+    assert_eq!(row.declared_summary["bindings"]["count"], json!(0));
+    assert_eq!(
+        row.declared_summary["event_summary"]["by_kind"].get(EVENT_KIND_RESOLVER_CHANGED),
+        None
+    );
+    assert_eq!(row.provenance["normalized_event_ids"], json!([3, 4, 5]));
+    let row_local_states: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT canonicality_state::TEXT
+        FROM normalized_events
+        WHERE block_hash = '0xres0100'
+        ORDER BY normalized_event_id
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(row_local_states, vec!["finalized", "finalized"]);
 
     database.cleanup().await
 }
@@ -1225,6 +1265,83 @@ async fn seed_identity(
     )
     .await?;
     Ok(())
+}
+
+async fn seed_readable_lineage(
+    pool: &PgPool,
+    chain_id: &str,
+    block_hash: &str,
+    block_number: i64,
+    state: CanonicalityState,
+) -> Result<()> {
+    if !matches!(
+        state,
+        CanonicalityState::Canonical | CanonicalityState::Safe | CanonicalityState::Finalized
+    ) {
+        return Ok(());
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO chain_lineage (
+            chain_id, block_hash, block_number, block_timestamp, canonicality_state
+        )
+        VALUES ($1, $2, $3, $4, $5::canonicality_state)
+        ON CONFLICT (chain_id, block_hash) DO NOTHING
+        "#,
+    )
+    .bind(chain_id)
+    .bind(block_hash)
+    .bind(block_number)
+    .bind(timestamp(1_700_000_000 + block_number))
+    .bind(state.as_str())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn upsert_name_surfaces(pool: &PgPool, rows: &[NameSurface]) -> Result<Vec<NameSurface>> {
+    for row in rows {
+        seed_readable_lineage(
+            pool,
+            &row.chain_id,
+            &row.block_hash,
+            row.block_number,
+            row.canonicality_state,
+        )
+        .await?;
+    }
+    store_upsert_name_surfaces(pool, rows).await
+}
+
+async fn upsert_resources(pool: &PgPool, rows: &[Resource]) -> Result<Vec<Resource>> {
+    for row in rows {
+        seed_readable_lineage(
+            pool,
+            &row.chain_id,
+            &row.block_hash,
+            row.block_number,
+            row.canonicality_state,
+        )
+        .await?;
+    }
+    store_upsert_resources(pool, rows).await
+}
+
+async fn upsert_surface_bindings(
+    pool: &PgPool,
+    rows: &[SurfaceBinding],
+) -> Result<Vec<SurfaceBinding>> {
+    for row in rows {
+        seed_readable_lineage(
+            pool,
+            &row.chain_id,
+            &row.block_hash,
+            row.block_number,
+            row.canonicality_state,
+        )
+        .await?;
+    }
+    store_upsert_surface_bindings(pool, rows).await
 }
 
 async fn seed_basenames_identity(

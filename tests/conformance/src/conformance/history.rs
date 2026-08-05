@@ -51,7 +51,7 @@
             )
             .await
             .context("failed to upsert raw blocks for address-history conformance")?;
-            bigname_storage::upsert_token_lineages(
+            upsert_test_token_lineages(
                 &database.pool,
                 &[
                     address_name_token_lineage(current_token_lineage_id, "0x540", 540),
@@ -60,7 +60,7 @@
             )
             .await
             .context("failed to upsert token lineages for address-history conformance")?;
-            bigname_storage::upsert_resources(
+            upsert_test_resources(
                 &database.pool,
                 &[
                     address_name_resource(
@@ -79,7 +79,7 @@
             )
             .await
             .context("failed to upsert resources for address-history conformance")?;
-            bigname_storage::upsert_name_surfaces(
+            upsert_test_name_surfaces(
                 &database.pool,
                 &[
                     collection_name_surface("ens:current.eth", "current.eth", "node:current.eth", 540),
@@ -93,7 +93,7 @@
             )
             .await
             .context("failed to upsert name surfaces for address-history conformance")?;
-            bigname_storage::upsert_surface_bindings(
+            upsert_test_surface_bindings(
                 &database.pool,
                 &[address_name_surface_binding(
                     current_surface_binding_id,
@@ -315,7 +315,7 @@
             )
             .await
             .context("failed to upsert basenames history raw blocks for conformance")?;
-            bigname_storage::upsert_resources(
+            upsert_test_resources(
                 &database.pool,
                 &[
                     Resource {
@@ -334,7 +334,7 @@
             )
             .await
             .context("failed to upsert basenames history resources for conformance")?;
-            bigname_storage::upsert_name_surfaces(
+            upsert_test_name_surfaces(
                 &database.pool,
                 &[
                     collection_name_surface(
@@ -353,7 +353,7 @@
             )
             .await
             .context("failed to upsert basenames history surfaces for conformance")?;
-            bigname_storage::upsert_surface_bindings(
+            upsert_test_surface_bindings(
                 &database.pool,
                 &[SurfaceBinding {
                     chain_id: "base-mainnet".to_owned(),
@@ -989,7 +989,7 @@
             )
             .await
             .context("failed to upsert filtered raw blocks for conformance")?;
-            bigname_storage::upsert_token_lineages(
+            upsert_test_token_lineages(
                 &database.pool,
                 &[
                     address_name_token_lineage(registrant_token_lineage_id, "0x560", 560),
@@ -998,7 +998,7 @@
             )
             .await
             .context("failed to upsert filtered token lineages for conformance")?;
-            bigname_storage::upsert_resources(
+            upsert_test_resources(
                 &database.pool,
                 &[
                     address_name_resource(
@@ -1019,7 +1019,7 @@
             )
             .await
             .context("failed to upsert filtered resources for conformance")?;
-            bigname_storage::upsert_name_surfaces(
+            upsert_test_name_surfaces(
                 &database.pool,
                 &[
                     collection_name_surface(
@@ -1050,7 +1050,7 @@
             )
             .await
             .context("failed to upsert filtered name surfaces for conformance")?;
-            bigname_storage::upsert_surface_bindings(
+            upsert_test_surface_bindings(
                 &database.pool,
                 &[
                     address_name_surface_binding(
@@ -1312,7 +1312,7 @@
             )
             .await
             .context("failed to upsert scope raw blocks for conformance")?;
-            bigname_storage::upsert_token_lineages(
+            upsert_test_token_lineages(
                 &database.pool,
                 &[address_name_token_lineage(
                     current_token_lineage_id,
@@ -1322,7 +1322,7 @@
             )
             .await
             .context("failed to upsert scope token lineage for conformance")?;
-            bigname_storage::upsert_resources(
+            upsert_test_resources(
                 &database.pool,
                 &[
                     address_name_resource(
@@ -1336,7 +1336,7 @@
             )
             .await
             .context("failed to upsert scope resources for conformance")?;
-            bigname_storage::upsert_name_surfaces(
+            upsert_test_name_surfaces(
                 &database.pool,
                 &[collection_name_surface(
                     "ens:current-controller.eth",
@@ -1347,7 +1347,7 @@
             )
             .await
             .context("failed to upsert scope name surface for conformance")?;
-            bigname_storage::upsert_surface_bindings(
+            upsert_test_surface_bindings(
                 &database.pool,
                 &[address_name_surface_binding(
                     current_surface_binding_id,
