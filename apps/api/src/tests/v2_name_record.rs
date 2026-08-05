@@ -659,6 +659,83 @@ async fn v2_get_name_rejects_source_auto() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_get_name_infers_exact_base_eth_as_ens() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:base.eth";
+    let resource_id = Uuid::from_u128(0x9180);
+    let token_lineage_id = Uuid::from_u128(0x9181);
+    let surface_binding_id = Uuid::from_u128(0x9182);
+
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "base.eth",
+            "base.eth",
+            "namehash:base.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row({
+            let mut row = exact_name_row(
+                logical_name_id,
+                surface_binding_id,
+                resource_id,
+                token_lineage_id,
+            );
+            row.normalized_name = "base.eth".to_owned();
+            row.canonical_display_name = "base.eth".to_owned();
+            row.namehash = "namehash:base.eth".to_owned();
+            row
+        })
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/base.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 base.eth name record request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["data"]["name"], json!("base.eth"));
+    assert_eq!(payload["data"]["namespace"], json!("ens"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_rejects_trailing_dot() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_record_fixture(&database, |_| {}, |_, _, _| {}).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/alice.eth.")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 trailing-dot name record request failed")?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("invalid_input"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_name_reads_basenames_record_with_base_network() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "basenames:alice.base.eth";

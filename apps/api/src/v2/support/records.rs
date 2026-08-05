@@ -13,7 +13,14 @@ pub(crate) struct RouteNameNormalizationError {
 }
 
 fn infer_resolution_namespace(name: &str) -> &'static str {
-    if name == "base.eth" || name.ends_with(".base.eth") {
+    if name == "base.eth" {
+        return bigname_storage::ENS_NAMESPACE;
+    }
+
+    if name
+        .strip_suffix(".base.eth")
+        .is_some_and(|prefix| !prefix.is_empty())
+    {
         BASENAMES_NAMESPACE
     } else {
         bigname_storage::ENS_NAMESPACE
@@ -23,7 +30,6 @@ fn infer_resolution_namespace(name: &str) -> &'static str {
 pub(crate) fn normalize_inferred_route_name(
     name: &str,
 ) -> Result<NormalizedRouteNameInput, RouteNameNormalizationError> {
-    let name = name.trim().trim_end_matches('.');
     if name.is_empty() {
         return Err(RouteNameNormalizationError {
             message: "name must not be empty".to_owned(),
@@ -36,7 +42,7 @@ pub(crate) fn normalize_inferred_route_name(
     })?;
     Ok(NormalizedRouteNameInput {
         namespace: infer_resolution_namespace(&normalized.normalized_name),
-        corrected_input_normalization: normalized.normalized_name != name,
+        corrected_input_normalization: name != normalized.normalized_name,
         normalized_name: normalized.normalized_name,
     })
 }
