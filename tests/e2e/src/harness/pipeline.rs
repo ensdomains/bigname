@@ -1,32 +1,793 @@
-use std::net::TcpListener;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use tokio::process::{Child, Command};
 
-const PIPELINE_BINARY_SPECS: [(&str, &str); 3] = [
-    ("bigname-api", "apps/api/Cargo.toml"),
-    ("bigname-indexer", "apps/indexer/Cargo.toml"),
-    ("bigname-worker", "apps/worker/Cargo.toml"),
-];
+type ProfileSnapshot = Vec<(PathBuf, Vec<u8>)>;
+const E2E_MANIFEST_PROFILE_ENV: &str = "BIGNAME_E2E_MANIFEST_PROFILE_ROOT";
+const RUNTIME_PROFILE_MIRROR_PREFIX: &str = ".bigname-e2e-runtime-profile-";
 
-#[derive(Debug)]
-struct PipelineBinaries {
-    api: PathBuf,
-    indexer: PathBuf,
-    worker: PathBuf,
+struct CachedProfileRunner {
+    snapshot: ProfileSnapshot,
+    binary: Weak<ProfileRunnerBinary>,
+    managed_lease: Option<Arc<ProfileRunnerBinary>>,
 }
 
-static PIPELINE_BINARIES: tokio::sync::OnceCell<std::result::Result<PipelineBinaries, String>> =
-    tokio::sync::OnceCell::const_new();
+struct ProfileRunnerBinary {
+    path: PathBuf,
+}
+
+struct ProfileBuildLock {
+    _file: std::fs::File,
+}
+
+impl ProfileBuildLock {
+    fn acquire(path: &Path) -> Result<Self> {
+        let file = open_profile_build_lock(path)?;
+        file.lock()
+            .with_context(|| format!("lock deployment-profile Cargo build at {path:?}"))?;
+        Ok(Self { _file: file })
+    }
+
+    #[cfg(test)]
+    fn try_acquire(path: &Path) -> Result<Option<Self>> {
+        let file = open_profile_build_lock(path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error)
+                .with_context(|| format!("try deployment-profile Cargo build lock at {path:?}")),
+        }
+    }
+}
+
+fn open_profile_build_lock(path: &Path) -> Result<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("open deployment-profile Cargo build lock at {path:?}"))
+}
+
+impl ProfileRunnerBinary {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl std::ops::Deref for ProfileRunnerBinary {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+impl Drop for ProfileRunnerBinary {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!(
+                "failed to remove temporary deployment-profile phase-runner {:?}: {error}",
+                self.path
+            );
+        }
+    }
+}
+type NameProjectionRow = (
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Value,
+    String,
+    Option<String>,
+    Value,
+    Value,
+    Value,
+);
+type RecordInventoryRow = (Value, Value, Option<Value>, Value, String, Option<String>);
+type ChildProjectionRow = (
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Value,
+    Value,
+    Value,
+);
+type AddressNameProjectionRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    String,
+    Option<String>,
+    Value,
+    Value,
+    Value,
+);
+type PrimaryNameProjectionRow = (String, Option<String>, bool, Option<String>, Value);
+
 static PROCESS_LOG_SEQ: AtomicU64 = AtomicU64::new(0);
 
 const DEFAULT_READY_TIMEOUT_SECS: u64 = 600;
 const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 600;
+const PROFILE_BINARY_DIR_ENV: &str = "BIGNAME_E2E_PROFILE_BINARY_DIR";
+
+static PHASE_RUNNER_BINARY: tokio::sync::OnceCell<std::result::Result<PathBuf, String>> =
+    tokio::sync::OnceCell::const_new();
+static PROFILE_PHASE_RUNNERS: OnceLock<tokio::sync::Mutex<Vec<CachedProfileRunner>>> =
+    OnceLock::new();
+
+/// Initialize the fresh phase schema through the shipped binary. The legacy
+/// public schema remains present until C2, but e2e scenario pools select only
+/// `bigname_phase` after this command succeeds.
+pub async fn phase_runner_init_schema(repo_root: &Path, database_url: &str) -> Result<()> {
+    let binary = canonical_phase_runner(repo_root).await?;
+    let mut command = pipeline_command(repo_root, binary);
+    command.args(["init-schema", "--database-url", database_url]);
+    run_to_completion(command, "phase-runner init-schema").await?;
+    Ok(())
+}
+
+async fn canonical_phase_runner(repo_root: &Path) -> Result<&'static PathBuf> {
+    match PHASE_RUNNER_BINARY
+        .get_or_init(|| async {
+            build_phase_runner_binary(repo_root, None)
+                .await
+                .map_err(|error| format!("{error:#}"))
+        })
+        .await
+    {
+        Ok(binary) => Ok(binary),
+        Err(error) => bail!("{error}"),
+    }
+}
+
+/// Build a phase-runner whose manifest hash allowlist includes the exact
+/// generated scenario [deployment profile](../../../../docs/glossary.md#deployment-profile).
+/// Production binaries reject local-address deployment profiles by design;
+/// the harness briefly mirrors the deployment profile under the workspace
+/// manifest root while compiling, hard-links the resulting executable for
+/// concurrent deployment-profile isolation, and removes both the mirror and
+/// link through scoped lifetimes. The checked-in manifest tree is never edited.
+async fn profile_phase_runner(
+    repo_root: &Path,
+    manifests_root: &Path,
+) -> Result<Arc<ProfileRunnerBinary>> {
+    let snapshot = profile_snapshot(manifests_root)?;
+    let runners = PROFILE_PHASE_RUNNERS.get_or_init(|| tokio::sync::Mutex::new(Vec::new()));
+    let mut runners = runners.lock().await;
+    runners.retain(|runner| runner.managed_lease.is_some() || runner.binary.strong_count() > 0);
+    if let Some(binary) = runners
+        .iter()
+        .find(|runner| runner.snapshot == snapshot)
+        .and_then(|runner| runner.binary.upgrade())
+    {
+        return Ok(binary);
+    }
+    let binary = Arc::new(ProfileRunnerBinary::new(
+        build_phase_runner_binary(repo_root, Some(manifests_root)).await?,
+    ));
+    let managed_lease = std::env::var_os(PROFILE_BINARY_DIR_ENV).map(|_| binary.clone());
+    runners.push(CachedProfileRunner {
+        snapshot,
+        binary: Arc::downgrade(&binary),
+        managed_lease,
+    });
+    Ok(binary)
+}
+
+async fn build_phase_runner_binary(
+    repo_root: &Path,
+    manifests_root: Option<&Path>,
+) -> Result<PathBuf> {
+    let build_lock_path = profile_build_lock_path(repo_root);
+    let _build_lock =
+        tokio::task::spawn_blocking(move || ProfileBuildLock::acquire(&build_lock_path))
+            .await
+            .context("join deployment-profile Cargo build-lock task")??;
+    let runtime_profile = match manifests_root {
+        Some(profile) => Some(RuntimeProfileMirror::create(repo_root, profile)?),
+        None => None,
+    };
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut command = Command::new(cargo);
+    command.current_dir(repo_root).args([
+        "build",
+        "--locked",
+        "--message-format=json-render-diagnostics",
+        "--package",
+        "phase-runner",
+        "--bin",
+        "phase-runner",
+    ]);
+    if let Some(runtime_profile) = runtime_profile.as_ref() {
+        command.env(E2E_MANIFEST_PROFILE_ENV, &runtime_profile.path);
+    }
+    let stdout = run_to_completion(command, "phase-runner binary build").await?;
+    let executable = parse_phase_runner_binary(repo_root, stdout.as_bytes())?;
+    if manifests_root.is_none() {
+        return Ok(executable);
+    }
+    let linked_path = hard_link_profile_binary(&executable)?;
+    drop(runtime_profile);
+    Ok(linked_path)
+}
+
+fn profile_build_lock_path(repo_root: &Path) -> PathBuf {
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                repo_root.join(path)
+            }
+        })
+        .unwrap_or_else(|| repo_root.join("target"));
+    target_dir.join(".bigname-e2e-phase-runner-build.lock")
+}
+
+fn hard_link_profile_binary(executable: &Path) -> Result<PathBuf> {
+    let fallback_directory = executable
+        .parent()
+        .context("phase-runner executable has no parent directory")?;
+    let configured_directory = std::env::var_os(PROFILE_BINARY_DIR_ENV).map(PathBuf::from);
+    let directory = configured_directory
+        .as_deref()
+        .unwrap_or(fallback_directory);
+    for _ in 0..1000 {
+        let sequence = PROCESS_LOG_SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = directory.join(format!(
+            ".bigname-e2e-phase-runner-profile-{}-{sequence}",
+            std::process::id()
+        ));
+        match std::fs::hard_link(executable, &path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "hard-link deployment-profile phase-runner from {executable:?} to {path:?}"
+                    )
+                });
+            }
+        }
+    }
+    bail!("could not allocate a unique deployment-profile phase-runner hard link")
+}
+
+fn parse_phase_runner_binary(repo_root: &Path, stdout: &[u8]) -> Result<PathBuf> {
+    let expected_manifest = repo_root.join("apps/phase-runner/Cargo.toml");
+    let mut executable = None;
+    for (line_index, line) in stdout.split(|byte| *byte == b'\n').enumerate() {
+        if line.iter().all(|byte| byte.is_ascii_whitespace()) {
+            continue;
+        }
+        let message: Value = serde_json::from_slice(line).with_context(|| {
+            format!("parse Cargo JSON message on stdout line {}", line_index + 1)
+        })?;
+        if message.get("reason").and_then(Value::as_str) != Some("compiler-artifact")
+            || message.pointer("/target/name").and_then(Value::as_str) != Some("phase-runner")
+            || !message
+                .pointer("/target/kind")
+                .and_then(Value::as_array)
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "bin"))
+        {
+            continue;
+        }
+        let Some(manifest) = message.get("manifest_path").and_then(Value::as_str) else {
+            continue;
+        };
+        if normalize_cargo_path(repo_root, manifest) != expected_manifest {
+            continue;
+        }
+        let path = message
+            .get("executable")
+            .and_then(Value::as_str)
+            .context("Cargo omitted the phase-runner executable")?;
+        if executable
+            .replace(normalize_cargo_path(repo_root, path))
+            .is_some()
+        {
+            bail!("Cargo reported duplicate phase-runner executable artifacts");
+        }
+    }
+    executable.context("Cargo build did not report the phase-runner executable artifact")
+}
+
+fn profile_snapshot(root: &Path) -> Result<ProfileSnapshot> {
+    fn visit(root: &Path, directory: &Path, files: &mut ProfileSnapshot) -> Result<()> {
+        let mut entries = std::fs::read_dir(directory)?.collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                visit(root, &path, files)?;
+            } else if path.extension().and_then(|extension| extension.to_str()) == Some("toml") {
+                files.push((path.strip_prefix(root)?.to_owned(), std::fs::read(path)?));
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    visit(root, root, &mut files)?;
+    anyhow::ensure!(
+        !files.is_empty(),
+        "scenario deployment profile has no TOML files"
+    );
+    Ok(files)
+}
+
+struct RuntimeProfileMirror {
+    path: PathBuf,
+}
+
+impl RuntimeProfileMirror {
+    fn create(repo_root: &Path, source: &Path) -> Result<Self> {
+        let manifest_root = repo_root.join("manifests");
+        sweep_stale_runtime_profile_mirrors(&manifest_root)?;
+        let path = manifest_root.join(format!(
+            "{RUNTIME_PROFILE_MIRROR_PREFIX}{}",
+            std::process::id()
+        ));
+        if path.exists() {
+            std::fs::remove_dir_all(&path).with_context(|| {
+                format!("remove stale runtime deployment-profile mirror {path:?}")
+            })?;
+        }
+        copy_profile_tree(source, &path)?;
+        Ok(Self { path })
+    }
+}
+
+fn sweep_stale_runtime_profile_mirrors(manifest_root: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(manifest_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(pid) = name.strip_prefix(RUNTIME_PROFILE_MIRROR_PREFIX) else {
+            continue;
+        };
+        let is_live = pid
+            .parse::<u32>()
+            .ok()
+            .is_some_and(|pid| Path::new("/proc").join(pid.to_string()).is_dir());
+        if is_live {
+            continue;
+        }
+        let path = entry.path();
+        if let Err(error) = std::fs::remove_dir_all(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error).with_context(|| {
+                format!("remove stale runtime deployment-profile mirror {path:?}")
+            });
+        }
+    }
+    Ok(())
+}
+
+impl Drop for RuntimeProfileMirror {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!(
+                "failed to remove runtime deployment-profile mirror {:?}: {error}",
+                self.path
+            );
+        }
+    }
+}
+
+fn copy_profile_tree(source: &Path, destination: &Path) -> Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_profile_tree(&source_path, &destination_path)?;
+        } else {
+            std::fs::copy(&source_path, &destination_path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Execute the fixture-backed schema-v2 spine for one or more local chains.
+/// Raw facts are supplied up front from Anvil, then the real phase-runner
+/// binary performs interpretation and projection over the recorded extent.
+pub async fn run_fixture_spine(
+    repo_root: &Path,
+    database_url: &str,
+    pool: &sqlx::PgPool,
+    manifests_root: &Path,
+    chain_rpc_urls: &[ChainRpcUrl<'_>],
+    targets: &[(&str, u64)],
+    extra_ready_sql: Option<&str>,
+) -> Result<()> {
+    let repository = bigname_manifests::load_repository(manifests_root)?;
+    bigname_manifests::sync_schema_v2_repository(pool, &repository).await?;
+
+    for (chain, target) in targets {
+        let rpc_url = chain_rpc_urls
+            .iter()
+            .find_map(|(configured_chain, url)| (*configured_chain == *chain).then_some(*url))
+            .with_context(|| format!("fixture chain {chain} has no RPC URL"))?;
+        super::facts::seed_anvil_snapshot(pool, chain, rpc_url, *target).await?;
+    }
+
+    let binary = profile_phase_runner(repo_root, manifests_root).await?;
+    for (chain, target) in targets {
+        let rpc_url = chain_rpc_urls
+            .iter()
+            .find_map(|(configured_chain, url)| (*configured_chain == *chain).then_some(*url))
+            .expect("checked above");
+        run_phase_redo(
+            repo_root,
+            &binary,
+            database_url,
+            manifests_root,
+            chain,
+            "interpret",
+            *target,
+            Some(rpc_url),
+        )
+        .await?;
+        run_phase_redo(
+            repo_root,
+            &binary,
+            database_url,
+            manifests_root,
+            chain,
+            "project",
+            *target,
+            Some(rpc_url),
+        )
+        .await?;
+    }
+
+    // Redo is synchronous, so one evaluation after command completion replaces
+    // the former polling loop. The predicate still carries scenario-specific
+    // semantic assertions that must not be discarded.
+    if let Some(ready_sql) = extra_ready_sql {
+        let ready: bool = sqlx::query_scalar(ready_sql)
+            .fetch_one(pool)
+            .await
+            .with_context(|| format!("evaluate post-redo readiness SQL: {ready_sql}"))?;
+        anyhow::ensure!(
+            ready,
+            "post-redo readiness predicate was false: {ready_sql}"
+        );
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)] // Arguments map one-for-one to bounded redo CLI fields.
+async fn run_phase_redo(
+    repo_root: &Path,
+    binary: &Path,
+    database_url: &str,
+    manifests_root: &Path,
+    chain: &str,
+    phase: &str,
+    target: u64,
+    hydration_rpc_url: Option<&str>,
+) -> Result<()> {
+    let target = target.to_string();
+    let source =
+        format!("{chain}:e2e-fixture:fixture:new_signature_range:0=BIGNAME_E2E_FIXTURE_SOURCE");
+    let mut command = pipeline_command(repo_root, binary);
+    command.env("BIGNAME_E2E_FIXTURE_SOURCE", "fixture://upfront");
+    command
+        .args(["redo", "--database-url", database_url, "--manifests-root"])
+        .arg(manifests_root)
+        .args([
+            "--chain",
+            chain,
+            "--source",
+            &source,
+            "--phase",
+            phase,
+            "--from-block",
+            "0",
+            "--to-block",
+            &target,
+            "--initial-backoff-ms",
+            "10",
+            "--maximum-backoff-ms",
+            "50",
+        ]);
+    if let Some(rpc_url) = hydration_rpc_url {
+        command.args(["--hydration-rpc", &format!("{chain}={rpc_url}")]);
+    }
+    run_to_completion(command, &format!("phase-runner {phase} redo for {chain}")).await?;
+    Ok(())
+}
+
+/// Run the production JSON-RPC ingest phase over a bounded local-chain range.
+/// Provider-fault scenarios use a non-production chain alias because the
+/// production `ethereum-mainnet` source contract requires a local Reth DB.
+#[allow(clippy::too_many_arguments)] // Public fault scenarios spell out every ingest boundary.
+pub async fn run_rpc_ingest_redo(
+    repo_root: &Path,
+    database_url: &str,
+    pool: &sqlx::PgPool,
+    manifests_root: &Path,
+    chain: &str,
+    rpc_url: &str,
+    from_block: u64,
+    to_block: u64,
+) -> Result<String> {
+    anyhow::ensure!(from_block <= to_block, "RPC ingest redo range is reversed");
+    super::facts::seed_anvil_rpc_redo_extent(pool, chain, rpc_url, to_block).await?;
+    let repository = bigname_manifests::load_repository(manifests_root)?;
+    bigname_manifests::sync_schema_v2_repository(pool, &repository).await?;
+    let binary = profile_phase_runner(repo_root, manifests_root).await?;
+    let source = format!("{chain}:e2e-rpc:rpc:new_signature_range:0=BIGNAME_E2E_RPC_SOURCE");
+    let mut command = pipeline_command(repo_root, &binary);
+    command.env("BIGNAME_E2E_RPC_SOURCE", rpc_url);
+    command
+        .args(["redo", "--database-url", database_url, "--manifests-root"])
+        .arg(manifests_root)
+        .args([
+            "--chain",
+            chain,
+            "--source",
+            &source,
+            "--phase",
+            "ingest",
+            "--from-block",
+            &from_block.to_string(),
+            "--to-block",
+            &to_block.to_string(),
+            "--initial-backoff-ms",
+            "10",
+            "--maximum-backoff-ms",
+            "50",
+        ]);
+    let output = run_to_completion(
+        command,
+        &format!("phase-runner RPC ingest redo for {chain}"),
+    )
+    .await?;
+
+    // A production redo operates over lineage whose canonicality was already
+    // established by live head tracking. This harness bootstraps that recorded
+    // extent so the ingest implementation itself can be exercised without
+    // first running a long-lived supervisor. The redo still
+    // fetches its headers, selected logs, transactions, and receipts from the
+    // configured (and potentially faulting) provider.
+    let promoted = sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'canonical'
+         WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3
+           AND canonicality_state = 'observed'",
+    )
+    .bind(chain)
+    .bind(i64::try_from(from_block)?)
+    .bind(i64::try_from(to_block)?)
+    .execute(pool)
+    .await?;
+    let expected = to_block - from_block + 1;
+    let readable: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT block_number) FROM chain_lineage
+         WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')",
+    )
+    .bind(chain)
+    .bind(i64::try_from(from_block)?)
+    .bind(i64::try_from(to_block)?)
+    .fetch_one(pool)
+    .await?;
+    anyhow::ensure!(
+        readable == i64::try_from(expected)?,
+        "RPC ingest redo left {readable}/{expected} readable lineage blocks for {chain}; promoted {} observed rows",
+        promoted.rows_affected()
+    );
+    let latest_hash: String = sqlx::query_scalar(
+        "SELECT block_hash FROM chain_lineage
+         WHERE chain_id = $1 AND block_number = $2
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')",
+    )
+    .bind(chain)
+    .bind(i64::try_from(to_block)?)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO chain_heads (chain_id, latest_block_hash, latest_block_number)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (chain_id) DO UPDATE
+         SET latest_block_hash = EXCLUDED.latest_block_hash,
+             latest_block_number = EXCLUDED.latest_block_number,
+             updated_at = now()",
+    )
+    .bind(chain)
+    .bind(latest_hash)
+    .bind(i64::try_from(to_block)?)
+    .execute(pool)
+    .await?;
+    Ok(output)
+}
+
+/// Interpret and project raw facts already materialized by a real ingest run.
+pub async fn run_existing_raw_spine(
+    repo_root: &Path,
+    database_url: &str,
+    pool: &sqlx::PgPool,
+    manifests_root: &Path,
+    chain: &str,
+    rpc_url: &str,
+    to_block: u64,
+) -> Result<()> {
+    super::facts::seed_downstream_redo_extents(pool, chain, to_block).await?;
+    let repository = bigname_manifests::load_repository(manifests_root)?;
+    bigname_manifests::sync_schema_v2_repository(pool, &repository).await?;
+    let binary = profile_phase_runner(repo_root, manifests_root).await?;
+    let source = format!("{chain}:e2e-rpc:rpc:new_signature_range:0=BIGNAME_E2E_RPC_SOURCE");
+    for phase in ["interpret", "project"] {
+        let mut command = pipeline_command(repo_root, &binary);
+        command.env("BIGNAME_E2E_RPC_SOURCE", rpc_url);
+        command
+            .args(["redo", "--database-url", database_url, "--manifests-root"])
+            .arg(manifests_root)
+            .args([
+                "--chain",
+                chain,
+                "--source",
+                &source,
+                "--phase",
+                phase,
+                "--from-block",
+                "0",
+                "--to-block",
+                &to_block.to_string(),
+                "--hydration-rpc",
+                &format!("{chain}={rpc_url}"),
+                "--initial-backoff-ms",
+                "10",
+                "--maximum-backoff-ms",
+                "50",
+            ]);
+        run_to_completion(command, &format!("phase-runner {phase} redo for {chain}")).await?;
+    }
+    Ok(())
+}
+
+/// Rewind the published head through the production operator command. The
+/// command preserves losing raw facts as orphaned lineage and stamps the
+/// affected interpret/project range for mandatory replay.
+pub async fn rewind_to_ancestor(
+    repo_root: &Path,
+    database_url: &str,
+    chain: &str,
+    ancestor_block: u64,
+    ancestor_hash: &str,
+) -> Result<String> {
+    let binary = canonical_phase_runner(repo_root).await?;
+    let mut command = pipeline_command(repo_root, binary);
+    command.args([
+        "rewind",
+        "--database-url",
+        database_url,
+        "--chain",
+        chain,
+        "--ancestor-block",
+        &ancestor_block.to_string(),
+        "--ancestor-hash",
+        ancestor_hash,
+    ]);
+    run_to_completion(command, &format!("phase-runner rewind for {chain}")).await
+}
+
+/// Complete the exact downstream replay stamped by a production rewind.
+/// `redo interpret` owns the projection cascade, so one command consumes both
+/// required ranges and preserves the phase runner's recovery contract.
+pub async fn run_required_reorg_spine(
+    repo_root: &Path,
+    database_url: &str,
+    pool: &sqlx::PgPool,
+    manifests_root: &Path,
+    chain: &str,
+    rpc_url: &str,
+) -> Result<()> {
+    let ranges: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT phase_name, redo_from_block_number, redo_to_block_number
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')
+           AND redo_in_progress
+         ORDER BY phase_name",
+    )
+    .bind(chain)
+    .fetch_all(pool)
+    .await?;
+    anyhow::ensure!(
+        ranges.len() == 2
+            && ranges[0].0 == "interpret"
+            && ranges[1].0 == "project"
+            && ranges[0].1 == ranges[1].1
+            && ranges[0].2 == ranges[1].2,
+        "rewind for {chain} did not stamp one matching interpret/project range: {ranges:?}"
+    );
+    let from = ranges[0].1.to_string();
+    let to = ranges[0].2.to_string();
+    let repository = bigname_manifests::load_repository(manifests_root)?;
+    bigname_manifests::sync_schema_v2_repository(pool, &repository).await?;
+    let binary = profile_phase_runner(repo_root, manifests_root).await?;
+    let source = format!("{chain}:e2e-rpc:rpc:new_signature_range:0=BIGNAME_E2E_RPC_SOURCE");
+    let mut command = pipeline_command(repo_root, &binary);
+    command.env("BIGNAME_E2E_RPC_SOURCE", rpc_url);
+    command
+        .args(["redo", "--database-url", database_url, "--manifests-root"])
+        .arg(manifests_root)
+        .args([
+            "--chain",
+            chain,
+            "--source",
+            &source,
+            "--phase",
+            "interpret",
+            "--from-block",
+            &from,
+            "--to-block",
+            &to,
+            "--hydration-rpc",
+            &format!("{chain}={rpc_url}"),
+            "--initial-backoff-ms",
+            "10",
+            "--maximum-backoff-ms",
+            "50",
+        ]);
+    run_to_completion(
+        command,
+        &format!("phase-runner required reorg spine for {chain}"),
+    )
+    .await?;
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')
+           AND redo_in_progress",
+    )
+    .bind(chain)
+    .fetch_one(pool)
+    .await?;
+    anyhow::ensure!(
+        remaining == 0,
+        "phase-runner left {remaining} required reorg phases active for {chain}"
+    );
+    Ok(())
+}
 
 #[cfg(unix)]
 mod unix_process {
@@ -109,43 +870,6 @@ enum TimeoutTerminationTarget {
     ProcessGroup(u32),
 }
 
-/// Build the three pipeline binaries once, then launch the exact artifacts
-/// Cargo reports. Direct launches keep later scenario startup independent of
-/// the workspace target lock while still honoring its effective target dir.
-async fn pipeline_binaries(repo_root: &Path) -> Result<&'static PipelineBinaries> {
-    match PIPELINE_BINARIES
-        .get_or_init(|| async {
-            build_pipeline_binaries(repo_root)
-                .await
-                .map_err(|error| format!("{error:#}"))
-        })
-        .await
-    {
-        Ok(binaries) => Ok(binaries),
-        Err(error) => bail!("{error}"),
-    }
-}
-
-async fn build_pipeline_binaries(repo_root: &Path) -> Result<PipelineBinaries> {
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut command = Command::new(cargo);
-    command.current_dir(repo_root).args([
-        "build",
-        "--locked",
-        "--message-format=json-render-diagnostics",
-        "--package",
-        "bigname-api",
-        "--package",
-        "bigname-indexer",
-        "--package",
-        "bigname-worker",
-        "--bins",
-    ]);
-    let stdout = run_to_completion(command, "one-time pipeline binary build").await?;
-
-    parse_pipeline_binaries(repo_root, stdout.as_bytes())
-}
-
 fn normalize_cargo_path(repo_root: &Path, path: &str) -> PathBuf {
     let path = PathBuf::from(path);
     if path.is_absolute() {
@@ -155,104 +879,10 @@ fn normalize_cargo_path(repo_root: &Path, path: &str) -> PathBuf {
     }
 }
 
-fn parse_pipeline_binaries(repo_root: &Path, stdout: &[u8]) -> Result<PipelineBinaries> {
-    let mut api = None;
-    let mut indexer = None;
-    let mut worker = None;
-
-    for (line_index, line) in stdout.split(|byte| *byte == b'\n').enumerate() {
-        if line.iter().all(|byte| byte.is_ascii_whitespace()) {
-            continue;
-        }
-        let message: Value = serde_json::from_slice(line).with_context(|| {
-            format!("parse Cargo JSON message on stdout line {}", line_index + 1)
-        })?;
-        if message.get("reason").and_then(Value::as_str) != Some("compiler-artifact") {
-            continue;
-        }
-        let Some(target) = message.get("target") else {
-            continue;
-        };
-        let is_binary = target
-            .get("kind")
-            .and_then(Value::as_array)
-            .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("bin")));
-        if !is_binary {
-            continue;
-        }
-        let Some(name) = target.get("name").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(manifest_path) = message.get("manifest_path").and_then(Value::as_str) else {
-            continue;
-        };
-        let manifest_path = normalize_cargo_path(repo_root, manifest_path);
-        let Some((_, expected_manifest)) = PIPELINE_BINARY_SPECS
-            .iter()
-            .find(|(expected, path)| name == *expected && manifest_path == repo_root.join(*path))
-        else {
-            continue;
-        };
-
-        let executable = match message.get("executable") {
-            Some(Value::String(path)) => normalize_cargo_path(repo_root, path),
-            Some(Value::Null) => {
-                bail!("Cargo reported a null executable for {name} from {expected_manifest}")
-            }
-            Some(_) => {
-                bail!("Cargo reported a non-string executable for {name} from {expected_manifest}")
-            }
-            None => bail!("Cargo omitted the executable for {name} from {expected_manifest}"),
-        };
-
-        let slot = match name {
-            "bigname-api" => &mut api,
-            "bigname-indexer" => &mut indexer,
-            "bigname-worker" => &mut worker,
-            _ => unreachable!("pipeline binary specification matched an unknown name"),
-        };
-        if slot.replace(executable).is_some() {
-            bail!("Cargo reported duplicate executable artifacts for {name}");
-        }
-    }
-
-    let mut missing = Vec::new();
-    if api.is_none() {
-        missing.push("bigname-api");
-    }
-    if indexer.is_none() {
-        missing.push("bigname-indexer");
-    }
-    if worker.is_none() {
-        missing.push("bigname-worker");
-    }
-    if !missing.is_empty() {
-        bail!(
-            "Cargo build did not report executable artifacts for {}",
-            missing.join(", ")
-        );
-    }
-
-    Ok(PipelineBinaries {
-        api: api.expect("checked above"),
-        indexer: indexer.expect("checked above"),
-        worker: worker.expect("checked above"),
-    })
-}
-
 fn pipeline_command(repo_root: &Path, executable: &Path) -> Command {
     let mut command = Command::new(executable);
     command.current_dir(repo_root);
-    // E2e corpora are tiny, but spawned binaries default to 10-connection
-    // pools. API and worker processes need four; seven is the minimum for the
-    // two-chain normalized-replay indexer fixture.
-    let max_connections =
-        if executable.file_stem().and_then(|stem| stem.to_str()) == Some("bigname-indexer") {
-            "7"
-        } else {
-            "4"
-        };
-    command.env("BIGNAME_DATABASE_MAX_CONNECTIONS", max_connections);
+    command.env("BIGNAME_DATABASE_MAX_CONNECTIONS", "4");
     command
 }
 
@@ -415,6 +1045,7 @@ where
     }
 }
 
+#[cfg(test)]
 async fn await_supervised_readiness<T, F>(
     child: &mut Child,
     log_path: &Path,
@@ -438,20 +1069,6 @@ where
             )))
         }
     }
-}
-
-async fn stop_after_readiness_deadline(
-    child: &mut Child,
-    log_path: &Path,
-    timeout_secs: u64,
-    message: &str,
-) -> Result<()> {
-    let stop_note =
-        stop_and_reap_timed_out_child(child, TimeoutTerminationTarget::DirectChild).await;
-    bail!(
-        "{message} within the configured {timeout_secs}s readiness deadline ({stop_note}); log tail (reversed) from {log_path:?}:\n{}",
-        process_log_tail(log_path)
-    )
 }
 
 fn sanitize_log_label(label: &str) -> String {
@@ -505,10 +1122,12 @@ fn process_log_tail(log_path: &Path) -> String {
     log.lines().rev().take(60).collect::<Vec<_>>().join("\n")
 }
 
+#[cfg(test)]
 async fn stop_supervised_child(child: Child, what: &str, log_path: &Path) -> Result<()> {
     stop_supervised_child_with_pre_kill_delay(child, what, log_path, None).await
 }
 
+#[cfg(test)]
 async fn stop_supervised_child_with_pre_kill_delay(
     mut child: Child,
     what: &str,
@@ -548,6 +1167,7 @@ async fn stop_supervised_child_with_pre_kill_delay(
     Ok(())
 }
 
+#[cfg(test)]
 fn exited_from_requested_kill(status: &std::process::ExitStatus) -> bool {
     #[cfg(unix)]
     {
@@ -567,526 +1187,130 @@ fn exited_from_requested_kill(status: &std::process::ExitStatus) -> bool {
 
 pub type ChainRpcUrl<'a> = (&'a str, &'a str);
 
-pub struct ChainCheckpointTarget<'a> {
+pub struct ChainReplayTarget<'a> {
     pub chain_rpc_urls: &'a [ChainRpcUrl<'a>],
     pub chain: &'a str,
     pub target_block: u64,
     pub extra_ready_sql: Option<&'a str>,
 }
 
-pub struct ChainBackfillTarget<'a> {
+pub struct FullFixtureReplayTarget<'a> {
     pub chain_rpc_urls: &'a [ChainRpcUrl<'a>],
     pub chain: &'a str,
     pub block_range: std::ops::RangeInclusive<u64>,
-    pub idempotency_key: &'a str,
 }
 
-fn format_chain_rpc_urls(chain_rpc_urls: &[ChainRpcUrl<'_>]) -> String {
-    chain_rpc_urls
-        .iter()
-        .map(|(chain, url)| format!("{chain}={url}"))
-        .collect::<Vec<_>>()
-        .join(",")
+/// Re-run the fixture-backed spine as a scenario adds blocks. Each call
+/// snapshots the requested Anvil range and synchronously executes the real
+/// phase-runner interpret/project commands; no background process is implied.
+pub struct SequentialFixtureReplay {
+    repo_root: PathBuf,
+    database_url: String,
+    manifests_root: PathBuf,
+    chain_rpc_urls: Vec<(String, String)>,
+    _binary: Arc<ProfileRunnerBinary>,
 }
 
-/// A supervised `indexer run` process. The caller decides when the live session
-/// has reached enough checkpoints/readiness and then stops it explicitly.
-pub struct IndexerRunSession {
-    child: Child,
-    log_path: PathBuf,
-}
-
-/// A supervised production `worker run` process. Most scenarios use the
-/// deterministic one-shot projection replay command; this session exists for
-/// the smaller set that must prove bootstrap handoff and continuous
-/// invalidation/apply behavior while intake and the API remain live.
-pub struct WorkerRunSession {
-    child: Child,
-    log_path: PathBuf,
-}
-
-impl WorkerRunSession {
-    pub async fn start(repo_root: &Path, database_url: &str, log_label: &str) -> Result<Self> {
-        let worker = &pipeline_binaries(repo_root).await?.worker;
-        let (log_path, log_file) = create_process_log_file("worker", log_label)?;
-        let child = pipeline_command(repo_root, worker)
-            .args([
-                "run",
-                "--database-url",
-                database_url,
-                "--poll-interval-secs",
-                "1",
-                "--metrics-bind-addr",
-                "127.0.0.1:0",
-            ])
-            .kill_on_drop(true)
-            .stdout(std::process::Stdio::from(log_file.try_clone()?))
-            .stderr(std::process::Stdio::from(log_file))
-            .spawn()
-            .context("spawn worker run")?;
-        Ok(Self { child, log_path })
-    }
-
-    pub async fn wait_for_sql(&mut self, pool: &sqlx::PgPool, sql: &str) -> Result<()> {
-        let ready_timeout_secs = ready_timeout_secs()?;
-        let deadline = deadline_after(ready_timeout_secs, "worker readiness")?;
-        loop {
-            self.bail_if_exited()?;
-            let ready = await_supervised_readiness(
-                &mut self.child,
-                &self.log_path,
-                "worker run",
-                deadline,
-                ready_timeout_secs,
-                "worker readiness SQL query",
-                async { Ok(sqlx::query_scalar::<_, bool>(sql).fetch_one(pool).await?) },
-            )
-            .await?;
-            if ready {
-                return Ok(());
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return stop_after_readiness_deadline(
-                    &mut self.child,
-                    &self.log_path,
-                    ready_timeout_secs,
-                    "worker run did not satisfy readiness SQL",
-                )
-                .await;
-            }
-            tokio::time::sleep_until(
-                deadline.min(tokio::time::Instant::now() + Duration::from_millis(250)),
-            )
-            .await;
-        }
-    }
-
-    pub async fn stop(self) -> Result<()> {
-        stop_supervised_child(self.child, "worker run", &self.log_path).await
-    }
-
-    fn bail_if_exited(&mut self) -> Result<()> {
-        if let Some(status) = self.child.try_wait()? {
-            bail!(
-                "worker run exited early ({status}); log tail (reversed) from {:?}:\n{}",
-                self.log_path,
-                self.log_tail()
-            );
-        }
-        Ok(())
-    }
-
-    fn log_tail(&self) -> String {
-        process_log_tail(&self.log_path)
-    }
-}
-
-impl IndexerRunSession {
-    pub async fn start(
-        repo_root: &Path,
-        database_url: &str,
-        manifests_root: &Path,
-        chain_rpc_url: &str,
-        log_label: &str,
-    ) -> Result<Self> {
-        Self::start_with_chain_rpc_urls(
-            repo_root,
-            database_url,
-            manifests_root,
-            &[("ethereum-mainnet", chain_rpc_url)],
-            log_label,
-        )
-        .await
-    }
-
+impl SequentialFixtureReplay {
     pub async fn start_with_chain_rpc_urls(
         repo_root: &Path,
         database_url: &str,
         manifests_root: &Path,
         chain_rpc_urls: &[ChainRpcUrl<'_>],
-        log_label: &str,
     ) -> Result<Self> {
-        Self::start_with_chain_rpc_urls_and_adapter_sync_mode(
-            repo_root,
-            database_url,
-            manifests_root,
-            chain_rpc_urls,
-            log_label,
-            None,
-        )
-        .await
+        let binary = profile_phase_runner(repo_root, manifests_root).await?;
+        Ok(Self {
+            repo_root: repo_root.to_owned(),
+            database_url: database_url.to_owned(),
+            manifests_root: manifests_root.to_owned(),
+            chain_rpc_urls: chain_rpc_urls
+                .iter()
+                .map(|(chain, url)| ((*chain).to_owned(), (*url).to_owned()))
+                .collect(),
+            _binary: binary,
+        })
     }
 
-    /// Start the production loop with live poll adapter sync enabled from the
-    /// first poll. This keeps automatic normalized replay catch-up out of the
-    /// assertion path so a test cannot pass after a later repair cycle.
-    pub async fn start_with_live_poll_adapter_sync(
-        repo_root: &Path,
-        database_url: &str,
-        manifests_root: &Path,
-        chain_rpc_urls: &[ChainRpcUrl<'_>],
-        log_label: &str,
-    ) -> Result<Self> {
-        Self::start_with_chain_rpc_urls_and_adapter_sync_mode(
-            repo_root,
-            database_url,
-            manifests_root,
-            chain_rpc_urls,
-            log_label,
-            Some("auto"),
-        )
-        .await
-    }
-
-    /// Derive the already-deployed contract baseline inline, then keep live
-    /// poll adapter sync enabled for events produced after the first checkpoint.
-    pub async fn start_with_inline_bootstrap_and_live_poll_adapter_sync(
-        repo_root: &Path,
-        database_url: &str,
-        manifests_root: &Path,
-        chain_rpc_urls: &[ChainRpcUrl<'_>],
-        log_label: &str,
-    ) -> Result<Self> {
-        Self::start_with_chain_rpc_urls_and_adapter_sync_mode(
-            repo_root,
-            database_url,
-            manifests_root,
-            chain_rpc_urls,
-            log_label,
-            Some("inline"),
-        )
-        .await
-    }
-
-    async fn start_with_chain_rpc_urls_and_adapter_sync_mode(
-        repo_root: &Path,
-        database_url: &str,
-        manifests_root: &Path,
-        chain_rpc_urls: &[ChainRpcUrl<'_>],
-        log_label: &str,
-        adapter_sync_mode: Option<&str>,
-    ) -> Result<Self> {
-        let indexer = &pipeline_binaries(repo_root).await?.indexer;
-        // Output goes to a log file, not a pipe: the run loop can out-write an
-        // undrained pipe buffer and block, deadlocking the session.
-        let (log_path, log_file) = create_process_log_file("indexer", log_label)?;
-        let chain_rpc_urls = format_chain_rpc_urls(chain_rpc_urls);
-        let mut command = pipeline_command(repo_root, indexer);
-        command
-            .args(["run", "--database-url", database_url, "--manifests-root"])
-            .arg(manifests_root)
-            .args([
-                "--chain-rpc-url",
-                &chain_rpc_urls,
-                "--poll-interval-secs",
-                "1",
-                "--metrics-bind-addr",
-                "127.0.0.1:0",
-                // Scenario readiness often waits on a full-closure authority
-                // sync round; the default 30s cadence just slows tests down.
-                "--normalized-replay-catchup-poll-interval-secs",
-                "2",
-            ]);
-        if let Some(adapter_sync_mode) = adapter_sync_mode {
-            command.args(["--hash-pinned-adapter-sync", adapter_sync_mode]);
-            command.env("BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_ENABLED", "false");
-        }
-        let child = command
-            .kill_on_drop(true)
-            .stdout(std::process::Stdio::from(log_file.try_clone()?))
-            .stderr(std::process::Stdio::from(log_file))
-            .spawn()
-            .context("spawn indexer run")?;
-
-        Ok(Self { child, log_path })
-    }
-
-    pub async fn wait_for_first_checkpoint(&mut self, pool: &sqlx::PgPool) -> Result<i64> {
-        self.wait_for_first_chain_checkpoint(pool, "ethereum-mainnet")
-            .await
-    }
-
-    pub async fn wait_for_first_chain_checkpoint(
+    pub async fn replay_current_chain_head(
         &mut self,
         pool: &sqlx::PgPool,
         chain: &str,
     ) -> Result<i64> {
-        let ready_timeout_secs = ready_timeout_secs()?;
-        let deadline = deadline_after(ready_timeout_secs, "indexer readiness")?;
-        loop {
-            self.bail_if_exited()?;
-            let checkpoint = await_supervised_readiness(
-                &mut self.child,
-                &self.log_path,
-                "indexer run",
-                deadline,
-                ready_timeout_secs,
-                format!("indexer canonical checkpoint query for {chain}"),
-                canonical_checkpoint(pool, chain),
-            )
+        let url = self.rpc_url(chain)?;
+        let target = super::rpc::RpcClient::new(url.to_owned())
+            .block_number()
             .await?;
-            if let Some(block) = checkpoint {
-                return Ok(block);
-            }
-            self.bail_if_timed_out(
-                deadline,
-                ready_timeout_secs,
-                "indexer run did not write a canonical checkpoint",
-            )
-            .await?;
-            tokio::time::sleep_until(
-                deadline.min(tokio::time::Instant::now() + Duration::from_millis(500)),
-            )
-            .await;
-        }
+        self.replay_chain_through(pool, chain, target, None).await?;
+        Ok(i64::try_from(target)?)
     }
 
-    pub async fn wait_for_checkpoint(
-        &mut self,
-        pool: &sqlx::PgPool,
-        target_block: u64,
-        extra_ready_sql: Option<&str>,
-    ) -> Result<()> {
-        self.wait_for_chain_checkpoint(pool, "ethereum-mainnet", target_block, extra_ready_sql)
-            .await
-    }
-
-    pub async fn wait_for_chain_checkpoint(
+    pub async fn replay_chain_through(
         &mut self,
         pool: &sqlx::PgPool,
         chain: &str,
         target_block: u64,
         extra_ready_sql: Option<&str>,
     ) -> Result<()> {
-        // The binary is built before the session starts, so this deadline
-        // measures intake readiness rather than workspace build-lock waits.
-        let ready_timeout_secs = ready_timeout_secs()?;
-        let deadline = deadline_after(ready_timeout_secs, "indexer readiness")?;
-        loop {
-            self.bail_if_exited()?;
-            let checkpoint = await_supervised_readiness(
-                &mut self.child,
-                &self.log_path,
-                "indexer run",
-                deadline,
-                ready_timeout_secs,
-                format!("indexer canonical checkpoint query for {chain}"),
-                canonical_checkpoint(pool, chain),
-            )
-            .await?;
-            if checkpoint.is_some_and(|block| block >= target_block as i64) {
-                let extra_ready = match extra_ready_sql {
-                    Some(sql) => {
-                        await_supervised_readiness(
-                            &mut self.child,
-                            &self.log_path,
-                            "indexer run",
-                            deadline,
-                            ready_timeout_secs,
-                            format!("indexer extra readiness SQL query for {chain}"),
-                            async { Ok(sqlx::query_scalar::<_, bool>(sql).fetch_one(pool).await?) },
-                        )
-                        .await?
-                    }
-                    None => true,
-                };
-                if extra_ready {
-                    return Ok(());
-                }
-            }
-            self.bail_if_timed_out(
-                deadline,
-                ready_timeout_secs,
-                &format!("indexer run did not reach canonical checkpoint {target_block}"),
-            )
-            .await?;
-            tokio::time::sleep_until(
-                deadline.min(tokio::time::Instant::now() + Duration::from_millis(500)),
-            )
-            .await;
-        }
+        let rpc_urls = self
+            .chain_rpc_urls
+            .iter()
+            .map(|(configured_chain, url)| (configured_chain.as_str(), url.as_str()))
+            .collect::<Vec<_>>();
+        run_fixture_spine(
+            &self.repo_root,
+            &self.database_url,
+            pool,
+            &self.manifests_root,
+            &rpc_urls,
+            &[(chain, target_block)],
+            extra_ready_sql,
+        )
+        .await
     }
 
-    pub async fn stop(self) -> Result<()> {
-        stop_supervised_child(self.child, "indexer run", &self.log_path).await
-    }
-
-    pub fn assert_running(&mut self) -> Result<()> {
-        self.bail_if_exited()
-    }
-
-    fn bail_if_exited(&mut self) -> Result<()> {
-        if let Some(status) = self.child.try_wait()? {
-            bail!(
-                "indexer run exited early ({status}); log tail (reversed) from {:?}:\n{}",
-                self.log_path,
-                self.log_tail()
-            );
-        }
-        Ok(())
-    }
-
-    async fn bail_if_timed_out(
-        &mut self,
-        deadline: tokio::time::Instant,
-        timeout_secs: u64,
-        message: &str,
-    ) -> Result<()> {
-        if tokio::time::Instant::now() >= deadline {
-            return stop_after_readiness_deadline(
-                &mut self.child,
-                &self.log_path,
-                timeout_secs,
-                message,
-            )
-            .await;
-        }
-        Ok(())
-    }
-
-    fn log_tail(&self) -> String {
-        process_log_tail(&self.log_path)
+    fn rpc_url(&self, chain: &str) -> Result<&str> {
+        self.chain_rpc_urls
+            .iter()
+            .find_map(|(configured_chain, url)| (configured_chain == chain).then_some(url.as_str()))
+            .with_context(|| format!("sequential fixture replay has no RPC URL for {chain}"))
     }
 }
 
-async fn canonical_checkpoint(pool: &sqlx::PgPool, chain: &str) -> Result<Option<i64>> {
-    Ok(bigname_storage::load_chain_checkpoint(pool, chain)
-        .await?
-        .and_then(|checkpoint| checkpoint.canonical_block_number))
-}
-
-pub async fn indexer_backfill(
+pub async fn run_full_fixture_replay(
     repo_root: &Path,
     database_url: &str,
     manifests_root: &Path,
-    chain_rpc_url: &str,
-    from_block: u64,
-    to_block: u64,
-    idempotency_key: &str,
-) -> Result<String> {
-    let chain_rpc_urls = [("ethereum-mainnet", chain_rpc_url)];
-    indexer_backfill_with_chain_rpc_urls(
+    target: FullFixtureReplayTarget<'_>,
+) -> Result<()> {
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use std::str::FromStr;
+
+    anyhow::ensure!(
+        *target.block_range.start() == 0,
+        "full fixture replay must begin at block zero"
+    );
+    let options =
+        PgConnectOptions::from_str(database_url)?.options([("search_path", "bigname_phase")]);
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await?;
+    run_fixture_spine(
         repo_root,
         database_url,
+        &pool,
         manifests_root,
-        ChainBackfillTarget {
-            chain_rpc_urls: &chain_rpc_urls,
-            chain: "ethereum-mainnet",
-            block_range: from_block..=to_block,
-            idempotency_key,
-        },
+        target.chain_rpc_urls,
+        &[(target.chain, *target.block_range.end())],
+        None,
     )
-    .await
+    .await?;
+    Ok(())
 }
 
-pub async fn indexer_backfill_with_chain_rpc_urls(
-    repo_root: &Path,
-    database_url: &str,
-    manifests_root: &Path,
-    target: ChainBackfillTarget<'_>,
-) -> Result<String> {
-    indexer_backfill_with_chain_rpc_urls_and_watch_targets(
-        repo_root,
-        database_url,
-        manifests_root,
-        target,
-        &[],
-        &[],
-    )
-    .await
-}
-
-/// Run bounded backfill with a per-chain historical-code fallback while all
-/// bulk block, log, and receipt reads continue through the primary RPC URLs.
-pub async fn indexer_backfill_with_chain_rpc_urls_and_code_fallbacks(
-    repo_root: &Path,
-    database_url: &str,
-    manifests_root: &Path,
-    target: ChainBackfillTarget<'_>,
-    chain_rpc_code_fallback_urls: &[ChainRpcUrl<'_>],
-) -> Result<String> {
-    indexer_backfill_with_chain_rpc_urls_and_watch_targets(
-        repo_root,
-        database_url,
-        manifests_root,
-        target,
-        &[],
-        chain_rpc_code_fallback_urls,
-    )
-    .await
-}
-
-pub async fn indexer_backfill_watched_target_with_chain_rpc_urls(
-    repo_root: &Path,
-    database_url: &str,
-    manifests_root: &Path,
-    target: ChainBackfillTarget<'_>,
-    watch_target: sqlx::types::Uuid,
-) -> Result<String> {
-    indexer_backfill_with_chain_rpc_urls_and_watch_targets(
-        repo_root,
-        database_url,
-        manifests_root,
-        target,
-        &[watch_target],
-        &[],
-    )
-    .await
-}
-
-async fn indexer_backfill_with_chain_rpc_urls_and_watch_targets(
-    repo_root: &Path,
-    database_url: &str,
-    manifests_root: &Path,
-    target: ChainBackfillTarget<'_>,
-    watch_targets: &[sqlx::types::Uuid],
-    chain_rpc_code_fallback_urls: &[ChainRpcUrl<'_>],
-) -> Result<String> {
-    let indexer = &pipeline_binaries(repo_root).await?.indexer;
-    let chain_rpc_urls = format_chain_rpc_urls(target.chain_rpc_urls);
-    let from_block = target.block_range.start().to_string();
-    let to_block = target.block_range.end().to_string();
-    let mut command = pipeline_command(repo_root, indexer);
-    command
-        .args([
-            "backfill",
-            "--database-url",
-            database_url,
-            "--manifests-root",
-        ])
-        .arg(manifests_root)
-        .args([
-            "--chain-rpc-url",
-            &chain_rpc_urls,
-            "--chain",
-            target.chain,
-            "--from-block",
-            &from_block,
-            "--to-block",
-            &to_block,
-            "--idempotency-key",
-            target.idempotency_key,
-        ]);
-    for watch_target in watch_targets {
-        command.arg("--watch-target").arg(watch_target.to_string());
-    }
-    if !chain_rpc_code_fallback_urls.is_empty() {
-        command.args([
-            "--chain-rpc-code-fallback-url",
-            &format_chain_rpc_urls(chain_rpc_code_fallback_urls),
-        ]);
-    }
-    run_to_completion(command, "indexer backfill").await
-}
-
-/// Live intake session: the real `indexer run` poll loop against the local
-/// chain. Unlike `backfill`, this is the path that promotes canonical chain
-/// checkpoints, which snapshot-selecting API reads require. The process is
-/// killed once the canonical checkpoint reaches the target block and the
-/// caller's readiness query (a parameterless SQL statement returning one
-/// boolean) is true — the latter guards against stopping intake before
-/// adapters finish deriving the scenario's normalized events.
-pub async fn indexer_run_until_checkpoint(
+/// Materialize one local-chain snapshot, then run the phase-runner
+/// interpret/project redo spine through the selected block.
+pub async fn run_fixture_spine_through_block(
     repo_root: &Path,
     database_url: &str,
     pool: &sqlx::PgPool,
@@ -1096,12 +1320,12 @@ pub async fn indexer_run_until_checkpoint(
     extra_ready_sql: Option<&str>,
 ) -> Result<()> {
     let chain_rpc_urls = [("ethereum-mainnet", chain_rpc_url)];
-    indexer_run_until_chain_checkpoint(
+    run_fixture_spine_through_chain_block(
         repo_root,
         database_url,
         pool,
         manifests_root,
-        ChainCheckpointTarget {
+        ChainReplayTarget {
             chain_rpc_urls: &chain_rpc_urls,
             chain: "ethereum-mainnet",
             target_block,
@@ -1111,36 +1335,28 @@ pub async fn indexer_run_until_checkpoint(
     .await
 }
 
-pub async fn indexer_run_until_chain_checkpoint(
+pub async fn run_fixture_spine_through_chain_block(
     repo_root: &Path,
     database_url: &str,
     pool: &sqlx::PgPool,
     manifests_root: &Path,
-    target: ChainCheckpointTarget<'_>,
+    target: ChainReplayTarget<'_>,
 ) -> Result<()> {
-    let mut session = IndexerRunSession::start_with_chain_rpc_urls(
+    run_fixture_spine(
         repo_root,
         database_url,
+        pool,
         manifests_root,
         target.chain_rpc_urls,
-        &target.target_block.to_string(),
+        &[(target.chain, target.target_block)],
+        target.extra_ready_sql,
     )
-    .await?;
-    session
-        .wait_for_chain_checkpoint(
-            pool,
-            target.chain,
-            target.target_block,
-            target.extra_ready_sql,
-        )
-        .await?;
-    session.stop().await
+    .await
 }
 
-/// Run one live session over multiple chains and wait each chain's
-/// canonical checkpoint sequentially; `extra_ready_sql` gates the final
-/// wait.
-pub async fn indexer_run_until_chain_checkpoints(
+/// Materialize multiple local-chain snapshots and execute each selected
+/// phase-runner fixture spine sequentially.
+pub async fn run_fixture_spines_through_targets(
     repo_root: &Path,
     database_url: &str,
     pool: &sqlx::PgPool,
@@ -1149,62 +1365,51 @@ pub async fn indexer_run_until_chain_checkpoints(
     targets: &[(&str, u64)],
     extra_ready_sql: Option<&str>,
 ) -> Result<()> {
-    let label = targets
-        .iter()
-        .map(|(_, block)| block.to_string())
-        .collect::<Vec<_>>()
-        .join("-");
-    let mut session = IndexerRunSession::start_with_chain_rpc_urls(
+    run_fixture_spine(
         repo_root,
         database_url,
+        pool,
         manifests_root,
         chain_rpc_urls,
-        &label,
+        targets,
+        extra_ready_sql,
     )
-    .await?;
-    for (index, (chain, target_block)) in targets.iter().enumerate() {
-        let extra = if index + 1 == targets.len() {
-            extra_ready_sql
-        } else {
-            None
-        };
-        session
-            .wait_for_chain_checkpoint(pool, chain, *target_block, extra)
-            .await?;
-    }
-    session.stop().await
+    .await
 }
 
-pub struct RestartCompletion {
+pub struct ReplayCompletion {
     pub target_block: u64,
     pub extra_ready_sql: Option<String>,
 }
 
-pub async fn indexer_run_restart_after_first_checkpoint<F, Fut>(
+pub async fn run_fixture_spine_with_midpoint<F, Fut>(
     repo_root: &Path,
     database_url: &str,
     pool: &sqlx::PgPool,
     manifests_root: &Path,
     chain_rpc_url: &str,
-    after_first_checkpoint: F,
+    after_first_replay: F,
 ) -> Result<()>
 where
     F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<RestartCompletion>>,
+    Fut: std::future::Future<Output = Result<ReplayCompletion>>,
 {
-    let mut first_session = IndexerRunSession::start(
+    let first_target = super::rpc::RpcClient::new(chain_rpc_url.to_owned())
+        .block_number()
+        .await?;
+    run_fixture_spine_through_block(
         repo_root,
         database_url,
+        pool,
         manifests_root,
         chain_rpc_url,
-        "restart-first",
+        first_target,
+        None,
     )
     .await?;
-    first_session.wait_for_first_checkpoint(pool).await?;
-    first_session.stop().await?;
 
-    let completion = after_first_checkpoint().await?;
-    indexer_run_until_checkpoint(
+    let completion = after_first_replay().await?;
+    run_fixture_spine_through_block(
         repo_root,
         database_url,
         pool,
@@ -1216,427 +1421,597 @@ where
     .await
 }
 
-/// Full-range normalized-event replay from stored raw facts — the operator
-/// command that rebuilds adapter state under a complete closure boundary.
-/// The active corpus registers under the `mainnet` profile (the generated
-/// root mirrors the shipped mainnet manifests), so that is the profile the
-/// replay must name.
-pub async fn indexer_replay_normalized_events(
+/// Full-range interpretation replay from the already stored immutable facts.
+pub async fn phase_runner_replay_normalized_events(
     repo_root: &Path,
     database_url: &str,
+    manifests_root: &Path,
+    chain_rpc_url: &str,
     to_block: u64,
 ) -> Result<String> {
-    let indexer = &pipeline_binaries(repo_root).await?.indexer;
-    let mut command = pipeline_command(repo_root, indexer);
-    command.args([
-        "replay",
-        "normalized-events",
-        "--database-url",
+    let binary = profile_phase_runner(repo_root, manifests_root).await?;
+    run_phase_redo(
+        repo_root,
+        &binary,
         database_url,
-        "--deployment-profile",
-        "mainnet",
-        "--chain",
+        manifests_root,
         "ethereum-mainnet",
-        "--from-block",
-        "0",
-        "--to-block",
-        &to_block.to_string(),
-    ]);
-    run_to_completion(command, "indexer replay normalized-events").await
+        "interpret",
+        to_block,
+        Some(chain_rpc_url),
+    )
+    .await?;
+    run_phase_redo(
+        repo_root,
+        &binary,
+        database_url,
+        manifests_root,
+        "ethereum-mainnet",
+        "project",
+        to_block,
+        Some(chain_rpc_url),
+    )
+    .await?;
+    Ok("phase-runner interpretation replay completed".to_owned())
 }
 
-pub async fn worker_replay_all_current_projections(
+/// Full-range projection replay over the currently normalized schema-v2
+/// events, executed by the production phase-runner binary.
+pub async fn phase_runner_replay_current_projections(
     repo_root: &Path,
     database_url: &str,
+    manifests_root: &Path,
+    chain_rpc_url: &str,
+    to_block: u64,
 ) -> Result<String> {
-    let worker = &pipeline_binaries(repo_root).await?.worker;
-    let mut command = pipeline_command(repo_root, worker);
-    command.args([
-        "replay",
-        "all-current-projections",
-        "--database-url",
+    let binary = profile_phase_runner(repo_root, manifests_root).await?;
+    run_phase_redo(
+        repo_root,
+        &binary,
         database_url,
-    ]);
-    run_to_completion(command, "worker replay all-current-projections").await
+        manifests_root,
+        "ethereum-mainnet",
+        "project",
+        to_block,
+        Some(chain_rpc_url),
+    )
+    .await?;
+    Ok("phase-runner projection replay completed".to_owned())
 }
 
-/// The shipped API binary serving HTTP on a local port; killed on drop.
-pub struct ApiServer {
-    _child: Child,
-    pub base_url: String,
-    http: reqwest::Client,
+/// Direct schema-v2 projection reader used while the retained v1 API still
+/// reads the legacy public schema. The route-shaped methods are temporary
+/// call-site compatibility for scenario assertions; no API process starts.
+pub struct ProjectionReader {
+    pool: sqlx::PgPool,
 }
 
-impl ApiServer {
+impl ProjectionReader {
     pub async fn start(
-        repo_root: &Path,
+        _repo_root: &Path,
         database_url: &str,
-        chain_rpc_urls: &[ChainRpcUrl<'_>],
+        _chain_rpc_urls: &[ChainRpcUrl<'_>],
     ) -> Result<Self> {
-        if chain_rpc_urls.is_empty() {
-            bail!("e2e API startup requires at least one chain RPC URL");
-        }
-        let api = &pipeline_binaries(repo_root).await?.api;
-        let ready_timeout_secs = ready_timeout_secs()?;
-        let deadline = deadline_after(ready_timeout_secs, "API readiness")?;
-        // The free port is released before the API binds it, so a parallel
-        // external process can still steal it in the window. Harness-managed
-        // Anvil/API starts share the startup lock only until the child listener
-        // is observed; health waits and retries do not block unrelated starts.
-        let mut last_error = None;
-        for attempt in 1..=3 {
-            match Self::try_start(
-                repo_root,
-                api,
-                database_url,
-                chain_rpc_urls,
-                deadline,
-                ready_timeout_secs,
-            )
-            .await
-            {
-                Ok(server) => return Ok(server),
-                Err(error) => {
-                    last_error =
-                        Some(error.context(format!("API startup attempt {attempt}/3 failed")));
-                    if tokio::time::Instant::now() >= deadline {
-                        break;
-                    }
-                }
-            }
-        }
-        let error = last_error.expect("at least one API start attempt ran");
-        if tokio::time::Instant::now() >= deadline {
-            return Err(error.context(format!(
-                "API did not become ready within the configured {ready_timeout_secs}s readiness deadline"
-            )));
-        }
-        Err(error)
-    }
+        use sqlx::postgres::PgConnectOptions;
+        use std::str::FromStr;
 
-    async fn try_start(
-        repo_root: &Path,
-        api: &Path,
-        database_url: &str,
-        chain_rpc_urls: &[ChainRpcUrl<'_>],
-        deadline: tokio::time::Instant,
-        ready_timeout_secs: u64,
-    ) -> Result<Self> {
-        let _startup_guard = await_with_readiness_deadline(
-            deadline,
-            ready_timeout_secs,
-            "API local-server startup lock wait",
-            super::lock_local_server_start(),
-        )
-        .await?;
-        let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
-        let bind_addr = format!("127.0.0.1:{port}");
-        let mut command = pipeline_command(repo_root, api);
-        command.args([
-            "serve",
-            "--bind-addr",
-            &bind_addr,
-            "--metrics-bind-addr",
-            "127.0.0.1:0",
-            "--database-url",
-            database_url,
-        ]);
-        command.env(
-            "BIGNAME_API_CHAIN_RPC_URLS",
-            format_chain_rpc_urls(chain_rpc_urls),
-        );
-        let child = command
-            .kill_on_drop(true)
-            .spawn()
-            .context("spawn bigname-api serve")?;
-        let mut server = Self {
-            _child: child,
-            base_url: format!("http://{bind_addr}"),
-            http: reqwest::Client::new(),
-        };
-        server
-            .wait_until_listener_bound(port, deadline, ready_timeout_secs)
+        let options =
+            PgConnectOptions::from_str(database_url)?.options([("search_path", "bigname_phase")]);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(options)
             .await?;
-        drop(_startup_guard);
-        server.wait_healthy(deadline, ready_timeout_secs).await?;
-        Ok(server)
-    }
-
-    async fn wait_until_listener_bound(
-        &mut self,
-        port: u16,
-        deadline: tokio::time::Instant,
-        ready_timeout_secs: u64,
-    ) -> Result<()> {
-        let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-        loop {
-            if let Some(status) = self._child.try_wait()? {
-                bail!(
-                    "API exited before binding its listener at {} ({status})",
-                    self.base_url
-                );
-            }
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                bail!(
-                    "API did not bind its listener at {} within the configured {ready_timeout_secs}s readiness deadline",
-                    self.base_url
-                );
-            }
-            let connect_timeout = deadline
-                .saturating_duration_since(now)
-                .min(Duration::from_millis(20));
-            if std::net::TcpStream::connect_timeout(&address, connect_timeout).is_ok() {
-                if let Some(status) = self._child.try_wait()? {
-                    bail!(
-                        "API exited while binding its listener at {} ({status})",
-                        self.base_url
-                    );
-                }
-                return Ok(());
-            }
-            tokio::time::sleep_until(
-                deadline.min(tokio::time::Instant::now() + Duration::from_millis(10)),
-            )
-            .await;
-        }
-    }
-
-    async fn wait_healthy(
-        &mut self,
-        deadline: tokio::time::Instant,
-        ready_timeout_secs: u64,
-    ) -> Result<()> {
-        // The binary is built before startup, so this loop measures process
-        // health rather than workspace build-lock waits.
-        loop {
-            if let Some(status) = self._child.try_wait()? {
-                bail!(
-                    "API exited before becoming healthy at {} ({status})",
-                    self.base_url
-                );
-            }
-            if tokio::time::Instant::now() >= deadline {
-                bail!(
-                    "API did not become healthy at {} within the configured {ready_timeout_secs}s readiness deadline",
-                    self.base_url
-                );
-            }
-            let response = await_with_readiness_deadline(
-                deadline,
-                ready_timeout_secs,
-                format!("API health request at {}/healthz", self.base_url),
-                self.http.get(format!("{}/healthz", self.base_url)).send(),
-            )
-            .await?;
-            if response.is_ok_and(|response| response.status().is_success()) {
-                if let Some(status) = self._child.try_wait()? {
-                    bail!(
-                        "API exited while its health endpoint responded at {} ({status})",
-                        self.base_url
-                    );
-                }
-                return Ok(());
-            }
-            tokio::time::sleep_until(
-                deadline.min(tokio::time::Instant::now() + Duration::from_millis(250)),
-            )
-            .await;
-        }
+        Ok(Self { pool })
     }
 
     pub async fn get_json(&self, path: &str) -> Result<(reqwest::StatusCode, serde_json::Value)> {
-        let response = self
-            .http
-            .get(format!("{}{path}", self.base_url))
-            .send()
-            .await
-            .with_context(|| format!("GET {path}"))?;
-        let status = response.status();
-        let body = response
-            .json()
-            .await
-            .with_context(|| format!("GET {path} body"))?;
-        Ok((status, body))
+        let route = path.split('?').next().unwrap_or(path);
+        let segments = route
+            .trim_start_matches('/')
+            .split('/')
+            .map(decode_path_segment)
+            .collect::<Vec<_>>();
+        if let ["v1", "names", namespace, name] = segments.as_slice() {
+            return self.exact_name_projection(namespace, name).await;
+        }
+        if let ["v1", "names", namespace, name, "records"] = segments.as_slice() {
+            return self
+                .record_inventory_projection(namespace, name, path)
+                .await;
+        }
+        if let ["v1", "names", namespace, name, "children"] = segments.as_slice() {
+            return self.children_projection(namespace, name).await;
+        }
+        if let ["v1", "addresses", address, "names"] = segments.as_slice() {
+            return self.address_names_projection(address, path).await;
+        }
+        if let ["v1", "primary-names", address] = segments.as_slice() {
+            return self.primary_name_projection(address, path).await;
+        }
+        if let ["v1", "manifests", namespace] = segments.as_slice() {
+            return self.manifest_projection(namespace).await;
+        }
+        Ok((
+            reqwest::StatusCode::NOT_FOUND,
+            serde_json::json!({
+                "error": {
+                    "code": "deferred_to_c2",
+                    "message": format!("projection reader has no mapping for {path}")
+                }
+            }),
+        ))
     }
 
     pub async fn post_json(
         &self,
-        path: &str,
-        request: &serde_json::Value,
+        _path: &str,
+        _request: &serde_json::Value,
     ) -> Result<(reqwest::StatusCode, serde_json::Value)> {
-        let response = self
-            .http
-            .post(format!("{}{path}", self.base_url))
-            .json(request)
-            .send()
-            .await
-            .with_context(|| format!("POST {path}"))?;
-        let status = response.status();
-        let body = response
-            .json()
-            .await
-            .with_context(|| format!("POST {path} body"))?;
-        Ok((status, body))
+        Ok((
+            reqwest::StatusCode::NOT_FOUND,
+            serde_json::json!({"error":{"code":"deferred_to_c2"}}),
+        ))
     }
+
+    async fn exact_name_projection(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<(reqwest::StatusCode, serde_json::Value)> {
+        let row: Option<NameProjectionRow> = sqlx::query_as(
+            "SELECT logical_name_id, namespace, raw_name, namehash,
+                    resource_id::text, token_lineage_id::text, binding_kind,
+                    declared_summary, support_status, unsupported_reason,
+                    provenance, chain_positions, canonicality_summary
+             FROM name_current
+             WHERE namespace = $1 AND raw_name = $2",
+        )
+        .bind(namespace)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some((
+            logical_name_id,
+            namespace,
+            raw_name,
+            namehash,
+            resource_id,
+            token_lineage_id,
+            binding_kind,
+            mut declared_state,
+            support_status,
+            unsupported_reason,
+            provenance,
+            chain_positions,
+            canonicality_summary,
+        )) = row
+        else {
+            return Ok((
+                reqwest::StatusCode::NOT_FOUND,
+                serde_json::json!({"error":{"code":"not_found"}}),
+            ));
+        };
+
+        if let Some(resource_id) = &resource_id {
+            let inventory: Option<RecordInventoryRow> = sqlx::query_as(
+                "SELECT selectors, unsupported_families, last_change,
+                            record_version_boundary, support_status, unsupported_reason
+                     FROM record_inventory_current
+                     WHERE resource_id = $1::uuid
+                     ORDER BY inserted_at DESC LIMIT 1",
+            )
+            .bind(resource_id)
+            .fetch_optional(&self.pool)
+            .await?;
+            if let Some((
+                selectors,
+                unsupported_families,
+                last_change,
+                record_version_boundary,
+                inventory_support,
+                inventory_reason,
+            )) = inventory
+                && let Some(object) = declared_state.as_object_mut()
+            {
+                object.insert(
+                    "record_inventory".to_owned(),
+                    serde_json::json!({
+                        "selectors": selectors,
+                        "unsupported_families": unsupported_families,
+                        "last_change": last_change,
+                        "record_version_boundary": record_version_boundary,
+                        "support_status": inventory_support,
+                        "unsupported_reason": inventory_reason,
+                    }),
+                );
+            }
+        }
+        let coverage = declared_state
+            .get("coverage")
+            .cloned()
+            .context("name_current.declared_summary omitted persisted coverage")?;
+        Ok((
+            reqwest::StatusCode::OK,
+            serde_json::json!({
+                "data": {
+                    "normalized_name": raw_name,
+                    "logical_name_id": logical_name_id,
+                    "namespace": namespace,
+                    "namehash": namehash,
+                    "resource_id": resource_id,
+                    "token_lineage_id": token_lineage_id,
+                    "binding_kind": binding_kind,
+                },
+                "declared_state": declared_state,
+                "coverage": coverage,
+                "support_status": support_status,
+                "unsupported_reason": unsupported_reason,
+                "provenance": provenance,
+                "chain_positions": chain_positions,
+                "canonicality_summary": canonicality_summary,
+            }),
+        ))
+    }
+
+    async fn record_inventory_projection(
+        &self,
+        namespace: &str,
+        name: &str,
+        path: &str,
+    ) -> Result<(reqwest::StatusCode, serde_json::Value)> {
+        let current: Option<(Option<String>, Value)> = sqlx::query_as(
+            "SELECT resource_id::text, declared_summary
+             FROM name_current WHERE namespace = $1 AND raw_name = $2",
+        )
+        .bind(namespace)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some((resource_id, declared_summary)) = current else {
+            return Ok((
+                reqwest::StatusCode::NOT_FOUND,
+                serde_json::json!({"error":{"code":"not_found"}}),
+            ));
+        };
+        let resolver_address = declared_summary
+            .pointer("/resolver/address")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let inventory: Option<(Value, Value, Value, String, Option<String>)> =
+            if let Some(resource_id) = resource_id {
+                sqlx::query_as(
+                    "SELECT entries, selectors, record_version_boundary,
+                            support_status, unsupported_reason
+                     FROM record_inventory_current
+                     WHERE resource_id = $1::uuid
+                     ORDER BY inserted_at DESC LIMIT 1",
+                )
+                .bind(resource_id)
+                .fetch_optional(&self.pool)
+                .await?
+            } else {
+                None
+            };
+        let (entries, selectors, boundary, support_status, unsupported_reason) = inventory
+            .unwrap_or_else(|| {
+                (
+                    serde_json::json!([]),
+                    serde_json::json!([]),
+                    serde_json::json!({}),
+                    "unsupported".to_owned(),
+                    Some("name_has_no_current_resource".to_owned()),
+                )
+            });
+
+        let mut coin_addresses = serde_json::Map::new();
+        let mut text_records = serde_json::Map::new();
+        let mut content_hash = serde_json::json!({"status":"not_found"});
+        let mut name_record = serde_json::json!({"status":"not_found"});
+        for entry in entries.as_array().into_iter().flatten() {
+            let Some(record_key) = entry.get("record_key").and_then(Value::as_str) else {
+                continue;
+            };
+            let value = entry.clone();
+            if let Some(coin_type) = record_key.strip_prefix("addr:") {
+                coin_addresses.insert(coin_type.to_owned(), value);
+            } else if let Some(text_key) = record_key.strip_prefix("text:") {
+                text_records.insert(text_key.to_owned(), value);
+            } else if record_key == "contenthash" {
+                content_hash = value;
+            } else if record_key == "name" {
+                name_record = value;
+            }
+        }
+        let query = query_parameters(path);
+        for coin_type in comma_values(query.get("coin_types").copied()) {
+            coin_addresses
+                .entry(coin_type.to_owned())
+                .or_insert_with(|| serde_json::json!({"status":"not_found"}));
+        }
+        for text_key in comma_values(query.get("texts").copied()) {
+            text_records
+                .entry(text_key.to_owned())
+                .or_insert_with(|| serde_json::json!({"status":"not_found"}));
+        }
+        let known_text_keys = text_records.keys().cloned().collect::<Vec<_>>();
+        Ok((
+            reqwest::StatusCode::OK,
+            serde_json::json!({
+                "data": {
+                    "resolver_address": resolver_address,
+                    "coin_addresses": coin_addresses,
+                    "text_records": text_records,
+                    "content_hash": content_hash,
+                    "name": name_record,
+                    "known_text_keys": {
+                        "keys": known_text_keys,
+                        "status": support_status,
+                    },
+                },
+                "declared_state": {
+                    "record_inventory": {
+                        "entries": entries,
+                        "selectors": selectors,
+                        "record_version_boundary": boundary,
+                        "support_status": support_status,
+                        "unsupported_reason": unsupported_reason,
+                    }
+                }
+            }),
+        ))
+    }
+
+    async fn children_projection(
+        &self,
+        namespace: &str,
+        parent: &str,
+    ) -> Result<(reqwest::StatusCode, serde_json::Value)> {
+        if parent.contains('[') || parent.contains(']') {
+            return Ok((
+                reqwest::StatusCode::BAD_REQUEST,
+                serde_json::json!({"error":{"code":"invalid_input"}}),
+            ));
+        }
+        let parent_id: Option<String> = sqlx::query_scalar(
+            "SELECT logical_name_id FROM name_current
+             WHERE namespace = $1 AND raw_name = $2",
+        )
+        .bind(namespace)
+        .bind(parent)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(parent_id) = parent_id else {
+            return Ok((
+                reqwest::StatusCode::NOT_FOUND,
+                serde_json::json!({"error":{"code":"not_found"}}),
+            ));
+        };
+        let rows: Vec<ChildProjectionRow> = sqlx::query_as(
+            "SELECT child_logical_name_id, decoded_name, decoded_label,
+                    namehash, labelhash, owner, registrant, provenance,
+                    chain_positions, canonicality_summary
+             FROM children_current
+             WHERE parent_logical_name_id = $1
+             ORDER BY decoded_name NULLS LAST, child_logical_name_id",
+        )
+        .bind(parent_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let data = rows
+            .into_iter()
+            .map(
+                |(
+                    logical_name_id,
+                    decoded_name,
+                    decoded_label,
+                    namehash,
+                    labelhash,
+                    owner,
+                    registrant,
+                    provenance,
+                    chain_positions,
+                    canonicality_summary,
+                )| {
+                    let normalized_name =
+                        decoded_name.unwrap_or_else(|| format!("[{labelhash}].{parent}"));
+                    serde_json::json!({
+                        "logical_name_id": logical_name_id,
+                        "normalized_name": normalized_name,
+                        "label": decoded_label,
+                        "namehash": namehash,
+                        "labelhash": labelhash,
+                        "owner": owner,
+                        "registrant": registrant,
+                        "provenance": provenance,
+                        "chain_positions": chain_positions,
+                        "canonicality_summary": canonicality_summary,
+                    })
+                },
+            )
+            .collect::<Vec<_>>();
+        Ok((reqwest::StatusCode::OK, serde_json::json!({"data": data})))
+    }
+
+    async fn address_names_projection(
+        &self,
+        address: &str,
+        path: &str,
+    ) -> Result<(reqwest::StatusCode, serde_json::Value)> {
+        let query = query_parameters(path);
+        let namespace = query.get("namespace").copied();
+        let relation = query.get("relation").copied();
+        let rows: Vec<AddressNameProjectionRow> = sqlx::query_as(
+            "SELECT logical_name_id, relation, namespace, raw_name, namehash,
+                    resource_id::text, token_lineage_id::text, binding_kind,
+                    support_status, unsupported_reason, provenance,
+                    chain_positions, canonicality_summary
+             FROM address_names_current
+             WHERE lower(address) = lower($1)
+               AND ($2::text IS NULL OR namespace = $2)
+               AND ($3::text IS NULL OR relation = $3)
+             ORDER BY raw_name, relation",
+        )
+        .bind(address)
+        .bind(namespace)
+        .bind(relation)
+        .fetch_all(&self.pool)
+        .await?;
+        let data = rows
+            .into_iter()
+            .map(
+                |(
+                    logical_name_id,
+                    relation,
+                    namespace,
+                    raw_name,
+                    namehash,
+                    resource_id,
+                    token_lineage_id,
+                    binding_kind,
+                    support_status,
+                    unsupported_reason,
+                    provenance,
+                    chain_positions,
+                    canonicality_summary,
+                )| {
+                    serde_json::json!({
+                        "logical_name_id": logical_name_id,
+                        "normalized_name": raw_name,
+                        "namespace": namespace,
+                        "namehash": namehash,
+                        "resource_id": resource_id,
+                        "token_lineage_id": token_lineage_id,
+                        "binding_kind": binding_kind,
+                        "relation": relation,
+                        "relation_facets": [relation],
+                        "support_status": support_status,
+                        "unsupported_reason": unsupported_reason,
+                        "provenance": provenance,
+                        "chain_positions": chain_positions,
+                        "canonicality_summary": canonicality_summary,
+                    })
+                },
+            )
+            .collect::<Vec<_>>();
+        Ok((reqwest::StatusCode::OK, serde_json::json!({"data": data})))
+    }
+
+    async fn primary_name_projection(
+        &self,
+        address: &str,
+        path: &str,
+    ) -> Result<(reqwest::StatusCode, serde_json::Value)> {
+        let query = query_parameters(path);
+        let namespace = query.get("namespace").copied().unwrap_or("ens");
+        let coin_type = query.get("coin_type").copied().unwrap_or("60");
+        let mode = query.get("mode").copied().unwrap_or("declared");
+        anyhow::ensure!(
+            mode == "declared",
+            "ProjectionReader only exposes persisted declared primary-name state; mode={mode} is deferred to C2/C3"
+        );
+        let row: Option<PrimaryNameProjectionRow> = sqlx::query_as(
+            "SELECT claim_status, raw_claim_name, claim_name_is_normalized,
+                    unsupported_reason, claim_provenance
+             FROM primary_names_current
+             WHERE lower(address) = lower($1) AND namespace = $2 AND coin_type = $3",
+        )
+        .bind(address)
+        .bind(namespace)
+        .bind(coin_type)
+        .fetch_optional(&self.pool)
+        .await?;
+        let (status, raw_name, normalized, unsupported_reason, provenance) =
+            row.unwrap_or_else(|| {
+                (
+                    "not_found".to_owned(),
+                    None,
+                    false,
+                    None,
+                    serde_json::json!({}),
+                )
+            });
+        let mut claimed = serde_json::json!({
+            "status": status,
+            "provenance": provenance,
+        });
+        if status == "success" {
+            claimed["name"] = raw_name.clone().map(Value::String).unwrap_or(Value::Null);
+        } else if status == "invalid_name" {
+            claimed["raw_claim_name"] = raw_name.clone().map(Value::String).unwrap_or(Value::Null);
+        }
+        if let Some(reason) = unsupported_reason {
+            claimed["unsupported_reason"] = Value::String(reason);
+        }
+        claimed["claim_name_is_normalized"] = Value::Bool(normalized);
+        Ok((
+            reqwest::StatusCode::OK,
+            serde_json::json!({
+                "declared_state": {"claimed_primary_name": claimed},
+            }),
+        ))
+    }
+
+    async fn manifest_projection(
+        &self,
+        namespace: &str,
+    ) -> Result<(reqwest::StatusCode, serde_json::Value)> {
+        let prefix = if namespace == "basenames" {
+            "basenames%"
+        } else {
+            "ens%"
+        };
+        let rows: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT source_family, chain_id, manifest_version
+             FROM manifest_versions WHERE source_family LIKE $1
+             ORDER BY source_family, manifest_version",
+        )
+        .bind(prefix)
+        .fetch_all(&self.pool)
+        .await?;
+        let manifests = rows
+            .into_iter()
+            .map(|(source_family, chain, version)| {
+                serde_json::json!({
+                    "source_family":source_family,
+                    "chain":chain,
+                    "version":version,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok((
+            reqwest::StatusCode::OK,
+            serde_json::json!({"declared_state":{"manifests":manifests}}),
+        ))
+    }
+}
+
+fn decode_path_segment(segment: &str) -> &str {
+    // Only bracket escapes occur in these scenario paths. Returning the
+    // original lets the caller reject encoded placeholder names below.
+    segment
+}
+
+fn query_parameters(path: &str) -> std::collections::BTreeMap<&str, &str> {
+    path.split_once('?')
+        .map(|(_, query)| {
+            query
+                .split('&')
+                .filter_map(|pair| pair.split_once('='))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn comma_values(value: Option<&str>) -> impl Iterator<Item = &str> {
+    value.into_iter().flat_map(|value| value.split(','))
 }
 
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
+    use std::os::unix::fs::MetadataExt;
 
     use super::*;
-
-    fn artifact_message(name: &str, manifest_path: &Path, executable: Option<Value>) -> String {
-        let mut message = serde_json::json!({
-            "reason": "compiler-artifact",
-            "manifest_path": manifest_path,
-            "target": {
-                "kind": ["bin"],
-                "name": name,
-            },
-        });
-        if let Some(executable) = executable {
-            message["executable"] = executable;
-        }
-        message.to_string()
-    }
-
-    fn expected_manifest(repo_root: &Path, name: &str) -> PathBuf {
-        let (_, manifest) = PIPELINE_BINARY_SPECS
-            .iter()
-            .find(|(expected, _)| *expected == name)
-            .expect("known pipeline binary");
-        repo_root.join(*manifest)
-    }
-
-    #[test]
-    fn parses_exact_pipeline_artifacts_and_normalizes_relative_executables() -> Result<()> {
-        let repo_root = std::env::temp_dir().join("bigname-e2e-artifact-parser-root");
-        let custom_target = std::env::temp_dir()
-            .join("custom target")
-            .join("aarch64-unknown-linux-gnu")
-            .join("debug");
-        let api = custom_target.join("bigname-api");
-        let indexer = custom_target.join("bigname-indexer");
-        let relative_worker = PathBuf::from("relative-target/debug/bigname-worker");
-        let messages = [
-            // An exact binary name from another manifest must not be selected.
-            artifact_message(
-                "bigname-api",
-                &repo_root.join("decoy/Cargo.toml"),
-                Some(Value::Null),
-            ),
-            artifact_message(
-                "bigname-api",
-                &expected_manifest(&repo_root, "bigname-api"),
-                Some(Value::String(api.to_string_lossy().into_owned())),
-            ),
-            artifact_message(
-                "bigname-indexer",
-                &expected_manifest(&repo_root, "bigname-indexer"),
-                Some(Value::String(indexer.to_string_lossy().into_owned())),
-            ),
-            artifact_message(
-                "bigname-worker",
-                &expected_manifest(&repo_root, "bigname-worker"),
-                Some(Value::String(
-                    relative_worker.to_string_lossy().into_owned(),
-                )),
-            ),
-            serde_json::json!({"reason": "build-finished", "success": true}).to_string(),
-        ]
-        .join("\n");
-
-        let binaries = parse_pipeline_binaries(&repo_root, messages.as_bytes())?;
-        assert_eq!(binaries.api, api);
-        assert_eq!(binaries.indexer, indexer);
-        assert_eq!(binaries.worker, repo_root.join(relative_worker));
-        Ok(())
-    }
-
-    #[test]
-    fn rejects_missing_pipeline_artifact() {
-        let repo_root = std::env::temp_dir().join("bigname-e2e-artifact-parser-missing");
-        let messages = [
-            artifact_message(
-                "bigname-api",
-                &expected_manifest(&repo_root, "bigname-api"),
-                Some(Value::String("api".to_string())),
-            ),
-            artifact_message(
-                "bigname-indexer",
-                &expected_manifest(&repo_root, "bigname-indexer"),
-                Some(Value::String("indexer".to_string())),
-            ),
-        ]
-        .join("\n");
-
-        let error = parse_pipeline_binaries(&repo_root, messages.as_bytes())
-            .expect_err("a missing worker artifact must fail");
-        assert!(format!("{error:#}").contains("bigname-worker"));
-    }
-
-    #[test]
-    fn rejects_null_or_omitted_pipeline_executable() {
-        let repo_root = std::env::temp_dir().join("bigname-e2e-artifact-parser-null");
-        for (executable, expected) in [
-            (Some(Value::Null), "null executable"),
-            (None, "omitted the executable"),
-        ] {
-            let message = artifact_message(
-                "bigname-api",
-                &expected_manifest(&repo_root, "bigname-api"),
-                executable,
-            );
-            let error = parse_pipeline_binaries(&repo_root, message.as_bytes())
-                .expect_err("a missing executable path must fail");
-            assert!(format!("{error:#}").contains(expected));
-        }
-    }
-
-    #[test]
-    fn rejects_duplicate_pipeline_artifacts() {
-        let repo_root = std::env::temp_dir().join("bigname-e2e-artifact-parser-duplicate");
-        let api = artifact_message(
-            "bigname-api",
-            &expected_manifest(&repo_root, "bigname-api"),
-            Some(Value::String("api".to_string())),
-        );
-        let messages = format!("{api}\n{api}");
-
-        let error = parse_pipeline_binaries(&repo_root, messages.as_bytes())
-            .expect_err("duplicate API artifacts must fail");
-        assert!(format!("{error:#}").contains("duplicate executable artifacts for bigname-api"));
-    }
-
-    #[test]
-    fn pipeline_command_uses_exact_binary_cwd_and_pool_limit() {
-        let repo_root = std::env::temp_dir().join("bigname-e2e-command-root");
-        for (binary, expected_pool_limit) in [
-            ("bigname-api", "4"),
-            ("bigname-indexer", "7"),
-            ("bigname-worker", "4"),
-        ] {
-            let executable = std::env::temp_dir()
-                .join("custom target")
-                .join("debug")
-                .join(binary);
-            let command = pipeline_command(&repo_root, &executable);
-            let command = command.as_std();
-
-            assert_eq!(command.get_program(), executable.as_os_str());
-            assert_eq!(command.get_current_dir(), Some(repo_root.as_path()));
-            assert_eq!(command.get_args().count(), 0);
-            assert_eq!(
-                command
-                    .get_envs()
-                    .find(|(name, _)| *name == OsStr::new("BIGNAME_DATABASE_MAX_CONNECTIONS"))
-                    .and_then(|(_, value)| value),
-                Some(OsStr::new(expected_pool_limit))
-            );
-        }
-    }
 
     #[test]
     fn timeout_configuration_requires_positive_integer_seconds() {
@@ -1655,8 +2030,8 @@ mod tests {
 
     #[test]
     fn process_log_files_are_unique_for_repeated_labels() -> Result<()> {
-        let (first_path, first_file) = create_process_log_file("indexer", "same/label")?;
-        let (second_path, second_file) = create_process_log_file("indexer", "same/label")?;
+        let (first_path, first_file) = create_process_log_file("runner", "same/label")?;
+        let (second_path, second_file) = create_process_log_file("runner", "same/label")?;
         drop(first_file);
         drop(second_file);
 
@@ -1669,6 +2044,60 @@ mod tests {
         );
         std::fs::remove_file(first_path).ok();
         std::fs::remove_file(second_path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn profile_runner_binary_and_build_lock_have_scoped_lifetimes() -> Result<()> {
+        let (source_path, file) =
+            create_process_log_file("phase-runner-hard-link-source", "drop-test")?;
+        drop(file);
+        let lock_path = source_path.with_extension("profile-build.lock");
+        let first_lock = ProfileBuildLock::acquire(&lock_path)?;
+        assert!(
+            ProfileBuildLock::try_acquire(&lock_path)?.is_none(),
+            "a second e2e process must not enter the shared Cargo build/link window"
+        );
+        let waiter_path = lock_path.clone();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::sync_channel(1);
+        let waiter = std::thread::spawn(move || {
+            let acquired = ProfileBuildLock::acquire(&waiter_path);
+            acquired_tx.send(acquired).ok();
+        });
+        drop(first_lock);
+        let second_lock = acquired_rx
+            .recv_timeout(Duration::from_secs(2))
+            .context("the deployment-profile build lock must release with its scope")??;
+        drop(second_lock);
+        waiter
+            .join()
+            .map_err(|_| anyhow::anyhow!("deployment-profile build-lock waiter panicked"))?;
+        let linked_path = hard_link_profile_binary(&source_path)?;
+        let source_metadata = std::fs::metadata(&source_path)?;
+        let linked_metadata = std::fs::metadata(&linked_path)?;
+        let shares_inode = source_metadata.dev() == linked_metadata.dev()
+            && source_metadata.ino() == linked_metadata.ino();
+        let runner = ProfileRunnerBinary::new(linked_path.clone());
+
+        drop(runner);
+
+        let removed = !linked_path.exists();
+        let source_retained = source_path.exists();
+        std::fs::remove_file(&linked_path).ok();
+        std::fs::remove_file(&lock_path).ok();
+        std::fs::remove_file(&source_path).ok();
+        assert!(
+            shares_inode,
+            "deployment-profile runner must be a hard link, not a copy"
+        );
+        assert!(
+            removed,
+            "dropping a cached deployment-profile runner must remove its temporary executable"
+        );
+        assert!(
+            source_retained,
+            "dropping a deployment-profile runner must not remove Cargo's source executable"
+        );
         Ok(())
     }
 

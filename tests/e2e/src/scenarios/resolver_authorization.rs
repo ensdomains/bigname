@@ -9,8 +9,9 @@ const YEAR: u64 = 365 * 24 * 60 * 60;
 
 async fn raw_sender(run: &support::PipelineRun, transaction_hash: &str) -> Result<String> {
     sqlx::query_scalar(
-        "SELECT from_address FROM raw_transactions \
-         WHERE transaction_hash = $1 AND canonicality_state = 'canonical'",
+        "SELECT from_address FROM raw_transactions raw \
+         JOIN chain_lineage lineage USING (chain_id, block_hash) \
+         WHERE transaction_hash = $1 AND lineage.canonicality_state = 'canonical'",
     )
     .bind(transaction_hash)
     .fetch_one(&run.db.pool)
@@ -84,7 +85,7 @@ async fn operator_delegate_writes_match_owner_authorship() -> Result<()> {
     let ready_sql = format!(
         "SELECT \
            (SELECT count(*) = 2 FROM normalized_events \
-            WHERE logical_name_id IN ('ens:ownerwrites.eth', 'ens:delegatewrites.eth') \
+            WHERE logical_name_id IN ('ens:0xb334aa4ebadd8edf9c4a8636c19248699b46d87627653142fe9d1453fcb6b2d4', 'ens:0x5caecf925554191e7aa450f8de79da33a7c0b0ecf7dcc8ffeb97f2e9f3c8866a') \
               AND event_kind = 'RecordChanged' \
               AND after_state->>'record_key' = 'text:description' \
               AND canonicality_state = 'canonical') \
@@ -102,7 +103,7 @@ async fn operator_delegate_writes_match_owner_authorship() -> Result<()> {
     let owner_record: (String, String, String, Value) = sqlx::query_as(
         "SELECT transaction_hash, event_kind, source_family, after_state \
          FROM normalized_events \
-         WHERE logical_name_id = 'ens:ownerwrites.eth' \
+         WHERE logical_name_id = 'ens:0xb334aa4ebadd8edf9c4a8636c19248699b46d87627653142fe9d1453fcb6b2d4' \
            AND event_kind = 'RecordChanged' \
            AND after_state->>'record_key' = 'text:description' \
            AND canonicality_state = 'canonical'",
@@ -112,7 +113,7 @@ async fn operator_delegate_writes_match_owner_authorship() -> Result<()> {
     let delegate_record: (String, String, String, Value) = sqlx::query_as(
         "SELECT transaction_hash, event_kind, source_family, after_state \
          FROM normalized_events \
-         WHERE logical_name_id = 'ens:delegatewrites.eth' \
+         WHERE logical_name_id = 'ens:0x5caecf925554191e7aa450f8de79da33a7c0b0ecf7dcc8ffeb97f2e9f3c8866a' \
            AND event_kind = 'RecordChanged' \
            AND after_state->>'record_key' = 'text:description' \
            AND canonicality_state = 'canonical'",

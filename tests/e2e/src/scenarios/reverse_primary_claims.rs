@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::support;
 use crate::harness::responses::{pointer, primary_name};
@@ -22,7 +22,7 @@ fn assert_declared_not_found(body: &Value) {
 
 async fn assert_persisted_not_found(run: &support::PipelineRun, address: &str) -> Result<()> {
     let row: (String, Option<String>) = sqlx::query_as(
-        "SELECT claim_status, normalized_claim_name FROM primary_names_current \
+        "SELECT claim_status, raw_claim_name FROM primary_names_current \
          WHERE address = $1 AND namespace = 'ens' AND coin_type = '60'",
     )
     .bind(address)
@@ -107,9 +107,10 @@ async fn claim_without_name_record_keeps_candidate_absent() -> Result<()> {
     );
 
     let resolver_logs: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM raw_logs \
+        "SELECT count(*) FROM raw_logs raw \
+         JOIN chain_lineage lineage USING (chain_id, block_hash) \
          WHERE transaction_hash = $1 AND lower(emitting_address) = $2 \
-           AND canonicality_state = 'canonical'",
+           AND lineage.canonicality_state = 'canonical'",
     )
     .bind(&claim_tx)
     .bind(format!("{:#x}", deployment.public_resolver.address))
@@ -131,7 +132,7 @@ async fn claim_without_name_record_keeps_candidate_absent() -> Result<()> {
 /// (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966f)
 #[tokio::test]
-async fn authorised_third_party_claim_keys_candidate_to_claimed_address() -> Result<()> {
+async fn authorised_third_party_generic_name_record_does_not_key_claim() -> Result<()> {
     let anvil = Anvil::spawn().await?;
     let rpc = anvil.client();
 
@@ -155,15 +156,12 @@ async fn authorised_third_party_claim_keys_candidate_to_claimed_address() -> Res
     )
     .await?;
 
-    let ready_sql = format!(
-        "SELECT EXISTS (SELECT 1 FROM normalized_events \
+    let ready_sql = "SELECT EXISTS (SELECT 1 FROM normalized_events \
          WHERE event_kind = 'RecordChanged' \
            AND after_state->>'raw_name' = 'thirdparty.eth' \
-           AND lower(after_state->'primary_claim_source'->>'address') = '{claimed_path}' \
-           AND after_state->'primary_claim_source'->>'reverse_node' = '{reverse_node}' \
-           AND canonicality_state = 'canonical')"
-    );
-    let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
+           AND NOT (after_state ? 'primary_claim_source') \
+           AND canonicality_state = 'canonical')";
+    let run = support::ingest_and_serve(&anvil, &deployment, Some(ready_sql)).await?;
 
     let reverse: Value = sqlx::query_scalar(
         "SELECT after_state FROM normalized_events \
@@ -181,23 +179,18 @@ async fn authorised_third_party_claim_keys_candidate_to_claimed_address() -> Res
         "SELECT transaction_hash, after_state FROM normalized_events \
          WHERE event_kind = 'RecordChanged' \
            AND after_state->>'raw_name' = 'thirdparty.eth' \
-           AND lower(after_state->'primary_claim_source'->>'address') = $1 \
            AND canonicality_state = 'canonical'",
     )
-    .bind(&claimed_path)
     .fetch_one(&run.db.pool)
     .await?;
-    assert_eq!(
-        name_state.pointer("/primary_claim_source/address"),
-        Some(&json!(&claimed_path))
-    );
-    assert_eq!(
-        name_state.pointer("/primary_claim_source/reverse_node"),
-        Some(&json!(&reverse_node))
+    assert!(
+        name_state.get("primary_claim_source").is_none(),
+        "generic resolver NameChanged must not become a primary claim: {name_state}"
     );
     let sender: String = sqlx::query_scalar(
-        "SELECT from_address FROM raw_transactions \
-         WHERE transaction_hash = $1 AND canonicality_state = 'canonical'",
+        "SELECT from_address FROM raw_transactions raw \
+         JOIN chain_lineage lineage USING (chain_id, block_hash) \
+         WHERE transaction_hash = $1 AND lineage.canonicality_state = 'canonical'",
     )
     .bind(&name_tx)
     .fetch_one(&run.db.pool)
@@ -206,14 +199,7 @@ async fn authorised_third_party_claim_keys_candidate_to_claimed_address() -> Res
     assert_ne!(sender, claimed_path);
 
     let claimed = primary_name(&run.api, "ens", 60, &claimed_path, "declared").await?;
-    assert_eq!(
-        pointer(&claimed, "/declared_state/claimed_primary_name/status"),
-        "success"
-    );
-    assert_eq!(
-        pointer(&claimed, "/declared_state/claimed_primary_name/name"),
-        "thirdparty.eth"
-    );
+    assert_declared_not_found(&claimed);
     let operator_rows: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM primary_names_current \
          WHERE address = $1 AND namespace = 'ens' AND coin_type = '60'",
@@ -253,11 +239,6 @@ async fn unadmitted_reverse_resolver_keeps_candidate_absent() -> Result<()> {
     )
     .await?;
 
-    let resolver_profile_ready = support::resolver_code_hash_comparison_sql(
-        unadmitted.address,
-        deployment.public_resolver.address,
-        false,
-    );
     let ready_sql = format!(
         "SELECT EXISTS (SELECT 1 FROM normalized_events \
          WHERE event_kind = 'ReverseChanged' \
@@ -272,8 +253,7 @@ async fn unadmitted_reverse_resolver_keeps_candidate_absent() -> Result<()> {
           WHERE ne.event_kind = 'RecordChanged' \
             AND ne.after_state->>'raw_name' = 'hidden.eth' \
             AND lower(rl.emitting_address) = '{unadmitted_path}' \
-            AND ne.canonicality_state = 'canonical') \
-         AND {resolver_profile_ready}"
+            AND ne.canonicality_state = 'canonical')"
     );
     let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
 
@@ -298,16 +278,7 @@ async fn unadmitted_reverse_resolver_keeps_candidate_absent() -> Result<()> {
         (1..=2).contains(&observed_names.len()),
         "match-all intake must retain the unanchored NameChanged observation, with at most one later unsupported-profile boundary"
     );
-    assert!(
-        observed_names
-            .iter()
-            .all(|(identity, _, _, _)| identity.contains(":record-change:")
-                || identity.contains(":record-change-unsupported:")),
-        "only the pending-profile observation and optional unsupported-profile boundary are allowed"
-    );
-    for (_, logical_name_id, resource_id, after_state) in &observed_names {
-        assert_eq!(logical_name_id, &None);
-        assert_eq!(resource_id, &None);
+    for (_, _, _, after_state) in &observed_names {
         assert_eq!(after_state["record_key"], "name");
         assert_eq!(after_state["raw_name"], "hidden.eth");
         assert!(
@@ -328,14 +299,12 @@ async fn unadmitted_reverse_resolver_keeps_candidate_absent() -> Result<()> {
 /// (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L105 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L26 @ ens_v1@91c966f)
 #[tokio::test]
-async fn forward_mismatch_keeps_declared_candidate_but_verified_not_found() -> Result<()> {
+async fn forward_mismatch_keeps_generic_name_record_unadmitted() -> Result<()> {
     let anvil = Anvil::spawn().await?;
     let rpc = anvil.client();
     let root = repo_root();
 
     let deployment = ens_v1::deploy_ens_v1(&rpc, &root).await?;
-    let universal_resolver =
-        ens_v1::install_local_universal_resolver(&rpc, &root, &deployment).await?;
     let accounts = rpc.accounts().await?;
     let (claimant, different_target) = (accounts[1], accounts[2]);
     assert_ne!(claimant, different_target);
@@ -363,7 +332,7 @@ async fn forward_mismatch_keeps_declared_candidate_but_verified_not_found() -> R
     let ready_sql = format!(
         "SELECT \
            EXISTS (SELECT 1 FROM normalized_events \
-            WHERE logical_name_id = 'ens:primarymismatch.eth' \
+            WHERE logical_name_id = 'ens:0xc7a82548d35271d2a5afc514f7250f90f03bec28061693ba42807217ff26b8a0' \
               AND event_kind = 'RecordChanged' \
               AND after_state->>'record_key' = 'addr:60' \
               AND lower(after_state->>'value') = '{different_target:#x}' \
@@ -371,16 +340,10 @@ async fn forward_mismatch_keeps_declared_candidate_but_verified_not_found() -> R
          AND EXISTS (SELECT 1 FROM normalized_events \
             WHERE event_kind = 'RecordChanged' \
               AND after_state->>'raw_name' = 'primarymismatch.eth' \
-              AND lower(after_state->'primary_claim_source'->>'address') = '{claimant_path}' \
+              AND NOT (after_state ? 'primary_claim_source') \
               AND canonicality_state = 'canonical')"
     );
-    let run = support::ingest_and_serve_with_ens_execution(
-        &anvil,
-        &deployment,
-        &universal_resolver,
-        Some(&ready_sql),
-    )
-    .await?;
+    let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
 
     let (records_status, records) = run
         .api
@@ -403,63 +366,8 @@ async fn forward_mismatch_keeps_declared_candidate_but_verified_not_found() -> R
         claimant_path
     );
 
-    let both = primary_name(&run.api, "ens", 60, &claimant_path, "both").await?;
-    assert_eq!(
-        pointer(&both, "/declared_state/claimed_primary_name/status"),
-        "success"
-    );
-    assert_eq!(
-        pointer(&both, "/declared_state/claimed_primary_name/name"),
-        "primarymismatch.eth"
-    );
-    assert_eq!(
-        pointer(
-            &both,
-            "/declared_state/claimed_primary_name/provenance/source_family"
-        ),
-        "ens_v1_reverse_l1"
-    );
-    assert_eq!(
-        pointer(&both, "/verified_state/verified_primary_name"),
-        json!({ "status": "not_found" }),
-        "tuple-present primary claims currently do not invoke live verification; body: {both}"
-    );
-    assert_eq!(pointer(&both, "/coverage/status"), "partial");
-    assert_eq!(pointer(&both, "/coverage/exhaustiveness"), "non_enumerable");
-    assert_eq!(
-        pointer(&both, "/coverage/source_classes_considered"),
-        json!(["ens_v1_reverse_l1", "ens_execution"])
-    );
-    assert_eq!(
-        pointer(&both, "/coverage/enumeration_basis"),
-        "primary_name_lookup"
-    );
-    assert_eq!(pointer(&both, "/coverage/unsupported_reason"), Value::Null);
-
-    let verified = primary_name(&run.api, "ens", 60, &claimant_path, "verified").await?;
-    assert_eq!(pointer(&verified, "/declared_state"), Value::Null);
-    assert_eq!(
-        pointer(&verified, "/verified_state/verified_primary_name"),
-        json!({ "status": "not_found" })
-    );
-
-    let primary_traces: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM execution_traces WHERE request_type = 'verified_primary_name'",
-    )
-    .fetch_one(&run.db.pool)
-    .await?;
-    let primary_outcomes: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM execution_cache_outcomes outcome \
-         JOIN execution_traces trace USING (execution_trace_id) \
-         WHERE trace.request_type = 'verified_primary_name'",
-    )
-    .fetch_one(&run.db.pool)
-    .await?;
-    assert_eq!(primary_traces, 0, "primary verifier was not invoked");
-    assert_eq!(
-        primary_outcomes, 0,
-        "no primary verification cache was written"
-    );
+    let declared = primary_name(&run.api, "ens", 60, &claimant_path, "declared").await?;
+    assert_declared_not_found(&declared);
 
     run.db.cleanup().await?;
     Ok(())

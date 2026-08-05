@@ -65,6 +65,25 @@ fn manifest_profile_fingerprint_excludes_only_normalizer_version() {
         initial,
         "other runtime manifest changes must not pass the compiled manifest-profile gate"
     );
+
+    let before_hidden_namespace =
+        manifest_profile_hash(&profile_root).expect("manifest profile must hash");
+    tree.write(
+        "manifests/mainnet/.hidden-namespace/extra.toml",
+        &manifest_document(
+            "ensip15@hidden",
+            "Hidden",
+            "event Hidden0(bytes32 indexed node)",
+            "[\"registry\"]",
+            "[\"RecordChanged\"]",
+            1,
+        ),
+    );
+    assert_ne!(
+        manifest_profile_hash(&profile_root).expect("manifest profile must hash"),
+        before_hidden_namespace,
+        "a nested hidden namespace is still runtime deployment-profile input"
+    );
 }
 
 #[test]
@@ -153,6 +172,17 @@ fn normalizer_version_and_test_only_sources_do_not_change_hash() {
     let tree = SampleTree::new();
     let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
 
+    tree.write(
+        "manifests/.bigname-e2e-runtime-profile-999999/local.toml",
+        &manifest_document(
+            "ensip15@hidden",
+            "Hidden",
+            "event Hidden0(bytes32 indexed node)",
+            "[\"registry\"]",
+            "[\"RecordChanged\"]",
+            1,
+        ),
+    );
     tree.write(
         "apps/worker/src/name_current/tests.rs",
         "fn test_only_change() {}\n",

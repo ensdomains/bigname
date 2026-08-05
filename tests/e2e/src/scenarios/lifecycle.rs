@@ -32,8 +32,8 @@ async fn register_without_resolver_keeps_declared_resolver_empty() -> Result<()>
     assert_eq!(status, 200, "exact-name lookup failed: {body}");
     let pointer = |path: &str| crate::harness::responses::pointer(&body, path);
     assert_eq!(pointer("/data/normalized_name"), "erin.eth");
-    assert_eq!(pointer("/coverage/status"), "full");
-    assert_eq!(pointer("/coverage/exhaustiveness"), "authoritative");
+    assert_eq!(pointer("/coverage/status"), "projected");
+    assert_eq!(pointer("/coverage/exhaustiveness"), "not_asserted");
     assert_eq!(pointer("/declared_state/registration/status"), "active");
     assert_eq!(
         pointer("/declared_state/registration/registrant"),
@@ -42,8 +42,8 @@ async fn register_without_resolver_keeps_declared_resolver_empty() -> Result<()>
     );
     assert_eq!(
         pointer("/declared_state/control/registry_owner"),
-        format!("{alice:#x}"),
-        "registry owner should still be populated from registrar registry update"
+        Value::Null,
+        "first-ownership setup is not projected as a later control transfer"
     );
     assert_eq!(
         pointer("/declared_state/resolver/address"),
@@ -84,13 +84,16 @@ async fn renew_and_transfer_keep_identity() -> Result<()> {
     ens_v1::renew_eth_name(&rpc, &deployment, alice, "carol", YEAR).await?;
     ens_v1::transfer_eth_name(&rpc, &deployment, alice, bob, "carol").await?;
 
-    let ready_sql =
-        support::canonical_event_ready_sql("ens:carol.eth", "TokenControlTransferred", None);
+    let ready_sql = support::canonical_event_ready_sql(
+        "ens:0xe3a6b53d6803112ab111b8dd6a02bc89a802451dec3eaec120740e5ed87bd5cb",
+        "TokenControlTransferred",
+        None,
+    );
     let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
 
     let event_kinds: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT event_kind FROM normalized_events \
-         WHERE logical_name_id = 'ens:carol.eth' AND canonicality_state = 'canonical'",
+         WHERE logical_name_id = 'ens:0xe3a6b53d6803112ab111b8dd6a02bc89a802451dec3eaec120740e5ed87bd5cb' AND canonicality_state = 'canonical'",
     )
     .fetch_all(&run.db.pool)
     .await?;
@@ -101,7 +104,7 @@ async fn renew_and_transfer_keep_identity() -> Result<()> {
     ] {
         assert!(
             event_kinds.iter().any(|kind| kind == expected),
-            "expected canonical {expected} for ens:carol.eth; saw {event_kinds:?}"
+            "expected canonical {expected} for ens:0xe3a6b53d6803112ab111b8dd6a02bc89a802451dec3eaec120740e5ed87bd5cb; saw {event_kinds:?}"
         );
     }
 
@@ -114,14 +117,14 @@ async fn renew_and_transfer_keep_identity() -> Result<()> {
     // back on the original registration anchor.
     let registration_resource: sqlx::types::Uuid = sqlx::query_scalar(
         "SELECT resource_id FROM normalized_events \
-         WHERE logical_name_id = 'ens:carol.eth' AND event_kind = 'RegistrationGranted' \
+         WHERE logical_name_id = 'ens:0xe3a6b53d6803112ab111b8dd6a02bc89a802451dec3eaec120740e5ed87bd5cb' AND event_kind = 'RegistrationGranted' \
          AND canonicality_state = 'canonical'",
     )
     .fetch_one(&run.db.pool)
     .await?;
     let resource_count: i64 = sqlx::query_scalar(
         "SELECT count(DISTINCT resource_id) FROM normalized_events \
-         WHERE logical_name_id = 'ens:carol.eth' AND resource_id IS NOT NULL \
+         WHERE logical_name_id = 'ens:0xe3a6b53d6803112ab111b8dd6a02bc89a802451dec3eaec120740e5ed87bd5cb' AND resource_id IS NOT NULL \
          AND canonicality_state = 'canonical'",
     )
     .fetch_one(&run.db.pool)
@@ -188,7 +191,7 @@ async fn expiry_grace_and_reregistration_rotate_identity() -> Result<()> {
         &deployment,
         Some(
             "SELECT EXISTS (SELECT 1 FROM normalized_events \
-             WHERE logical_name_id = 'ens:dave.eth' AND canonicality_state = 'canonical')",
+             WHERE logical_name_id = 'ens:0x2ca4a3098bf61a1886dac6774bfe4dccdd1477d99a6fdbac5b409549f281cbe9' AND canonicality_state = 'canonical')",
         ),
     )
     .await?;
@@ -232,7 +235,7 @@ async fn expiry_grace_and_reregistration_rotate_identity() -> Result<()> {
         &deployment,
         Some(
             "SELECT count(*) >= 2 FROM normalized_events \
-             WHERE logical_name_id = 'ens:dave.eth' AND event_kind = 'RegistrationGranted' \
+             WHERE logical_name_id = 'ens:0x2ca4a3098bf61a1886dac6774bfe4dccdd1477d99a6fdbac5b409549f281cbe9' AND event_kind = 'RegistrationGranted' \
              AND canonicality_state = 'canonical'",
         ),
     )
@@ -259,7 +262,7 @@ async fn expiry_grace_and_reregistration_rotate_identity() -> Result<()> {
     // The prior lease's history stays queryable, partitioned by resource.
     let resources_with_grants: i64 = sqlx::query_scalar(
         "SELECT count(DISTINCT resource_id) FROM normalized_events \
-         WHERE logical_name_id = 'ens:dave.eth' AND event_kind = 'RegistrationGranted' \
+         WHERE logical_name_id = 'ens:0x2ca4a3098bf61a1886dac6774bfe4dccdd1477d99a6fdbac5b409549f281cbe9' AND event_kind = 'RegistrationGranted' \
          AND canonicality_state = 'canonical'",
     )
     .fetch_one(&after.db.pool)
@@ -309,19 +312,21 @@ async fn expire_without_reregistration_releases_and_unlists_registration() -> Re
     rpc.increase_time(MIN_REGISTRATION + GRACE_PERIOD + 24 * 60 * 60)
         .await?;
 
-    let quiet_ready_sql =
-        support::canonical_event_ready_sql("ens:frank.eth", "RegistrationGranted", None);
+    let quiet_ready_sql = support::canonical_event_ready_sql(
+        "ens:0x6c8c5623561beac9ea78ee69edee27feb45bef543cc86d0700a8e79a9319f745",
+        "RegistrationGranted",
+        None,
+    );
     let quiet = support::ingest_and_serve(&anvil, &deployment, Some(&quiet_ready_sql)).await?;
     let released_on_quiet_chain: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM normalized_events \
-         WHERE logical_name_id = 'ens:frank.eth' AND event_kind = 'RegistrationReleased')",
+         WHERE logical_name_id = 'ens:0x6c8c5623561beac9ea78ee69edee27feb45bef543cc86d0700a8e79a9319f745' AND event_kind = 'RegistrationReleased')",
     )
     .fetch_one(&quiet.db.pool)
     .await?;
     assert!(
-        !released_on_quiet_chain,
-        "release must not settle without a post-grace log-bearing boundary; \
-         if this now settles, update this scenario and the ledger"
+        released_on_quiet_chain,
+        "phase-runner reconciliation must settle expiry at the selected target even without a later name event"
     );
     quiet.db.cleanup().await?;
 
@@ -329,8 +334,11 @@ async fn expire_without_reregistration_releases_and_unlists_registration() -> Re
     // boundary past the grace end.
     ens_v1::register_eth_name(&rpc, &deployment, "george", bob, MIN_REGISTRATION, resolver).await?;
 
-    let released_ready_sql =
-        support::canonical_event_ready_sql("ens:frank.eth", "RegistrationReleased", None);
+    let released_ready_sql = support::canonical_event_ready_sql(
+        "ens:0x6c8c5623561beac9ea78ee69edee27feb45bef543cc86d0700a8e79a9319f745",
+        "RegistrationReleased",
+        None,
+    );
     let run = support::ingest_and_serve(&anvil, &deployment, Some(&released_ready_sql)).await?;
 
     let (status, body) = run.api.get_json("/v1/names/ens/frank.eth").await?;
@@ -358,7 +366,7 @@ async fn expire_without_reregistration_releases_and_unlists_registration() -> Re
         .context("released_at missing from released registration")?;
     let event_released_at: i64 = sqlx::query_scalar(
         "SELECT (after_state->>'released_at')::BIGINT FROM normalized_events \
-         WHERE logical_name_id = 'ens:frank.eth' AND event_kind = 'RegistrationReleased' \
+         WHERE logical_name_id = 'ens:0x6c8c5623561beac9ea78ee69edee27feb45bef543cc86d0700a8e79a9319f745' AND event_kind = 'RegistrationReleased' \
          AND canonicality_state = 'canonical'",
     )
     .fetch_one(&run.db.pool)

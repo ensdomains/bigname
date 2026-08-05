@@ -202,6 +202,7 @@ async fn assert_execution_artifacts(
 }
 
 #[tokio::test]
+#[ignore = "deferred to C2/C3: the scenario is exclusively a public API lookup/explain contract over execution output"]
 async fn direct_path_verified_query_via_local_universal_resolver_persists_trace() -> Result<()> {
     let anvil = Anvil::spawn().await?;
     let rpc = anvil.client();

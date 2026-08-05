@@ -66,11 +66,12 @@ impl HarnessDb {
             armed: true,
         };
         admin.close().await?;
+        super::pipeline::phase_runner_init_schema(&super::repo_root(), &url).await?;
+        let connect_options = bigname_storage::stamp_projection_replay_version(url.parse()?)
+            .options([("search_path", "bigname_phase")]);
         let pool = PgPoolOptions::new()
             .max_connections(5)
-            .connect_with(bigname_storage::stamp_projection_replay_version(
-                url.parse()?,
-            ))
+            .connect_with(connect_options)
             .await?;
         Ok(Self {
             url,
@@ -402,7 +403,7 @@ mod tests {
         assert_ne!(first.url, second.url);
         for database in [&first, &second] {
             let applied_migrations: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+                sqlx::query_scalar("SELECT COUNT(*) FROM public._sqlx_migrations")
                     .fetch_one(&database.pool)
                     .await?;
             assert!(applied_migrations > 0, "template clone must be migrated");

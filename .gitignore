@@ -2,6 +2,7 @@
 /.env
 .DS_Store
 /.agents/state/
+/manifests/.bigname-e2e-runtime-profile-*
 /.refs/*/
 /.refs/*.zip
 *.pdf

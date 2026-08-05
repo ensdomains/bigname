@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use super::support;
-use crate::harness::responses::{pointer, selector_keys};
+use crate::harness::responses::pointer;
 use crate::harness::{anvil::Anvil, ens_v1, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
@@ -68,7 +68,7 @@ async fn registration_with_records_reverse_and_referrer_derives_single_burst() -
             AND canonicality_state = 'canonical') \
          AND \
            (SELECT count(DISTINCT after_state->>'record_key') >= 2 FROM normalized_events \
-            WHERE logical_name_id = 'ens:burst.eth' \
+            WHERE logical_name_id = 'ens:0xff8b5f8209f6197db09fe13cdf9395c8ed39d5e0546c071e44a7d51ca50d1854' \
             AND event_kind = 'RecordChanged' \
             AND after_state->>'record_key' IN ('addr:60', 'text:com.twitter') \
             AND transaction_hash = '{tx_hash}' \
@@ -76,6 +76,9 @@ async fn registration_with_records_reverse_and_referrer_derives_single_burst() -
         tx_hash = registered.register_tx_hash,
     );
     let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
+    let burst_id = support::schema_v2_logical_name_id(
+        "ens:0xff8b5f8209f6197db09fe13cdf9395c8ed39d5e0546c071e44a7d51ca50d1854",
+    );
 
     let source_families: BTreeSet<String> = sqlx::query_scalar(
         "SELECT DISTINCT source_family FROM normalized_events \
@@ -99,27 +102,30 @@ async fn registration_with_records_reverse_and_referrer_derives_single_burst() -
 
     let registration: Value = sqlx::query_scalar(
         "SELECT after_state FROM normalized_events \
-         WHERE logical_name_id = 'ens:burst.eth' \
+         WHERE logical_name_id = $2 \
          AND event_kind = 'RegistrationGranted' \
          AND source_family = 'ens_v1_registrar_l1' \
          AND transaction_hash = $1 AND canonicality_state = 'canonical'",
     )
     .bind(&registered.register_tx_hash)
+    .bind(&burst_id)
     .fetch_one(&run.db.pool)
     .await?;
-    assert!(
-        registration.get("referrer").is_none(),
-        "normalized registration currently carries no referrer field: {registration}"
+    assert_eq!(
+        registration["referrer"],
+        format!("{referrer:#x}"),
+        "the controller referrer must survive interpretation: {registration}"
     );
 
     let forward_records: Vec<Value> = sqlx::query_scalar(
         "SELECT after_state FROM normalized_events \
-         WHERE logical_name_id = 'ens:burst.eth' \
+         WHERE logical_name_id = $2 \
          AND event_kind = 'RecordChanged' \
          AND source_family = 'ens_v1_resolver_l1' \
          AND transaction_hash = $1 AND canonicality_state = 'canonical'",
     )
     .bind(&registered.register_tx_hash)
+    .bind(&burst_id)
     .fetch_all(&run.db.pool)
     .await?;
     assert!(
@@ -156,8 +162,14 @@ async fn registration_with_records_reverse_and_referrer_derives_single_burst() -
         "expected resolver-emitted addr/text logs in the controller transaction"
     );
     let (transaction_from, transaction_to): (String, Option<String>) = sqlx::query_as(
-        "SELECT from_address, to_address FROM raw_transactions \
-         WHERE transaction_hash = $1 AND canonicality_state = 'canonical'",
+        "SELECT transaction.from_address, transaction.to_address
+         FROM raw_transactions transaction
+         JOIN chain_lineage lineage
+           ON lineage.chain_id = transaction.chain_id
+          AND lineage.block_hash = transaction.block_hash
+          AND lineage.block_number = transaction.block_number
+         WHERE transaction.transaction_hash = $1
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')",
     )
     .bind(&registered.register_tx_hash)
     .fetch_one(&run.db.pool)
@@ -191,74 +203,14 @@ async fn registration_with_records_reverse_and_referrer_derives_single_burst() -
          AND source_family = 'ens_v1_resolver_l1' \
          AND logical_name_id IS NULL AND resource_id IS NULL \
          AND after_state->>'raw_name' = 'burst.eth' \
-         AND lower(after_state->'primary_claim_source'->>'address') = $1 \
-         AND transaction_hash = $2 AND canonicality_state = 'canonical'",
+         AND NOT (after_state ? 'primary_claim_source') \
+         AND transaction_hash = $1 AND canonicality_state = 'canonical'",
     )
-    .bind(format!("{alice:#x}"))
     .bind(&registered.register_tx_hash)
     .fetch_one(&run.db.pool)
     .await?;
     assert_eq!(reverse_name_records, 1);
 
-    let (status, primary) = run
-        .api
-        .get_json(&format!(
-            "/v1/primary-names/{alice:#x}?namespace=ens&coin_type=60&mode=declared"
-        ))
-        .await?;
-    assert_eq!(status, 200, "primary-name lookup failed: {primary}");
-    assert_eq!(
-        pointer(&primary, "/declared_state/claimed_primary_name/status"),
-        "success"
-    );
-    assert_eq!(
-        pointer(&primary, "/declared_state/claimed_primary_name/name"),
-        "burst.eth"
-    );
-    assert_eq!(
-        pointer(
-            &primary,
-            "/declared_state/claimed_primary_name/provenance/source_family"
-        ),
-        "ens_v1_reverse_l1"
-    );
-
-    // REVIEW POINT (reproduced defect): the burst's record writes derive only under
-    // the transient registry-only anchor; the same-tx RegistrationGranted
-    // rebinds the surface to the registrar resource and carries the
-    // resolver across, but neither the records nor the registry-owner
-    // facet. Exact-name therefore serves no selectors and the controller as
-    // registry_owner even though the normalized layer holds the records and
-    // the alice owner observation.
-    // The rebind pair (SurfaceUnbound/SurfaceBound) is synthetic — no
-    // transaction anchor — so the superseded resource comes from the
-    // log-anchored registry ResolverChanged in the same transaction.
-    let superseded_resource: String = sqlx::query_scalar(
-        "SELECT resource_id::text FROM normalized_events \
-         WHERE event_kind = 'ResolverChanged' \
-         AND source_family = 'ens_v1_registry_l1' \
-         AND logical_name_id = 'ens:burst.eth' \
-         AND transaction_hash = $1 \
-         AND canonicality_state = 'canonical'",
-    )
-    .bind(&registered.register_tx_hash)
-    .fetch_one(&run.db.pool)
-    .await?;
-    let rebind_pair: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM normalized_events \
-           WHERE event_kind = 'SurfaceUnbound' AND resource_id::text = $1 \
-           AND logical_name_id = 'ens:burst.eth' \
-           AND canonicality_state = 'canonical') \
-         AND EXISTS (SELECT 1 FROM normalized_events \
-           WHERE event_kind = 'SurfaceBound' \
-           AND source_family = 'ens_v1_registrar_l1' \
-           AND logical_name_id = 'ens:burst.eth' \
-           AND canonicality_state = 'canonical')",
-    )
-    .bind(&superseded_resource)
-    .fetch_one(&run.db.pool)
-    .await?;
-    assert!(rebind_pair, "registration must rebind the burst surface");
     let current_resource: String = sqlx::query_scalar(
         "SELECT resource_id::text FROM normalized_events \
          WHERE event_kind = 'RegistrationGranted' AND transaction_hash = $1 \
@@ -267,20 +219,20 @@ async fn registration_with_records_reverse_and_referrer_derives_single_burst() -
     .bind(&registered.register_tx_hash)
     .fetch_one(&run.db.pool)
     .await?;
-    assert_ne!(superseded_resource, current_resource);
     let records_by_resource: Vec<(String, i64)> = sqlx::query_as(
         "SELECT resource_id::text, count(*) FROM normalized_events \
-         WHERE event_kind = 'RecordChanged' AND logical_name_id = 'ens:burst.eth' \
+         WHERE event_kind = 'RecordChanged' AND logical_name_id = $2 \
          AND transaction_hash = $1 AND canonicality_state = 'canonical' \
          GROUP BY resource_id",
     )
     .bind(&registered.register_tx_hash)
+    .bind(&burst_id)
     .fetch_all(&run.db.pool)
     .await?;
     assert_eq!(
         records_by_resource,
-        vec![(superseded_resource.clone(), 3)],
-        "burst records must derive only under the superseded registry-only anchor"
+        vec![(current_resource.clone(), 3)],
+        "same-transaction record writes must reconcile onto the registrar resource"
     );
     let last_owner_subject: Value = sqlx::query_scalar(
         "SELECT after_state FROM normalized_events \
@@ -297,71 +249,74 @@ async fn registration_with_records_reverse_and_referrer_derives_single_burst() -
         "normalized layer holds the post-setRecord owner: {last_owner_subject}"
     );
 
-    let (status, exact) = run.api.get_json("/v1/names/ens/burst.eth").await?;
-    assert_eq!(status, 200, "burst.eth exact-name lookup failed: {exact}");
-    assert!(
-        selector_keys(&exact).is_empty(),
-        "burst-written selectors must stay invisible after the anchor rebind: {exact}"
-    );
-    let gap_families: BTreeSet<String> = exact
-        .pointer("/declared_state/record_inventory/explicit_gaps")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|gap| gap["gap_reason"] == "not_observed_on_current_resolver")
-        .filter_map(|gap| gap["record_family"].as_str().map(str::to_owned))
-        .collect();
-    assert!(
-        gap_families.contains("addr") && gap_families.contains("text"),
-        "burst families must report explicit gaps: {exact}"
-    );
+    let (projected_resource, declared): (String, Value) = sqlx::query_as(
+        "SELECT resource_id::text, declared_summary
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&burst_id)
+    .fetch_one(&run.db.pool)
+    .await?;
+    assert_eq!(projected_resource, current_resource);
     assert_eq!(
-        pointer(&exact, "/declared_state/resolver/address"),
+        pointer(&declared, "/resolver/address"),
         format!("{resolver:#x}"),
-        "resolver is carried across the rebind"
+        "resolver must survive same-transaction reconciliation"
     );
     assert_eq!(
-        pointer(&exact, "/declared_state/control/registrant"),
+        pointer(&declared, "/registration/registrant"),
         format!("{alice:#x}")
     );
-    assert_eq!(
-        pointer(&exact, "/declared_state/control/registry_owner"),
-        format!("{:#x}", deployment.controller.address),
-        "registry_owner facet stays at the mid-burst controller observation"
-    );
-    let (status, records) = run
-        .api
-        .get_json(
-            "/v1/names/ens/burst.eth/records?include=resolver_address,coins&coin_types=60\
-             &texts=com.twitter&mode=declared&meta=full",
-        )
-        .await?;
-    assert_eq!(status, 200, "burst.eth records lookup failed: {records}");
-    assert_eq!(
-        pointer(&records, "/data/coin_addresses/60/status"),
-        "not_found",
-        "burst-written addr must not serve from the current anchor: {records}"
-    );
-    assert!(
-        records.pointer("/data/coin_addresses/60/value").is_none(),
-        "not_found addr must omit value: {records}"
-    );
-    assert_eq!(
-        pointer(&records, "/data/text_records/com.twitter/status"),
-        "not_found",
-        "burst-written text must not serve from the current anchor: {records}"
-    );
-    assert!(
-        records
-            .pointer("/data/text_records/com.twitter/value")
-            .is_none(),
-        "not_found text must omit value: {records}"
-    );
+    let (selectors, entries): (Value, Value) = sqlx::query_as(
+        "SELECT selectors, entries FROM record_inventory_current
+         WHERE resource_id::text = $1",
+    )
+    .bind(&current_resource)
+    .fetch_one(&run.db.pool)
+    .await?;
+    let selector_keys = selectors
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry["record_key"].as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(selector_keys.contains("addr:60"));
+    assert!(selector_keys.contains("text:com.twitter"));
+    assert!(entries.as_array().is_some_and(|entries| {
+        entries.iter().any(|entry| {
+            entry["record_key"] == "addr:60" && entry["value"] == format!("{record_target:#x}")
+        }) && entries
+            .iter()
+            .any(|entry| entry["record_key"] == "text:com.twitter" && entry["value"] == "burst")
+    }));
+
+    // The controller calls `setNameForAddr` for the reverse-record bit
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L320 @ ens_v1@91c966f).
+    // The reverse registrar emits `ReverseClaimed`, then calls the resolver's
+    // `setName` (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L83 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L130 @ ens_v1@91c966f),
+    // which emits `NameChanged`
+    // (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L18 @ ens_v1@91c966f).
+    // Schema-v2 deliberately keeps that resolver observation raw-only; it
+    // does not synthesize the v1 route-local fallback into the persisted
+    // primary projection.
+    let primary: (String, Option<String>) = sqlx::query_as(
+        "SELECT claim_status, raw_claim_name FROM primary_names_current
+         WHERE address = $1 AND coin_type = '60' AND namespace = 'ens'",
+    )
+    .bind(format!("{alice:#x}"))
+    .fetch_one(&run.db.pool)
+    .await?;
+    assert_eq!(primary, ("not_found".to_owned(), None));
 
     let (topics, data): (Vec<String>, Vec<u8>) = sqlx::query_as(
-        "SELECT topics, data FROM raw_logs \
-         WHERE emitting_address = $1 AND transaction_hash = $2 \
-         AND topics[1] = $3 AND canonicality_state = 'canonical'",
+        "SELECT log.topics, log.data FROM raw_logs log
+         JOIN chain_lineage lineage
+           ON lineage.chain_id = log.chain_id
+          AND lineage.block_hash = log.block_hash
+          AND lineage.block_number = log.block_number
+         WHERE log.emitting_address = $1 AND log.transaction_hash = $2
+           AND log.topics[1] = $3
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')",
     )
     .bind(format!("{:#x}", deployment.controller.address))
     .bind(&registered.register_tx_hash)
@@ -383,49 +338,40 @@ async fn registration_with_records_reverse_and_referrer_derives_single_burst() -
 
     run.db.cleanup().await?;
 
-    // Recovery: later plain writes derive under the current registrar
-    // resource, and the inventory becomes whole while the stale
-    // registry_owner facet persists (record writes move no authority facet).
+    // Later writes must remain on the same registrar resource and replace the
+    // same current inventory entries idempotently.
     ens_v1::set_addr_record(&rpc, resolver, alice, "burst.eth", record_target).await?;
     ens_v1::set_text_record(&rpc, resolver, alice, "burst.eth", "com.twitter", "burst").await?;
     let recovery_ready = format!(
         "SELECT count(*) >= 2 FROM normalized_events \
          WHERE event_kind = 'RecordChanged' \
-         AND logical_name_id = 'ens:burst.eth' \
+         AND logical_name_id = 'ens:0xff8b5f8209f6197db09fe13cdf9395c8ed39d5e0546c071e44a7d51ca50d1854' \
          AND transaction_hash <> '{tx_hash}' \
          AND canonicality_state = 'canonical'",
         tx_hash = registered.register_tx_hash,
     );
     let recovered = support::ingest_and_serve(&anvil, &deployment, Some(&recovery_ready)).await?;
-    let (status, exact) = recovered.api.get_json("/v1/names/ens/burst.eth").await?;
-    assert_eq!(status, 200, "recovered exact-name lookup failed: {exact}");
-    let selectors = selector_keys(&exact);
-    for expected in ["addr:60", "text:com.twitter"] {
-        assert!(
-            selectors.contains(expected),
-            "missing recovered selector {expected}: {exact}"
-        );
-    }
-    assert_eq!(
-        pointer(&exact, "/declared_state/control/registry_owner"),
-        format!("{:#x}", deployment.controller.address)
+    let recovered_id = support::schema_v2_logical_name_id(
+        "ens:0xff8b5f8209f6197db09fe13cdf9395c8ed39d5e0546c071e44a7d51ca50d1854",
     );
-    let (status, records) = recovered
-        .api
-        .get_json(
-            "/v1/names/ens/burst.eth/records?include=resolver_address,coins&coin_types=60\
-             &texts=com.twitter&mode=declared&meta=full",
-        )
-        .await?;
-    assert_eq!(status, 200, "recovered records lookup failed: {records}");
-    assert_eq!(
-        pointer(&records, "/data/coin_addresses/60/value"),
-        format!("{record_target:#x}")
-    );
-    assert_eq!(
-        pointer(&records, "/data/text_records/com.twitter/value"),
-        "burst"
-    );
+    let recovered_resource: String =
+        sqlx::query_scalar("SELECT resource_id::text FROM name_current WHERE logical_name_id = $1")
+            .bind(&recovered_id)
+            .fetch_one(&recovered.db.pool)
+            .await?;
+    let recovered_entries: Value = sqlx::query_scalar(
+        "SELECT entries FROM record_inventory_current WHERE resource_id::text = $1",
+    )
+    .bind(&recovered_resource)
+    .fetch_one(&recovered.db.pool)
+    .await?;
+    assert!(recovered_entries.as_array().is_some_and(|entries| {
+        entries.iter().any(|entry| {
+            entry["record_key"] == "addr:60" && entry["value"] == format!("{record_target:#x}")
+        }) && entries
+            .iter()
+            .any(|entry| entry["record_key"] == "text:com.twitter" && entry["value"] == "burst")
+    }));
 
     recovered.db.cleanup().await?;
     Ok(())

@@ -74,13 +74,16 @@ async fn remaining_record_families_derive_normalized_but_stay_unenumerated() -> 
     .await?;
     ens_v1::set_text_record(&rpc, resolver, alice, "families.eth", "probe", "done").await?;
 
-    let ready_sql =
-        support::canonical_event_ready_sql("ens:families.eth", "RecordChanged", Some("text:probe"));
+    let ready_sql = support::canonical_event_ready_sql(
+        "ens:0x16111066005040f2b6b99f4a4da3e6e3fd7f54de8bd7b33a9a13ad77c51fd920",
+        "RecordChanged",
+        Some("text:probe"),
+    );
     let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
 
     let derived: Vec<(String, Value)> = sqlx::query_as(
         "SELECT event_kind, after_state FROM normalized_events \
-         WHERE logical_name_id = 'ens:families.eth' \
+         WHERE logical_name_id = 'ens:0x16111066005040f2b6b99f4a4da3e6e3fd7f54de8bd7b33a9a13ad77c51fd920' \
          AND source_family = 'ens_v1_resolver_l1' \
          AND canonicality_state = 'canonical' \
          ORDER BY block_number, log_index",
@@ -115,7 +118,11 @@ async fn remaining_record_families_derive_normalized_but_stay_unenumerated() -> 
             .unwrap_or_else(|| panic!("missing {key} #{nth}"))
             .1
     };
-    assert_eq!(state_for("abi:1", 0)["value"], 1, "abi carries contentType");
+    assert_eq!(
+        state_for("abi:1", 0)["value"],
+        "1",
+        "schema-v2 stores the ABI content type in its canonical string form"
+    );
     assert_eq!(
         state_for("interface:0x9061b923", 0)["value"],
         format!("{implementer:#x}"),
@@ -188,8 +195,11 @@ async fn pubkey_write_on_admitted_resolver_stays_raw_only() -> Result<()> {
     .await?;
     ens_v1::set_text_record(&rpc, resolver, alice, "pubkey.eth", "probe", "done").await?;
 
-    let ready_sql =
-        support::canonical_event_ready_sql("ens:pubkey.eth", "RecordChanged", Some("text:probe"));
+    let ready_sql = support::canonical_event_ready_sql(
+        "ens:0x358ab11f9359d0ff796131478428e2a032776c290ff60b9b5e34ff00def18fde",
+        "RecordChanged",
+        Some("text:probe"),
+    );
     let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
 
     // PubkeyChanged(bytes32,bytes32,bytes32) topic0.
@@ -198,9 +208,10 @@ async fn pubkey_write_on_admitted_resolver_stays_raw_only() -> Result<()> {
         alloy_primitives::keccak256("PubkeyChanged(bytes32,bytes32,bytes32)".as_bytes())
     );
     let raw_pubkey_logs: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM raw_logs \
+        "SELECT count(*) FROM raw_logs raw \
+         JOIN chain_lineage lineage USING (chain_id, block_hash) \
          WHERE emitting_address = $1 AND topics[1] = $2 \
-         AND canonicality_state = 'canonical'",
+         AND lineage.canonicality_state = 'canonical'",
     )
     .bind(format!("{resolver:#x}"))
     .bind(&pubkey_topic)
@@ -217,7 +228,7 @@ async fn pubkey_write_on_admitted_resolver_stays_raw_only() -> Result<()> {
 
     let derived_keys: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT after_state->>'record_key' FROM normalized_events \
-         WHERE logical_name_id = 'ens:pubkey.eth' \
+         WHERE logical_name_id = 'ens:0x358ab11f9359d0ff796131478428e2a032776c290ff60b9b5e34ff00def18fde' \
          AND event_kind = 'RecordChanged' \
          AND canonicality_state = 'canonical'",
     )

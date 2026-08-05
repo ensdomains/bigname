@@ -10,11 +10,12 @@ use crate::harness::{
 
 pub struct PipelineRun {
     pub db: HarnessDb,
-    pub api: pipeline::ApiServer,
+    pub api: pipeline::ProjectionReader,
+    pub manifests_root: std::path::PathBuf,
     _scratch: TempDir,
 }
 
-pub struct BackfillRun {
+pub struct DerivedRun {
     pub db: HarnessDb,
     _scratch: TempDir,
 }
@@ -40,9 +41,9 @@ where
         }
     }
 
-    let mut checkpoints = Vec::with_capacity(chains.len());
+    let mut targets = Vec::with_capacity(chains.len());
     for chain in chains {
-        checkpoints.push((chain.id, chain.anvil.client().block_number().await?));
+        targets.push((chain.id, chain.anvil.client().block_number().await?));
     }
 
     let repo_root = repo_root();
@@ -53,31 +54,29 @@ where
         .iter()
         .map(|chain| (chain.id, chain.anvil.url.as_str()))
         .collect::<Vec<_>>();
-    pipeline::indexer_run_until_chain_checkpoints(
+    pipeline::run_fixture_spines_through_targets(
         &repo_root,
         &db.url,
         &db.pool,
         &profile.root,
         &chain_rpc_urls,
-        &checkpoints,
+        &targets,
         ready_sql,
     )
     .await?;
-    pipeline::worker_replay_all_current_projections(&repo_root, &db.url).await?;
-    let api = pipeline::ApiServer::start(&repo_root, &db.url, &chain_rpc_urls).await?;
+    let api = pipeline::ProjectionReader::start(&repo_root, &db.url, &chain_rpc_urls).await?;
     Ok(PipelineRun {
         db,
         api,
+        manifests_root: profile.root,
         _scratch: scratch,
     })
 }
 
-async fn backfill_local_chain<F>(
+async fn replay_full_local_chain<F>(
     chain: LocalChain<'_>,
-    idempotency_key: &str,
-    replay_projections: bool,
     generate_profile: F,
-) -> Result<BackfillRun>
+) -> Result<DerivedRun>
 where
     F: FnOnce(&std::path::Path, &std::path::Path) -> Result<manifests::LocalProfile>,
 {
@@ -87,25 +86,99 @@ where
     let profile = generate_profile(scratch.path(), &repo_root)?;
     let db = HarnessDb::create().await?;
     let chain_rpc_urls = [(chain.id, chain.anvil.url.as_str())];
-    pipeline::indexer_backfill_with_chain_rpc_urls(
+    pipeline::run_full_fixture_replay(
         &repo_root,
         &db.url,
         &profile.root,
-        pipeline::ChainBackfillTarget {
+        pipeline::FullFixtureReplayTarget {
             chain_rpc_urls: &chain_rpc_urls,
             chain: chain.id,
             block_range: 0..=head,
-            idempotency_key,
         },
     )
     .await?;
-    if replay_projections {
-        pipeline::worker_replay_all_current_projections(&repo_root, &db.url).await?;
-    }
-    Ok(BackfillRun {
+    Ok(DerivedRun {
         db,
         _scratch: scratch,
     })
+}
+
+#[derive(Clone, Copy)]
+enum EnsV1RawFactPath {
+    UpfrontFixture,
+    RpcIngest,
+}
+
+async fn derive_ens_v1_on_rpc_alias(
+    anvil: &Anvil,
+    deployment: &EnsV1Deployment,
+    path: EnsV1RawFactPath,
+) -> Result<DerivedRun> {
+    const CHAIN: &str = "ethereum-e2e-rpc";
+
+    let root = repo_root();
+    let head = anvil.client().block_number().await?;
+    let scratch = TempDir::create()?;
+    let profile =
+        manifests::generate_local_profile(scratch.path(), &root, &deployment.manifest_targets())?;
+    profile.retarget_chain("ethereum-mainnet", CHAIN)?;
+    let db = HarnessDb::create().await?;
+    match path {
+        EnsV1RawFactPath::UpfrontFixture => {
+            let chain_rpc_urls = [(CHAIN, anvil.url.as_str())];
+            pipeline::run_fixture_spines_through_targets(
+                &root,
+                &db.url,
+                &db.pool,
+                &profile.root,
+                &chain_rpc_urls,
+                &[(CHAIN, head)],
+                None,
+            )
+            .await?;
+        }
+        EnsV1RawFactPath::RpcIngest => {
+            pipeline::run_rpc_ingest_redo(
+                &root,
+                &db.url,
+                &db.pool,
+                &profile.root,
+                CHAIN,
+                &anvil.url,
+                0,
+                head,
+            )
+            .await?;
+            pipeline::run_existing_raw_spine(
+                &root,
+                &db.url,
+                &db.pool,
+                &profile.root,
+                CHAIN,
+                &anvil.url,
+                head,
+            )
+            .await?;
+        }
+    }
+    Ok(DerivedRun {
+        db,
+        _scratch: scratch,
+    })
+}
+
+pub async fn derive_ens_v1_from_upfront_facts(
+    anvil: &Anvil,
+    deployment: &EnsV1Deployment,
+) -> Result<DerivedRun> {
+    derive_ens_v1_on_rpc_alias(anvil, deployment, EnsV1RawFactPath::UpfrontFixture).await
+}
+
+pub async fn derive_ens_v1_from_rpc_ingest(
+    anvil: &Anvil,
+    deployment: &EnsV1Deployment,
+) -> Result<DerivedRun> {
+    derive_ens_v1_on_rpc_alias(anvil, deployment, EnsV1RawFactPath::RpcIngest).await
 }
 
 /// SQL scalar expression that compares the latest non-orphaned code-hash
@@ -149,7 +222,7 @@ pub fn resolver_code_hash_comparison_sql(
 /// Scenarios with additional constraints should keep spelling out those
 /// constraints so this helper does not weaken their stop condition.
 pub fn canonical_event_ready_sql(
-    logical_name_id: &str,
+    surface_id: &str,
     event_kind: &str,
     record_key: Option<&str>,
 ) -> String {
@@ -157,7 +230,7 @@ pub fn canonical_event_ready_sql(
         value.replace('\'', "''")
     }
 
-    let logical_name_id = quoted(logical_name_id);
+    let logical_name_id = quoted(&schema_v2_logical_name_id(surface_id));
     let event_kind = quoted(event_kind);
     let record_key =
         record_key.map(|key| format!(" AND after_state->>'record_key' = '{}'", quoted(key)));
@@ -170,8 +243,21 @@ pub fn canonical_event_ready_sql(
     )
 }
 
-/// Ingest the chain as it stands (live intake to the current head, then a
-/// full projection replay) and serve the API. The manifest profile mirrors
+/// Convert the scenario-friendly `namespace:name` notation to the stable
+/// schema-v2 logical-name identity. Schema-v2 stores the readable name on the
+/// name surface and keys cross-phase identity by the onchain namehash.
+pub fn schema_v2_logical_name_id(surface_id: &str) -> String {
+    let (namespace, name) = surface_id
+        .split_once(':')
+        .expect("scenario logical-name notation must contain a namespace");
+    if name.starts_with("0x") && name.len() == 66 {
+        return surface_id.to_owned();
+    }
+    format!("{namespace}:{:#x}", crate::harness::ens_v1::namehash(name))
+}
+
+/// Replay the chain as it stands through the full fixture-backed spine. The
+/// generated deployment profile mirrors
 /// every shipped mainnet ENSv1 family manifest version with addresses
 /// re-pointed at the local deployment.
 pub async fn ingest_and_serve(
@@ -289,10 +375,9 @@ pub async fn ingest_ens_v2_sepolia_and_serve(
     .await
 }
 
-/// Ingest BOTH mainnet-profile chains into one corpus: the ENSv1 ethereum
-/// anvil and the Basenames base anvil run under one live session with the
-/// full composed profile (ENSv1 + Basenames + the ethereum-chain glue
-/// families), waiting each chain's canonical checkpoint before serving.
+/// Replay both mainnet deployment-profile chains into one corpus with the full
+/// composed deployment profile (ENSv1 + Basenames + the Ethereum-chain glue
+/// families).
 pub async fn ingest_mainnet_composed_and_serve(
     eth_anvil: &Anvil,
     ens_deployment: &EnsV1Deployment,
@@ -321,14 +406,14 @@ pub async fn ingest_mainnet_composed_and_serve(
     .await
 }
 
-pub async fn ingest_with_restart_and_serve<F, Fut>(
+pub async fn ingest_with_successive_replay_and_serve<F, Fut>(
     anvil: &Anvil,
     deployment: &EnsV1Deployment,
-    after_first_checkpoint: F,
+    after_first_replay: F,
 ) -> Result<PipelineRun>
 where
     F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<pipeline::RestartCompletion>>,
+    Fut: std::future::Future<Output = Result<pipeline::ReplayCompletion>>,
 {
     let repo_root = repo_root();
     let rpc = anvil.client();
@@ -342,42 +427,23 @@ where
     )?;
 
     let db = HarnessDb::create().await?;
-    pipeline::indexer_run_restart_after_first_checkpoint(
+    pipeline::run_fixture_spine_with_midpoint(
         &repo_root,
         &db.url,
         &db.pool,
         &profile.root,
         &anvil.url,
-        after_first_checkpoint,
+        after_first_replay,
     )
     .await?;
-    pipeline::worker_replay_all_current_projections(&repo_root, &db.url).await?;
     let chain_rpc_urls = [("ethereum-mainnet", anvil.url.as_str())];
-    let api = pipeline::ApiServer::start(&repo_root, &db.url, &chain_rpc_urls).await?;
+    let api = pipeline::ProjectionReader::start(&repo_root, &db.url, &chain_rpc_urls).await?;
     Ok(PipelineRun {
         db,
         api,
+        manifests_root: profile.root,
         _scratch: scratch,
     })
-}
-
-pub async fn backfill_normalized_events(
-    anvil: &Anvil,
-    deployment: &EnsV1Deployment,
-    idempotency_key: &str,
-) -> Result<BackfillRun> {
-    backfill_local_chain(
-        LocalChain {
-            anvil,
-            id: "ethereum-mainnet",
-        },
-        idempotency_key,
-        false,
-        |scratch, repo_root| {
-            manifests::generate_local_profile(scratch, repo_root, &deployment.manifest_targets())
-        },
-    )
-    .await
 }
 
 pub async fn serve_existing_db(
@@ -386,30 +452,26 @@ pub async fn serve_existing_db(
     anvil: &Anvil,
 ) -> Result<PipelineRun> {
     let chain_rpc_urls = [("ethereum-mainnet", anvil.url.as_str())];
-    let api = pipeline::ApiServer::start(&repo_root(), &db.url, &chain_rpc_urls).await?;
+    let api = pipeline::ProjectionReader::start(&repo_root(), &db.url, &chain_rpc_urls).await?;
     Ok(PipelineRun {
         db,
         api,
+        manifests_root: scratch.path().join("manifests-e2e"),
         _scratch: scratch,
     })
 }
 
-/// Backfill-derive the chain and rebuild projections without a live run.
-/// Used where live re-ingest of a chain wedges the run loop (see the
-/// preimage-reveal review point); API serving is impossible on this path
-/// because backfill does not promote canonical checkpoints.
-pub async fn backfill_and_replay_projections(
+/// Materialize the fixture facts and execute interpret/project without
+/// constructing a projection reader.
+pub async fn replay_full_corpus_projections(
     anvil: &Anvil,
     deployment: &EnsV1Deployment,
-    idempotency_key: &str,
-) -> Result<BackfillRun> {
-    backfill_local_chain(
+) -> Result<DerivedRun> {
+    replay_full_local_chain(
         LocalChain {
             anvil,
             id: "ethereum-mainnet",
         },
-        idempotency_key,
-        true,
         |scratch, repo_root| {
             manifests::generate_local_profile(scratch, repo_root, &deployment.manifest_targets())
         },
@@ -424,8 +486,7 @@ pub async fn route_snapshots(
     perturb::route_snapshots(&run.api, subjects).await
 }
 
-/// Scratch dir that lives as long as the pipeline run (the indexer reads the
-/// generated manifest profile from it).
+/// Scratch dir that lives as long as the generated deployment profile.
 pub struct TempDir(std::path::PathBuf);
 
 static NEXT_TEMP_DIR_ID: AtomicU64 = AtomicU64::new(0);
@@ -464,7 +525,7 @@ impl Drop for TempDir {
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{TempDir, canonical_event_ready_sql};
+    use super::{TempDir, canonical_event_ready_sql, schema_v2_logical_name_id};
 
     #[test]
     fn temp_dirs_created_concurrently_are_distinct() {
@@ -486,12 +547,23 @@ mod tests {
         assert_eq!(
             canonical_event_ready_sql("ens:o'hare.eth", "RecordChanged", Some("text:it's")),
             "SELECT EXISTS (SELECT 1 FROM normalized_events WHERE logical_name_id = \
-             'ens:o''hare.eth' AND event_kind = 'RecordChanged' AND \
+             'ens:0x28d7ef2fa333511772cc70752f8d9122e2150117f42fdd2bb6577eb89dc1d263' \
+             AND event_kind = 'RecordChanged' AND \
              after_state->>'record_key' = 'text:it''s' AND canonicality_state = 'canonical')"
         );
         assert!(
-            !canonical_event_ready_sql("ens:alice.eth", "RegistrationGranted", None)
-                .contains("record_key")
+            !canonical_event_ready_sql(
+                "ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
+                "RegistrationGranted",
+                None
+            )
+            .contains("record_key")
+        );
+        assert_eq!(
+            schema_v2_logical_name_id(
+                "ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec"
+            ),
+            "ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec"
         );
     }
 }

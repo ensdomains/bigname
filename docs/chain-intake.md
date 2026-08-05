@@ -214,8 +214,11 @@ Each command reads one bounded repeatable-read snapshot and emits JSON.
 Block-canonicality labels every stored fork and reports raw-fact and
 normalized-event counts. Stored-lineage includes optional
 `chain_header_audit` fields. Raw-events joins retained logs to their raw
-transaction, receipt, header-presence, lineage canonicality, and matching
-normalized events. Orphaned forks remain visible and explicitly labeled.
+transaction, receipt, header-presence, lineage canonicality, and any matching
+current-epoch normalized events. Orphaned lineage and retained raw facts remain
+visible and explicitly labeled. Before required redo, matching losing-fork
+normalized rows remain physically present but inherit unreadability from their
+orphaned lineage; after redo, those superseded derivations are absent by design.
 There are no API routes for these windows. Drift, cache, execution-trace, and
 watch-plan inspection were cut and have no phase-runner replacements.
 

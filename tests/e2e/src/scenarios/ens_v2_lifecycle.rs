@@ -106,8 +106,8 @@ async fn renewal_preserves_promoted_coverage_and_registry_edges_follow() -> Resu
     let run =
         support::ingest_ens_v2_sepolia_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
 
-    // Row 1 core claim: renewal preserves the exact-name profile's promoted
-    // coverage while moving the registration lifecycle forward.
+    // Renewal preserves the schema-v2 exact-name projection while moving the
+    // registration lifecycle forward.
     let (status, body) = run
         .api
         .get_json("/v1/names/ens/promoted.eth?chain=ethereum-sepolia")
@@ -115,13 +115,13 @@ async fn renewal_preserves_promoted_coverage_and_registry_edges_follow() -> Resu
     assert_eq!(status, 200, "promoted.eth lookup failed: {body}");
     assert_eq!(
         pointer(&body, "/coverage/status"),
-        "full",
-        "renewed name must retain full exact-name coverage: {body}"
+        "projected",
+        "renewed name must retain exact-name projection coverage: {body}"
     );
     assert_eq!(
         pointer(&body, "/coverage/exhaustiveness"),
-        "authoritative",
-        "renewed name coverage must remain authoritative: {body}"
+        "not_asserted",
+        "schema-v2 does not assert source exhaustiveness: {body}"
     );
     assert_eq!(
         pointer(&body, "/coverage/enumeration_basis"),
@@ -245,7 +245,7 @@ async fn resolver_and_subregistry_edges_follow_set_change_zero() -> Result<()> {
         &deployment,
         Some(
             "SELECT EXISTS (SELECT 1 FROM normalized_events \
-             WHERE logical_name_id = 'ens:edges.eth' \
+             WHERE logical_name_id = 'ens:0xef82654fb982e788fba316ac3b4cfbea26669009aac0c5378156e7bf50880d67' \
                AND event_kind = 'SubregistryChanged' \
                AND after_state->>'subregistry' IS NULL \
                AND canonicality_state = 'canonical')",
@@ -274,7 +274,7 @@ async fn resolver_and_subregistry_edges_follow_set_change_zero() -> Result<()> {
     );
     let current_resolver: Option<String> = sqlx::query_scalar(
         "SELECT declared_summary->'resolver'->>'address' FROM name_current \
-         WHERE logical_name_id = 'ens:edges.eth'",
+         WHERE logical_name_id = 'ens:0xef82654fb982e788fba316ac3b4cfbea26669009aac0c5378156e7bf50880d67'",
     )
     .fetch_one(&run.db.pool)
     .await?;
@@ -307,7 +307,11 @@ async fn resolver_and_subregistry_edges_follow_set_change_zero() -> Result<()> {
     // (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L274 @ ens_v2@48b3e2d).
     // Automatic startup + replay must retain exactly that registry-scoped
     // permission derivation, attributed to the registered resource and owner.
-    let edges_resource = name_resource(&run.db.pool, "ens:edges.eth").await?;
+    let edges_resource = name_resource(
+        &run.db.pool,
+        "ens:0xef82654fb982e788fba316ac3b4cfbea26669009aac0c5378156e7bf50880d67",
+    )
+    .await?;
     type RegistrationPermission = (
         Uuid,
         String,
@@ -428,7 +432,7 @@ async fn expiry_passes_then_reregistration_advances_lineage() -> Result<()> {
     );
     let summary: Value = sqlx::query_scalar(
         "SELECT declared_summary FROM name_current \
-         WHERE logical_name_id = 'ens:fleeting.eth'",
+         WHERE logical_name_id = 'ens:0xebeb30c0ed8d518212f883517e086e19588c459e1b5d50e613df0fceca59a3fb'",
     )
     .fetch_one(&first.db.pool)
     .await?;
@@ -477,7 +481,7 @@ async fn expiry_passes_then_reregistration_advances_lineage() -> Result<()> {
 
     let ready_sql = "SELECT count(DISTINCT resource_id) = 2
          FROM normalized_events
-         WHERE logical_name_id = 'ens:fleeting.eth'
+         WHERE logical_name_id = 'ens:0xebeb30c0ed8d518212f883517e086e19588c459e1b5d50e613df0fceca59a3fb'
            AND event_kind = 'RegistrationGranted'
            AND canonicality_state IN ('canonical', 'safe', 'finalized')";
     let run =
@@ -491,8 +495,8 @@ async fn expiry_passes_then_reregistration_advances_lineage() -> Result<()> {
         status, 200,
         "re-registered exact-name lookup failed: {body}"
     );
-    assert_eq!(pointer(&body, "/coverage/status"), "full");
-    assert_eq!(pointer(&body, "/coverage/exhaustiveness"), "authoritative");
+    assert_eq!(pointer(&body, "/coverage/status"), "projected");
+    assert_eq!(pointer(&body, "/coverage/exhaustiveness"), "not_asserted");
     assert_eq!(
         pointer(&body, "/declared_state/registration/registrant"),
         format!("{carol:#x}"),
@@ -507,7 +511,7 @@ async fn expiry_passes_then_reregistration_advances_lineage() -> Result<()> {
         .context("re-registered resource_id should be a UUID")?;
     let bindings: Vec<(Uuid, OffsetDateTime, Option<OffsetDateTime>)> = sqlx::query_as(
         "SELECT resource_id, active_from, active_to FROM surface_bindings \
-         WHERE logical_name_id = 'ens:fleeting.eth' \
+         WHERE logical_name_id = 'ens:0xebeb30c0ed8d518212f883517e086e19588c459e1b5d50e613df0fceca59a3fb' \
            AND canonicality_state IN ('canonical', 'safe', 'finalized') \
          ORDER BY active_from, surface_binding_id",
     )
@@ -518,7 +522,10 @@ async fn expiry_passes_then_reregistration_advances_lineage() -> Result<()> {
         2,
         "both fleeting.eth resource epochs should remain"
     );
-    assert_eq!(bindings[0].2, Some(bindings[1].1));
+    assert!(
+        bindings[0].2.is_some_and(|closed| closed <= bindings[1].1),
+        "the predecessor binding must close no later than the successor epoch: {bindings:?}"
+    );
     assert_eq!(bindings[1].2, None);
     assert_eq!(current_resource, bindings[1].0);
 
@@ -856,8 +863,8 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
     assert_eq!(status, 200, "foreign.eth lookup failed: {foreign_body}");
     assert_eq!(
         pointer(&foreign_body, "/coverage/status"),
-        "unsupported",
-        "foreign registration stays coverage-gated: {foreign_body}"
+        "projected",
+        "foreign registration remains a projected unsupported surface: {foreign_body}"
     );
 
     // Row 2 pins the canonical token-control event. The accompanying role
@@ -905,7 +912,10 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
     .bind(&sale_receipt.tx_hash)
     .fetch_one(&run.db.pool)
     .await?;
-    assert_eq!(single_transfer.0, "ens:sale.eth");
+    assert_eq!(
+        single_transfer.0,
+        "ens:0xf31116838b246bb4a6b332f695a3f6d42fa3216bd663c1ff90ebd97fd8b79059"
+    );
     assert_eq!(single_transfer.4, format!("{alice:#x}"));
     assert_eq!(single_transfer.5, format!("{bob:#x}"));
 
@@ -926,9 +936,12 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
     assert_eq!(
         batch_transfers
             .iter()
-            .map(|row| row.0.as_str())
+            .map(|row| row.0.clone())
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from(["ens:batchsaleone.eth", "ens:batchsaletwo.eth"])
+        BTreeSet::from([
+            support::schema_v2_logical_name_id("ens:batchsaleone.eth"),
+            support::schema_v2_logical_name_id("ens:batchsaletwo.eth"),
+        ])
     );
     assert_eq!(
         batch_transfers
@@ -952,7 +965,22 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
         batch_transfers[0].3, batch_transfers[1].3,
         "batch fan-out identities must be distinct"
     );
-    assert_eq!(batch_transfers[0].6, batch_transfers[1].6);
+    let mut first_raw_ref = batch_transfers[0].6.clone();
+    let mut second_raw_ref = batch_transfers[1].6.clone();
+    for raw_ref in [&mut first_raw_ref, &mut second_raw_ref] {
+        if let Some(object) = raw_ref.as_object_mut() {
+            object.remove("interpreter_state_key");
+            object.remove("state_scope");
+        }
+    }
+    assert_eq!(
+        first_raw_ref, second_raw_ref,
+        "both batch transfers must retain the same physical raw-log reference"
+    );
+    assert_ne!(
+        batch_transfers[0].6["state_scope"], batch_transfers[1].6["state_scope"],
+        "batch fan-out must keep token-specific interpreter state scopes"
+    );
     assert!(
         batch_transfers
             .iter()
@@ -1062,7 +1090,7 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
         }
     }
     let sale_summary: Value = sqlx::query_scalar(
-        "SELECT declared_summary FROM name_current WHERE logical_name_id = 'ens:sale.eth'",
+        "SELECT declared_summary FROM name_current WHERE logical_name_id = 'ens:0xf31116838b246bb4a6b332f695a3f6d42fa3216bd663c1ff90ebd97fd8b79059'",
     )
     .fetch_one(&run.db.pool)
     .await?;
@@ -1071,11 +1099,13 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
         format!("{bob:#x}"),
         "the registrant facet must follow the ERC1155 buyer: {sale_summary}"
     );
-    for logical_name_id in ["ens:batchsaleone.eth", "ens:batchsaletwo.eth"] {
+    for logical_name_id in
+        ["ens:batchsaleone.eth", "ens:batchsaletwo.eth"].map(support::schema_v2_logical_name_id)
+    {
         let batch_summary: Value = sqlx::query_scalar(
             "SELECT declared_summary FROM name_current WHERE logical_name_id = $1",
         )
-        .bind(logical_name_id)
+        .bind(&logical_name_id)
         .fetch_one(&run.db.pool)
         .await?;
         assert_eq!(
@@ -1088,9 +1118,13 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
     // Row 9's admin-half pin rides this live sale corpus so it also checks the
     // role migration: the registrar bitmap's admin bits must render as distinct
     // powers rather than merging with regular ones, and post-sale the migrated
-    // roles must belong to the buyer. The separate backfill + replay scenario
+    // roles must belong to the buyer. The separate full-corpus replay scenario
     // pins the registration grant's initial PermissionChanged.
-    let sale_resource = name_resource(&run.db.pool, "ens:sale.eth").await?;
+    let sale_resource = name_resource(
+        &run.db.pool,
+        "ens:0xf31116838b246bb4a6b332f695a3f6d42fa3216bd663c1ff90ebd97fd8b79059",
+    )
+    .await?;
     let power_rows: Vec<Value> = sqlx::query_scalar(
         "SELECT effective_powers FROM permissions_current \
          WHERE resource_id = $1 AND lower(subject) = $2",

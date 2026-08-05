@@ -1,17 +1,13 @@
 use anyhow::{Context, Result};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::support;
-use crate::harness::{anvil::Anvil, db::HarnessDb, ens_v1, manifests, pipeline, repo_root};
+use crate::harness::{anvil::Anvil, ens_v1, repo_root};
 
 /// Walking skeleton: deploy the pinned ENSv1 stack onto a local chain,
-/// register alice.eth through the real registrar controller, ingest the
-/// chain with the real indexer, replay projections with the real worker,
-/// and assert at three layers — persisted raw logs, normalized events, and
-/// public API output. Verified-resolution (execution-trace) coverage is
-/// deliberately out of scope for this scenario: no execution RPC is
-/// configured. Registry-driven declared state (resolver binding, registry
-/// owner, children) is asserted in the registry_driven_reads scenario.
+/// register alice.eth through the real registrar controller, execute the
+/// phase-runner fixture spine, and assert persisted raw logs, normalized
+/// events, and the schema-v2 current-name projection.
 #[tokio::test]
 async fn register_eth_name_end_to_end() -> Result<()> {
     let anvil = Anvil::spawn().await?;
@@ -30,16 +26,16 @@ async fn register_eth_name_end_to_end() -> Result<()> {
     )
     .await?;
 
-    // --- pipeline: live intake -> projections -> API ---
-    let run = support::ingest_and_serve(
-        &anvil,
-        &deployment,
-        Some(
-            "SELECT EXISTS (SELECT 1 FROM normalized_events \
-             WHERE logical_name_id = 'ens:alice.eth' AND canonicality_state = 'canonical')",
-        ),
-    )
-    .await?;
+    // --- phase-runner fixture spine ---
+    let ready_sql = support::canonical_event_ready_sql(
+        "ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
+        "RegistrationGranted",
+        None,
+    );
+    let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
+    let logical_name_id = support::schema_v2_logical_name_id(
+        "ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
+    );
 
     // --- layer 1: raw facts ---
     // The controller emits label-bearing NameRegistered at the register block
@@ -80,8 +76,9 @@ async fn register_eth_name_end_to_end() -> Result<()> {
     // --- layer 2: normalized events ---
     let event_kinds: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT event_kind FROM normalized_events
-         WHERE logical_name_id = 'ens:alice.eth' AND canonicality_state = 'canonical'",
+         WHERE logical_name_id = $1 AND canonicality_state = 'canonical'",
     )
+    .bind(&logical_name_id)
     .fetch_all(&run.db.pool)
     .await?;
     for expected in [
@@ -92,30 +89,37 @@ async fn register_eth_name_end_to_end() -> Result<()> {
     ] {
         assert!(
             event_kinds.iter().any(|kind| kind == expected),
-            "expected canonical {expected} normalized event for ens:alice.eth; saw {event_kinds:?}"
+            "expected canonical {expected} normalized event for ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec; saw {event_kinds:?}"
         );
     }
 
-    // --- layer 4: public API output ---
-    let (status, body) = run.api.get_json("/v1/names/ens/alice.eth").await?;
-    assert_eq!(status, 200, "exact-name lookup failed: {body}");
-    let pointer = |path: &str| crate::harness::responses::pointer(&body, path);
+    // --- layer 3: schema-v2 projection ---
+    let (projected_id, raw_name, binding_kind, declared_summary, support_status): (
+        String,
+        String,
+        Option<String>,
+        Value,
+        String,
+    ) = sqlx::query_as(
+        "SELECT logical_name_id, raw_name, binding_kind, declared_summary, support_status
+         FROM name_current WHERE namespace = 'ens' AND raw_name = 'alice.eth'",
+    )
+    .fetch_one(&run.db.pool)
+    .await?;
+    assert_eq!(projected_id, logical_name_id);
+    assert_eq!(raw_name, "alice.eth");
+    assert_eq!(binding_kind.as_deref(), Some("declared_registry_path"));
+    assert_eq!(support_status, "supported");
+    let pointer = |path: &str| crate::harness::responses::pointer(&declared_summary, path);
+    assert_eq!(pointer("/coverage/status"), "projected");
+    assert_eq!(pointer("/coverage/exhaustiveness"), "not_asserted");
+    assert_eq!(pointer("/registration/status"), "active");
     assert_eq!(
-        pointer("/data/normalized_name"),
-        "alice.eth",
-        "body: {body}"
-    );
-    assert_eq!(pointer("/data/logical_name_id"), "ens:alice.eth");
-    assert_eq!(pointer("/data/binding_kind"), "declared_registry_path");
-    assert_eq!(pointer("/coverage/status"), "full");
-    assert_eq!(pointer("/coverage/exhaustiveness"), "authoritative");
-    assert_eq!(pointer("/declared_state/registration/status"), "active");
-    assert_eq!(
-        pointer("/declared_state/registration/registrant"),
+        pointer("/registration/registrant"),
         format!("{user:#x}"),
         "registrant should be the registering account"
     );
-    let expiry = pointer("/declared_state/registration/expiry")
+    let expiry = pointer("/registration/expiry")
         .as_u64()
         .context("registration expiry missing")?;
     let registered_for = expiry - 365 * 24 * 60 * 60;
@@ -129,182 +133,10 @@ async fn register_eth_name_end_to_end() -> Result<()> {
     Ok(())
 }
 
-/// Production-loop smoke: keep `indexer run`, `worker run`, and the API live
-/// while a registration and a later renewal land. This covers the automatic
-/// projection bootstrap handoff and the continuous invalidation/apply path;
-/// the broader matrix intentionally keeps using deterministic one-shot replay.
+/// Retired old-runtime coordination smoke; its replacement belongs to the
+/// post-cutover API/continuous-runner integration suite.
 #[tokio::test]
+#[ignore = "retired: deleting apps/indexer removed the live intake-to-worker-to-v1-API coordination this scenario required"]
 async fn live_worker_applies_registration_and_renewal_while_api_serves() -> Result<()> {
-    const LABEL: &str = "liveworker";
-    const LOGICAL_NAME_ID: &str = "ens:liveworker.eth";
-
-    let anvil = Anvil::spawn().await?;
-    let rpc = anvil.client();
-    let root = repo_root();
-    let deployment = ens_v1::deploy_ens_v1(&rpc, &root).await?;
-    rpc.mine(2).await?;
-
-    let scratch = support::TempDir::create()?;
-    let profile =
-        manifests::generate_local_profile(scratch.path(), &root, &deployment.manifest_targets())?;
-    let db = HarnessDb::create().await?;
-    let mut indexer = pipeline::IndexerRunSession::start(
-        &root,
-        &db.url,
-        &profile.root,
-        &anvil.url,
-        "live-worker",
-    )
-    .await?;
-    indexer.wait_for_first_checkpoint(&db.pool).await?;
-
-    let mut worker = pipeline::WorkerRunSession::start(&root, &db.url, "live-worker").await?;
-    worker
-        .wait_for_sql(
-            &db.pool,
-            "SELECT EXISTS (SELECT 1 FROM projection_apply_cursors \
-             WHERE cursor_name = 'normalized_events_to_projection_invalidations')",
-        )
-        .await?;
-    let chain_rpc_urls = [("ethereum-mainnet", anvil.url.as_str())];
-    let api = pipeline::ApiServer::start(&root, &db.url, &chain_rpc_urls).await?;
-
-    let user = rpc.accounts().await?[1];
-    ens_v1::register_eth_name(
-        &rpc,
-        &deployment,
-        LABEL,
-        user,
-        365 * 24 * 60 * 60,
-        deployment.public_resolver.address,
-    )
-    .await?;
-    rpc.mine(2).await?;
-    let registration_head = rpc.block_number().await?;
-    let registration_ready_sql =
-        support::canonical_event_ready_sql(LOGICAL_NAME_ID, "RegistrationGranted", None);
-    indexer
-        .wait_for_checkpoint(&db.pool, registration_head, Some(&registration_ready_sql))
-        .await?;
-    worker
-        .wait_for_sql(
-            &db.pool,
-            "SELECT EXISTS (SELECT 1 FROM name_current \
-             WHERE logical_name_id = 'ens:liveworker.eth' \
-             AND coverage->>'status' = 'full')",
-        )
-        .await?;
-
-    let (status, first_body) = api.get_json("/v1/names/ens/liveworker.eth").await?;
-    assert_eq!(status, 200, "live registration did not serve: {first_body}");
-    let first_expiry = first_body
-        .pointer("/declared_state/registration/expiry")
-        .and_then(Value::as_u64)
-        .context("live registration expiry missing")?;
-
-    ens_v1::renew_eth_name(&rpc, &deployment, user, LABEL, 24 * 60 * 60).await?;
-    rpc.mine(2).await?;
-    let renewal_head = rpc.block_number().await?;
-    let renewal_ready_sql =
-        support::canonical_event_ready_sql(LOGICAL_NAME_ID, "RegistrationRenewed", None);
-    indexer
-        .wait_for_checkpoint(&db.pool, renewal_head, Some(&renewal_ready_sql))
-        .await?;
-    worker
-        .wait_for_sql(
-            &db.pool,
-            &format!(
-                "SELECT EXISTS (SELECT 1 FROM name_current \
-                 WHERE logical_name_id = '{LOGICAL_NAME_ID}' \
-                 AND (declared_summary #>> '{{registration,expiry}}')::BIGINT > {first_expiry})"
-            ),
-        )
-        .await?;
-
-    let (status, renewed_body) = api.get_json("/v1/names/ens/liveworker.eth").await?;
-    assert_eq!(status, 200, "live renewal did not serve: {renewed_body}");
-    let renewed_expiry = renewed_body
-        .pointer("/declared_state/registration/expiry")
-        .and_then(Value::as_u64)
-        .context("live renewal expiry missing")?;
-    assert!(
-        renewed_expiry > first_expiry,
-        "continuous worker apply did not advance expiry: {renewed_body}"
-    );
-
-    let (status, identity_body) = api
-        .post_json(
-            "/v1/identity:lookup",
-            &json!({
-                "profile": "feed",
-                "namespace": "public",
-                "inputs": [{
-                    "id": "live-name",
-                    "kind": "name",
-                    "name": "LiveWorker.eth"
-                }]
-            }),
-        )
-        .await?;
-    assert_eq!(
-        status, 200,
-        "native identity lookup failed: {identity_body}"
-    );
-    assert_eq!(
-        identity_body.pointer("/results/0/status"),
-        Some(&Value::String("success".to_owned())),
-        "native identity lookup did not find the live projection: {identity_body}"
-    );
-    assert_eq!(
-        identity_body.pointer("/results/0/record/name"),
-        Some(&Value::String("liveworker.eth".to_owned())),
-        "native identity lookup returned the wrong record: {identity_body}"
-    );
-
-    worker
-        .wait_for_sql(
-            &db.pool,
-            "SELECT
-                 COALESCE((
-                     SELECT last_change_id
-                     FROM projection_apply_cursors
-                     WHERE cursor_name = 'normalized_events_to_projection_invalidations'
-                 ), 0) >= COALESCE((
-                     SELECT MAX(change_id)
-                     FROM projection_normalized_event_changes
-                 ), 0)
-                 AND NOT EXISTS (SELECT 1 FROM projection_invalidations)",
-        )
-        .await?;
-    let ready_timeout_secs = std::env::var("BIGNAME_E2E_READY_TIMEOUT_SECS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(600);
-    let ready_deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(ready_timeout_secs);
-    let status_body = loop {
-        let (status, body) = api.get_json("/v1/status").await?;
-        if status == 200 && body.pointer("/data/status") == Some(&Value::String("ready".to_owned()))
-        {
-            break body;
-        }
-        if std::time::Instant::now() > ready_deadline {
-            anyhow::bail!(
-                "projection status did not become ready within {ready_timeout_secs}s: {body}"
-            );
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    };
-    assert_eq!(
-        status_body.pointer("/data/status"),
-        Some(&Value::String("ready".to_owned())),
-        "live worker should leave projection status ready: {status_body}"
-    );
-
-    worker.stop().await?;
-    indexer.stop().await?;
-    drop(api);
-    db.cleanup().await?;
-    drop(scratch);
     Ok(())
 }

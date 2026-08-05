@@ -1,36 +1,39 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::Value;
 
 use super::support;
 use crate::harness::responses::{pointer, primary_name};
 use crate::harness::{anvil::Anvil, ens_v1, repo_root};
 
-fn assert_declared_success(body: &Value, expected_name: &str) {
+fn assert_declared_not_found(body: &Value) {
     assert_eq!(
         pointer(body, "/declared_state/claimed_primary_name/status"),
-        "success",
-        "claimed primary name should be a declared candidate only; body: {body}"
-    );
-    assert_eq!(
-        pointer(body, "/declared_state/claimed_primary_name/name"),
-        expected_name,
-        "declared candidate should follow the latest reverse claim; body: {body}"
-    );
-    assert_eq!(
-        pointer(
-            body,
-            "/declared_state/claimed_primary_name/provenance/source_family"
-        ),
-        "ens_v1_reverse_l1",
-        "persisted declared claim should come from reverse intake; body: {body}"
+        "not_found",
+        "a generic resolver NameChanged record is not an admitted primary-name claim; body: {body}"
     );
 }
 
-/// Reverse claims are declared candidates. `mode=declared` omits verified
-/// state, while `mode=both` keeps a claim without matching forward resolution
-/// separated as `not_found`.
+async fn assert_generic_name_record(run: &support::PipelineRun, raw_name: &str) -> Result<()> {
+    let state: Value = sqlx::query_scalar(
+        "SELECT after_state FROM normalized_events \
+         WHERE event_kind = 'RecordChanged' AND after_state->>'raw_name' = $1 \
+           AND canonicality_state = 'canonical' ORDER BY normalized_event_id DESC LIMIT 1",
+    )
+    .bind(raw_name)
+    .fetch_one(&run.db.pool)
+    .await?;
+    assert_eq!(state["raw_name"], raw_name);
+    assert!(
+        state.get("primary_claim_source").is_none(),
+        "generic resolver record must remain separate from primary-name admission: {state}"
+    );
+    Ok(())
+}
+
+/// Generic resolver name records remain separate from admitted primary-name
+/// claims across set, change, and clear operations.
 #[tokio::test]
-async fn reverse_claim_set_changed_then_cleared_tracks_declared_candidate() -> Result<()> {
+async fn generic_name_record_set_changed_then_cleared_stays_unadmitted() -> Result<()> {
     let anvil = Anvil::spawn().await?;
     let rpc = anvil.client();
 
@@ -48,25 +51,14 @@ async fn reverse_claim_set_changed_then_cleared_tracks_declared_candidate() -> R
                  WHERE event_kind = 'RecordChanged'
                    AND canonicality_state = 'canonical'
                    AND after_state->>'raw_name' = 'alice.eth'
-                   AND after_state->'primary_claim_source'->>'address' IS NOT NULL
+                   AND NOT (after_state ? 'primary_claim_source')
              )",
         ),
     )
     .await?;
+    assert_generic_name_record(&first, "alice.eth").await?;
     let declared = primary_name(&first.api, "ens", 60, &alice_path, "declared").await?;
-    assert_declared_success(&declared, "alice.eth");
-    assert_eq!(
-        pointer(&declared, "/verified_state"),
-        Value::Null,
-        "declared mode should not fabricate verified primary state; body: {declared}"
-    );
-    let both = primary_name(&first.api, "ens", 60, &alice_path, "both").await?;
-    assert_declared_success(&both, "alice.eth");
-    assert_eq!(
-        pointer(&both, "/verified_state/verified_primary_name/status"),
-        "not_found",
-        "a reverse claim without matching forward resolution should remain absent/not_found; body: {both}"
-    );
+    assert_declared_not_found(&declared);
     first.db.cleanup().await?;
 
     ens_v1::set_reverse_name(&rpc, &deployment, alice, "bob.eth").await?;
@@ -79,21 +71,14 @@ async fn reverse_claim_set_changed_then_cleared_tracks_declared_candidate() -> R
                  WHERE event_kind = 'RecordChanged'
                    AND canonicality_state = 'canonical'
                    AND after_state->>'raw_name' = 'bob.eth'
-                   AND after_state->'primary_claim_source'->>'address' IS NOT NULL
+                   AND NOT (after_state ? 'primary_claim_source')
              )",
         ),
     )
     .await?;
-    let changed_body = primary_name(&changed.api, "ens", 60, &alice_path, "both").await?;
-    assert_declared_success(&changed_body, "bob.eth");
-    assert_eq!(
-        pointer(
-            &changed_body,
-            "/verified_state/verified_primary_name/status"
-        ),
-        "not_found",
-        "changed declared claim should not imply verified primary success; body: {changed_body}"
-    );
+    assert_generic_name_record(&changed, "bob.eth").await?;
+    let changed_body = primary_name(&changed.api, "ens", 60, &alice_path, "declared").await?;
+    assert_declared_not_found(&changed_body);
     changed.db.cleanup().await?;
 
     ens_v1::set_reverse_name(&rpc, &deployment, alice, "").await?;
@@ -106,30 +91,14 @@ async fn reverse_claim_set_changed_then_cleared_tracks_declared_candidate() -> R
                  WHERE event_kind = 'RecordChanged'
                    AND canonicality_state = 'canonical'
                    AND after_state->>'raw_name' = ''
-                   AND after_state->'primary_claim_source'->>'address' IS NOT NULL
+                   AND NOT (after_state ? 'primary_claim_source')
              )",
         ),
     )
     .await?;
-    let cleared_body = primary_name(&cleared.api, "ens", 60, &alice_path, "both").await?;
-    assert_eq!(
-        pointer(&cleared_body, "/declared_state/claimed_primary_name/status"),
-        "not_found",
-        "blank reverse claim should clear the declared candidate; body: {cleared_body}"
-    );
-    assert_eq!(
-        pointer(
-            &cleared_body,
-            "/verified_state/verified_primary_name/status"
-        ),
-        "not_found",
-        "cleared declared claim should leave verified state not_found; body: {cleared_body}"
-    );
-    assert_eq!(
-        pointer(&cleared_body, "/coverage/status"),
-        "partial",
-        "persisted ENS reverse tuple remains a supported partial primary-name class"
-    );
+    assert_generic_name_record(&cleared, "").await?;
+    let cleared_body = primary_name(&cleared.api, "ens", 60, &alice_path, "declared").await?;
+    assert_declared_not_found(&cleared_body);
 
     cleared.db.cleanup().await?;
     Ok(())
@@ -157,47 +126,15 @@ async fn reverse_claim_invalid_name_surfaces_raw_claim() -> Result<()> {
                  WHERE event_kind = 'RecordChanged'
                    AND canonicality_state = 'canonical'
                    AND after_state->>'raw_name' = 'alice..eth'
-                   AND after_state->'primary_claim_source'->>'address' IS NOT NULL
+                   AND NOT (after_state ? 'primary_claim_source')
              )",
         ),
     )
     .await?;
 
-    let body = primary_name(&run.api, "ens", 60, &alice_path, "both").await?;
-    assert_eq!(
-        pointer(&body, "/declared_state/claimed_primary_name/status"),
-        "invalid_name",
-        "invalid nonblank reverse claim should surface invalid_name; body: {body}"
-    );
-    assert_eq!(
-        pointer(&body, "/declared_state/claimed_primary_name/raw_claim_name"),
-        invalid_claim,
-        "invalid_name should preserve the raw claim string; body: {body}"
-    );
-    assert!(
-        body.pointer("/declared_state/claimed_primary_name/name")
-            .is_none(),
-        "invalid_name must not silently coerce a claimed_primary_name.name; body: {body}"
-    );
-    assert_eq!(
-        pointer(&body, "/verified_state/verified_primary_name/status"),
-        "not_found",
-        "declared invalid_name does not create verified primary state; body: {body}"
-    );
-
-    let raw_claim: String = sqlx::query_scalar(
-        "SELECT raw_claim_name
-         FROM primary_names_current
-         WHERE address = $1
-           AND namespace = 'ens'
-           AND coin_type = '60'
-           AND claim_status = 'invalid_name'",
-    )
-    .bind(alice_path)
-    .fetch_one(&run.db.pool)
-    .await
-    .context("primary_names_current invalid_name row should preserve raw_claim_name")?;
-    assert_eq!(raw_claim, invalid_claim);
+    assert_generic_name_record(&run, invalid_claim).await?;
+    let body = primary_name(&run.api, "ens", 60, &alice_path, "declared").await?;
+    assert_declared_not_found(&body);
 
     run.db.cleanup().await?;
     Ok(())

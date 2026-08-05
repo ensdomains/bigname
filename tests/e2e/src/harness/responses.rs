@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use anyhow::Result;
 use serde_json::Value;
 
-use super::pipeline::ApiServer;
+use super::pipeline::ProjectionReader;
 
 pub fn pointer(body: &Value, path: &str) -> Value {
     body.pointer(path)
@@ -28,7 +28,7 @@ pub fn selector_keys(body: &Value) -> BTreeSet<String> {
         .collect()
 }
 
-pub async fn exact_name(api: &ApiServer, namespace: &str, name: &str) -> Result<Value> {
+pub async fn exact_name(api: &ProjectionReader, namespace: &str, name: &str) -> Result<Value> {
     let (status, body) = api
         .get_json(&format!("/v1/names/{namespace}/{name}"))
         .await?;
@@ -40,7 +40,7 @@ pub async fn exact_name(api: &ApiServer, namespace: &str, name: &str) -> Result<
 }
 
 pub async fn primary_name(
-    api: &ApiServer,
+    api: &ProjectionReader,
     namespace: &str,
     coin_type: u64,
     address: &str,
