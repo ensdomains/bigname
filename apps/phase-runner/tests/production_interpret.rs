@@ -232,6 +232,55 @@ async fn same_transaction_registry_permission_writes_with_registration_resource(
 }
 
 #[tokio::test]
+async fn lease_release_materializes_dormant_registry_resource_before_binding() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_lease_release_resource").await?;
+    let chain = "interpret-lease-release-resource";
+    seed_same_transaction_registration_fixture(scratch.pool(), chain).await?;
+    let release_timestamp = 1_000_001 + 90 * 24 * 60 * 60 + 1;
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number, block_timestamp,
+             canonicality_state
+         )
+         VALUES ($1, $2, $3, 2, to_timestamp($4), 'canonical')",
+    )
+    .bind(chain)
+    .bind(block_hash(chain, 2))
+    .bind(block_hash(chain, 1))
+    .bind(release_timestamp)
+    .execute(scratch.pool())
+    .await?;
+
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+    run_engine(scratch.pool(), chain, 2, 2, InterpretRunMode::Normal).await?;
+
+    let (resource_id, source_event): (Uuid, String) = sqlx::query_as(
+        "SELECT resource_id, after_state ->> 'source_event'
+         FROM normalized_events
+         WHERE chain_id = $1
+           AND block_number = 2
+           AND event_kind = 'SurfaceBound'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await
+    .context("lease release did not emit its registry fallback binding")?;
+    assert_eq!(source_event, "RegistrationReleased");
+    let resource_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM resources
+             WHERE chain_id = $1 AND resource_id = $2
+         )",
+    )
+    .bind(chain)
+    .bind(resource_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(resource_exists);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn legacy_register_with_config_midflow_record_writes_with_registration_identity() -> Result<()>
 {
     let scratch =

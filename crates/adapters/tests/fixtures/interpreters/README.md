@@ -7,6 +7,15 @@ unchanged. `expected-outputs.json` records every
 interpret-phase-owned `name_surfaces`, `surface_bindings`, `resources`,
 `token_lineages`, and `discovery_edges` tables.
 
+`binding-fk-release.json` is a production-derived, four-batch regression
+corpus for the `puy.eth` lease release observed at Ethereum block 16,176,355.
+It retains the exact `NameRenewed`, registrar transfers, registry `NewOwner`,
+block hashes, timestamps, and expected release-side resource and binding IDs.
+The physical-batch harness proves that compacted prior-state restoration and a
+live incremental session both materialize the dormant direct-registry resource
+before opening its replacement binding. The original 19 raw-event cases and
+their committed outputs remain byte-identical.
+
 The original four cases were copied from these now-deleted legacy adapter
 tests:
 

@@ -279,6 +279,22 @@ fn settle_block_boundary(
             });
         }
         if let (Some(next), Some(surface_binding_id)) = (next_surface, next_binding_id) {
+            let boundary_provenance = serde_json::json!({
+                "kind":"raw_block",
+                "chain_id":block.chain_id,
+                "block_hash":block.block_hash,
+                "block_number":block.block_number,
+                "source_manifest_id":active_source.manifest_id,
+            });
+            output.resources.push(Resource {
+                resource_id: next.resource_id,
+                token_lineage_id: next.token_lineage_id,
+                chain_id: block.chain_id.clone(),
+                block_hash: block.block_hash.clone(),
+                block_number: block.block_number,
+                provenance: boundary_provenance.clone(),
+                canonicality_state: block.canonicality_state.clone(),
+            });
             output.surface_bindings.push(SurfaceBinding {
                 surface_binding_id,
                 logical_name_id,
@@ -288,13 +304,7 @@ fn settle_block_boundary(
                 chain_id: block.chain_id.clone(),
                 block_hash: block.block_hash.clone(),
                 block_number: block.block_number,
-                provenance: serde_json::json!({
-                    "kind":"raw_block",
-                    "chain_id":block.chain_id,
-                    "block_hash":block.block_hash,
-                    "block_number":block.block_number,
-                    "source_manifest_id":active_source.manifest_id,
-                }),
+                provenance: boundary_provenance,
                 canonicality_state: block.canonicality_state.clone(),
             });
         }
