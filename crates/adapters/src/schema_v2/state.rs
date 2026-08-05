@@ -1,17 +1,19 @@
-use std::collections::{BTreeMap, BTreeSet};
-
+use imbl::{ordmap::OrdMap, ordset::OrdSet};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::{model::PriorEventInput, state_key::interpreter_state_key};
+use super::state_key::interpreter_state_key;
 
 #[path = "state_topology.rs"]
 mod topology;
 
+#[path = "state_incremental.rs"]
+mod incremental;
+
 #[path = "state_surfaces.rs"]
 mod surfaces;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct V1NameState {
     pub logical_name_id: String,
     pub surface_known: bool,
@@ -28,7 +30,12 @@ pub(super) struct V1NameState {
 #[path = "state_v2.rs"]
 mod v2;
 
-pub(super) use self::v2::{V2NameState, V2NameTransition, V2TokenState};
+#[path = "state_v2_refresh.rs"]
+mod v2_refresh;
+
+pub(super) use self::v2::{V2NameState, V2NameTransition, V2RawNameState, V2TokenState};
+#[cfg(test)]
+pub(super) use self::v2_refresh::{reset_v2_refresh_visits, v2_refresh_visits};
 
 #[derive(Clone, Debug)]
 pub(super) struct V1Release {
@@ -40,95 +47,38 @@ pub(super) struct V1Release {
     pub resolver: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct State {
-    values: BTreeMap<String, Value>,
-    v1_names: BTreeMap<String, V1NameState>,
-    v1_registrars: BTreeMap<String, V1NameState>,
-    v1_registry_authorities: BTreeMap<String, V1NameState>,
-    v1_registry_owners: BTreeMap<String, String>,
-    v1_resolvers: BTreeMap<String, String>,
-    v1_migrated_nodes: std::collections::BTreeSet<String>,
-    v1_materialized_surfaces: BTreeSet<String>,
-    known_surfaces: BTreeSet<String>,
-    active_resources: BTreeMap<String, Uuid>,
-    v2_tokens: BTreeMap<String, V2TokenState>,
-    v2_entry_by_parent_label: BTreeMap<(String, Vec<u8>), String>,
-    v2_parent_claims: BTreeMap<String, (String, Vec<u8>)>,
-    v2_suffix_anchors: BTreeMap<String, (String, Vec<String>)>,
-    v2_resolver_hints: BTreeMap<(String, String), (String, Value)>,
-    materialized_token_lineages: BTreeSet<Uuid>,
+    values: OrdMap<String, Value>,
+    v1_names: OrdMap<String, V1NameState>,
+    v1_registrars: OrdMap<String, V1NameState>,
+    v1_registry_authorities: OrdMap<String, V1NameState>,
+    v1_registry_owners: OrdMap<String, String>,
+    v1_resolvers: OrdMap<String, String>,
+    v1_migrated_nodes: OrdSet<String>,
+    v1_materialized_surfaces: OrdSet<String>,
+    known_surfaces: OrdSet<String>,
+    restored_surface_sources: OrdMap<String, OrdSet<String>>,
+    restored_surface_counts: OrdMap<String, usize>,
+    v2_current_surface_counts: OrdMap<String, usize>,
+    surface_removal_candidates: OrdSet<String>,
+    restoring_state_key: Option<String>,
+    active_resources: OrdMap<String, Uuid>,
+    v2_tokens: OrdMap<String, V2TokenState>,
+    v2_expiries: OrdSet<(u64, String)>,
+    v2_entry_by_parent_label: OrdMap<(String, Vec<u8>), String>,
+    v2_parent_claims: OrdMap<String, (String, Vec<u8>)>,
+    v2_suffix_anchors: OrdMap<String, (String, Vec<String>)>,
+    latest_v2_timestamp: Option<i64>,
+    v2_resolver_hints: OrdMap<(String, String), (String, Value)>,
+    materialized_token_lineages: OrdSet<Uuid>,
 }
 
 impl State {
-    pub(super) fn new(
-        prior: Vec<PriorEventInput>,
-        v2_suffix_anchors: Vec<(String, String, Vec<String>)>,
-    ) -> Self {
-        let materialized_token_lineages = prior
-            .iter()
-            .filter_map(|event| {
-                event
-                    .after_state
-                    .get(super::seam::TOKEN_LINEAGE_ID_KEY)
-                    .and_then(Value::as_str)
-                    .and_then(|value| Uuid::parse_str(value).ok())
-            })
-            .collect();
-        let mut state = Self {
-            values: BTreeMap::new(),
-            v1_names: BTreeMap::new(),
-            v1_registrars: BTreeMap::new(),
-            v1_registry_authorities: BTreeMap::new(),
-            v1_registry_owners: BTreeMap::new(),
-            v1_resolvers: BTreeMap::new(),
-            v1_migrated_nodes: std::collections::BTreeSet::new(),
-            v1_materialized_surfaces: BTreeSet::new(),
-            known_surfaces: BTreeSet::new(),
-            active_resources: BTreeMap::new(),
-            v2_tokens: BTreeMap::new(),
-            v2_entry_by_parent_label: BTreeMap::new(),
-            v2_parent_claims: BTreeMap::new(),
-            v2_resolver_hints: BTreeMap::new(),
-            materialized_token_lineages,
-            v2_suffix_anchors: v2_suffix_anchors
-                .into_iter()
-                .map(|(address, namespace, suffix)| {
-                    (address.to_ascii_lowercase(), (namespace, suffix))
-                })
-                .collect(),
-        };
-        let mut latest_timestamp = None;
-        for event in prior {
-            if matches!(
-                event.source_family.as_str(),
-                "ens_v2_registry_l1" | "ens_v2_root_l1"
-            ) {
-                latest_timestamp = latest_timestamp.max(event.block_timestamp);
-            }
-            let scope = event.state_scope.as_deref().unwrap_or("legacy");
-            let key = interpreter_state_key(
-                &event.namespace,
-                event.logical_name_id.as_deref(),
-                event.resource_id,
-                &event.event_kind,
-                &event.source_family,
-                scope,
-            );
-            state.values.insert(key, event.after_state.clone());
-            super::state_restore::v1(&mut state, &event);
-            super::state_restore::v2(&mut state, &event);
-        }
-        if let Some(timestamp) = latest_timestamp {
-            // Replaying prior events reconstructs topology before the next raw-log batch. The
-            // resulting transitions already exist in normalized_events, so only retain the
-            // reconstructed name state here.
-            state.refresh_v2_names(timestamp.unix_timestamp());
-        }
-        state
-    }
-
     pub(super) fn materialize_token_lineage(&mut self, token_lineage_id: Uuid) -> bool {
-        self.materialized_token_lineages.insert(token_lineage_id)
+        self.materialized_token_lineages
+            .insert(token_lineage_id)
+            .is_none()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -147,7 +97,7 @@ impl State {
     ) {
         let key = v1_key(namespace, namehash);
         if surface_known {
-            self.known_surfaces.insert(logical_name_id.clone());
+            self.remember_known_surface(logical_name_id.clone());
             self.active_resources
                 .insert(logical_name_id.clone(), resource_id);
         }
@@ -190,7 +140,7 @@ impl State {
         make_current: bool,
     ) {
         if surface_known {
-            self.known_surfaces.insert(logical_name_id.clone());
+            self.remember_known_surface(logical_name_id.clone());
         }
         if make_current && surface_known {
             self.active_resources
@@ -304,8 +254,7 @@ impl State {
         }
         if let Some(authority) = authority {
             if authority.surface_known {
-                self.known_surfaces
-                    .insert(authority.logical_name_id.clone());
+                self.remember_known_surface(authority.logical_name_id.clone());
                 self.active_resources
                     .insert(authority.logical_name_id.clone(), authority.resource_id);
             }
@@ -424,8 +373,7 @@ impl State {
             .clone();
         self.v1_names.insert(key, registrar.clone());
         if registrar.surface_known {
-            self.known_surfaces
-                .insert(registrar.logical_name_id.clone());
+            self.remember_known_surface(registrar.logical_name_id.clone());
             self.active_resources
                 .insert(registrar.logical_name_id.clone(), registrar.resource_id);
         }
@@ -451,8 +399,7 @@ impl State {
         self.v1_names
             .insert(v1_key(namespace, namehash), registrar.clone());
         if registrar.surface_known {
-            self.known_surfaces
-                .insert(registrar.logical_name_id.clone());
+            self.remember_known_surface(registrar.logical_name_id.clone());
             self.active_resources
                 .insert(registrar.logical_name_id.clone(), registrar.resource_id);
         }

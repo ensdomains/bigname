@@ -8,7 +8,7 @@ use bigname_adapters::schema_v2::seam::{
     INTERPRETER_STATE_KEY, STATE_SCOPE_KEY, retained_prior_state_key,
 };
 
-use super::cache::{PriorDependency, PriorSnapshot};
+use super::cache::{PriorCache, PriorDependency, PriorRestore};
 
 type Row = (
     String,
@@ -32,7 +32,7 @@ pub(super) async fn events(
     connection: &mut PgConnection,
     chain_id: &str,
     before_block: i64,
-) -> Result<PriorSnapshot> {
+) -> Result<PriorRestore> {
     // The content-hashed adapter owns the opaque state key. Rows without one are intentionally
     // keyed by event identity, so this transport layer never invents compaction semantics.
     let statement = format!(
@@ -144,10 +144,12 @@ pub(super) async fn events(
             after_state,
         });
     }
-    Ok(PriorSnapshot {
+    Ok(PriorRestore {
         events,
-        dependencies,
-        validated_orphaning_epoch: 0,
-        pending_dependencies: Default::default(),
+        cache: PriorCache {
+            dependencies,
+            validated_orphaning_epoch: 0,
+            pending_dependencies: Default::default(),
+        },
     })
 }

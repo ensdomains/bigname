@@ -86,7 +86,7 @@ pub struct BatchInput {
     pub raw_logs: Vec<RawLogInput>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BatchOutput {
     pub normalized_events: Vec<NormalizedEvent>,
     pub label_preimages: Vec<LabelPreimage>,
@@ -101,7 +101,7 @@ pub struct BatchOutput {
     pub discovery_edge_closures: Vec<DiscoveryEdgeClosure>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NormalizedEvent {
     pub event_identity: String,
     pub namespace: String,
@@ -124,7 +124,7 @@ pub struct NormalizedEvent {
     pub after_state: Value,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LabelPreimage {
     pub labelhash: String,
     pub raw_label: Vec<u8>,
@@ -137,7 +137,7 @@ pub struct LabelPreimage {
     pub provenance: Value,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NameSurface {
     pub logical_name_id: String,
     pub namespace: String,
@@ -158,7 +158,7 @@ pub struct NameSurface {
     pub canonicality_state: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TokenLineage {
     pub token_lineage_id: Uuid,
     pub chain_id: String,
@@ -168,7 +168,7 @@ pub struct TokenLineage {
     pub canonicality_state: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Resource {
     pub resource_id: Uuid,
     pub token_lineage_id: Option<Uuid>,
@@ -179,7 +179,7 @@ pub struct Resource {
     pub canonicality_state: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SurfaceBinding {
     pub surface_binding_id: Uuid,
     pub logical_name_id: String,
@@ -193,7 +193,7 @@ pub struct SurfaceBinding {
     pub canonicality_state: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BindingClosure {
     pub logical_name_id: String,
     pub except_surface_binding_id: Option<Uuid>,
@@ -203,7 +203,7 @@ pub struct BindingClosure {
     pub log_index: i64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContractInstance {
     pub contract_instance_id: Uuid,
     pub chain_id: String,
@@ -211,7 +211,7 @@ pub struct ContractInstance {
     pub provenance: Value,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContractAddress {
     pub contract_instance_id: Uuid,
     pub chain_id: String,
@@ -222,7 +222,7 @@ pub struct ContractAddress {
     pub provenance: Value,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiscoveryEdge {
     pub chain_id: String,
     pub edge_kind: String,
@@ -238,7 +238,7 @@ pub struct DiscoveryEdge {
     pub provenance: Value,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiscoveryEdgeClosure {
     pub chain_id: String,
     pub edge_kind: String,

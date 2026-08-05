@@ -12,18 +12,24 @@ pub(crate) struct PriorDependency {
     pub block_hash: String,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct PriorSnapshot {
-    pub events: Vec<PriorEventInput>,
+#[derive(Debug)]
+pub(crate) struct PriorCache {
+    // The adapter owns the retained values. Interpretation keeps only their canonical block
+    // anchors so epoch changes can invalidate the opaque adapter session without cloning it.
     pub dependencies: BTreeMap<String, PriorDependency>,
     pub(crate) validated_orphaning_epoch: i64,
     pub(crate) pending_dependencies: BTreeSet<(i64, String)>,
 }
 
-pub(super) fn freshly_loaded(mut snapshot: PriorSnapshot, orphaning_epoch: i64) -> PriorSnapshot {
-    snapshot.validated_orphaning_epoch = orphaning_epoch;
-    snapshot.pending_dependencies.clear();
-    snapshot
+pub(crate) struct PriorRestore {
+    pub events: Vec<PriorEventInput>,
+    pub cache: PriorCache,
+}
+
+pub(super) fn freshly_loaded(mut restored: PriorRestore, orphaning_epoch: i64) -> PriorRestore {
+    restored.cache.validated_orphaning_epoch = orphaning_epoch;
+    restored.cache.pending_dependencies.clear();
+    restored
 }
 
 pub(super) async fn orphaning_epoch(connection: &mut PgConnection, chain_id: &str) -> Result<i64> {
@@ -50,18 +56,15 @@ pub(super) async fn orphaning_epoch(connection: &mut PgConnection, chain_id: &st
 pub(super) async fn revalidate(
     connection: &mut PgConnection,
     chain_id: &str,
-    mut snapshot: PriorSnapshot,
+    mut cache: PriorCache,
     orphaning_epoch: i64,
-) -> Result<Option<PriorSnapshot>> {
-    if snapshot.events.len() != snapshot.dependencies.len() {
-        return Ok(None);
-    }
-    let full_revalidation = snapshot.validated_orphaning_epoch != orphaning_epoch;
-    let expected = validation_candidates(&mut snapshot, full_revalidation);
+) -> Result<Option<PriorCache>> {
+    let full_revalidation = cache.validated_orphaning_epoch != orphaning_epoch;
+    let expected = validation_candidates(&mut cache, full_revalidation);
     if expected.is_empty() {
-        snapshot.validated_orphaning_epoch = orphaning_epoch;
-        snapshot.pending_dependencies.clear();
-        return Ok(Some(snapshot));
+        cache.validated_orphaning_epoch = orphaning_epoch;
+        cache.pending_dependencies.clear();
+        return Ok(Some(cache));
     }
     let block_numbers = expected
         .iter()
@@ -95,31 +98,27 @@ pub(super) async fn revalidate(
     if live.into_iter().collect::<BTreeSet<_>>() != expected {
         return Ok(None);
     }
-    snapshot.validated_orphaning_epoch = orphaning_epoch;
-    snapshot.pending_dependencies.clear();
-    Ok(Some(snapshot))
+    cache.validated_orphaning_epoch = orphaning_epoch;
+    cache.pending_dependencies.clear();
+    Ok(Some(cache))
 }
 
 fn validation_candidates(
-    snapshot: &mut PriorSnapshot,
+    cache: &mut PriorCache,
     full_revalidation: bool,
 ) -> BTreeSet<(i64, String)> {
     if full_revalidation {
-        snapshot
+        cache
             .dependencies
             .values()
             .map(|dependency| (dependency.block_number, dependency.block_hash.clone()))
             .collect()
     } else {
-        std::mem::take(&mut snapshot.pending_dependencies)
+        std::mem::take(&mut cache.pending_dependencies)
     }
 }
 
-pub(crate) fn fold(
-    mut snapshot: PriorSnapshot,
-    events: Vec<PriorEventInput>,
-    normalized_events: &[NormalizedEvent],
-) -> PriorSnapshot {
+pub(crate) fn fold(mut cache: PriorCache, normalized_events: &[NormalizedEvent]) -> PriorCache {
     for event in normalized_events {
         let (Some(block_number), Some(block_hash)) = (event.block_number, &event.block_hash) else {
             continue;
@@ -131,26 +130,18 @@ pub(crate) fn fold(
                 .and_then(serde_json::Value::as_str),
             &event.event_identity,
         );
-        snapshot.dependencies.insert(
+        cache.dependencies.insert(
             key,
             PriorDependency {
                 block_number,
                 block_hash: block_hash.clone(),
             },
         );
-        snapshot
+        cache
             .pending_dependencies
             .insert((block_number, block_hash.clone()));
     }
-    let retained = events
-        .iter()
-        .map(|event| event.retained_state_key.as_str())
-        .collect::<BTreeSet<_>>();
-    snapshot
-        .dependencies
-        .retain(|state_key, _| retained.contains(state_key.as_str()));
-    snapshot.events = events;
-    snapshot
+    cache
 }
 
 #[cfg(test)]
@@ -183,54 +174,36 @@ mod tests {
         }
     }
 
-    fn snapshot() -> PriorSnapshot {
-        PriorSnapshot {
-            events: Vec::new(),
+    fn cache() -> PriorCache {
+        PriorCache {
             dependencies: BTreeMap::new(),
             validated_orphaning_epoch: 7,
             pending_dependencies: BTreeSet::new(),
         }
     }
 
-    fn prior(state_key: &str) -> PriorEventInput {
-        PriorEventInput {
-            retained_state_key: retained_prior_state_key(Some(state_key), "unused"),
-            chain_id: "chain".to_owned(),
-            namespace: "ens".to_owned(),
-            logical_name_id: None,
-            resource_id: None,
-            event_kind: "RecordChanged".to_owned(),
-            source_family: "test".to_owned(),
-            manifest_version: 1,
-            source_manifest_id: None,
-            state_scope: None,
-            block_timestamp: None,
-            after_state: json!({}),
-        }
-    }
-
     #[test]
     fn unchanged_epoch_checks_only_anchors_added_by_the_latest_fold() {
-        let mut snapshot = fold(snapshot(), vec![prior("new")], &[event("new")]);
+        let mut cache = fold(cache(), &[event("new")]);
 
         assert_eq!(
-            validation_candidates(&mut snapshot, false),
+            validation_candidates(&mut cache, false),
             BTreeSet::from([(10, "block-10".to_owned())])
         );
-        assert!(validation_candidates(&mut snapshot, false).is_empty());
+        assert!(validation_candidates(&mut cache, false).is_empty());
     }
 
     #[test]
     fn changed_epoch_checks_every_retained_anchor() {
-        let mut snapshot = snapshot();
-        snapshot.dependencies.insert(
+        let mut cache = cache();
+        cache.dependencies.insert(
             "old".to_owned(),
             PriorDependency {
                 block_number: 3,
                 block_hash: "block-3".to_owned(),
             },
         );
-        snapshot.dependencies.insert(
+        cache.dependencies.insert(
             "new".to_owned(),
             PriorDependency {
                 block_number: 10,
@@ -239,7 +212,7 @@ mod tests {
         );
 
         assert_eq!(
-            validation_candidates(&mut snapshot, true),
+            validation_candidates(&mut cache, true),
             BTreeSet::from([(3, "block-3".to_owned()), (10, "block-10".to_owned())])
         );
     }

@@ -2,7 +2,6 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::State;
-use crate::schema_v2::common::surface_labels;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::schema_v2) struct V2NameState {
@@ -18,7 +17,7 @@ pub(in crate::schema_v2) struct V2RawNameState {
     pub logical_name_id: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(in crate::schema_v2) struct V2TokenState {
     pub registry_contract_instance_id: Option<Uuid>,
     pub namespace: Option<String>,
@@ -89,6 +88,10 @@ impl State {
         let token_key = v2_key(&emitter, token_id);
         let mut replaced = Vec::new();
         let previous = self.v2_tokens.remove(&token_key);
+        if let Some(previous) = previous.as_ref() {
+            self.replace_v2_expiry_index(&token_key, previous.expiry, None);
+            self.remove_v2_current_surface(previous);
+        }
         if let Some(previous) = previous.as_ref()
             && let Some(previous_label) = previous.raw_label.as_ref()
         {
@@ -104,6 +107,8 @@ impl State {
             && replaced_key != token_key
             && let Some(displaced) = self.v2_tokens.remove(&replaced_key)
         {
+            self.replace_v2_expiry_index(&replaced_key, displaced.expiry, None);
+            self.remove_v2_current_surface(&displaced);
             let displaced_token = replaced_key
                 .rsplit_once(':')
                 .map(|(_, token)| token.to_owned())
@@ -111,7 +116,7 @@ impl State {
             replaced.push((displaced_token, displaced));
         }
         self.v2_tokens.insert(
-            token_key,
+            token_key.clone(),
             V2TokenState {
                 registry_contract_instance_id,
                 namespace: Some(namespace.to_owned()),
@@ -121,6 +126,7 @@ impl State {
                 ..V2TokenState::default()
             },
         );
+        self.replace_v2_expiry_index(&token_key, None, Some(expiry));
         replaced
     }
 
@@ -148,23 +154,31 @@ impl State {
                 .insert((emitter.clone(), raw_label.to_vec()), token_key.clone())
                 && displaced_key != token_key
             {
-                self.v2_tokens.remove(&displaced_key);
+                if let Some(displaced) = self.v2_tokens.remove(&displaced_key) {
+                    self.replace_v2_expiry_index(&displaced_key, displaced.expiry, None);
+                    self.remove_v2_current_name(&displaced);
+                }
             }
-            let existing = self
-                .v2_tokens
-                .get_mut(&token_key)
-                .expect("the restored ENSv2 token was checked above");
-            existing.registry_contract_instance_id =
-                registry_contract_instance_id.or(existing.registry_contract_instance_id);
-            existing.namespace = Some(namespace.to_owned());
-            existing.raw_label = Some(raw_label.to_vec());
-            existing.expiry = Some(expiry);
-            if registration.is_some() {
-                existing.registration = registration;
+            let previous_expiry;
+            {
+                let existing = self
+                    .v2_tokens
+                    .get_mut(&token_key)
+                    .expect("the restored ENSv2 token was checked above");
+                previous_expiry = existing.expiry;
+                existing.registry_contract_instance_id =
+                    registry_contract_instance_id.or(existing.registry_contract_instance_id);
+                existing.namespace = Some(namespace.to_owned());
+                existing.raw_label = Some(raw_label.to_vec());
+                existing.expiry = Some(expiry);
+                if registration.is_some() {
+                    existing.registration = registration;
+                }
             }
+            self.replace_v2_expiry_index(&token_key, previous_expiry, Some(expiry));
             return;
         }
-        let _ = self.install_v2_registration(
+        let replaced = self.install_v2_registration(
             &emitter,
             token_id,
             registry_contract_instance_id,
@@ -173,91 +187,12 @@ impl State {
             expiry,
             registration,
         );
-    }
-
-    pub(in crate::schema_v2) fn refresh_v2_names(
-        &mut self,
-        at_unix_timestamp: i64,
-    ) -> Vec<V2NameTransition> {
-        let mut transitions = Vec::new();
-        let keys = self.v2_tokens.keys().cloned().collect::<Vec<_>>();
-        for key in keys {
-            let Some((emitter, token_id)) = key.rsplit_once(':') else {
-                continue;
-            };
-            let Some(token) = self.v2_tokens.get(&key) else {
-                continue;
-            };
-            let (Some(namespace), Some(raw_label)) =
-                (token.namespace.as_ref(), token.raw_label.as_ref())
-            else {
-                continue;
-            };
-            let raw_name = self
-                .v2_registry_raw_suffix(emitter, namespace, at_unix_timestamp)
-                .map(|mut suffix| {
-                    suffix.insert(0, raw_label.clone());
-                    suffix
-                });
-            let name = raw_name
-                .as_ref()
-                .and_then(|raw_labels| surface_labels(raw_labels))
-                .map(|labels| {
-                    let namehash = crate::schema_v2::common::namehash(&labels);
-                    V2NameState {
-                        logical_name_id: format!("{namespace}:{namehash}"),
-                        labels,
-                        namehash,
-                    }
-                });
-            let shadow_name = raw_name.filter(|_| name.is_none()).map(|raw_labels| {
-                let namehash =
-                    crate::schema_v2::common::namehash_raw(raw_labels.iter().map(Vec::as_slice));
-                V2RawNameState {
-                    logical_name_id: format!("{namespace}:{namehash}"),
-                    raw_labels,
-                    namehash,
-                }
-            });
-            let previous = token.name.clone();
-            let previous_shadow = token.shadow_name.clone();
-            if previous != name || previous_shadow != shadow_name {
-                if let Some(previous) = previous.as_ref()
-                    && token.resource_id.is_some_and(|resource_id| {
-                        self.active_resources.get(&previous.logical_name_id) == Some(&resource_id)
-                    })
-                {
-                    self.active_resources.remove(&previous.logical_name_id);
-                }
-                if let Some(current) = name.as_ref() {
-                    self.known_surfaces.insert(current.logical_name_id.clone());
-                    if let Some(resource_id) = token.resource_id {
-                        self.active_resources
-                            .insert(current.logical_name_id.clone(), resource_id);
-                    }
-                }
-                transitions.push(V2NameTransition {
-                    registry: emitter.to_owned(),
-                    registry_contract_instance_id: token.registry_contract_instance_id,
-                    token_id: token_id.to_owned(),
-                    previous,
-                    previous_shadow,
-                    current: name.clone(),
-                    current_shadow: shadow_name.clone(),
-                    resource_id: token.resource_id,
-                    token_lineage_id: token.token_lineage_id,
-                    upstream_resource: token.upstream_resource.clone(),
-                    registration: token.registration.clone(),
-                    resolver: token.resolver.clone(),
-                    subregistry: token.subregistry.clone(),
-                });
-            }
-            if let Some(token) = self.v2_tokens.get_mut(&key) {
-                token.name = name;
-                token.shadow_name = shadow_name;
-            }
+        // Live interpretation preserves the historical one-shot behavior while producing the
+        // batch. A retained-event restore has no displaced token to refresh at the end, so clear
+        // only the opaque restored state here after the output boundary.
+        for (_, displaced) in &replaced {
+            self.remove_v2_active_resource(displaced);
         }
-        transitions
     }
 
     pub(in crate::schema_v2) fn v2_name_for_registration(
@@ -314,14 +249,20 @@ impl State {
         token_id: &str,
         expiry: u64,
     ) {
-        if let Some(entry) = self.v2_tokens.get_mut(&v2_key(emitter, token_id)) {
+        let key = v2_key(emitter, token_id);
+        let previous_expiry;
+        if let Some(entry) = self.v2_tokens.get_mut(&key) {
+            previous_expiry = entry.expiry;
             entry.expiry = Some(expiry);
             if let Some(registration) = entry.registration.as_mut()
                 && let Some(registration) = registration.as_object_mut()
             {
                 registration.insert("expiry".to_owned(), Value::from(expiry));
             }
+        } else {
+            return;
         }
+        self.replace_v2_expiry_index(&key, previous_expiry, Some(expiry));
     }
 
     pub(in crate::schema_v2) fn transfer_v2_registrant(
@@ -483,7 +424,9 @@ impl State {
         old_token_id: &str,
         new_token_id: &str,
     ) -> Option<V2TokenState> {
-        let state = self.v2_tokens.remove(&v2_key(emitter, old_token_id))?;
+        let old_key = v2_key(emitter, old_token_id);
+        let state = self.v2_tokens.remove(&old_key)?;
+        self.replace_v2_expiry_index(&old_key, state.expiry, None);
         let new_key = v2_key(emitter, new_token_id);
         if let Some(label) = state.raw_label.as_ref() {
             self.v2_entry_by_parent_label.insert(
@@ -491,7 +434,10 @@ impl State {
                 new_key.clone(),
             );
         }
-        self.v2_tokens.insert(new_key, state.clone());
+        if let Some(displaced) = self.v2_tokens.insert(new_key.clone(), state.clone()) {
+            self.replace_v2_expiry_index(&new_key, displaced.expiry, None);
+        }
+        self.replace_v2_expiry_index(&new_key, None, state.expiry);
         Some(state)
     }
 
@@ -501,12 +447,10 @@ impl State {
         token_id: &str,
     ) -> Option<V2TokenState> {
         let emitter = emitter.to_ascii_lowercase();
-        let state = self.v2_tokens.remove(&v2_key(&emitter, token_id))?;
-        if let (Some(name), Some(resource_id)) = (state.name.as_ref(), state.resource_id)
-            && self.active_resources.get(&name.logical_name_id) == Some(&resource_id)
-        {
-            self.active_resources.remove(&name.logical_name_id);
-        }
+        let token_key = v2_key(&emitter, token_id);
+        let state = self.v2_tokens.remove(&token_key)?;
+        self.replace_v2_expiry_index(&token_key, state.expiry, None);
+        self.remove_v2_current_name(&state);
         if let Some(label) = state.raw_label.as_ref() {
             self.v2_entry_by_parent_label
                 .remove(&(emitter, label.clone()));
@@ -515,7 +459,7 @@ impl State {
     }
 
     pub(in crate::schema_v2) fn observe_name_surface(&mut self, logical_name_id: String) {
-        self.known_surfaces.insert(logical_name_id);
+        self.remember_known_surface(logical_name_id);
     }
 
     pub(in crate::schema_v2) fn name_link_by_namehash(
@@ -528,6 +472,48 @@ impl State {
             let resource_id = self.active_resources.get(&logical_name_id).copied();
             (logical_name_id, resource_id)
         })
+    }
+
+    fn replace_v2_expiry_index(
+        &mut self,
+        token_key: &str,
+        previous: Option<u64>,
+        current: Option<u64>,
+    ) {
+        if previous == current {
+            return;
+        }
+        if let Some(previous) = previous {
+            self.v2_expiries.remove(&(previous, token_key.to_owned()));
+        }
+        if let Some(current) = current {
+            self.v2_expiries.insert((current, token_key.to_owned()));
+        }
+    }
+
+    fn remove_v2_current_name(&mut self, token: &V2TokenState) {
+        self.remove_v2_current_surface(token);
+        self.remove_v2_active_resource(token);
+    }
+
+    fn remove_v2_current_surface(&mut self, token: &V2TokenState) {
+        let logical_name_id = token
+            .name
+            .as_ref()
+            .map(|name| name.logical_name_id.as_str());
+        self.replace_v2_current_surface(logical_name_id, None);
+    }
+
+    fn remove_v2_active_resource(&mut self, token: &V2TokenState) {
+        let logical_name_id = token
+            .name
+            .as_ref()
+            .map(|name| name.logical_name_id.as_str());
+        if let (Some(logical_name_id), Some(resource_id)) = (logical_name_id, token.resource_id)
+            && self.active_resources.get(logical_name_id) == Some(&resource_id)
+        {
+            self.active_resources.remove(logical_name_id);
+        }
     }
 }
 

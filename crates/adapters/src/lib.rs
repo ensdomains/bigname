@@ -8,8 +8,9 @@ pub mod schema_v2;
 
 #[cfg(feature = "schema-v2")]
 pub use schema_v2::{
-    AddressAdmissionInput, BatchInput as SchemaV2BatchInput, BatchOutput as SchemaV2BatchOutput,
-    DiscoveryRuleInput, ManifestInput as SchemaV2ManifestInput,
-    NormalizedEvent as SchemaV2NormalizedEvent, PriorEventInput,
-    RawLogInput as SchemaV2RawLogInput, interpret_schema_v2_batch,
+    AdapterSession as SchemaV2AdapterSession, AddressAdmissionInput,
+    BatchInput as SchemaV2BatchInput, BatchOutput as SchemaV2BatchOutput, DiscoveryRuleInput,
+    ManifestInput as SchemaV2ManifestInput, NormalizedEvent as SchemaV2NormalizedEvent,
+    PriorEventInput, RawLogInput as SchemaV2RawLogInput, interpret_schema_v2_batch,
+    interpret_schema_v2_batch_incremental,
 };
