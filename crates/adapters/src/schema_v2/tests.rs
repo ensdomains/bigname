@@ -1327,6 +1327,380 @@ fn wrapper_incremental_updates_keep_identity_and_prior_state_across_batches() ->
 }
 
 #[test]
+fn incremental_session_state_matches_a_fresh_compacted_restore() -> anyhow::Result<()> {
+    let labels = vec!["session".to_owned(), "eth".to_owned()];
+    let node = super::common::namehash(&labels).parse::<B256>()?;
+    let manifest = manifest_with_events(
+        56,
+        "ens",
+        "ens_v1_wrapper_l1",
+        &[
+            (
+                "NameWrapped",
+                "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)",
+                &["name_wrapper"],
+                &[
+                    "TokenControlTransferred",
+                    "ExpiryChanged",
+                    "PermissionScopeChanged",
+                    "SurfaceBound",
+                    "AuthorityEpochChanged",
+                ],
+            ),
+            (
+                "ExpiryExtended",
+                "event ExpiryExtended(bytes32 indexed node, uint64 expiry)",
+                &["name_wrapper"],
+                &["ExpiryChanged"],
+            ),
+            (
+                "FusesSet",
+                "event FusesSet(bytes32 indexed node, uint32 fuses)",
+                &["name_wrapper"],
+                &["PermissionScopeChanged"],
+            ),
+        ],
+    );
+    let blocks = |number| RawBlockInput {
+        chain_id: CHAIN.to_owned(),
+        block_hash: format!("block-{number}"),
+        block_number: number,
+        block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(number),
+        canonicality_state: "canonical".to_owned(),
+    };
+    let (first, session) = interpret_test_batch_incremental(
+        BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![manifest.clone()],
+            discovery_rules: Vec::new(),
+            admissions: vec![admission(56, "name_wrapper")],
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: vec![raw_at(
+                NameWrapped {
+                    node,
+                    name: b"\x07session\x03eth\0".to_vec().into(),
+                    owner: CONTRACT.parse()?,
+                    fuses: 1,
+                    expiry: 42,
+                }
+                .encode_log_data(),
+                1,
+                0,
+                CONTRACT,
+            )],
+        },
+        None,
+    )?;
+    let prior = seam::fold_prior_events(Vec::new(), &first.normalized_events, &[blocks(1)])?;
+    let second_input = BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest.clone()],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(56, "name_wrapper")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw_at(
+            ExpiryExtended { node, expiry: 84 }.encode_log_data(),
+            2,
+            0,
+            CONTRACT,
+        )],
+    };
+    let mut fresh_second_input = second_input.clone();
+    fresh_second_input.prior_events = prior.clone();
+    let fresh_second = interpret_test_batch(fresh_second_input)?;
+    let (second, session) = interpret_test_batch_incremental(second_input, Some(session))?;
+    assert_eq!(second, fresh_second);
+    let prior = seam::fold_prior_events(prior, &second.normalized_events, &[blocks(2)])?;
+    let (third, session) = interpret_test_batch_incremental(
+        BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![manifest.clone()],
+            discovery_rules: Vec::new(),
+            admissions: vec![admission(56, "name_wrapper")],
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: vec![raw_at(
+                FusesSet { node, fuses: 3 }.encode_log_data(),
+                3,
+                0,
+                CONTRACT,
+            )],
+        },
+        Some(session),
+    )?;
+    let prior = seam::fold_prior_events(prior, &third.normalized_events, &[blocks(3)])?;
+    let (_, restored) = interpret_test_batch_incremental(
+        BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![manifest],
+            discovery_rules: Vec::new(),
+            admissions: vec![admission(56, "name_wrapper")],
+            prior_events: prior,
+            blocks: Vec::new(),
+            raw_logs: Vec::new(),
+        },
+        None,
+    )?;
+
+    assert_eq!(session, restored);
+    Ok(())
+}
+
+#[test]
+fn incremental_session_refreshes_names_when_v2_suffix_anchors_change() -> anyhow::Result<()> {
+    const REPLACEMENT_ANCHOR: &str = "0x0000000000000000000000000000000000000043";
+    let manifest = manifest(
+        57,
+        "ens_v2_registry_l1",
+        "LabelRegistered",
+        "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)",
+        &["registry"],
+        &["RegistrationGranted"],
+    );
+    let label = "anchor-change";
+    let (first, session) = interpret_test_batch_incremental(
+        BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![manifest.clone()],
+            discovery_rules: Vec::new(),
+            admissions: vec![admission(57, "registry")],
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: vec![raw_at(
+                v2_registry::LabelRegistered {
+                    tokenId: versioned_token(label, 1),
+                    labelHash: keccak256(label.as_bytes()),
+                    label: label.to_owned(),
+                    owner: CONTRACT.parse()?,
+                    expiry: 1_000,
+                    sender: CONTRACT.parse()?,
+                }
+                .encode_log_data(),
+                1,
+                0,
+                CONTRACT,
+            )],
+        },
+        None,
+    )?;
+    let prior = seam::fold_prior_events(
+        Vec::new(),
+        &first.normalized_events,
+        &[RawBlockInput {
+            chain_id: CHAIN.to_owned(),
+            block_hash: "block-1".to_owned(),
+            block_number: 1,
+            block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1),
+            canonicality_state: "canonical".to_owned(),
+        }],
+    )?;
+    let mut replacement_admission = admission(57, "registry");
+    replacement_admission.address = REPLACEMENT_ANCHOR.to_owned();
+    let (_, resumed) = interpret_test_batch_incremental(
+        BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![manifest.clone()],
+            discovery_rules: Vec::new(),
+            admissions: vec![replacement_admission.clone()],
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: Vec::new(),
+        },
+        Some(session),
+    )?;
+    let (_, restored) = interpret_test_batch_incremental(
+        BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![manifest],
+            discovery_rules: Vec::new(),
+            admissions: vec![replacement_admission],
+            prior_events: prior,
+            blocks: Vec::new(),
+            raw_logs: Vec::new(),
+        },
+        None,
+    )?;
+
+    assert_eq!(resumed, restored);
+    Ok(())
+}
+
+#[test]
+fn incremental_v2_displacement_drops_the_replaced_active_resource() -> anyhow::Result<()> {
+    let manifest = manifest_with_events(
+        85,
+        "ens",
+        "ens_v2_registry_l1",
+        &[
+            (
+                "LabelRegistered",
+                "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)",
+                &["registry"],
+                &["RegistrationGranted"],
+            ),
+            (
+                "LabelReserved",
+                "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender)",
+                &["registry"],
+                &["RegistrationReserved"],
+            ),
+            (
+                "TokenResource",
+                "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)",
+                &["registry"],
+                &["TokenResourceLinked"],
+            ),
+        ],
+    );
+    let block = |number| RawBlockInput {
+        chain_id: CHAIN.to_owned(),
+        block_hash: format!("block-{number}"),
+        block_number: number,
+        block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(number),
+        canonicality_state: "canonical".to_owned(),
+    };
+    let label = "displaced";
+    let first_token = versioned_token(label, 1);
+    let second_token = versioned_token(label, 2);
+    let sender: Address = CONTRACT.parse()?;
+    let (first, session) = interpret_test_batch_incremental(
+        BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![manifest.clone()],
+            discovery_rules: Vec::new(),
+            admissions: vec![admission(85, "registry")],
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: vec![
+                raw_at(
+                    v2_registry::LabelRegistered {
+                        tokenId: first_token,
+                        labelHash: keccak256(label.as_bytes()),
+                        label: label.to_owned(),
+                        owner: sender,
+                        expiry: 1_000,
+                        sender,
+                    }
+                    .encode_log_data(),
+                    1,
+                    0,
+                    CONTRACT,
+                ),
+                raw_at(
+                    v2_registry::TokenResource {
+                        tokenId: first_token,
+                        resource: U256::from(99),
+                    }
+                    .encode_log_data(),
+                    1,
+                    1,
+                    CONTRACT,
+                ),
+            ],
+        },
+        None,
+    )?;
+    let prior = seam::fold_prior_events(Vec::new(), &first.normalized_events, &[block(1)])?;
+    let (second, resumed) = interpret_test_batch_incremental(
+        BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![manifest.clone()],
+            discovery_rules: Vec::new(),
+            admissions: vec![admission(85, "registry")],
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: vec![raw_at(
+                v2_registry::LabelReserved {
+                    tokenId: second_token,
+                    labelHash: keccak256(label.as_bytes()),
+                    label: label.to_owned(),
+                    expiry: 1_000,
+                    sender,
+                }
+                .encode_log_data(),
+                2,
+                0,
+                CONTRACT,
+            )],
+        },
+        Some(session),
+    )?;
+    let prior = seam::fold_prior_events(prior, &second.normalized_events, &[block(2)])?;
+    let (_, restored) = interpret_test_batch_incremental(
+        BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![manifest],
+            discovery_rules: Vec::new(),
+            admissions: vec![admission(85, "registry")],
+            prior_events: prior,
+            blocks: Vec::new(),
+            raw_logs: Vec::new(),
+        },
+        None,
+    )?;
+
+    assert_eq!(resumed, restored);
+    Ok(())
+}
+
+#[test]
+fn incremental_v2_delta_refreshes_only_the_affected_topology_component() {
+    const OTHER_REGISTRY: &str = "0x0000000000000000000000000000000000000043";
+    let retained_registration = |registry: &str, ordinal: usize, timestamp: i64| {
+        let token_id = format!("0x{ordinal:064x}");
+        PriorEventInput {
+            retained_state_key: format!("retained:{registry}:{ordinal}"),
+            chain_id: CHAIN.to_owned(),
+            namespace: "ens".to_owned(),
+            logical_name_id: None,
+            resource_id: None,
+            event_kind: "RegistrationGranted".to_owned(),
+            source_family: "ens_v2_registry_l1".to_owned(),
+            manifest_version: 1,
+            source_manifest_id: Some(58),
+            state_scope: Some(format!("{registry}:-:{token_id}:-:LabelRegistered")),
+            block_timestamp: Some(OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(timestamp)),
+            after_state: json!({
+                "source_event":"LabelRegistered",
+                "token_id":token_id,
+                "raw_label_hex":hex::encode(format!("name-{ordinal}")),
+                "expiry":10_000,
+            }),
+        }
+    };
+    let retained = (0..128)
+        .map(|ordinal| retained_registration(CONTRACT, ordinal, 1))
+        .collect::<Vec<_>>();
+    let anchors = vec![
+        (
+            CONTRACT.to_owned(),
+            "ens".to_owned(),
+            vec!["eth".to_owned()],
+        ),
+        (
+            OTHER_REGISTRY.to_owned(),
+            "ens".to_owned(),
+            vec!["eth".to_owned()],
+        ),
+    ];
+    let mut state = super::state::State::new(retained.clone(), anchors.clone());
+    let delta = vec![retained_registration(OTHER_REGISTRY, 999, 2)];
+
+    super::state::reset_v2_refresh_visits();
+    state.apply_prior_event_delta(delta.clone());
+
+    assert_eq!(
+        super::state::v2_refresh_visits(),
+        1,
+        "a one-token delta must not revisit the unrelated retained registry"
+    );
+    let restored = super::state::State::new(retained.into_iter().chain(delta).collect(), anchors);
+    assert_eq!(state, restored);
+}
+
+#[test]
 fn registrar_adapter_emits_raw_namehash_identity_and_preimages() -> anyhow::Result<()> {
     let encoded = NameRegistered {
         name: "alice".to_owned(),
@@ -8227,6 +8601,28 @@ fn interpret_test_batch(mut input: BatchInput) -> anyhow::Result<BatchOutput> {
         input.blocks = blocks.into_values().collect();
     }
     super::interpret_schema_v2_batch(input)
+}
+
+fn interpret_test_batch_incremental(
+    mut input: BatchInput,
+    session: Option<AdapterSession>,
+) -> anyhow::Result<(BatchOutput, AdapterSession)> {
+    if input.blocks.is_empty() {
+        let mut blocks = std::collections::BTreeMap::new();
+        for raw in &input.raw_logs {
+            blocks
+                .entry((raw.block_number, raw.block_hash.clone()))
+                .or_insert_with(|| RawBlockInput {
+                    chain_id: raw.chain_id.clone(),
+                    block_hash: raw.block_hash.clone(),
+                    block_number: raw.block_number,
+                    block_timestamp: raw.block_timestamp,
+                    canonicality_state: raw.canonicality_state.clone(),
+                });
+        }
+        input.blocks = blocks.into_values().collect();
+    }
+    super::interpret_schema_v2_batch_incremental(input, session)
 }
 
 fn assert_batch_referential_integrity(

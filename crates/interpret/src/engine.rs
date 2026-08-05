@@ -1,5 +1,6 @@
-use std::{collections::HashMap, sync::Mutex};
+use std::{collections::HashMap, sync::Mutex, time::Instant};
 
+use bigname_adapters::SchemaV2AdapterSession;
 use sqlx::PgPool;
 
 use crate::{InterpretError, Result, load, recompute, write};
@@ -38,7 +39,7 @@ pub struct BatchOutcome {
 
 pub struct Engine {
     pool: PgPool,
-    prior_sessions: Mutex<HashMap<SessionKey, PriorSession>>,
+    prior_sessions: Mutex<HashMap<String, PriorSession>>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -49,8 +50,10 @@ struct SessionKey {
 }
 
 struct PriorSession {
+    key: SessionKey,
     next_block: i64,
-    snapshot: load::PriorSnapshot,
+    cache: load::PriorCache,
+    adapter_session: SchemaV2AdapterSession,
 }
 
 impl Engine {
@@ -62,6 +65,8 @@ impl Engine {
     }
 
     pub async fn run_batch(&self, request: BatchRequest) -> Result<BatchOutcome> {
+        let profile = std::env::var_os("BIGNAME_INTERPRET_FOLD_PROFILE").is_some();
+        let batch_started = Instant::now();
         validate_request(&request)?;
         let target = load::marker(&self.pool, &request.chain_id, request.to_block)
             .await?
@@ -121,11 +126,11 @@ impl Engine {
             from_block: request.from_block,
             mode: request.mode,
         };
-        let cached_prior_snapshot = if request.resume_current.is_some() {
-            self.cached_prior_snapshot(&session_key, *batch_from)?
-        } else {
-            None
-        };
+        let phase_started = Instant::now();
+        let cached_prior =
+            self.take_prior_session(&session_key, *batch_from, request.resume_current.is_some())?;
+        profile_phase(profile, "take_prior_session", phase_started, None);
+        let phase_started = Instant::now();
         let loaded = load::batch_input(
             &self.pool,
             &request.chain_id,
@@ -135,14 +140,21 @@ impl Engine {
                 .resume_current
                 .as_ref()
                 .map(|marker| (marker.number, marker.hash.as_str())),
-            cached_prior_snapshot,
+            cached_prior,
         )
         .await?;
-        let prior_snapshot = loaded.prior_snapshot;
+        let restored_event_count = loaded.input.prior_events.len();
+        profile_phase(
+            profile,
+            "batch_input",
+            phase_started,
+            Some(restored_event_count),
+        );
+        let prior_cache = loaded.prior_cache;
+        let adapter_session = loaded.adapter_session;
         let input = loaded.input;
-        let prior_events = input.prior_events.clone();
-        let batch_blocks = input.blocks.clone();
-        let loaded_markers = batch_blocks
+        let loaded_markers = input
+            .blocks
             .iter()
             .map(|block| (block.block_number, block.block_hash.clone()))
             .collect::<Vec<_>>();
@@ -154,28 +166,34 @@ impl Engine {
             write_lineage.push((resume.number, resume.hash.clone()));
         }
         write_lineage.extend(loaded_markers.iter().cloned());
-        let output =
-            bigname_adapters::schema_v2::interpret_schema_v2_batch(input).map_err(|error| {
-                InterpretError::data_integrity(format!(
-                    "hash-covered adapter interpretation failed: {error:#}"
-                ))
-            })?;
-        let next_prior_events = bigname_adapters::schema_v2::seam::fold_prior_events(
-            prior_events,
-            &output.normalized_events,
-            &batch_blocks,
-        )
-        .map_err(|error| {
-            InterpretError::data_integrity(format!(
-                "hash-covered adapter prior-state fold failed: {error:#}"
-            ))
-        })?;
-        let next_prior_snapshot =
-            load::fold_prior_snapshot(prior_snapshot, next_prior_events, &output.normalized_events);
+        let phase_started = Instant::now();
+        let (output, adapter_session) =
+            bigname_adapters::interpret_schema_v2_batch_incremental(input, adapter_session)
+                .map_err(|error| {
+                    InterpretError::data_integrity(format!(
+                        "hash-covered adapter interpretation failed: {error:#}"
+                    ))
+                })?;
+        profile_phase(
+            profile,
+            "adapter_restore_and_batch",
+            phase_started,
+            Some(restored_event_count),
+        );
+        let phase_started = Instant::now();
+        let next_prior_cache = load::fold_prior_cache(prior_cache, &output.normalized_events);
+        let retained_state_count = next_prior_cache.dependencies.len();
+        profile_phase(
+            profile,
+            "fold_prior_cache_delta",
+            phase_started,
+            Some(retained_state_count),
+        );
         let complete = *batch_to == target.number;
         let redo_range =
             matches!(request.mode, RunMode::Redo).then_some((request.from_block, request.to_block));
         let prepare_redo_range = redo_range.is_some() && request.resume_current.is_none();
+        let phase_started = Instant::now();
         let estimated_write_bytes = write::batch(
             &self.pool,
             &request.chain_id,
@@ -186,16 +204,26 @@ impl Engine {
             &output,
         )
         .await?;
-        self.store_prior_snapshot(
+        profile_phase(profile, "write_batch", phase_started, None);
+        let phase_started = Instant::now();
+        self.store_prior_session(
             session_key,
             batch_to.saturating_add(1),
-            next_prior_snapshot,
+            next_prior_cache,
+            adapter_session,
             complete,
         )?;
+        profile_phase(
+            profile,
+            "store_prior_session",
+            phase_started,
+            Some(retained_state_count),
+        );
         let current = Marker {
             number: *batch_to,
             hash: batch_hash.clone(),
         };
+        profile_phase(profile, "batch_total", batch_started, None);
         Ok(BatchOutcome {
             complete,
             current,
@@ -204,52 +232,83 @@ impl Engine {
         })
     }
 
-    fn cached_prior_snapshot(
+    fn take_prior_session(
         &self,
         key: &SessionKey,
         next_block: i64,
-    ) -> Result<Option<load::PriorSnapshot>> {
-        let sessions = self.prior_sessions.lock().map_err(|_| {
+        allow_resume: bool,
+    ) -> Result<Option<load::CachedPrior>> {
+        let mut sessions = self.prior_sessions.lock().map_err(|_| {
             InterpretError::transient("interpret prior-state session lock was poisoned")
         })?;
-        Ok(sessions
-            .get(key)
-            .filter(|session| session.next_block == next_block)
-            .map(|session| session.snapshot.clone()))
+        // Moving the value out prevents a retained copy from overlapping the active batch and
+        // makes the chain ID itself the one-session ownership boundary.
+        let session = sessions.remove(&key.chain_id);
+        Ok(session
+            .filter(|session| {
+                allow_resume && session.key == *key && session.next_block == next_block
+            })
+            .map(|session| load::CachedPrior {
+                cache: session.cache,
+                adapter_session: session.adapter_session,
+            }))
     }
 
-    fn store_prior_snapshot(
+    fn store_prior_session(
         &self,
         key: SessionKey,
         next_block: i64,
-        snapshot: load::PriorSnapshot,
+        cache: load::PriorCache,
+        adapter_session: SchemaV2AdapterSession,
         complete: bool,
     ) -> Result<()> {
         let mut sessions = self.prior_sessions.lock().map_err(|_| {
             InterpretError::transient("interpret prior-state session lock was poisoned")
         })?;
-        update_prior_sessions(&mut sessions, key, next_block, snapshot, complete);
+        let chain_id = key.chain_id.clone();
+        let session = (!(matches!(key.mode, RunMode::Redo) && complete)).then_some(PriorSession {
+            key,
+            next_block,
+            cache,
+            adapter_session,
+        });
+        update_prior_sessions(&mut sessions, chain_id, session);
         Ok(())
     }
 }
 
-fn update_prior_sessions(
-    sessions: &mut HashMap<SessionKey, PriorSession>,
-    key: SessionKey,
-    next_block: i64,
-    snapshot: load::PriorSnapshot,
-    complete: bool,
+fn profile_phase(enabled: bool, phase: &str, started: Instant, retained_events: Option<usize>) {
+    if !enabled {
+        return;
+    }
+    let rss_kib = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status.lines().find_map(|line| {
+                line.strip_prefix("VmRSS:")?
+                    .split_whitespace()
+                    .next()?
+                    .parse::<u64>()
+                    .ok()
+            })
+        })
+        .unwrap_or(0);
+    eprintln!(
+        "interpret-fold-profile phase={phase} elapsed_ms={} retained_events={} rss_kib={rss_kib}",
+        started.elapsed().as_millis(),
+        retained_events.unwrap_or(0),
+    );
+}
+
+fn update_prior_sessions<T>(
+    sessions: &mut HashMap<String, T>,
+    chain_id: String,
+    session: Option<T>,
 ) {
-    if matches!(key.mode, RunMode::Redo) && complete {
-        sessions.retain(|candidate, _| candidate.chain_id != key.chain_id);
+    if let Some(session) = session {
+        sessions.insert(chain_id, session);
     } else {
-        sessions.insert(
-            key,
-            PriorSession {
-                next_block,
-                snapshot,
-            },
-        );
+        sessions.remove(&chain_id);
     }
 }
 

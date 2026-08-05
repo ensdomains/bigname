@@ -17,6 +17,7 @@ schema-v2 = [
     "dep:alloy-sol-types",
     "dep:anyhow",
     "dep:bigname-domain",
+    "dep:imbl",
     "dep:serde",
     "dep:serde_json",
     "dep:time",
@@ -29,6 +30,7 @@ alloy-primitives = { workspace = true, optional = true }
 alloy-sol-types = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
 bigname-domain = { workspace = true, optional = true }
+imbl = { version = "7.0.0", optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { version = "1.0.145", features = ["raw_value"], optional = true }
 time = { version = "0.3.47", features = ["serde"], optional = true }

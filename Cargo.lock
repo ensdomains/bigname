@@ -1667,6 +1667,7 @@ dependencies = [
  "anyhow",
  "bigname-domain",
  "bigname-manifests",
+ "imbl",
  "serde",
  "serde_json",
  "time",

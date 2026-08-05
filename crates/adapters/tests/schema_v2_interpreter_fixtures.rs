@@ -6,7 +6,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, BatchOutput, DiscoveryRuleInput, ManifestInput,
-    RawBlockInput, RawLogInput, interpret_schema_v2_batch,
+    RawBlockInput, RawLogInput, interpret_schema_v2_batch, interpret_schema_v2_batch_incremental,
+    seam,
 };
 use bigname_manifests::{LoadedManifest, load_repository};
 use serde::Deserialize;
@@ -153,7 +154,8 @@ fn schema_v2_output_seam_semantically_matches_the_committed_raw_event_tripwire()
         let expected = expected_cases.remove(&case.id).with_context(|| {
             format!("raw-event case {} has no unique committed output", case.id)
         })?;
-        let output = interpret_schema_v2_batch(batch_input(&case, &expected, &checked_in)?)
+        let input = batch_input(&case, &expected, &checked_in)?;
+        let output = interpret_with_incremental_equivalence(&case.id, input)
             .with_context(|| format!("schema-v2 output seam rejected golden case {}", case.id))?;
         assert_semantic_output(&case, &expected, &output)?;
     }
@@ -164,6 +166,35 @@ fn schema_v2_output_seam_semantically_matches_the_committed_raw_event_tripwire()
         );
     }
     Ok(())
+}
+
+fn interpret_with_incremental_equivalence(case_id: &str, input: BatchInput) -> Result<BatchOutput> {
+    let fresh = interpret_schema_v2_batch(input.clone())?;
+    let (incremental, live_session) = interpret_schema_v2_batch_incremental(input.clone(), None)?;
+    assert_eq!(
+        incremental, fresh,
+        "{case_id}: incremental output differs from fresh interpretation"
+    );
+
+    let retained = seam::fold_prior_events(
+        input.prior_events.clone(),
+        &incremental.normalized_events,
+        &input.blocks,
+    )?;
+    let (_, restored_session) = interpret_schema_v2_batch_incremental(
+        BatchInput {
+            prior_events: retained,
+            blocks: Vec::new(),
+            raw_logs: Vec::new(),
+            ..input
+        },
+        None,
+    )?;
+    assert_eq!(
+        live_session, restored_session,
+        "{case_id}: live incremental adapter state differs from a compacted restore"
+    );
+    Ok(incremental)
 }
 
 fn assert_semantic_output(

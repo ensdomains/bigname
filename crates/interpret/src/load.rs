@@ -1,3 +1,4 @@
+use bigname_adapters::SchemaV2AdapterSession;
 use bigname_adapters::schema_v2::seam::{ADMISSION_DISCOVERY_EDGE_KINDS, OBSERVATION_KEY};
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, DiscoveryRuleInput, ManifestInput, RawBlockInput,
@@ -10,11 +11,17 @@ use crate::{InterpretError, Result};
 mod cache;
 mod prior;
 
-pub(crate) use cache::{PriorSnapshot, fold as fold_prior_snapshot};
+pub(crate) use cache::{PriorCache, fold as fold_prior_cache};
+
+pub(crate) struct CachedPrior {
+    pub cache: PriorCache,
+    pub adapter_session: SchemaV2AdapterSession,
+}
 
 pub(crate) struct LoadedBatch {
     pub input: BatchInput,
-    pub prior_snapshot: PriorSnapshot,
+    pub prior_cache: PriorCache,
+    pub adapter_session: Option<SchemaV2AdapterSession>,
 }
 
 type ManifestRow = (i64, i64, String, String, String, String, String, String);
@@ -38,7 +45,7 @@ pub(crate) async fn batch_input(
     from_block: i64,
     to_block: i64,
     resume_marker: Option<(i64, &str)>,
-    prior_snapshot: Option<PriorSnapshot>,
+    cached_prior: Option<CachedPrior>,
 ) -> Result<LoadedBatch> {
     let mut transaction = pool.begin().await.map_err(|error| {
         InterpretError::database("failed to begin interpret input snapshot", error)
@@ -51,19 +58,39 @@ pub(crate) async fn batch_input(
         })?;
     validate_snapshot_resume_marker(&mut transaction, chain_id, resume_marker).await?;
     let orphaning_epoch = cache::orphaning_epoch(&mut transaction, chain_id).await?;
-    let prior_snapshot = match prior_snapshot {
-        Some(snapshot) => {
-            match cache::revalidate(&mut transaction, chain_id, snapshot, orphaning_epoch).await? {
-                Some(snapshot) => snapshot,
-                None => cache::freshly_loaded(
-                    prior::events(&mut transaction, chain_id, from_block).await?,
-                    orphaning_epoch,
+    let (restored, adapter_session) = match cached_prior {
+        Some(CachedPrior {
+            cache: prior_cache,
+            adapter_session,
+        }) => {
+            match cache::revalidate(&mut transaction, chain_id, prior_cache, orphaning_epoch)
+                .await?
+            {
+                Some(prior_cache) => (
+                    cache::PriorRestore {
+                        events: Vec::new(),
+                        cache: prior_cache,
+                    },
+                    Some(adapter_session),
                 ),
+                None => {
+                    drop(adapter_session);
+                    (
+                        cache::freshly_loaded(
+                            prior::events(&mut transaction, chain_id, from_block).await?,
+                            orphaning_epoch,
+                        ),
+                        None,
+                    )
+                }
             }
         }
-        None => cache::freshly_loaded(
-            prior::events(&mut transaction, chain_id, from_block).await?,
-            orphaning_epoch,
+        None => (
+            cache::freshly_loaded(
+                prior::events(&mut transaction, chain_id, from_block).await?,
+                orphaning_epoch,
+            ),
+            None,
         ),
     };
     let manifests = load_manifests(&mut transaction, chain_id).await?;
@@ -84,12 +111,13 @@ pub(crate) async fn batch_input(
             chain_id: chain_id.to_owned(),
             discovery_rules,
             admissions,
-            prior_events: prior_snapshot.events.clone(),
+            prior_events: restored.events,
             blocks,
             raw_logs,
             manifests,
         },
-        prior_snapshot,
+        prior_cache: restored.cache,
+        adapter_session,
     })
 }
 

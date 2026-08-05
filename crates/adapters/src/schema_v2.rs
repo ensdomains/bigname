@@ -13,11 +13,15 @@ mod model;
 mod normalized;
 mod protocol;
 pub mod seam;
+mod session;
 mod state;
 mod state_key;
 mod state_restore;
 
 pub use model::*;
+pub use session::{
+    AdapterSession, interpret_schema_v2_batch, interpret_schema_v2_batch_incremental,
+};
 
 use anyhow::{Context, bail};
 
@@ -391,63 +395,6 @@ fn v1_authority_kind(source_family: &str) -> &'static str {
         "ens_v1_registrar_l1" | "basenames_base_registrar" => "registrar",
         _ => "registry_only",
     }
-}
-
-pub fn interpret_schema_v2_batch(input: BatchInput) -> anyhow::Result<BatchOutput> {
-    validate_order(&input)?;
-    let mut catalog = Catalog::new(input.manifests, input.discovery_rules, input.admissions)?;
-    let mut state = State::new(input.prior_events, catalog.v2_suffix_anchors());
-    let mut output = BatchOutput::default();
-    let mut raw_logs = input.raw_logs.into_iter().peekable();
-    for block in input.blocks {
-        settle_block_boundary(&catalog, &block, &mut state, &mut output)?;
-        while raw_logs.peek().is_some_and(|raw| {
-            raw.block_number == block.block_number && raw.block_hash == block.block_hash
-        }) {
-            let raw = raw_logs.next().expect("peeked raw log");
-            interpret_raw(&mut catalog, &raw, &mut state, &mut output)?;
-        }
-    }
-    if let Some(raw) = raw_logs.next() {
-        bail!(
-            "raw log {}:{} at block {} {} has no matching loaded live-lineage block",
-            raw.transaction_hash,
-            raw.log_index,
-            raw.block_number,
-            raw.block_hash
-        );
-    }
-    protocol::reconcile_batch(&mut output);
-    Ok(output)
-}
-
-fn interpret_raw(
-    catalog: &mut Catalog,
-    raw: &RawLogInput,
-    state: &mut State,
-    output: &mut BatchOutput,
-) -> anyhow::Result<()> {
-    let Some(selected) = catalog.select(raw)? else {
-        return Ok(());
-    };
-    let interpreted = match protocol::interpret(&selected, raw, state) {
-        Ok(interpreted) => interpreted,
-        Err(error) if selected.match_all && crate::evm_abi::is_malformed_event_log(&error) => {
-            return Ok(());
-        }
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "{} adapter failed for raw log {}:{}",
-                    selected.source.source_family, raw.block_hash, raw.log_index
-                )
-            });
-        }
-    };
-    normalized::materialize(&selected, raw, interpreted.events.clone(), state, output);
-    identity::materialize(&selected, raw, &interpreted, state, output)?;
-    discovery::materialize(catalog, &selected, raw, interpreted.discovery, output)?;
-    Ok(())
 }
 
 fn validate_order(input: &BatchInput) -> anyhow::Result<()> {

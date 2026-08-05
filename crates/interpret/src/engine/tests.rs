@@ -1,47 +1,33 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
-use super::{RunMode, SessionKey, update_prior_sessions};
-use crate::load::PriorSnapshot;
+use super::update_prior_sessions;
 
-fn empty_snapshot() -> PriorSnapshot {
-    PriorSnapshot {
-        events: Vec::new(),
-        dependencies: BTreeMap::new(),
-        validated_orphaning_epoch: 0,
-        pending_dependencies: Default::default(),
-    }
+#[test]
+fn a_new_completed_normal_session_replaces_the_chain_slot() {
+    let mut sessions = HashMap::new();
+    update_prior_sessions(&mut sessions, "chain".to_owned(), Some("normal-from-0"));
+    update_prior_sessions(
+        &mut sessions,
+        "other-chain".to_owned(),
+        Some("other-normal"),
+    );
+    update_prior_sessions(&mut sessions, "chain".to_owned(), Some("normal-from-100"));
+
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions.get("chain"), Some(&"normal-from-100"));
 }
 
 #[test]
-fn completed_redo_evicts_every_session_for_its_chain() {
+fn completed_redo_evicts_the_chain_slot() {
     let mut sessions = HashMap::new();
-    let normal = SessionKey {
-        chain_id: "chain".to_owned(),
-        from_block: 0,
-        mode: RunMode::Normal,
-    };
-    let other_chain = SessionKey {
-        chain_id: "other-chain".to_owned(),
-        from_block: 0,
-        mode: RunMode::Normal,
-    };
-    let redo = SessionKey {
-        chain_id: "chain".to_owned(),
-        from_block: 100,
-        mode: RunMode::Redo,
-    };
-    update_prior_sessions(&mut sessions, normal, 500, empty_snapshot(), false);
+    update_prior_sessions(&mut sessions, "chain".to_owned(), Some("normal"));
     update_prior_sessions(
         &mut sessions,
-        other_chain.clone(),
-        500,
-        empty_snapshot(),
-        false,
+        "other-chain".to_owned(),
+        Some("other-normal"),
     );
-    update_prior_sessions(&mut sessions, redo.clone(), 200, empty_snapshot(), false);
-    assert_eq!(sessions.len(), 3);
+    update_prior_sessions(&mut sessions, "chain".to_owned(), None);
 
-    update_prior_sessions(&mut sessions, redo, 201, empty_snapshot(), true);
     assert_eq!(sessions.len(), 1);
-    assert!(sessions.contains_key(&other_chain));
+    assert_eq!(sessions.get("other-chain"), Some(&"other-normal"));
 }
