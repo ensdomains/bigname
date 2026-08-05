@@ -56,14 +56,17 @@ async fn wrapped_renewal_tracks_registrar_expiry_without_wrapper_event() -> Resu
         "current-controller renewal touches the registrar, leaving wrapper storage stale"
     );
 
-    let ready_sql =
-        support::canonical_event_ready_sql("ens:renewwrapped.eth", "RegistrationRenewed", None);
+    let ready_sql = support::canonical_event_ready_sql(
+        "ens:0xdb165fc3a095544e91e941fb7d1956cf94364560468d92a0cb20f43437202240",
+        "RegistrationRenewed",
+        None,
+    );
     let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
 
     let (renewal_tx, renewal_expiry, registrar_resource): (String, i64, Uuid) = sqlx::query_as(
         "SELECT transaction_hash, (after_state->>'expiry')::BIGINT, resource_id \
              FROM normalized_events \
-             WHERE logical_name_id = 'ens:renewwrapped.eth' \
+             WHERE logical_name_id = 'ens:0xdb165fc3a095544e91e941fb7d1956cf94364560468d92a0cb20f43437202240' \
                AND event_kind = 'RegistrationRenewed' \
                AND source_family = 'ens_v1_registrar_l1' \
                AND canonicality_state = 'canonical' \
@@ -75,7 +78,7 @@ async fn wrapped_renewal_tracks_registrar_expiry_without_wrapper_event() -> Resu
 
     let renewal_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
-         WHERE logical_name_id = 'ens:renewwrapped.eth' \
+         WHERE logical_name_id = 'ens:0xdb165fc3a095544e91e941fb7d1956cf94364560468d92a0cb20f43437202240' \
            AND event_kind = 'RegistrationRenewed' \
            AND canonicality_state = 'canonical'",
     )
@@ -100,7 +103,7 @@ async fn wrapped_renewal_tracks_registrar_expiry_without_wrapper_event() -> Resu
 
     let last_wrapper_expiry: i64 = sqlx::query_scalar(
         "SELECT (after_state->>'expiry')::BIGINT FROM normalized_events \
-         WHERE logical_name_id = 'ens:renewwrapped.eth' \
+         WHERE logical_name_id = 'ens:0xdb165fc3a095544e91e941fb7d1956cf94364560468d92a0cb20f43437202240' \
            AND source_family = 'ens_v1_wrapper_l1' \
            AND event_kind = 'ExpiryChanged' \
            AND canonicality_state = 'canonical' \
@@ -121,7 +124,7 @@ async fn wrapped_renewal_tracks_registrar_expiry_without_wrapper_event() -> Resu
 
     let wrapper_resource: Uuid = sqlx::query_scalar(
         "SELECT resource_id FROM normalized_events \
-         WHERE logical_name_id = 'ens:renewwrapped.eth' \
+         WHERE logical_name_id = 'ens:0xdb165fc3a095544e91e941fb7d1956cf94364560468d92a0cb20f43437202240' \
            AND source_family = 'ens_v1_wrapper_l1' \
            AND after_state->>'authority_kind' = 'wrapper' \
            AND resource_id IS NOT NULL \
@@ -240,7 +243,10 @@ async fn wrapped_erc1155_single_and_batch_transfers_preserve_identity() -> Resul
     .fetch_all(&run.db.pool)
     .await?;
     assert_eq!(single_transfers.len(), 1);
-    assert_eq!(single_transfers[0].0, "ens:singlemove.eth");
+    assert_eq!(
+        single_transfers[0].0,
+        support::schema_v2_logical_name_id("ens:singlemove.eth")
+    );
     assert_eq!(single_transfers[0].4, format!("{alice:#x}"));
     assert_eq!(single_transfers[0].5, format!("{bob:#x}"));
 
@@ -265,9 +271,12 @@ async fn wrapped_erc1155_single_and_batch_transfers_preserve_identity() -> Resul
     assert_eq!(
         batch_transfers
             .iter()
-            .map(|row| row.0.as_str())
+            .map(|row| row.0.clone())
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from(["ens:batchmoveone.eth", "ens:batchmovetwo.eth"])
+        BTreeSet::from([
+            support::schema_v2_logical_name_id("ens:batchmoveone.eth"),
+            support::schema_v2_logical_name_id("ens:batchmovetwo.eth"),
+        ])
     );
     assert_eq!(
         batch_transfers
@@ -302,10 +311,11 @@ async fn wrapped_erc1155_single_and_batch_transfers_preserve_identity() -> Resul
     }
 
     let transfer_blocks: Vec<i64> = sqlx::query_scalar(
-        "SELECT block_number FROM raw_transactions \
+        "SELECT raw.block_number FROM raw_transactions raw \
+         JOIN chain_lineage lineage USING (chain_id, block_hash) \
          WHERE transaction_hash IN ($1, $2) \
-           AND canonicality_state = 'canonical' \
-         ORDER BY block_number",
+           AND lineage.canonicality_state = 'canonical' \
+         ORDER BY raw.block_number",
     )
     .bind(&single_tx)
     .bind(&batch_tx)
@@ -318,7 +328,7 @@ async fn wrapped_erc1155_single_and_batch_transfers_preserve_identity() -> Resul
     );
     let logical_name_ids = names
         .iter()
-        .map(|name| format!("ens:{name}"))
+        .map(|name| support::schema_v2_logical_name_id(&format!("ens:{name}")))
         .collect::<Vec<_>>();
 
     let registry_derivations: i64 = sqlx::query_scalar(
@@ -372,7 +382,7 @@ async fn assert_transferred_exact_shape(
     holder: Address,
     wrapper: Address,
 ) -> Result<()> {
-    let logical_name_id = format!("ens:{name}");
+    let logical_name_id = support::schema_v2_logical_name_id(&format!("ens:{name}"));
     let wrapper_control_events: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
          WHERE logical_name_id = $1 \
@@ -442,22 +452,19 @@ async fn assert_transferred_exact_shape(
         "registration registrant should follow the ERC1155 holder; body: {body}"
     );
     assert_eq!(
-        pointer(&body, "/declared_state/control"),
-        serde_json::json!({
-            "status": "unsupported",
-            "unsupported_reason": "ENSv1 wrapper effective control is not yet projected",
-        }),
-        "wrapper control must stay explicitly unsupported instead of leaking stale or holder-derived facets; body: {body}"
+        pointer(&body, "/declared_state/control/registrant"),
+        format!("{holder:#x}"),
+        "wrapper control should follow the ERC1155 holder; body: {body}"
     );
 
-    // The registration summary follows the ERC1155 holder, but wrapper
-    // effective control is deliberately not inferred from that shared fact.
+    // Wrapped-flow routing keeps the registration identity on its wrapper
+    // authority after holder rotation.
     let authority_key = pointer(&body, "/declared_state/registration/authority_key");
     assert!(
         authority_key
             .as_str()
-            .is_some_and(|key| key.starts_with("registrar:")),
-        "pinned stale registrar authority_key after wrapped holder rotation; body: {body}"
+            .is_some_and(|key| key.starts_with("wrapper:")),
+        "wrapper authority key was not retained after holder rotation; body: {body}"
     );
 
     Ok(())

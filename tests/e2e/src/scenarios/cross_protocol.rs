@@ -9,6 +9,8 @@ use crate::harness::{
 };
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
+const ETH_REORG_CHAIN: &str = "ethereum-e2e-composed-reorg";
+const BASE_REORG_CHAIN: &str = "base-e2e-composed-reorg";
 
 /// Strip corpus-minted identifiers and read-time fields so route bodies
 /// from two corpora over the SAME chain compare equal on everything that
@@ -21,6 +23,9 @@ fn strip_corpus_minted(value: &mut Value) {
         "surface_binding_id",
         "normalized_event_id",
         "normalized_event_ids",
+        "selected_event_ids",
+        "source_manifest_id",
+        "interpreter_state_key",
         "last_updated",
     ];
     match value {
@@ -139,11 +144,11 @@ async fn composed_mainnet_profile_serves_both_protocols_without_leakage() -> Res
 
     let ready_sql = "SELECT \
          EXISTS (SELECT 1 FROM normalized_events \
-          WHERE logical_name_id = 'ens:alice.eth' \
+          WHERE logical_name_id = 'ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec' \
             AND event_kind = 'RegistrationGranted' \
             AND canonicality_state = 'canonical') \
        AND EXISTS (SELECT 1 FROM normalized_events \
-          WHERE logical_name_id = 'basenames:alicebase.base.eth' \
+          WHERE logical_name_id = 'basenames:0xd194a2d2e1620922f3d56a474bc28bfc4f71402475e8fa8a6b3e787fbd3403d3' \
             AND event_kind = 'RegistrationGranted' \
             AND canonicality_state = 'canonical')";
     let composed = support::ingest_mainnet_composed_and_serve(
@@ -155,15 +160,15 @@ async fn composed_mainnet_profile_serves_both_protocols_without_leakage() -> Res
     )
     .await?;
 
-    // Row 1: both chains hold their own canonical checkpoints in one corpus.
-    let checkpoint_chains: Vec<String> =
-        sqlx::query_scalar("SELECT DISTINCT chain_id FROM chain_checkpoints ORDER BY chain_id")
+    // Both chains hold their own published schema-v2 heads in one corpus.
+    let published_head_chains: Vec<String> =
+        sqlx::query_scalar("SELECT DISTINCT chain_id FROM chain_heads ORDER BY chain_id")
             .fetch_all(&composed.db.pool)
             .await?;
     assert_eq!(
-        checkpoint_chains,
+        published_head_chains,
         vec!["base-mainnet".to_owned(), "ethereum-mainnet".to_owned()],
-        "both chains must checkpoint independently"
+        "both chains must publish independent stored heads"
     );
 
     // Row 1: per-protocol route bodies equal the single-protocol baselines
@@ -247,7 +252,14 @@ async fn composed_mainnet_profile_serves_both_protocols_without_leakage() -> Res
         "cross-protocol names must keep distinct resources"
     );
 
-    // Row 4: primary candidates coexist per coin type without leaking.
+    // Row 4: primary claims remain namespace-scoped. The generic ENSv1
+    // resolver emits `NameChanged`
+    // (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L18 @ ens_v1@91c966f);
+    // schema-v2 preserves it but does not admit it as a primary-name claim.
+    // The Basenames reverse registrar remains admitted for its deployment's
+    // coin type 2147492101
+    // (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L8 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L391 @ ens_v1@91c966f).
     let (status, ens_primary) = body(
         &composed,
         &format!("/v1/primary-names/{alice:#x}?namespace=ens&coin_type=60&mode=declared"),
@@ -255,8 +267,8 @@ async fn composed_mainnet_profile_serves_both_protocols_without_leakage() -> Res
     .await?;
     assert_eq!(status, 200, "ens primary failed: {ens_primary}");
     assert_eq!(
-        pointer(&ens_primary, "/declared_state/claimed_primary_name/name"),
-        "alice.eth"
+        pointer(&ens_primary, "/declared_state/claimed_primary_name/status"),
+        "not_found"
     );
     let (status, base_primary) = body(
         &composed,
@@ -273,13 +285,12 @@ async fn composed_mainnet_profile_serves_both_protocols_without_leakage() -> Res
     );
 
     // Row 6: the glue families' admission syncs into the corpus as stored
-    // manifest state on the ethereum chain (live runs derive no manifest
-    // bookkeeping events — those are backfill-only extras per the phase-3
-    // parity pin), and their placeholder role stays silent.
-    let glue_manifests: Vec<(String, String)> = sqlx::query_as(
-        "SELECT DISTINCT source_family, chain FROM manifest_versions \
+    // manifest state on the ethereum chain, and their placeholder role stays
+    // silent.
+    let glue_manifests: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT source_family, chain_id, manifest_version FROM manifest_versions \
          WHERE source_family IN ('basenames_l1_compat', 'basenames_execution') \
-         ORDER BY source_family",
+         ORDER BY source_family, manifest_version",
     )
     .fetch_all(&composed.db.pool)
     .await?;
@@ -288,11 +299,18 @@ async fn composed_mainnet_profile_serves_both_protocols_without_leakage() -> Res
         vec![
             (
                 "basenames_execution".to_owned(),
-                "ethereum-mainnet".to_owned()
+                "ethereum-mainnet".to_owned(),
+                1,
+            ),
+            (
+                "basenames_execution".to_owned(),
+                "ethereum-mainnet".to_owned(),
+                2,
             ),
             (
                 "basenames_l1_compat".to_owned(),
-                "ethereum-mainnet".to_owned()
+                "ethereum-mainnet".to_owned(),
+                1,
             ),
         ],
         "glue-family admission must sync on the ethereum chain"
@@ -314,6 +332,7 @@ async fn composed_mainnet_profile_serves_both_protocols_without_leakage() -> Res
             Some((
                 source_family.to_owned(),
                 entry["chain"].as_str()?.to_owned(),
+                entry["version"].as_i64()?,
             ))
         })
         .collect::<Vec<_>>();
@@ -374,6 +393,7 @@ async fn base_reorg_leaves_ethereum_canonicality_untouched() -> Result<()> {
     base_rpc.mine(2).await?;
     let eth_head = eth_rpc.block_number().await?;
     let base_head = base_rpc.block_number().await?;
+    let base_ancestor_hash = base_rpc.block_hash(base_head).await?;
     let base_snapshot = base_rpc.evm_snapshot().await?;
 
     let scratch = TempDir::create()?;
@@ -383,34 +403,60 @@ async fn base_reorg_leaves_ethereum_canonicality_untouched() -> Result<()> {
         &ens_deployment.manifest_targets(),
         &basenames_deployment.manifest_targets(),
     )?;
+    profile.retarget_chain("ethereum-mainnet", ETH_REORG_CHAIN)?;
+    profile.retarget_chain("base-mainnet", BASE_REORG_CHAIN)?;
     let db = HarnessDb::create().await?;
     let chain_rpc_urls = [
-        ("ethereum-mainnet", eth.url.as_str()),
-        ("base-mainnet", base.url.as_str()),
+        (ETH_REORG_CHAIN, eth.url.as_str()),
+        (BASE_REORG_CHAIN, base.url.as_str()),
     ];
-    // This scenario asserts same-session live reorg convergence. Keep the
-    // automatic historical replay handoff out of the readiness path so the
-    // losing and winning record facts must each be normalized by the live
-    // poll that observed them.
-    let mut session = pipeline::IndexerRunSession::start_with_live_poll_adapter_sync(
+    pipeline::run_rpc_ingest_redo(
         &root,
         &db.url,
+        &db.pool,
         &profile.root,
-        &chain_rpc_urls,
-        "composed-reorg",
+        ETH_REORG_CHAIN,
+        &eth.url,
+        0,
+        eth_head,
     )
     .await?;
-    session
-        .wait_for_chain_checkpoint(&db.pool, "ethereum-mainnet", eth_head, None)
-        .await?;
-    session
-        .wait_for_chain_checkpoint(&db.pool, "base-mainnet", base_head, None)
-        .await?;
-    let eth_checkpoint_before: i64 = sqlx::query_scalar(
-        "SELECT max(canonical_block_number) FROM chain_checkpoints WHERE chain_id = 'ethereum-mainnet'",
+    pipeline::run_existing_raw_spine(
+        &root,
+        &db.url,
+        &db.pool,
+        &profile.root,
+        ETH_REORG_CHAIN,
+        &eth.url,
+        eth_head,
     )
-    .fetch_one(&db.pool)
     .await?;
+    pipeline::run_rpc_ingest_redo(
+        &root,
+        &db.url,
+        &db.pool,
+        &profile.root,
+        BASE_REORG_CHAIN,
+        &base.url,
+        0,
+        base_head,
+    )
+    .await?;
+    pipeline::run_existing_raw_spine(
+        &root,
+        &db.url,
+        &db.pool,
+        &profile.root,
+        BASE_REORG_CHAIN,
+        &base.url,
+        base_head,
+    )
+    .await?;
+    let eth_head_before: i64 =
+        sqlx::query_scalar("SELECT max(latest_block_number) FROM chain_heads WHERE chain_id = $1")
+            .bind(ETH_REORG_CHAIN)
+            .fetch_one(&db.pool)
+            .await?;
 
     // Losing branch on Base only.
     basenames::set_base_text_record(
@@ -422,22 +468,45 @@ async fn base_reorg_leaves_ethereum_canonicality_untouched() -> Result<()> {
         "losing",
     )
     .await?;
+    let losing_event_block = base_rpc.block_number().await?;
+    let losing_hash = base_rpc.block_hash(losing_event_block).await?;
+    base_rpc.mine(3).await?;
     let losing_head = base_rpc.block_number().await?;
-    let losing_hash = base_rpc.block_hash(losing_head).await?;
-    let losing_ready_sql = "SELECT EXISTS (SELECT 1 FROM normalized_events \
-         WHERE logical_name_id = 'basenames:churner.base.eth' \
-           AND event_kind = 'RecordChanged' \
-           AND after_state->>'record_key' = 'text:branch' \
-           AND after_state->>'value' = 'losing' \
-           AND canonicality_state = 'canonical')";
-    session
-        .wait_for_chain_checkpoint(
-            &db.pool,
-            "base-mainnet",
-            losing_head,
-            Some(losing_ready_sql),
-        )
+    let losing_ready_sql = format!(
+        "SELECT EXISTS (SELECT 1 FROM normalized_events event \
+         JOIN chain_lineage lineage USING (chain_id, block_hash) \
+         WHERE event.chain_id = '{BASE_REORG_CHAIN}' \
+           AND event.logical_name_id = 'basenames:0x4d5ef02a96a4ee46c5ebdf480853dd812e13ca50d2dd5807c77d5db1a6e2f940' \
+           AND event.event_kind = 'RecordChanged' \
+           AND event.after_state->>'record_key' = 'text:branch' \
+           AND event.after_state->>'value' = 'losing' \
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))"
+    );
+    pipeline::run_rpc_ingest_redo(
+        &root,
+        &db.url,
+        &db.pool,
+        &profile.root,
+        BASE_REORG_CHAIN,
+        &base.url,
+        base_head + 1,
+        losing_head,
+    )
+    .await?;
+    pipeline::run_existing_raw_spine(
+        &root,
+        &db.url,
+        &db.pool,
+        &profile.root,
+        BASE_REORG_CHAIN,
+        &base.url,
+        losing_head,
+    )
+    .await?;
+    let losing_ready: bool = sqlx::query_scalar(&losing_ready_sql)
+        .fetch_one(&db.pool)
         .await?;
+    assert!(losing_ready, "losing Base branch was not interpreted");
 
     base_rpc.evm_revert(&base_snapshot).await?;
     basenames::set_base_text_record(
@@ -449,106 +518,162 @@ async fn base_reorg_leaves_ethereum_canonicality_untouched() -> Result<()> {
         "winning",
     )
     .await?;
+    let winning_event_block = base_rpc.block_number().await?;
+    let winning_hash = base_rpc.block_hash(winning_event_block).await?;
     base_rpc.mine(3).await?;
     let winning_head = base_rpc.block_number().await?;
-    let winning_ready_sql = "SELECT EXISTS (SELECT 1 FROM normalized_events \
-         WHERE logical_name_id = 'basenames:churner.base.eth' \
-           AND event_kind = 'RecordChanged' \
-           AND after_state->>'record_key' = 'text:branch' \
-           AND after_state->>'value' = 'winning' \
-           AND canonicality_state = 'canonical')";
-    session
-        .wait_for_chain_checkpoint(
-            &db.pool,
-            "base-mainnet",
-            winning_head,
-            Some(winning_ready_sql),
-        )
-        .await?;
-    session.stop().await?;
-    pipeline::worker_replay_all_current_projections(&root, &db.url).await?;
-
-    let orphaned_base_rows: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM raw_logs \
-         WHERE block_hash = $1 AND canonicality_state = 'orphaned'",
+    assert_eq!(
+        winning_head, losing_head,
+        "both Base forks stay at one height so the rewind stamp covers the winner"
+    );
+    let winning_ready_sql = format!(
+        "SELECT EXISTS (SELECT 1 FROM normalized_events event \
+         JOIN chain_lineage lineage USING (chain_id, block_hash) \
+         WHERE event.chain_id = '{BASE_REORG_CHAIN}' \
+           AND event.logical_name_id = 'basenames:0x4d5ef02a96a4ee46c5ebdf480853dd812e13ca50d2dd5807c77d5db1a6e2f940' \
+           AND event.event_kind = 'RecordChanged' \
+           AND event.after_state->>'record_key' = 'text:branch' \
+           AND event.after_state->>'value' = 'winning' \
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))"
+    );
+    pipeline::rewind_to_ancestor(
+        &root,
+        &db.url,
+        BASE_REORG_CHAIN,
+        base_head,
+        &base_ancestor_hash,
     )
+    .await?;
+    let losing_rows_before_redo: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events
+         WHERE chain_id = $1 AND block_hash = $2",
+    )
+    .bind(BASE_REORG_CHAIN)
     .bind(&losing_hash)
     .fetch_one(&db.pool)
     .await?;
     assert!(
-        orphaned_base_rows > 0,
-        "the losing Base branch must retain orphaned rows"
+        losing_rows_before_redo > 0,
+        "head publication must retain losing Base normalized rows until stamped redo starts"
     );
-    let orphaned_losing_records: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM normalized_events \
-         WHERE block_hash = $1 \
-           AND logical_name_id = 'basenames:churner.base.eth' \
-           AND event_kind = 'RecordChanged' \
-           AND after_state->>'record_key' = 'text:branch' \
-           AND after_state->>'value' = 'losing' \
-           AND canonicality_state = 'orphaned'",
+    let readable_losing_rows_before_redo: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events event
+         JOIN chain_lineage lineage USING (chain_id, block_hash)
+         WHERE event.chain_id = $1 AND event.block_hash = $2
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')",
     )
+    .bind(BASE_REORG_CHAIN)
     .bind(&losing_hash)
     .fetch_one(&db.pool)
     .await?;
     assert_eq!(
-        orphaned_losing_records, 1,
-        "the losing Base record must be retained exactly once as orphaned normalized history"
+        readable_losing_rows_before_redo, 0,
+        "the lineage join must exclude losing Base normalized rows before stamped redo"
     );
-    let canonical_losing_records: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM normalized_events \
-         WHERE block_hash = $1 \
-           AND logical_name_id = 'basenames:churner.base.eth' \
-           AND event_kind = 'RecordChanged' \
-           AND after_state->>'record_key' = 'text:branch' \
-           AND after_state->>'value' = 'losing' \
-           AND canonicality_state = 'canonical'",
+    pipeline::run_rpc_ingest_redo(
+        &root,
+        &db.url,
+        &db.pool,
+        &profile.root,
+        BASE_REORG_CHAIN,
+        &base.url,
+        base_head + 1,
+        winning_head,
     )
+    .await?;
+    pipeline::run_required_reorg_spine(
+        &root,
+        &db.url,
+        &db.pool,
+        &profile.root,
+        BASE_REORG_CHAIN,
+        &base.url,
+    )
+    .await?;
+    let winning_ready: bool = sqlx::query_scalar(&winning_ready_sql)
+        .fetch_one(&db.pool)
+        .await?;
+    assert!(winning_ready, "winning Base branch was not projected");
+
+    let retained_losing_raw_logs: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM raw_logs WHERE chain_id = $1 AND block_hash = $2")
+            .bind(BASE_REORG_CHAIN)
+            .bind(&losing_hash)
+            .fetch_one(&db.pool)
+            .await?;
+    assert!(
+        retained_losing_raw_logs > 0,
+        "the losing Base branch must retain its immutable raw logs"
+    );
+    let losing_lineage_state: String = sqlx::query_scalar(
+        "SELECT canonicality_state::text FROM chain_lineage
+         WHERE chain_id = $1 AND block_hash = $2",
+    )
+    .bind(BASE_REORG_CHAIN)
     .bind(&losing_hash)
     .fetch_one(&db.pool)
     .await?;
     assert_eq!(
-        canonical_losing_records, 0,
-        "the losing Base record must not survive as canonical normalized history"
+        losing_lineage_state, "orphaned",
+        "the losing Base branch must remain in permanent orphaned lineage"
+    );
+    let losing_normalized_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events
+         WHERE chain_id = $1 AND block_hash = $2",
+    )
+    .bind(BASE_REORG_CHAIN)
+    .bind(&losing_hash)
+    .fetch_one(&db.pool)
+    .await?;
+    assert_eq!(
+        losing_normalized_events, 0,
+        "completed interpret redo must remove the losing Base normalized derivation"
     );
     let winning_record: Option<String> = sqlx::query_scalar(
-        "SELECT after_state->>'value' FROM normalized_events \
-         WHERE logical_name_id = 'basenames:churner.base.eth' \
-           AND event_kind = 'RecordChanged' \
-           AND after_state->>'record_key' = 'text:branch' \
-           AND canonicality_state = 'canonical' \
-         ORDER BY block_number DESC LIMIT 1",
+        "SELECT event.after_state->>'value' FROM normalized_events event \
+         JOIN chain_lineage lineage USING (chain_id, block_hash) \
+         WHERE event.chain_id = $1 AND event.block_hash = $2 \
+           AND event.logical_name_id = 'basenames:0x4d5ef02a96a4ee46c5ebdf480853dd812e13ca50d2dd5807c77d5db1a6e2f940' \
+           AND event.event_kind = 'RecordChanged' \
+           AND event.after_state->>'record_key' = 'text:branch' \
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized') \
+         ORDER BY event.block_number DESC LIMIT 1",
     )
+    .bind(BASE_REORG_CHAIN)
+    .bind(&winning_hash)
     .fetch_optional(&db.pool)
     .await?;
     assert_eq!(
         winning_record.as_deref(),
         Some("winning"),
-        "the winning Base branch must be canonical"
+        "the winning Base branch must be readable through canonical lineage"
     );
 
-    // The ethereum chain never reorged: zero orphaned rows, checkpoint
-    // unmoved, and the name still serves.
+    // The ethereum chain never reorged: zero orphaned rows, its stored intake
+    // head stays fixed, and the name still serves.
     let orphaned_eth_rows: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM raw_logs \
-         WHERE chain_id = 'ethereum-mainnet' AND canonicality_state = 'orphaned'",
+        "SELECT count(*) FROM raw_logs raw \
+         JOIN chain_lineage lineage USING (chain_id, block_hash) \
+         WHERE raw.chain_id = $1 \
+           AND lineage.canonicality_state = 'orphaned'",
     )
+    .bind(ETH_REORG_CHAIN)
     .fetch_one(&db.pool)
     .await?;
     assert_eq!(
         orphaned_eth_rows, 0,
         "a Base reorg must not orphan ethereum rows"
     );
-    let eth_checkpoint_after: i64 = sqlx::query_scalar(
-        "SELECT max(canonical_block_number) FROM chain_checkpoints WHERE chain_id = 'ethereum-mainnet'",
-    )
-    .fetch_one(&db.pool)
-    .await?;
+    let eth_head_after: i64 =
+        sqlx::query_scalar("SELECT max(latest_block_number) FROM chain_heads WHERE chain_id = $1")
+            .bind(ETH_REORG_CHAIN)
+            .fetch_one(&db.pool)
+            .await?;
     assert_eq!(
-        eth_checkpoint_after, eth_checkpoint_before,
-        "the ethereum checkpoint must not move during a Base-only reorg"
+        eth_head_after, eth_head_before,
+        "the ethereum stored intake head must not move during a Base-only reorg"
     );
-    let api = pipeline::ApiServer::start(&root, &db.url, &chain_rpc_urls).await?;
+    let api = pipeline::ProjectionReader::start(&root, &db.url, &chain_rpc_urls).await?;
     let (status, steady) = api.get_json("/v1/names/ens/steady.eth").await?;
     assert_eq!(status, 200, "the ethereum name must still serve: {steady}");
     assert_eq!(

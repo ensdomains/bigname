@@ -235,10 +235,19 @@ that increases whenever head publication moves previously readable blocks to
 lineage checks; a changed value requires every retained prior-state block
 anchor to be checked again.
 
-**Normalized event** — the append-only, interpret-phase record of one semantic
-protocol transition, carrying identity, provenance, chain position, and
-before/after state. The event stream, not raw logs, is what projections
-consume. Cross-reference: event sourcing.
+**Normalized event** — the current-interpretation-epoch record of one semantic
+protocol transition, carrying identity, provenance, optional chain position,
+and before/after state. Normal forward interpretation appends events. For a
+block-anchored, chain-derived event, canonical readability comes from its
+block-anchor join to chain lineage, never from row-local canonicality alone. A
+reorg orphans the losing lineage and thereby excludes its retained event rows
+until the required bounded interpret redo deletes and re-derives the range.
+Unanchored manifest-control events such as `SourceManifestUpdated` instead use
+their row-local finalized state because they have no chain observation anchor
+and are not reorg-addressable. Durable raw facts and competing chain lineage,
+not superseded normalized events, are the permanent audit trail for chain
+events. The current event stream is what projections consume. See the [reorg
+and redo boundary](storage.md#reorg-and-redo-boundary).
 
 **Path class / support class** — the classification of a resolution's shape
 that decides which verified answers are publicly supported. Direct, alias-only,
@@ -247,6 +256,14 @@ refusal semantics, not a closed list: the docs also classify shapes such as
 ancestor-selected, linked-subregistry, CCIP-participating, transport-free, and
 offchain-gateway. A class is "frozen": fixed at admission and re-derived from
 stored inputs before any outcome persists as supported.
+
+**Plain-events redo** — the bounded interpret-redo model in which normalized
+events carry no revision or supersession history. A reorg leaves losing event
+rows physically present but unreadable through their orphaned lineage until
+required redo starts; redo then deletes and re-derives its selected range from
+readable raw facts. Durable raw facts and competing chain lineage preserve the
+audit trail instead of accumulating stale normalized derivations across
+interpreter versions.
 
 **Preimage observation / label preimage** — learning the human-readable string
 behind a name or label hash, from an event, a retained name surface, or a

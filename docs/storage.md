@@ -44,10 +44,13 @@ eligibility atomically with phase-lineage orphaning.
 
 The system of record splits into six layers.
 
-1. `chain_lineage` — block ancestry, fork points, hash-first reconciliation, head promotion, one durable header-anchor row per observed block hash.
+1. `chain_lineage` — block ancestry, fork points, hash-first reconciliation, head checkpoint publication, one durable header-anchor row per observed block hash.
 2. `raw_facts` — hot indexed replay facts: selected/admitted target logs, the minimum transaction/receipt fields needed to decode them, fetched call snapshots, optional header/log audit extensions, compact payload-cache metadata. Legacy `public.raw_code_hashes` rows and resolver-profile readers remain compiled only for the old worker's public-schema service until Stage C; no current runtime produces new rows, and schema-v2 projection does not read them. The replacement classifier uses manifest declarations and canonical ERC-1967 upgrade history; see [`manifests.md`](manifests.md#discovery-admission).
 3. `manifests_and_discovery` — source manifests, discovered edges, rollout flags.
-4. `identity_and_events` — `NameSurface`, `SurfaceBinding`, `resources`, `token_lineages`, and append-only `normalized_events`.
+4. `identity_and_events` — `NameSurface`, `SurfaceBinding`, `resources`,
+   `token_lineages`, and current-interpretation-epoch `normalized_events`.
+   Normal interpretation appends events; an explicit bounded interpret redo
+   replaces its selected event range as described below.
 5. `projections` — current-state and collection read models.
 6. `execution` — durable traces and steps, `execution_cache_outcomes`, invalidation records.
 
@@ -112,9 +115,12 @@ ENSv2 resolver `AliasChanged` and `Named*Resource` payloads with a structurally 
 
 UUID values are internal identities, not user-generated strings. `resource_id` and `token_lineage_id` survive projection rebuilds. Token IDs, node hashes, and resolver addresses are attributes, not identity anchors.
 
-### Append-only event IDs
+### Monotonic row IDs
 
-`bigint generated always as identity` for raw fact rows, normalized event rows, and projection job rows.
+Raw fact rows, normalized event rows, and projection job rows use
+`bigint generated always as identity`. Allocation is monotonic and deleted
+values are not reused; this is an identifier-allocation rule, not a promise
+that an interpret redo retains superseded normalized-event rows.
 
 ### Continuity rules
 
@@ -214,7 +220,7 @@ The current migrations create ordinary PostgreSQL tables for lineage, raw facts,
 - `timestamp`
 - checkpoint-promotion state
 
-Header audit fields are optional retention. The default lineage contract omits `logs_bloom`, `transactions_root`, `receipts_root`, and `state_root`; reorg repair walks backward through `(block_hash, parent_hash)` until it reaches a stored matching ancestor, then marks the losing stored branch and dependent facts noncanonical from that point forward.
+Header audit fields are optional retention. The default lineage contract omits `logs_bloom`, `transactions_root`, `receipts_root`, and `state_root`; reorg repair walks backward through `(block_hash, parent_hash)` until it reaches a stored matching ancestor, then marks the losing stored lineage noncanonical. Every dependent fact becomes unreadable as canonical through its mandatory lineage join; reorg repair does not require per-table orphan writes.
 
 An auditable-header retention mode stores those fields in `chain_header_audit` keyed by the same `(chain_id, block_hash)` so inspection tooling can explain or cross-check fetched payloads. Their absence cannot prevent canonicality repair, checkpoint promotion, replay over retained selected facts, or projection rebuilds. When both stored and incoming audit rows carry the same field, mismatches are hard storage conflicts.
 
@@ -228,15 +234,44 @@ Every fact-derived row that can be invalidated by reorg carries `chain_id`, `blo
 - `finalized`
 - `orphaned`
 
+For a block-anchored, chain-derived row, canonical readability is defined only
+by joining its `(chain_id, block_hash)` anchor to `chain_lineage`. The row-local
+`canonicality_state` records the replay/verification checkpoint-promotion
+lifecycle from `canonical` through `safe` and `finalized`; it may lag a reorg
+and is never a standalone readability predicate. Every consumer of a
+block-anchored row must apply the lineage join.
+
+Manifest-derived control events such as `SourceManifestUpdated` have no block
+anchor and therefore cannot join lineage. They use their row-local finalized
+state for project admission and are not reorg-addressable chain observations.
+This unanchored control-event rule never permits a consumer of a block-anchored
+row to skip the lineage join.
+
 Rules:
 
 - block hash is the identity anchor; block number is position only
-- fork detection marks affected rows `orphaned`; it does not delete them
-- reorg repair preserves lineage and normalized-event/identity canonicality for losing branches as audit truth; log-audit mode also preserves selected raw-log/transaction/receipt facts. Minimal raw-log retention may already have compacted those staging rows
-- evictable payload-cache bytes or compacted staging rows do not erase canonicality, normalized-event provenance, or replay-critical evidence retained by the selected policy
+- head publication marks displaced lineage `orphaned`; it never deletes the
+  losing lineage, and that one lineage mutation makes every anchored derived
+  row unreadable as canonical without per-table orphan writes
+- between head publication and the required interpret redo, losing-fork
+  normalized events remain physically present but are excluded from the
+  canonical-readable universe by the lineage join
+- interpret redo deletes the selected normalized-event range and re-derives it
+  from readable lineage; superseded losing-fork derivations are not retained
+  after that redo completes
+- reorg repair preserves permanent audit truth in lineage and durable raw
+  facts. Log-audit mode also preserves selected raw-log/transaction/receipt
+  facts; minimal raw-log retention may already have compacted non-audit
+  staging rows
+- evictable payload-cache bytes or compacted staging rows do not erase
+  permanent lineage anchors or replay-critical raw evidence retained by the
+  selected policy. Normalized-event provenance describes the current
+  interpretation epoch
 - optional header audit fields are verified when both stored and incoming audit rows carry them. A minimal replay does not conflict with an existing auditable row solely because it omitted those fields
 - projection rebuilds read rows that are `canonical`, `safe`, or `finalized` by default; history and audit tools may opt into `observed` and `orphaned` rows
 - canonical readability of block-anchored derived rows and normalized events requires both readable row-local state and a readable `chain_lineage` join on `(chain_id, block_hash)`; the row-local column records only the replay/verify canonicality-promotion lifecycle and may lag reorg state, so readers must never consult it without that lineage join. The only exemption is interpret's [discovery-edge](glossary.md#discovery-graph--discovery-edge) admission reads: they consume discovery-authority state with activation anchors and are healed by the stamped interpret redo; adding readable-lineage validation for each edge's `(chain_id, active_from_block_hash)` activation anchor remains ticketed hardening
+- before stamped redo replaces its range, audit tools may still inspect the
+  retained losing rows while labeling them from their orphaned lineage
 - normal phase targets use only that readable path. An `observed` suffix written before head publication is intake staging, not a downstream target
 - safe and finalized checkpoint promotion is monotonic per chain
 - `chain_heads.lineage_orphaning_epoch` is the per-chain [lineage orphaning epoch](glossary.md#lineage-orphaning-epoch). It increases only when head publication moves previously readable lineage to `orphaned`; ordinary head advancement and checkpoint promotion preserve it
@@ -264,11 +299,24 @@ adapter repair, coverage proof, normalized-event supersession, or
 resolver-profile convergence.
 
 Derived schema-v2 repair is an explicit `interpret` redo over a complete
-ingested range. Redo preparation orphans derived identities and events anchored
-in the selected range, replays the range through the schema-v2 interpreter, and
-re-anchors stable identities when the winning facts reproduce them. An
-interrupted multi-batch redo remains explicit persisted redo state and must
-resume; its intermediate orphaning is not a completed projection boundary.
+ingested range. Head publication first orphans the losing lineage, immediately
+excluding its anchored normalized events through the mandatory lineage join
+while retaining those event rows physically. Their row-local canonicality may
+lag during this window. Redo preparation then deletes normalized events in the
+selected range, orphans derived identities anchored there, replays the range
+through the schema-v2 interpreter, and re-anchors stable identities when the
+winning facts reproduce them. An interrupted multi-batch redo remains explicit
+persisted redo state and must resume; its intermediate state is not a completed
+projection boundary.
+
+This bounded delete-and-re-derive behavior is the intentional
+[plain-events redo](glossary.md#plain-events-redo) rule and a deliberate
+divergence from the previous wording that promised permanent retention of
+losing normalized events. Keeping superseded derivations across interpreter
+versions would require the event revision and supersession machinery removed
+in Stage B and would otherwise accumulate stale copies of history. Durable raw
+facts plus permanent competing chain lineage are the audit trail; normalized
+events are the current interpreter epoch's derivation of the readable universe.
 `recompute-flags` is the bounded normalizer-version repair mode. Under the
 Interpret and Project phase locks, it first uses the existing scoped Project
 machinery to refresh `primary_names_current.claim_name_is_normalized`, then
@@ -691,7 +739,10 @@ phase-runner commands.
 ## Migration rules
 
 - Schema changes land through checked-in migrations only.
-- Append-only tables prefer additive changes over destructive rewrites.
+- Tables explicitly documented as append-only prefer additive changes over
+  destructive rewrites. `normalized_events` is not one of those tables: it is
+  the current interpretation epoch, and a bounded interpret redo intentionally
+  deletes and re-derives its selected range.
 - Old-schema migrations, including `backfill_*`, normalized replay, coverage,
   reconciliation, and repair tables, remain immutable even after their Rust
   writers are deleted.

@@ -5,19 +5,21 @@ use alloy_primitives::{Address, keccak256};
 use anyhow::{Context, Result};
 use toml::Value;
 
-/// Generate a temporary manifest profile for the local chain by copying
+/// Generate a temporary
+/// [deployment profile](../../../../docs/glossary.md#deployment-profile) for
+/// the local chain by copying
 /// every version file of the shipped mainnet ENSv1 family manifests and
 /// re-pointing each declared root and contract role at the locally deployed
 /// address with its real deploy block. Rollout statuses, capability flags,
 /// ABI declarations, and discovery rules are preserved verbatim, so the
-/// generated profile carries the shipped semantics — including the active
+/// generated deployment profile carries the shipped semantics — including the active
 /// registry v3 admission with its old-registry role and discovery rules.
 /// Optional authored root `code_hash` pins are deliberately removed after
 /// target substitution because a production hash does not describe the local
-/// deployment or a placeholder. The checked-in profiles currently declare no
+/// deployment or a placeholder. The checked-in deployment profiles currently declare no
 /// such pins, but this harness does not test production code-hash drift pins.
-/// ENSv1 resolver-profile admission still compares code hashes observed from
-/// the local seed and target deployments.
+/// ENSv1 resolver-profile admission remains exact-address classification from
+/// the generated declared list; local bytecode identity does not widen it.
 /// Roles a scenario does not deploy are re-pointed at deterministic
 /// placeholder addresses (no code, no logs). Nothing under the checked-in
 /// `manifests/` tree changes.
@@ -29,10 +31,51 @@ use toml::Value;
 /// does not watch the registry" finding).
 ///
 /// The root directory is named `manifests-e2e` so the derived deployment
-/// profile is `e2e`; chain identity stays `ethereum-mainnet`, matching the
-/// provider label the harness hands the indexer.
+/// deployment profile is `e2e`; chain identity stays `ethereum-mainnet`, matching the
+/// chain label the fixture harness records for the phase-runner.
 pub struct LocalProfile {
     pub root: PathBuf,
+}
+
+impl LocalProfile {
+    /// Present a generated local deployment profile under a non-production chain label.
+    /// The production ingest plan deliberately rejects JSON-RPC for
+    /// `ethereum-mainnet`; provider-fault scenarios use this alias so they can
+    /// exercise the shipped RPC ingest engine without weakening that contract.
+    pub fn retarget_chain(&self, from: &str, to: &str) -> Result<()> {
+        fn visit(directory: &Path, from: &str, to: &str, changed: &mut usize) -> Result<()> {
+            for entry in std::fs::read_dir(directory)? {
+                let path = entry?.path();
+                if path.is_dir() {
+                    visit(&path, from, to, changed)?;
+                    continue;
+                }
+                if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
+                    continue;
+                }
+                let raw = std::fs::read_to_string(&path)?;
+                let mut document: Value = raw.parse()?;
+                let Some(chain) = document.get_mut("chain") else {
+                    continue;
+                };
+                if chain.as_str() != Some(from) {
+                    continue;
+                }
+                *chain = Value::String(to.to_owned());
+                std::fs::write(&path, toml::to_string(&document)?)?;
+                *changed += 1;
+            }
+            Ok(())
+        }
+
+        let mut changed = 0;
+        visit(&self.root, from, to, &mut changed)?;
+        anyhow::ensure!(
+            changed > 0,
+            "generated deployment profile contained no {from} manifests"
+        );
+        Ok(())
+    }
 }
 
 const FAMILIES: &[&str] = &[

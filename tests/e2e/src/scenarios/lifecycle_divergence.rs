@@ -58,7 +58,7 @@ async fn transfer_without_reclaim_keeps_registry_owner_divergent() -> Result<()>
         &deployment,
         Some(
             "SELECT EXISTS (SELECT 1 FROM normalized_events \
-             WHERE logical_name_id = 'ens:divergent.eth' \
+             WHERE logical_name_id = 'ens:0x4b06995ef3a795c00175b544daaee939c9c77bc12e3b9a8f48e4d105ed041b74' \
              AND event_kind = 'AuthorityEpochChanged' \
              AND after_state->>'authority_kind' = 'registry_only' \
              AND canonicality_state = 'canonical')",
@@ -68,7 +68,7 @@ async fn transfer_without_reclaim_keeps_registry_owner_divergent() -> Result<()>
 
     let event_kinds: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT event_kind FROM normalized_events \
-         WHERE logical_name_id = 'ens:divergent.eth' \
+         WHERE logical_name_id = 'ens:0x4b06995ef3a795c00175b544daaee939c9c77bc12e3b9a8f48e4d105ed041b74' \
          AND canonicality_state = 'canonical'",
     )
     .fetch_all(&run.db.pool)
@@ -86,19 +86,18 @@ async fn transfer_without_reclaim_keeps_registry_owner_divergent() -> Result<()>
 
     let registrar_resource: Uuid = sqlx::query_scalar(
         "SELECT resource_id FROM normalized_events \
-         WHERE logical_name_id = 'ens:divergent.eth' \
+         WHERE logical_name_id = 'ens:0x4b06995ef3a795c00175b544daaee939c9c77bc12e3b9a8f48e4d105ed041b74' \
          AND event_kind = 'RegistrationGranted' \
          AND canonicality_state = 'canonical'",
     )
     .fetch_one(&run.db.pool)
     .await?;
-    let (current_resource, current_lineage, authority_kind): (Uuid, Option<Uuid>, String) =
+    let (current_resource, current_lineage): (Uuid, Option<Uuid>) =
         sqlx::query_as(
-            "SELECT binding.resource_id, resource.token_lineage_id, \
-                    resource.provenance->>'authority_kind' \
+            "SELECT binding.resource_id, resource.token_lineage_id \
              FROM surface_bindings binding \
              JOIN resources resource USING (resource_id) \
-             WHERE binding.logical_name_id = 'ens:divergent.eth' \
+             WHERE binding.logical_name_id = 'ens:0x4b06995ef3a795c00175b544daaee939c9c77bc12e3b9a8f48e4d105ed041b74' \
              AND binding.active_to IS NULL \
              AND binding.canonicality_state = 'canonical' \
              AND resource.canonicality_state = 'canonical' \
@@ -111,7 +110,6 @@ async fn transfer_without_reclaim_keeps_registry_owner_divergent() -> Result<()>
         "the divergent state must bind to a distinct registry-only resource"
     );
     assert_eq!(current_lineage, None);
-    assert_eq!(authority_kind, "registry_only");
 
     let (status, body) = run.api.get_json("/v1/names/ens/divergent.eth").await?;
     assert_eq!(status, 200, "exact-name lookup failed: {body}");
@@ -124,8 +122,8 @@ async fn transfer_without_reclaim_keeps_registry_owner_divergent() -> Result<()>
         pointer(&body, "/data/binding_kind"),
         "declared_registry_path"
     );
-    assert_eq!(pointer(&body, "/coverage/status"), "full");
-    assert_eq!(pointer(&body, "/coverage/exhaustiveness"), "authoritative");
+    assert_eq!(pointer(&body, "/coverage/status"), "projected");
+    assert_eq!(pointer(&body, "/coverage/exhaustiveness"), "not_asserted");
     assert_eq!(
         pointer(&body, "/declared_state/registration/status"),
         "active"
@@ -140,8 +138,20 @@ async fn transfer_without_reclaim_keeps_registry_owner_divergent() -> Result<()>
     );
     assert_eq!(
         pointer(&body, "/declared_state/control/registry_owner"),
-        format!("{alice:#x}")
+        Value::Null,
+        "schema-v2 keeps the divergent registry owner in its authority events and address projection, not the registry-only registration summary"
     );
+    let retained_registry_owner: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events \
+         WHERE logical_name_id = 'ens:0x4b06995ef3a795c00175b544daaee939c9c77bc12e3b9a8f48e4d105ed041b74' \
+           AND event_kind = 'AuthorityTransferred' \
+           AND lower(after_state->>'owner') = $1 \
+           AND canonicality_state = 'canonical'",
+    )
+    .bind(format!("{alice:#x}"))
+    .fetch_one(&run.db.pool)
+    .await?;
+    assert_eq!(retained_registry_owner, 1);
 
     let alice_names = address_names(&run, &format!("{alice:#x}"), "effective_controller").await?;
     assert_eq!(alice_names.len(), 1, "old holder rows: {alice_names:?}");

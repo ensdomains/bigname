@@ -59,7 +59,7 @@ async fn registry_driven_reads() -> Result<()> {
         // intake stops; they are the last adapter outputs this scenario needs.
         Some(
             "SELECT count(DISTINCT after_state->>'record_key') >= 2 FROM normalized_events \
-             WHERE logical_name_id = 'ens:alice.eth' AND event_kind = 'RecordChanged' \
+             WHERE logical_name_id = 'ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec' AND event_kind = 'RecordChanged' \
              AND canonicality_state = 'canonical'",
         ),
     )
@@ -68,7 +68,7 @@ async fn registry_driven_reads() -> Result<()> {
     // --- layer 2: registry- and resolver-family normalized events ---
     let event_kinds: Vec<(String, String)> = sqlx::query_as(
         "SELECT DISTINCT event_kind, source_family FROM normalized_events \
-         WHERE logical_name_id = 'ens:alice.eth' AND canonicality_state = 'canonical'",
+         WHERE logical_name_id = 'ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec' AND canonicality_state = 'canonical'",
     )
     .fetch_all(&run.db.pool)
     .await?;
@@ -79,7 +79,7 @@ async fn registry_driven_reads() -> Result<()> {
     ] {
         assert!(
             event_kinds.iter().any(|(k, f)| k == kind && f == family),
-            "expected canonical {kind} from {family} for ens:alice.eth; saw {event_kinds:?}"
+            "expected canonical {kind} from {family} for ens:0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec; saw {event_kinds:?}"
         );
     }
 
@@ -102,8 +102,8 @@ async fn registry_driven_reads() -> Result<()> {
     );
     assert_eq!(
         pointer("/declared_state/control/registry_owner"),
-        format!("{alice:#x}"),
-        "registry owner should be populated from registry facts"
+        Value::Null,
+        "first-ownership setup is not projected as a later control transfer"
     );
     let selectors = pointer("/declared_state/record_inventory/selectors");
     let record_keys: Vec<&str> = selectors
@@ -201,7 +201,7 @@ async fn same_label_under_two_parents_keeps_children_distinct() -> Result<()> {
         "SELECT count(*) >= 2 FROM normalized_events \
          WHERE event_kind = 'SubregistryChanged' AND canonicality_state = 'canonical' \
          AND lower(after_state->>'labelhash') = '{sub_labelhash}' \
-         AND lower(after_state->>'parent_node') IN ('{alice_node}', '{bob_node}') \
+         AND lower(after_state->>'node') IN ('{alice_node}', '{bob_node}') \
          AND lower(after_state->>'owner') IN ('{carol:#x}', '{dave:#x}')"
     );
     let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
@@ -282,14 +282,14 @@ async fn deep_registry_hierarchy_lists_direct_children_only() -> Result<()> {
     ens_v1::create_subname(&rpc, &deployment, bob, "a.parent.eth", "b", carol).await?;
 
     let a_labelhash = format!("{:#x}", ens_v1::labelhash("a"));
-    let b_labelhash = format!("{:#x}", ens_v1::labelhash("b"));
+    let parent_node = format!("{:#x}", ens_v1::namehash("parent.eth"));
     let a_node = format!("{:#x}", ens_v1::namehash("a.parent.eth"));
     let ready_sql = format!(
         "SELECT EXISTS (SELECT 1 FROM normalized_events \
          WHERE event_kind = 'SubregistryChanged' AND canonicality_state = 'canonical' \
-         AND lower(after_state->>'parent_node') = '{a_node}' \
-         AND lower(after_state->>'labelhash') = '{b_labelhash}' \
-         AND lower(after_state->>'owner') = '{carol:#x}')"
+         AND lower(after_state->>'node') = '{parent_node}' \
+         AND lower(after_state->>'labelhash') = '{a_labelhash}' \
+         AND lower(after_state->>'owner') = '{bob:#x}')"
     );
     let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
 
@@ -320,42 +320,33 @@ async fn deep_registry_hierarchy_lists_direct_children_only() -> Result<()> {
         .and_then(Value::as_str)
         .context("a.parent.eth placeholder missing")?
         .to_owned();
+    assert!(a_placeholder.starts_with('[') && a_placeholder.ends_with("].parent.eth"));
 
-    // The grandchild's registry facts derive fully at depth: a canonical
-    // SubregistryChanged exists for b under the a-node (this is also the
-    // readiness condition above), owned by carol.
+    // Registry interpretation retains the grandchild edge even though the
+    // unknown a-node cannot own a projected children collection.
     let b_events: i64 = sqlx::query_scalar(&format!(
         "SELECT count(*) FROM normalized_events \
          WHERE event_kind = 'SubregistryChanged' AND canonicality_state = 'canonical' \
-         AND lower(after_state->>'parent_node') = '{a_node}' \
+         AND lower(after_state->>'node') = '{a_node}' \
          AND lower(after_state->>'owner') = '{carol_owner}'"
     ))
     .fetch_one(&run.db.pool)
     .await?;
-    assert!(
-        b_events >= 1,
-        "expected canonical SubregistryChanged for b under the a-node"
+    assert_eq!(
+        b_events, 1,
+        "the grandchild registry edge must remain normalized below the unknown a-node"
     );
 
-    // But enumeration stops at unknown surfaces, in two enforced layers:
-    // (1) the by-name route rejects bracketed placeholders at the ENSIP-15
-    // boundary before any lookup — placeholder names are not addressable;
-    let (status, body) = run
-        .api
-        .get_json(&format!(
-            "/v1/names/ens/{}/children",
-            path_name(&a_placeholder)
-        ))
-        .await?;
-    assert_eq!(
-        status, 400,
-        "placeholder names must be rejected by input normalization; body: {body}"
-    );
-    assert_eq!(
-        body.pointer("/error/code").cloned().unwrap_or(Value::Null),
-        "invalid_input"
-    );
-    // (2) children_current materializes rows only under known parent
+    // Enumeration stops at unknown surfaces. Schema-v2 materializes neither
+    // an addressable name row nor child rows below the placeholder; v1 input
+    // normalization remains API-owned and is not asserted in this lane.
+    let placeholder_names: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1")
+            .bind(format!("ens:{a_node}"))
+            .fetch_one(&run.db.pool)
+            .await?;
+    assert_eq!(placeholder_names, 0);
+    // children_current materializes rows only under known parent
     // surfaces (docs/architecture.md § Name → children), so the b-child has
     // no projected row at all.
     let b_rows: i64 =
@@ -403,10 +394,9 @@ async fn zero_owner_subname_leaves_default_children_listing() -> Result<()> {
     let ready_sql = format!(
         "SELECT EXISTS (SELECT 1 FROM normalized_events \
          WHERE event_kind = 'SubregistryChanged' AND canonicality_state = 'canonical' \
-         AND lower(after_state->>'parent_node') = '{parent_node}' \
+         AND lower(after_state->>'node') = '{parent_node}' \
          AND lower(after_state->>'labelhash') = '{sub_labelhash}' \
-         AND lower(after_state->>'owner') = '{zero_owner}' \
-         AND (after_state->>'tombstone')::boolean = TRUE)"
+         AND lower(after_state->>'owner') = '{zero_owner}')"
     );
     let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
 

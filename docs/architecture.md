@@ -607,9 +607,13 @@ Repository layout:
 
 This is a protocol-risk inventory, not a claim that the e2e suite covers every
 row. `tests/conformance` owns public route-contract permutations. `tests/e2e`
-retains the high-value upstream-to-storage-to-HTTP scenario inventory, but it is
-compile-only until the C-e2e runtime port and is not current Stage B runtime
-evidence.
+is current contract-to-schema-v2 pipeline evidence: pinned contracts run on
+Anvil, the production `phase-runner` ingests or consumes immutable raw facts,
+and scenarios assert normalized events, phase state, and projections directly.
+The suite does not start the retained v1 API, so it is not public HTTP evidence.
+Its exact runnable, retired, and deferred inventory is maintained in
+[`tests/e2e/README.md`](../tests/e2e/README.md) and the expanded
+[coverage ledger](internal/e2e-testing-plan.md).
 
 ENSv1 and wrapper: ENSv1-only name, wrapped name, wrapped expiry/grace edge, fuse-scope history plus missing wrapper-holder permission projection and public suppression of stale internal control inputs, wrapped owner ≠ registrant, reverse claim vs verified primary mismatch.
 
@@ -621,10 +625,12 @@ Basenames: NFT-only transfer, management-only transfer, address-resolution chang
 
 Operational: reorg across authority events, reorg across verified execution cache, replay determinism from raw facts, replay determinism from normalized events, proxy implementation change, manifest version change.
 
-When the C-e2e runtime port lands, end-to-end cases must again validate the
-layers material to their claim: raw facts, normalized events, projections,
-execution traces, and/or public API output. They do not replace conformance
-coverage of the documented route surface.
+End-to-end cases validate every schema-v2 layer material to their claim: raw
+facts, normalized events, projections, and, once a contract-backed caller
+exists, execution traces or public API output. The current suite stops before
+the v1 API and does not replace conformance coverage of the documented route
+surface. Public lookup/explain integration remains explicitly deferred to the
+C2/C3 cutover.
 
 ## Open decisions
 

@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+result_log="$(mktemp "${TMPDIR:-/tmp}/bigname-e2e-gate.XXXXXX")"
+profile_binary_parent="$repo_root/target/bigname-e2e-profile-binaries"
+mkdir -p "$profile_binary_parent"
+profile_binary_dir="$(mktemp -d "$profile_binary_parent/run.XXXXXX")"
+
+cleanup() {
+    rm -f -- "$result_log"
+    rm -rf -- "$profile_binary_dir"
+}
+trap cleanup EXIT
+export BIGNAME_E2E_PROFILE_BINARY_DIR="$profile_binary_dir"
+
+expected_passed=79
+expected_failed=0
+expected_ignored=6
+test_threads="${BIGNAME_E2E_TEST_THREADS:-8}"
+
+cd "$repo_root"
+cargo test --manifest-path tests/e2e/Cargo.toml --locked -- --test-threads="$test_threads" \
+    2>&1 | tee "$result_log"
+cargo_status="${PIPESTATUS[0]}"
+
+summary="$(grep -m1 '^test result:' "$result_log" || true)"
+expected_prefix="test result: ok. ${expected_passed} passed; ${expected_failed} failed; ${expected_ignored} ignored; 0 measured; 0 filtered out;"
+
+if [ "$cargo_status" -ne 0 ]; then
+    printf 'e2e gate: cargo test failed with status %s\n' "$cargo_status" >&2
+    exit "$cargo_status"
+fi
+
+case "$summary" in
+    "$expected_prefix"*) ;;
+    *)
+        printf 'e2e gate: unexpected suite summary\nexpected: %s\nactual:   %s\n' \
+            "$expected_prefix" "$summary" >&2
+        exit 1
+        ;;
+esac
+
+printf 'e2e gate: %s passed; %s failed; %s ignored\n' \
+    "$expected_passed" "$expected_failed" "$expected_ignored"

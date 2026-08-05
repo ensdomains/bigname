@@ -91,7 +91,7 @@ async fn renew_release_and_premium_reregistration_rotate_lineage() -> Result<()>
     rpc.increase_time(2 * YEAR + DAY).await?;
 
     let renewal_ready_sql = support::canonical_event_ready_sql(
-        "basenames:phoenix.base.eth",
+        "basenames:0x655849ebdf0fdaad2841db2f076a016bacae6d806f08b1d58f3770c13e2c1020",
         "RegistrationRenewed",
         None,
     );
@@ -100,7 +100,7 @@ async fn renew_release_and_premium_reregistration_rotate_lineage() -> Result<()>
     let renewal_events: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
          WHERE transaction_hash = $1 \
-           AND logical_name_id = 'basenames:phoenix.base.eth' \
+           AND logical_name_id = 'basenames:0x655849ebdf0fdaad2841db2f076a016bacae6d806f08b1d58f3770c13e2c1020' \
            AND event_kind = 'RegistrationRenewed' \
            AND source_family = 'basenames_base_registrar' \
            AND canonicality_state = 'canonical'",
@@ -124,7 +124,11 @@ async fn renew_release_and_premium_reregistration_rotate_lineage() -> Result<()>
         u128::from(grace_expiry) < rpc.block_timestamp().await?,
         "the renewed lease should be expired but still represented inside grace"
     );
-    let first_identity = active_registrar_identity(&grace, "basenames:phoenix.base.eth").await?;
+    let first_identity = active_registrar_identity(
+        &grace,
+        "basenames:0x655849ebdf0fdaad2841db2f076a016bacae6d806f08b1d58f3770c13e2c1020",
+    )
+    .await?;
     grace.db.cleanup().await?;
 
     rpc.increase_time(GRACE_PERIOD).await?;
@@ -132,7 +136,7 @@ async fn renew_release_and_premium_reregistration_rotate_lineage() -> Result<()>
         basenames::register_base_name(&rpc, &deployment, alice, "releaseprobe", alice, YEAR)
             .await?;
     let released_ready_sql = support::canonical_event_ready_sql(
-        "basenames:phoenix.base.eth",
+        "basenames:0x655849ebdf0fdaad2841db2f076a016bacae6d806f08b1d58f3770c13e2c1020",
         "RegistrationReleased",
         None,
     );
@@ -140,7 +144,7 @@ async fn renew_release_and_premium_reregistration_rotate_lineage() -> Result<()>
         support::ingest_basenames_and_serve(&base, &deployment, Some(&released_ready_sql)).await?;
     let release_block: i64 = sqlx::query_scalar(
         "SELECT block_number FROM normalized_events \
-         WHERE logical_name_id = 'basenames:phoenix.base.eth' \
+         WHERE logical_name_id = 'basenames:0x655849ebdf0fdaad2841db2f076a016bacae6d806f08b1d58f3770c13e2c1020' \
            AND event_kind = 'RegistrationReleased' \
            AND canonicality_state = 'canonical'",
     )
@@ -171,7 +175,7 @@ async fn renew_release_and_premium_reregistration_rotate_lineage() -> Result<()>
     let reregistered =
         basenames::register_base_name(&rpc, &deployment, bob, "phoenix", bob, YEAR).await?;
     let ready_sql = "SELECT count(*) = 2 FROM normalized_events \
-         WHERE logical_name_id = 'basenames:phoenix.base.eth' \
+         WHERE logical_name_id = 'basenames:0x655849ebdf0fdaad2841db2f076a016bacae6d806f08b1d58f3770c13e2c1020' \
            AND event_kind = 'RegistrationGranted' \
            AND canonicality_state = 'canonical'";
     let current = support::ingest_basenames_and_serve(&base, &deployment, Some(ready_sql)).await?;
@@ -181,11 +185,12 @@ async fn renew_release_and_premium_reregistration_rotate_lineage() -> Result<()>
         keccak256("Transfer(address,address,uint256)".as_bytes())
     );
     let reregister_transfers: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM raw_logs \
+        "SELECT count(*) FROM raw_logs raw \
+         JOIN chain_lineage lineage USING (chain_id, block_hash) \
          WHERE transaction_hash = $1 \
            AND lower(emitting_address) = $2 \
            AND topics[1] = $3 \
-           AND canonicality_state = 'canonical'",
+           AND lineage.canonicality_state = 'canonical'",
     )
     .bind(&reregistered.register_tx_hash)
     .bind(format!("{:#x}", deployment.base_registrar.address))
@@ -201,7 +206,7 @@ async fn renew_release_and_premium_reregistration_rotate_lineage() -> Result<()>
         "SELECT event.resource_id, resource.token_lineage_id \
          FROM normalized_events event \
          JOIN resources resource USING (resource_id) \
-         WHERE event.logical_name_id = 'basenames:phoenix.base.eth' \
+         WHERE event.logical_name_id = 'basenames:0x655849ebdf0fdaad2841db2f076a016bacae6d806f08b1d58f3770c13e2c1020' \
            AND event.event_kind = 'RegistrationGranted' \
            AND event.canonicality_state = 'canonical' \
          ORDER BY event.block_number, event.log_index",
@@ -228,7 +233,7 @@ async fn renew_release_and_premium_reregistration_rotate_lineage() -> Result<()>
     let renewal_resource: Uuid = sqlx::query_scalar(
         "SELECT resource_id FROM normalized_events \
          WHERE transaction_hash = $1 AND event_kind = 'RegistrationRenewed' \
-           AND logical_name_id = 'basenames:phoenix.base.eth' \
+           AND logical_name_id = 'basenames:0x655849ebdf0fdaad2841db2f076a016bacae6d806f08b1d58f3770c13e2c1020' \
            AND canonicality_state = 'canonical'",
     )
     .bind(&renewal.tx_hash)
@@ -276,7 +281,7 @@ async fn upgradeable_controller_proxy_registers_and_renews() -> Result<()> {
         basenames::renew_upgradeable_base_name(&rpc, &deployment, alice, "proxied", YEAR).await?;
     let ready_sql = format!(
         "SELECT EXISTS (SELECT 1 FROM normalized_events \
-         WHERE logical_name_id = 'basenames:proxied.base.eth' \
+         WHERE logical_name_id = 'basenames:0xf46aa6e99df01bcdde980e8b64aed31cf0eb7515c42f311555c4f7afbc23af98' \
            AND event_kind = 'RegistrationRenewed' \
            AND transaction_hash = '{}' \
            AND canonicality_state = 'canonical')",
@@ -314,7 +319,7 @@ async fn upgradeable_controller_proxy_registers_and_renews() -> Result<()> {
     assert_eq!(identity.3, format!("{:#x}", implementation.address));
     assert_eq!(identity.4, "erc1967");
     assert_eq!(identity.5, "manifest_declaration");
-    assert_eq!(identity.6, "manifest_contract_implementation");
+    assert_eq!(identity.6, "manifest_proxy_implementation");
 
     let proxy_edge: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM discovery_edges \
@@ -334,10 +339,11 @@ async fn upgradeable_controller_proxy_registers_and_renews() -> Result<()> {
         (&renewed.tx_hash, "RegistrationRenewed"),
     ] {
         let raw_proxy_logs: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM raw_logs \
+            "SELECT count(*) FROM raw_logs raw \
+             JOIN chain_lineage lineage USING (chain_id, block_hash) \
              WHERE transaction_hash = $1 \
                AND lower(emitting_address) = $2 \
-               AND canonicality_state = 'canonical'",
+               AND lineage.canonicality_state = 'canonical'",
         )
         .bind(transaction_hash)
         .bind(format!("{:#x}", proxy.address))
@@ -347,7 +353,7 @@ async fn upgradeable_controller_proxy_registers_and_renews() -> Result<()> {
         let derived: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM normalized_events \
              WHERE transaction_hash = $1 AND event_kind = $2 \
-               AND logical_name_id = 'basenames:proxied.base.eth' \
+               AND logical_name_id = 'basenames:0xf46aa6e99df01bcdde980e8b64aed31cf0eb7515c42f311555c4f7afbc23af98' \
                AND canonicality_state = 'canonical'",
         )
         .bind(transaction_hash)
@@ -423,7 +429,7 @@ async fn basenames_subnames_list_preimages_placeholders_and_tombstones() -> Resu
     let ready_sql = format!(
         "SELECT EXISTS (SELECT 1 FROM normalized_events \
          WHERE event_kind = 'SubregistryChanged' \
-           AND after_state->>'parent_node' = '{parent_node}' \
+           AND after_state->>'node' = '{parent_node}' \
            AND after_state->>'labelhash' = '{opaque_labelhash}' \
            AND canonicality_state = 'canonical')"
     );
@@ -477,10 +483,9 @@ async fn basenames_subnames_list_preimages_placeholders_and_tombstones() -> Resu
     let tombstone_sql = format!(
         "SELECT EXISTS (SELECT 1 FROM normalized_events \
          WHERE event_kind = 'SubregistryChanged' \
-           AND after_state->>'parent_node' = '{parent_node}' \
+           AND after_state->>'node' = '{parent_node}' \
            AND after_state->>'labelhash' = '{opaque_labelhash}' \
            AND lower(after_state->>'owner') = '{zero_owner}' \
-           AND (after_state->>'tombstone')::boolean \
            AND canonicality_state = 'canonical')"
     );
     let current =
@@ -555,7 +560,7 @@ async fn l2_resolver_records_clear_and_contenthash_gap() -> Result<()> {
         Some(
             "SELECT count(DISTINCT after_state->>'record_key') = 3 \
              FROM normalized_events \
-             WHERE logical_name_id = 'basenames:records.base.eth' \
+             WHERE logical_name_id = 'basenames:0xfcb7e9e91917e0b14a681580be903b6135c4e0d763185f81ce807bdd708d70ff' \
                AND event_kind = 'RecordChanged' \
                AND after_state->>'record_key' IN ('text:description', 'addr:0', 'name') \
                AND canonicality_state = 'canonical'",
@@ -565,7 +570,7 @@ async fn l2_resolver_records_clear_and_contenthash_gap() -> Result<()> {
 
     let derived_keys: BTreeSet<String> = sqlx::query_scalar(
         "SELECT DISTINCT after_state->>'record_key' FROM normalized_events \
-         WHERE logical_name_id = 'basenames:records.base.eth' \
+         WHERE logical_name_id = 'basenames:0xfcb7e9e91917e0b14a681580be903b6135c4e0d763185f81ce807bdd708d70ff' \
            AND event_kind = 'RecordChanged' \
            AND source_family = 'basenames_base_resolver' \
            AND canonicality_state = 'canonical'",
@@ -584,7 +589,7 @@ async fn l2_resolver_records_clear_and_contenthash_gap() -> Result<()> {
     );
     let name_value: String = sqlx::query_scalar(
         "SELECT after_state->>'raw_name' FROM normalized_events \
-         WHERE logical_name_id = 'basenames:records.base.eth' \
+         WHERE logical_name_id = 'basenames:0xfcb7e9e91917e0b14a681580be903b6135c4e0d763185f81ce807bdd708d70ff' \
            AND event_kind = 'RecordChanged' \
            AND after_state->>'record_key' = 'name' \
            AND canonicality_state = 'canonical'",
@@ -615,7 +620,7 @@ async fn l2_resolver_records_clear_and_contenthash_gap() -> Result<()> {
     );
     let contenthash_events: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
-         WHERE logical_name_id = 'basenames:records.base.eth' \
+         WHERE logical_name_id = 'basenames:0xfcb7e9e91917e0b14a681580be903b6135c4e0d763185f81ce807bdd708d70ff' \
            AND event_kind = 'RecordChanged' \
            AND after_state->>'record_key' = 'contenthash'",
     )
@@ -629,8 +634,9 @@ async fn l2_resolver_records_clear_and_contenthash_gap() -> Result<()> {
         BTreeSet::from(["addr:0".to_owned(), "text:description".to_owned()])
     );
     assert_eq!(
-        inventory_reason(&initial_exact, "explicit_gaps", "contenthash", "gap_reason").as_deref(),
-        Some("not_observed_on_current_resolver")
+        inventory_reason(&initial_exact, "explicit_gaps", "contenthash", "gap_reason"),
+        None,
+        "schema-v2 projections do not synthesize the legacy API's explicit contenthash gap"
     );
     let initial_boundary = pointer(
         &initial_exact,
@@ -662,14 +668,14 @@ async fn l2_resolver_records_clear_and_contenthash_gap() -> Result<()> {
 
     basenames::clear_base_records(&rpc, resolver, alice, "records.base.eth").await?;
     let ready_sql = support::canonical_event_ready_sql(
-        "basenames:records.base.eth",
+        "basenames:0xfcb7e9e91917e0b14a681580be903b6135c4e0d763185f81ce807bdd708d70ff",
         "RecordVersionChanged",
         None,
     );
     let current = support::ingest_basenames_and_serve(&base, &deployment, Some(&ready_sql)).await?;
     let version_events: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
-         WHERE logical_name_id = 'basenames:records.base.eth' \
+         WHERE logical_name_id = 'basenames:0xfcb7e9e91917e0b14a681580be903b6135c4e0d763185f81ce807bdd708d70ff' \
            AND event_kind = 'RecordVersionChanged' \
            AND source_family = 'basenames_base_resolver' \
            AND canonicality_state = 'canonical'",
@@ -810,11 +816,12 @@ async fn legacy_reverse_registrar_stays_registry_and_raw_record_only() -> Result
     );
     for (topic, expected) in [(&new_owner_topic, 2_i64), (&new_resolver_topic, 1_i64)] {
         let raw_registry_facts: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM raw_logs \
+            "SELECT count(*) FROM raw_logs raw \
+             JOIN chain_lineage lineage USING (chain_id, block_hash) \
              WHERE transaction_hash IN ($1, $2) \
                AND lower(emitting_address) = $3 \
                AND topics[1] = $4 \
-               AND canonicality_state = 'canonical'",
+               AND lineage.canonicality_state = 'canonical'",
         )
         .bind(&claim.tx_hash)
         .bind(&named.tx_hash)
@@ -845,12 +852,13 @@ async fn legacy_reverse_registrar_stays_registry_and_raw_record_only() -> Result
 
     let name_changed_topic = format!("{:#x}", keccak256("NameChanged(bytes32,string)".as_bytes()));
     let raw_name_changed: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM raw_logs \
+        "SELECT count(*) FROM raw_logs raw \
+         JOIN chain_lineage lineage USING (chain_id, block_hash) \
          WHERE transaction_hash = $1 \
            AND lower(emitting_address) = $2 \
            AND topics[1] = $3 \
            AND topics[2] = $4 \
-           AND canonicality_state = 'canonical'",
+           AND lineage.canonicality_state = 'canonical'",
     )
     .bind(&named.tx_hash)
     .bind(format!("{:#x}", deployment.l2_resolver.address))
@@ -868,8 +876,20 @@ async fn legacy_reverse_registrar_stays_registry_and_raw_record_only() -> Result
     .fetch_one(&run.db.pool)
     .await?;
     assert_eq!(
-        normalized_records, 0,
-        "REVIEW POINT: helper reverse NameChanged lacks an admitted claim source"
+        normalized_records, 1,
+        "the admitted resolver record is interpreted, independently of primary-name eligibility"
+    );
+    let primary_sources: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events \
+         WHERE transaction_hash = $1 AND event_kind = 'RecordChanged' \
+           AND after_state ? 'primary_claim_source'",
+    )
+    .bind(&named.tx_hash)
+    .fetch_one(&run.db.pool)
+    .await?;
+    assert_eq!(
+        primary_sources, 0,
+        "a generic resolver NameChanged must not mint a primary-name claim"
     );
     let reverse_claims: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
@@ -977,11 +997,12 @@ async fn third_party_controller_registration_degrades_without_label_events() -> 
     );
     for transaction_hash in [&direct.tx_hash, &token_only.tx_hash] {
         let raw_mints: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM raw_logs \
+            "SELECT count(*) FROM raw_logs raw \
+             JOIN chain_lineage lineage USING (chain_id, block_hash) \
              WHERE transaction_hash = $1 \
                AND lower(emitting_address) = $2 \
                AND topics[1] = $3 \
-               AND canonicality_state = 'canonical'",
+               AND lineage.canonicality_state = 'canonical'",
         )
         .bind(transaction_hash)
         .bind(format!("{:#x}", deployment.base_registrar.address))
@@ -1001,7 +1022,11 @@ async fn third_party_controller_registration_degrades_without_label_events() -> 
     .await?;
     assert_eq!(
         direct_kinds,
-        vec!["SubregistryChanged".to_owned()],
+        vec![
+            "AuthorityTransferred".to_owned(),
+            "PermissionChanged".to_owned(),
+            "SubregistryChanged".to_owned(),
+        ],
         "direct register degraded shape changed"
     );
     let token_only_kinds: Vec<String> = sqlx::query_scalar(
@@ -1018,18 +1043,20 @@ async fn third_party_controller_registration_degrades_without_label_events() -> 
     );
 
     let direct_registry_logs: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM raw_logs \
+        "SELECT count(*) FROM raw_logs raw \
+         JOIN chain_lineage lineage USING (chain_id, block_hash) \
          WHERE transaction_hash = $1 AND lower(emitting_address) = $2 \
-           AND canonicality_state = 'canonical'",
+           AND lineage.canonicality_state = 'canonical'",
     )
     .bind(&direct.tx_hash)
     .bind(format!("{:#x}", deployment.registry.address))
     .fetch_one(&run.db.pool)
     .await?;
     let token_only_registry_logs: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM raw_logs \
+        "SELECT count(*) FROM raw_logs raw \
+         JOIN chain_lineage lineage USING (chain_id, block_hash) \
          WHERE transaction_hash = $1 AND lower(emitting_address) = $2 \
-           AND canonicality_state = 'canonical'",
+           AND lineage.canonicality_state = 'canonical'",
     )
     .bind(&token_only.tx_hash)
     .bind(format!("{:#x}", deployment.registry.address))
@@ -1041,8 +1068,8 @@ async fn third_party_controller_registration_degrades_without_label_events() -> 
     let named_surfaces: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM name_surfaces \
          WHERE logical_name_id IN ( \
-           'basenames:thirdparty.base.eth', \
-           'basenames:tokenonly.base.eth' \
+           'basenames:0xdfa08232ef9f414a648791b8e277797475e1ae7c4a02739377776fe6998564c5', \
+           'basenames:0x3f9791eaf26cb507f9d00cb5ea9a3ec77658a401eabca6e68de2e8519771a06e' \
          )",
     )
     .fetch_one(&run.db.pool)

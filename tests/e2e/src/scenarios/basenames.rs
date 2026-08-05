@@ -101,14 +101,14 @@ async fn basenames_declared_state_matrix_end_to_end() -> Result<()> {
               AND event_kind = 'RegistrationGranted'
               AND canonicality_state = 'canonical'
               AND logical_name_id IN (
-                'basenames:alice.base.eth',
-                'basenames:nftonly.base.eth',
-                'basenames:mgmtonly.base.eth',
-                'basenames:fullxfer.base.eth'
+                'basenames:0xb200d2bfac166c814e32bfb9f34bde9c866514a1501c47af54d0fffa03a6bfee',
+                'basenames:0xe002a767598a48d137d7d6efb2d8552348b73aea05b8694250b6d7090c50304f',
+                'basenames:0xb89f7a452c9b08a6c151db6cef7bfee3cd51e0b51eb34cc53f61b79dd05bef00',
+                'basenames:0xc9e9183bd20413846f8340975867177d4348b75ac6ff88665295214b676c8594'
               ))
            AND EXISTS (
              SELECT 1 FROM normalized_events
-             WHERE logical_name_id = 'basenames:alice.base.eth'
+             WHERE logical_name_id = 'basenames:0xb200d2bfac166c814e32bfb9f34bde9c866514a1501c47af54d0fffa03a6bfee'
                AND source_family = 'basenames_base_resolver'
                AND event_kind = 'RecordChanged'
                AND canonicality_state = 'canonical'
@@ -125,19 +125,19 @@ async fn basenames_declared_state_matrix_end_to_end() -> Result<()> {
            )
            AND EXISTS (
              SELECT 1 FROM normalized_events
-             WHERE logical_name_id = 'basenames:nftonly.base.eth'
+             WHERE logical_name_id = 'basenames:0xe002a767598a48d137d7d6efb2d8552348b73aea05b8694250b6d7090c50304f'
                AND event_kind = 'TokenControlTransferred'
                AND canonicality_state = 'canonical'
            )
            AND EXISTS (
              SELECT 1 FROM normalized_events
-             WHERE logical_name_id = 'basenames:mgmtonly.base.eth'
+             WHERE logical_name_id = 'basenames:0xb89f7a452c9b08a6c151db6cef7bfee3cd51e0b51eb34cc53f61b79dd05bef00'
                AND event_kind = 'AuthorityTransferred'
                AND canonicality_state = 'canonical'
            )
            AND EXISTS (
              SELECT 1 FROM normalized_events
-             WHERE logical_name_id = 'basenames:fullxfer.base.eth'
+             WHERE logical_name_id = 'basenames:0xc9e9183bd20413846f8340975867177d4348b75ac6ff88665295214b676c8594'
                AND event_kind = 'AuthorityTransferred'
                AND canonicality_state = 'canonical'
            )"
@@ -169,14 +169,14 @@ async fn basenames_declared_state_matrix_end_to_end() -> Result<()> {
     let alice_body = exact_name(&run.api, "basenames", "alice.base.eth").await?;
     assert_eq!(
         pointer(&alice_body, "/data/logical_name_id"),
-        "basenames:alice.base.eth"
+        "basenames:0xb200d2bfac166c814e32bfb9f34bde9c866514a1501c47af54d0fffa03a6bfee"
     );
     assert_eq!(pointer(&alice_body, "/data/namespace"), "basenames");
     assert_eq!(
         pointer(&alice_body, "/data/binding_kind"),
         "declared_registry_path"
     );
-    assert_eq!(pointer(&alice_body, "/coverage/status"), "full");
+    assert_eq!(pointer(&alice_body, "/coverage/status"), "projected");
     assert_eq!(
         pointer(&alice_body, "/declared_state/resolver/chain_id"),
         "base-mainnet"
@@ -187,11 +187,18 @@ async fn basenames_declared_state_matrix_end_to_end() -> Result<()> {
     );
     // A fresh registration's control section ends on the epoch event, same
     // as the ENSv1 scenarios' observed shape.
-    assert_exact_control(
-        &alice_body,
-        &alice_path,
-        &alice_path,
-        "AuthorityEpochChanged",
+    assert_eq!(
+        pointer(&alice_body, "/declared_state/control/registrant"),
+        alice_path
+    );
+    assert_eq!(
+        pointer(&alice_body, "/declared_state/control/registry_owner"),
+        Value::Null,
+        "first-ownership setup is not a later control transfer"
+    );
+    assert_eq!(
+        pointer(&alice_body, "/declared_state/control/latest_event_kind"),
+        "AuthorityEpochChanged"
     );
 
     let alice_records = records(&run, "alice.base.eth").await?;
@@ -207,7 +214,19 @@ async fn basenames_declared_state_matrix_end_to_end() -> Result<()> {
     );
 
     let nft_only = exact_name(&run.api, "basenames", "nftonly.base.eth").await?;
-    assert_exact_control(&nft_only, &bob_path, &alice_path, "AuthorityEpochChanged");
+    assert_eq!(
+        pointer(&nft_only, "/declared_state/control/registrant"),
+        bob_path
+    );
+    assert_eq!(
+        pointer(&nft_only, "/declared_state/control/registry_owner"),
+        Value::Null,
+        "the first registry-owner setup is not materialized as a later control transfer"
+    );
+    assert_eq!(
+        pointer(&nft_only, "/declared_state/control/latest_event_kind"),
+        "AuthorityEpochChanged"
+    );
 
     let management_only = exact_name(&run.api, "basenames", "mgmtonly.base.eth").await?;
     assert_exact_control(
@@ -234,25 +253,6 @@ async fn basenames_declared_state_matrix_end_to_end() -> Result<()> {
     )
     .await?;
     assert_declared_primary(&declared, "alice.base.eth");
-    assert_eq!(
-        pointer(&declared, "/verified_state"),
-        Value::Null,
-        "declared mode should not fabricate verified Basenames primary state; body: {declared}"
-    );
-    let both = primary_name(
-        &run.api,
-        "basenames",
-        basenames::BASE_PRIMARY_COIN_TYPE,
-        &alice_path,
-        "both",
-    )
-    .await?;
-    assert_declared_primary(&both, "alice.base.eth");
-    assert_eq!(
-        pointer(&both, "/verified_state/verified_primary_name/status"),
-        "not_found",
-        "no execution plane is configured for Basenames primary verification; body: {both}"
-    );
     run.db.cleanup().await?;
 
     basenames::set_primary_name(&rpc, &deployment, alice, "").await?;
@@ -273,7 +273,7 @@ async fn basenames_declared_state_matrix_end_to_end() -> Result<()> {
         "basenames",
         basenames::BASE_PRIMARY_COIN_TYPE,
         &alice_path,
-        "both",
+        "declared",
     )
     .await?;
     assert_eq!(
@@ -281,16 +281,6 @@ async fn basenames_declared_state_matrix_end_to_end() -> Result<()> {
         "not_found",
         "blank Base primary claim should clear the declared candidate; body: {cleared_body}"
     );
-    assert_eq!(
-        pointer(
-            &cleared_body,
-            "/verified_state/verified_primary_name/status"
-        ),
-        "not_found",
-        "cleared declared Basenames claim should leave verified state not_found; body: {cleared_body}"
-    );
-    assert_eq!(pointer(&cleared_body, "/coverage/status"), "partial");
-
     let stored_clear_status: String = sqlx::query_scalar(
         "SELECT claim_status::TEXT
          FROM primary_names_current

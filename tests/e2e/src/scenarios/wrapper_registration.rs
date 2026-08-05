@@ -18,9 +18,18 @@ async fn active_binding(
 ) -> Result<(Uuid, Option<Uuid>, String)> {
     sqlx::query_as(
         "SELECT binding.resource_id, resource.token_lineage_id, \
-                resource.provenance->>'authority_kind' \
+                (SELECT event.after_state->>'authority_kind' \
+                 FROM normalized_events event \
+                 WHERE event.resource_id = binding.resource_id \
+                   AND event.event_kind = 'AuthorityEpochChanged' \
+                   AND event.canonicality_state = 'canonical' \
+                 ORDER BY event.block_number DESC, event.log_index DESC, \
+                          event.normalized_event_id DESC LIMIT 1) \
          FROM surface_bindings binding \
          JOIN resources resource USING (resource_id) \
+         JOIN name_current current \
+           ON current.logical_name_id = binding.logical_name_id \
+          AND current.resource_id = binding.resource_id \
          WHERE binding.logical_name_id = $1 \
            AND binding.active_to IS NULL \
            AND binding.canonicality_state = 'canonical' \
@@ -61,19 +70,19 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
     let tx_hash = &registered.register_tx_hash;
     let ready_sql = format!(
         "SELECT EXISTS (SELECT 1 FROM normalized_events \
-           WHERE logical_name_id = 'ens:bornwrapped.eth' \
+           WHERE logical_name_id = 'ens:0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141' \
              AND event_kind = 'RegistrationGranted' \
              AND source_family = 'ens_v1_registrar_l1' \
              AND transaction_hash = '{tx_hash}' \
              AND canonicality_state = 'canonical') \
          AND EXISTS (SELECT 1 FROM normalized_events \
-           WHERE logical_name_id = 'ens:bornwrapped.eth' \
+           WHERE logical_name_id = 'ens:0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141' \
              AND event_kind = 'ExpiryChanged' \
              AND source_family = 'ens_v1_wrapper_l1' \
              AND transaction_hash = '{tx_hash}' \
              AND canonicality_state = 'canonical') \
          AND EXISTS (SELECT 1 FROM normalized_events \
-           WHERE logical_name_id = 'ens:bornwrapped.eth' \
+           WHERE logical_name_id = 'ens:0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141' \
              AND event_kind = 'AuthorityTransferred' \
              AND lower(after_state->>'owner') = '{wrapper:#x}' \
              AND transaction_hash = '{tx_hash}' \
@@ -84,7 +93,7 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
 
     let registration: Value = sqlx::query_scalar(
         "SELECT after_state FROM normalized_events \
-         WHERE logical_name_id = 'ens:bornwrapped.eth' \
+         WHERE logical_name_id = 'ens:0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141' \
            AND event_kind = 'RegistrationGranted' \
            AND source_family = 'ens_v1_registrar_l1' \
            AND transaction_hash = $1 \
@@ -99,8 +108,9 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
         .as_i64()
         .context("born-wrapped registrar expiry missing")?;
     let transaction_to: Option<String> = sqlx::query_scalar(
-        "SELECT to_address FROM raw_transactions \
-         WHERE transaction_hash = $1 AND canonicality_state = 'canonical'",
+        "SELECT to_address FROM raw_transactions raw \
+         JOIN chain_lineage lineage USING (chain_id, block_hash) \
+         WHERE transaction_hash = $1 AND lineage.canonicality_state = 'canonical'",
     )
     .bind(tx_hash)
     .fetch_one(&run.db.pool)
@@ -113,7 +123,7 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
 
     let wrapper_expiry: i64 = sqlx::query_scalar(
         "SELECT (after_state->>'expiry')::BIGINT FROM normalized_events \
-         WHERE logical_name_id = 'ens:bornwrapped.eth' \
+         WHERE logical_name_id = 'ens:0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141' \
            AND event_kind = 'ExpiryChanged' \
            AND source_family = 'ens_v1_wrapper_l1' \
            AND transaction_hash = $1 \
@@ -133,11 +143,11 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
     let bornwrapped_labelhash = format!("{:#x}", ens_v1::labelhash("bornwrapped"));
     let preimage_observations: Vec<(String, String, String, String)> = sqlx::query_as(
         "SELECT source_family, after_state->>'source_event', \
-                after_state->>'decoded_name', after_state->'labelhashes'->>0 \
+                after_state->>'raw_name', after_state->'raw_labels'->>0 \
          FROM normalized_events \
          WHERE event_kind = 'PreimageObserved' \
            AND transaction_hash = $1 \
-           AND after_state->>'decoded_name' = 'bornwrapped.eth' \
+           AND after_state->>'raw_name' = 'bornwrapped.eth' \
            AND canonicality_state = 'canonical' \
          ORDER BY source_family, log_index",
     )
@@ -151,19 +161,19 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
                 "ens_v1_registrar_l1".to_owned(),
                 "NameRegistered".to_owned(),
                 "bornwrapped.eth".to_owned(),
-                bornwrapped_labelhash.clone(),
+                "bornwrapped".to_owned(),
             ),
             (
                 "ens_v1_wrapper_l1".to_owned(),
                 "NameWrapped".to_owned(),
                 "bornwrapped.eth".to_owned(),
-                bornwrapped_labelhash.clone(),
+                "bornwrapped".to_owned(),
             ),
         ],
         "the registrar and wrapper name-bearing logs must both retain the same verified label preimage"
     );
-    let retained_label: (String, String, String) = sqlx::query_as(
-        "SELECT label, normalized_label, canonical_display_label \
+    let retained_label: (Vec<u8>, Option<String>, bool) = sqlx::query_as(
+        "SELECT raw_label, decoded_label, normalized_under_version \
          FROM label_preimages WHERE labelhash = $1",
     )
     .bind(&bornwrapped_labelhash)
@@ -172,16 +182,16 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
     assert_eq!(
         retained_label,
         (
-            "bornwrapped".to_owned(),
-            "bornwrapped".to_owned(),
-            "bornwrapped".to_owned(),
+            b"bornwrapped".to_vec(),
+            Some("bornwrapped".to_owned()),
+            true,
         ),
         "duplicate observations must converge on one verified label fact"
     );
 
     let registry_owner_events: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
-         WHERE logical_name_id = 'ens:bornwrapped.eth' \
+         WHERE logical_name_id = 'ens:0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141' \
            AND event_kind = 'AuthorityTransferred' \
            AND source_family = 'ens_v1_registry_l1' \
            AND lower(after_state->>'owner') = $1 \
@@ -198,7 +208,7 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
     );
     let registrar_holder_events: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
-         WHERE logical_name_id = 'ens:bornwrapped.eth' \
+         WHERE logical_name_id = 'ens:0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141' \
            AND event_kind = 'TokenControlTransferred' \
            AND source_family = 'ens_v1_registrar_l1' \
            AND transaction_hash = $1 \
@@ -214,7 +224,7 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
 
     let wrapper_resources: Vec<Uuid> = sqlx::query_scalar(
         "SELECT DISTINCT resource_id FROM normalized_events \
-         WHERE logical_name_id = 'ens:bornwrapped.eth' \
+         WHERE logical_name_id = 'ens:0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141' \
            AND source_family = 'ens_v1_wrapper_l1' \
            AND after_state->>'authority_kind' = 'wrapper' \
            AND resource_id IS NOT NULL \
@@ -229,23 +239,43 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
     );
     let resource_shape: (i64, i64, i64) = sqlx::query_as(
         "SELECT \
-           count(*) FILTER (WHERE provenance->>'authority_kind' = 'registrar'), \
-           count(*) FILTER (WHERE provenance->>'authority_kind' = 'registry_only'), \
-           count(*) FILTER (WHERE provenance->>'authority_kind' = 'wrapper') \
-         FROM resources \
-         WHERE provenance->>'logical_name_id' = 'ens:bornwrapped.eth' \
+           count(DISTINCT resource_id) FILTER (WHERE after_state->>'authority_kind' = 'registrar'), \
+           count(DISTINCT resource_id) FILTER (WHERE after_state->>'authority_kind' = 'registry_only'), \
+           count(DISTINCT resource_id) FILTER (WHERE after_state->>'authority_kind' = 'wrapper') \
+         FROM normalized_events \
+         WHERE transaction_hash = $1 \
+           AND resource_id IS NOT NULL \
            AND canonicality_state = 'canonical'",
     )
+    .bind(tx_hash)
     .fetch_one(&run.db.pool)
     .await?;
     assert_eq!(
         resource_shape,
-        (1, 1, 1),
-        "pinned born-wrapped rebind should retain registrar, registry-only, and wrapper resources"
+        (1, 0, 1),
+        "same-transaction registry setup must remain on the registrar epoch instead of minting a spurious registry-only epoch"
+    );
+    let setup_and_registration_resources: (Uuid, Uuid) = sqlx::query_as(
+        "SELECT \
+           (SELECT resource_id FROM normalized_events \
+            WHERE transaction_hash = $1 AND source_family = 'ens_v1_registry_l1' \
+              AND event_kind = 'AuthorityTransferred' \
+              AND canonicality_state = 'canonical' LIMIT 1), \
+           (SELECT resource_id FROM normalized_events \
+            WHERE transaction_hash = $1 AND source_family = 'ens_v1_registrar_l1' \
+              AND event_kind = 'RegistrationGranted' \
+              AND canonicality_state = 'canonical' LIMIT 1)",
+    )
+    .bind(tx_hash)
+    .fetch_one(&run.db.pool)
+    .await?;
+    assert_eq!(
+        setup_and_registration_resources.0, setup_and_registration_resources.1,
+        "the registry ownership setup and registrar grant must share the registration resource"
     );
     let wrapper_bound: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM normalized_events \
-         WHERE logical_name_id = 'ens:bornwrapped.eth' \
+         WHERE logical_name_id = 'ens:0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141' \
            AND event_kind = 'SurfaceBound' \
            AND after_state->>'authority_kind' = 'wrapper' \
            AND resource_id = $1 \
@@ -263,8 +293,11 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
     // observations belong to the same atomic registration. The later grant
     // must therefore retain the wrapper binding instead of treating it as a
     // stale wrapper from a previous registration epoch.
-    let (active_resource, active_lineage, active_kind) =
-        active_binding(&run.db.pool, "ens:bornwrapped.eth").await?;
+    let (active_resource, active_lineage, active_kind) = active_binding(
+        &run.db.pool,
+        "ens:0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141",
+    )
+    .await?;
     assert_eq!(active_kind, "wrapper");
     assert!(active_lineage.is_some());
     assert_eq!(active_resource, wrapper_resources[0]);
@@ -288,21 +321,18 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
         registrar_expiry
     );
     assert_eq!(
-        pointer(&body, "/declared_state/control"),
-        serde_json::json!({
-            "status": "unsupported",
-            "unsupported_reason": "ENSv1 wrapper effective control is not yet projected",
-        }),
-        "born-wrapped control must fail closed instead of publishing the registry owner as effective control"
+        pointer(&body, "/declared_state/control/registrant"),
+        format!("{alice:#x}"),
+        "wrapped-flow reconciliation should route control to the wrapper holder"
     );
     assert_eq!(
         pointer(&body, "/declared_state/registration/authority_kind"),
-        "wrapper"
+        "registrar"
     );
     assert!(
         pointer(&body, "/declared_state/registration/authority_key")
             .as_str()
-            .is_some_and(|key| key.starts_with("wrapper:")),
+            .is_some_and(|key| key.starts_with("registrar:")),
         "born-wrapped authority key missing: {body}"
     );
 
@@ -388,13 +418,13 @@ async fn parent_burns_pcc_then_extends_existing_child_expiry() -> Result<()> {
 
     let ready_sql = format!(
         "SELECT EXISTS (SELECT 1 FROM normalized_events \
-           WHERE logical_name_id = 'ens:transition.fuseparent.eth' \
+           WHERE logical_name_id = 'ens:0xe4704a24a660012d3847315355c68cc41069cecb265cf1cf5e98ef53debb84a3' \
              AND event_kind = 'PermissionScopeChanged' \
              AND (after_state->>'fuses')::BIGINT = {pcc} \
              AND transaction_hash = '{fuse_tx}' \
              AND canonicality_state = 'canonical') \
          AND EXISTS (SELECT 1 FROM normalized_events \
-           WHERE logical_name_id = 'ens:transition.fuseparent.eth' \
+           WHERE logical_name_id = 'ens:0xe4704a24a660012d3847315355c68cc41069cecb265cf1cf5e98ef53debb84a3' \
              AND event_kind = 'ExpiryChanged' \
              AND (after_state->>'expiry')::BIGINT = {final_expiry} \
              AND transaction_hash = '{extend_tx}' \
@@ -408,7 +438,7 @@ async fn parent_burns_pcc_then_extends_existing_child_expiry() -> Result<()> {
         "SELECT (before_state->>'fuses')::BIGINT, \
                 (after_state->>'fuses')::BIGINT \
          FROM normalized_events \
-         WHERE logical_name_id = 'ens:transition.fuseparent.eth' \
+         WHERE logical_name_id = 'ens:0xe4704a24a660012d3847315355c68cc41069cecb265cf1cf5e98ef53debb84a3' \
            AND event_kind = 'PermissionScopeChanged' \
            AND source_family = 'ens_v1_wrapper_l1' \
            AND canonicality_state = 'canonical' \
@@ -425,7 +455,7 @@ async fn parent_burns_pcc_then_extends_existing_child_expiry() -> Result<()> {
         "SELECT (before_state->>'expiry')::BIGINT, \
                 (after_state->>'expiry')::BIGINT \
          FROM normalized_events \
-         WHERE logical_name_id = 'ens:transition.fuseparent.eth' \
+         WHERE logical_name_id = 'ens:0xe4704a24a660012d3847315355c68cc41069cecb265cf1cf5e98ef53debb84a3' \
            AND event_kind = 'ExpiryChanged' \
            AND source_family = 'ens_v1_wrapper_l1' \
            AND canonicality_state = 'canonical' \
@@ -442,7 +472,7 @@ async fn parent_burns_pcc_then_extends_existing_child_expiry() -> Result<()> {
     );
     let fuse_tx_expiry_events: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
-         WHERE logical_name_id = 'ens:transition.fuseparent.eth' \
+         WHERE logical_name_id = 'ens:0xe4704a24a660012d3847315355c68cc41069cecb265cf1cf5e98ef53debb84a3' \
            AND event_kind = 'ExpiryChanged' \
            AND transaction_hash = $1 \
            AND canonicality_state = 'canonical'",
@@ -457,7 +487,7 @@ async fn parent_burns_pcc_then_extends_existing_child_expiry() -> Result<()> {
 
     let event_resources: Vec<Uuid> = sqlx::query_scalar(
         "SELECT DISTINCT resource_id FROM normalized_events \
-         WHERE logical_name_id = 'ens:transition.fuseparent.eth' \
+         WHERE logical_name_id = 'ens:0xe4704a24a660012d3847315355c68cc41069cecb265cf1cf5e98ef53debb84a3' \
            AND event_kind IN ('PermissionScopeChanged', 'ExpiryChanged') \
            AND resource_id IS NOT NULL \
            AND canonicality_state = 'canonical'",
@@ -465,8 +495,11 @@ async fn parent_burns_pcc_then_extends_existing_child_expiry() -> Result<()> {
     .fetch_all(&run.db.pool)
     .await?;
     assert_eq!(event_resources.len(), 1, "child wrapper resource rotated");
-    let (active_resource, active_lineage, active_kind) =
-        active_binding(&run.db.pool, "ens:transition.fuseparent.eth").await?;
+    let (active_resource, active_lineage, active_kind) = active_binding(
+        &run.db.pool,
+        "ens:0xe4704a24a660012d3847315355c68cc41069cecb265cf1cf5e98ef53debb84a3",
+    )
+    .await?;
     assert_eq!(active_kind, "wrapper");
     assert_eq!(active_resource, event_resources[0]);
     assert!(active_lineage.is_some());
@@ -490,11 +523,8 @@ async fn parent_burns_pcc_then_extends_existing_child_expiry() -> Result<()> {
         format!("{carol:#x}")
     );
     assert_eq!(
-        pointer(&body, "/declared_state/control"),
-        serde_json::json!({
-            "status": "unsupported",
-            "unsupported_reason": "ENSv1 wrapper effective control is not yet projected",
-        })
+        pointer(&body, "/declared_state/control/registrant"),
+        format!("{carol:#x}")
     );
     assert_eq!(
         pointer(&body, "/declared_state/registration/expiry"),
@@ -552,13 +582,9 @@ async fn wrap_existing_registry_subname_rotates_child_only() -> Result<()> {
             .await?;
 
     // Wrapping an existing placeholder child reveals its label via
-    // NameWrapped — the same live-intake reveal wedge pinned on the
-    // registration path (reproduced defect): the run loop hangs before checkpoint
-    // promotion. Derivation and projections are pinned via backfill +
-    // replay instead; API reads are impossible on this path.
-    let run =
-        support::backfill_and_replay_projections(&anvil, &deployment, "wrap-registry-subname")
-            .await?;
+    // NameWrapped. Replay the complete immutable corpus and assert the
+    // resulting normalized events and projections directly.
+    let run = support::replay_full_corpus_projections(&anvil, &deployment).await?;
     let (child_wrapper_epoch, parent_registry_epoch): (bool, bool) = sqlx::query_as(
         "SELECT \
            EXISTS (SELECT 1 FROM normalized_events \
@@ -567,12 +593,14 @@ async fn wrap_existing_registry_subname_rotates_child_only() -> Result<()> {
                AND after_state->>'authority_kind' = 'wrapper' \
                AND canonicality_state = 'canonical'), \
            EXISTS (SELECT 1 FROM normalized_events \
-             WHERE logical_name_id = 'ens:registryparent.eth' \
+             WHERE logical_name_id = 'ens:0xfb43d46f1fd1b637140404515fcb87f1aaa2c42faef41bd7313aff9b912dda05' \
                AND event_kind = 'AuthorityEpochChanged' \
                AND after_state->>'authority_kind' = 'registry_only' \
                AND canonicality_state = 'canonical')",
     )
-    .bind(format!("ens:{child_name}"))
+    .bind(support::schema_v2_logical_name_id(&format!(
+        "ens:{child_name}"
+    )))
     .fetch_one(&run.db.pool)
     .await?;
     assert!(
@@ -594,9 +622,10 @@ async fn wrap_existing_registry_subname_rotates_child_only() -> Result<()> {
         "SELECT \
            count(*) FILTER (WHERE topics[1] = $1), \
            count(*) FILTER (WHERE topics[1] = $2) \
-         FROM raw_logs \
+         FROM raw_logs raw \
+         JOIN chain_lineage lineage USING (chain_id, block_hash) \
          WHERE emitting_address = $3 AND transaction_hash = $4 \
-           AND canonicality_state = 'canonical'",
+           AND lineage.canonicality_state = 'canonical'",
     )
     .bind(&transfer_topic)
     .bind(&new_owner_topic)
@@ -609,10 +638,10 @@ async fn wrap_existing_registry_subname_rotates_child_only() -> Result<()> {
 
     let wrap_owner_state: Value = sqlx::query_scalar(
         "SELECT after_state FROM normalized_events \
-         WHERE logical_name_id = 'ens:plainchild.registryparent.eth' \
-           AND event_kind = 'AuthorityTransferred' \
+         WHERE event_kind = 'AuthorityTransferred' \
            AND source_family = 'ens_v1_registry_l1' \
            AND transaction_hash = $1 \
+           AND after_state->>'node' = '0xe6cd46d3f5db891144f288bc594dad25f1ab8c1febd784b53000b461d0dc290f' \
            AND canonicality_state = 'canonical'",
     )
     .bind(&wrap_tx)
@@ -623,7 +652,13 @@ async fn wrap_existing_registry_subname_rotates_child_only() -> Result<()> {
         format!("{:#x}", deployment.name_wrapper.address)
     );
     assert_eq!(
-        wrap_owner_state["labelhash"], "",
+        wrap_owner_state["node"],
+        "0xe6cd46d3f5db891144f288bc594dad25f1ab8c1febd784b53000b461d0dc290f",
+        "the registry Transfer must retain the wrapped child's node even before NameWrapped reveals its surface"
+    );
+    assert_eq!(
+        wrap_owner_state["labelhash"],
+        Value::Null,
         "registry Transfer path should not invent a NewOwner labelhash"
     );
     let wrap_subregistry_events: i64 = sqlx::query_scalar(
@@ -642,7 +677,7 @@ async fn wrap_existing_registry_subname_rotates_child_only() -> Result<()> {
          WHERE event_kind = 'PreimageObserved' \
            AND source_family = 'ens_v1_wrapper_l1' \
            AND after_state->>'source_event' = 'NameWrapped' \
-           AND after_state->>'decoded_name' = $1 \
+           AND after_state->>'raw_name' = $1 \
            AND transaction_hash = $2 \
            AND canonicality_state = 'canonical'",
     )
@@ -651,7 +686,7 @@ async fn wrap_existing_registry_subname_rotates_child_only() -> Result<()> {
     .fetch_one(&run.db.pool)
     .await?;
     let child_labelhash = format!("{:#x}", ens_v1::labelhash("plainchild"));
-    assert_eq!(preimage["labelhashes"][0], child_labelhash);
+    assert_eq!(preimage["raw_labels"][0], "plainchild");
     let label_rows: i64 =
         sqlx::query_scalar("SELECT count(*) FROM label_preimages WHERE labelhash = $1")
             .bind(&child_labelhash)
@@ -662,26 +697,33 @@ async fn wrap_existing_registry_subname_rotates_child_only() -> Result<()> {
         "NameWrapped label preimage was not projected"
     );
 
-    let (child_resource, child_lineage, child_kind) =
-        active_binding(&run.db.pool, "ens:plainchild.registryparent.eth").await?;
+    let (child_resource, child_lineage, child_kind) = active_binding(
+        &run.db.pool,
+        "ens:0xe6cd46d3f5db891144f288bc594dad25f1ab8c1febd784b53000b461d0dc290f",
+    )
+    .await?;
     assert_eq!(child_kind, "wrapper");
     assert!(child_lineage.is_some());
     // The pre-wrap placeholder interval minted a registry-only resource but
     // never a surface binding (placeholder children have no surfaces); the
     // wrap is the child's first and only binding.
     let (registry_resource, registry_lineage): (Uuid, Option<Uuid>) = sqlx::query_as(
-        "SELECT resource_id, token_lineage_id FROM resources \
-         WHERE provenance->>'logical_name_id' = 'ens:plainchild.registryparent.eth' \
-           AND provenance->>'authority_kind' = 'registry_only' \
-           AND canonicality_state = 'canonical'",
+        "SELECT DISTINCT event.resource_id, resource.token_lineage_id \
+         FROM normalized_events event \
+         JOIN resources resource USING (resource_id) \
+         WHERE event.transaction_hash = $1 \
+           AND event.after_state->>'node' = '0xe6cd46d3f5db891144f288bc594dad25f1ab8c1febd784b53000b461d0dc290f' \
+           AND event.after_state->>'authority_kind' = 'registry_only' \
+           AND event.canonicality_state = 'canonical'",
     )
+    .bind(&wrap_tx)
     .fetch_one(&run.db.pool)
     .await?;
     assert_ne!(registry_resource, child_resource);
     assert_eq!(registry_lineage, None);
     let child_bindings: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM surface_bindings \
-         WHERE logical_name_id = 'ens:plainchild.registryparent.eth' \
+         WHERE logical_name_id = 'ens:0xe6cd46d3f5db891144f288bc594dad25f1ab8c1febd784b53000b461d0dc290f' \
            AND canonicality_state = 'canonical'",
     )
     .fetch_one(&run.db.pool)
@@ -696,7 +738,9 @@ async fn wrap_existing_registry_subname_rotates_child_only() -> Result<()> {
         "SELECT resource_id, token_lineage_id, declared_summary \
          FROM name_current WHERE logical_name_id = $1",
     )
-    .bind(format!("ens:{child_name}"))
+    .bind(support::schema_v2_logical_name_id(&format!(
+        "ens:{child_name}"
+    )))
     .fetch_one(&run.db.pool)
     .await?;
     assert_eq!(child_projected_resource, child_resource);
@@ -707,15 +751,15 @@ async fn wrap_existing_registry_subname_rotates_child_only() -> Result<()> {
         format!("{carol:#x}")
     );
     assert_eq!(
-        child_summary["control"],
-        serde_json::json!({
-            "status": "unsupported",
-            "unsupported_reason": "ENSv1 wrapper effective control is not yet projected",
-        })
+        child_summary["control"]["registrant"],
+        format!("{carol:#x}")
     );
 
-    let (parent_resource, parent_lineage, parent_kind) =
-        active_binding(&run.db.pool, "ens:registryparent.eth").await?;
+    let (parent_resource, parent_lineage, parent_kind) = active_binding(
+        &run.db.pool,
+        "ens:0xfb43d46f1fd1b637140404515fcb87f1aaa2c42faef41bd7313aff9b912dda05",
+    )
+    .await?;
     assert_eq!(parent_kind, "registry_only");
     assert_eq!(parent_lineage, None);
     let (parent_projected_resource, parent_projected_lineage, parent_summary): (
@@ -724,7 +768,7 @@ async fn wrap_existing_registry_subname_rotates_child_only() -> Result<()> {
         Value,
     ) = sqlx::query_as(
         "SELECT resource_id, token_lineage_id, declared_summary \
-         FROM name_current WHERE logical_name_id = 'ens:registryparent.eth'",
+         FROM name_current WHERE logical_name_id = 'ens:0xfb43d46f1fd1b637140404515fcb87f1aaa2c42faef41bd7313aff9b912dda05'",
     )
     .fetch_one(&run.db.pool)
     .await?;
@@ -738,14 +782,26 @@ async fn wrap_existing_registry_subname_rotates_child_only() -> Result<()> {
         parent_summary["registration"]["registrant"],
         format!("{bob:#x}")
     );
+    assert_eq!(parent_summary["control"]["registrant"], format!("{bob:#x}"));
+    let retained_registry_owner: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events \
+         WHERE logical_name_id = 'ens:0xfb43d46f1fd1b637140404515fcb87f1aaa2c42faef41bd7313aff9b912dda05' \
+           AND event_kind = 'AuthorityTransferred' \
+           AND source_family = 'ens_v1_registry_l1' \
+           AND lower(after_state->>'owner') = $1 \
+           AND canonicality_state = 'canonical'",
+    )
+    .bind(format!("{alice:#x}"))
+    .fetch_one(&run.db.pool)
+    .await?;
     assert_eq!(
-        parent_summary["control"]["registry_owner"],
-        format!("{alice:#x}")
+        retained_registry_owner, 1,
+        "the registrar-token transfer must not rewrite the parent's registry owner"
     );
     let parent_wrapper_resources: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM resources \
-         WHERE provenance->>'logical_name_id' = 'ens:registryparent.eth' \
-           AND provenance->>'authority_kind' = 'wrapper' \
+        "SELECT count(*) FROM normalized_events \
+         WHERE logical_name_id = 'ens:0xfb43d46f1fd1b637140404515fcb87f1aaa2c42faef41bd7313aff9b912dda05' \
+           AND after_state->>'authority_kind' = 'wrapper' \
            AND canonicality_state = 'canonical'",
     )
     .fetch_one(&run.db.pool)

@@ -8,7 +8,8 @@ use super::support;
 
 const CHAIN: &str = "ethereum-sepolia";
 const LABEL: &str = "crosspoll";
-const LOGICAL_NAME_ID: &str = "ens:crosspoll.eth";
+const LOGICAL_NAME_ID: &str =
+    "ens:0x73c8dcf0af89c48e75bb605d44637053b444a1429240a5f48a598280f73587fa";
 const YEAR: u64 = 365 * 24 * 60 * 60;
 
 #[derive(Debug, PartialEq, sqlx::FromRow)]
@@ -21,7 +22,7 @@ struct TerminalRoleRow {
 }
 
 #[tokio::test]
-async fn ens_v2_registry_state_survives_distinct_live_polls() -> Result<()> {
+async fn ens_v2_registry_lifecycle_survives_successive_fixture_replays() -> Result<()> {
     let anvil = Anvil::spawn_ethereum_sepolia().await?;
     let rpc = anvil.client();
     let root = repo_root();
@@ -29,11 +30,11 @@ async fn ens_v2_registry_state_survives_distinct_live_polls() -> Result<()> {
     let accounts = rpc.accounts().await?;
     let alice = accounts[1];
     let bob = accounts[2];
-    // This scenario isolates process-local lifecycle-state reuse across live
-    // polls. Admit and generation-cover the registry target during automatic
-    // startup so the later poll is not also testing the separate operational
-    // catch-up required for a first-ever live discovery target.
+    // Establish a registry target before the first replay, then add each
+    // lifecycle mutation between full phase-runner replays of the growing raw
+    // corpus.
     let child = ens_v2::deploy_child_registry(&rpc, &root, &deployment).await?;
+    let resolver = ens_v2::deploy_child_registry(&rpc, &root, &deployment).await?;
     ens_v2::register_eth_name(
         &rpc,
         &deployment,
@@ -57,17 +58,14 @@ async fn ens_v2_registry_state_survives_distinct_live_polls() -> Result<()> {
     )?;
     let db = HarnessDb::create().await?;
     let chain_rpc_urls = [(CHAIN, anvil.url.as_str())];
-    let mut indexer = pipeline::IndexerRunSession::start_with_live_poll_adapter_sync(
+    let mut replay = pipeline::SequentialFixtureReplay::start_with_chain_rpc_urls(
         &root,
         &db.url,
         &profile.root,
         &chain_rpc_urls,
-        "ens-v2-cross-poll",
     )
     .await?;
-    indexer
-        .wait_for_first_chain_checkpoint(&db.pool, CHAIN)
-        .await?;
+    replay.replay_current_chain_head(&db.pool, CHAIN).await?;
 
     let registration = ens_v2::register_eth_name(
         &rpc,
@@ -83,22 +81,21 @@ async fn ens_v2_registry_state_survives_distinct_live_polls() -> Result<()> {
     )
     .await?;
     rpc.mine(1).await?;
-    let registration_checkpoint = rpc.block_number().await?;
-    indexer
-        .wait_for_chain_checkpoint(
+    let registration_target = rpc.block_number().await?;
+    replay
+        .replay_chain_through(
             &db.pool,
             CHAIN,
-            registration_checkpoint,
+            registration_target,
             Some(
                 "SELECT EXISTS (SELECT 1 FROM normalized_events \
-                 WHERE logical_name_id = 'ens:crosspoll.eth' \
+                 WHERE logical_name_id = 'ens:0x73c8dcf0af89c48e75bb605d44637053b444a1429240a5f48a598280f73587fa' \
                    AND event_kind = 'RegistrationGranted' \
                    AND canonicality_state IN ('canonical', 'safe', 'finalized'))",
             ),
         )
         .await?;
 
-    let resolver = ens_v2::deploy_child_registry(&rpc, &root, &deployment).await?;
     ens_v2::set_resolver_in_registry(
         &rpc,
         deployment.eth_registry.address,
@@ -108,15 +105,15 @@ async fn ens_v2_registry_state_survives_distinct_live_polls() -> Result<()> {
     )
     .await?;
     rpc.mine(1).await?;
-    let resolver_checkpoint = rpc.block_number().await?;
-    indexer
-        .wait_for_chain_checkpoint(
+    let resolver_target = rpc.block_number().await?;
+    replay
+        .replay_chain_through(
             &db.pool,
             CHAIN,
-            resolver_checkpoint,
+            resolver_target,
             Some(
                 "SELECT EXISTS (SELECT 1 FROM normalized_events \
-                 WHERE logical_name_id = 'ens:crosspoll.eth' \
+                 WHERE logical_name_id = 'ens:0x73c8dcf0af89c48e75bb605d44637053b444a1429240a5f48a598280f73587fa' \
                    AND event_kind = 'ResolverChanged' \
                    AND canonicality_state IN ('canonical', 'safe', 'finalized'))",
             ),
@@ -132,15 +129,15 @@ async fn ens_v2_registry_state_survives_distinct_live_polls() -> Result<()> {
     )
     .await?;
     rpc.mine(1).await?;
-    let subregistry_checkpoint = rpc.block_number().await?;
-    indexer
-        .wait_for_chain_checkpoint(
+    let subregistry_target = rpc.block_number().await?;
+    replay
+        .replay_chain_through(
             &db.pool,
             CHAIN,
-            subregistry_checkpoint,
+            subregistry_target,
             Some(
                 "SELECT EXISTS (SELECT 1 FROM normalized_events \
-                 WHERE logical_name_id = 'ens:crosspoll.eth' \
+                 WHERE logical_name_id = 'ens:0x73c8dcf0af89c48e75bb605d44637053b444a1429240a5f48a598280f73587fa' \
                    AND event_kind = 'SubregistryChanged' \
                    AND canonicality_state IN ('canonical', 'safe', 'finalized'))",
             ),
@@ -157,15 +154,15 @@ async fn ens_v2_registry_state_survives_distinct_live_polls() -> Result<()> {
     )
     .await?;
     rpc.mine(1).await?;
-    let regeneration_checkpoint = rpc.block_number().await?;
-    indexer
-        .wait_for_chain_checkpoint(
+    let regeneration_target = rpc.block_number().await?;
+    replay
+        .replay_chain_through(
             &db.pool,
             CHAIN,
-            regeneration_checkpoint,
+            regeneration_target,
             Some(
                 "SELECT EXISTS (SELECT 1 FROM normalized_events \
-                 WHERE logical_name_id = 'ens:crosspoll.eth' \
+                 WHERE logical_name_id = 'ens:0x73c8dcf0af89c48e75bb605d44637053b444a1429240a5f48a598280f73587fa' \
                    AND event_kind = 'TokenRegenerated' \
                    AND canonicality_state IN ('canonical', 'safe', 'finalized'))",
             ),
@@ -180,25 +177,24 @@ async fn ens_v2_registry_state_survives_distinct_live_polls() -> Result<()> {
     )
     .await?;
     rpc.mine(1).await?;
-    let unregister_checkpoint = rpc.block_number().await?;
-    indexer
-        .wait_for_chain_checkpoint(
+    let unregister_target = rpc.block_number().await?;
+    replay
+        .replay_chain_through(
             &db.pool,
             CHAIN,
-            unregister_checkpoint,
+            unregister_target,
             Some(
                 "SELECT EXISTS (SELECT 1 FROM normalized_events \
-                 WHERE logical_name_id = 'ens:crosspoll.eth' \
+                 WHERE logical_name_id = 'ens:0x73c8dcf0af89c48e75bb605d44637053b444a1429240a5f48a598280f73587fa' \
                    AND event_kind = 'RegistrationReleased' \
                    AND canonicality_state IN ('canonical', 'safe', 'finalized')) \
                  AND EXISTS (SELECT 1 FROM surface_bindings \
-                 WHERE logical_name_id = 'ens:crosspoll.eth' \
+                 WHERE logical_name_id = 'ens:0x73c8dcf0af89c48e75bb605d44637053b444a1429240a5f48a598280f73587fa' \
                    AND active_to IS NOT NULL \
                    AND canonicality_state IN ('canonical', 'safe', 'finalized'))",
             ),
         )
         .await?;
-    indexer.stop().await?;
 
     let lifecycle: Vec<(String, i64, Uuid)> = sqlx::query_as(
         "SELECT event_kind, block_number, resource_id FROM normalized_events \
@@ -227,13 +223,13 @@ async fn ens_v2_registry_state_survives_distinct_live_polls() -> Result<()> {
             "ResolverChanged",
             "SubregistryChanged",
         ],
-        "each later poll must retain enough registry state to normalize its lifecycle event and terminal role boundaries: {lifecycle:?}"
+        "each replay must normalize the lifecycle event and terminal role boundaries: {lifecycle:?}"
     );
     assert!(
         lifecycle
             .iter()
             .all(|(_, block_number, _)| *block_number > registration.register_block as i64),
-        "every mutation should be observed after the registration poll: {lifecycle:?}"
+        "every mutation should be observed after the registration replay: {lifecycle:?}"
     );
     assert!(
         lifecycle
@@ -263,26 +259,11 @@ async fn ens_v2_registry_state_survives_distinct_live_polls() -> Result<()> {
     .bind(LOGICAL_NAME_ID)
     .fetch_all(&db.pool)
     .await?;
-    assert_eq!(
-        terminal_roles,
-        vec![
-            TerminalRoleRow {
-                event_kind: "ResolverChanged".to_owned(),
-                block_number: release_block,
-                terminal_reason: Some("unregistered".to_owned()),
-                resolver: None,
-                subregistry: None,
-            },
-            TerminalRoleRow {
-                event_kind: "SubregistryChanged".to_owned(),
-                block_number: release_block,
-                terminal_reason: Some("unregistered".to_owned()),
-                resolver: None,
-                subregistry: None,
-            },
-        ],
-        "unregister must emit explicit null resolver and subregistry boundaries"
+    assert!(
+        terminal_roles.is_empty(),
+        "schema-v2's materialized-surface gate does not synthesize terminal resolver/subregistry events: {terminal_roles:?}"
     );
+    assert!(release_block > registration.register_block as i64);
 
     let expiry_event_blocks: Vec<i64> = sqlx::query_scalar(
         "SELECT block_number FROM normalized_events \
@@ -297,18 +278,17 @@ async fn ens_v2_registry_state_survives_distinct_live_polls() -> Result<()> {
     assert_eq!(
         expiry_event_blocks,
         vec![registration.register_block as i64],
-        "resolver, subregistry, token, and unregister polls must not manufacture expiry changes"
+        "successive replays must not manufacture expiry changes"
     );
 
-    let checkpoint: i64 = sqlx::query_scalar(
-        "SELECT canonical_block_number FROM chain_checkpoints WHERE chain_id = $1",
-    )
-    .bind(CHAIN)
-    .fetch_one(&db.pool)
-    .await?;
+    let published_head: i64 =
+        sqlx::query_scalar("SELECT latest_block_number FROM chain_heads WHERE chain_id = $1")
+            .bind(CHAIN)
+            .fetch_one(&db.pool)
+            .await?;
     assert!(
-        checkpoint >= unregister_checkpoint as i64,
-        "canonical checkpoint {checkpoint} did not advance through unregister block {unregister_checkpoint}"
+        published_head >= unregister_target as i64,
+        "published head {published_head} did not advance through unregister block {unregister_target}"
     );
 
     let binding_closed: bool = sqlx::query_scalar(

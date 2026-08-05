@@ -82,7 +82,11 @@ async fn resolver_changes_follow_registry_and_zero_releases() -> Result<()> {
     ens_v1::register_eth_name(&rpc, &deployment, "flip", alice, YEAR, first_resolver).await?;
 
     {
-        let ready_sql = support::canonical_event_ready_sql("ens:flip.eth", "ResolverChanged", None);
+        let ready_sql = support::canonical_event_ready_sql(
+            "ens:0x1973cc0d7ca356c07f68eae6cb7ca41dc66e9d1552a607d2fe446fd0d3fc9804",
+            "ResolverChanged",
+            None,
+        );
         let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
         let body = exact_name(&run.api, "ens", "flip.eth").await?;
         assert_resolver(&body, first_resolver);
@@ -99,17 +103,11 @@ async fn resolver_changes_follow_registry_and_zero_releases() -> Result<()> {
     .await?;
 
     {
-        let resolver_profile_ready = support::resolver_code_hash_comparison_sql(
-            second_resolver.address,
-            first_resolver,
-            true,
-        );
         let ready_sql = format!(
             "SELECT EXISTS (SELECT 1 FROM normalized_events \
-             WHERE logical_name_id = 'ens:flip.eth' AND event_kind = 'ResolverChanged' \
+             WHERE logical_name_id = 'ens:0x1973cc0d7ca356c07f68eae6cb7ca41dc66e9d1552a607d2fe446fd0d3fc9804' AND event_kind = 'ResolverChanged' \
              AND canonicality_state = 'canonical' \
-             AND lower(after_state->>'resolver') = '{:#x}') \
-             AND {resolver_profile_ready}",
+             AND lower(after_state->>'resolver') = '{:#x}')",
             second_resolver.address
         );
         let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
@@ -125,7 +123,7 @@ async fn resolver_changes_follow_registry_and_zero_releases() -> Result<()> {
         &deployment,
         Some(
             "SELECT count(*) >= 3 FROM normalized_events \
-             WHERE logical_name_id = 'ens:flip.eth' AND event_kind = 'ResolverChanged' \
+             WHERE logical_name_id = 'ens:0x1973cc0d7ca356c07f68eae6cb7ca41dc66e9d1552a607d2fe446fd0d3fc9804' AND event_kind = 'ResolverChanged' \
              AND canonicality_state = 'canonical'",
         ),
     )
@@ -196,12 +194,12 @@ async fn records_route_values_and_version_boundaries_follow_current_resolver() -
         Some(
             "SELECT \
                (SELECT count(DISTINCT after_state->>'record_key') >= 2 FROM normalized_events \
-                WHERE logical_name_id = 'ens:records.eth' AND event_kind = 'RecordChanged' \
+                WHERE logical_name_id = 'ens:0x9407a4f27b24ccf343caeb964a24d93fe04d7851e8fa0813a35c1c3b9eda8574' AND event_kind = 'RecordChanged' \
                 AND canonicality_state = 'canonical' \
                 AND after_state->>'record_key' IN ('addr:0', 'contenthash')) \
              AND \
                EXISTS (SELECT 1 FROM normalized_events \
-                WHERE logical_name_id = 'ens:clearable.eth' AND event_kind = 'RecordChanged' \
+                WHERE logical_name_id = 'ens:0x129efdee8c82c635f3d70c6f1b7b36923b7419ade3f0c5eb4c1223435cc277dd' AND event_kind = 'RecordChanged' \
                 AND canonicality_state = 'canonical' \
                 AND after_state->>'record_key' = 'text:com.twitter')",
         ),
@@ -277,19 +275,16 @@ async fn records_route_values_and_version_boundaries_follow_current_resolver() -
     ens_v1::clear_records(&rpc, resolver_a, alice, "clearable.eth").await?;
 
     let replacement_addr = format!("{:#x}", replacement_resolver.address);
-    let replacement_profile_ready =
-        support::resolver_code_hash_comparison_sql(replacement_resolver.address, resolver_a, true);
     let ready_sql = format!(
         "SELECT \
            EXISTS (SELECT 1 FROM normalized_events \
-            WHERE logical_name_id = 'ens:records.eth' AND event_kind = 'ResolverChanged' \
+            WHERE logical_name_id = 'ens:0x9407a4f27b24ccf343caeb964a24d93fe04d7851e8fa0813a35c1c3b9eda8574' AND event_kind = 'ResolverChanged' \
             AND canonicality_state = 'canonical' \
             AND lower(after_state->>'resolver') = '{replacement_addr}') \
          AND \
            EXISTS (SELECT 1 FROM normalized_events \
-            WHERE logical_name_id = 'ens:clearable.eth' AND event_kind = 'RecordVersionChanged' \
-            AND canonicality_state = 'canonical') \
-         AND {replacement_profile_ready}"
+            WHERE logical_name_id = 'ens:0x129efdee8c82c635f3d70c6f1b7b36923b7419ade3f0c5eb4c1223435cc277dd' AND event_kind = 'RecordVersionChanged' \
+            AND canonicality_state = 'canonical')"
     );
     let current = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
 
@@ -346,6 +341,7 @@ async fn records_route_values_and_version_boundaries_follow_current_resolver() -
 }
 
 #[tokio::test]
+#[ignore = "retired: byte-identical resolver admission by observed code hash was replaced by declared-list classification"]
 async fn byte_identical_public_resolver_copy_converges_to_admitted_profile() -> Result<()> {
     let anvil = Anvil::spawn().await?;
     let rpc = anvil.client();
@@ -389,7 +385,7 @@ async fn byte_identical_public_resolver_copy_converges_to_admitted_profile() -> 
     );
     let ready_sql = format!(
         "SELECT EXISTS (SELECT 1 FROM normalized_events \
-         WHERE logical_name_id = 'ens:custom.eth' AND event_kind = 'RecordChanged' \
+         WHERE logical_name_id = 'ens:0xa2fabe46600ed54c2ddf6013c7588548f91faf8f5a89ca514e89b32a3a69d612' AND event_kind = 'RecordChanged' \
          AND after_state->>'record_key' = 'text:description' \
          AND canonicality_state = 'canonical') \
          AND {resolver_profile_ready}",
@@ -408,7 +404,7 @@ async fn byte_identical_public_resolver_copy_converges_to_admitted_profile() -> 
 
     let record_events: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
-         WHERE logical_name_id = 'ens:custom.eth' AND event_kind = 'RecordChanged' \
+         WHERE logical_name_id = 'ens:0xa2fabe46600ed54c2ddf6013c7588548f91faf8f5a89ca514e89b32a3a69d612' AND event_kind = 'RecordChanged' \
          AND canonicality_state = 'canonical'",
     )
     .fetch_one(&run.db.pool)
@@ -507,7 +503,8 @@ async fn byte_identical_public_resolver_copy_converges_to_admitted_profile() -> 
 }
 
 #[tokio::test]
-async fn shared_resolver_keeps_per_name_records_and_overview_fan_in_unsupported() -> Result<()> {
+async fn shared_resolver_keeps_per_name_records_and_projection_marks_fan_in_unsupported()
+-> Result<()> {
     let anvil = Anvil::spawn().await?;
     let rpc = anvil.client();
 
@@ -534,7 +531,7 @@ async fn shared_resolver_keeps_per_name_records_and_overview_fan_in_unsupported(
         &deployment,
         Some(
             "SELECT count(*) >= 2 FROM normalized_events \
-             WHERE logical_name_id IN ('ens:sharedone.eth', 'ens:sharedtwo.eth') \
+             WHERE logical_name_id IN ('ens:0x139602c6817eb66c83e55c315be8b13b69f89cf04eae8a9815295e737729eea7', 'ens:0x7e8051d3a865d1f28e73883a890c8a7a8ebfcd91a3e1012ebabcee0d3fa85ed6') \
              AND event_kind = 'RecordChanged' AND canonicality_state = 'canonical'",
         ),
     )
@@ -572,30 +569,27 @@ async fn shared_resolver_keeps_per_name_records_and_overview_fan_in_unsupported(
         format!("{resolver:#x}")
     );
 
-    let (status, overview) = run
-        .api
-        .get_json(&format!(
-            "/v1/resolvers/ethereum-mainnet/{resolver:#x}/overview?include=nodes&meta=full"
-        ))
-        .await?;
-    assert_eq!(status, 200, "resolver overview failed: {overview}");
+    let overview: Value = sqlx::query_scalar(
+        "SELECT declared_summary FROM resolver_current
+         WHERE chain_id = 'ethereum-mainnet' AND resolver_address = $1",
+    )
+    .bind(format!("{resolver:#x}"))
+    .fetch_one(&run.db.pool)
+    .await?;
     assert_eq!(
-        pointer(&overview, "/data/nodes"),
-        Value::Null,
-        "resolver overview should not enumerate shared-resolver fan-in; body: {overview}"
-    );
-    assert!(
-        pointer(&overview, "/meta/unsupported_fields")
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|field| field.as_str() == Some("nodes")),
-        "resolver overview should mark nodes unsupported; body: {overview}"
+        pointer(&overview, "/bindings/status"),
+        "unsupported",
+        "schema-v2 must not claim ENSv1 resolver-binding enumeration: {overview}"
     );
     assert_eq!(
-        pointer(&overview, "/meta/coverage/unsupported_reason"),
+        pointer(&overview, "/bindings/unsupported_reason"),
         "resolver_binding_enumeration_not_projected",
-        "resolver overview should report the documented fan-in unsupported reason; body: {overview}"
+        "schema-v2 should persist the fan-in unsupported reason: {overview}"
+    );
+    assert_eq!(pointer(&overview, "/coverage/status"), "projected");
+    assert_eq!(
+        pointer(&overview, "/coverage/exhaustiveness"),
+        "not_asserted"
     );
 
     run.db.cleanup().await?;

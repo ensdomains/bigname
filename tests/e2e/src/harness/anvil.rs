@@ -15,7 +15,7 @@ const SPAWN_ATTEMPTS: usize = 5;
 /// Fixed genesis timestamp so scenario time math is stable across runs.
 pub const GENESIS_TIMESTAMP: u64 = 1_750_000_000;
 
-/// A local anvil instance presented to the indexer under a provider label.
+/// A local Anvil instance presented to the phase-runner under a chain label.
 /// Chain admission is keyed by the provider label, not the numeric chain id,
 /// but we still run realistic local ids so transaction receipts look familiar.
 pub struct Anvil {

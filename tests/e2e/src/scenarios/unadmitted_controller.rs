@@ -36,9 +36,10 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
     let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
 
     let register_tx: String = sqlx::query_scalar(
-        "SELECT transaction_hash FROM raw_logs \
+        "SELECT transaction_hash FROM raw_logs raw \
+         JOIN chain_lineage lineage USING (chain_id, block_hash) \
          WHERE emitting_address = $1 AND topics[4] = $2 \
-         AND canonicality_state = 'canonical' LIMIT 1",
+         AND lineage.canonicality_state = 'canonical' LIMIT 1",
     )
     .bind(format!("{:#x}", deployment.base_registrar.address))
     .bind(&shadow_labelhash)
@@ -48,9 +49,10 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
     // The registrar-plane facts persist raw: the ERC721 mint and the
     // uint256-id NameRegistered both live in the transaction's log set.
     let registrar_raw_logs: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM raw_logs \
+        "SELECT count(*) FROM raw_logs raw \
+         JOIN chain_lineage lineage USING (chain_id, block_hash) \
          WHERE emitting_address = $1 AND transaction_hash = $2 \
-         AND canonicality_state = 'canonical'",
+         AND lineage.canonicality_state = 'canonical'",
     )
     .bind(format!("{:#x}", deployment.base_registrar.address))
     .bind(&register_tx)
@@ -61,8 +63,9 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
         "expected registrar mint + NameRegistered raw logs, saw {registrar_raw_logs}"
     );
 
-    // Nothing lease-bearing derives: the only normalized event from the
-    // transaction is the registry-side child edge.
+    // Nothing lease-bearing derives. Schema-v2 expands the registry-side
+    // child edge into its authority and permission facets, but all three
+    // remain registry-family facts.
     let derived_kinds: Vec<(String, String)> = sqlx::query_as(
         "SELECT event_kind, source_family FROM normalized_events \
          WHERE transaction_hash = $1 AND canonicality_state = 'canonical'",
@@ -72,11 +75,21 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
     .await?;
     assert_eq!(
         derived_kinds,
-        vec![(
-            "SubregistryChanged".to_owned(),
-            "ens_v1_registry_l1".to_owned(),
-        )],
-        "unadmitted-controller registration must derive exactly one registry-side event"
+        vec![
+            (
+                "SubregistryChanged".to_owned(),
+                "ens_v1_registry_l1".to_owned(),
+            ),
+            (
+                "AuthorityTransferred".to_owned(),
+                "ens_v1_registry_l1".to_owned(),
+            ),
+            (
+                "PermissionChanged".to_owned(),
+                "ens_v1_registry_l1".to_owned(),
+            ),
+        ],
+        "unadmitted-controller registration must derive only registry-side facets"
     );
     let lease_events: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
@@ -84,7 +97,7 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
                               'ExpiryChanged', 'RegistrationRenewed') \
          AND (after_state->>'labelhash' = $1 \
               OR after_state->>'child_node' = $2 \
-              OR logical_name_id = 'ens:shadow.eth') \
+              OR logical_name_id = 'ens:0x71912a92f1d7b9f48a8ccc1e1a7bcc3ed43e88c682cb276692e6618bb96437ae') \
          AND canonicality_state = 'canonical'",
     )
     .bind(&shadow_labelhash)
@@ -107,7 +120,7 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
     );
     let surfaces: i64 =
         sqlx::query_scalar("SELECT count(*) FROM name_surfaces WHERE logical_name_id = $1")
-            .bind("ens:shadow.eth")
+            .bind("ens:0x71912a92f1d7b9f48a8ccc1e1a7bcc3ed43e88c682cb276692e6618bb96437ae")
             .fetch_one(&run.db.pool)
             .await?;
     assert_eq!(surfaces, 0, "no exact-name surface may be minted");

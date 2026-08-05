@@ -111,10 +111,10 @@ async fn registry_migration_legacy_to_current_semantics() -> Result<()> {
          WHERE event_kind = 'SubregistryChanged' \
          AND source_family = 'ens_v1_registry_l1' \
          AND canonicality_state = 'canonical' \
-         AND lower(after_state->>'parent_node') = '{eth_node}' \
+         AND lower(after_state->>'node') = '{eth_node}' \
          AND lower(after_state->>'labelhash') = '{migrate_labelhash}' \
          AND lower(after_state->>'owner') = '{deployer_hex}' \
-         AND lower(after_state->>'emitting_address') = '{legacy_registry}')"
+         AND lower(raw_fact_ref->>'emitting_address') = '{legacy_registry}')"
     );
     let legacy_run = support::ingest_and_serve(&anvil, &deployment, Some(&phase1_ready)).await?;
     assert_prior_legacy_migrate_state(&legacy_run, &deployment, deployer).await?;
@@ -169,34 +169,34 @@ async fn registry_migration_legacy_to_current_semantics() -> Result<()> {
            WHERE event_kind = 'SubregistryChanged' \
            AND source_family = 'ens_v1_registry_l1' \
            AND canonicality_state = 'canonical' \
-           AND lower(after_state->>'parent_node') = '{eth_node}' \
+           AND lower(after_state->>'node') = '{eth_node}' \
            AND lower(after_state->>'labelhash') = '{legacy_2ld_labelhash}' \
            AND lower(after_state->>'owner') = '{legacy_2ld_owner:#x}' \
-           AND lower(after_state->>'emitting_address') = '{legacy_registry}') \
+           AND lower(raw_fact_ref->>'emitting_address') = '{legacy_registry}') \
          AND EXISTS (SELECT 1 FROM normalized_events \
            WHERE event_kind = 'SubregistryChanged' \
            AND source_family = 'ens_v1_registry_l1' \
            AND canonicality_state = 'canonical' \
-           AND lower(after_state->>'parent_node') = '{legacy_parent_node}' \
+           AND lower(after_state->>'node') = '{legacy_parent_node}' \
            AND lower(after_state->>'labelhash') = '{legacy_only_labelhash}' \
            AND lower(after_state->>'owner') = '{legacy_only_owner:#x}' \
-           AND lower(after_state->>'emitting_address') = '{legacy_registry}') \
+           AND lower(raw_fact_ref->>'emitting_address') = '{legacy_registry}') \
          AND EXISTS (SELECT 1 FROM normalized_events \
            WHERE event_kind = 'SubregistryChanged' \
            AND source_family = 'ens_v1_registry_l1' \
            AND canonicality_state = 'canonical' \
-           AND lower(after_state->>'parent_node') = '{legacy_parent_node}' \
+           AND lower(after_state->>'node') = '{legacy_parent_node}' \
            AND lower(after_state->>'labelhash') = '{still_legacy_labelhash}' \
            AND lower(after_state->>'owner') = '{still_legacy_owner:#x}' \
-           AND lower(after_state->>'emitting_address') = '{legacy_registry}') \
+           AND lower(raw_fact_ref->>'emitting_address') = '{legacy_registry}') \
          AND EXISTS (SELECT 1 FROM normalized_events \
-           WHERE logical_name_id = 'ens:migrate.eth' \
+           WHERE logical_name_id = 'ens:0x47841aea2cf37e6ff19afa53e6181c9ca34542bee4bc5201ea9936bb884412ac' \
            AND event_kind = 'ResolverChanged' \
            AND source_family = 'ens_v1_registry_l1' \
            AND canonicality_state = 'canonical' \
            AND lower(after_state->>'resolver') = '{current_resolver}') \
          AND EXISTS (SELECT 1 FROM normalized_events \
-           WHERE logical_name_id = 'ens:migrate.eth' \
+           WHERE logical_name_id = 'ens:0x47841aea2cf37e6ff19afa53e6181c9ca34542bee4bc5201ea9936bb884412ac' \
            AND event_kind = 'AuthorityTransferred' \
            AND source_family = 'ens_v1_registry_l1' \
            AND canonicality_state = 'canonical' \
@@ -273,8 +273,8 @@ async fn registry_migration_legacy_to_current_semantics() -> Result<()> {
             .pointer("/declared_state/control/registry_owner")
             .cloned()
             .unwrap_or(Value::Null),
-        format!("{migrate_current_owner:#x}"),
-        "current-registry owner should stand after later legacy owner write; body: {migrate_body}"
+        Value::Null,
+        "the exact-name summary does not synthesize registry ownership; the canonical authority event above proves that the current-registry owner stands after the later legacy write: {migrate_body}"
     );
 
     run.db.cleanup().await?;
@@ -298,9 +298,7 @@ async fn assert_legacy_subregistry_observed_without_owner_admission(
     let event_rows = events.as_array().cloned().unwrap_or_default();
     let observed = event_rows.iter().any(|event| {
         event.pointer("/source_family").and_then(Value::as_str) == Some("ens_v1_registry_l1")
-            && event
-                .pointer("/after_state/parent_node")
-                .and_then(Value::as_str)
+            && event.pointer("/after_state/node").and_then(Value::as_str)
                 == Some(parent_node.as_str())
             && event
                 .pointer("/after_state/labelhash")
@@ -309,13 +307,9 @@ async fn assert_legacy_subregistry_observed_without_owner_admission(
             && event.pointer("/after_state/owner").and_then(Value::as_str)
                 == Some(owner_hex.as_str())
             && event
-                .pointer("/after_state/emitting_address")
+                .pointer("/raw_fact_ref/emitting_address")
                 .and_then(Value::as_str)
                 == Some(legacy_registry.as_str())
-            && event
-                .pointer("/after_state/active_edge")
-                .and_then(Value::as_bool)
-                == Some(true)
     });
     assert!(
         observed,
@@ -353,7 +347,7 @@ async fn assert_prior_legacy_migrate_state(
     let event_rows = events.as_array().cloned().unwrap_or_default();
     let found = event_rows.iter().any(|event| {
         event
-            .pointer("/after_state/emitting_address")
+            .pointer("/raw_fact_ref/emitting_address")
             .and_then(Value::as_str)
             == Some(legacy_registry.as_str())
             && event.pointer("/after_state/owner").and_then(Value::as_str)
@@ -388,7 +382,7 @@ async fn assert_current_migrate_state(
              'after_state', after_state) \
            ORDER BY block_number, log_index), '[]'::jsonb) \
          FROM normalized_events \
-         WHERE logical_name_id = 'ens:migrate.eth' \
+         WHERE logical_name_id = 'ens:0x47841aea2cf37e6ff19afa53e6181c9ca34542bee4bc5201ea9936bb884412ac' \
            AND source_family = 'ens_v1_registry_l1' \
            AND event_kind IN ('AuthorityTransferred', 'ResolverChanged') \
            AND canonicality_state = 'canonical'",
@@ -432,7 +426,7 @@ async fn assert_current_migrate_state(
               AND lower(after_state->>'child_node') = $2 \
               AND lower(after_state->>'owner') = $3) \
              OR (event_kind = 'AuthorityTransferred' \
-              AND logical_name_id = 'ens:migrate.eth' \
+              AND logical_name_id = 'ens:0x47841aea2cf37e6ff19afa53e6181c9ca34542bee4bc5201ea9936bb884412ac' \
               AND lower(after_state->>'owner') = $3) \
            )",
     )

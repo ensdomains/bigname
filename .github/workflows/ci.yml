@@ -318,8 +318,13 @@ jobs:
           scripts/sync-refs
           scripts/sync-refs --check
 
-      - name: cargo check e2e
-        run: cargo check --manifest-path tests/e2e/Cargo.toml --locked --all-targets
+      - name: Prebuild phase-runner
+        run: cargo build --locked --package phase-runner --bin phase-runner
+
+      - name: Run e2e passed-count gate
+        env:
+          BIGNAME_E2E_TEST_THREADS: "8"
+        run: tests/e2e/run-gate
 
   test:
     name: test

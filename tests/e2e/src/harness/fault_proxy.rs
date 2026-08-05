@@ -212,7 +212,7 @@ struct ProxyState {
 }
 
 /// A small in-process HTTP proxy used only by the e2e harness. Scenario driver
-/// RPC stays connected directly to Anvil; only the production indexer receives
+/// RPC stays connected directly to Anvil; only phase-runner ingest receives
 /// this proxy URL.
 pub struct FaultProxy {
     pub url: String,
@@ -661,13 +661,17 @@ fn apply_fault_action(
             transaction_hash,
             count,
         } => {
-            let removed = drop_matching_results(
+            let mut removed = drop_matching_results(
                 request,
                 response,
                 "eth_getBlockReceipts",
                 transaction_hash,
                 *count,
             );
+            if removed == 0 {
+                removed =
+                    null_matching_transaction_receipts(request, response, transaction_hash, *count);
+            }
             if removed == 0 {
                 return Ok(None);
             }
@@ -766,6 +770,33 @@ fn drop_matching_results(
                 true
             }
         });
+    });
+    count - remaining
+}
+
+fn null_matching_transaction_receipts(
+    request: &Value,
+    response: &mut Value,
+    transaction_hash: &str,
+    count: usize,
+) -> usize {
+    let ids = request_ids_matching(request, "eth_getTransactionReceipt", |call| {
+        call.get("params")
+            .and_then(Value::as_array)
+            .and_then(|params| params.first())
+            .and_then(Value::as_str)
+            .is_some_and(|actual| actual.eq_ignore_ascii_case(transaction_hash))
+    });
+    let mut remaining = count;
+    visit_values_mut(response, &mut |item| {
+        if remaining == 0 || !response_id_is_selected(item, &ids) {
+            return;
+        }
+        let Some(result) = item.get_mut("result") else {
+            return;
+        };
+        *result = Value::Null;
+        remaining -= 1;
     });
     count - remaining
 }
