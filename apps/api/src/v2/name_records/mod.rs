@@ -145,12 +145,6 @@ pub(crate) enum VerifiedRecordLookup {
     NotSupported,
 }
 
-impl VerifiedRecordLookup {
-    pub(crate) fn uses_on_demand_fallback(&self) -> bool {
-        false
-    }
-}
-
 pub(crate) async fn get_name_records(
     Path(input_name): Path<String>,
     params: NameRecordsQuery,

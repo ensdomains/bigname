@@ -10,16 +10,14 @@ use crate::v2::support::{
 use super::super::{
     SnapshotReadResource, Source, Status, V2Result, default_requested_records,
     name_records::{
-        RecordAnswer, VERIFIED_NOT_SUPPORTED_REASON, VerifiedRecordLookup,
-        build_verified_name_records, ensure_verified_record_limit,
-        load_verified_record_lookup_for_resource,
+        RecordAnswer, VERIFIED_NOT_SUPPORTED_REASON, build_verified_name_records,
+        ensure_verified_record_limit, load_verified_record_lookup_for_resource,
     },
 };
 use super::{NameRecord, build_name_record, string_field};
 
 pub(super) struct VerifiedNameRecord {
     pub(super) record: NameRecord,
-    pub(super) uses_on_demand_fallback: bool,
 }
 
 pub(super) async fn build_name_record_for_source(
@@ -33,7 +31,6 @@ pub(super) async fn build_name_record_for_source(
     match source {
         Source::Indexed => Ok(VerifiedNameRecord {
             record: build_name_record(row, record_inventory, chain_id, Status::Ok),
-            uses_on_demand_fallback: false,
         }),
         Source::Verified => {
             build_verified_name_record(state, row, record_inventory, chain_id, selected_snapshot)
@@ -59,9 +56,6 @@ async fn build_verified_name_record(
         SnapshotReadResource::Name,
     )
     .await?;
-    let uses_on_demand_fallback = verified_lookup
-        .as_ref()
-        .is_some_and(VerifiedRecordLookup::uses_on_demand_fallback);
     let mut verified_records = build_verified_name_records(
         row,
         record_inventory,
@@ -108,10 +102,7 @@ async fn build_verified_name_record(
     record.unsupported_reason = verified_profile_unsupported_reason(answers, status);
     record.failure_reason = verified_profile_failure_reason(answers, status);
     record.unsupported_fields = unsupported_fields;
-    Ok(VerifiedNameRecord {
-        record,
-        uses_on_demand_fallback,
-    })
+    Ok(VerifiedNameRecord { record })
 }
 
 fn profile_verified_requested_records(

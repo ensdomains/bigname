@@ -73,7 +73,7 @@ async fn healthz_reports_ready_when_database_is_reachable() -> Result<()> {
 }
 
 #[tokio::test]
-async fn documented_api_role_persists_retained_v1_raw_call_snapshots() -> Result<()> {
+async fn documented_api_role_persists_retained_v1_cache_misses() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let suffix = database
         .database_name
@@ -93,6 +93,15 @@ async fn documented_api_role_persists_retained_v1_raw_call_snapshots() -> Result
          GRANT {role} TO CURRENT_USER;
          GRANT USAGE ON SCHEMA public TO {role};
          GRANT SELECT ON ALL TABLES IN SCHEMA public TO {role};
+         GRANT EXECUTE ON FUNCTION public.bigname_lock_primary_name_anchor(
+             text, text, text
+         ) TO {role};
+         GRANT INSERT ON TABLE
+             public.execution_traces,
+             public.execution_steps,
+             public.execution_cache_outcomes
+         TO {role};
+         GRANT UPDATE ON TABLE public.execution_cache_outcomes TO {role};
          GRANT INSERT, UPDATE ON TABLE public.raw_call_snapshots TO {role};
          GRANT USAGE ON SEQUENCE public.raw_call_snapshots_raw_call_snapshot_id_seq
          TO {role};"
@@ -112,6 +121,21 @@ async fn documented_api_role_persists_retained_v1_raw_call_snapshots() -> Result
         .max_connections(2)
         .connect_with(connect_options)
         .await?;
+    let projection_write_error = sqlx::query(
+        "UPDATE public.primary_names_current
+         SET claim_status = claim_status
+         WHERE false",
+    )
+    .execute(&role_pool)
+    .await
+    .expect_err("the API role must not update the retained primary-name projection directly");
+    assert_eq!(
+        projection_write_error
+            .as_database_error()
+            .and_then(|error| error.code().map(|code| code.into_owned()))
+            .as_deref(),
+        Some("42501")
+    );
     let mut snapshot = bigname_storage::RawCallSnapshot {
         chain_id: "ethereum-mainnet".to_owned(),
         block_hash: format!("0x{}", "11".repeat(32)),
@@ -130,6 +154,42 @@ async fn documented_api_role_persists_retained_v1_raw_call_snapshots() -> Result
     let refreshed =
         bigname_storage::upsert_raw_call_snapshots(&role_pool, &[snapshot.clone()]).await?;
     assert_eq!(refreshed, vec![snapshot]);
+
+    let claim = bigname_execution::RouteLocalEnsPrimaryNameClaim::NotFound;
+    let evidence = bigname_execution::OnDemandEnsPrimaryNameExecutionEvidence {
+        contracts_called: vec![json!({
+            "chain_id": bigname_execution::ETHEREUM_MAINNET_CHAIN_ID,
+            "contract_address": bigname_execution::ENS_REGISTRY_ADDRESS,
+            "selector": "0x0178b8bf",
+        })],
+        ..Default::default()
+    };
+    let primary_name_request =
+        bigname_execution::build_on_demand_ens_verified_primary_name_request(
+            bigname_execution::BuildOnDemandEnsVerifiedPrimaryNameRequest {
+                normalized_address: "0x00000000000000000000000000000000000000af",
+                claim: &claim,
+                verified_primary_name: json!({ "status": "not_found" }),
+                block_number: 21_000_003,
+                block_hash: "0xabc123",
+                block_timestamp: "2026-08-05T00:00:00Z",
+                manifest_versions: json!([{
+                    "source_family": bigname_execution::ENS_EXECUTION_SOURCE_FAMILY,
+                    "manifest_version": 1,
+                }]),
+                forward_call_attempted: false,
+                reverse_latency_ms: 2,
+                forward_latency_ms: None,
+                execution_evidence: &evidence,
+            },
+        )?;
+    let persisted =
+        bigname_execution::persist_ens_verified_primary_name(&role_pool, &primary_name_request)
+            .await?;
+    assert_eq!(
+        persisted.execution_trace_id,
+        primary_name_request.trace.execution_trace_id
+    );
 
     role_pool.close().await;
     raw_sql(&format!(

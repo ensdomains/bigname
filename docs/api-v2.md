@@ -318,12 +318,23 @@ The post-call guard also revalidates the Ethereum project generation and both
 selected ENS manifest declarations; a concurrent replacement returns `409
 stale` and no verified answer.
 
+The exact-head and post-call generation fences fail safe under pipeline lag. If
+head following or project publication remains behind the readable chain head,
+verified reads degrade to `409 stale` instead of executing against mixed
+generations. Fast-moving chains such as Base are especially sensitive when a
+CCIP round trip overlaps a new head. The rejection rate under realistic lag is
+not yet measured; measuring it and setting an acceptable pre-edge-flip bound is
+an operational release task.
+
 ### Tier 3: Diagnostics
 
 Diagnostics are the only public routes that may carry pipeline vocabulary.
 They expose coverage taxonomy, binding and authority explanations, record
 inventory/cache internals, persisted execution explanations, active manifests,
 and raw normalized-event rows.
+The diagnostics records route drives the same verified lookup engine and can
+write or clear rows in the
+[resolution divergence ledger](glossary.md#resolution-divergence-ledger).
 
 ## Parameters
 

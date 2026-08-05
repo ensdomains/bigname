@@ -85,11 +85,7 @@ pub(crate) async fn ensure_primary_name_anchor_matches_in_transaction(
     let Some(anchor) = sqlx::query_as::<_, LockedPrimaryNameAnchor>(
         r#"
         SELECT claim_status, normalized_claim_name, claim_name_is_normalized
-        FROM primary_names_current
-        WHERE address = $1
-          AND namespace = $2
-          AND coin_type = $3
-        FOR UPDATE
+        FROM public.bigname_lock_primary_name_anchor($1, $2, $3)
         "#,
     )
     .bind(&tuple.normalized_address)
@@ -142,11 +138,7 @@ pub(crate) async fn ensure_primary_name_anchor_absent_in_transaction(
         r#"
         SELECT EXISTS (
             SELECT 1
-            FROM primary_names_current
-            WHERE address = $1
-              AND namespace = $2
-              AND coin_type = $3
-            FOR UPDATE
+            FROM public.bigname_lock_primary_name_anchor($1, $2, $3)
         )
         "#,
     )

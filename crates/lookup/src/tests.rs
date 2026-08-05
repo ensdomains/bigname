@@ -158,6 +158,151 @@ fn avatar_comparison_uses_the_text_avatar_inventory_entry() -> crate::Result<()>
 }
 
 #[tokio::test]
+async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<()> {
+    let oversized_text_key = "k".repeat(4_096);
+    let oversized_record_key = format!("text:{oversized_text_key}");
+    let cases = vec![
+        (
+            "nested value",
+            "text:url".to_owned(),
+            json!([{
+                "record_key": "text:url",
+                "record_family": "text",
+                "selector_key": "url",
+                "status": "success",
+                "value": { "value": "https://value.example" },
+            }]),
+        ),
+        (
+            "nested bytes",
+            "contenthash".to_owned(),
+            json!([{
+                "record_key": "contenthash",
+                "record_family": "contenthash",
+                "selector_key": null,
+                "status": "success",
+                "value": { "bytes": "0xe3010170" },
+            }]),
+        ),
+        (
+            "avatar exact entry preferred over text fallback",
+            "avatar".to_owned(),
+            json!([
+                {
+                    "record_key": "text:avatar",
+                    "record_family": "text",
+                    "selector_key": "avatar",
+                    "status": "success",
+                    "value": { "value": "ipfs://fallback" },
+                },
+                {
+                    "record_key": "avatar",
+                    "record_family": "avatar",
+                    "selector_key": null,
+                    "status": "success",
+                    "value": { "value": "ipfs://preferred" },
+                },
+            ]),
+        ),
+        (
+            "address value lowercasing",
+            "addr:60".to_owned(),
+            json!([{
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "status": "success",
+                "value": { "bytes": "0xAbCdEf0123" },
+            }]),
+        ),
+        ("absent entry", "text:missing".to_owned(), json!([])),
+        (
+            "null value",
+            "text:null".to_owned(),
+            json!([{
+                "record_key": "text:null",
+                "record_family": "text",
+                "selector_key": "null",
+                "status": "success",
+                "value": null,
+            }]),
+        ),
+        (
+            "oversized text key",
+            oversized_record_key.clone(),
+            json!([{
+                "record_key": oversized_record_key,
+                "record_family": "text",
+                "selector_key": oversized_text_key,
+                "status": "success",
+                "value": { "value": "oversized-key-value" },
+            }]),
+        ),
+    ];
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+
+    for (case_name, record_key, entries) in cases {
+        let selector = RecordSelector::parse(&record_key)?;
+        let rust_answer = crate::store::indexed_answer(&entries, &selector);
+        sqlx::query("UPDATE record_inventory_current SET entries = $1")
+            .bind(&entries)
+            .execute(fixture.pool())
+            .await?;
+        let snapshot = crate::store::load_snapshot(
+            fixture.pool(),
+            &LookupRequest::new(&fixture.logical_name_id, [&record_key])?,
+        )
+        .await?;
+        let (resource_id, boundary_key, row_xmin): (String, String, String) = sqlx::query_as(
+            "SELECT resource_id::text, record_version_boundary_key, xmin::text
+             FROM record_inventory_current",
+        )
+        .fetch_one(fixture.pool())
+        .await?;
+        let live_probe = json!({ "status": "derivation_probe", "case": case_name });
+        let write_status: String = sqlx::query_scalar(
+            "SELECT write_resolution_divergence(
+                 $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, false
+             )",
+        )
+        .bind(&resource_id)
+        .bind(&boundary_key)
+        .bind(&row_xmin)
+        .bind(&snapshot.authoritative_position.chain_id)
+        .bind(snapshot.authoritative_position.block_number)
+        .bind(&snapshot.authoritative_position.block_hash)
+        .bind(&snapshot.execution_authority)
+        .bind(&snapshot.logical_name_id)
+        .bind(&snapshot.resolver_chain_id)
+        .bind(&snapshot.resolver_address)
+        .bind(&record_key)
+        .bind(&snapshot.revalidation_positions)
+        .bind(&live_probe)
+        .fetch_one(fixture.pool())
+        .await?;
+        assert_eq!(write_status, "written", "SQL probe failed for {case_name}");
+        let sql_answer: Value = sqlx::query_scalar(
+            "SELECT indexed_result
+             FROM resolution_divergences
+             WHERE request_kind = $1 AND cleared_at IS NULL",
+        )
+        .bind(&record_key)
+        .fetch_one(fixture.pool())
+        .await?;
+        assert_eq!(
+            rust_answer, sql_answer,
+            "derivation mismatch for {case_name}"
+        );
+        sqlx::query("DELETE FROM resolution_divergences")
+            .execute(fixture.pool())
+            .await?;
+    }
+
+    fixture.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn agreeing_resolution_without_active_divergence_writes_nothing() -> AnyResult<()> {
     let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(
         INDEXED_VALUE,

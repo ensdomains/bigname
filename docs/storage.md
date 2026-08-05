@@ -156,7 +156,7 @@ For ENSv2, `resource_id` keys by `(chain_id, registry_contract_instance_id, upst
 | `manifest_alert_*` | worker audit | Manifest-drift and proxy observations; not admission truth. |
 | `service_loop_heartbeats` | worker | Current worker liveness. The API still reads retained old-indexer process/chain rows until its readiness port. |
 | `execution_*` | legacy execution worker; retained v1 API cache-miss persistence | Durable traces, steps, cache outcomes, and invalidation records. V2 serving paths do not write this family after their lookup-engine cutover. |
-| `resolution_divergences` | schema-v2 lookup engine, including v2 verified record lookups | Rows in the [resolution divergence ledger](glossary.md#resolution-divergence-ledger): active rows represent direct live/indexed disagreements only, and restored agreement may clear a matching row. The compared exact `record_inventory_current` row is guarded through commit; CCIP answers are excluded. |
+| `resolution_divergences` | schema-v2 lookup engine, including v2 verified product reads and the Tier-3 diagnostics records route | Rows in the [resolution divergence ledger](glossary.md#resolution-divergence-ledger): active rows represent direct live/indexed disagreements only, and restored agreement may clear a matching row. The compared exact `record_inventory_current` row is guarded through commit; CCIP answers are excluded. |
 | `backfill_*` | no current writer | Immutable migration-era jobs and ranges; storage retains read-only worker inspection. |
 | `normalized_replay_*` | no current writer | Migration-era replay/checkpoint state. The worker still reads selected cursors for projection readiness and raw staging compaction. |
 | `base_normalized_rederive_*`, resolver-profile queues/journals/reconciliation, retained-history/coverage/frontier tables, startup adapter checkpoints | no current writer | Stranded transitional schema retained only because migrations are immutable. These rows are not current admission, readiness, replay, or repair authority. |
@@ -622,7 +622,11 @@ clear a matching active row. The guarded writer derives the indexed answer from
 that exact inventory row and verifies that the requested name, selected
 resolver, record selector, and record boundary still match the current name
 projection; callers cannot supply a different indexed answer or target an
-unrelated ledger row. When comparison and live execution use different blocks
+unrelated ledger row. The Rust caller independently derives the same indexed
+answer to interpret the writer's action. If those derivations disagree, the
+writer result is rejected as an internal database error and the request fails
+closed with `500` rather than exposing or accepting the inconsistent decision.
+When comparison and live execution use different blocks
 on one chain, the ledger retains separate `indexed` and `live` position slots so
 a reorg of either dependency clears the active row. These internal role slots
 do not change v2 response metadata. A supported wildcard
@@ -728,6 +732,15 @@ different locks and do not serialize. Full projection replacement uses an
 exclusive database-scoped maintenance advisory lock while tuple operations join
 that maintenance boundary in shared mode, avoiding an unbounded set of tuple
 locks during a rebuild.
+
+The retained v1 execution code first joins that tuple and replacement advisory
+fence, then invokes the fixed-`search_path`, security-definer
+`bigname_lock_primary_name_anchor` function. The function row-locks and returns
+only the requested projection anchor; when no row exists, the earlier advisory
+lock protects that absence. Its default `PUBLIC` execution privilege is
+revoked. This preserves the anchor through the execution-artifact commit
+without granting the API direct `UPDATE` access to the worker-owned projection
+table.
 
 The migration that introduces this protocol also installs projection-table
 write triggers for rolling-version compatibility. A writer from the preceding
