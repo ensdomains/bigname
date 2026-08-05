@@ -135,6 +135,8 @@ struct BindingFkExpected {
     release_block_hash: String,
     release_block_number: i64,
     source_manifest_id: i64,
+    binding_closure: Value,
+    authority_epoch_changed: Value,
 }
 
 #[derive(Deserialize)]
@@ -325,6 +327,62 @@ fn production_lease_release_corpus_materializes_its_registry_fallback() -> Resul
                 .and_then(Value::as_str)
                 == Some("RegistrationReleased")
     }));
+
+    assert_eq!(
+        release.binding_closures.len(),
+        1,
+        "release batch binding-closure count changed"
+    );
+    let closure = &release.binding_closures[0];
+    assert_eq!(
+        serde_json::json!({
+            "logical_name_id": closure.logical_name_id,
+            "except_surface_binding_id": closure.except_surface_binding_id,
+            "active_to": rfc3339(closure.active_to),
+            "block_number": closure.block_number,
+            "transaction_index": closure.transaction_index,
+            "log_index": closure.log_index,
+        }),
+        expected.binding_closure,
+        "release batch binding closure changed"
+    );
+
+    let authority_epochs = release
+        .normalized_events
+        .iter()
+        .filter(|event| event.event_kind == "AuthorityEpochChanged")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        authority_epochs.len(),
+        1,
+        "release batch AuthorityEpochChanged count changed"
+    );
+    let authority_epoch = authority_epochs[0];
+    assert_eq!(
+        serde_json::json!({
+            "event_identity": authority_epoch.event_identity,
+            "namespace": authority_epoch.namespace,
+            "logical_name_id": authority_epoch.logical_name_id,
+            "resource_id": authority_epoch.resource_id,
+            "event_kind": authority_epoch.event_kind,
+            "source_family": authority_epoch.source_family,
+            "manifest_version": authority_epoch.manifest_version,
+            "source_manifest_id": authority_epoch.source_manifest_id,
+            "chain_id": authority_epoch.chain_id,
+            "block_number": authority_epoch.block_number,
+            "block_hash": authority_epoch.block_hash,
+            "transaction_hash": authority_epoch.transaction_hash,
+            "transaction_index": authority_epoch.transaction_index,
+            "log_index": authority_epoch.log_index,
+            "raw_fact_ref": authority_epoch.raw_fact_ref,
+            "derivation_kind": authority_epoch.derivation_kind,
+            "canonicality_state": authority_epoch.canonicality_state,
+            "before_state": authority_epoch.before_state,
+            "after_state": authority_epoch.after_state,
+        }),
+        expected.authority_epoch_changed,
+        "release batch AuthorityEpochChanged row changed"
+    );
     assert!(outputs[..outputs.len() - 1].iter().all(|output| {
         output
             .resources
