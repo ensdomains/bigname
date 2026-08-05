@@ -8814,3 +8814,289 @@ fn prior_event(event: &NormalizedEvent) -> PriorEventInput {
         after_state: event.after_state.clone(),
     }
 }
+
+#[test]
+#[ignore = "diagnostic reconciliation timing probe"]
+fn same_transaction_reconciliation_complexity_probe() {
+    let cases = std::env::var("BIGNAME_RECON_PROBE_CASES")
+        .unwrap_or_else(|_| "1x64,2x64,4x64,8x64,16x64".to_owned());
+    for case in cases.split(',') {
+        let (transactions, logs_per_transaction) = case
+            .split_once('x')
+            .expect("probe cases must use TRANSACTIONSxLOGS_PER_TRANSACTION");
+        let transactions = transactions.parse::<usize>().expect("transaction count");
+        let logs_per_transaction = logs_per_transaction
+            .parse::<usize>()
+            .expect("logs per transaction");
+        let mut output = dense_reconciliation_output(transactions, logs_per_transaction);
+        let normalized_events_before = output.normalized_events.len();
+        let pairwise_json_started = std::time::Instant::now();
+        let pairwise_json_matches = reconciliation_probe_pairwise_json(&output.normalized_events);
+        let pairwise_json_elapsed = pairwise_json_started.elapsed();
+        let typed_started = std::time::Instant::now();
+        let typed = output
+            .normalized_events
+            .iter()
+            .map(ReconciliationProbeFields::extract)
+            .collect::<Vec<_>>();
+        let pairwise_typed_matches = reconciliation_probe_pairwise_typed(&typed);
+        let pairwise_typed_elapsed = typed_started.elapsed();
+        let started = std::time::Instant::now();
+        super::protocol::reconcile_same_transaction_setups_for_test(&mut output);
+        let elapsed = started.elapsed();
+        assert_eq!(pairwise_json_matches, pairwise_typed_matches);
+        std::hint::black_box(&output);
+        eprintln!(
+            "reconcile_probe transactions={transactions} logs_per_transaction={logs_per_transaction} raw_logs={} normalized_events={normalized_events_before} pairwise_json_ms={:.3} pairwise_typed_ms={:.3} elapsed_ms={:.3}",
+            transactions * logs_per_transaction,
+            pairwise_json_elapsed.as_secs_f64() * 1_000.0,
+            pairwise_typed_elapsed.as_secs_f64() * 1_000.0,
+            elapsed.as_secs_f64() * 1_000.0,
+        );
+    }
+}
+
+fn reconciliation_probe_pairwise_json(events: &[NormalizedEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| event.event_kind == "RegistrationGranted")
+        .map(|registration| {
+            let transaction_hash = registration.transaction_hash.as_deref().unwrap();
+            let registration_log_index = registration.log_index.unwrap();
+            let namehash = registration
+                .after_state
+                .get("namehash")
+                .unwrap()
+                .as_str()
+                .unwrap();
+            events
+                .iter()
+                .filter(|event| {
+                    event.transaction_hash.as_deref() == Some(transaction_hash)
+                        && event
+                            .log_index
+                            .is_some_and(|index| index < registration_log_index)
+                        && event
+                            .after_state
+                            .get("child_node")
+                            .or_else(|| event.after_state.get("node"))
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|target| target.eq_ignore_ascii_case(namehash))
+                })
+                .count()
+        })
+        .sum()
+}
+
+struct ReconciliationProbeFields<'a> {
+    registration_namehash: Option<&'a str>,
+    target_namehash: Option<&'a str>,
+    transaction_hash: Option<&'a str>,
+    log_index: Option<i64>,
+}
+
+impl<'a> ReconciliationProbeFields<'a> {
+    fn extract(event: &'a NormalizedEvent) -> Self {
+        Self {
+            registration_namehash: (event.event_kind == "RegistrationGranted")
+                .then(|| event.after_state.get("namehash")?.as_str())
+                .flatten(),
+            target_namehash: event
+                .after_state
+                .get("child_node")
+                .or_else(|| event.after_state.get("node"))
+                .and_then(serde_json::Value::as_str),
+            transaction_hash: event.transaction_hash.as_deref(),
+            log_index: event.log_index,
+        }
+    }
+}
+
+fn reconciliation_probe_pairwise_typed(events: &[ReconciliationProbeFields<'_>]) -> usize {
+    events
+        .iter()
+        .filter_map(|registration| Some((registration.registration_namehash?, registration)))
+        .map(|(namehash, registration)| {
+            events
+                .iter()
+                .filter(|event| {
+                    event.transaction_hash == registration.transaction_hash
+                        && event
+                            .log_index
+                            .zip(registration.log_index)
+                            .is_some_and(|(index, registration_index)| index < registration_index)
+                        && event
+                            .target_namehash
+                            .is_some_and(|target| target.eq_ignore_ascii_case(namehash))
+                })
+                .count()
+        })
+        .sum()
+}
+
+fn dense_reconciliation_output(transactions: usize, logs_per_transaction: usize) -> BatchOutput {
+    const EMITTER: &str = "0x0000000000000000000000000000000000000001";
+    const REGISTRANT: &str = "0x0000000000000000000000000000000000000002";
+    let mut normalized_events = Vec::new();
+    let shapes_per_transaction = logs_per_transaction / 4;
+    for transaction in 0..transactions {
+        let transaction_hash = format!("0x{transaction:064x}");
+        for shape in 0..shapes_per_transaction {
+            let ordinal = transaction * shapes_per_transaction + shape;
+            let namehash = format!("0x{:064x}", ordinal + 1);
+            let logical_name_id = format!("ens:{namehash}");
+            let stale_resource = Uuid::from_u128((ordinal as u128) * 2 + 1);
+            let registrar_resource = Uuid::from_u128((ordinal as u128) * 2 + 2);
+            let first_log = (shape * 4) as i64;
+            normalized_events.push(reconciliation_probe_event(
+                ordinal,
+                "AuthorityTransferred",
+                "ens_v1_registry_l1",
+                &transaction_hash,
+                transaction as i64,
+                first_log,
+                Some(stale_resource),
+                json!({
+                    "authority_kind":"registry_only",
+                    "child_node":namehash,
+                    "owner":EMITTER,
+                    "source_event":"NewOwner",
+                }),
+            ));
+            normalized_events.push(reconciliation_probe_event(
+                ordinal,
+                "PermissionChanged",
+                "ens_v1_registry_l1",
+                &transaction_hash,
+                transaction as i64,
+                first_log,
+                Some(stale_resource),
+                json!({
+                    "authority_kind":"registry_only",
+                    "grant_source":{"kind":"ens_v1_authority","authority_kind":"registry_only"},
+                    "node":namehash,
+                    "scope":{"kind":"resource"},
+                    "subject":EMITTER,
+                }),
+            ));
+            normalized_events.push(reconciliation_probe_event(
+                ordinal,
+                "RecordChanged",
+                "ens_v1_resolver_l1",
+                &transaction_hash,
+                transaction as i64,
+                first_log + 1,
+                Some(stale_resource),
+                json!({"node":namehash,"selector":"text:avatar","value":"dense"}),
+            ));
+            normalized_events.push(reconciliation_probe_event(
+                ordinal,
+                "AuthorityTransferred",
+                "ens_v1_registry_l1",
+                &transaction_hash,
+                transaction as i64,
+                first_log + 2,
+                Some(stale_resource),
+                json!({
+                    "authority_kind":"registry_only",
+                    "child_node":namehash,
+                    "owner":REGISTRANT,
+                    "source_event":"NewOwner",
+                }),
+            ));
+            normalized_events.push(reconciliation_probe_event(
+                ordinal,
+                "PermissionChanged",
+                "ens_v1_registry_l1",
+                &transaction_hash,
+                transaction as i64,
+                first_log + 2,
+                Some(stale_resource),
+                json!({
+                    "authority_kind":"registry_only",
+                    "grant_source":{"kind":"ens_v1_authority","authority_kind":"registry_only"},
+                    "node":namehash,
+                    "scope":{"kind":"resource"},
+                    "subject":REGISTRANT,
+                }),
+            ));
+            let mut registration = reconciliation_probe_event(
+                ordinal,
+                "RegistrationGranted",
+                "ens_v1_registrar_l1",
+                &transaction_hash,
+                transaction as i64,
+                first_log + 3,
+                Some(registrar_resource),
+                json!({
+                    "authority_key":format!("registrar:{namehash}"),
+                    "namehash":namehash,
+                    "registrant":REGISTRANT,
+                    "source_event":"NameRegistered",
+                }),
+            );
+            registration.logical_name_id = Some(logical_name_id);
+            registration.raw_fact_ref["emitting_address"] = json!(EMITTER);
+            normalized_events.push(registration);
+        }
+        for unrelated in (shapes_per_transaction * 4)..logs_per_transaction {
+            normalized_events.push(reconciliation_probe_event(
+                transactions * shapes_per_transaction
+                    + transaction * logs_per_transaction
+                    + unrelated,
+                "RecordChanged",
+                "ens_v1_resolver_l1",
+                &transaction_hash,
+                transaction as i64,
+                unrelated as i64,
+                None,
+                json!({
+                    "node":format!("0x{:064x}", usize::MAX - unrelated),
+                    "selector":"text:unrelated",
+                    "value":"mixed",
+                }),
+            ));
+        }
+    }
+    BatchOutput {
+        normalized_events,
+        ..BatchOutput::default()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconciliation_probe_event(
+    ordinal: usize,
+    event_kind: &str,
+    source_family: &str,
+    transaction_hash: &str,
+    transaction_index: i64,
+    log_index: i64,
+    resource_id: Option<Uuid>,
+    after_state: serde_json::Value,
+) -> NormalizedEvent {
+    NormalizedEvent {
+        event_identity: format!("probe:{ordinal}:{event_kind}:{log_index}"),
+        namespace: "ens".to_owned(),
+        logical_name_id: None,
+        resource_id,
+        event_kind: event_kind.to_owned(),
+        source_family: source_family.to_owned(),
+        manifest_version: 1,
+        source_manifest_id: Some(1),
+        chain_id: CHAIN.to_owned(),
+        block_number: Some(1),
+        block_hash: Some("0xdense".to_owned()),
+        transaction_hash: Some(transaction_hash.to_owned()),
+        transaction_index: Some(transaction_index),
+        log_index: Some(log_index),
+        raw_fact_ref: json!({
+            seam::INTERPRETER_STATE_KEY:"probe-state",
+            seam::STATE_SCOPE_KEY:"probe-scope",
+        }),
+        derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+        canonicality_state: "canonical".to_owned(),
+        before_state: json!({}),
+        after_state,
+    }
+}
