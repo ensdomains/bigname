@@ -1393,23 +1393,25 @@ fn incremental_session_state_matches_a_fresh_compacted_restore() -> anyhow::Resu
         None,
     )?;
     let prior = seam::fold_prior_events(Vec::new(), &first.normalized_events, &[blocks(1)])?;
-    let (second, session) = interpret_test_batch_incremental(
-        BatchInput {
-            chain_id: CHAIN.to_owned(),
-            manifests: vec![manifest.clone()],
-            discovery_rules: Vec::new(),
-            admissions: vec![admission(56, "name_wrapper")],
-            prior_events: Vec::new(),
-            blocks: Vec::new(),
-            raw_logs: vec![raw_at(
-                ExpiryExtended { node, expiry: 84 }.encode_log_data(),
-                2,
-                0,
-                CONTRACT,
-            )],
-        },
-        Some(session),
-    )?;
+    let second_input = BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest.clone()],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(56, "name_wrapper")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw_at(
+            ExpiryExtended { node, expiry: 84 }.encode_log_data(),
+            2,
+            0,
+            CONTRACT,
+        )],
+    };
+    let mut fresh_second_input = second_input.clone();
+    fresh_second_input.prior_events = prior.clone();
+    let fresh_second = interpret_test_batch(fresh_second_input)?;
+    let (second, session) = interpret_test_batch_incremental(second_input, Some(session))?;
+    assert_eq!(second, fresh_second);
     let prior = seam::fold_prior_events(prior, &second.normalized_events, &[blocks(2)])?;
     let (third, session) = interpret_test_batch_incremental(
         BatchInput {
