@@ -4,8 +4,9 @@ use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use crate::{
     BASE_MAINNET_CHAIN_ID, BASENAMES_EXECUTION_SOURCE_FAMILY, BASENAMES_L1_RESOLVER_ROLE,
     BASENAMES_NAMESPACE, ENS_EXECUTION_SOURCE_FAMILY, ENS_NAMESPACE, ENS_UNIVERSAL_RESOLVER_ROLE,
-    ENS_V1_REGISTRY_SOURCE_FAMILY, ETHEREUM_MAINNET_CHAIN_ID, LookupError, LookupRequest,
-    RecordSelector, Result, abi::ResolutionResultAbi, call::ExecutionBlock, error::database,
+    ENS_V1_REGISTRY_SOURCE_FAMILY, ETHEREUM_MAINNET_CHAIN_ID, LookupError, LookupPosition,
+    LookupRequest, RecordSelector, Result, abi::ResolutionResultAbi, call::ExecutionBlock,
+    error::database,
 };
 
 mod indexed;
@@ -17,7 +18,7 @@ mod topology;
 pub(crate) use indexed::answer as indexed_answer;
 #[cfg(test)]
 pub(crate) use persistence::divergence_write_error;
-pub(crate) use persistence::persist_comparisons;
+pub(crate) use persistence::{persist_comparisons, revalidate_primary_name_position};
 
 #[derive(Clone, Debug)]
 pub(crate) struct LookupSnapshot {
@@ -29,11 +30,14 @@ pub(crate) struct LookupSnapshot {
     pub resolver_address: String,
     pub entrypoint_chain_id: String,
     pub entrypoint_address: String,
-    pub authoritative_head: ExecutionBlock,
+    pub authoritative_position: LookupPosition,
+    pub execution_position: LookupPosition,
     pub execution_block: ExecutionBlock,
     pub follow_ccip: bool,
     pub result_abi: ResolutionResultAbi,
     pub observed_positions: Value,
+    pub revalidation_positions: Value,
+    pub execution_authority: Value,
     comparison: Option<IndexedComparison>,
 }
 
@@ -49,8 +53,8 @@ pub(super) struct IndexedComparison {
 pub(crate) struct EnsPrimaryNameAuthority {
     pub registry_address: String,
     pub universal_resolver_address: String,
-    pub block_number: i64,
-    pub block_hash: String,
+    pub position: LookupPosition,
+    pub execution_authority: Value,
 }
 
 impl LookupSnapshot {
@@ -71,6 +75,7 @@ struct NameRow {
     resource_chain_id: String,
     declared_summary: Value,
     chain_positions: Value,
+    row_xmin: String,
 }
 
 #[derive(FromRow)]
@@ -87,6 +92,7 @@ struct HeadRow {
     chain_id: String,
     block_hash: String,
     block_number: i64,
+    timestamp: String,
 }
 
 pub(crate) async fn load_snapshot(
@@ -135,7 +141,8 @@ pub(crate) async fn load_snapshot(
         Some(load_inventory(&mut transaction, boundary_resource_id, boundary).await?)
     };
     let resolver_head = load_head(&mut transaction, &resolver_chain_id).await?;
-    positions::ensure_project_at_head(&mut transaction, &resolver_head).await?;
+    let project_row_xmin =
+        positions::ensure_project_at_head(&mut transaction, &resolver_head).await?;
     let resolver_position =
         positions::position_for_chain(&name.chain_positions, &resolver_chain_id)?;
     positions::ensure_canonical(&mut transaction, &resolver_position).await?;
@@ -152,10 +159,11 @@ pub(crate) async fn load_snapshot(
     };
 
     let entrypoint = entrypoint_authority(&name.namespace, topology, &resolver_chain_id)?;
-    let authoritative_head = ExecutionBlock {
+    let authoritative_position = LookupPosition {
         chain_id: resolver_head.chain_id,
         block_number: resolver_head.block_number,
         block_hash: resolver_head.block_hash,
+        timestamp: resolver_head.timestamp,
     };
     let execution_position = if entrypoint.chain_id == resolver_position.chain_id {
         resolver_position.clone()
@@ -165,7 +173,11 @@ pub(crate) async fn load_snapshot(
         position
     };
     let execution_block = if entrypoint.chain_id == resolver_position.chain_id {
-        authoritative_head.clone()
+        ExecutionBlock {
+            chain_id: authoritative_position.chain_id.clone(),
+            block_number: authoritative_position.block_number,
+            block_hash: authoritative_position.block_hash.clone(),
+        }
     } else {
         ExecutionBlock {
             chain_id: execution_position.chain_id.clone(),
@@ -173,7 +185,12 @@ pub(crate) async fn load_snapshot(
             block_hash: execution_position.block_hash.clone(),
         }
     };
-    let entrypoint_address = manifests::load_entrypoint(
+    let live_execution_position = if entrypoint.chain_id == resolver_position.chain_id {
+        authoritative_position.clone()
+    } else {
+        execution_position.clone().into()
+    };
+    let entrypoint_manifest = manifests::load_entrypoint(
         &mut transaction,
         manifests::EntrypointQuery {
             namespace: &name.namespace,
@@ -188,7 +205,9 @@ pub(crate) async fn load_snapshot(
     )
     .await?;
     if let Some(expected) = entrypoint.transport_address
-        && !entrypoint_address.eq_ignore_ascii_case(expected)
+        && !entrypoint_manifest
+            .declared_address
+            .eq_ignore_ascii_case(expected)
     {
         return Err(LookupError::unsupported(
             "projected transport address does not match the execution manifest",
@@ -201,6 +220,13 @@ pub(crate) async fn load_snapshot(
 
     let observed_positions =
         positions::observed_positions(&comparison_position, &execution_position)?;
+    let revalidation_positions =
+        positions::comparison_and_live_positions(&comparison_position, &live_execution_position)?;
+    let execution_authority = execution_authority(
+        &project_row_xmin,
+        Some((&name.logical_name_id, &name.row_xmin)),
+        std::slice::from_ref(&entrypoint_manifest),
+    )?;
     Ok(LookupSnapshot {
         logical_name_id: name.logical_name_id,
         name: name.raw_name,
@@ -211,12 +237,15 @@ pub(crate) async fn load_snapshot(
         resolver_chain_id,
         resolver_address: resolver_address.to_ascii_lowercase(),
         entrypoint_chain_id: entrypoint.chain_id.to_owned(),
-        entrypoint_address: entrypoint_address.to_ascii_lowercase(),
-        authoritative_head,
+        entrypoint_address: entrypoint_manifest.declared_address.to_ascii_lowercase(),
+        authoritative_position,
+        execution_position: live_execution_position,
         execution_block,
         follow_ccip: entrypoint.follow_ccip,
         result_abi: entrypoint.result_abi,
         observed_positions,
+        revalidation_positions,
+        execution_authority,
         comparison: inventory.map(|inventory| IndexedComparison {
             resource_id: inventory.resource_id,
             boundary_key: inventory.record_version_boundary_key,
@@ -238,7 +267,8 @@ pub(crate) async fn load_ens_primary_name_authority(
         .await
         .map_err(database("set primary-name authority read isolation"))?;
     let head = load_head(&mut transaction, ETHEREUM_MAINNET_CHAIN_ID).await?;
-    let registry_address = manifests::load_entrypoint(
+    let project_row_xmin = positions::ensure_project_at_head(&mut transaction, &head).await?;
+    let registry_manifest = manifests::load_entrypoint(
         &mut transaction,
         manifests::EntrypointQuery {
             namespace: ENS_NAMESPACE,
@@ -252,7 +282,7 @@ pub(crate) async fn load_ens_primary_name_authority(
         },
     )
     .await?;
-    let universal_resolver_address = manifests::load_entrypoint(
+    let universal_resolver_manifest = manifests::load_entrypoint(
         &mut transaction,
         manifests::EntrypointQuery {
             namespace: ENS_NAMESPACE,
@@ -271,11 +301,36 @@ pub(crate) async fn load_ens_primary_name_authority(
         .await
         .map_err(database("commit primary-name authority read"))?;
     Ok(EnsPrimaryNameAuthority {
-        registry_address: registry_address.to_ascii_lowercase(),
-        universal_resolver_address: universal_resolver_address.to_ascii_lowercase(),
-        block_number: head.block_number,
-        block_hash: head.block_hash,
+        registry_address: registry_manifest.declared_address.to_ascii_lowercase(),
+        universal_resolver_address: universal_resolver_manifest
+            .declared_address
+            .to_ascii_lowercase(),
+        position: LookupPosition {
+            chain_id: head.chain_id,
+            block_number: head.block_number,
+            block_hash: head.block_hash,
+            timestamp: head.timestamp,
+        },
+        execution_authority: execution_authority(
+            &project_row_xmin,
+            None,
+            &[registry_manifest, universal_resolver_manifest],
+        )?,
     })
+}
+
+fn execution_authority(
+    project_row_xmin: &str,
+    name: Option<(&str, &str)>,
+    manifests: &[manifests::ManifestEntry],
+) -> Result<Value> {
+    let (logical_name_id, name_row_xmin) = name.unzip();
+    Ok(serde_json::json!({
+        "project_row_xmin": project_row_xmin,
+        "logical_name_id": logical_name_id,
+        "name_row_xmin": name_row_xmin,
+        "manifest_authorities": manifests,
+    }))
 }
 
 async fn load_name(
@@ -286,7 +341,8 @@ async fn load_name(
         r#"
         SELECT name.logical_name_id, name.namespace, name.raw_name, name.namehash,
                surface.dns_encoded_name, resource.chain_id AS resource_chain_id,
-               name.declared_summary, name.chain_positions
+               name.declared_summary, name.chain_positions,
+               name.xmin::text AS row_xmin
         FROM name_current name
         JOIN name_surfaces surface
           ON surface.logical_name_id = name.logical_name_id
@@ -373,7 +429,11 @@ async fn load_head(transaction: &mut Transaction<'_, Postgres>, chain_id: &str) 
     sqlx::query_as::<_, HeadRow>(
         r#"
         SELECT head.chain_id, head.latest_block_hash AS block_hash,
-               head.latest_block_number AS block_number
+               head.latest_block_number AS block_number,
+               to_char(
+                   lineage.block_timestamp AT TIME ZONE 'UTC',
+                   'YYYY-MM-DD"T"HH24:MI:SS"Z"'
+               ) AS timestamp
         FROM chain_heads head
         JOIN chain_lineage lineage
           ON lineage.chain_id = head.chain_id

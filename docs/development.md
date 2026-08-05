@@ -25,16 +25,19 @@ puts the fresh baseline in `bigname_phase` and connects with
 removed.
 
 Without phase-runner configuration, `dev-up` warns and runs only API and
-worker. This is useful for read-model and execution development against an
-existing database, but it is not live indexing.
+worker. This is useful for retained read-model and v1 execution development
+against an existing database, but v2 verified lookup requires an initialized,
+current `bigname_phase` schema and it is not live indexing.
 
 The two PostgreSQL schemas are an explicit Stage B boundary. `./scripts/migrate`
 and `bigname-worker migrate` prepare only retained `public` objects.
 `phase-runner init-schema` installs only into an empty `bigname_phase` schema;
 it refuses every nonempty target until a reviewed schema-v2 upgrade or rebuild
-path exists. API and worker do not read the phase projections yet. The one
-intentional cross-schema operation is head publication: orphaning phase lineage
-and evicting affected retained execution-cache outcomes commit atomically.
+path exists. The v2 API's verified lookup pool reads phase projections and may
+invoke the guarded resolution-divergence write; the worker and retained v1
+handlers remain on `public`. The other intentional cross-schema operation is
+head publication: orphaning phase lineage and evicting affected retained
+execution-cache outcomes commit atomically.
 
 ## Database-backed tests
 
@@ -76,8 +79,9 @@ The current phase runner implements `ingest`, `interpret`, `project`, read-only
 `verify`, and continuous `live` follow. Verification compares only finalized
 history: Base dRPC records `cross_checked` through the Coinbase-to-dRPC ingest
 seam, while Ethereum local reth records `node_checked` through its finalized
-marker. The API still reads the legacy public-schema
-projections until Stage C.
+marker. V2 verified name, record, and ENS/60 primary-name reads use the phase
+runner's schema-v2 lookup state. Other API reads remain on the legacy
+public-schema projections until their Stage C cutovers.
 
 Set the [deployment profile](glossary.md#deployment-profile) root and
 chain/source descriptors, for example:

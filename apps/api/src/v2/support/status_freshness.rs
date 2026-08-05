@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use anyhow::{Result, ensure};
-use bigname_execution::ChainRpcUrls;
+use bigname_lookup::ChainRpcUrls;
 use sqlx::types::time::OffsetDateTime;
 use tokio::{sync::RwLock, task::JoinSet, time::MissedTickBehavior};
 use tracing::warn;
@@ -189,7 +189,7 @@ impl StatusFreshness {
             probes.spawn(async move {
                 let result = tokio::time::timeout(
                     timeout,
-                    bigname_execution::fetch_network_head_block_number(&endpoint),
+                    bigname_lookup::fetch_network_head_block_number(&endpoint),
                 )
                 .await
                 .map_err(|_| ())

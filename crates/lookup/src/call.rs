@@ -56,7 +56,7 @@ pub(crate) async fn execute_record_call(
             return Ok(failed(record, "resolver_call_failed", false));
         }
         Err(error) => {
-            return Err(LookupError::stale(format!(
+            return Err(LookupError::transport(format!(
                 "verified lookup RPC transport failed on {}: {error:#}",
                 context.block.chain_id
             )));
@@ -103,7 +103,7 @@ async fn resolve_ccip_if_supported(
         Err(error) if error.is_transport_failure() && error.is_configured_timeout() => {
             Ok((synthetic_failure(initial, "resolver_call_failed"), true))
         }
-        Err(error) if error.is_transport_failure() => Err(LookupError::stale(format!(
+        Err(error) if error.is_transport_failure() => Err(LookupError::transport(format!(
             "CCIP-Read transport failed for {}: {error}",
             record.record_key
         ))),

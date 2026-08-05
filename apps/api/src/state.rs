@@ -1,12 +1,45 @@
-use bigname_execution::ChainRpcUrls;
-use sqlx::PgPool;
+use std::{str::FromStr, time::Duration};
+
+use anyhow::{Context, Result};
+use sqlx::{PgPool, postgres::PgConnectOptions};
 
 use crate::status_freshness::{StatusFreshness, StatusFreshnessConfig};
+
+pub(crate) async fn connect_lookup_pool(
+    config: &bigname_storage::DatabaseConfig,
+    application_name: &str,
+    statement_timeout: Duration,
+) -> Result<PgPool> {
+    let database_url = config
+        .database_url
+        .clone()
+        .or_else(|| std::env::var("DATABASE_URL").ok())
+        .unwrap_or_else(|| bigname_storage::default_database_url().to_owned());
+    let options = bigname_storage::stamp_projection_replay_version(
+        PgConnectOptions::from_str(&database_url)
+            .context("failed to parse schema-v2 lookup database URL")?
+            .application_name(application_name)
+            .options([
+                ("search_path", "bigname_phase".to_owned()),
+                (
+                    "statement_timeout",
+                    format!("{}ms", statement_timeout.as_millis()),
+                ),
+            ]),
+    );
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(config.max_connections)
+        .connect_with(options)
+        .await
+        .context("failed to connect schema-v2 lookup PostgreSQL pool")
+}
 
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) pool: PgPool,
-    pub(crate) chain_rpc_urls: ChainRpcUrls,
+    pub(crate) lookup_pool: PgPool,
+    pub(crate) chain_rpc_urls: bigname_execution::ChainRpcUrls,
+    pub(crate) lookup_chain_rpc_urls: bigname_lookup::ChainRpcUrls,
     pub(crate) heartbeat_max_age_secs: i64,
     pub(crate) indexer_chain_heartbeat_max_age_secs: i64,
     pub(crate) worker_rebuild_phase_max_age_secs: i64,
@@ -14,10 +47,36 @@ pub(crate) struct AppState {
 }
 
 impl AppState {
-    pub(crate) fn new(pool: PgPool, chain_rpc_urls: ChainRpcUrls) -> Self {
-        Self {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn new(
+        pool: PgPool,
+        legacy_execution_rpc_urls: bigname_execution::ChainRpcUrls,
+    ) -> Self {
+        let entries = legacy_execution_rpc_urls
+            .iter()
+            .map(|(chain_id, url)| format!("{chain_id}={url}"))
+            .collect::<Vec<_>>();
+        let chain_rpc_urls = bigname_lookup::ChainRpcUrls::from_entries(&entries)
+            .expect("validated legacy RPC URLs must be valid lookup RPC URLs");
+        Self::new_with_rpc_urls(
+            pool.clone(),
             pool,
             chain_rpc_urls,
+            legacy_execution_rpc_urls,
+        )
+    }
+
+    pub(crate) fn new_with_rpc_urls(
+        pool: PgPool,
+        lookup_pool: PgPool,
+        lookup_chain_rpc_urls: bigname_lookup::ChainRpcUrls,
+        chain_rpc_urls: bigname_execution::ChainRpcUrls,
+    ) -> Self {
+        Self {
+            pool,
+            lookup_pool,
+            chain_rpc_urls,
+            lookup_chain_rpc_urls,
             heartbeat_max_age_secs: 20,
             indexer_chain_heartbeat_max_age_secs:
                 bigname_storage::DEFAULT_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS,

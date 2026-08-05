@@ -3,7 +3,7 @@ use axum::{
     extract::{FromRequestParts, Path, State},
     http::request::Parts,
 };
-use bigname_storage::{BASENAMES_NAMESPACE, PrimaryNameClaimStatus};
+use bigname_storage::PrimaryNameClaimStatus;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -11,9 +11,9 @@ use crate::AppState;
 
 use super::support::{
     OnDemandPrimaryNameClaimState, OnDemandPrimaryNameVerificationState, PrimaryNameLookupState,
-    PrimaryNameTupleState, ResolutionMode, load_primary_name_route_read, parse_evm_address,
+    PrimaryNameTupleState, ResolutionMode, load_v2_primary_name_route_read, parse_evm_address,
     parse_primary_name_coin_type, parse_primary_name_namespace,
-    primary_name_claim_not_normalized_result, projected_primary_name_claim_is_not_normalized,
+    primary_name_claim_not_normalized_result,
 };
 use super::{
     Envelope, RawQueryParams, Source, Status, V2Error, V2Result, api_error_to_v2,
@@ -143,10 +143,15 @@ pub(crate) async fn get_primary_name(
     let address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let mode = params.source.resolution_mode();
     let coin_type = primary_name_coin_type_number(&params.coin_type)?;
-    let read =
-        load_primary_name_route_read(&state, &address, &params.namespace, &params.coin_type, mode)
-            .await
-            .map_err(api_error_to_v2)?;
+    let read = load_v2_primary_name_route_read(
+        &state,
+        &address,
+        &params.namespace,
+        &params.coin_type,
+        mode,
+    )
+    .await
+    .map_err(api_error_to_v2)?;
 
     let lookup_state = read.lookup_state;
 
@@ -157,8 +162,7 @@ pub(crate) async fn get_primary_name(
             &state,
             &params.namespace,
             None,
-            params.namespace == BASENAMES_NAMESPACE
-                && persisted_verified_answer_is_served(params.source, &lookup_state),
+            false,
         )
         .await?;
         load_served_head_meta(&state.pool, &snapshot_scope).await?
@@ -187,7 +191,7 @@ pub(crate) fn build_primary_name(
 ) -> V2Result<PrimaryName> {
     let verified = source
         .includes_verified()
-        .then(|| build_verified_answer(&namespace, lookup_state))
+        .then(|| build_verified_answer(lookup_state))
         .transpose()?;
     let mut answers = Vec::with_capacity(match source {
         PrimaryNameSourceSelection::Both => 2,
@@ -215,34 +219,15 @@ pub(crate) fn build_primary_name(
     })
 }
 
-fn persisted_verified_answer_is_served(
-    source: PrimaryNameSourceSelection,
-    lookup_state: &PrimaryNameLookupState,
-) -> bool {
-    source.includes_verified()
-        && !projected_primary_name_claim_is_not_normalized(lookup_state)
-        && lookup_state.persisted_verified.is_some()
-}
-
 fn build_indexed_answer(lookup_state: &PrimaryNameLookupState) -> PrimaryNameAnswer {
     match &lookup_state.tuple_state {
         PrimaryNameTupleState::ProjectionUnavailable => PrimaryNameAnswer::unsupported(
             Source::Indexed,
             "declared primary-name claim surface is not yet supported",
         ),
-        PrimaryNameTupleState::TupleMissing => match &lookup_state.on_demand_claim {
-            OnDemandPrimaryNameClaimState::Found(claim) => {
-                PrimaryNameAnswer::named(Source::Indexed, Status::Ok, &claim.normalized_name)
-            }
-            OnDemandPrimaryNameClaimState::InvalidName(invalid_claim) => {
-                PrimaryNameAnswer::invalid(Source::Indexed, &invalid_claim.raw_name)
-            }
-            OnDemandPrimaryNameClaimState::Unavailable => PrimaryNameAnswer {
-                failure_reason: Some("resolver_call_failed".to_owned()),
-                ..PrimaryNameAnswer::new(Source::Indexed, Status::Stale)
-            },
-            _ => PrimaryNameAnswer::new(Source::Indexed, Status::NotFound),
-        },
+        PrimaryNameTupleState::TupleMissing => {
+            PrimaryNameAnswer::new(Source::Indexed, Status::NotFound)
+        }
         PrimaryNameTupleState::TuplePresent(row) => {
             let mut answer =
                 PrimaryNameAnswer::new(Source::Indexed, claim_status_to_v2(row.claim_status));
@@ -265,16 +250,17 @@ fn build_indexed_answer(lookup_state: &PrimaryNameLookupState) -> PrimaryNameAns
     }
 }
 
-fn build_verified_answer(
-    namespace: &str,
-    lookup_state: &PrimaryNameLookupState,
-) -> V2Result<VerifiedAnswer> {
-    if projected_primary_name_claim_is_not_normalized(lookup_state) {
+fn build_verified_answer(lookup_state: &PrimaryNameLookupState) -> V2Result<VerifiedAnswer> {
+    let live_verified = match &lookup_state.on_demand_verified {
+        OnDemandPrimaryNameVerificationState::ClaimNotNormalized => {
+            Some(primary_name_claim_not_normalized_result())
+        }
+        OnDemandPrimaryNameVerificationState::Verified(verified) => Some(verified.clone()),
+        OnDemandPrimaryNameVerificationState::NotAttempted => None,
+    };
+    if let Some(live_verified) = live_verified {
         return Ok(VerifiedAnswer {
-            answer: verified_answer_from_value(
-                &primary_name_claim_not_normalized_result(),
-                lookup_state,
-            )?,
+            answer: verified_answer_from_value(&live_verified, lookup_state)?,
             outcome_exists: true,
         });
     }
@@ -290,65 +276,34 @@ fn build_verified_answer(
             outcome_exists: true,
         });
     }
-    if let Some(persisted) = lookup_state.persisted_verified.as_ref() {
+    if matches!(
+        &lookup_state.on_demand_claim,
+        OnDemandPrimaryNameClaimState::InvalidName(_)
+    ) {
         return Ok(VerifiedAnswer {
-            answer: verified_answer_from_value(&persisted.verified_primary_name, lookup_state)?,
+            answer: PrimaryNameAnswer {
+                failure_reason: Some(product_primary_name_reason("claim_name_not_normalizable")?),
+                ..PrimaryNameAnswer::new(Source::Verified, Status::NotFound)
+            },
             outcome_exists: true,
         });
     }
-
-    match &lookup_state.tuple_state {
-        PrimaryNameTupleState::TupleMissing => {
-            let on_demand_verified = match &lookup_state.on_demand_verified {
-                OnDemandPrimaryNameVerificationState::ClaimNotNormalized => {
-                    Some(primary_name_claim_not_normalized_result())
-                }
-                OnDemandPrimaryNameVerificationState::Verified(on_demand_verified) => {
-                    Some(on_demand_verified.clone())
-                }
-                OnDemandPrimaryNameVerificationState::NotAttempted => None,
-            };
-            if let Some(on_demand_verified) = on_demand_verified {
-                return Ok(VerifiedAnswer {
-                    answer: verified_answer_from_value(&on_demand_verified, lookup_state)?,
-                    outcome_exists: true,
-                });
-            }
-            if matches!(
-                &lookup_state.on_demand_claim,
-                OnDemandPrimaryNameClaimState::InvalidName(_)
-            ) {
-                return Ok(VerifiedAnswer {
-                    answer: PrimaryNameAnswer {
-                        failure_reason: Some(product_primary_name_reason(
-                            "claim_name_not_normalizable",
-                        )?),
-                        ..PrimaryNameAnswer::new(Source::Verified, Status::NotFound)
-                    },
-                    outcome_exists: true,
-                });
-            }
-            Ok(VerifiedAnswer {
-                answer: PrimaryNameAnswer::new(Source::Verified, Status::NotFound),
-                outcome_exists: false,
-            })
-        }
-        PrimaryNameTupleState::TuplePresent(_) if primary_name_supported_namespace(namespace) => {
-            Ok(VerifiedAnswer {
-                answer: PrimaryNameAnswer::new(Source::Verified, Status::NotFound),
-                outcome_exists: false,
-            })
-        }
-        PrimaryNameTupleState::ProjectionUnavailable | PrimaryNameTupleState::TuplePresent(_) => {
-            Ok(VerifiedAnswer {
-                answer: PrimaryNameAnswer::unsupported(
-                    Source::Verified,
-                    "verified primary-name entrypoint is not yet supported",
-                ),
-                outcome_exists: false,
-            })
-        }
+    if matches!(
+        &lookup_state.on_demand_claim,
+        OnDemandPrimaryNameClaimState::NotFound
+    ) {
+        return Ok(VerifiedAnswer {
+            answer: PrimaryNameAnswer::new(Source::Verified, Status::NotFound),
+            outcome_exists: false,
+        });
     }
+    Ok(VerifiedAnswer {
+        answer: PrimaryNameAnswer::unsupported(
+            Source::Verified,
+            "verified primary-name entrypoint is not yet supported",
+        ),
+        outcome_exists: false,
+    })
 }
 
 fn verified_answer_from_value(
@@ -365,8 +320,7 @@ fn verified_answer_from_value(
     if status == Status::InvalidName
         && matches!(
             failure_reason.as_deref(),
-            Some(bigname_execution::VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON)
-                | Some("claim_name_not_normalizable")
+            Some("claim_not_normalized") | Some("claim_name_not_normalizable")
         )
     {
         // v2 permits reasoned not_found results but does not attach failure_reason to
@@ -410,17 +364,11 @@ impl PrimaryNameAnswer {
         }
     }
 
+    #[cfg(test)]
     fn named(source: Source, status: Status, name: &str) -> Self {
         Self {
             name: Some(name.to_owned()),
             ..Self::new(source, status)
-        }
-    }
-
-    fn invalid(source: Source, raw_claim_name: &str) -> Self {
-        Self {
-            raw_claim_name: Some(raw_claim_name.to_owned()),
-            ..Self::new(source, Status::InvalidName)
         }
     }
 
@@ -502,10 +450,6 @@ fn raw_claim_name(lookup_state: &PrimaryNameLookupState) -> Option<String> {
         },
         PrimaryNameTupleState::ProjectionUnavailable => None,
     }
-}
-
-fn primary_name_supported_namespace(namespace: &str) -> bool {
-    matches!(namespace, "ens" | "basenames")
 }
 
 fn parse_primary_name_source(value: Option<&str>) -> V2Result<PrimaryNameSourceSelection> {

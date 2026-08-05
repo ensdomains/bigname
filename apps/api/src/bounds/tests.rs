@@ -77,7 +77,9 @@ fn verified_request_classifier_covers_live_execution_modes() {
         ),
         ("/v1/names/ens/alice.eth/records?mode=declared", false),
         ("/v2/addresses/0x01/primary-name", true),
-        ("/v2/addresses/0x01/primary-name?source=indexed", true),
+        ("/v2/addresses/0x01/primary-name?source=", true),
+        ("/v2/addresses/0x01/primary-name?source=%20%20", true),
+        ("/v2/addresses/0x01/primary-name?source=indexed", false),
         ("/v2/names/alice.eth?source=ver%69fied", true),
         ("/v2/names/alice.eth?source=%20verified%20", true),
         ("/v2/names/alice.eth?source=auto", false),
@@ -432,6 +434,69 @@ async fn verified_concurrency_limit_is_separate_from_cheap_requests() {
         .await
         .expect("first task must join")
         .expect("first request must complete");
+}
+
+#[tokio::test]
+async fn indexed_v2_primary_name_bypasses_verified_concurrency_admission() {
+    let config = test_config();
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let app = apply_request_bounds(
+        Router::new().route(
+            "/v2/addresses/{address}/primary-name",
+            get({
+                let started = started.clone();
+                let release = release.clone();
+                move |uri: Uri| {
+                    let started = started.clone();
+                    let release = release.clone();
+                    async move {
+                        if !uri
+                            .query()
+                            .is_some_and(|query| query.contains("source=indexed"))
+                        {
+                            started.notify_one();
+                            release.notified().await;
+                        }
+                        "ok"
+                    }
+                }
+            }),
+        ),
+        Router::new(),
+        &config,
+    );
+
+    let held = tokio::spawn(
+        app.clone()
+            .oneshot(request("/v2/addresses/0x01/primary-name")),
+    );
+    started.notified().await;
+
+    let indexed = app
+        .clone()
+        .oneshot(request("/v2/addresses/0x02/primary-name?source=indexed"))
+        .await
+        .expect("indexed primary-name request must complete");
+    assert_eq!(indexed.status(), StatusCode::OK);
+
+    for uri in [
+        "/v2/addresses/0x03/primary-name?source=verified",
+        "/v2/addresses/0x03/primary-name?source=",
+        "/v2/addresses/0x03/primary-name?source=%20%20",
+    ] {
+        let overloaded = app
+            .clone()
+            .oneshot(request(uri))
+            .await
+            .expect("verified primary-name request must complete");
+        assert_error(overloaded, StatusCode::SERVICE_UNAVAILABLE, "overloaded").await;
+    }
+
+    release.notify_waiters();
+    held.await
+        .expect("held task must join")
+        .expect("held request must complete");
 }
 
 #[tokio::test]

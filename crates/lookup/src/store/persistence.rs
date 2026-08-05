@@ -1,9 +1,10 @@
+use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::{
-    LedgerAction, LookupError, LookupRecordResult, RecordSelector, Result,
+    LedgerAction, LookupError, LookupPosition, LookupRecordResult, RecordSelector, Result,
     error::database,
-    store::{IndexedComparison, LookupSnapshot},
+    store::{EnsPrimaryNameAuthority, IndexedComparison, LookupSnapshot},
 };
 
 pub(crate) async fn persist_comparisons(
@@ -18,46 +19,24 @@ pub(crate) async fn persist_comparisons(
         .begin()
         .await
         .map_err(database("start divergence write"))?;
-    lock_authoritative_head(&mut transaction, snapshot).await?;
-    let Some(comparison) = snapshot.comparison.as_ref() else {
+    let comparable = results
+        .iter()
+        .any(|result| !result.ccip_read && result.status.is_comparable());
+    revalidate_lookup_state(
+        &mut transaction,
+        &snapshot.authoritative_position,
+        &snapshot.revalidation_positions,
+        &snapshot.execution_authority,
+        snapshot.comparison.as_ref(),
+    )
+    .await?;
+    let Some(comparison) = snapshot.comparison.as_ref().filter(|_| comparable) else {
         transaction
             .commit()
             .await
             .map_err(database("commit lookup head revalidation"))?;
         return Ok(());
     };
-    if !results
-        .iter()
-        .any(|result| !result.ccip_read && result.status.is_comparable())
-    {
-        transaction
-            .commit()
-            .await
-            .map_err(database("commit lookup head revalidation"))?;
-        return Ok(());
-    }
-
-    let locked_xmin: Option<String> = sqlx::query_scalar(
-        r#"
-        SELECT xmin::text
-        FROM record_inventory_current
-        WHERE resource_id = $1::uuid
-          AND record_version_boundary_key = $2
-          AND xmin::text = $3
-        FOR SHARE
-        "#,
-    )
-    .bind(&comparison.resource_id)
-    .bind(&comparison.boundary_key)
-    .bind(&comparison.row_xmin)
-    .fetch_optional(&mut *transaction)
-    .await
-    .map_err(database("lock compared record projection"))?;
-    if locked_xmin.is_none() {
-        return Err(LookupError::concurrent_state(
-            "indexed record state changed while live lookup was running",
-        ));
-    }
 
     for result in results {
         persist_result(&mut transaction, snapshot, comparison, result).await?;
@@ -66,30 +45,76 @@ pub(crate) async fn persist_comparisons(
     Ok(())
 }
 
-async fn lock_authoritative_head(
-    transaction: &mut Transaction<'_, Postgres>,
-    snapshot: &LookupSnapshot,
+pub(crate) async fn revalidate_primary_name_position(
+    pool: &PgPool,
+    authority: &EnsPrimaryNameAuthority,
 ) -> Result<()> {
-    let unchanged: Option<i64> = sqlx::query_scalar(
-        "SELECT latest_block_number
-         FROM chain_heads
-         WHERE chain_id = $1
-           AND latest_block_number = $2
-           AND latest_block_hash = $3
-         FOR SHARE",
+    let observed_positions = json!({ "ethereum": authority.position });
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(database("start primary-name position revalidation"))?;
+    revalidate_lookup_state(
+        &mut transaction,
+        &authority.position,
+        &observed_positions,
+        &authority.execution_authority,
+        None,
     )
-    .bind(&snapshot.authoritative_head.chain_id)
-    .bind(snapshot.authoritative_head.block_number)
-    .bind(&snapshot.authoritative_head.block_hash)
-    .fetch_optional(&mut **transaction)
+    .await?;
+    transaction
+        .commit()
+        .await
+        .map_err(database("commit primary-name position revalidation"))
+}
+
+async fn revalidate_lookup_state(
+    transaction: &mut Transaction<'_, Postgres>,
+    authoritative_position: &LookupPosition,
+    observed_positions: &Value,
+    execution_authority: &Value,
+    comparison: Option<&IndexedComparison>,
+) -> Result<()> {
+    let status: String = sqlx::query_scalar(
+        "SELECT revalidate_resolution_lookup_state(
+             $1, $2, $3, $4, $5, $6::uuid, $7, $8
+         )",
+    )
+    .bind(&authoritative_position.chain_id)
+    .bind(authoritative_position.block_number)
+    .bind(&authoritative_position.block_hash)
+    .bind(observed_positions)
+    .bind(execution_authority)
+    .bind(comparison.map(|comparison| comparison.resource_id.as_str()))
+    .bind(comparison.map(|comparison| comparison.boundary_key.as_str()))
+    .bind(comparison.map(|comparison| comparison.row_xmin.as_str()))
+    .fetch_one(&mut **transaction)
     .await
-    .map_err(database("revalidate lookup execution head"))?;
-    if unchanged.is_none() {
-        return Err(LookupError::concurrent_state(
+    .map_err(lookup_state_error("revalidate lookup execution head"))?;
+    match status.as_str() {
+        "unchanged" => Ok(()),
+        "head_changed" => Err(LookupError::concurrent_state(
             "canonical head changed while live lookup was running",
-        ));
+        )),
+        "record_changed" => Err(LookupError::concurrent_state(
+            "indexed record state changed while live lookup was running",
+        )),
+        "project_changed" => Err(LookupError::concurrent_state(
+            "projected execution authority changed while live lookup was running",
+        )),
+        "name_changed" => Err(LookupError::concurrent_state(
+            "projected name state changed while live lookup was running",
+        )),
+        "manifest_changed" => Err(LookupError::concurrent_state(
+            "lookup manifest authority changed while live lookup was running",
+        )),
+        "position_changed" => Err(LookupError::concurrent_state(
+            "canonical lookup position changed while live lookup was running",
+        )),
+        unexpected => Err(LookupError::database(format!(
+            "lookup state guard returned unexpected status {unexpected}"
+        ))),
     }
-    Ok(())
 }
 
 async fn persist_result(
@@ -116,17 +141,22 @@ async fn persist_result(
     let agrees = indexed == live;
 
     let status: String = sqlx::query_scalar(
-        "SELECT write_resolution_divergence($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, false)",
+        "SELECT write_resolution_divergence(
+             $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, false
+         )",
     )
     .bind(&comparison.resource_id)
     .bind(&comparison.boundary_key)
     .bind(&comparison.row_xmin)
+    .bind(&snapshot.authoritative_position.chain_id)
+    .bind(snapshot.authoritative_position.block_number)
+    .bind(&snapshot.authoritative_position.block_hash)
+    .bind(&snapshot.execution_authority)
     .bind(&snapshot.logical_name_id)
     .bind(&snapshot.resolver_chain_id)
     .bind(&snapshot.resolver_address)
     .bind(&result.record_key)
-    .bind(&snapshot.observed_positions)
-    .bind(&indexed)
+    .bind(&snapshot.revalidation_positions)
     .bind(&live)
     .fetch_one(&mut **transaction)
     .await
@@ -152,6 +182,11 @@ async fn persist_result(
 pub(crate) fn divergence_write_error(error: sqlx::Error) -> LookupError {
     if let sqlx::Error::Database(database_error) = &error {
         match database_error.code().as_deref() {
+            Some("40P01" | "40001") => {
+                return LookupError::concurrent_state(format!(
+                    "lookup state changed during divergence commit: {database_error}"
+                ));
+            }
             Some("23503") => {
                 return LookupError::concurrent_state(format!(
                     "canonical lookup state changed before divergence commit: {database_error}"
@@ -174,4 +209,17 @@ pub(crate) fn divergence_write_error(error: sqlx::Error) -> LookupError {
         }
     }
     database("persist resolution divergence")(error)
+}
+
+fn lookup_state_error(context: &'static str) -> impl FnOnce(sqlx::Error) -> LookupError {
+    move |error| {
+        if let sqlx::Error::Database(database_error) = &error
+            && matches!(database_error.code().as_deref(), Some("40P01" | "40001"))
+        {
+            return LookupError::concurrent_state(format!(
+                "lookup state changed during revalidation: {database_error}"
+            ));
+        }
+        database(context)(error)
+    }
 }

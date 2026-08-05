@@ -3,6 +3,7 @@ pub enum ErrorKind {
     Configuration,
     Unsupported,
     Stale,
+    Transport,
     Execution,
     Database,
     ConcurrentState,
@@ -32,6 +33,10 @@ impl LookupError {
 
     pub(crate) fn stale(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Stale, message)
+    }
+
+    pub(crate) fn transport(message: impl Into<String>) -> Self {
+        Self::new(ErrorKind::Transport, message)
     }
 
     pub(crate) fn execution(message: impl Into<String>) -> Self {

@@ -12,6 +12,8 @@ mod history;
 mod lookup;
 mod name_record;
 mod name_records;
+#[cfg(test)]
+pub(crate) use name_records::auto_fallback_test_hooks as name_records_auto_fallback_test_hooks;
 mod name_records_inventory;
 mod namespaces;
 mod params;
@@ -54,8 +56,7 @@ pub(crate) use lookup::{get_lookup, load_served_head_meta};
 pub(crate) use name_record::{NameRecord, build_name_record, get_name_record};
 pub(crate) use name_records::{
     RecordAnswer, build_indexed_name_records, build_verified_name_records, get_name_records,
-    load_ephemeral_verified_record_lookup, load_persisted_verified_record_lookup,
-    parse_record_keys,
+    load_ephemeral_verified_record_lookup, parse_record_keys,
 };
 pub(crate) use name_records_inventory::{default_requested_records, validate_product_record};
 pub(crate) use namespaces::get_namespace;

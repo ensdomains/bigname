@@ -96,7 +96,7 @@ pub(crate) async fn build_indexing_status_response(
         let network_head = state
             .status_freshness
             .compare(
-                &state.chain_rpc_urls,
+                &state.lookup_chain_rpc_urls,
                 &row.chain_id,
                 row.canonical_block,
                 row.canonical_timestamp,

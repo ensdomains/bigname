@@ -18,14 +18,14 @@ use crate::v2::support::{
 
 use super::{
     Envelope, QueryParams, RawQueryParams, V2Error, V2Result, apply_diagnostics_dictionary_names,
-    resolve_diagnostic_name,
+    resolve_diagnostic_name_with_resolution_auxiliary,
 };
 
 use crate::v2::{
     RecordAnswer, SnapshotReadResource, Source, api_error_to_v2_for_resource,
     build_indexed_name_records, build_verified_name_records, default_requested_records,
-    load_ephemeral_verified_record_lookup, load_persisted_verified_record_lookup,
-    parse_raw_query_params_with_allowlist, parse_record_keys, snapshot_meta,
+    load_ephemeral_verified_record_lookup, parse_raw_query_params_with_allowlist,
+    parse_record_keys, snapshot_meta,
 };
 
 pub(crate) const DIAGNOSTIC_RECORDS_DEFAULT_COMPARISON_LIMIT: usize = 16;
@@ -126,7 +126,8 @@ pub(crate) async fn get_name_records_diagnostic(
 ) -> V2Result<Json<Envelope<NameRecordsDiagnostic>>> {
     let params = bind_diagnostic_records_path_name(input_name, params);
     let requested_records = parse_record_keys(params.keys.as_deref())?;
-    let (row, selected_snapshot) = resolve_diagnostic_name(&state, &params).await?;
+    let (row, mut selected_snapshot) =
+        resolve_diagnostic_name_with_resolution_auxiliary(&state, &params, true).await?;
     let record_inventory =
         load_diagnostic_record_inventory_current(&state, &row, &selected_snapshot).await?;
     let comparison_scope =
@@ -137,7 +138,7 @@ pub(crate) async fn get_name_records_diagnostic(
         record_inventory.as_ref(),
         &comparison_scope.records,
         comparison_scope.explicit_gaps,
-        &selected_snapshot,
+        &mut selected_snapshot,
     )
     .await?;
 
@@ -162,7 +163,7 @@ async fn build_name_records_diagnostic(
     record_inventory: Option<&RecordInventoryCurrentRow>,
     records: &[ResolutionRecordKey],
     comparison_explicit_gaps: Vec<RecordComparisonGap>,
-    selected_snapshot: &SelectedSnapshot,
+    selected_snapshot: &mut SelectedSnapshot,
 ) -> V2Result<NameRecordsDiagnostic> {
     let indexed = build_indexed_name_records(row, record_inventory, Some(records), false)?;
     let verified_records = build_bounded_ephemeral_verified_record_answers(
@@ -205,27 +206,8 @@ async fn build_bounded_ephemeral_verified_record_answers(
     row: &NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,
     records: &[ResolutionRecordKey],
-    selected_snapshot: &SelectedSnapshot,
+    selected_snapshot: &mut SelectedSnapshot,
 ) -> V2Result<BTreeMap<String, RecordAnswer>> {
-    if let Some(verified_lookup) = load_persisted_verified_record_lookup(
-        state,
-        row,
-        record_inventory,
-        records,
-        selected_snapshot,
-    )
-    .await?
-    {
-        let verified = build_verified_name_records(
-            row,
-            record_inventory,
-            Some(records),
-            Some(verified_lookup),
-            false,
-        )?;
-        return Ok(verified.records.unwrap_or_default());
-    }
-
     let mut answers = BTreeMap::new();
     for chunk in records.chunks(DIAGNOSTIC_RECORDS_VERIFIED_LOOKUP_CONCURRENCY) {
         let verified_lookup = load_ephemeral_verified_record_lookup(

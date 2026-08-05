@@ -107,21 +107,34 @@ pub(crate) struct ServeArgs {
 
 impl ServeArgs {
     pub(crate) fn effective_chain_rpc_urls(&self) -> Result<ChainRpcUrls> {
-        ensure!(
-            self.rpc_connect_timeout_ms > 0,
-            "BIGNAME_API_RPC_CONNECT_TIMEOUT_MS must be greater than zero"
-        );
-        ensure!(
-            self.rpc_timeout_ms > 0,
-            "BIGNAME_API_RPC_TIMEOUT_MS must be greater than zero"
-        );
-        ensure!(
-            self.rpc_connect_timeout_ms < self.rpc_timeout_ms,
-            "BIGNAME_API_RPC_CONNECT_TIMEOUT_MS must be less than BIGNAME_API_RPC_TIMEOUT_MS"
-        );
+        validate_rpc_timeouts(self.rpc_connect_timeout_ms, self.rpc_timeout_ms)?;
         ChainRpcUrls::from_entries(&self.chain_rpc_urls)?.with_http_timeouts(
             Duration::from_millis(self.rpc_connect_timeout_ms),
             Duration::from_millis(self.rpc_timeout_ms),
         )
     }
+
+    pub(crate) fn effective_lookup_chain_rpc_urls(&self) -> Result<bigname_lookup::ChainRpcUrls> {
+        validate_rpc_timeouts(self.rpc_connect_timeout_ms, self.rpc_timeout_ms)?;
+        bigname_lookup::ChainRpcUrls::from_entries(&self.chain_rpc_urls)?.with_http_timeouts(
+            Duration::from_millis(self.rpc_connect_timeout_ms),
+            Duration::from_millis(self.rpc_timeout_ms),
+        )
+    }
+}
+
+fn validate_rpc_timeouts(connect_timeout_ms: u64, total_timeout_ms: u64) -> Result<()> {
+    ensure!(
+        connect_timeout_ms > 0,
+        "BIGNAME_API_RPC_CONNECT_TIMEOUT_MS must be greater than zero"
+    );
+    ensure!(
+        total_timeout_ms > 0,
+        "BIGNAME_API_RPC_TIMEOUT_MS must be greater than zero"
+    );
+    ensure!(
+        connect_timeout_ms < total_timeout_ms,
+        "BIGNAME_API_RPC_CONNECT_TIMEOUT_MS must be less than BIGNAME_API_RPC_TIMEOUT_MS"
+    );
+    Ok(())
 }

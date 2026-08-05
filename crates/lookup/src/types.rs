@@ -157,6 +157,14 @@ impl LookupRecordResult {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LookupPosition {
+    pub chain_id: String,
+    pub block_number: i64,
+    pub block_hash: String,
+    pub timestamp: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LookupResponse {
     pub logical_name_id: String,
     pub name: String,
@@ -164,6 +172,10 @@ pub struct LookupResponse {
     pub resolver_address: String,
     pub entrypoint_chain_id: String,
     pub entrypoint_address: String,
+    /// Current readable resolver-chain head required by the lookup.
+    pub authoritative_position: LookupPosition,
+    /// Exact hash-pinned block used for the live call.
+    pub execution_position: LookupPosition,
     pub observed_positions: Value,
     pub records: Vec<LookupRecordResult>,
 }

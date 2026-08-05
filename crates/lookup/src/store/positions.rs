@@ -1,7 +1,7 @@
 use serde_json::{Map, Value};
 use sqlx::{Postgres, Transaction};
 
-use crate::{LookupError, Result, error::database};
+use crate::{LookupError, LookupPosition, Result, error::database};
 
 use super::HeadRow;
 
@@ -44,32 +44,32 @@ pub(super) fn position_for_chain(positions: &Value, chain_id: &str) -> Result<Pr
 pub(super) async fn ensure_project_at_head(
     transaction: &mut Transaction<'_, Postgres>,
     head: &HeadRow,
-) -> Result<()> {
-    let caught_up: bool = sqlx::query_scalar(
+) -> Result<String> {
+    let project_row_xmin: Option<String> = sqlx::query_scalar(
         r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM chain_phase_state
-            WHERE chain_id = $1
-              AND phase_name = 'project'
-              AND current_block_number = $2
-              AND current_block_hash = $3
-        )
+        SELECT xmin::text
+        FROM chain_phase_state
+        WHERE chain_id = $1
+          AND phase_name = 'project'
+          AND phase_status = 'completed'
+          AND current_block_number = $2
+          AND current_block_hash = $3
+          AND input_content_hash = $4
         "#,
     )
     .bind(&head.chain_id)
     .bind(head.block_number)
     .bind(&head.block_hash)
-    .fetch_one(&mut **transaction)
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .fetch_optional(&mut **transaction)
     .await
     .map_err(database("validate project publication head"))?;
-    if !caught_up {
-        return Err(LookupError::stale(format!(
+    project_row_xmin.ok_or_else(|| {
+        LookupError::stale(format!(
             "projected state has not reached the newest processed {} block",
             head.chain_id
-        )));
-    }
-    Ok(())
+        ))
+    })
 }
 
 pub(super) async fn inventory_position(
@@ -167,6 +167,35 @@ pub(super) fn observed_positions(
     Ok(Value::Object(positions))
 }
 
+pub(super) fn comparison_and_live_positions(
+    comparison: &ProjectedPosition,
+    live: &LookupPosition,
+) -> Result<Value> {
+    if comparison.chain_id != live.chain_id {
+        let mut positions = Map::new();
+        positions.insert(
+            chain_slot(&comparison.chain_id)?.to_owned(),
+            comparison.value(),
+        );
+        positions.insert(
+            chain_slot(&live.chain_id)?.to_owned(),
+            serde_json::to_value(live).map_err(|error| {
+                LookupError::database(format!("failed to encode live lookup position: {error}"))
+            })?,
+        );
+        return Ok(Value::Object(positions));
+    }
+    if comparison.block_number == live.block_number
+        && comparison.block_hash.eq_ignore_ascii_case(&live.block_hash)
+    {
+        return observed_positions(comparison, comparison);
+    }
+    Ok(serde_json::json!({
+        "indexed": comparison.value(),
+        "live": live,
+    }))
+}
+
 impl ProjectedPosition {
     fn value(&self) -> Value {
         serde_json::json!({
@@ -175,6 +204,17 @@ impl ProjectedPosition {
             "block_number": self.block_number,
             "timestamp": self.timestamp,
         })
+    }
+}
+
+impl From<ProjectedPosition> for LookupPosition {
+    fn from(position: ProjectedPosition) -> Self {
+        Self {
+            chain_id: position.chain_id,
+            block_hash: position.block_hash,
+            block_number: position.block_number,
+            timestamp: position.timestamp,
+        }
     }
 }
 

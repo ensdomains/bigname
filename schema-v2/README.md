@@ -155,15 +155,35 @@ therefore identifies an ingested block. Every active row must identify that
 block in `chain_lineage` with the same chain, hash, height, and timestamp and
 with readable canonicality; the strict position trigger remains required. The
 guarded writer locks the compared inventory row and accepts a mutation only
-while its `xmin` is unchanged from the read. Before inserting a disagreement or
+while its `xmin` is unchanged from the read. It derives the indexed answer from
+that row and verifies the current requested name, selected resolver, record
+selector, and record boundary before targeting a ledger row. Callers supply
+only the live answer. When indexed comparison and live execution use different
+blocks on one chain, `observed_positions` retains separate `indexed` and `live`
+slots so either block's reorg clears the active row. Before inserting a disagreement or
 clearing one after restored agreement, it also locks every observed canonical
-lineage row and rejects a reorged observation. It refuses CCIP-participating
-results before the guard or any mutation. A later chain canonicality change
+lineage row and rejects a reorged observation. Its writer refuses
+CCIP-participating results before the mutation-specific guard or any mutation.
+A later chain canonicality change
 clears every active row that observed the affected block. This reorg auto-clear
 rule was maintainer-ratified on 2026-07-31. Position validation locks those
 lineage rows through commit, so a concurrent canonicality change cannot miss
 an uncommitted lookup insert. Projection support logic and operators read the
-rows. The
+rows. After live execution, the serving transaction revalidates and locks the
+authoritative head, completed project generation, every observed canonical
+position, the exact projected name when present, and the optional inventory row
+through `revalidate_resolution_lookup_state`; it also verifies every selected
+manifest version and contract declaration. The name lock precedes the inventory
+lock to match projection publication. A shared manifest-sync advisory lock is
+held through commit, including for admitted shadow execution declarations. This
+guard runs when wildcard or CCIP behavior precludes a ledger mutation, and CCIP
+still guards an inventory row it read. It then mutates the
+ledger through `write_resolution_divergence`. Both are fixed-`search_path`,
+security-definer functions with default `PUBLIC` execution revoked. Deployment
+grants the API role explicit `EXECUTE` on them, but no direct write privilege on
+the guarded relations or ledger. ENS/60 primary-name verification uses the same
+head, lineage, project-generation, and manifest-authority guard after its live
+calls without passing a name or inventory comparison or mutating the ledger. The
 [B6 lookup-engine rule](../simplification-build-plan-20260730.md#stage-b--port-the-keep-set)
 and
 [no-outcome-cache decision](../simplification-audit-20260730.md#maintainer-question-list-consolidated-for-decision)

@@ -922,7 +922,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         V2SuccessFixture::Name => {
             let database = TestDatabase::new_with_schemas(false, true).await?;
             let uri = "/v2/names/Alice.eth";
-            seed_v2_alice_name_records_fixture(&database, |_, _, _| {}, None).await?;
+            seed_v2_alice_name_records_fixture(&database, |_, _, _| {}).await?;
             let payload = v2_conformance_get_json(&database, uri).await?;
             assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
             database.cleanup().await?;
@@ -946,7 +946,6 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
                         "unsupported_reason": "value_not_retained_in_normalized_events"
                     });
                 },
-                None,
             )
             .await?;
             let payload = v2_conformance_get_json(&database, uri).await?;
@@ -1007,7 +1006,9 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
                 .await?;
             let payload = v2_primary_name_payload_for_database(
                 &database,
-                &format!("/v2/addresses/{V2_PRIMARY_NAME_ADDRESS}/primary-name"),
+                &format!(
+                    "/v2/addresses/{V2_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
+                ),
             )
             .await?;
             database.cleanup().await?;
@@ -1086,7 +1087,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         }
         V2SuccessFixture::DiagnosticsRecords => {
             let database = TestDatabase::new_with_schemas(false, true).await?;
-            seed_v2_alice_name_records_fixture(&database, |_, _, _| {}, None).await?;
+            seed_v2_alice_name_records_fixture(&database, |_, _, _| {}).await?;
             let uri = "/v2/diagnostics/names/Alice.eth/records";
             let payload = request_v2_diagnostics_json(&database, uri, StatusCode::OK).await?;
             assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
@@ -1149,7 +1150,7 @@ async fn collect_v2_stale_and_conflict_error_violations(
     violations: &mut Vec<String>,
 ) -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
-    seed_v2_alice_name_records_fixture(&database, |_, _, _| {}, None).await?;
+    seed_v2_alice_name_records_fixture(&database, |_, _, _| {}).await?;
     let alice_stale_at = seed_v2_conformance_snapshot_position(
         &database,
         "ethereum",
@@ -1429,7 +1430,6 @@ async fn v2_conformance_name_records_verified_stale_payload() -> Result<Value> {
     v2_name_records_payload_with_setup(
         "/v2/names/Alice.eth/records?source=verified&keys=addr:60",
         |_, _, _| {},
-        None,
     )
     .await
 }

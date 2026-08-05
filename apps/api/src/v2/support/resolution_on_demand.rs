@@ -8,13 +8,6 @@ pub(crate) struct VerifiedOutcomeExecutionOptions {
 
 pub(crate) struct LoadedResolutionVerifiedOutcome {
     pub(crate) outcome: ExecutionOutcome,
-    pub(crate) origin: ResolutionVerifiedOutcomeOrigin,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ResolutionVerifiedOutcomeOrigin {
-    Persisted,
-    OnDemand,
 }
 
 /// Loads a cached verified outcome or executes on miss using the requested compact-hit policy.
@@ -38,10 +31,7 @@ pub(crate) async fn load_or_execute_resolution_verified_outcome(
 
     match lookup {
         ResolutionVerifiedOutcomeLookup::Found(outcome) => {
-            Ok(Some(LoadedResolutionVerifiedOutcome {
-                outcome,
-                origin: ResolutionVerifiedOutcomeOrigin::Persisted,
-            }))
+            Ok(Some(LoadedResolutionVerifiedOutcome { outcome }))
         }
         ResolutionVerifiedOutcomeLookup::NotSupported => Ok(None),
         ResolutionVerifiedOutcomeLookup::CacheMiss => {
@@ -55,10 +45,7 @@ pub(crate) async fn load_or_execute_resolution_verified_outcome(
                 &options,
             )
             .await?;
-            Ok(Some(LoadedResolutionVerifiedOutcome {
-                outcome,
-                origin: ResolutionVerifiedOutcomeOrigin::OnDemand,
-            }))
+            Ok(Some(LoadedResolutionVerifiedOutcome { outcome }))
         }
     }
 }

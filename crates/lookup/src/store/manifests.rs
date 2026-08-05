@@ -1,3 +1,4 @@
+use serde::Serialize;
 use sqlx::{FromRow, Postgres, Transaction};
 
 use crate::{LookupError, Result, error::database};
@@ -13,19 +14,24 @@ pub(super) struct EntrypointQuery<'a> {
     pub require_resolution_capability: bool,
 }
 
-#[derive(FromRow)]
-struct ManifestEntry {
-    declared_address: String,
+#[derive(Clone, Debug, FromRow, Serialize)]
+pub(super) struct ManifestEntry {
+    pub declared_address: String,
+    manifest_id: String,
+    manifest_row_xmin: String,
+    declaration_id: String,
+    declaration_row_xmin: String,
 }
 
 pub(super) async fn load_entrypoint(
     transaction: &mut Transaction<'_, Postgres>,
     query: EntrypointQuery<'_>,
-) -> Result<String> {
+) -> Result<ManifestEntry> {
     sqlx::query_as::<_, ManifestEntry>(
         r#"
         WITH authoritative_manifest AS (
-            SELECT manifest_id, chain_id, manifest_payload
+            SELECT manifest_id, chain_id, manifest_payload,
+                   xmin::text AS manifest_row_xmin
             FROM manifest_versions
             WHERE namespace = $1
               AND source_family = $2
@@ -39,7 +45,11 @@ pub(super) async fn load_entrypoint(
                      manifest_version DESC, manifest_id DESC
             LIMIT 1
         )
-        SELECT declaration.declared_address
+        SELECT declaration.declared_address,
+               manifest.manifest_id::text AS manifest_id,
+               manifest.manifest_row_xmin,
+               declaration.manifest_contract_instance_id::text AS declaration_id,
+               declaration.xmin::text AS declaration_row_xmin
         FROM authoritative_manifest manifest
         JOIN manifest_contract_instances declaration
           ON declaration.manifest_id = manifest.manifest_id
@@ -73,7 +83,6 @@ pub(super) async fn load_entrypoint(
     .fetch_optional(&mut **transaction)
     .await
     .map_err(database("load lookup entrypoint manifest"))?
-    .map(|row| row.declared_address)
     .ok_or_else(|| {
         LookupError::unsupported(format!(
             "no declared {}/{} lookup entrypoint is available",

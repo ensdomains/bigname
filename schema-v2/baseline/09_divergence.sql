@@ -55,52 +55,93 @@ CREATE UNIQUE INDEX IF NOT EXISTS resolution_divergences_one_active_request_idx
 COMMENT ON INDEX resolution_divergences_one_active_request_idx IS
     'This bounded btree uses SHA-256 of the unbounded request key; writes retain and compare the original key so a digest collision fails closed.';
 
--- Authorized by simplification-build-plan-20260730.md § B6, lines 100-104.
--- The compared projection row is locked until the caller's transaction ends.
-CREATE OR REPLACE FUNCTION write_resolution_divergence(
+-- Keep serving-path row locks behind a narrow privilege boundary. The API role
+-- receives EXECUTE on this function, not UPDATE on the guarded projection and
+-- head tables. Both locks remain held by the caller's transaction.
+CREATE OR REPLACE FUNCTION revalidate_resolution_lookup_state(
+    requested_authoritative_chain_id text,
+    requested_authoritative_block_number bigint,
+    requested_authoritative_block_hash text,
+    requested_observed_positions jsonb,
+    compared_execution_authority jsonb,
     compared_resource_id uuid,
     compared_boundary_key text,
-    compared_row_xmin text,
-    requested_logical_name_id text,
-    requested_resolver_chain_id text,
-    requested_resolver_address text,
-    requested_record_key text,
-    compared_positions jsonb,
-    indexed_answer jsonb,
-    live_answer jsonb,
-    used_ccip_read boolean
+    compared_row_xmin text
 )
 RETURNS text
 LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, bigname_phase, pg_temp
 AS $$
 DECLARE
     position_slot text;
     position_value jsonb;
+    manifest_authority jsonb;
+    compared_project_row_xmin text;
+    compared_logical_name_id text;
+    compared_name_row_xmin text;
 BEGIN
-    IF used_ccip_read THEN
-        RETURN 'ccip_skipped';
-    END IF;
+    -- Keep this key aligned with SCHEMA_V2_MANIFEST_SYNC_LOCK in
+    -- crates/manifests/src/schema_v2.rs. A shared transaction lock makes the
+    -- captured active-or-shadow manifest selection stable through commit.
+    PERFORM pg_advisory_xact_lock_shared(4776427281231725874);
 
     PERFORM 1
-    FROM record_inventory_current
-    WHERE resource_id = compared_resource_id
-      AND record_version_boundary_key = compared_boundary_key
-      AND xmin::text = compared_row_xmin
+    FROM chain_heads
+    WHERE chain_id = requested_authoritative_chain_id
+      AND latest_block_number = requested_authoritative_block_number
+      AND latest_block_hash = requested_authoritative_block_hash
     FOR SHARE;
 
     IF NOT FOUND THEN
-        RETURN 'guard_rejected';
+        RETURN 'head_changed';
     END IF;
 
-    IF jsonb_typeof(compared_positions) IS DISTINCT FROM 'object'
-        OR compared_positions = '{}'::jsonb
+    IF jsonb_typeof(compared_execution_authority) IS DISTINCT FROM 'object'
     THEN
-        RETURN 'guard_rejected';
+        RETURN 'invalid_comparison';
+    END IF;
+
+    compared_project_row_xmin :=
+        compared_execution_authority ->> 'project_row_xmin';
+    compared_logical_name_id :=
+        compared_execution_authority ->> 'logical_name_id';
+    compared_name_row_xmin :=
+        compared_execution_authority ->> 'name_row_xmin';
+
+    IF compared_project_row_xmin IS NULL
+        OR btrim(compared_project_row_xmin) = ''
+    THEN
+        RETURN 'invalid_comparison';
+    END IF;
+
+    -- This lock is the projection-publication generation fence. Phase
+    -- transitions change this row before a new projected generation is
+    -- admitted. The advisory lock above separately fences manifest sync,
+    -- including changes to admitted shadow execution declarations.
+    PERFORM 1
+    FROM chain_phase_state
+    WHERE chain_id = requested_authoritative_chain_id
+      AND phase_name = 'project'
+      AND phase_status = 'completed'
+      AND current_block_number = requested_authoritative_block_number
+      AND current_block_hash = requested_authoritative_block_hash
+      AND xmin::text = compared_project_row_xmin
+    FOR SHARE;
+
+    IF NOT FOUND THEN
+        RETURN 'project_changed';
+    END IF;
+
+    IF jsonb_typeof(requested_observed_positions) IS DISTINCT FROM 'object'
+        OR requested_observed_positions = '{}'::jsonb
+    THEN
+        RETURN 'position_changed';
     END IF;
 
     FOR position_slot, position_value IN
         SELECT key, value
-        FROM jsonb_each(compared_positions)
+        FROM jsonb_each(requested_observed_positions)
         ORDER BY key
     LOOP
         BEGIN
@@ -120,13 +161,272 @@ BEGIN
             FOR SHARE;
         EXCEPTION
             WHEN data_exception THEN
-                RETURN 'guard_rejected';
+                RETURN 'position_changed';
         END;
 
         IF NOT FOUND THEN
-            RETURN 'guard_rejected';
+            RETURN 'position_changed';
         END IF;
     END LOOP;
+
+    -- Match project publication order: name_current is locked before
+    -- record_inventory_current. This prevents serving-path writes from
+    -- deadlocking with a same-height projection swap.
+    IF compared_logical_name_id IS NULL
+        AND compared_name_row_xmin IS NULL
+    THEN
+        NULL;
+    ELSIF compared_logical_name_id IS NULL
+        OR compared_name_row_xmin IS NULL
+    THEN
+        RETURN 'invalid_comparison';
+    ELSE
+        PERFORM 1
+        FROM name_current
+        WHERE logical_name_id = compared_logical_name_id
+          AND support_status = 'supported'
+          AND xmin::text = compared_name_row_xmin
+        FOR SHARE;
+
+        IF NOT FOUND THEN
+            RETURN 'name_changed';
+        END IF;
+    END IF;
+
+    IF jsonb_typeof(
+        compared_execution_authority -> 'manifest_authorities'
+    ) IS DISTINCT FROM 'array'
+        OR jsonb_array_length(
+            compared_execution_authority -> 'manifest_authorities'
+        ) = 0
+    THEN
+        RETURN 'invalid_comparison';
+    END IF;
+
+    FOR manifest_authority IN
+        SELECT value
+        FROM jsonb_array_elements(
+            compared_execution_authority -> 'manifest_authorities'
+        )
+    LOOP
+        PERFORM 1
+        FROM manifest_versions AS manifest
+        JOIN manifest_contract_instances AS declaration
+          ON declaration.manifest_id = manifest.manifest_id
+         AND declaration.chain_id = manifest.chain_id
+        WHERE manifest.manifest_id::text =
+                  manifest_authority ->> 'manifest_id'
+          AND manifest.xmin::text =
+                  manifest_authority ->> 'manifest_row_xmin'
+          AND declaration.manifest_contract_instance_id::text =
+                  manifest_authority ->> 'declaration_id'
+          AND declaration.xmin::text =
+                  manifest_authority ->> 'declaration_row_xmin'
+          AND lower(declaration.declared_address) = lower(
+                  manifest_authority ->> 'declared_address'
+              );
+
+        IF NOT FOUND THEN
+            RETURN 'manifest_changed';
+        END IF;
+    END LOOP;
+
+    IF compared_resource_id IS NULL
+        AND compared_boundary_key IS NULL
+        AND compared_row_xmin IS NULL
+    THEN
+        RETURN 'unchanged';
+    END IF;
+
+    IF compared_resource_id IS NULL
+        OR compared_boundary_key IS NULL
+        OR compared_row_xmin IS NULL
+    THEN
+        RETURN 'invalid_comparison';
+    END IF;
+
+    PERFORM 1
+    FROM record_inventory_current
+    WHERE resource_id = compared_resource_id
+      AND record_version_boundary_key = compared_boundary_key
+      AND xmin::text = compared_row_xmin
+    FOR SHARE;
+
+    IF NOT FOUND THEN
+        RETURN 'record_changed';
+    END IF;
+
+    RETURN 'unchanged';
+END
+$$;
+
+REVOKE ALL ON FUNCTION revalidate_resolution_lookup_state(
+    text, bigint, text, jsonb, jsonb, uuid, text, text
+) FROM PUBLIC;
+
+-- Authorized by simplification-build-plan-20260730.md § B6, lines 100-104.
+-- The compared projection row is locked until the caller's transaction ends.
+CREATE OR REPLACE FUNCTION write_resolution_divergence(
+    compared_resource_id uuid,
+    compared_boundary_key text,
+    compared_row_xmin text,
+    requested_authoritative_chain_id text,
+    requested_authoritative_block_number bigint,
+    requested_authoritative_block_hash text,
+    compared_execution_authority jsonb,
+    requested_logical_name_id text,
+    requested_resolver_chain_id text,
+    requested_resolver_address text,
+    requested_record_key text,
+    compared_positions jsonb,
+    live_answer jsonb,
+    used_ccip_read boolean
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, bigname_phase, pg_temp
+AS $$
+DECLARE
+    guard_status text;
+    resolver_path jsonb;
+    compared_entries jsonb;
+    selector_family text;
+    selector_key text;
+    indexed_entry jsonb;
+    indexed_status text;
+    indexed_value jsonb;
+    indexed_answer jsonb;
+BEGIN
+    IF used_ccip_read THEN
+        RETURN 'ccip_skipped';
+    END IF;
+
+    IF compared_execution_authority ->> 'logical_name_id'
+        IS DISTINCT FROM requested_logical_name_id
+    THEN
+        RETURN 'guard_rejected';
+    END IF;
+
+    guard_status := revalidate_resolution_lookup_state(
+        requested_authoritative_chain_id,
+        requested_authoritative_block_number,
+        requested_authoritative_block_hash,
+        compared_positions,
+        compared_execution_authority,
+        compared_resource_id,
+        compared_boundary_key,
+        compared_row_xmin
+    );
+
+    IF guard_status <> 'unchanged' THEN
+        RETURN 'guard_rejected';
+    END IF;
+
+    CASE
+        WHEN requested_record_key = 'avatar' THEN
+            selector_family := 'avatar';
+            selector_key := NULL;
+        WHEN requested_record_key = 'contenthash' THEN
+            selector_family := 'contenthash';
+            selector_key := NULL;
+        WHEN requested_record_key LIKE 'text:%'
+            AND length(substr(requested_record_key, 6)) > 0
+        THEN
+            selector_family := 'text';
+            selector_key := substr(requested_record_key, 6);
+        WHEN requested_record_key ~ '^addr:(0|[1-9][0-9]*)$' THEN
+            BEGIN
+                selector_key := substr(requested_record_key, 6);
+                IF selector_key::numeric > 18446744073709551615::numeric THEN
+                    RETURN 'guard_rejected';
+                END IF;
+                selector_family := 'addr';
+            EXCEPTION
+                WHEN data_exception THEN
+                    RETURN 'guard_rejected';
+            END;
+        ELSE
+            RETURN 'guard_rejected';
+    END CASE;
+
+    SELECT inventory.entries,
+           name.declared_summary #> '{topology,resolver_path}'
+    INTO compared_entries, resolver_path
+    FROM record_inventory_current AS inventory
+    JOIN name_current AS name
+      ON name.logical_name_id = requested_logical_name_id
+     AND name.support_status = 'supported'
+     AND name.declared_summary
+            #> '{topology,version_boundaries,record_version_boundary}' =
+         inventory.record_version_boundary
+    WHERE inventory.resource_id = compared_resource_id
+      AND inventory.record_version_boundary_key = compared_boundary_key
+      AND inventory.xmin::text = compared_row_xmin
+    FOR SHARE OF inventory, name;
+
+    IF NOT FOUND
+        OR jsonb_typeof(resolver_path) IS DISTINCT FROM 'array'
+        OR jsonb_array_length(resolver_path) = 0
+        OR resolver_path -> (jsonb_array_length(resolver_path) - 1)
+                ->> 'chain_id' <> requested_resolver_chain_id
+        OR lower(
+            resolver_path -> (jsonb_array_length(resolver_path) - 1)
+                ->> 'address'
+        ) <> lower(requested_resolver_address)
+    THEN
+        RETURN 'guard_rejected';
+    END IF;
+
+    SELECT candidate.entry
+    INTO indexed_entry
+    FROM jsonb_array_elements(compared_entries)
+        WITH ORDINALITY AS candidate(entry, ordinal)
+    WHERE candidate.entry ->> 'record_key' = requested_record_key
+       OR (
+            candidate.entry ->> 'record_family' = selector_family
+            AND (candidate.entry ->> 'selector_key')
+                IS NOT DISTINCT FROM selector_key
+       )
+       OR (
+            requested_record_key = 'avatar'
+            AND candidate.entry ->> 'record_key' = 'text:avatar'
+       )
+    ORDER BY CASE
+        WHEN candidate.entry ->> 'record_key' = 'text:avatar'
+            AND requested_record_key = 'avatar'
+        THEN 1
+        ELSE 0
+    END,
+    candidate.ordinal
+    LIMIT 1;
+
+    IF indexed_entry IS NULL THEN
+        indexed_answer := jsonb_build_object('status', 'not_found');
+    ELSE
+        indexed_status := COALESCE(
+            indexed_entry ->> 'status',
+            'unsupported'
+        );
+        indexed_answer := jsonb_build_object('status', indexed_status);
+        IF indexed_status = 'success' THEN
+            indexed_value := COALESCE(
+                indexed_entry #> '{value,value}',
+                indexed_entry #> '{value,bytes}',
+                indexed_entry -> 'value'
+            );
+            IF jsonb_typeof(indexed_value) = 'string' THEN
+                indexed_answer := indexed_answer || jsonb_build_object(
+                    'value',
+                    CASE
+                        WHEN selector_family = 'addr'
+                            THEN lower(indexed_value #>> '{}')
+                        ELSE indexed_value #>> '{}'
+                    END
+                );
+            END IF;
+        END IF;
+    END IF;
 
     IF indexed_answer = live_answer THEN
         UPDATE resolution_divergences
@@ -204,6 +504,11 @@ BEGIN
     RETURN 'written';
 END
 $$;
+
+REVOKE ALL ON FUNCTION write_resolution_divergence(
+    uuid, text, text, text, bigint, text, jsonb, text, text, text,
+    text, jsonb, jsonb, boolean
+) FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION validate_resolution_divergence_positions()
 RETURNS trigger
@@ -363,6 +668,11 @@ COMMENT ON COLUMN resolution_divergences.last_observed_at IS
 COMMENT ON COLUMN resolution_divergences.cleared_at IS
     'This time records agreement restoration.';
 COMMENT ON FUNCTION write_resolution_divergence(
-    uuid, text, text, text, text, text, text, jsonb, jsonb, jsonb, boolean
+    uuid, text, text, text, bigint, text, jsonb, text, text, text,
+    text, jsonb, jsonb, boolean
 ) IS
-    'Mutates direct-resolution disagreements only while the compared inventory row and observed canonical lineage are unchanged.';
+    'Derives the indexed answer and mutates a direct-resolution disagreement only while its exact projected name, resolver, inventory row, head, and canonical positions are unchanged.';
+COMMENT ON FUNCTION revalidate_resolution_lookup_state(
+    text, bigint, text, jsonb, jsonb, uuid, text, text
+) IS
+    'Locks and revalidates the authoritative head, project generation, optional exact name and inventory rows, manifest declarations, and all observed canonical positions without granting the caller UPDATE on those relations.';

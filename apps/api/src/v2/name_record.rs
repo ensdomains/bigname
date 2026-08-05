@@ -116,7 +116,7 @@ pub(crate) async fn get_name_record(
         include_resolution_auxiliary,
     )
     .await?;
-    let selected_snapshot = resolve_v2_snapshot_for(
+    let mut selected_snapshot = resolve_v2_snapshot_for(
         &state.pool,
         &scope,
         params.at.as_ref(),
@@ -163,7 +163,7 @@ pub(crate) async fn get_name_record(
         &row,
         record_inventory.as_ref(),
         chain_id,
-        &selected_snapshot,
+        &mut selected_snapshot,
         route_source,
     )
     .await?;

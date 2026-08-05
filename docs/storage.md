@@ -155,18 +155,19 @@ For ENSv2, `resource_id` keys by `(chain_id, registry_contract_instance_id, upst
 | `public.projection_*`, `public.*_current`, replay staging and apply cursors | worker and storage triggers | Surviving legacy public-schema read models, rebuild/apply progress, and invalidation journals until Stage C. |
 | `manifest_alert_*` | worker audit | Manifest-drift and proxy observations; not admission truth. |
 | `service_loop_heartbeats` | worker | Current worker liveness. The API still reads retained old-indexer process/chain rows until its readiness port. |
-| `execution_*` | execution worker; documented API cache-miss persistence | Durable traces, steps, cache outcomes, and invalidation records. |
-| `resolution_divergences` | schema-v2 lookup engine, triggered by its future Stage C API caller | Rows in the [resolution divergence ledger](glossary.md#resolution-divergence-ledger): direct live/indexed disagreements only. The compared exact `record_inventory_current` row is guarded through commit; CCIP answers are excluded. |
+| `execution_*` | legacy execution worker; retained v1 API cache-miss persistence | Durable traces, steps, cache outcomes, and invalidation records. V2 serving paths do not write this family after their lookup-engine cutover. |
+| `resolution_divergences` | schema-v2 lookup engine, including v2 verified record lookups | Rows in the [resolution divergence ledger](glossary.md#resolution-divergence-ledger): active rows represent direct live/indexed disagreements only, and restored agreement may clear a matching row. The compared exact `record_inventory_current` row is guarded through commit; CCIP answers are excluded. |
 | `backfill_*` | no current writer | Immutable migration-era jobs and ranges; storage retains read-only worker inspection. |
 | `normalized_replay_*` | no current writer | Migration-era replay/checkpoint state. The worker still reads selected cursors for projection readiness and raw staging compaction. |
 | `base_normalized_rederive_*`, resolver-profile queues/journals/reconciliation, retained-history/coverage/frontier tables, startup adapter checkpoints | no current writer | Stranded transitional schema retained only because migrations are immutable. These rows are not current admission, readiness, replay, or repair authority. |
 | `name_surface_normalization_repair_findings` | no current writer | Historical audit rows from the deleted indexer repair command. |
 
-The retained API is otherwise read-only over projections and execution output,
-except for its documented legacy on-demand verified-resolution persistence
-path. At the Stage C cutover, that exception narrows to the schema-v2
-divergence-ledger write described below. Neither path grants a raw-fact or
-legacy operational-table fallback.
+The API is otherwise read-only over projections and execution output. Retained
+v1 routes keep their documented legacy on-demand verified-resolution
+persistence path. V2 verified record routes instead use the schema-v2 lookup
+engine and may perform only the divergence-ledger write described below; v2
+primary-name verification performs no serving-path write. Neither path grants
+a raw-fact or legacy operational-table fallback.
 
 The worker continues to update its process and named rebuild-phase heartbeat
 rows at bounded projection progress points. Existing API readiness code also
@@ -602,26 +603,66 @@ If the selected positions are valid but no eligible projection or persisted exec
 
 ## Execution storage
 
-The schema-v2 successor has no execution cache, durable trace, revalidation
-state, or persisted request-validation state. For direct and alias paths, it
+The schema-v2 successor used by v2 has no execution cache, durable trace,
+reusable outcome, revalidation state, or persisted request-validation state.
+Every v2 verified record request executes again after the API admits the
+current authoritative projection position. A cross-chain execution chain must
+be in the selected API scope, but the lookup engine derives the exact
+hash-pinned execution position from the canonical projected row. That position may
+be older than the API's newest generic checkpoint for the execution chain, but
+it cannot be newer and must match the admitted hash at the same height; the
+lookup result returns the actual authoritative and execution positions so the
+v2 response metadata can expose them. For direct and alias paths, it
 reads the exact `record_inventory_current` row identified by the projected
 record-version boundary's `resource_id`, compares each direct hash-pinned
 answer with that row's exact record entry, and calls
-`write_resolution_divergence` only for a disagreement. A supported wildcard
+`write_resolution_divergence` for every comparable direct answer. Disagreement
+may create or replace an active row; restored agreement creates no row but may
+clear a matching active row. The guarded writer derives the indexed answer from
+that exact inventory row and verifies that the requested name, selected
+resolver, record selector, and record boundary still match the current name
+projection; callers cannot supply a different indexed answer or target an
+unrelated ledger row. When comparison and live execution use different blocks
+on one chain, the ledger retains separate `indexed` and `live` position slots so
+a reorg of either dependency clears the active row. These internal role slots
+do not change v2 response metadata. A supported wildcard
 lookup can execute without an exact inventory row; it then has no comparison
 target and performs no ledger write or clear rather than comparing the request
-with its wildcard ancestor's inventory. The function takes the inventory
-primary key plus the `xmin` observed during the read, locks that row, and
-rejects a changed or removed row. Before inserting a disagreement or clearing
-one after restored agreement, it also locks every observed canonical-lineage
-row; a reorged observation rejects the mutation. Active divergence anchors are
+with its wildcard ancestor's inventory. The read captures the completed
+project-generation row, the exact `name_current` row when record topology is
+involved, and every selected manifest version and contract declaration. The
+serving transaction first calls `revalidate_resolution_lookup_state` after live
+execution. It locks the authoritative head, the unchanged project generation,
+every observed canonical position, the exact name row, and the optional
+inventory row; it also verifies the selected manifest rows. A phase restart,
+manifest-driven project invalidation, same-height projection publication,
+name-topology replacement, or manifest replacement therefore rejects the
+result instead of combining generations. A shared manifest-sync advisory lock
+is held through the serving commit, so active or admitted shadow declarations
+cannot change between validation and commit. The name lock precedes the
+inventory lock, matching projection publication order. The guard runs even when
+wildcard or CCIP behavior precludes a ledger mutation, and CCIP still guards an
+inventory row it read. The writer receives the same captured authority plus the
+inventory primary key and `xmin`, then repeats the guard before deriving or
+mutating an answer. Both functions are fixed-`search_path`, security-definer
+interfaces whose default `PUBLIC` execution privilege is revoked; the API role
+receives only explicit `EXECUTE`, not direct write privileges on the guarded
+relations or ledger. Before
+inserting a disagreement or clearing one after restored agreement, it also
+locks every observed canonical-lineage row; a reorged observation rejects the
+mutation. Active divergence positions are
 automatically cleared by a later reorg. CCIP participation short-circuits
-before the guard and any ledger write or clear.
+the mutation-specific writer before any ledger write or clear, while the
+serving transaction still performs the general head and position guard above.
+ENS/60 primary-name verification uses the same schema-v2 lookup engine and
+current readable Ethereum position and revalidates that head, lineage, project
+generation, and both selected manifest declarations after its live calls, but
+it has no indexed record comparison and therefore never writes this ledger.
 This narrow write is authorized by
 [`simplification-build-plan-20260730.md` § B6](../simplification-build-plan-20260730.md#stage-b--port-the-keep-set).
 
 The remaining execution tables and rules in this section describe the legacy
-crate and retained v1 API until Stage C.
+crate and retained v1 API only.
 
 Inline in Postgres for small payloads:
 
@@ -764,9 +805,9 @@ phase-runner commands.
 - Projection workers own current read models, replay staging, apply cursors,
   invalidation journals, and worker heartbeats.
 - Legacy execution workers own traces, steps, and normal cache outcomes, with
-  the retained v1 API on-demand verified-resolution cache-miss exception until
-  Stage C. The schema-v2 lookup engine owns only guarded divergence-ledger
-  writes; its future API caller remains otherwise read-only.
+  the retained v1 API on-demand verified-resolution cache-miss exception. The
+  schema-v2 lookup engine owns only guarded divergence-ledger writes; its v2 API
+  caller remains otherwise read-only and never writes legacy execution rows.
 - The API reads projections and execution output. It has no general raw-fact or
   legacy operational-table fallback; explicit audit endpoints remain the only
   documented exception.

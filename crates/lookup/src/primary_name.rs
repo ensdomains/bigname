@@ -3,8 +3,8 @@ use serde_json::{Value, json};
 use bigname_domain::normalization::normalize_name;
 
 use crate::{
-    ChainRpcUrls, ETHEREUM_MAINNET_CHAIN_ID, LookupError, LookupRecordStatus, RecordSelector,
-    Result,
+    ChainRpcUrls, ETHEREUM_MAINNET_CHAIN_ID, LookupError, LookupPosition, LookupRecordStatus,
+    RecordSelector, Result,
     abi::{
         ResolutionResultAbi, decode_registry_resolver, decode_resolver_name, dns_encode_name,
         hex_to_bytes, namehash, registry_resolver_call, resolver_name_call,
@@ -27,6 +27,7 @@ pub enum EnsPrimaryNameStatus {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnsPrimaryNameLookup {
+    pub position: LookupPosition,
     pub status: EnsPrimaryNameStatus,
     /// Verbatim value returned by the reverse resolver.
     pub name: Option<String>,
@@ -43,22 +44,21 @@ pub(crate) struct EnsPrimaryNameRequest<'a> {
     pub normalized_address: &'a str,
     pub registry_address: &'a str,
     pub universal_resolver_address: &'a str,
-    pub block_number: i64,
-    pub block_hash: &'a str,
+    pub position: &'a LookupPosition,
     pub chain_rpc_urls: &'a ChainRpcUrls,
 }
 
 pub(crate) async fn lookup_ens_primary_name(
     request: EnsPrimaryNameRequest<'_>,
 ) -> Result<EnsPrimaryNameLookup> {
-    if request.block_hash.trim().is_empty() {
+    if request.position.block_hash.trim().is_empty() {
         return Err(LookupError::configuration(
             "ENS primary-name lookup block hash must not be empty",
         ));
     }
     let reverse_node = reverse_node(request.normalized_address)?;
     let rpc = primary_name_rpc(request.chain_rpc_urls)?;
-    let block_selector = hash_pinned_block_selector(request.block_hash);
+    let block_selector = hash_pinned_block_selector(&request.position.block_hash);
     let resolver_address = match registry_resolver(
         &rpc,
         request.registry_address,
@@ -68,18 +68,18 @@ pub(crate) async fn lookup_ens_primary_name(
     .await
     {
         Ok(Some(address)) => address,
-        Ok(None) => return Ok(not_found()),
-        Err(error) => return primary_call_error(error, None),
+        Ok(None) => return Ok(not_found(request.position)),
+        Err(error) => return primary_call_error(error, None, request.position),
     };
     let raw_name = match reverse_name(&rpc, &resolver_address, reverse_node, &block_selector).await
     {
         Ok(Some(name)) => name,
-        Ok(None) => return Ok(not_found()),
-        Err(error) => return primary_call_error(error, Some(&resolver_address)),
+        Ok(None) => return Ok(not_found(request.position)),
+        Err(error) => return primary_call_error(error, Some(&resolver_address), request.position),
     };
     let normalized_name = match normalized_reverse_claim(&raw_name) {
         ReverseClaimNormalization::Ready(name) => name,
-        ReverseClaimNormalization::NotFound => return Ok(not_found()),
+        ReverseClaimNormalization::NotFound => return Ok(not_found(request.position)),
         ReverseClaimNormalization::Invalid {
             normalized_name,
             failure_reason,
@@ -89,6 +89,7 @@ pub(crate) async fn lookup_ens_primary_name(
                 normalized_name,
                 &resolver_address,
                 failure_reason,
+                request.position,
             ));
         }
     };
@@ -106,8 +107,8 @@ pub(crate) async fn lookup_ens_primary_name(
     })?;
     let block = ExecutionBlock {
         chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
-        block_number: request.block_number,
-        block_hash: request.block_hash.to_owned(),
+        block_number: request.position.block_number,
+        block_hash: request.position.block_hash.clone(),
     };
     let forward = execute_record_call(
         &RecordCallContext {
@@ -132,6 +133,7 @@ pub(crate) async fn lookup_ens_primary_name(
                 .as_deref()
                 .unwrap_or("resolver_call_failed"),
             forward.ccip_read,
+            request.position,
         ));
     }
     let forward_address = forward
@@ -153,6 +155,7 @@ pub(crate) async fn lookup_ens_primary_name(
         ),
     };
     Ok(EnsPrimaryNameLookup {
+        position: request.position.clone(),
         status,
         name: Some(raw_name),
         normalized_name: Some(normalized_name),
@@ -200,8 +203,10 @@ fn invalid_name(
     normalized_name: Option<String>,
     resolver_address: &str,
     failure_reason: &str,
+    position: &LookupPosition,
 ) -> EnsPrimaryNameLookup {
     EnsPrimaryNameLookup {
+        position: position.clone(),
         status: EnsPrimaryNameStatus::InvalidName,
         name: Some(raw_name.to_owned()),
         normalized_name,
@@ -218,8 +223,10 @@ fn execution_failed(
     resolver_address: Option<&str>,
     failure_reason: &str,
     ccip_read: bool,
+    position: &LookupPosition,
 ) -> EnsPrimaryNameLookup {
     EnsPrimaryNameLookup {
+        position: position.clone(),
         status: EnsPrimaryNameStatus::ExecutionFailed,
         name: raw_name.map(str::to_owned),
         normalized_name: normalized_name.map(str::to_owned),
@@ -230,8 +237,9 @@ fn execution_failed(
     }
 }
 
-fn not_found() -> EnsPrimaryNameLookup {
+fn not_found(position: &LookupPosition) -> EnsPrimaryNameLookup {
     EnsPrimaryNameLookup {
+        position: position.clone(),
         status: EnsPrimaryNameStatus::NotFound,
         name: None,
         normalized_name: None,
@@ -312,7 +320,7 @@ async fn eth_call(
             return Err(PrimaryCallError::InBand("resolver_call_failed"));
         }
         Err(error) => {
-            return Err(PrimaryCallError::Lookup(LookupError::stale(format!(
+            return Err(PrimaryCallError::Lookup(LookupError::transport(format!(
                 "ENS primary-name RPC failed: {error:#}"
             ))));
         }
@@ -347,6 +355,7 @@ type PrimaryCallResult<T> = std::result::Result<T, PrimaryCallError>;
 fn primary_call_error(
     error: PrimaryCallError,
     resolver_address: Option<&str>,
+    position: &LookupPosition,
 ) -> Result<EnsPrimaryNameLookup> {
     match error {
         PrimaryCallError::InBand(reason) => Ok(execution_failed(
@@ -355,6 +364,7 @@ fn primary_call_error(
             resolver_address,
             reason,
             false,
+            position,
         )),
         PrimaryCallError::Lookup(error) => Err(error),
     }

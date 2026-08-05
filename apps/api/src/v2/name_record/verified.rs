@@ -11,7 +11,8 @@ use super::super::{
     SnapshotReadResource, Source, Status, V2Result, default_requested_records,
     name_records::{
         RecordAnswer, VERIFIED_NOT_SUPPORTED_REASON, VerifiedRecordLookup,
-        build_verified_name_records, load_verified_record_lookup_for_resource,
+        build_verified_name_records, ensure_verified_record_limit,
+        load_verified_record_lookup_for_resource,
     },
 };
 use super::{NameRecord, build_name_record, string_field};
@@ -26,7 +27,7 @@ pub(super) async fn build_name_record_for_source(
     row: &NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,
     chain_id: Option<u64>,
-    selected_snapshot: &SelectedSnapshot,
+    selected_snapshot: &mut SelectedSnapshot,
     source: Source,
 ) -> V2Result<VerifiedNameRecord> {
     match source {
@@ -46,9 +47,9 @@ async fn build_verified_name_record(
     row: &NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,
     chain_id: Option<u64>,
-    selected_snapshot: &SelectedSnapshot,
+    selected_snapshot: &mut SelectedSnapshot,
 ) -> V2Result<VerifiedNameRecord> {
-    let requested_records = profile_verified_requested_records(record_inventory);
+    let requested_records = profile_verified_requested_records(record_inventory)?;
     let verified_lookup = load_verified_record_lookup_for_resource(
         state,
         row,
@@ -115,13 +116,15 @@ async fn build_verified_name_record(
 
 fn profile_verified_requested_records(
     record_inventory: Option<&RecordInventoryCurrentRow>,
-) -> Vec<ResolutionRecordKey> {
+) -> V2Result<Vec<ResolutionRecordKey>> {
     let records = default_requested_records(record_inventory);
-    if !records.is_empty() || !should_use_profile_fallback_records(record_inventory) {
+    let records = if !records.is_empty() || !should_use_profile_fallback_records(record_inventory) {
         records
     } else {
         profile_fallback_requested_records()
-    }
+    };
+    ensure_verified_record_limit(&records)?;
+    Ok(records)
 }
 
 fn should_use_profile_fallback_records(

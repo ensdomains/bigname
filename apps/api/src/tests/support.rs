@@ -26,7 +26,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use sqlx::{
     ConnectOptions, PgPool, Row,
-    postgres::PgConnectOptions,
+    postgres::{PgConnectOptions, PgPoolOptions},
+    raw_sql,
     types::{Uuid, time::OffsetDateTime},
 };
 use tower::ServiceExt;
@@ -559,6 +560,62 @@ impl TestDatabase {
             )
             .await?;
         Ok(database)
+    }
+
+    async fn initialize_lookup_schema(&self) -> Result<()> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("CREATE SCHEMA bigname_phase")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("SET LOCAL search_path TO bigname_phase, public")
+            .execute(&mut *transaction)
+            .await?;
+        for script in [
+            include_str!("../../../../schema-v2/baseline/01_chain.sql"),
+            include_str!("../../../../schema-v2/baseline/02_raw_facts.sql"),
+            include_str!("../../../../schema-v2/baseline/03_identity.sql"),
+            include_str!("../../../../schema-v2/baseline/04_manifests.sql"),
+            include_str!("../../../../schema-v2/baseline/05_normalized_events.sql"),
+            include_str!("../../../../schema-v2/baseline/06_projections.sql"),
+            include_str!("../../../../schema-v2/baseline/07_labels.sql"),
+            include_str!("../../../../schema-v2/baseline/08_heartbeats.sql"),
+            include_str!("../../../../schema-v2/baseline/09_divergence.sql"),
+            include_str!("../../../../schema-v2/baseline/10_phase_state.sql"),
+        ] {
+            raw_sql(script).execute(&mut *transaction).await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn lookup_pool(&self) -> Result<PgPool> {
+        let config = self.database_config(6)?;
+        let options = bigname_storage::stamp_projection_replay_version(
+            PgConnectOptions::from_str(
+                config
+                    .database_url
+                    .as_deref()
+                    .context("lookup test database URL is missing")?,
+            )?
+            .options([("search_path", "bigname_phase".to_owned())]),
+        );
+        PgPoolOptions::new()
+            .max_connections(config.max_connections)
+            .connect_with(options)
+            .await
+            .context("failed to connect API lookup test pool")
+    }
+
+    async fn app_state_with_lookup_chain_rpc_urls(
+        &self,
+        chain_rpc_urls: bigname_lookup::ChainRpcUrls,
+    ) -> Result<AppState> {
+        Ok(AppState::new_with_rpc_urls(
+            self.pool.clone(),
+            self.lookup_pool().await?,
+            chain_rpc_urls,
+            bigname_execution::ChainRpcUrls::default(),
+        ))
     }
 
     fn app_state(&self) -> AppState {
@@ -2174,6 +2231,481 @@ impl TestDatabase {
         drop(pool);
         database.cleanup().await
     }
+}
+
+async fn seed_schema_v2_ens_lookup_head(
+    pool: &PgPool,
+    block_number: i64,
+    block_hash: &str,
+    timestamp: &str,
+) -> Result<()> {
+    seed_schema_v2_lookup_head(
+        pool,
+        "ethereum-mainnet",
+        block_number,
+        block_hash,
+        timestamp,
+    )
+    .await
+}
+
+async fn seed_schema_v2_lookup_head(
+    pool: &PgPool,
+    chain_id: &str,
+    block_number: i64,
+    block_hash: &str,
+    timestamp: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO chain_lineage
+            (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         VALUES ($1, $2, $3, $4::timestamptz, 'canonical')",
+    )
+    .bind(chain_id)
+    .bind(block_hash)
+    .bind(block_number)
+    .bind(timestamp)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO chain_heads (chain_id, latest_block_hash, latest_block_number)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(chain_id)
+    .bind(block_hash)
+    .bind(block_number)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO chain_phase_state
+            (chain_id, phase_name, phase_status, current_block_number, current_block_hash,
+             target_block_number, target_block_hash, input_content_hash, started_at, finished_at)
+         VALUES ($1, 'project', 'completed', $2, $3, $2, $3, $4, now(), now())",
+    )
+    .bind(chain_id)
+    .bind(block_number)
+    .bind(block_hash)
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn seed_schema_v2_ens_manifest(
+    pool: &PgPool,
+    source_family: &str,
+    role: &str,
+    address: &str,
+    contract_instance_id: Uuid,
+    resolution_capability: bool,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO contract_instances
+            (contract_instance_id, chain_id, contract_kind)
+         VALUES ($1, 'ethereum-mainnet', 'contract')",
+    )
+    .bind(contract_instance_id)
+    .execute(pool)
+    .await?;
+    let manifest_payload = if resolution_capability {
+        json!({
+            "capability_flags": {
+                "verified_resolution": { "status": "supported" }
+            }
+        })
+    } else {
+        json!({})
+    };
+    let manifest_id: i64 = sqlx::query_scalar(
+        "INSERT INTO manifest_versions
+            (manifest_version, namespace, source_family, chain_id, deployment_label,
+             rollout_status, normalizer_version, file_path, manifest_payload)
+         VALUES (1, 'ens', $1, 'ethereum-mainnet', 'api-test', 'active', 'test', $2, $3)
+         RETURNING manifest_id",
+    )
+    .bind(source_family)
+    .bind(format!("test/ens/{source_family}.toml"))
+    .bind(manifest_payload)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO manifest_contract_instances
+            (manifest_id, chain_id, declaration_kind, declaration_name,
+             contract_instance_id, declared_address, role, proxy_kind)
+         VALUES ($1, 'ethereum-mainnet', 'contract', $2, $3, $4, $2, 'none')",
+    )
+    .bind(manifest_id)
+    .bind(role)
+    .bind(contract_instance_id)
+    .bind(address)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn seed_schema_v2_ens_record_lookup(
+    pool: &PgPool,
+    block_number: i64,
+    block_hash: &str,
+    timestamp: &str,
+    indexed_address: &str,
+) -> Result<String> {
+    seed_schema_v2_ens_lookup_head(pool, block_number, block_hash, timestamp).await?;
+    seed_schema_v2_ens_manifest(
+        pool,
+        "ens_execution",
+        "universal_resolver",
+        "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+        Uuid::from_u128(0xc200_0000_0000_0000_0000_0000_0000_0103),
+        true,
+    )
+    .await?;
+    let namehash = bigname_lookup::ens_namehash_hex("alice.eth")?;
+    let logical_name_id = format!("ens:{namehash}");
+    let resource_id = Uuid::from_u128(0xc200_0000_0000_0000_0000_0000_0000_0101);
+    let binding_id = Uuid::from_u128(0xc200_0000_0000_0000_0000_0000_0000_0102);
+    let positions = json!({
+        "ethereum": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": block_number,
+            "block_hash": block_hash,
+            "timestamp": timestamp
+        }
+    });
+    let boundary = json!({
+        "logical_name_id": logical_name_id,
+        "resource_id": resource_id,
+        "normalized_event_id": 1,
+        "event_kind": "ResolverChanged",
+        "chain_position": positions["ethereum"]
+    });
+    let topology = json!({
+        "registry_path": [],
+        "subregistry_path": [],
+        "resolver_path": [{
+            "logical_name_id": logical_name_id,
+            "resource_id": resource_id,
+            "chain_id": "ethereum-mainnet",
+            "address": "0x1000000000000000000000000000000000000001"
+        }],
+        "wildcard": { "source": null, "matched_labels": [] },
+        "alias": { "final_target": null, "hops": [] },
+        "version_boundaries": { "record_version_boundary": boundary },
+        "transport": {
+            "source_chain_id": null,
+            "target_chain_id": null,
+            "contract_address": null,
+            "latest_event_kind": null
+        }
+    });
+    sqlx::query(
+        "INSERT INTO resources
+            (resource_id, chain_id, block_hash, block_number, canonicality_state)
+         VALUES ($1, 'ethereum-mainnet', $2, $3, 'canonical')",
+    )
+    .bind(resource_id)
+    .bind(block_hash)
+    .bind(block_number)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO name_surfaces
+            (logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+             namehash, labelhashes, normalizer_version, visibility_state,
+             chain_id, block_hash, block_number, canonicality_state)
+         VALUES ($1, 'ens', 'alice.eth', ARRAY['alice.eth'], $2, $3, ARRAY[$3], 'test',
+                 'active', 'ethereum-mainnet', $4, $5, 'canonical')",
+    )
+    .bind(&logical_name_id)
+    .bind(b"\x05alice\x03eth\0".as_slice())
+    .bind(&namehash)
+    .bind(block_hash)
+    .bind(block_number)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO surface_bindings
+            (surface_binding_id, logical_name_id, resource_id, binding_kind, active_from,
+             chain_id, block_hash, block_number, canonicality_state)
+         VALUES ($1, $2, $3, 'declared_registry_path', $4::timestamptz,
+                 'ethereum-mainnet', $5, $6, 'canonical')",
+    )
+    .bind(binding_id)
+    .bind(&logical_name_id)
+    .bind(resource_id)
+    .bind(timestamp)
+    .bind(block_hash)
+    .bind(block_number)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO name_current
+            (logical_name_id, namespace, raw_name, namehash, surface_binding_id,
+             resource_id, binding_kind, declared_summary, support_status,
+             provenance, chain_positions, canonicality_summary, manifest_version)
+         VALUES ($1, 'ens', 'alice.eth', $2, $3, $4, 'declared_registry_path',
+                 jsonb_build_object('topology', $5::jsonb), 'supported', '{}', $6,
+                 jsonb_build_object('state', 'canonical'), 1)",
+    )
+    .bind(&logical_name_id)
+    .bind(&namehash)
+    .bind(binding_id)
+    .bind(resource_id)
+    .bind(&topology)
+    .bind(&positions)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO record_inventory_current
+            (resource_id, record_version_boundary_key, record_version_boundary,
+             selectors, unsupported_families, entries, support_status, provenance,
+             chain_positions, canonicality_summary, manifest_version)
+         VALUES ($1, 'boundary-1', $2, $3, '[]', $4, 'supported', '{}', $5,
+                 jsonb_build_object('state', 'canonical'), 1)",
+    )
+    .bind(resource_id)
+    .bind(&boundary)
+    .bind(json!([{
+        "record_key": "addr:60",
+        "record_family": "addr",
+        "selector_key": "60"
+    }]))
+    .bind(json!([{
+        "record_key": "addr:60",
+        "record_family": "addr",
+        "selector_key": "60",
+        "status": "success",
+        "value": { "coin_type": "60", "value": indexed_address }
+    }]))
+    .bind(json!({
+        "target_block_number": block_number,
+        "target_block_hash": block_hash
+    }))
+    .execute(pool)
+    .await?;
+    Ok(namehash)
+}
+
+async fn seed_schema_v2_basenames_record_lookup(
+    pool: &PgPool,
+    block_number: i64,
+    base_block_hash: &str,
+    ethereum_block_hash: &str,
+    timestamp: &str,
+    indexed_address: &str,
+) -> Result<String> {
+    seed_schema_v2_lookup_head(
+        pool,
+        "base-mainnet",
+        block_number,
+        base_block_hash,
+        timestamp,
+    )
+    .await?;
+    seed_schema_v2_lookup_head(
+        pool,
+        "ethereum-mainnet",
+        block_number,
+        ethereum_block_hash,
+        timestamp,
+    )
+    .await?;
+
+    let l1_resolver = "0xde9049636f4a1dfe0a64d1bfe3155c0a14c54f31";
+    let contract_instance_id = Uuid::from_u128(0xc200_0000_0000_0000_0000_0000_0000_0203);
+    sqlx::query(
+        "INSERT INTO contract_instances
+            (contract_instance_id, chain_id, contract_kind)
+         VALUES ($1, 'ethereum-mainnet', 'contract')",
+    )
+    .bind(contract_instance_id)
+    .execute(pool)
+    .await?;
+    let manifest_id: i64 = sqlx::query_scalar(
+        "INSERT INTO manifest_versions
+            (manifest_version, namespace, source_family, chain_id, deployment_label,
+             rollout_status, normalizer_version, file_path, manifest_payload)
+         VALUES (2, 'basenames', 'basenames_execution', 'ethereum-mainnet',
+                 'api-test', 'active', 'test', 'test/basenames/execution.toml', $1)
+         RETURNING manifest_id",
+    )
+    .bind(json!({
+        "capability_flags": {
+            "verified_resolution": { "status": "supported" }
+        }
+    }))
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO manifest_contract_instances
+            (manifest_id, chain_id, declaration_kind, declaration_name,
+             contract_instance_id, declared_address, role, proxy_kind)
+         VALUES ($1, 'ethereum-mainnet', 'contract', 'l1_resolver', $2, $3,
+                 'l1_resolver', 'none')",
+    )
+    .bind(manifest_id)
+    .bind(contract_instance_id)
+    .bind(l1_resolver)
+    .execute(pool)
+    .await?;
+
+    let namehash = bigname_lookup::ens_namehash_hex("alice.base.eth")?;
+    let logical_name_id = format!("basenames:{namehash}");
+    let resource_id = Uuid::from_u128(0xc200_0000_0000_0000_0000_0000_0000_0201);
+    let binding_id = Uuid::from_u128(0xc200_0000_0000_0000_0000_0000_0000_0202);
+    let positions = json!({
+        "base": {
+            "chain_id": "base-mainnet",
+            "block_number": block_number,
+            "block_hash": base_block_hash,
+            "timestamp": timestamp
+        },
+        "ethereum": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": block_number,
+            "block_hash": ethereum_block_hash,
+            "timestamp": timestamp
+        }
+    });
+    let boundary = json!({
+        "logical_name_id": logical_name_id,
+        "resource_id": resource_id,
+        "normalized_event_id": 1,
+        "event_kind": "ResolverChanged",
+        "chain_position": positions["base"]
+    });
+    let topology = json!({
+        "registry_path": [],
+        "subregistry_path": [],
+        "resolver_path": [{
+            "logical_name_id": logical_name_id,
+            "resource_id": resource_id,
+            "chain_id": "base-mainnet",
+            "address": "0x1000000000000000000000000000000000000001"
+        }],
+        "wildcard": { "source": null, "matched_labels": [] },
+        "alias": { "final_target": null, "hops": [] },
+        "version_boundaries": { "record_version_boundary": boundary },
+        "transport": {
+            "source_chain_id": "base-mainnet",
+            "target_chain_id": "ethereum-mainnet",
+            "contract_address": l1_resolver,
+            "latest_event_kind": "ResolverChanged"
+        }
+    });
+    sqlx::query(
+        "INSERT INTO resources
+            (resource_id, chain_id, block_hash, block_number, canonicality_state)
+         VALUES ($1, 'base-mainnet', $2, $3, 'canonical')",
+    )
+    .bind(resource_id)
+    .bind(base_block_hash)
+    .bind(block_number)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO name_surfaces
+            (logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+             namehash, labelhashes, normalizer_version, visibility_state,
+             chain_id, block_hash, block_number, canonicality_state)
+         VALUES ($1, 'basenames', 'alice.base.eth', ARRAY['alice.base.eth'], $2, $3,
+                 ARRAY[$3], 'test', 'active', 'base-mainnet', $4, $5, 'canonical')",
+    )
+    .bind(&logical_name_id)
+    .bind(b"\x05alice\x04base\x03eth\0".as_slice())
+    .bind(&namehash)
+    .bind(base_block_hash)
+    .bind(block_number)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO surface_bindings
+            (surface_binding_id, logical_name_id, resource_id, binding_kind, active_from,
+             chain_id, block_hash, block_number, canonicality_state)
+         VALUES ($1, $2, $3, 'declared_registry_path', $4::timestamptz,
+                 'base-mainnet', $5, $6, 'canonical')",
+    )
+    .bind(binding_id)
+    .bind(&logical_name_id)
+    .bind(resource_id)
+    .bind(timestamp)
+    .bind(base_block_hash)
+    .bind(block_number)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO name_current
+            (logical_name_id, namespace, raw_name, namehash, surface_binding_id,
+             resource_id, binding_kind, declared_summary, support_status,
+             provenance, chain_positions, canonicality_summary, manifest_version)
+         VALUES ($1, 'basenames', 'alice.base.eth', $2, $3, $4,
+                 'declared_registry_path', jsonb_build_object('topology', $5::jsonb),
+                 'supported', '{}', $6, jsonb_build_object('state', 'canonical'), 2)",
+    )
+    .bind(&logical_name_id)
+    .bind(&namehash)
+    .bind(binding_id)
+    .bind(resource_id)
+    .bind(&topology)
+    .bind(&positions)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO record_inventory_current
+            (resource_id, record_version_boundary_key, record_version_boundary,
+             selectors, unsupported_families, entries, support_status, provenance,
+             chain_positions, canonicality_summary, manifest_version)
+         VALUES ($1, 'boundary-1', $2, $3, '[]', $4, 'supported', '{}', $5,
+                 jsonb_build_object('state', 'canonical'), 2)",
+    )
+    .bind(resource_id)
+    .bind(&boundary)
+    .bind(json!([{
+        "record_key": "addr:60",
+        "record_family": "addr",
+        "selector_key": "60"
+    }]))
+    .bind(json!([{
+        "record_key": "addr:60",
+        "record_family": "addr",
+        "selector_key": "60",
+        "status": "success",
+        "value": { "coin_type": "60", "value": indexed_address }
+    }]))
+    .bind(json!({
+        "target_block_number": block_number,
+        "target_block_hash": base_block_hash
+    }))
+    .execute(pool)
+    .await?;
+    Ok(namehash)
+}
+
+async fn seed_schema_v2_ens_primary_name_authority(
+    pool: &PgPool,
+    block_number: i64,
+    block_hash: &str,
+    timestamp: &str,
+) -> Result<()> {
+    seed_schema_v2_ens_lookup_head(pool, block_number, block_hash, timestamp).await?;
+    seed_schema_v2_ens_manifest(
+        pool,
+        "ens_v1_registry_l1",
+        "registry",
+        "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e",
+        Uuid::from_u128(0xc200_0000_0000_0000_0000_0000_0000_0104),
+        false,
+    )
+    .await?;
+    seed_schema_v2_ens_manifest(
+        pool,
+        "ens_execution",
+        "universal_resolver",
+        "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+        Uuid::from_u128(0xc200_0000_0000_0000_0000_0000_0000_0105),
+        true,
+    )
+    .await
 }
 
 async fn read_json<T: DeserializeOwned>(response: Response) -> Result<T> {

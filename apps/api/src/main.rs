@@ -99,10 +99,17 @@ async fn main() -> Result<()> {
 
 async fn serve(args: ServeArgs) -> Result<()> {
     args.bounds.validate()?;
-    let chain_rpc_urls = args.effective_chain_rpc_urls()?;
+    let legacy_execution_rpc_urls = args.effective_chain_rpc_urls()?;
+    let chain_rpc_urls = args.effective_lookup_chain_rpc_urls()?;
     let pool = bigname_storage::connect_with_application_name_and_statement_timeout(
         &args.database,
         "bigname-api",
+        args.bounds.db_statement_timeout(),
+    )
+    .await?;
+    let lookup_pool = state::connect_lookup_pool(
+        &args.database,
+        "bigname-api-lookup",
         args.bounds.db_statement_timeout(),
     )
     .await?;
@@ -145,14 +152,15 @@ async fn serve(args: ServeArgs) -> Result<()> {
         args.status_max_block_lag,
         args.status_max_lag_secs,
     )?;
-    let state = AppState::new(pool, chain_rpc_urls)
-        .with_heartbeat_max_age_secs(args.heartbeat_max_age_secs)
-        .with_indexer_chain_heartbeat_max_age_secs(args.indexer_chain_heartbeat_max_age_secs)
-        .with_worker_rebuild_phase_max_age_secs(args.worker_rebuild_phase_max_age_secs)
-        .with_status_freshness_config(status_freshness_config);
+    let state =
+        AppState::new_with_rpc_urls(pool, lookup_pool, chain_rpc_urls, legacy_execution_rpc_urls)
+            .with_heartbeat_max_age_secs(args.heartbeat_max_age_secs)
+            .with_indexer_chain_heartbeat_max_age_secs(args.indexer_chain_heartbeat_max_age_secs)
+            .with_worker_rebuild_phase_max_age_secs(args.worker_rebuild_phase_max_age_secs)
+            .with_status_freshness_config(status_freshness_config);
     state
         .status_freshness
-        .spawn_refresh(state.chain_rpc_urls.clone());
+        .spawn_refresh(state.lookup_chain_rpc_urls.clone());
     warm_compact_records_route_sql_path(&state, args.database.max_connections)
         .await
         .context("failed to warm compact records route SQL path")?;
