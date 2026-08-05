@@ -15,8 +15,8 @@ use super::support::{
     record_value_string_from_entry, snapshot_selection_api_error,
 };
 use super::{
-    Envelope, Meta, QueryParamAllowlist, RequestSource, SnapshotReadResource, StrictQueryParams,
-    V2Error, V2Result, api_error_to_v2_for_resource, resolve_v2_snapshot_for, snapshot_meta,
+    Envelope, QueryParamAllowlist, RequestSource, SnapshotReadResource, StrictQueryParams, V2Error,
+    V2Result, api_error_to_v2_for_resource, resolve_v2_snapshot_for, snapshot_meta,
     v2_exact_name_snapshot_scope_with_resolution_auxiliary,
     vocab::{RegistrationStatus, Resolver, Source, Status},
 };
@@ -116,7 +116,7 @@ pub(crate) async fn get_name_record(
         include_resolution_auxiliary,
     )
     .await?;
-    let selected_snapshot = resolve_v2_snapshot_for(
+    let mut selected_snapshot = resolve_v2_snapshot_for(
         &state.pool,
         &scope,
         params.at.as_ref(),
@@ -163,15 +163,11 @@ pub(crate) async fn get_name_record(
         &row,
         record_inventory.as_ref(),
         chain_id,
-        &selected_snapshot,
+        &mut selected_snapshot,
         route_source,
     )
     .await?;
-    let mut meta = if record.uses_on_demand_fallback {
-        Meta::default()
-    } else {
-        snapshot_meta(&selected_snapshot)?
-    };
+    let mut meta = snapshot_meta(&selected_snapshot)?;
     meta.source = Some(route_source);
 
     Ok(Json(Envelope {

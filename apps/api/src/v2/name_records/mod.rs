@@ -4,30 +4,28 @@ use axum::{
     Json,
     extract::{Path, State},
 };
-use bigname_storage::{RecordInventoryCurrentRow, SelectedSnapshot, SnapshotSelectionErrorKind};
+use bigname_storage::{
+    BASENAMES_NAMESPACE, NameCurrentRow, RecordInventoryCurrentRow, SelectedSnapshot,
+    SnapshotSelectionErrorKind,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::AppState;
 use crate::v2::support::{
-    PartialCompactHits, ResolutionRecordKey, ResolutionVerifiedOutcomeLookup,
-    load_name_current_for_selected_snapshot, load_supported_record_inventory_current_for_snapshot,
-    lookup_resolution_verified_outcome, map_internal_api_error, normalize_inferred_route_name,
-    parse_resolution_record_key, snapshot_selection_api_error,
+    ResolutionLookupError, ResolutionRecordKey, load_name_current_for_selected_snapshot,
+    load_supported_record_inventory_current_for_snapshot, map_internal_api_error,
+    normalize_inferred_route_name, parse_resolution_record_key, snapshot_selection_api_error,
 };
-use bigname_storage::ExecutionOutcome;
 
-use super::support::resolution_on_demand::{
-    ResolutionVerifiedOutcomeOrigin, VerifiedOutcomeExecutionOptions,
-    load_or_execute_resolution_verified_outcome,
-};
+use super::support::execute_resolution_lookup;
 
 use super::{
-    Envelope, MAX_PAGE_SIZE, QueryParamAllowlist, RequestSource, Resolver, SnapshotReadResource,
-    Source, Status, StrictQueryParams, V2Error, V2Result, api_error_to_v2,
+    AtSelector, Envelope, Finality, MAX_PAGE_SIZE, QueryParamAllowlist, RequestSource, Resolver,
+    SnapshotReadResource, Source, Status, StrictQueryParams, V2Error, V2Result,
     api_error_to_v2_for_resource, default_requested_records,
     name_records_inventory::RecordInventory, resolve_v2_snapshot_for, snapshot_meta,
-    v2_exact_name_snapshot_scope, validate_product_record,
+    v2_exact_name_snapshot_scope_with_resolution_auxiliary, validate_product_record,
 };
 
 mod build;
@@ -36,8 +34,75 @@ pub(crate) use build::{
     build_verified_name_records, indexed_records_requiring_verified_fallback,
 };
 
-const MAX_RECORD_KEYS: usize = MAX_PAGE_SIZE as usize;
+pub(crate) const MAX_RECORD_KEYS: usize = MAX_PAGE_SIZE as usize;
 const VERIFIED_ANSWER_STALE_FOR_SNAPSHOT_REASON: &str = "verified_answer_stale_for_snapshot";
+
+#[cfg(test)]
+pub(crate) mod auto_fallback_test_hooks {
+    use std::sync::Arc;
+
+    use anyhow::Result;
+    use bigname_test_support::{
+        ScopedTestHookGuard, ScopedTestHookRegistry, current_test_database,
+    };
+    use sqlx::PgPool;
+    use tokio::sync::Barrier;
+
+    use super::{V2Error, V2Result};
+
+    #[derive(Clone)]
+    pub(crate) struct AutoFallbackHook {
+        reached: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    }
+
+    pub(crate) struct AutoFallbackControl {
+        reached: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    }
+
+    impl AutoFallbackControl {
+        pub(crate) async fn wait_until_reached(&self) {
+            self.reached.wait().await;
+        }
+
+        pub(crate) async fn resume(&self) {
+            self.resume.wait().await;
+        }
+    }
+
+    static HOOKS: ScopedTestHookRegistry<String, AutoFallbackHook> = ScopedTestHookRegistry::new();
+
+    pub(crate) async fn install(
+        pool: &PgPool,
+    ) -> Result<(
+        ScopedTestHookGuard<String, AutoFallbackHook>,
+        AutoFallbackControl,
+    )> {
+        let database = current_test_database(pool).await?;
+        let reached = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let guard = HOOKS.install(
+            database,
+            AutoFallbackHook {
+                reached: Arc::clone(&reached),
+                resume: Arc::clone(&resume),
+            },
+        );
+        Ok((guard, AutoFallbackControl { reached, resume }))
+    }
+
+    pub(super) async fn run(pool: &PgPool) -> V2Result<()> {
+        let database = current_test_database(pool)
+            .await
+            .map_err(|_| V2Error::internal_error("failed to run auto-fallback test hook"))?;
+        if let Some(hook) = HOOKS.take(&database) {
+            hook.reached.wait().await;
+            hook.resume.wait().await;
+        }
+        Ok(())
+    }
+}
 
 pub(crate) struct NameRecordsQueryParams;
 
@@ -74,23 +139,10 @@ pub(crate) struct RecordAnswer {
 
 pub(crate) enum VerifiedRecordLookup {
     Found {
-        outcome: Box<ExecutionOutcome>,
-        origin: ResolutionVerifiedOutcomeOrigin,
+        response: Box<bigname_lookup::LookupResponse>,
     },
     Stale(String),
     NotSupported,
-}
-
-impl VerifiedRecordLookup {
-    pub(crate) fn uses_on_demand_fallback(&self) -> bool {
-        matches!(
-            self,
-            Self::Found {
-                origin: ResolutionVerifiedOutcomeOrigin::OnDemand,
-                ..
-            }
-        )
-    }
 }
 
 pub(crate) async fn get_name_records(
@@ -108,49 +160,24 @@ pub(crate) async fn get_name_records(
     let requested_records = parse_record_keys(params.keys.as_deref())?;
     let include_inventory = records_include_inventory(&params.include)?;
 
-    let scope = v2_exact_name_snapshot_scope(&state, &namespace, params.at.as_ref()).await?;
-    let selected_snapshot = resolve_v2_snapshot_for(
-        &state.pool,
-        &scope,
-        params.at.as_ref(),
-        params.finality,
-        SnapshotReadResource::NameRecords,
-    )
-    .await?;
-    let row = load_name_current_for_selected_snapshot(
-        &state.pool,
+    let include_resolution_auxiliary =
+        namespace == BASENAMES_NAMESPACE && params.source == RequestSource::Verified;
+    let (mut selected_snapshot, mut row, mut record_inventory) = load_name_records_snapshot_state(
+        &state,
         &namespace,
         &normalized.normalized_name,
-        &selected_snapshot,
+        params.at.as_ref(),
+        params.finality,
+        include_resolution_auxiliary,
     )
-    .await
-    .map_err(|error| {
-        api_error_to_v2_for_resource(
-            map_internal_api_error(
-                error,
-                format!(
-                    "failed to load name records for {}/{}",
-                    namespace, normalized.normalized_name
-                ),
-            ),
-            SnapshotReadResource::NameRecords,
-        )
-    })?;
+    .await?;
 
-    let record_inventory =
-        load_supported_record_inventory_current_for_snapshot(&state.pool, &row, &selected_snapshot)
-            .await
-            .map_err(|error| {
-                api_error_to_v2_for_resource(
-                    snapshot_selection_api_error(error),
-                    SnapshotReadResource::NameRecords,
-                )
-            })?;
     let default_records;
     let requested_records = match requested_records.as_deref() {
         Some(records) => Some(records),
         None if params.source == RequestSource::Verified => {
             default_records = default_requested_records(record_inventory.as_ref());
+            ensure_verified_record_limit(&default_records)?;
             Some(default_records.as_slice())
         }
         None => None,
@@ -172,7 +199,7 @@ pub(crate) async fn get_name_records(
                 &row,
                 record_inventory.as_ref(),
                 requested_records.unwrap_or_default(),
-                &selected_snapshot,
+                &mut selected_snapshot,
             )
             .await?;
             (
@@ -199,17 +226,41 @@ pub(crate) async fn get_name_records(
                     )?,
                 )
             } else {
-                let fallback_records = indexed_records_requiring_verified_fallback(
+                let mut fallback_records = indexed_records_requiring_verified_fallback(
                     &row,
                     record_inventory.as_ref(),
                     records,
                 )?;
+                if namespace == BASENAMES_NAMESPACE && !fallback_records.is_empty() {
+                    #[cfg(test)]
+                    auto_fallback_test_hooks::run(&state.pool).await?;
+                    (selected_snapshot, row, record_inventory) = load_name_records_snapshot_state(
+                        &state,
+                        &namespace,
+                        &normalized.normalized_name,
+                        params.at.as_ref(),
+                        params.finality,
+                        true,
+                    )
+                    .await?;
+                    let refreshed_fallback_records = indexed_records_requiring_verified_fallback(
+                        &row,
+                        record_inventory.as_ref(),
+                        records,
+                    )?;
+                    if refreshed_fallback_records.is_empty() {
+                        return Err(V2Error::stale(
+                            "name records changed while preparing verified fallback; retry the request",
+                        ));
+                    }
+                    fallback_records = refreshed_fallback_records;
+                }
                 let verified_lookup = load_verified_record_lookup(
                     &state,
                     &row,
                     record_inventory.as_ref(),
                     &fallback_records,
-                    &selected_snapshot,
+                    &mut selected_snapshot,
                 )
                 .await?;
                 build_auto_name_records(
@@ -233,12 +284,80 @@ pub(crate) async fn get_name_records(
     }))
 }
 
+async fn load_name_records_snapshot_state(
+    state: &AppState,
+    namespace: &str,
+    normalized_name: &str,
+    at: Option<&AtSelector>,
+    finality: Finality,
+    include_resolution_auxiliary: bool,
+) -> V2Result<(
+    SelectedSnapshot,
+    NameCurrentRow,
+    Option<RecordInventoryCurrentRow>,
+)> {
+    let scope = v2_exact_name_snapshot_scope_with_resolution_auxiliary(
+        state,
+        namespace,
+        at,
+        include_resolution_auxiliary,
+    )
+    .await?;
+    let selected_snapshot = resolve_v2_snapshot_for(
+        &state.pool,
+        &scope,
+        at,
+        finality,
+        SnapshotReadResource::NameRecords,
+    )
+    .await?;
+    let row = load_name_current_for_selected_snapshot(
+        &state.pool,
+        namespace,
+        normalized_name,
+        &selected_snapshot,
+    )
+    .await
+    .map_err(|error| {
+        api_error_to_v2_for_resource(
+            map_internal_api_error(
+                error,
+                format!(
+                    "failed to load name records for {}/{}",
+                    namespace, normalized_name
+                ),
+            ),
+            SnapshotReadResource::NameRecords,
+        )
+    })?;
+
+    let record_inventory =
+        load_supported_record_inventory_current_for_snapshot(&state.pool, &row, &selected_snapshot)
+            .await
+            .map_err(|error| {
+                api_error_to_v2_for_resource(
+                    snapshot_selection_api_error(error),
+                    SnapshotReadResource::NameRecords,
+                )
+            })?;
+    Ok((selected_snapshot, row, record_inventory))
+}
+
+pub(crate) fn ensure_verified_record_limit(records: &[ResolutionRecordKey]) -> V2Result<()> {
+    if records.len() > MAX_RECORD_KEYS {
+        return Err(V2Error::unsupported(format!(
+            "verified record reads support at most {MAX_RECORD_KEYS} record keys"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) async fn load_verified_record_lookup(
     state: &AppState,
     row: &bigname_storage::NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,
     records: &[ResolutionRecordKey],
-    selected_snapshot: &SelectedSnapshot,
+    selected_snapshot: &mut SelectedSnapshot,
 ) -> V2Result<Option<VerifiedRecordLookup>> {
     load_verified_record_lookup_for_resource(
         state,
@@ -256,7 +375,7 @@ pub(crate) async fn load_verified_record_lookup_for_resource(
     row: &bigname_storage::NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,
     records: &[ResolutionRecordKey],
-    selected_snapshot: &SelectedSnapshot,
+    selected_snapshot: &mut SelectedSnapshot,
     resource: SnapshotReadResource,
 ) -> V2Result<Option<VerifiedRecordLookup>> {
     load_verified_record_lookup_with_persistence(
@@ -265,7 +384,6 @@ pub(crate) async fn load_verified_record_lookup_for_resource(
         record_inventory,
         records,
         selected_snapshot,
-        true,
         resource,
     )
     .await
@@ -276,7 +394,7 @@ pub(crate) async fn load_ephemeral_verified_record_lookup(
     row: &bigname_storage::NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,
     records: &[ResolutionRecordKey],
-    selected_snapshot: &SelectedSnapshot,
+    selected_snapshot: &mut SelectedSnapshot,
 ) -> V2Result<Option<VerifiedRecordLookup>> {
     load_verified_record_lookup_with_persistence(
         state,
@@ -284,48 +402,9 @@ pub(crate) async fn load_ephemeral_verified_record_lookup(
         record_inventory,
         records,
         selected_snapshot,
-        false,
         SnapshotReadResource::NameRecords,
     )
     .await
-}
-
-pub(crate) async fn load_persisted_verified_record_lookup(
-    state: &AppState,
-    row: &bigname_storage::NameCurrentRow,
-    record_inventory: Option<&RecordInventoryCurrentRow>,
-    records: &[ResolutionRecordKey],
-    selected_snapshot: &SelectedSnapshot,
-) -> V2Result<Option<VerifiedRecordLookup>> {
-    if records.is_empty() {
-        return Ok(None);
-    }
-
-    match lookup_resolution_verified_outcome(
-        &state.pool,
-        row,
-        records,
-        record_inventory,
-        selected_snapshot,
-        PartialCompactHits::Serve,
-    )
-    .await
-    {
-        Ok(ResolutionVerifiedOutcomeLookup::Found(outcome)) => {
-            Ok(Some(VerifiedRecordLookup::Found {
-                outcome: Box::new(outcome),
-                origin: ResolutionVerifiedOutcomeOrigin::Persisted,
-            }))
-        }
-        Ok(ResolutionVerifiedOutcomeLookup::NotSupported) => {
-            Ok(Some(VerifiedRecordLookup::NotSupported))
-        }
-        Ok(ResolutionVerifiedOutcomeLookup::CacheMiss) => Ok(None),
-        Err(error) if error.kind() == SnapshotSelectionErrorKind::Stale => Ok(Some(
-            VerifiedRecordLookup::Stale(VERIFIED_ANSWER_STALE_FOR_SNAPSHOT_REASON.to_owned()),
-        )),
-        Err(error) => Err(api_error_to_v2(snapshot_selection_api_error(error))),
-    }
 }
 
 async fn load_verified_record_lookup_with_persistence(
@@ -333,38 +412,28 @@ async fn load_verified_record_lookup_with_persistence(
     row: &bigname_storage::NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,
     records: &[ResolutionRecordKey],
-    selected_snapshot: &SelectedSnapshot,
-    persist_execution: bool,
+    selected_snapshot: &mut SelectedSnapshot,
     resource: SnapshotReadResource,
 ) -> V2Result<Option<VerifiedRecordLookup>> {
     if records.is_empty() {
         return Ok(None);
     }
 
-    match load_or_execute_resolution_verified_outcome(
-        state,
-        row,
-        records,
-        record_inventory,
-        selected_snapshot,
-        VerifiedOutcomeExecutionOptions {
-            use_latest_block_tag: false,
-            persist_execution,
-            partial_compact_hits: PartialCompactHits::TreatAsMiss,
-        },
-    )
-    .await
-    {
-        Ok(Some(loaded)) => Ok(Some(VerifiedRecordLookup::Found {
-            outcome: Box::new(loaded.outcome),
-            origin: loaded.origin,
+    let _ = record_inventory;
+    match execute_resolution_lookup(state, row, records, selected_snapshot).await {
+        Ok(Some(response)) => Ok(Some(VerifiedRecordLookup::Found {
+            response: Box::new(response),
         })),
         Ok(None) => Ok(Some(VerifiedRecordLookup::NotSupported)),
-        Err(error) if error.kind() == SnapshotSelectionErrorKind::Stale => Ok(Some(
-            VerifiedRecordLookup::Stale(VERIFIED_ANSWER_STALE_FOR_SNAPSHOT_REASON.to_owned()),
-        )),
+        Err(ResolutionLookupError::Snapshot(error))
+            if error.kind() == SnapshotSelectionErrorKind::Stale =>
+        {
+            Ok(Some(VerifiedRecordLookup::Stale(
+                VERIFIED_ANSWER_STALE_FOR_SNAPSHOT_REASON.to_owned(),
+            )))
+        }
         Err(error) => Err(api_error_to_v2_for_resource(
-            snapshot_selection_api_error(error),
+            snapshot_selection_api_error(error.into_snapshot()),
             resource,
         )),
     }

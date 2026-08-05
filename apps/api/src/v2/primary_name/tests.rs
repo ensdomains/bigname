@@ -2,9 +2,7 @@ use bigname_storage::PrimaryNameCurrentRow;
 use serde_json::json;
 
 use crate::v2::ErrorCode;
-use crate::v2::support::{
-    OnDemandPrimaryNameClaim, OnDemandPrimaryNameInvalidClaim, PersistedPrimaryNameVerifiedReadback,
-};
+use crate::v2::support::{OnDemandPrimaryNameClaim, OnDemandPrimaryNameInvalidClaim};
 
 use super::*;
 
@@ -22,22 +20,16 @@ fn builder_returns_indexed_then_verified_answers_for_both_sources() {
         normalized_claim_name: Some("alice.eth".to_owned()),
         claim_name_is_normalized: true,
         on_demand_claim: OnDemandPrimaryNameClaimState::NotAttempted,
-        on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
-        persisted_verified: Some(PersistedPrimaryNameVerifiedReadback {
-            verified_primary_name: json!({
-                "status": "mismatch",
-                "name": {
-                    "logical_name_id": "ens:alice.eth",
-                    "normalized_name": "alice.eth",
-                    "resource_id": "00000000-0000-0000-0000-000000000456"
-                },
-                "failure_reason": "resolved_target_mismatch"
-            }),
-            provenance: json!({}),
-            finished_at: sqlx::types::time::OffsetDateTime::UNIX_EPOCH,
-            route_local_claim: None,
-            forward_call_attempted: false,
-        }),
+        on_demand_verified: OnDemandPrimaryNameVerificationState::Verified(json!({
+            "status": "mismatch",
+            "name": {
+                "logical_name_id": "ens:alice.eth",
+                "normalized_name": "alice.eth",
+                "resource_id": "00000000-0000-0000-0000-000000000456"
+            },
+            "failure_reason": "resolved_target_mismatch"
+        })),
+        persisted_verified: None,
     };
 
     let response = build_primary_name(
@@ -111,38 +103,49 @@ fn builder_narrows_answers_to_requested_source() {
 }
 
 #[test]
-fn builder_maps_non_normalized_claims_to_reasoned_not_found() {
-    let persisted_success = PersistedPrimaryNameVerifiedReadback {
-        verified_primary_name: json!({
-            "status": "success",
-            "name": {
-                "normalized_name": "alice.eth"
-            }
-        }),
-        provenance: json!({}),
-        finished_at: sqlx::types::time::OffsetDateTime::UNIX_EPOCH,
-        route_local_claim: None,
-        forward_call_attempted: false,
+fn builder_keeps_completed_reverse_timeout_as_in_band_failure() {
+    let lookup_state = PrimaryNameLookupState {
+        tuple_state: PrimaryNameTupleState::TupleMissing,
+        normalized_claim_name: None,
+        claim_name_is_normalized: false,
+        on_demand_claim: OnDemandPrimaryNameClaimState::Unavailable,
+        on_demand_verified: OnDemandPrimaryNameVerificationState::Verified(json!({
+            "status": "execution_failed",
+            "failure_reason": "resolver_call_failed"
+        })),
+        persisted_verified: None,
     };
+
+    let response = build_primary_name(
+        "0x0000000000000000000000000000000000000abc".to_owned(),
+        "ens".to_owned(),
+        60,
+        PrimaryNameSourceSelection::Verified,
+        &lookup_state,
+    )
+    .expect("completed timeout result must build");
+
+    assert_eq!(
+        response.answers,
+        vec![PrimaryNameAnswer {
+            failure_reason: Some("resolver_call_failed".to_owned()),
+            ..PrimaryNameAnswer::new(Source::Verified, Status::Failed)
+        }]
+    );
+    assert_eq!(
+        response.verification,
+        Some(PrimaryNameVerification {
+            status: Status::Failed,
+            name: None,
+            unsupported_reason: None,
+            failure_reason: Some("resolver_call_failed".to_owned()),
+        })
+    );
+}
+
+#[test]
+fn builder_maps_non_normalized_claims_to_reasoned_not_found() {
     let lookup_states = [
-        (
-            PrimaryNameLookupState {
-                tuple_state: PrimaryNameTupleState::TuplePresent(PrimaryNameCurrentRow {
-                    address: "0x0000000000000000000000000000000000000abc".to_owned(),
-                    namespace: "ens".to_owned(),
-                    coin_type: "60".to_owned(),
-                    claim_status: PrimaryNameClaimStatus::Success,
-                    raw_claim_name: None,
-                    claim_provenance: json!({}),
-                }),
-                normalized_claim_name: Some("alice.eth".to_owned()),
-                claim_name_is_normalized: false,
-                on_demand_claim: OnDemandPrimaryNameClaimState::NotAttempted,
-                on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
-                persisted_verified: Some(persisted_success),
-            },
-            bigname_execution::VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON,
-        ),
         (
             PrimaryNameLookupState {
                 tuple_state: PrimaryNameTupleState::TupleMissing,
@@ -156,7 +159,7 @@ fn builder_maps_non_normalized_claims_to_reasoned_not_found() {
                 on_demand_verified: OnDemandPrimaryNameVerificationState::ClaimNotNormalized,
                 persisted_verified: None,
             },
-            bigname_execution::VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON,
+            "claim_not_normalized",
         ),
         (
             PrimaryNameLookupState {
@@ -243,7 +246,7 @@ fn builder_keeps_indexed_non_normalized_claim_declared_only() {
 }
 
 #[test]
-fn builder_preserves_unnormalizable_on_demand_claim_for_both_sources() {
+fn builder_keeps_unnormalizable_live_claim_out_of_indexed_answer() {
     let lookup_state = PrimaryNameLookupState {
         tuple_state: PrimaryNameTupleState::TupleMissing,
         normalized_claim_name: None,
@@ -274,7 +277,7 @@ fn builder_preserves_unnormalizable_on_demand_claim_for_both_sources() {
     assert_eq!(
         response.answers,
         vec![
-            PrimaryNameAnswer::invalid(Source::Indexed, "alice..eth"),
+            PrimaryNameAnswer::new(Source::Indexed, Status::NotFound),
             verified.clone(),
         ]
     );

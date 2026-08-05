@@ -117,6 +117,44 @@ apply_baseline() {
 apply_baseline
 apply_baseline
 
+# The production functions intentionally bind their SECURITY DEFINER lookups
+# to bigname_phase. Prove that contract before rebinding only this scratch
+# schema's copies so the remainder of this isolated harness can exercise them.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+DO $$
+DECLARE
+    unsafe_function_count bigint;
+BEGIN
+    SELECT count(*)
+    INTO unsafe_function_count
+    FROM pg_proc procedure
+    JOIN pg_namespace namespace
+      ON namespace.oid = procedure.pronamespace
+    WHERE namespace.nspname = current_schema()
+      AND procedure.proname IN (
+          'revalidate_resolution_lookup_state',
+          'write_resolution_divergence'
+      )
+      AND procedure.proconfig @>
+          ARRAY['search_path=pg_catalog, bigname_phase, pg_temp']::text[];
+
+    IF unsafe_function_count <> 2 THEN
+        RAISE EXCEPTION
+            'lookup SECURITY DEFINER functions lack the fixed production search path';
+    END IF;
+END
+$$;
+SQL
+    printf \
+        'ALTER FUNCTION "%s".revalidate_resolution_lookup_state(text, bigint, text, jsonb, jsonb, uuid, text, text) SET search_path = pg_catalog, "%s", pg_temp;\n' \
+        "$scratch_schema" "$scratch_schema"
+    printf \
+        'ALTER FUNCTION "%s".write_resolution_divergence(uuid, text, text, text, bigint, text, jsonb, text, text, text, text, jsonb, jsonb, boolean) SET search_path = pg_catalog, "%s", pg_temp;\n' \
+        "$scratch_schema" "$scratch_schema"
+} | run_psql
+
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     cat <<'SQL'
@@ -515,7 +553,7 @@ BEGIN
                 WHERE namespace.nspname = current_schema()
                   AND procedure.proname = 'write_resolution_divergence'
                   AND pg_get_function_identity_arguments(procedure.oid) =
-                      'compared_resource_id uuid, compared_boundary_key text, compared_row_xmin text, requested_logical_name_id text, requested_resolver_chain_id text, requested_resolver_address text, requested_record_key text, compared_positions jsonb, indexed_answer jsonb, live_answer jsonb, used_ccip_read boolean'
+                      'compared_resource_id uuid, compared_boundary_key text, compared_row_xmin text, requested_authoritative_chain_id text, requested_authoritative_block_number bigint, requested_authoritative_block_hash text, compared_execution_authority jsonb, requested_logical_name_id text, requested_resolver_chain_id text, requested_resolver_address text, requested_record_key text, compared_positions jsonb, live_answer jsonb, used_ccip_read boolean'
             )
         UNION ALL
         SELECT
@@ -800,6 +838,7 @@ DECLARE
     accepted_manifest_mismatches text[] := ARRAY[]::text[];
     accepted_divergence_canonicality text[] := ARRAY[]::text[];
     divergence_guard_xmin text;
+    divergence_execution_authority jsonb;
     divergence_write_status text;
     divergence_count bigint;
     oversized_text text;
@@ -2153,6 +2192,128 @@ BEGIN
         1
     );
 
+    INSERT INTO name_current (
+        logical_name_id,
+        namespace,
+        raw_name,
+        namehash,
+        declared_summary,
+        support_status,
+        manifest_version
+    ) VALUES (
+        'schema-v2-check:namehash-0',
+        'schema-v2-check',
+        'Name',
+        'namehash-0',
+        '{
+            "topology": {
+                "resolver_path": [
+                    {
+                        "chain_id": "schema-v2-check",
+                        "address": "resolver-address-guard"
+                    }
+                ],
+                "version_boundaries": {
+                    "record_version_boundary": {
+                        "kind": "schema-v2-lookup-guard"
+                    }
+                }
+            }
+        }'::jsonb,
+        'supported',
+        1
+    );
+
+    INSERT INTO chain_phase_state (
+        chain_id,
+        phase_name,
+        phase_status,
+        current_block_number,
+        current_block_hash,
+        target_block_number,
+        target_block_hash,
+        input_content_hash,
+        started_at,
+        finished_at
+    ) VALUES (
+        'schema-v2-check',
+        'project',
+        'completed',
+        0,
+        'block-0',
+        0,
+        'block-0',
+        'schema-v2-check-content',
+        now(),
+        now()
+    );
+
+    INSERT INTO manifest_versions (
+        manifest_version,
+        namespace,
+        source_family,
+        chain_id,
+        deployment_label,
+        rollout_status,
+        normalizer_version,
+        file_path,
+        manifest_payload
+    ) VALUES (
+        1,
+        'schema-v2-check',
+        'schema-v2-lookup-guard',
+        'schema-v2-check',
+        'schema-v2-lookup-guard',
+        'active',
+        'check',
+        'schema-v2-lookup-guard.toml',
+        '{}'::jsonb
+    ) RETURNING manifest_id INTO manifest_key;
+
+    INSERT INTO manifest_contract_instances (
+        manifest_id,
+        chain_id,
+        declaration_kind,
+        declaration_name,
+        contract_instance_id,
+        declared_address,
+        role,
+        proxy_kind
+    ) VALUES (
+        manifest_key,
+        'schema-v2-check',
+        'contract',
+        'schema-v2-lookup-guard',
+        '00000000-0000-0000-0000-000000000002',
+        'resolver-address-guard',
+        'lookup-guard',
+        'none'
+    );
+
+    SELECT jsonb_build_object(
+        'project_row_xmin', phase.xmin::text,
+        'logical_name_id', name.logical_name_id,
+        'name_row_xmin', name.xmin::text,
+        'manifest_authorities', jsonb_build_array(jsonb_build_object(
+            'declared_address', declaration.declared_address,
+            'manifest_id', manifest.manifest_id::text,
+            'manifest_row_xmin', manifest.xmin::text,
+            'declaration_id',
+                declaration.manifest_contract_instance_id::text,
+            'declaration_row_xmin', declaration.xmin::text
+        ))
+    )
+    INTO divergence_execution_authority
+    FROM chain_phase_state AS phase
+    CROSS JOIN name_current AS name
+    JOIN manifest_versions AS manifest
+      ON manifest.manifest_id = manifest_key
+    JOIN manifest_contract_instances AS declaration
+      ON declaration.manifest_id = manifest.manifest_id
+    WHERE phase.chain_id = 'schema-v2-check'
+      AND phase.phase_name = 'project'
+      AND name.logical_name_id = 'schema-v2-check:namehash-0';
+
     SELECT xmin::text
     INTO divergence_guard_xmin
     FROM record_inventory_current
@@ -2163,6 +2324,10 @@ BEGIN
         '00000000-0000-0000-0000-000000000011',
         'schema-v2-lookup-guard',
         divergence_guard_xmin,
+        'schema-v2-check',
+        0,
+        'block-0',
+        divergence_execution_authority,
         'schema-v2-check:namehash-0',
         'schema-v2-check',
         'resolver-address-guard',
@@ -2175,7 +2340,6 @@ BEGIN
                 "timestamp": "2026-01-01T00:00:00Z"
             }
         }'::jsonb,
-        '{"status": "not_found"}'::jsonb,
         '{"status": "success", "value": "0x01"}'::jsonb,
         false
     ) INTO divergence_write_status;
@@ -2200,10 +2364,14 @@ BEGIN
         '00000000-0000-0000-0000-000000000011',
         'schema-v2-lookup-guard',
         divergence_guard_xmin,
+        'schema-v2-check',
+        0,
+        'block-0',
+        divergence_execution_authority,
         'schema-v2-check:namehash-0',
         'schema-v2-check',
-        'resolver-address-oversized',
-        oversized_text,
+        'resolver-address-guard',
+        'text:' || oversized_text,
         '{
             "resolver": {
                 "chain_id": "schema-v2-check",
@@ -2212,7 +2380,6 @@ BEGIN
                 "timestamp": "2026-01-01T00:00:00Z"
             }
         }'::jsonb,
-        '{"status": "not_found"}'::jsonb,
         '{"status": "success", "value": "oversized"}'::jsonb,
         false
     ) INTO divergence_write_status;
@@ -2221,9 +2388,10 @@ BEGIN
         OR NOT EXISTS (
             SELECT 1
             FROM resolution_divergences
-            WHERE resolver_address = 'resolver-address-oversized'
-              AND request_kind_hash = public.digest(oversized_text, 'sha256')
-              AND request_kind = oversized_text
+            WHERE resolver_address = 'resolver-address-guard'
+              AND request_kind_hash =
+                  public.digest('text:' || oversized_text, 'sha256')
+              AND request_kind = 'text:' || oversized_text
         )
     THEN
         RAISE EXCEPTION
@@ -2238,6 +2406,10 @@ BEGIN
         '00000000-0000-0000-0000-000000000011',
         'schema-v2-lookup-guard',
         divergence_guard_xmin,
+        'schema-v2-check',
+        0,
+        'block-0',
+        divergence_execution_authority,
         'schema-v2-check:namehash-0',
         'schema-v2-check',
         'resolver-address-guard',
@@ -2250,7 +2422,6 @@ BEGIN
                 "timestamp": "2026-01-01T00:00:01Z"
             }
         }'::jsonb,
-        '{"status": "not_found"}'::jsonb,
         '{"status": "not_found"}'::jsonb,
         false
     ) INTO divergence_write_status;
@@ -2272,9 +2443,13 @@ BEGIN
         '00000000-0000-0000-0000-000000000011',
         'schema-v2-lookup-guard',
         divergence_guard_xmin || '-stale',
+        'schema-v2-check',
+        0,
+        'block-0',
+        divergence_execution_authority,
         'schema-v2-check:namehash-0',
         'schema-v2-check',
-        'resolver-address-stale-guard',
+        'resolver-address-guard',
         'text:url',
         '{
             "resolver": {
@@ -2284,7 +2459,6 @@ BEGIN
                 "timestamp": "2026-01-01T00:00:00Z"
             }
         }'::jsonb,
-        '{"status": "not_found"}'::jsonb,
         '{"status": "success", "value": "https://example.test"}'::jsonb,
         false
     ) INTO divergence_write_status;
@@ -2300,6 +2474,10 @@ BEGIN
         '00000000-0000-0000-0000-000000000011',
         'schema-v2-lookup-guard',
         divergence_guard_xmin,
+        'schema-v2-check',
+        0,
+        'block-0',
+        divergence_execution_authority,
         'schema-v2-check:namehash-0',
         'schema-v2-check',
         'resolver-address-ccip-guard',
@@ -2312,7 +2490,6 @@ BEGIN
                 "timestamp": "2026-01-01T00:00:00Z"
             }
         }'::jsonb,
-        '{"status": "not_found"}'::jsonb,
         '{"status": "success", "value": "ccip"}'::jsonb,
         true
     ) INTO divergence_write_status;
@@ -2322,6 +2499,9 @@ BEGIN
     THEN
         RAISE EXCEPTION 'CCIP result reached the divergence ledger';
     END IF;
+
+    DELETE FROM name_current
+    WHERE logical_name_id = 'schema-v2-check:namehash-0';
 
     INSERT INTO resolution_divergences (
         logical_name_id,

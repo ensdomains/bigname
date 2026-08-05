@@ -4,7 +4,7 @@ use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow};
 use serde_json::Value;
 use tracing::error;
 
-use crate::v2::support::{ResolutionRecordKey, build_resolution_verified_state};
+use crate::v2::support::{ResolutionRecordKey, build_lookup_resolution_verified_state};
 
 use super::super::{
     PRODUCT_PIPELINE_TERMS, Source, Status, V2Error, V2Result, contains_boundary_vocabulary,
@@ -300,17 +300,8 @@ fn verified_record_answers(
     verified_lookup: Option<VerifiedRecordLookup>,
 ) -> V2Result<BTreeMap<String, RecordAnswer>> {
     match verified_lookup {
-        Some(VerifiedRecordLookup::Found { outcome, .. }) => {
-            let state = build_resolution_verified_state(row, records, Some(outcome.as_ref()))
-                .map_err(|error| {
-                    error!(
-                        service = "api",
-                        logical_name_id = %row.logical_name_id,
-                        error = ?error,
-                        "failed to build v2 verified name records"
-                    );
-                    V2Error::internal_error("failed to build verified name records")
-                })?;
+        Some(VerifiedRecordLookup::Found { response }) => {
+            let state = build_lookup_resolution_verified_state(records, Some(response.as_ref()));
             verified_queries_from_state(&state, records)
         }
         Some(VerifiedRecordLookup::Stale(reason)) => {

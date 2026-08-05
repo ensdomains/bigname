@@ -172,39 +172,46 @@ Field ownership:
 
 - Method/path: `GET /v2/names/{name}`
 - Tier: product read.
-- Purpose: name profile, using the flat record shape plus registration summary.
+- Purpose: name-profile read, using the flat record shape plus registration summary.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`,
   `source`. `source` accepts `indexed` or `verified`; omitting it is identical
-  to `source=indexed`. This profile route does not accept `source=auto`.
+  to `source=indexed`. This name-profile route does not accept `source=auto`.
 - Response shape: `data` is one flat record object using dictionary fields.
   The registration summary is not nested; it is represented by
   `registration_id`, `token_id`, `owner`, `manager`, `registrant`,
   `registered_at`, `created_at`, `expires_at`, and `registration_status` on
   the same object when backed. `manager` is omitted when no forward-read source
-  can derive it; it is not emitted as a permanent null placeholder. The profile
-  portion uses `name`, `display_name`, `namespace`, `namehash`, `resolver`,
+  can derive it; it is not emitted as a permanent null placeholder. The
+  name-profile portion uses `name`, `display_name`, `namespace`, `namehash`, `resolver`,
   `addresses`, `text_records`, `content_hash`,
   `primary_name`, `primary_address`, `chain_id`, `network`, `status`, and
   `unsupported_reason`/`failure_reason`/`unsupported_fields` when those fields
   are served. With `source=verified`, the resolver-record-backed fields
   `addresses`, `text_records`, `content_hash`, and `primary_address` are built
-  from the same persisted-or-on-demand verified execution path used by
-  `/v2/names/{name}/records`; indexed resolver-record values are not substituted
-  into those fields. The registration and identity summary fields
-  (`registration_id`, `token_id`, `owner`, `manager`, `registrant`, dates,
+  by a fresh schema-v2 lookup at the current readable position, using the same
+  verified path as `/v2/names/{name}/records`; indexed resolver-record values
+  are not substituted into those fields. The registration and identity summary
+  fields (`registration_id`, `token_id`, `owner`, `manager`, `registrant`, dates,
   `registration_status`, `name`, `display_name`, `namespace`, `namehash`,
   `resolver`, `primary_name`, `chain_id`, and `network`) remain indexed
-  projection values because they are not resolver records. Persisted or
-  snapshot-pinned verified profile responses include
-  `meta.as_of`/`meta.as_of_token`; the response supplied by route-local
-  on-demand verified execution omits both. On a `200` profile,
+  projection values because they are not resolver records. Verified responses
+  include `meta.as_of`/`meta.as_of_token` for the positions used by the fresh
+  lookup. For cross-chain resolution, the authoritative position is admitted
+  from the selected product snapshot and the auxiliary position is the
+  canonical execution position retained by the projected row; it may be older
+  than the newest generic checkpoint selected for that chain, but never newer;
+  an anchor at the same height must have the same block hash. They create no
+  legacy trace or reusable execution outcome. Provider connect, DNS, TLS,
+  connection-reset, and other transport failures abort the whole request with
+  `500 internal_error`; they are not flat-record `status=stale` results. On a
+  `200` name-profile response,
   `status` is the flat-record result: `ok` for clean indexed reads; `failed`,
   `stale`, or `unsupported` may appear only when `source=verified` cannot serve
   the verified sections, with `failure_reason` or `unsupported_reason` carrying
   the product reason when available;
   `not_found` and `invalid_name` are unreachable in-record.
 - Pagination behavior: none.
-- Status semantics: valid names with no profile return `404 not_found`.
+- Status semantics: valid names with no name-profile data return `404 not_found`.
   Invalid path names return `400 invalid_input`.
 - Replaces (v1): `GET /v1/names/{namespace}/{name}` and
   `GET /v1/profiles/names/{name}`.
@@ -223,16 +230,39 @@ Field ownership:
   `text:<key>`, `avatar`, and `contenthash`. Requested-key outcomes are also
   returned in route-local `records`, keyed by the requested key; each value is
   `{status, value?, unsupported_reason?, failure_reason?}`. `source=verified`
-  and verified fallback from `source=auto` use persisted verified outcomes when
-  available and otherwise attempt on-demand verified execution behind `source=`.
-  A supported verified value that cannot be served or executed for the selected
-  snapshot is reported per key as `status=stale` with a `failure_reason`.
+  and verified fallback from `source=auto` execute a fresh schema-v2 lookup on
+  every request. They do not read or write the legacy execution cache. A direct
+  live/indexed disagreement may update the guarded resolution divergence
+  ledger; restored agreement may clear a matching active row, while wildcard
+  and CCIP-Read answers do not mutate it. A selected position
+  that the provider cannot serve is reported per key as `status=stale` with a
+  `failure_reason`; a completed provider response timeout or malformed result
+  remains an in-band `status=failed` result.
+  `meta.as_of` and `meta.as_of_token` report the authoritative and actual
+  hash-pinned execution positions returned by the lookup engine. On a
+  cross-chain path, the execution position may be an older canonical projected
+  position than the generic auxiliary checkpoint initially selected by the
+  route. It may not be newer, and a position at the same height must have the
+  same block hash; violations are stale before provider execution. Provider
+  connect, DNS, TLS, connection-reset, and other transport
+  failures abort the whole request with `500 internal_error`; they are not
+  per-key stale answers and `source=auto` does not return a partial blend.
   Product records use product reason vocabulary: retained-selector misses use
   `value_not_retained`, and phase-unsupported record families use
   `record_family_not_supported`.
   `source=auto` blends per key: indexed answers are used where they satisfy the
   requested key, and only the remaining supported keys fall back to verified
-  readback or on-demand execution.
+  lookup. A Basenames auto read remains Base-scoped when no fallback key
+  remains; it selects the Ethereum resolution-auxiliary position only when it
+  will attempt that verified fallback. If projection movement removes the last
+  fallback key while the expanded snapshot is being selected, the request
+  returns `409 stale` so a retry can return an indexed Base-scoped response.
+  Explicit `keys` and the inventory-derived default verified selector set are
+  both limited to 200 record keys. When omitted `keys` would derive more than
+  200 keys, `source=verified` returns `422 unsupported` before any provider call;
+  callers can supply `keys` to select a smaller set. The verified flat
+  name-profile has the same 200-key server-derived limit and returns `422
+  unsupported` because that route has no key selector.
   `include=inventory` adds route-local
   `inventory: {known_keys, unset_keys, unsupported_keys}`. Deep inventory
   internals stay on diagnostics.
@@ -444,52 +474,55 @@ Field ownership:
   not omitted.
   Supplying `source=indexed` or `source=verified` narrows the `answers` array
   to that source for single-source callers. `verification` is
-  `{status, name?, unsupported_reason?, failure_reason?}` and appears whenever
-  a persisted or on-demand verified outcome exists. As an explicit exception,
+  `{status, name?, unsupported_reason?, failure_reason?}` and appears when the
+  fresh lookup produces a verification outcome. As an explicit exception,
   it also appears when the request includes the `verified` source and the
-  projected or route-local on-demand claim fails the pre-forward normalization
-  gate. A projected gate result is synthetic; a route-local gate result is a
-  persisted trace of the pinned reverse lookup and normalization decision, but
-  neither represents a forward resolver call.
+  live reverse claim fails the pre-forward normalization gate. That gate result
+  represents the fresh hash-pinned reverse lookup and normalization decision,
+  not a forward resolver call or a persisted execution trace.
   An indexed-only response never includes `verification`. The `verified` answer
   entry is the source-specific payload; `verification` is the typed comparison
   summary and must not contradict that entry. Claimed-vs-verified remains one
   call without `declared_state`/`verified_state`. When a served head is
   available, `meta.as_of` and `meta.as_of_token` record the served positions
-  for staleness attribution and shadow-diff correlation. The ENS/60 route-local
-  fallback selects that stored Ethereum checkpoint, pins its reverse and
-  optional forward calls to the block hash, persists verified-mode outcomes,
-  and includes the same snapshot metadata.
-  Basenames responses that serve a persisted verified answer include both the
-  Base authority position and the Ethereum resolution-auxiliary position;
-  indexed-only responses and missing persisted verified outcomes remain
-  Base-scoped.
+  for staleness attribution and shadow-diff correlation. ENS/60 verification
+  uses the schema-v2 lookup engine's current readable Ethereum position and
+  pins its reverse and optional forward calls to that block hash. It persists
+  neither a legacy trace/outcome nor a divergence row. When `source` is omitted,
+  the indexed claim is returned beside the verified answer only when its
+  checkpoint matches the lookup position before and after the indexed read;
+  otherwise the request returns `409 stale`. Live results never change the
+  indexed answer. Basenames verified primary-name lookup is unsupported;
+  indexed Basenames responses remain Base-scoped.
 - Pagination behavior: none.
 - Snapshot behavior: current-state read over chain-derived primary-name state.
   The route does not accept `at` or `finality`. Successful responses carry
-  `meta.as_of` and `meta.as_of_token` for indexed and persisted state served at
-  the API's current chain head. When the tuple is missing and the route uses the
-  on-demand ENS RPC fallback, both fields identify the stored Ethereum
-  checkpoint used for its hash-pinned calls and persisted execution identity.
+  `meta.as_of` and `meta.as_of_token` for indexed state or the current readable
+  Ethereum position used by fresh ENS/60 verification. No metadata field
+  implies cache reuse or a persisted execution identity. Provider transport
+  failures abort the request with `500 internal_error`; they are not verified
+  answer entries with `status=stale`.
 - Status semantics: answer entries use in-band `status`. Valid tuples with no
   indexed claim return an `indexed` entry with `status=not_found`. Unsupported,
   not-found, failed, and mismatched verified outcomes return `200` with the
   corresponding `verified` entry status. When the requested output includes the
-  verified source, a successful projected or on-demand claim whose raw spelling
+  verified source, a successful live claim whose raw spelling
   differs from its normalized form produces a verified answer and
   `verification` with `status=not_found` and
-  `failure_reason=claim_not_normalized`. An unnormalizable on-demand claim
-  produces an indexed answer with `status=invalid_name` and `raw_claim_name`
-  when the indexed source is included, and a verified answer plus `verification`
-  with `status=not_found` and `failure_reason=claim_name_not_normalizable` when
-  the verified source is included. Missing provider configuration, a completed
-  JSON-RPC failure, malformed response data, or expiration of the configured
-  provider or CCIP-Read gateway response deadline produces in-band
-  `status=stale` with `failure_reason=resolver_call_failed` for each requested
-  source; it is not an in-band `not_found`. A provider or gateway connect-phase
-  timeout, DNS failure, TLS failure, connection reset, or other transport
-  failure returns whole-request `409 stale` before trace or outcome persistence,
-  so the next read retries. Malformed addresses return `400 invalid_input`.
+  `failure_reason=claim_not_normalized`. An unnormalizable live claim
+  leaves a missing indexed tuple as `status=not_found` and produces a verified
+  answer plus `verification` with `status=not_found` and
+  `failure_reason=claim_name_not_normalizable`. A completed JSON-RPC failure,
+  malformed response, or configured provider or CCIP-Read gateway response
+  timeout produces an in-band verified `status=failed` result. Missing provider
+  configuration or a selected-block rejection returns whole-request `409
+  stale`. A provider or gateway connect-phase timeout, DNS failure, TLS
+  failure, connection reset, or other transport failure returns whole-request
+  `500 internal_error`; no trace or outcome is persisted, so the next read
+  retries. Malformed addresses return `400 invalid_input`.
+  `source=indexed` does not enter verified-execution rate or concurrency
+  admission; omitted `source` and `source=verified` do because they run the
+  fresh lookup.
 - Replaces (v1): `GET /v1/primary-names/{address}`.
 
 ### `GET /v2/addresses/{address}/history`

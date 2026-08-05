@@ -16,7 +16,9 @@ pub(super) fn is_verified_execution_request(method: &Method, uri: &Uri) -> bool 
             query_matches(uri, "mode", &["verified", "both"])
                 || (query_matches(uri, "mode", &["auto"]) && v1_auto_records_can_execute(uri))
         }
-        ["v2", "addresses", _, "primary-name"] => true,
+        ["v2", "addresses", _, "primary-name"] => {
+            query_absent_blank_or_matches(uri, "source", &["verified"])
+        }
         ["v2", "names", _] => query_matches(uri, "source", &["verified"]),
         ["v2", "names", _, "records"] => {
             query_matches(uri, "source", &["verified"])
@@ -58,6 +60,18 @@ fn query_absent_or_matches(uri: &Uri, key: &str, expected: &[&str]) -> bool {
     for value in query_values(uri, key) {
         found = true;
         if expected.contains(&value.trim()) {
+            return true;
+        }
+    }
+    !found
+}
+
+fn query_absent_blank_or_matches(uri: &Uri, key: &str, expected: &[&str]) -> bool {
+    let mut found = false;
+    for value in query_values(uri, key) {
+        found = true;
+        let value = value.trim();
+        if value.is_empty() || expected.contains(&value) {
             return true;
         }
     }

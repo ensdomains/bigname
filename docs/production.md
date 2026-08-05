@@ -68,6 +68,11 @@ BIGNAME_PUBLIC_HTTP_PORT=80
 BIGNAME_PUBLIC_HTTPS_PORT=443
 ```
 
+The normal server environment must set `BIGNAME_API_DATABASE_URL` to the
+dedicated non-owner login provisioned in
+[`deployment.md`](deployment.md#surviving-services). The server Compose file
+refuses to substitute the writer/owner `BIGNAME_DATABASE_URL` for the API.
+
 `BIGNAME_API_HOST=127.0.0.1` keeps direct host access to the API on localhost
 only. Public access goes through Caddy on ports 80 and 443.
 
@@ -81,7 +86,7 @@ recommended starting point before the public edge is undrained.
 | Environment variable | Default | Undrain starting value | Mechanism |
 | --- | ---: | ---: | --- |
 | `BIGNAME_API_REQUEST_TIMEOUT_MS` | `30000` | `30000` | Whole-request deadline on every REST, GraphQL, docs, status, and health route; returns `408 request_timeout`. |
-| `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS` | `25000` | `25000` | PostgreSQL `statement_timeout` applied to primary API request-pool connections. The readiness pool has a fixed two-second check limit. |
+| `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS` | `25000` | `25000` | PostgreSQL `statement_timeout` applied to both API request pools. The readiness pool has a fixed two-second check limit. |
 | `BIGNAME_API_MAX_IN_FLIGHT` | `1024` | `256` | Shared process-wide in-flight ceiling; excess work is load-shed as `503 overloaded`. `/healthz` bypasses it. |
 | `BIGNAME_API_HEALTH_MAX_IN_FLIGHT` | `4` | `4` | Independent in-flight ceiling reserved for `/healthz`; excess health work is load-shed as `503 overloaded`. |
 | `BIGNAME_API_VERIFIED_EXECUTION_MAX_IN_FLIGHT` | `128` | `16` | Separate ceiling for requests that can initiate verified resolution or primary-name fallback; it must be lower than the global ceiling. |
@@ -126,16 +131,19 @@ than consuming an API request indefinitely. The request deadline remains a
 backstop on `/healthz`, `/v1/status`, and `/v2/status`; the status routes remain
 bounded by the primary API pool's statement timeout. `/healthz` alone bypasses
 the process-wide concurrency limiter and load shedding, and its `SELECT 1` uses
-a persistent one-connection readiness pool with a two-second check limit. This
-connection is additional to `BIGNAME_DATABASE_MAX_CONNECTIONS`. HTTP-concurrency
-saturation and exhaustion of the primary API pool therefore cannot queue the
-probe past the compose healthcheck's five-second window: a healthy but busy
-process returns `200` with `status="ready"`. A readiness connection failure or
-timeout instead returns `503` with `status="degraded"`, preserving the database
-reachability check for a genuinely unavailable PostgreSQL server. The
-health-specific ceiling prevents unbounded probe work. The status routes retain
-global admission because their aggregate database query can be expensive under
-backlog.
+a persistent one-connection readiness pool with a two-second check limit. The
+retained `public`-schema request pool and the schema-v2 lookup request pool each
+use `BIGNAME_DATABASE_MAX_CONNECTIONS`; the readiness connection is additional,
+so the API process can open at most
+`2 * BIGNAME_DATABASE_MAX_CONNECTIONS + 1` PostgreSQL connections.
+HTTP-concurrency saturation and exhaustion of either request pool therefore
+cannot queue the probe past the compose healthcheck's five-second window: a
+healthy but busy process returns `200` with `status="ready"`. A readiness
+connection failure or timeout instead returns `503` with `status="degraded"`,
+preserving the database reachability check for a genuinely unavailable
+PostgreSQL server. The health-specific ceiling prevents unbounded probe work.
+The status routes retain global admission because their aggregate database
+query can be expensive under backlog.
 
 For a temporary HTTP-only deployment before DNS is ready, set:
 

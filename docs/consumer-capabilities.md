@@ -70,29 +70,37 @@ separate support status and reason fields to decide whether a setup is
 supported. The retained v1 API continues reading the legacy public schema
 until the Stage C route cutover; this wording change does not re-point a route.
 
-The Stage B6 schema-v2 lookup engine is likewise staged for the Stage C route
-cutover and does not re-point a v1 route in this change. It reads a supported
+The Stage B6 schema-v2 lookup engine serves the v2 verified name, record, and
+ENS/60 primary-name paths; retained v1 routes remain on the legacy execution
+crate. It reads a supported
 exact name and projected resolver topology only when the project phase's
 published cursor matches the newest processed authoritative block. An
 unchanged name may retain an older canonical projection position; same-chain
 execution still targets the current published head, while cross-chain
 execution uses any timestamp-aligned projected auxiliary position. For direct
 and alias paths, the projected record boundary identifies the exact
-`record_inventory_current` comparison row. A direct live answer is durable
-only when it disagrees with that indexed entry: the engine writes the small
-[resolution divergence ledger](glossary.md#resolution-divergence-ledger) after
-re-locking the exact inventory row it compared and revalidating the published
-head through commit. The ledger cites the projection row's actual canonical
+`record_inventory_current` comparison row. A direct live disagreement creates
+or replaces an active row in the small
+[resolution divergence ledger](glossary.md#resolution-divergence-ledger), and
+restored agreement may clear the matching active row, after the engine re-locks
+the exact inventory row it compared and revalidates the published head through
+commit. The ledger cites the projection row's actual canonical
 positions, which can be older than that head. A wildcard lookup without an
 exact inventory comparison still executes live but cannot write or clear a
 divergence; it never substitutes the wildcard ancestor's inventory. Agreement
-writes no row, and a CCIP-participating answer never writes or clears the
-ledger. The successor stores no reusable outcome, request-validation state,
+creates no divergence, and a CCIP-participating answer never writes or clears
+the ledger. V2 response metadata reports the actual projected cross-chain
+execution position rather than the newer generic auxiliary checkpoint that may
+have been used only to establish the API's selected chain scope. The projected
+position may be older but never newer than that checkpoint; at the same height,
+its block hash must match.
+The successor stores no reusable outcome, request-validation state,
 revalidation state, or durable trace.
-The retained ENS primary-name execution path selects the registry and Universal
-Resolver from manifests at the readable Ethereum head, applies the existing raw
-claim normalization gate before any forward call, and does not use the record
-divergence ledger.
+The v2 ENS/60 primary-name path selects the registry and Universal Resolver from
+manifests at the readable Ethereum head, applies the existing raw-claim
+normalization gate before any forward call, and writes neither the record
+divergence ledger nor legacy execution storage. Other v2 verified primary-name
+tuples are unsupported. Retained v1 primary-name behavior is unchanged.
 
 ## Chain synchronization status
 

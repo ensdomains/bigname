@@ -1,10 +1,125 @@
 #[tokio::test]
-async fn v2_get_primary_name_shapes_answers_for_source_selection() -> Result<()> {
+async fn v2_get_primary_name_executes_lookup_each_time_without_legacy_persistence() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    database.seed_default_ens_snapshot_selector_position().await?;
+    database.initialize_lookup_schema().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let lookup_pool = database.lookup_pool().await?;
+    seed_schema_v2_ens_primary_name_authority(
+        &lookup_pool,
+        21_000_003,
+        "0xbinding",
+        "2026-04-17T00:00:03Z",
+    )
+    .await?;
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("taytems.eth"),
+        primary_name_universal_resolver_addr60_response(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS),
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("taytems.eth"),
+        primary_name_universal_resolver_addr60_response(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS),
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("taytems.eth"),
+        primary_name_universal_resolver_addr60_response(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
+
+    for _ in 0..2 {
+        let verified_response = app_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 verified schema-v2 primary-name request failed")?;
+        let status = verified_response.status();
+        let verified_payload: Value = read_json(verified_response).await?;
+        assert_eq!(status, StatusCode::OK, "unexpected response: {verified_payload}");
+        assert_eq!(
+            verified_payload["data"]["answers"],
+            json!([{
+                "source": "verified",
+                "status": "ok",
+                "name": "taytems.eth"
+            }])
+        );
+        assert_primary_name_snapshot_meta_chain_ids(&verified_payload, &["1"]);
+    }
+
+    let mixed_response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 mixed schema-v2 primary-name request failed")?;
+    let status = mixed_response.status();
+    let mixed_payload: Value = read_json(mixed_response).await?;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {mixed_payload}");
+    assert_eq!(
+        mixed_payload["data"]["answers"],
+        json!([
+            {
+                "source": "indexed",
+                "status": "not_found"
+            },
+            {
+                "source": "verified",
+                "status": "ok",
+                "name": "taytems.eth"
+            }
+        ])
+    );
+
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(
+        rpc_requests.len(),
+        9,
+        "v2 primary-name verification must execute again on every request"
+    );
+    assert_eq!(
+        persisted_route_local_primary_name_counts(
+            &database,
+            V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        )
+        .await?,
+        (0, 0)
+    );
+    let ledger_count: i64 = sqlx::query_scalar("SELECT count(*) FROM resolution_divergences")
+        .fetch_one(&lookup_pool)
+        .await?;
+    assert_eq!(ledger_count, 0, "primary-name lookup has no ledger comparison target");
+
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_primary_name_rejects_mixed_answers_from_different_positions() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
     database
         .insert_primary_name_current_claim_row(
-            V2_PRIMARY_NAME_ADDRESS,
+            V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
             "ens",
             "60",
             PrimaryNameClaimStatus::Success,
@@ -13,461 +128,273 @@ async fn v2_get_primary_name_shapes_answers_for_source_selection() -> Result<()>
         .await?;
     database
         .insert_primary_name_current_normalized_claim_name(
-            V2_PRIMARY_NAME_ADDRESS,
+            V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
             "ens",
             "60",
-            Some("alice.eth"),
+            Some("taytems.eth"),
             true,
         )
         .await?;
+    let lookup_pool = database.lookup_pool().await?;
+    seed_schema_v2_ens_primary_name_authority(
+        &lookup_pool,
+        21_000_004,
+        "0xnewer-phase-head",
+        "2026-04-17T00:00:04Z",
+    )
+    .await?;
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("taytems.eth"),
+        primary_name_universal_resolver_addr60_response(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
 
-    let omitted = v2_primary_name_payload_for_database(
-        &database,
-        &format!("/v2/addresses/{V2_PRIMARY_NAME_ADDRESS}/primary-name"),
-    )
-    .await?;
-    let indexed = v2_primary_name_payload_for_database(
-        &database,
-        &format!("/v2/addresses/{V2_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"),
-    )
-    .await?;
-    let verified = v2_primary_name_payload_for_database(
-        &database,
-        &format!("/v2/addresses/{V2_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"),
-    )
-    .await?;
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 mixed primary-name request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::CONFLICT, "unexpected response: {payload}");
+    assert_eq!(payload["error"]["code"], json!("stale"));
 
+    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 3);
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_primary_name_returns_mixed_answers_at_one_position() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    database
+        .insert_primary_name_current_claim_row(
+            V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+            "ens",
+            "60",
+            PrimaryNameClaimStatus::Success,
+            None,
+        )
+        .await?;
+    database
+        .insert_primary_name_current_normalized_claim_name(
+            V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+            "ens",
+            "60",
+            Some("taytems.eth"),
+            true,
+        )
+        .await?;
+    let lookup_pool = database.lookup_pool().await?;
+    seed_schema_v2_ens_primary_name_authority(
+        &lookup_pool,
+        21_000_003,
+        "0xbinding",
+        "2026-04-17T00:00:03Z",
+    )
+    .await?;
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("taytems.eth"),
+        primary_name_universal_resolver_addr60_response(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
+
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 mixed primary-name request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {payload}");
     assert_eq!(
-        omitted["data"],
-        json!({
-            "address": V2_PRIMARY_NAME_ADDRESS,
-            "coin_type": 60,
-            "namespace": "ens",
-            "answers": [
-                {
-                    "source": "indexed",
-                    "status": "ok",
-                    "name": "alice.eth"
-                },
-                {
-                    "source": "verified",
-                    "status": "not_found"
-                }
-            ]
-        })
-    );
-    assert!(omitted.get("page").is_none());
-    assert_primary_name_snapshot_meta(&omitted);
-    assert!(omitted["meta"].get("source").is_none());
-    assert_no_banned_v1_spellings(&omitted);
-
-    assert_eq!(
-        indexed["data"]["answers"],
+        payload["data"]["answers"],
         json!([
             {
                 "source": "indexed",
                 "status": "ok",
-                "name": "alice.eth"
-            }
-        ])
-    );
-    assert_primary_name_snapshot_meta(&indexed);
-    assert_eq!(indexed["meta"]["source"], json!("indexed"));
-
-    assert_eq!(
-        verified["data"]["answers"],
-        json!([
+                "name": "taytems.eth"
+            },
             {
                 "source": "verified",
-                "status": "not_found"
+                "status": "ok",
+                "name": "taytems.eth"
             }
         ])
     );
-    assert_primary_name_snapshot_meta(&verified);
-    assert_eq!(verified["meta"]["source"], json!("verified"));
+    assert_eq!(payload["meta"]["as_of"]["1"]["block_hash"], json!("0xbinding"));
+    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 3);
 
+    lookup_pool.close().await;
     database.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
-async fn v2_get_primary_name_surfaces_reverse_provider_failure_in_band() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    database
-        .seed_default_ens_primary_name_fallback_context()
-        .await?;
-
-    let response = v2_primary_name_response_for_database(
-        &database,
-        &format!("/v2/addresses/{V2_PRIMARY_NAME_ADDRESS}/primary-name"),
-    )
-    .await?;
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let payload: Value = read_json(response).await?;
-    assert_eq!(
-        payload["data"],
-        json!({
-            "address": V2_PRIMARY_NAME_ADDRESS,
-            "coin_type": 60,
-            "namespace": "ens",
-            "answers": [
-                {
-                    "source": "indexed",
-                    "status": "stale",
-                    "failure_reason": "resolver_call_failed"
-                },
-                {
-                    "source": "verified",
-                    "status": "stale",
-                    "failure_reason": "resolver_call_failed"
-                }
-            ],
-            "verification": {
-                "status": "stale",
-                "failure_reason": "resolver_call_failed"
-            }
-        })
-    );
-    assert_primary_name_snapshot_meta(&payload);
-    assert_primary_name_snapshot_meta_chain_ids(&payload, &["1"]);
-    assert_primary_name_snapshot_token_slots(&payload, &["ethereum"]);
-
-    database.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn v2_get_primary_name_reuses_persisted_route_local_claim_for_indexed_source() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    database
-        .seed_default_ens_primary_name_fallback_context()
-        .await?;
-    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
-        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
-        primary_name_reverse_name_response("taytems.eth"),
-        primary_name_universal_resolver_addr60_response(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS),
-    ])
-    .await?;
-    let chain_rpc_urls =
-        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
-    let state = database.app_state_with_chain_rpc_urls(chain_rpc_urls);
-
-    let verified_response = app_router(state.clone())
-        .oneshot(
-            Request::builder()
-                .uri(format!(
-                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
-                ))
-                .body(Body::empty())
-                .expect("request must build"),
-        )
-        .await
-        .context("v2 verified route-local primary-name request failed")?;
-    assert_eq!(verified_response.status(), StatusCode::OK);
-    let verified_payload: Value = read_json(verified_response).await?;
-    assert_eq!(
-        verified_payload["data"]["answers"],
-        json!([{
-            "source": "verified",
-            "status": "ok",
-            "name": "taytems.eth"
-        }])
-    );
-    assert_eq!(
-        persisted_route_local_primary_name_counts(
-            &database,
-            V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
-        )
-        .await?,
-        (1, 1)
-    );
-
-    let indexed_response = app_router(state)
-        .oneshot(
-            Request::builder()
-                .uri(format!(
-                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
-                ))
-                .body(Body::empty())
-                .expect("request must build"),
-        )
-        .await
-        .context("v2 indexed route-local primary-name readback request failed")?;
-    assert_eq!(indexed_response.status(), StatusCode::OK);
-    let indexed_payload: Value = read_json(indexed_response).await?;
-    assert_eq!(
-        indexed_payload["data"]["answers"],
-        json!([{
-            "source": "indexed",
-            "status": "ok",
-            "name": "taytems.eth"
-        }])
-    );
-    assert!(
-        indexed_payload["data"].get("verification").is_none(),
-        "indexed-only readback must not expose a verification object"
-    );
-    assert_eq!(indexed_payload["meta"]["source"], json!("indexed"));
-
-    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
-    assert_eq!(
-        rpc_requests.len(),
-        3,
-        "indexed-only readback must not repeat provider requests"
-    );
-
-    database.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn v2_get_primary_name_indexed_fallback_persists_only_after_verified_request() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    database
-        .seed_default_ens_primary_name_fallback_context()
-        .await?;
-    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
-        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
-        primary_name_reverse_name_response("taytems.eth"),
-        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
-        primary_name_reverse_name_response("taytems.eth"),
-        primary_name_universal_resolver_addr60_response(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS),
-    ])
-    .await?;
-    let chain_rpc_urls =
-        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
-    let state = database.app_state_with_chain_rpc_urls(chain_rpc_urls);
-
-    let indexed_response = app_router(state.clone())
-        .oneshot(
-            Request::builder()
-                .uri(format!(
-                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
-                ))
-                .body(Body::empty())
-                .expect("request must build"),
-        )
-        .await
-        .context("v2 fresh indexed route-local primary-name request failed")?;
-    assert_eq!(indexed_response.status(), StatusCode::OK);
-    let indexed_payload: Value = read_json(indexed_response).await?;
-    assert_eq!(
-        indexed_payload["data"]["answers"],
-        json!([{
-            "source": "indexed",
-            "status": "ok",
-            "name": "taytems.eth"
-        }])
-    );
-    assert_eq!(
-        persisted_route_local_primary_name_counts(
-            &database,
-            V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
-        )
-        .await?,
-        (0, 0),
-        "indexed-only fallback must not persist execution artifacts"
-    );
-
-    let verified_response = app_router(state)
-        .oneshot(
-            Request::builder()
-                .uri(format!(
-                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
-                ))
-                .body(Body::empty())
-                .expect("request must build"),
-        )
-        .await
-        .context("v2 verified request after indexed fallback failed")?;
-    assert_eq!(verified_response.status(), StatusCode::OK);
-    let verified_payload: Value = read_json(verified_response).await?;
-    assert_eq!(
-        verified_payload["data"]["answers"],
-        json!([{
-            "source": "verified",
-            "status": "ok",
-            "name": "taytems.eth"
-        }])
-    );
-    assert_eq!(
-        persisted_route_local_primary_name_counts(
-            &database,
-            V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
-        )
-        .await?,
-        (1, 1)
-    );
-
-    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
-    assert_eq!(
-        rpc_requests.len(),
-        5,
-        "verified mode must perform and persist the execution after an indexed-only miss"
-    );
-
-    database.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn v2_get_primary_name_keeps_persisted_unnormalizable_claim_verified_not_found()
+async fn v2_get_primary_name_keeps_provider_response_timeout_in_band_without_persistence()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
     database
         .seed_default_ens_primary_name_fallback_context()
         .await?;
-    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
-        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
-        primary_name_reverse_name_response("alice..eth"),
-    ])
+    let lookup_pool = database.lookup_pool().await?;
+    seed_schema_v2_ens_primary_name_authority(
+        &lookup_pool,
+        21_000_003,
+        "0xbinding",
+        "2026-04-17T00:00:03Z",
+    )
     .await?;
+    let (rpc_url, rpc_handle) = spawn_hanging_primary_name_rpc().await?;
     let chain_rpc_urls =
-        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?
+            .with_http_timeouts(
+                std::time::Duration::from_millis(10),
+                std::time::Duration::from_millis(25),
+            )?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
 
-    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+    let response = app_router(state)
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v2/addresses/{V2_PRIMARY_NAME_ADDRESS}/primary-name"
+                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
         )
         .await
-        .context("v2 unnormalizable on-demand primary-name request failed")?;
-
-    assert_eq!(response.status(), StatusCode::OK);
+        .context("v2 timed-out primary-name request failed")?;
+    rpc_handle.abort();
+    let status = response.status();
     let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {payload}");
     assert_eq!(
-        payload["data"],
-        json!({
-            "address": V2_PRIMARY_NAME_ADDRESS,
-            "coin_type": 60,
-            "namespace": "ens",
-            "answers": [
-                {
-                    "source": "indexed",
-                    "status": "invalid_name",
-                    "raw_claim_name": "alice..eth"
-                },
-                {
-                    "source": "verified",
-                    "status": "not_found",
-                    "failure_reason": "claim_name_not_normalizable"
-                }
-            ],
-            "verification": {
-                "status": "not_found",
-                "failure_reason": "claim_name_not_normalizable"
+        payload["data"]["answers"],
+        json!([
+            {
+                "source": "indexed",
+                "status": "not_found"
+            },
+            {
+                "source": "verified",
+                "status": "failed",
+                "failure_reason": "resolver_call_failed"
             }
-        })
+        ])
     );
-    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 2);
+    assert_eq!(
+        persisted_route_local_primary_name_counts(
+            &database,
+            V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        )
+        .await?,
+        (0, 0)
+    );
+    let ledger_count: i64 = sqlx::query_scalar("SELECT count(*) FROM resolution_divergences")
+        .fetch_one(&lookup_pool)
+        .await?;
+    assert_eq!(ledger_count, 0);
 
+    lookup_pool.close().await;
     database.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
-async fn v2_get_primary_name_surfaces_persisted_mismatch_in_verification() -> Result<()> {
+async fn v2_get_primary_name_aborts_provider_transport_failure_without_persistence() -> Result<()>
+{
     let database = TestDatabase::new_migrated().await?;
-    database.seed_default_ens_snapshot_selector_position().await?;
-    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000063);
-    let verified_primary_name = json!({
-        "status": "mismatch",
-        "name": {
-            "logical_name_id": "ens:alice.eth",
-            "namespace": "ens",
-            "normalized_name": "alice.eth",
-            "canonical_display_name": "Alice.eth",
-            "namehash": "0x0000000000000000000000000000000000000000000000000000000000000123",
-            "resource_id": "00000000-0000-0000-0000-000000000456",
-            "binding_kind": "declared_registry_path"
-        },
-        "failure_reason": "resolved_target_mismatch"
-    });
-
+    database.initialize_lookup_schema().await?;
     database
-        .insert_primary_name_current_claim_row(
-            V2_PRIMARY_NAME_ADDRESS,
-            "ens",
-            "60",
-            PrimaryNameClaimStatus::Success,
-            None,
-        )
+        .seed_default_ens_primary_name_fallback_context()
         .await?;
-    database
-        .insert_primary_name_current_normalized_claim_name(
-            V2_PRIMARY_NAME_ADDRESS,
-            "ens",
-            "60",
-            Some("alice.eth"),
-            true,
-        )
-        .await?;
-
-    let trace = primary_name_execution_trace(
-        execution_trace_id,
-        "ens",
-        V2_PRIMARY_NAME_ADDRESS,
-        "60",
-        verified_primary_name.clone(),
-        timestamp(1_717_172_463),
-    );
-    let outcome = primary_name_execution_outcome(
-        execution_trace_id,
-        "ens",
-        V2_PRIMARY_NAME_ADDRESS,
-        "60",
-        verified_primary_name,
-        timestamp(1_717_172_463),
-    );
-    upsert_execution_trace(&database.pool, &trace).await?;
-    upsert_execution_outcome(&database.pool, &outcome).await?;
-
-    let payload = v2_primary_name_payload_for_database(
-        &database,
-        &format!("/v2/addresses/{V2_PRIMARY_NAME_ADDRESS}/primary-name"),
+    let lookup_pool = database.lookup_pool().await?;
+    seed_schema_v2_ens_primary_name_authority(
+        &lookup_pool,
+        21_000_003,
+        "0xbinding",
+        "2026-04-17T00:00:03Z",
     )
     .await?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let unavailable_rpc_url = format!("http://{}", listener.local_addr()?);
+    drop(listener);
+    let chain_rpc_urls = bigname_lookup::ChainRpcUrls::from_entries(&[format!(
+        "ethereum-mainnet={unavailable_rpc_url}"
+    )])?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
 
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 transport-failed primary-name request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{payload}");
+    assert_eq!(payload["error"]["code"], json!("internal_error"));
     assert_eq!(
-        payload["data"],
-        json!({
-            "address": V2_PRIMARY_NAME_ADDRESS,
-            "coin_type": 60,
-            "namespace": "ens",
-            "answers": [
-                {
-                    "source": "indexed",
-                    "status": "ok",
-                    "name": "alice.eth"
-                },
-                {
-                    "source": "verified",
-                    "status": "mismatch",
-                    "name": "alice.eth",
-                    "failure_reason": "resolved_target_mismatch"
-                }
-            ],
-            "verification": {
-                "status": "mismatch",
-                "name": "alice.eth",
-                "failure_reason": "resolved_target_mismatch"
-            }
-        })
+        persisted_route_local_primary_name_counts(
+            &database,
+            V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        )
+        .await?,
+        (0, 0)
     );
-    assert_no_banned_v1_spellings(&payload);
-    assert_primary_name_snapshot_meta(&payload);
+    let ledger_count: i64 = sqlx::query_scalar("SELECT count(*) FROM resolution_divergences")
+        .fetch_one(&lookup_pool)
+        .await?;
+    assert_eq!(ledger_count, 0);
 
+    lookup_pool.close().await;
     database.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
-async fn v2_get_basenames_primary_name_verified_meta_spans_base_and_ethereum() -> Result<()> {
+async fn v2_get_basenames_primary_name_verified_is_explicitly_unsupported_and_base_scoped()
+-> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000bcd";
     seed_v2_basenames_primary_name_snapshot_positions(&database).await?;
@@ -481,15 +408,19 @@ async fn v2_get_basenames_primary_name_verified_meta_spans_base_and_ethereum() -
         ),
     )
     .await?;
-    assert_primary_name_snapshot_meta_chain_ids(&verified, &["1", "8453"]);
-    assert_primary_name_snapshot_token_slots(&verified, &["base", "ethereum"]);
+    assert_eq!(
+        verified["data"]["answers"],
+        json!([{
+            "source": "verified",
+            "status": "unsupported",
+            "unsupported_reason": "verified primary-name entrypoint is not yet supported"
+        }])
+    );
+    assert_primary_name_snapshot_meta_chain_ids(&verified, &["8453"]);
+    assert_primary_name_snapshot_token_slots(&verified, &["base"]);
     assert_eq!(
         verified["meta"]["as_of"]["8453"]["block_hash"],
         json!("0xprimary-base")
-    );
-    assert_eq!(
-        verified["meta"]["as_of"]["1"]["block_hash"],
-        json!("0xprimary-ethereum")
     );
 
     let indexed = v2_primary_name_payload_for_database(
@@ -538,167 +469,13 @@ async fn v2_get_basenames_primary_name_normalization_gate_keeps_meta_base_scoped
             "namespace": "basenames",
             "answers": [{
                 "source": "verified",
-                "status": "not_found",
-                "failure_reason": "claim_not_normalized"
-            }],
-            "verification": {
-                "status": "not_found",
-                "failure_reason": "claim_not_normalized"
-            }
+                "status": "unsupported",
+                "unsupported_reason": "verified primary-name entrypoint is not yet supported"
+            }]
         })
     );
     assert_primary_name_snapshot_meta_chain_ids(&verified, &["8453"]);
     assert_primary_name_snapshot_token_slots(&verified, &["base"]);
-
-    database.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn primary_name_routes_skip_pre_upgrade_success_readback_for_normalization_gate()
--> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    let address = V2_PRIMARY_NAME_ADDRESS;
-    database.seed_default_ens_snapshot_selector_position().await?;
-    database
-        .insert_primary_name_current_claim_row(
-            address,
-            "ens",
-            "60",
-            PrimaryNameClaimStatus::Success,
-            None,
-        )
-        .await?;
-    database
-        .insert_primary_name_current_normalized_claim_name(
-            address,
-            "ens",
-            "60",
-            Some("alice.eth"),
-            true,
-        )
-        .await?;
-
-    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000007a);
-    let verified_primary_name = json!({
-        "status": "success",
-        "name": {
-            "logical_name_id": "ens:alice.eth",
-            "namespace": "ens",
-            "normalized_name": "alice.eth",
-            "canonical_display_name": "Alice.eth",
-            "namehash": "0x0000000000000000000000000000000000000000000000000000000000000123",
-            "resource_id": "00000000-0000-0000-0000-000000000456",
-            "binding_kind": "declared_registry_path"
-        }
-    });
-    let finished_at = timestamp(1_717_172_470);
-    let trace = primary_name_execution_trace(
-        execution_trace_id,
-        "ens",
-        address,
-        "60",
-        verified_primary_name.clone(),
-        finished_at,
-    );
-    let outcome = primary_name_execution_outcome(
-        execution_trace_id,
-        "ens",
-        address,
-        "60",
-        verified_primary_name,
-        finished_at,
-    );
-    upsert_execution_trace(&database.pool, &trace).await?;
-    upsert_execution_outcome(&database.pool, &outcome).await?;
-
-    // Model a success cached before claim normalization was materialized. The persistence
-    // readback fence must continue rejecting that success after the tuple is marked non-normalized.
-    database
-        .insert_primary_name_current_normalized_claim_name(
-            address,
-            "ens",
-            "60",
-            Some("alice.eth"),
-            false,
-        )
-        .await?;
-    assert!(
-        bigname_execution::load_persisted_ens_verified_primary_name(
-            &database.pool,
-            &outcome.cache_key,
-        )
-        .await?
-        .is_none(),
-        "the persisted-success fence must reject a non-normalized current claim"
-    );
-
-    let lookup_state = match load_primary_name_lookup_state(
-        &database.pool,
-        address,
-        "ens",
-        "60",
-        ResolutionMode::Verified,
-    )
-    .await
-    {
-        Ok(lookup_state) => lookup_state,
-        Err(_) => panic!("primary-name lookup state must load"),
-    };
-    assert!(
-        lookup_state.persisted_verified.is_none(),
-        "the normalization gate must bypass persisted verified-primary readback"
-    );
-
-    let v1_response = app_router(database.app_state())
-        .oneshot(
-            Request::builder()
-                .uri(format!(
-                    "/v1/primary-names/{address}?namespace=ens&coin_type=60&mode=verified"
-                ))
-                .body(Body::empty())
-                .expect("request must build"),
-        )
-        .await
-        .context("v1 pre-upgrade primary-name readback request failed")?;
-    assert_eq!(v1_response.status(), StatusCode::OK);
-    let v1_payload: PrimaryNameResponse = read_json(v1_response).await?;
-    assert_eq!(v1_payload.declared_state, None);
-    assert_eq!(
-        v1_payload.verified_state,
-        Some(json!({
-            "verified_primary_name": {
-                "status": "invalid_name",
-                "failure_reason": bigname_execution::VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON,
-            }
-        }))
-    );
-
-    let v2_payload = v2_primary_name_payload_for_database(
-        &database,
-        &format!(
-            "/v2/addresses/{address}/primary-name?namespace=ens&coin_type=60&source=verified"
-        ),
-    )
-    .await?;
-    assert_eq!(
-        v2_payload["data"],
-        json!({
-            "address": address,
-            "coin_type": 60,
-            "namespace": "ens",
-            "answers": [{
-                "source": "verified",
-                "status": "not_found",
-                "failure_reason": "claim_not_normalized"
-            }],
-            "verification": {
-                "status": "not_found",
-                "failure_reason": "claim_not_normalized"
-            }
-        })
-    );
-    assert_primary_name_snapshot_meta(&v2_payload);
 
     database.cleanup().await?;
     Ok(())
@@ -740,7 +517,8 @@ async fn v2_get_basenames_primary_name_without_persisted_verified_stays_base_sco
         verified["data"]["answers"],
         json!([{
             "source": "verified",
-            "status": "not_found"
+            "status": "unsupported",
+            "unsupported_reason": "verified primary-name entrypoint is not yet supported"
         }])
     );
     assert_primary_name_snapshot_meta_chain_ids(&verified, &["8453"]);
@@ -763,223 +541,13 @@ async fn v2_get_basenames_primary_name_without_persisted_verified_stays_base_sco
             },
             {
                 "source": "verified",
-                "status": "not_found"
+                "status": "unsupported",
+                "unsupported_reason": "verified primary-name entrypoint is not yet supported"
             }
         ])
     );
     assert_primary_name_snapshot_meta_chain_ids(&omitted_source, &["8453"]);
     assert_primary_name_snapshot_token_slots(&omitted_source, &["base"]);
-
-    database.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn v2_get_primary_name_requires_reason_for_verified_unsupported() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    database.seed_default_ens_snapshot_selector_position().await?;
-    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000064);
-    let verified_primary_name = json!({
-        "status": "unsupported"
-    });
-
-    database
-        .insert_primary_name_current_claim_row(
-            V2_PRIMARY_NAME_ADDRESS,
-            "ens",
-            "60",
-            PrimaryNameClaimStatus::Success,
-            None,
-        )
-        .await?;
-    database
-        .insert_primary_name_current_normalized_claim_name(
-            V2_PRIMARY_NAME_ADDRESS,
-            "ens",
-            "60",
-            Some("alice.eth"),
-            true,
-        )
-        .await?;
-
-    let trace = primary_name_execution_trace(
-        execution_trace_id,
-        "ens",
-        V2_PRIMARY_NAME_ADDRESS,
-        "60",
-        verified_primary_name.clone(),
-        timestamp(1_717_172_464),
-    );
-    let outcome = primary_name_execution_outcome(
-        execution_trace_id,
-        "ens",
-        V2_PRIMARY_NAME_ADDRESS,
-        "60",
-        verified_primary_name,
-        timestamp(1_717_172_464),
-    );
-    upsert_execution_trace(&database.pool, &trace).await?;
-    upsert_execution_outcome(&database.pool, &outcome).await?;
-
-    let payload = v2_primary_name_payload_for_database(
-        &database,
-        &format!("/v2/addresses/{V2_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"),
-    )
-    .await?;
-
-    assert_eq!(
-        payload["data"]["answers"],
-        json!([
-            {
-                "source": "verified",
-                "status": "unsupported",
-                "unsupported_reason": "unsupported_reason_missing"
-            }
-        ])
-    );
-    assert_eq!(
-        payload["data"]["verification"],
-        json!({
-            "status": "unsupported",
-            "unsupported_reason": "unsupported_reason_missing"
-        })
-    );
-
-    database.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn v2_get_primary_name_rejects_pipeline_unsupported_reason() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    database.seed_default_ens_snapshot_selector_position().await?;
-    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000065);
-    let verified_primary_name = json!({
-        "status": "unsupported",
-        "unsupported_reason": "primary_name_sidecar_missing"
-    });
-
-    database
-        .insert_primary_name_current_claim_row(
-            V2_PRIMARY_NAME_ADDRESS,
-            "ens",
-            "60",
-            PrimaryNameClaimStatus::Success,
-            None,
-        )
-        .await?;
-    database
-        .insert_primary_name_current_normalized_claim_name(
-            V2_PRIMARY_NAME_ADDRESS,
-            "ens",
-            "60",
-            Some("alice.eth"),
-            true,
-        )
-        .await?;
-
-    let trace = primary_name_execution_trace(
-        execution_trace_id,
-        "ens",
-        V2_PRIMARY_NAME_ADDRESS,
-        "60",
-        verified_primary_name.clone(),
-        timestamp(1_717_172_465),
-    );
-    let outcome = primary_name_execution_outcome(
-        execution_trace_id,
-        "ens",
-        V2_PRIMARY_NAME_ADDRESS,
-        "60",
-        verified_primary_name,
-        timestamp(1_717_172_465),
-    );
-    upsert_execution_trace(&database.pool, &trace).await?;
-    upsert_execution_outcome(&database.pool, &outcome).await?;
-
-    let response = v2_primary_name_response_for_database(
-        &database,
-        &format!("/v2/addresses/{V2_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"),
-    )
-    .await?;
-
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let payload: Value = read_json(response).await?;
-    assert_eq!(payload["error"]["code"], json!("internal_error"));
-    assert_eq!(
-        payload["error"]["message"],
-        json!("failed to map primary-name reason vocabulary")
-    );
-
-    database.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn v2_get_primary_name_runs_on_demand_claim_and_verification_for_default_tuple() -> Result<()>
-{
-    let database = TestDatabase::new_migrated().await?;
-    database
-        .seed_default_ens_primary_name_fallback_context()
-        .await?;
-    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
-        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
-        primary_name_reverse_name_response("taytems.eth"),
-        primary_name_universal_resolver_addr60_response(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS),
-    ])
-    .await?;
-    let chain_rpc_urls =
-        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
-
-    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
-        .oneshot(
-            Request::builder()
-                .uri(format!(
-                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name"
-                ))
-                .body(Body::empty())
-                .expect("request must build"),
-        )
-        .await
-        .context("v2 on-demand primary-name request failed")?;
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let payload: Value = read_json(response).await?;
-    assert_eq!(
-        payload["data"],
-        json!({
-            "address": V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
-            "coin_type": 60,
-            "namespace": "ens",
-            "answers": [
-                {
-                    "source": "indexed",
-                    "status": "ok",
-                    "name": "taytems.eth"
-                },
-                {
-                    "source": "verified",
-                    "status": "ok",
-                    "name": "taytems.eth"
-                }
-            ],
-            "verification": {
-                "status": "ok",
-                "name": "taytems.eth"
-            }
-        })
-    );
-    assert_primary_name_snapshot_meta(&payload);
-    assert_primary_name_snapshot_meta_chain_ids(&payload, &["1"]);
-    assert_primary_name_snapshot_token_slots(&payload, &["ethereum"]);
-    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
-    assert_eq!(rpc_requests.len(), 3);
-    for request in rpc_requests {
-        assert_eq!(
-            request["params"][1],
-            primary_name_selected_block_selector()
-        );
-    }
 
     database.cleanup().await?;
     Ok(())

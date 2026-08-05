@@ -322,11 +322,12 @@ canonical normalized observations, but does not assert exhaustive history or
 event-to-call parity. Unknown or mismatched resolvers are explicitly
 unsupported. See [source manifests](manifests.md#required-fields).
 
-**Resolution divergence ledger** — the schema-v2 audit table that records only
-when a direct, hash-pinned resolution answer disagrees with the exact indexed
-record entry used for comparison. It is not a result cache: agreement writes
-nothing, wildcard resolution without an exact comparison row writes nothing,
-and any answer that used CCIP-read is never stored. A write succeeds only while
+**Resolution divergence ledger** — the schema-v2 audit table whose active rows
+record only when a direct, hash-pinned resolution answer disagrees with the
+exact indexed record entry used for comparison. It is not a result cache:
+agreement creates no divergence but may clear a matching active row, wildcard
+resolution without an exact comparison row writes nothing, and any answer that
+used CCIP-read never writes or clears a row. A mutation succeeds only while
 the compared projection row and its canonical block lineage remain unchanged.
 
 **Resource** (backing resource, `resource_id`) — the authority object behind a

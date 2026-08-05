@@ -189,9 +189,20 @@ Rules:
   include `meta.as_of` and `meta.as_of_token` when they can attribute at least
   one served snapshot-pinned chain position. Top-level collection routes omit
   both because their mutable latest-state rows are not bound to one snapshot.
-  Control-plane routes (`/v2/status`, `/v2/namespaces/{namespace}`) and verified
-  name-profile responses served by the route-local on-demand fallback also
-  omit both. `meta.as_of` is human-readable staleness attribution on routes
+  Control-plane routes (`/v2/status`, `/v2/namespaces/{namespace}`) omit both.
+  Verified name and record responses keep the same metadata shape as their
+  indexed peers. The authoritative position identifies the projection snapshot
+  admitted for the lookup. For a cross-chain path, the auxiliary position is
+  the canonical execution position retained by that projected row, even when it
+  is older than the newest generic checkpoint for that chain. The lookup engine
+  returns both positions, and `meta.as_of`/`meta.as_of_token` expose those actual
+  lookup positions rather than implying execution at the newer checkpoint. The
+  engine independently requires its project phase to be at the current readable
+  authoritative head before executing. After the live calls it revalidates the
+  exact project generation, projected name topology, selected manifest
+  declarations, and canonical positions. A concurrent replacement returns the
+  existing `409 stale` response and performs no ledger mutation. `meta.as_of` is
+  human-readable staleness attribution on routes
   that provide it. `meta.as_of_token` is opaque and is the value to pass to
   `at` when a route supports snapshot replay. `meta.completeness`,
   `meta.unsupported_fields`, and `meta.unsupported_reason` appear only when the
@@ -257,12 +268,73 @@ The product-route denylist includes pipeline terms such as `projection`,
 `execution_checkpoint` pseudo-chain slot. If a product capability needs that
 detail, it belongs on a diagnostics route instead.
 
+`GET /v2/names/{name}?source=verified` and
+`GET /v2/names/{name}/records` with a verified source execute through the
+schema-v2 lookup engine on every request. Response fields and per-record status
+meaning stay unchanged, but there is no reusable outcome, durable execution
+trace, or legacy execution-cache readback. A direct live answer that disagrees
+with the exact indexed record used for comparison writes the guarded
+[resolution divergence ledger](glossary.md#resolution-divergence-ledger).
+Agreement creates no divergence but may clear a matching active row, wildcard
+lookup without an exact comparison row writes nothing, and an answer that used
+CCIP-Read never writes or clears the ledger. For cross-chain resolution, the
+selected product snapshot must admit
+the current authoritative position and include the execution chain, while the
+canonical projected row supplies the exact hash-pinned execution position. The
+response metadata reports that actual position, which may be older than the
+generic auxiliary checkpoint initially selected by the route, but never newer;
+a position at the same height must have the same block hash. A newer or
+same-height incompatible position makes the verified answer stale before any
+provider call or ledger write. The current
+lookup engine does not replay historical `at`, `safe`, or `finalized`
+authoritative execution: if the selected product snapshot does not admit the
+engine's current readable authoritative position, the verified section is
+`stale` rather than being executed at a different authoritative position.
+Provider connect, DNS, TLS, connection-reset, and other transport failures
+abort a verified name or record request with `500 internal_error`; they are not
+reported as selector-local stale answers, and `source=auto` does not return a
+partial blend after such a failure.
+Explicit record `keys` and the inventory-derived default verified selector set
+are each limited to 200 keys. An oversized server-derived set returns `422
+unsupported` before provider execution; the compact records caller can narrow
+the request with `keys`, while the verified flat name-profile has no selector
+parameter and returns the same error.
+
+`GET /v2/addresses/{address}/primary-name` keeps its documented `answers` and
+typed `verification` shapes. The verified producer is a fresh ENS/60 lookup at
+the current readable Ethereum position. It applies the raw-claim normalization
+gate before forward resolution and persists neither a legacy execution outcome
+nor a divergence row. When `source` is omitted, the route returns the indexed
+and verified answers together only if the indexed Ethereum checkpoint matches
+that lookup position before and after the indexed read; otherwise the whole
+request returns `409 stale` instead of assigning answers from different
+positions to one `meta.as_of`. The indexed answer depends only on the projected
+tuple: a live reverse claim or live lookup failure changes only the verified
+answer. Other verified primary-name tuples are explicit `unsupported`; indexed
+answers remain available where their projection supports the requested tuple.
+Provider transport failures abort this route with `500 internal_error` rather
+than producing a verified answer entry with `status=stale`.
+The post-call guard also revalidates the Ethereum project generation and both
+selected ENS manifest declarations; a concurrent replacement returns `409
+stale` and no verified answer.
+
+The exact-head and post-call generation fences fail safe under pipeline lag. If
+head following or project publication remains behind the readable chain head,
+verified reads degrade to `409 stale` instead of executing against mixed
+generations. Fast-moving chains such as Base are especially sensitive when a
+CCIP round trip overlaps a new head. The rejection rate under realistic lag is
+not yet measured; measuring it and setting an acceptable pre-edge-flip bound is
+an operational release task.
+
 ### Tier 3: Diagnostics
 
 Diagnostics are the only public routes that may carry pipeline vocabulary.
 They expose coverage taxonomy, binding and authority explanations, record
 inventory/cache internals, persisted execution explanations, active manifests,
 and raw normalized-event rows.
+The diagnostics records route drives the same verified lookup engine and can
+write or clear rows in the
+[resolution divergence ledger](glossary.md#resolution-divergence-ledger).
 
 ## Parameters
 
@@ -343,13 +415,13 @@ emitting a token that cannot replay on a compatible snapshot-read route.
 `GET /v2/addresses/{address}/primary-name` is also a current-state read. It
 does not accept `at` or `finality`; when a served head is available, its
 `meta.as_of` and `meta.as_of_token` record the served positions for staleness
-attribution and shadow-diff correlation. When the ENS/60 route-local on-demand
-fallback supplies the answer instead of projection state, both metadata fields
-record the stored selected Ethereum checkpoint that pins the verified calls and
-the persisted execution trace. Basenames responses that serve a persisted
-verified answer include both the Base authority position and the Ethereum
-resolution-auxiliary position; indexed-only responses and missing persisted
-verified outcomes remain Base-scoped.
+attribution and shadow-diff correlation. For an ENS/60 verified answer, both
+metadata fields identify the current readable Ethereum position that pins the
+fresh lookup. An omitted-source ENS/60 response fences the indexed claim to
+that same position and returns `409 stale` if the two current positions differ.
+There is no persisted trace or verified-outcome cache. Indexed-only Basenames
+responses remain Base-scoped; Basenames verified primary-name lookup is
+currently unsupported.
 
 The `chain_positions` query parameter from `v1` does not exist in `v2`.
 
@@ -413,12 +485,14 @@ Rules:
   cannot serve the selected block. Provider response timeouts for that path use
   the existing in-band execution-failure behavior; they are not whole-request
   `408` responses. Provider connect-phase timeouts and other transport failures
-  during verified record resolution surface as `stale` and do not cache an
-  execution outcome. The ENS/60 primary-name fallback uses the same transport
+  during verified record resolution return whole-request `500 internal_error`;
+  no execution outcome is cached for any v2 lookup. ENS/60 primary-name
+  verification uses the same transport
   split with its CCIP-Read gateway leg: configured provider or gateway response
-  timeouts remain persisted in-band failures, while provider or gateway
+  timeouts remain in-band failures for that response, while provider or gateway
   connect-phase timeouts, DNS failures, TLS failures, connection resets, and
-  other transport failures return whole-request `409 stale` before persistence.
+  other transport failures return whole-request `500 internal_error`. Neither
+  result is persisted by the v2 serving path.
 - Every route has a whole-request deadline. `/healthz`, `/v1/status`, and
   `/v2/status` retain that deadline as their final backstop. `/healthz` bypasses
   the process-wide concurrency limiter and load shedding, uses a reserved
@@ -432,7 +506,8 @@ Rules:
   reject work before it waits for execution capacity. The rate-limit key is an
   IPv4 address or IPv6 `/64`; `/healthz` passes only through the health-specific
   ceiling. `GET /v2/names/{name}/records?source=auto` with omitted or empty
-  `keys` is an indexed read and does not enter verified-execution admission.
+  `keys` and `GET /v2/addresses/{address}/primary-name?source=indexed` are
+  indexed reads and do not enter verified-execution admission.
 - Single-resource GETs return `404 not_found` when no answer exists.
 - Collections return `200` with empty `data`.
 - Batch lookup results carry in-band `status` per input; a batch never returns

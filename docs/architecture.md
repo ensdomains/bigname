@@ -394,7 +394,13 @@ Other ENS classes (non-alias ancestor-selected, linked-subregistry ancestor-sele
 
 Basenames supports the exact-surface transport-assisted direct path through active `basenames_execution` v2 at the L1 Resolver. Other Basenames verified [path classes](glossary.md) return selector-local `unsupported`.[^bn-readme-l69][^bn-readme-l70][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
 
-Verified answers persist an `ExecutionTrace`. `ExplainResolution` shows resolver selection, wildcard traversal, alias rewriting, record version boundary, CCIP steps, and the source event or execution result that last changed the answer.
+Retained v1 verified answers persist an `ExecutionTrace`. V2 verified name and
+record routes execute through the schema-v2 lookup engine without a durable
+trace or reusable outcome. A guarded direct live/indexed disagreement may
+create or replace an active
+[resolution divergence ledger](glossary.md#resolution-divergence-ledger) row;
+restored agreement may clear the matching active row.
+`ExplainResolution` remains a v1 view over persisted execution.
 
 ## Permissions
 
@@ -410,7 +416,14 @@ Required indexes: by resource, by account, by resolver; permission history by re
 
 ## Primary and reverse names
 
-`PrimaryName` is address- and `coin_type`-centric, not just a reverse-record projection. Persists `claimed_primary_name`, `verified_primary_name`, `reverse_namespace`, `coin_type`, `resolver`, provenance, coverage.
+The primary-name projection is address- and `coin_type`-centric, not just a
+reverse-record projection. Unless a sentence explicitly says v2, the
+persistence, cache, fallback, and provenance rules in this section describe
+the retained v1 execution plane.
+
+That retained v1 plane persists `claimed_primary_name`,
+`verified_primary_name`, `reverse_namespace`, `coin_type`, `resolver`,
+provenance, and coverage.
 
 - Both objects use `ResultStatus`. `mismatch` applies to verified only; `execution_failed` also applies to a route-local claimed lookup when its provider fails.
 - `claimed_primary_name` is candidate-only; `verified_primary_name` is authoritative only when `success`.
@@ -422,12 +435,21 @@ For ENS, declared claim precedence is reverse-only through `ens_v1_reverse_l1`.[
 
 For Basenames, declared primary-name value intake is `basenames_base_primary` at the ENSv1 Base `L2ReverseRegistrar` (`0x0000000000D8e504002cC26E3Ec46D81971C1664`), using the `NameForAddrChanged(address,string)` event and Base coin type `2147492101`.[^v1-l2rev-base-deploy][^v1-l2rev-base-args][^v1-l2rev-event][^v1-l2rev-nameforaddr] It does not replace the Base registry/registrar/resolver families for declared truth on exact-name, address-name, or children reads, and it does not use the Basenames `ReverseRegistrar` as the primary-name value source. Verified primary names enter through `basenames_execution` against the L1 Resolver.[^bn-readme-l22][^bn-l1resolver-l13]
 
+V2 reads an indexed claim from `primary_names_current` but obtains ENS/60
+verification from a fresh hash-pinned schema-v2 lookup. It writes no legacy
+trace or reusable outcome and no divergence row. Provider transport failure
+aborts v2 with `500 internal_error`. V2 Basenames primary-name verification is
+unsupported; its indexed response remains Base-scoped.
+
 Verified-primary cache identity is `request_type=verified_primary_name` with key `{namespace}:{normalized_address}:{coin_type}`. Materialized results are fenced by the matching `primary_names_current` row. The route-local ENS/60 exception is fenced by that exact row remaining absent and by an exact selected-checkpoint match; its topology and record dependency fields carry the explicit selected checkpoint rather than fabricated projected name/resource identities. Route-local and materialized traces do not satisfy each other's readback fence.
 
-Section-local provenance:
+Retained v1 section-local provenance:
 
 - `claimed_primary_name.provenance` is exact-tuple declared-only provenance from the requested row, optionally with projection-owned legacy reverse-resolver hydration metadata, or route-local `ens_reverse_rpc` resolver provenance for the ENS/60 on-demand fallback. No `execution_trace_id`.
-- `verified_primary_name.provenance` (when present) is `{execution_trace_id, manifest_versions}` for persisted readback and must equal the top-level `execution_trace_id`, including persisted ENS/60 fallback results. The fallback also exposes the selected positions through v1 `chain_positions` and v2 snapshot metadata.
+- `verified_primary_name.provenance` (when present) is `{execution_trace_id, manifest_versions}` for persisted readback and must equal the top-level `execution_trace_id`, including persisted ENS/60 fallback results. The v1 fallback also exposes the selected positions through `chain_positions`.
+
+V2 publishes no execution-trace provenance. Its fresh ENS/60 response uses
+snapshot metadata for the actual lookup position.
 
 ## Collection semantics
 
@@ -486,7 +508,11 @@ Coverage is contractual.
 - Wildcard and offchain name classes are not globally enumerable.
 - Record inventory is `best_effort` unless a resolver family enumerates explicitly or there's a source-specific index.
 - Child enumeration is authoritative only for declared direct children unless the caller opts into other surface classes.
-- Primary-name route-level coverage is `partial` for the frozen ENS and Basenames exact-tuple persisted-readback class and for the ENS/60 on-demand fallback, including `ens_execution` when verified mode performs persisted forward verification, with `exhaustiveness=non_enumerable` and `enumeration_basis=primary_name_lookup`. Out-of-class tuples are explicit `unsupported`.
+- Primary-name route-level coverage is `partial`, with
+  `exhaustiveness=non_enumerable` and
+  `enumeration_basis=primary_name_lookup`, for the retained v1 persisted
+  classes and for v2 ENS/60 fresh verification. Other v2 verified tuples are
+  explicit `unsupported`.
 
 Every response carries `coverage.status`, `coverage.exhaustiveness`, `coverage.source_classes_considered`, `coverage.unsupported_reason`, `coverage.enumeration_basis`.
 
@@ -497,11 +523,14 @@ Default verified entrypoints:
 - ENS: `ens_execution` at the official Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`.[^ens-docs-univ][^v1-aur-l90][^v1-aur-l106]
 - Basenames: active `basenames_execution` v2 at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` supports only the exact-surface transport-assisted direct path; other Basenames verified path classes stay `unsupported`.[^bn-readme-l22][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
 
-The execution engine supports onchain calls, wildcard resolution, alias-aware execution, nested CCIP-Read, batch/multicall, proof and verification persistence.
+The retained v1 execution engine supports onchain calls, wildcard resolution,
+alias-aware execution, nested CCIP-Read, batch/multicall, proof and verification
+persistence. Its verified answers carry `ExecutionTrace` and cache identity.
 
-`ExecutionTrace` per verified answer: entrypoint, resolver discovery path, contracts called, gateway URLs or digests, proof and callback checks, final result, errors, chain positions.
-
-Cache identity: request, chain positions, manifest versions, relevant topology/version boundaries. Invalidate on reorg, manifest change, relevant topology change, relevant record change, relevant alias/wildcard change.
+The v2 lookup engine executes afresh at the schema-v2 current readable position.
+It has no trace or cache identity. It may compare a direct record answer with
+the exact projected record row and perform the guarded divergence-ledger write;
+v2 primary-name verification performs no write.
 
 ## Reorg, redo, and historical ranges
 

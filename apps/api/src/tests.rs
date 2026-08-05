@@ -73,6 +73,137 @@ async fn healthz_reports_ready_when_database_is_reachable() -> Result<()> {
 }
 
 #[tokio::test]
+async fn documented_api_role_persists_retained_v1_cache_misses() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let suffix = database
+        .database_name
+        .chars()
+        .rev()
+        .take(40)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    let role_name = format!("api_v1_{suffix}");
+    let role = format!(r#""{}""#, role_name.replace('"', r#""""#));
+    raw_sql(&format!(
+        "CREATE ROLE {role}
+             NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT
+             NOREPLICATION NOBYPASSRLS;
+         GRANT {role} TO CURRENT_USER;
+         GRANT USAGE ON SCHEMA public TO {role};
+         GRANT SELECT ON ALL TABLES IN SCHEMA public TO {role};
+         GRANT EXECUTE ON FUNCTION public.bigname_lock_primary_name_anchor(
+             text, text, text
+         ) TO {role};
+         GRANT INSERT ON TABLE
+             public.execution_traces,
+             public.execution_steps,
+             public.execution_cache_outcomes
+         TO {role};
+         GRANT UPDATE ON TABLE public.execution_cache_outcomes TO {role};
+         GRANT INSERT, UPDATE ON TABLE public.raw_call_snapshots TO {role};
+         GRANT USAGE ON SEQUENCE public.raw_call_snapshots_raw_call_snapshot_id_seq
+         TO {role};"
+    ))
+    .execute(&database.pool)
+    .await?;
+
+    let connect_options = bigname_storage::stamp_projection_replay_version(
+        database
+            .pool
+            .connect_options()
+            .as_ref()
+            .clone()
+            .options([("role", role_name.as_str())]),
+    );
+    let role_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(connect_options)
+        .await?;
+    let projection_write_error = sqlx::query(
+        "UPDATE public.primary_names_current
+         SET claim_status = claim_status
+         WHERE false",
+    )
+    .execute(&role_pool)
+    .await
+    .expect_err("the API role must not update the retained primary-name projection directly");
+    assert_eq!(
+        projection_write_error
+            .as_database_error()
+            .and_then(|error| error.code().map(|code| code.into_owned()))
+            .as_deref(),
+        Some("42501")
+    );
+    let mut snapshot = bigname_storage::RawCallSnapshot {
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: format!("0x{}", "11".repeat(32)),
+        block_number: 21_000_003,
+        request_hash: format!("0x{}", "22".repeat(32)),
+        request_payload: json!({
+            "to": "0x0000000000000000000000000000000000000001",
+            "data": "0x1234"
+        }),
+        response_hash: format!("0x{}", "33".repeat(32)),
+        response_payload: json!({ "result": "0xabcd" }),
+        canonicality_state: CanonicalityState::Observed,
+    };
+    bigname_storage::upsert_raw_call_snapshots(&role_pool, &[snapshot.clone()]).await?;
+    snapshot.canonicality_state = CanonicalityState::Canonical;
+    let refreshed =
+        bigname_storage::upsert_raw_call_snapshots(&role_pool, &[snapshot.clone()]).await?;
+    assert_eq!(refreshed, vec![snapshot]);
+
+    let claim = bigname_execution::RouteLocalEnsPrimaryNameClaim::NotFound;
+    let evidence = bigname_execution::OnDemandEnsPrimaryNameExecutionEvidence {
+        contracts_called: vec![json!({
+            "chain_id": bigname_execution::ETHEREUM_MAINNET_CHAIN_ID,
+            "contract_address": bigname_execution::ENS_REGISTRY_ADDRESS,
+            "selector": "0x0178b8bf",
+        })],
+        ..Default::default()
+    };
+    let primary_name_request =
+        bigname_execution::build_on_demand_ens_verified_primary_name_request(
+            bigname_execution::BuildOnDemandEnsVerifiedPrimaryNameRequest {
+                normalized_address: "0x00000000000000000000000000000000000000af",
+                claim: &claim,
+                verified_primary_name: json!({ "status": "not_found" }),
+                block_number: 21_000_003,
+                block_hash: "0xabc123",
+                block_timestamp: "2026-08-05T00:00:00Z",
+                manifest_versions: json!([{
+                    "source_family": bigname_execution::ENS_EXECUTION_SOURCE_FAMILY,
+                    "manifest_version": 1,
+                }]),
+                forward_call_attempted: false,
+                reverse_latency_ms: 2,
+                forward_latency_ms: None,
+                execution_evidence: &evidence,
+            },
+        )?;
+    let persisted =
+        bigname_execution::persist_ens_verified_primary_name(&role_pool, &primary_name_request)
+            .await?;
+    assert_eq!(
+        persisted.execution_trace_id,
+        primary_name_request.trace.execution_trace_id
+    );
+
+    role_pool.close().await;
+    raw_sql(&format!(
+        "DROP OWNED BY {role};
+         REVOKE {role} FROM CURRENT_USER;
+         DROP ROLE {role};"
+    ))
+    .execute(&database.pool)
+    .await?;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn healthz_returns_ready_within_probe_window_when_request_pool_is_exhausted() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     register_ready_health_loops(&database).await?;
@@ -356,6 +487,47 @@ async fn api_pool_applies_statement_timeout_to_every_connection() -> Result<()> 
         .execute(&pool)
         .await
         .expect_err("statement timeout must cancel a slow query");
+    assert!(matches!(
+        timeout_error,
+        sqlx::Error::Database(ref error) if error.code().as_deref() == Some("57014")
+    ));
+
+    pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn lookup_pool_applies_phase_schema_and_statement_timeout_to_every_connection() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
+    let pool = crate::state::connect_lookup_pool(
+        &database.database_config(2)?,
+        "bigname-api-lookup-test",
+        std::time::Duration::from_millis(75),
+    )
+    .await?;
+    let mut connections = Vec::new();
+    for _ in 0..2 {
+        connections.push(pool.acquire().await?);
+    }
+    for connection in &mut connections {
+        let search_path = sqlx::query_scalar::<_, String>("SHOW search_path")
+            .fetch_one(&mut **connection)
+            .await?;
+        let timeout = sqlx::query_scalar::<_, String>("SHOW statement_timeout")
+            .fetch_one(&mut **connection)
+            .await?;
+        assert_eq!(search_path, "bigname_phase");
+        assert_eq!(timeout, "75ms");
+    }
+    drop(connections);
+
+    let timeout_error = sqlx::query("SELECT pg_sleep(0.2)")
+        .execute(&pool)
+        .await
+        .expect_err("lookup statement timeout must cancel a slow query");
     assert!(matches!(
         timeout_error,
         sqlx::Error::Database(ref error) if error.code().as_deref() == Some("57014")

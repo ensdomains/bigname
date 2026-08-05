@@ -1,11 +1,11 @@
 # Deployment
 
-The old `bigname-indexer` runtime has been deleted. This Stage B source tree is
-not yet a complete replacement production deployment: the phase runner
-implements `ingest`, `interpret`, `project`, read-only `verify`, and continuous
-`live` follow, while the Stage C API cutover remains outstanding. Production
-must remain on the last pre-cut release until that gate lands. Commands and
-environment variables for the old
+The old `bigname-indexer` runtime has been deleted. The phase runner implements
+`ingest`, `interpret`, `project`, read-only `verify`, and continuous `live`
+follow, and the first Stage C slice moves v2 verified execution onto its lookup
+engine. The public edge flip and deletion of the retained v1 plane remain
+outstanding, so production must remain on the last pre-cut release until those
+gates land. Commands and environment variables for the old
 indexer, backfill scheduler, reconciliation replay, and repair tools are no
 longer supported by this source tree.
 
@@ -37,10 +37,9 @@ persist ingest-through-project output and continuously follow provider heads,
 including reorg-driven downstream redo and canonical-head hydration. Its
 read-only verification phase compares Base's Coinbase-loaded range with dRPC
 through the `48,428,000` ingest seam and compares Ethereum with local reth only
-through the finalized head. It is included for isolated Stage B
-verification, not as a replacement production service until Stage C lands.
-The surviving API/worker do not consume its projection output yet; they
-continue to use `public`.
+through the finalized head. The v2 verified name, record, and ENS/60
+primary-name paths consume its schema-v2 projection output through the lookup
+engine. Retained v1 handlers and the worker continue to use `public`.
 
 ## Server Compose during Stage B
 
@@ -54,6 +53,12 @@ deployment.
 cp .env.server.example .env.server
 docker compose --env-file .env.server -f docker-compose.server.yml up -d
 ```
+
+Before the full `up`, use the writer URL to apply `migrate` and
+`phases-migrate`, then provision the non-owner `bigname_api` login below. Set
+`BIGNAME_API_DATABASE_URL` to that login; Compose deliberately does not fall
+back to `BIGNAME_DATABASE_URL` for the API. Migrations, the worker, and explicit
+phase-runner commands continue to use the writer URL.
 
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. The API
@@ -261,10 +266,127 @@ does not read those legacy tables or infer their dynamic cursor seeds.
 
 ## Surviving services
 
-The API remains read-only over projections and execution output except for its
-documented on-demand verified-resolution persistence path. Configure
-`BIGNAME_API_CHAIN_RPC_URLS` for status and verified execution as described in
-the API docs.
+The API keeps a legacy `public`-schema pool for v1 and indexed product reads,
+and a `bigname_phase`-schema pool for v2 verified lookup. Retained v1 routes may
+perform their documented execution-cache-miss persistence. V2 record lookup may
+perform only the schema-v2 guarded
+[resolution divergence ledger](glossary.md#resolution-divergence-ledger) write;
+v2 primary-name lookup writes nothing. The API database role therefore needs
+`USAGE` on `bigname_phase`, `SELECT` on only the schema-v2 lookup relations
+enumerated below,
+and `EXECUTE` on the three guarded functions below in addition to its retained
+legacy grants. These fixed-`search_path`, security-definer functions are owned
+by their schema owner; their installers revoke default `PUBLIC` execution.
+Grant them only to the API role, and do not grant that role `CREATE` on
+`bigname_phase` or `public`. In particular, the API receives no direct `INSERT`
+or `UPDATE` on
+`resolution_divergences` and no `UPDATE` on the guarded head, lineage, or
+projection relations.
+
+After both schemas exist, the schema owner provisions the dedicated login with
+these exact retained-v1 and schema-v2 privileges (substitute database, role,
+and secret through the normal secret-management path):
+
+```sql
+CREATE ROLE bigname_api
+    LOGIN PASSWORD '<secret>'
+    NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+GRANT CONNECT ON DATABASE bigname TO bigname_api;
+GRANT USAGE ON SCHEMA public, bigname_phase TO bigname_api;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO bigname_api;
+GRANT INSERT ON TABLE
+    public.execution_traces,
+    public.execution_steps,
+    public.execution_cache_outcomes
+TO bigname_api;
+GRANT UPDATE ON TABLE public.execution_cache_outcomes TO bigname_api;
+GRANT INSERT, UPDATE ON TABLE public.raw_call_snapshots TO bigname_api;
+GRANT USAGE ON SEQUENCE public.raw_call_snapshots_raw_call_snapshot_id_seq
+TO bigname_api;
+GRANT EXECUTE ON FUNCTION public.bigname_lock_primary_name_anchor(
+    text, text, text
+) TO bigname_api;
+GRANT SELECT ON TABLE
+    bigname_phase.chain_heads,
+    bigname_phase.chain_lineage,
+    bigname_phase.chain_phase_state,
+    bigname_phase.name_current,
+    bigname_phase.name_surfaces,
+    bigname_phase.resources,
+    bigname_phase.surface_bindings,
+    bigname_phase.token_lineages,
+    bigname_phase.record_inventory_current,
+    bigname_phase.manifest_versions,
+    bigname_phase.manifest_contract_instances
+TO bigname_api;
+GRANT EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state(
+    text, bigint, text, jsonb, jsonb, uuid, text, text
+) TO bigname_api;
+GRANT EXECUTE ON FUNCTION bigname_phase.write_resolution_divergence(
+    uuid, text, text, text, bigint, text, jsonb, text, text, text,
+    text, jsonb, jsonb, boolean
+) TO bigname_api;
+```
+
+This role cannot read raw facts, normalized events, discovery state, the
+divergence table, or unrelated operational tables directly. Reapply these
+explicit relation and function grants after a reviewed public migration or
+phase-schema replacement; do not use ownership or schema-wide write grants as
+a shortcut.
+
+### Replacing an initialized phase schema for the v2 cutover
+
+The current installer cannot upgrade a nonempty `bigname_phase` schema. For an
+existing initialized database, this cutover therefore requires an offline
+replacement and full pipeline walk:
+
+1. Build `phase-runner` and `bigname-api` from the same commit. Stop the old
+   phase runner and every API process that can open the phase schema, and retain
+   a database backup.
+2. As the phase-schema owner, move the old namespace aside and create the empty
+   target expected by the installer:
+
+   ```sql
+   BEGIN;
+   ALTER SCHEMA bigname_phase RENAME TO bigname_phase_pre_c2;
+   CREATE SCHEMA bigname_phase AUTHORIZATION <phase_owner>;
+   COMMIT;
+   ```
+
+3. Run the new binary's `phase-runner init-schema` with `--database-url
+   "$BIGNAME_DATABASE_URL"`. Reapply the verification-role `USAGE`/`SELECT`
+   grants and the exact API-role relation/function grant block above; schema
+   rename and replacement do not carry those grants to the new namespace.
+4. Run the configured `phase-runner run` from each admitted source's historical
+   start through the current head. Wait for ingest, interpretation, projection,
+   and stored-history verification to complete and for live follow to catch up.
+   Do not copy phase tables from `bigname_phase_pre_c2` into the new schema.
+5. Validate the rebuilt projections and grants, deploy the same-commit API, and
+   only then retire the archived schema under the normal backup-retention
+   policy.
+
+The expected cost is one complete historical ingest-through-verification walk,
+the associated provider traffic and projection work, and temporary storage for
+both schemas. The v2 lookup writer is not admitted before this cutover, so the
+old [resolution divergence ledger](glossary.md#resolution-divergence-ledger) is
+expected to contain no rows and nothing from it is copied. After cutover,
+ledger rows are not reconstructable from raw facts: once any row exists, a
+future schema upgrade must use a separately reviewed migration or lossless
+export/import mechanism rather than this replacement procedure.
+
+The project-at-head guard also binds the API's compiled interpreter content
+hash. `bigname-api` and `phase-runner` must therefore come from the same commit.
+After any interpreter-hash rotation, deploy the new phase runner and finish its
+required re-walk before deploying the matching API; deploying the API first
+makes v2 verified reads return `409 stale` until the new project generation is
+published.
+
+Configure
+`BIGNAME_API_CHAIN_RPC_URLS` for status and both verified engines as described
+in the API docs. The retained and schema-v2 request pools each use
+`BIGNAME_DATABASE_MAX_CONNECTIONS`; together with the reserved readiness
+connection, one API process can open at most
+`2 * BIGNAME_DATABASE_MAX_CONNECTIONS + 1` PostgreSQL connections.
 
 The worker continues to own projection rebuild/apply, hydration, verified
 execution, pruning, and read-only inspection. Its continued use of projection

@@ -12,6 +12,7 @@ alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 alloy-transport-http.workspace = true
 anyhow.workspace = true
+bigname-content-hash.workspace = true
 bigname-domain.workspace = true
 futures-util.workspace = true
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls"] }
@@ -21,5 +22,6 @@ sqlx = { workspace = true, features = ["time"] }
 tower = { version = "0.5.2", default-features = false }
 
 [dev-dependencies]
+bigname-storage.workspace = true
 bigname-test-support.workspace = true
 tokio.workspace = true

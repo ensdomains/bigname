@@ -1,20 +1,28 @@
-use std::{str::FromStr, time::Duration};
+use std::{
+    str::FromStr,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::SolValue;
 use anyhow::{Context, Result as AnyResult, bail};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
-use sqlx::{PgPool, raw_sql};
+use sqlx::{PgPool, postgres::PgPoolOptions, raw_sql};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::oneshot,
     task::JoinHandle,
 };
 
 use crate::{
     BASENAMES_NAMESPACE, ChainRpcUrls, ENS_NAMESPACE, EnsPrimaryNameStatus, ErrorKind,
-    LedgerAction, LookupEngine, LookupRequest, LookupResponse, RecordSelector,
+    LedgerAction, LookupEngine, LookupPosition, LookupRequest, LookupResponse, RecordSelector,
     abi::{dns_encode_name, hex_string, namehash},
     ccip::encode_offchain_lookup_for_test,
 };
@@ -31,6 +39,7 @@ const UNIVERSAL_RESOLVER: &str = "0xeeeeeeee14d718c2b47d9923deab1335e144eeee";
 const ENS_REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
 const BASE_L1_RESOLVER: &str = "0xde9049636f4a1dfe0a64d1bfe3155c0a14c54f31";
 const REPLACEMENT_UNIVERSAL_RESOLVER: &str = "0x2000000000000000000000000000000000000002";
+const SCHEMA_V2_MANIFEST_SYNC_LOCK: i64 = 0x4249_474e_414d_4532;
 const INDEXED_VALUE: &str = "https://indexed.example";
 const LIVE_VALUE: &str = "https://live.example";
 
@@ -74,6 +83,33 @@ fn lookup_request_canonicalizes_and_deduplicates_selectors() -> crate::Result<()
             RecordSelector::parse("text:url")?,
         ]
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn record_lookup_bounds_provider_call_concurrency_for_two_hundred_selectors() -> AnyResult<()>
+{
+    const SELECTOR_COUNT: usize = 200;
+    const EXPECTED_MAX_CONCURRENCY: usize = 16;
+
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let request = LookupRequest::new(
+        &fixture.logical_name_id,
+        (0..SELECTOR_COUNT).map(|index| format!("text:key-{index}")),
+    )?;
+    let (rpc_url, rpc_handle) = spawn_peak_concurrency_rpc(SELECTOR_COUNT).await?;
+
+    let response = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup(request)
+        .await?;
+    let peak = rpc_handle.await??;
+    assert_eq!(response.records.len(), SELECTOR_COUNT);
+    assert!(
+        peak <= EXPECTED_MAX_CONCURRENCY,
+        "one lookup opened {peak} concurrent provider calls"
+    );
+
+    fixture.cleanup().await?;
     Ok(())
 }
 
@@ -122,7 +158,152 @@ fn avatar_comparison_uses_the_text_avatar_inventory_entry() -> crate::Result<()>
 }
 
 #[tokio::test]
-async fn agreeing_resolution_writes_nothing_to_divergence_ledger() -> AnyResult<()> {
+async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<()> {
+    let oversized_text_key = "k".repeat(4_096);
+    let oversized_record_key = format!("text:{oversized_text_key}");
+    let cases = vec![
+        (
+            "nested value",
+            "text:url".to_owned(),
+            json!([{
+                "record_key": "text:url",
+                "record_family": "text",
+                "selector_key": "url",
+                "status": "success",
+                "value": { "value": "https://value.example" },
+            }]),
+        ),
+        (
+            "nested bytes",
+            "contenthash".to_owned(),
+            json!([{
+                "record_key": "contenthash",
+                "record_family": "contenthash",
+                "selector_key": null,
+                "status": "success",
+                "value": { "bytes": "0xe3010170" },
+            }]),
+        ),
+        (
+            "avatar exact entry preferred over text fallback",
+            "avatar".to_owned(),
+            json!([
+                {
+                    "record_key": "text:avatar",
+                    "record_family": "text",
+                    "selector_key": "avatar",
+                    "status": "success",
+                    "value": { "value": "ipfs://fallback" },
+                },
+                {
+                    "record_key": "avatar",
+                    "record_family": "avatar",
+                    "selector_key": null,
+                    "status": "success",
+                    "value": { "value": "ipfs://preferred" },
+                },
+            ]),
+        ),
+        (
+            "address value lowercasing",
+            "addr:60".to_owned(),
+            json!([{
+                "record_key": "addr:60",
+                "record_family": "addr",
+                "selector_key": "60",
+                "status": "success",
+                "value": { "bytes": "0xAbCdEf0123" },
+            }]),
+        ),
+        ("absent entry", "text:missing".to_owned(), json!([])),
+        (
+            "null value",
+            "text:null".to_owned(),
+            json!([{
+                "record_key": "text:null",
+                "record_family": "text",
+                "selector_key": "null",
+                "status": "success",
+                "value": null,
+            }]),
+        ),
+        (
+            "oversized text key",
+            oversized_record_key.clone(),
+            json!([{
+                "record_key": oversized_record_key,
+                "record_family": "text",
+                "selector_key": oversized_text_key,
+                "status": "success",
+                "value": { "value": "oversized-key-value" },
+            }]),
+        ),
+    ];
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+
+    for (case_name, record_key, entries) in cases {
+        let selector = RecordSelector::parse(&record_key)?;
+        let rust_answer = crate::store::indexed_answer(&entries, &selector);
+        sqlx::query("UPDATE record_inventory_current SET entries = $1")
+            .bind(&entries)
+            .execute(fixture.pool())
+            .await?;
+        let snapshot = crate::store::load_snapshot(
+            fixture.pool(),
+            &LookupRequest::new(&fixture.logical_name_id, [&record_key])?,
+        )
+        .await?;
+        let (resource_id, boundary_key, row_xmin): (String, String, String) = sqlx::query_as(
+            "SELECT resource_id::text, record_version_boundary_key, xmin::text
+             FROM record_inventory_current",
+        )
+        .fetch_one(fixture.pool())
+        .await?;
+        let live_probe = json!({ "status": "derivation_probe", "case": case_name });
+        let write_status: String = sqlx::query_scalar(
+            "SELECT write_resolution_divergence(
+                 $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, false
+             )",
+        )
+        .bind(&resource_id)
+        .bind(&boundary_key)
+        .bind(&row_xmin)
+        .bind(&snapshot.authoritative_position.chain_id)
+        .bind(snapshot.authoritative_position.block_number)
+        .bind(&snapshot.authoritative_position.block_hash)
+        .bind(&snapshot.execution_authority)
+        .bind(&snapshot.logical_name_id)
+        .bind(&snapshot.resolver_chain_id)
+        .bind(&snapshot.resolver_address)
+        .bind(&record_key)
+        .bind(&snapshot.revalidation_positions)
+        .bind(&live_probe)
+        .fetch_one(fixture.pool())
+        .await?;
+        assert_eq!(write_status, "written", "SQL probe failed for {case_name}");
+        let sql_answer: Value = sqlx::query_scalar(
+            "SELECT indexed_result
+             FROM resolution_divergences
+             WHERE request_kind = $1 AND cleared_at IS NULL",
+        )
+        .bind(&record_key)
+        .fetch_one(fixture.pool())
+        .await?;
+        assert_eq!(
+            rust_answer, sql_answer,
+            "derivation mismatch for {case_name}"
+        );
+        sqlx::query("DELETE FROM resolution_divergences")
+            .execute(fixture.pool())
+            .await?;
+    }
+
+    fixture.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn agreeing_resolution_without_active_divergence_writes_nothing() -> AnyResult<()> {
     let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(
         INDEXED_VALUE,
     ))])
@@ -135,6 +316,64 @@ async fn agreeing_resolution_writes_nothing_to_divergence_ledger() -> AnyResult<
     assert_eq!(outcome.records[0].value, Some(json!(INDEXED_VALUE)));
     let requests = join_rpc(rpc_handle).await?;
     assert_hash_pinned(&requests, ETHEREUM_HASH);
+    Ok(())
+}
+
+#[tokio::test]
+async fn restored_agreement_clears_the_matching_active_divergence() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Result(encoded_text_result(LIVE_VALUE)),
+        RpcResponse::Result(encoded_text_result(INDEXED_VALUE)),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+
+    let disagreement = run_lookup(&fixture, &rpc_url).await?;
+    assert_eq!(disagreement.records[0].ledger_action, LedgerAction::Written);
+    assert_eq!(ledger_count(fixture.pool()).await?, 1);
+
+    let agreement = run_lookup(&fixture, &rpc_url).await?;
+    assert_eq!(agreement.records[0].ledger_action, LedgerAction::Cleared);
+    let (total, active, cleared): (i64, i64, i64) = sqlx::query_as(
+        "SELECT count(*),
+                count(*) FILTER (WHERE cleared_at IS NULL),
+                count(*) FILTER (WHERE cleared_at IS NOT NULL)
+         FROM resolution_divergences",
+    )
+    .fetch_one(fixture.pool())
+    .await?;
+    assert_eq!((total, active, cleared), (1, 0, 1));
+
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(requests.len(), 2);
+    assert_hash_pinned(&requests, ETHEREUM_HASH);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unadmitted_serving_position_fails_before_rpc_or_ledger_write() -> AnyResult<()> {
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let error = lookup_engine(fixture.pool(), "http://127.0.0.1:1")?
+        .lookup_at_positions(
+            lookup_request(&fixture.logical_name_id)?,
+            &[LookupPosition {
+                chain_id: ETHEREUM.to_owned(),
+                block_number: 9,
+                block_hash: ETHEREUM_PRIOR_HASH.to_owned(),
+                timestamp: "2026-08-03T00:00:00Z".to_owned(),
+            }],
+        )
+        .await
+        .expect_err("a stale serving snapshot must be rejected before execution");
+
+    assert_eq!(error.kind(), ErrorKind::Stale);
+    assert_eq!(
+        error.message(),
+        "lookup authoritative position is not present in the caller's admitted snapshot"
+    );
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+    fixture.cleanup().await?;
     Ok(())
 }
 
@@ -173,6 +412,198 @@ async fn disagreement_writes_one_ledger_row_with_answers_and_anchor() -> AnyResu
 }
 
 #[tokio::test]
+async fn least_privileged_api_role_can_guard_and_write_only_through_functions() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let role_name = format!(
+        "lookup_api_{}",
+        fixture
+            .database
+            .database_name()
+            .chars()
+            .rev()
+            .take(40)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>()
+    );
+    let role = quote_identifier(&role_name);
+    raw_sql(&format!(
+        "CREATE ROLE {role}
+             NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT
+             NOREPLICATION NOBYPASSRLS;
+         GRANT {role} TO CURRENT_USER;
+         GRANT TEMPORARY ON DATABASE {} TO {role};
+         GRANT USAGE ON SCHEMA bigname_phase TO {role};
+         GRANT SELECT ON TABLE
+             bigname_phase.chain_heads,
+             bigname_phase.chain_lineage,
+             bigname_phase.chain_phase_state,
+             bigname_phase.name_current,
+             bigname_phase.name_surfaces,
+             bigname_phase.resources,
+             bigname_phase.surface_bindings,
+             bigname_phase.token_lineages,
+             bigname_phase.record_inventory_current,
+             bigname_phase.manifest_versions,
+             bigname_phase.manifest_contract_instances
+         TO {role};
+         GRANT EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state(
+             text, bigint, text, jsonb, jsonb, uuid, text, text
+         ) TO {role};
+         GRANT EXECUTE ON FUNCTION bigname_phase.write_resolution_divergence(
+             uuid, text, text, text, bigint, text, jsonb, text, text, text,
+             text, jsonb, jsonb, boolean
+         ) TO {role};",
+        quote_identifier(fixture.database.database_name())
+    ))
+    .execute(fixture.pool())
+    .await?;
+
+    let connect_options = bigname_storage::stamp_projection_replay_version(
+        fixture
+            .pool()
+            .connect_options()
+            .as_ref()
+            .clone()
+            .options([("role", role_name.as_str())]),
+    );
+    let api_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(connect_options)
+        .await?;
+
+    let request = lookup_request(&fixture.logical_name_id)?;
+    let snapshot = crate::store::load_snapshot(&api_pool, &request).await?;
+
+    let mut api_connection = api_pool.acquire().await?;
+    let (resource_id, boundary_key, row_xmin): (String, String, String) = sqlx::query_as(
+        "SELECT resource_id::text, record_version_boundary_key, xmin::text
+         FROM record_inventory_current",
+    )
+    .fetch_one(&mut *api_connection)
+    .await?;
+    raw_sql(
+        "CREATE TEMP TABLE chain_heads (shadow text);
+         CREATE TEMP TABLE chain_lineage (shadow text);
+         CREATE TEMP TABLE record_inventory_current (shadow text);
+         CREATE TEMP TABLE resolution_divergences (shadow text);",
+    )
+    .execute(&mut *api_connection)
+    .await?;
+    let positions = observed_position(10, ETHEREUM_HASH, "2026-08-03T00:00:00Z");
+    let guard_status: String = sqlx::query_scalar(
+        "SELECT bigname_phase.revalidate_resolution_lookup_state(
+             $1, 10, $2, $3, $4, $5::uuid, $6, $7
+         )",
+    )
+    .bind(ETHEREUM)
+    .bind(ETHEREUM_HASH)
+    .bind(&positions)
+    .bind(&snapshot.execution_authority)
+    .bind(&resource_id)
+    .bind(&boundary_key)
+    .bind(&row_xmin)
+    .fetch_one(&mut *api_connection)
+    .await?;
+    assert_eq!(guard_status, "unchanged");
+    let indexed_answer = json!({ "status": "success", "value": INDEXED_VALUE });
+    let writer_status: String = sqlx::query_scalar(
+        "SELECT bigname_phase.write_resolution_divergence(
+             $1::uuid, $2, $3, $4, 10, $5, $6, $7, $4, $8, $9, $10, $11, false
+         )",
+    )
+    .bind(&resource_id)
+    .bind(&boundary_key)
+    .bind(&row_xmin)
+    .bind(ETHEREUM)
+    .bind(ETHEREUM_HASH)
+    .bind(&snapshot.execution_authority)
+    .bind(&fixture.logical_name_id)
+    .bind("0x1000000000000000000000000000000000000001")
+    .bind("text:url")
+    .bind(&positions)
+    .bind(&indexed_answer)
+    .fetch_one(&mut *api_connection)
+    .await?;
+    assert_eq!(writer_status, "agreement");
+    let forged_status: String = sqlx::query_scalar(
+        "SELECT bigname_phase.write_resolution_divergence(
+             $1::uuid, $2, $3, $4, 10, $5, $6, 'ens:forged', $4, $7, 'text:url',
+             $8, $9, false
+         )",
+    )
+    .bind(&resource_id)
+    .bind(&boundary_key)
+    .bind(&row_xmin)
+    .bind(ETHEREUM)
+    .bind(ETHEREUM_HASH)
+    .bind(&snapshot.execution_authority)
+    .bind("0x1000000000000000000000000000000000000001")
+    .bind(&positions)
+    .bind(&indexed_answer)
+    .fetch_one(&mut *api_connection)
+    .await?;
+    assert_eq!(forged_status, "guard_rejected");
+    raw_sql(
+        "DROP TABLE pg_temp.chain_heads;
+         DROP TABLE pg_temp.chain_lineage;
+         DROP TABLE pg_temp.record_inventory_current;
+         DROP TABLE pg_temp.resolution_divergences;",
+    )
+    .execute(&mut *api_connection)
+    .await?;
+    drop(api_connection);
+
+    let direct_write_error = sqlx::query(
+        "UPDATE record_inventory_current
+         SET entries = entries
+         WHERE false",
+    )
+    .execute(&api_pool)
+    .await
+    .expect_err("the API role must not update guarded projection rows directly");
+    assert_eq!(
+        direct_write_error
+            .as_database_error()
+            .and_then(|error| error.code().map(|code| code.into_owned()))
+            .as_deref(),
+        Some("42501")
+    );
+
+    let raw_read_error = sqlx::query("SELECT count(*) FROM raw_logs")
+        .fetch_one(&api_pool)
+        .await
+        .expect_err("the API role must not read raw facts");
+    assert_eq!(
+        raw_read_error
+            .as_database_error()
+            .and_then(|error| error.code().map(|code| code.into_owned()))
+            .as_deref(),
+        Some("42501")
+    );
+
+    let response = lookup_engine(&api_pool, &rpc_url)?.lookup(request).await?;
+    assert_eq!(response.records[0].ledger_action, LedgerAction::Written);
+    assert_eq!(ledger_count(fixture.pool()).await?, 1);
+
+    api_pool.close().await;
+    raw_sql(&format!(
+        "DROP OWNED BY {role};
+         REVOKE {role} FROM CURRENT_USER;
+         DROP ROLE {role};"
+    ))
+    .execute(fixture.pool())
+    .await?;
+    fixture.cleanup().await?;
+    let requests = join_rpc(rpc_handle).await?;
+    assert_hash_pinned(&requests, ETHEREUM_HASH);
+    Ok(())
+}
+
+#[tokio::test]
 async fn stable_projection_row_executes_at_caught_up_head() -> AnyResult<()> {
     let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(
         INDEXED_VALUE,
@@ -194,7 +625,7 @@ async fn stable_projection_row_executes_at_caught_up_head() -> AnyResult<()> {
 }
 
 #[tokio::test]
-async fn stable_projection_divergence_keeps_the_rows_actual_anchor() -> AnyResult<()> {
+async fn stable_projection_divergence_tracks_live_reorg_dependency() -> AnyResult<()> {
     let (rpc_url, rpc_handle) =
         spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
@@ -202,13 +633,39 @@ async fn stable_projection_divergence_keeps_the_rows_actual_anchor() -> AnyResul
 
     let response = run_lookup(&fixture, &rpc_url).await?;
     assert_eq!(response.records[0].ledger_action, LedgerAction::Written);
+    assert_eq!(response.observed_positions["ethereum"]["block_number"], 10);
     let positions: Value = sqlx::query_scalar(
         "SELECT observed_positions FROM resolution_divergences WHERE cleared_at IS NULL",
     )
     .fetch_one(fixture.pool())
     .await?;
-    assert_eq!(positions["ethereum"]["block_number"], 10);
-    assert_eq!(positions["ethereum"]["block_hash"], ETHEREUM_HASH);
+    assert_eq!(positions["indexed"]["block_number"], 10);
+    assert_eq!(positions["indexed"]["block_hash"], ETHEREUM_HASH);
+    assert_eq!(positions["live"]["block_number"], 11);
+    assert_eq!(positions["live"]["block_hash"], ETHEREUM_LATER_HASH);
+
+    let mut transaction = fixture.pool().begin().await?;
+    sqlx::query("DELETE FROM chain_heads WHERE chain_id = $1")
+        .bind(ETHEREUM)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "UPDATE chain_lineage SET canonicality_state = 'orphaned'
+         WHERE chain_id = $1 AND block_hash = $2",
+    )
+    .bind(ETHEREUM)
+    .bind(ETHEREUM_LATER_HASH)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    let (active, cleared): (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE cleared_at IS NULL),
+                count(*) FILTER (WHERE cleared_at IS NOT NULL)
+         FROM resolution_divergences",
+    )
+    .fetch_one(fixture.pool())
+    .await?;
+    assert_eq!((active, cleared), (0, 1));
 
     fixture.cleanup().await?;
     let requests = join_rpc(rpc_handle).await?;
@@ -385,6 +842,52 @@ async fn wildcard_lookup_executes_without_an_indexed_record_row() -> AnyResult<(
     fixture.cleanup().await?;
     let requests = join_rpc(rpc_handle).await?;
     assert_hash_pinned(&requests, ETHEREUM_HASH);
+    Ok(())
+}
+
+#[tokio::test]
+async fn wildcard_lookup_rejects_a_concurrent_name_projection_change() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    sqlx::query(
+        "UPDATE name_current
+         SET declared_summary = jsonb_set(
+             jsonb_set(
+                 declared_summary,
+                 '{topology,wildcard}',
+                 jsonb_build_object(
+                     'source', jsonb_build_object('logical_name_id', 'ens:ancestor'),
+                     'matched_labels', jsonb_build_array('alice')
+                 )
+             ),
+             '{topology,resolver_path,0,logical_name_id}',
+             to_jsonb('ens:ancestor'::text)
+         )",
+    )
+    .execute(fixture.pool())
+    .await?;
+    sqlx::query("DELETE FROM record_inventory_current")
+        .execute(fixture.pool())
+        .await?;
+
+    let pool = fixture.pool().clone();
+    let update_pool = pool.clone();
+    let logical_name_id = fixture.logical_name_id.clone();
+    let result = lookup_engine(&pool, &rpc_url)?
+        .lookup_with_before_persist(lookup_request(&logical_name_id)?, move || async move {
+            sqlx::query("UPDATE name_current SET declared_summary = declared_summary")
+                .execute(&update_pool)
+                .await
+                .expect("second session must replace the wildcard name row");
+        })
+        .await;
+
+    let error = result.expect_err("wildcard execution must retain its exact projected topology");
+    assert_eq!(error.kind(), ErrorKind::ConcurrentState);
+    assert_eq!(ledger_count(&pool).await?, 0);
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
     Ok(())
 }
 
@@ -586,6 +1089,23 @@ async fn record_lookup_missing_selected_state_is_stale() -> AnyResult<()> {
 }
 
 #[tokio::test]
+async fn record_lookup_transport_failure_is_not_stale() -> AnyResult<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let rpc_url = format!("http://{}", listener.local_addr()?);
+    drop(listener);
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+
+    let error = run_lookup(&fixture, &rpc_url)
+        .await
+        .expect_err("provider transport failure must abort the lookup");
+    assert_eq!(error.kind(), ErrorKind::Transport);
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+
+    fixture.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn row_unchanged_guard_rejects_two_session_projection_modification() -> AnyResult<()> {
     let (rpc_url, rpc_handle) =
         spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
@@ -608,6 +1128,195 @@ async fn row_unchanged_guard_rejects_two_session_projection_modification() -> An
 
     let error = result.expect_err("stale projection token must reject the ledger write");
     assert_eq!(error.kind(), ErrorKind::ConcurrentState);
+    assert_eq!(ledger_count(&pool).await?, 0);
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalidated_project_generation_is_stale_before_rpc() -> AnyResult<()> {
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET input_content_hash = 'manifest-authority:test-invalidation'
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(ETHEREUM)
+    .execute(fixture.pool())
+    .await?;
+
+    let error = lookup_engine(fixture.pool(), "http://127.0.0.1:1")?
+        .lookup(lookup_request(&fixture.logical_name_id)?)
+        .await
+        .expect_err("invalidated projected authority must fail before provider execution");
+    assert_eq!(error.kind(), ErrorKind::Stale);
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+    fixture.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn project_generation_change_during_rpc_rejects_the_lookup() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let pool = fixture.pool().clone();
+    let update_pool = pool.clone();
+    let logical_name_id = fixture.logical_name_id.clone();
+    let result = lookup_engine(&pool, &rpc_url)?
+        .lookup_with_before_persist(lookup_request(&logical_name_id)?, move || async move {
+            sqlx::query(
+                "UPDATE chain_phase_state
+                 SET input_content_hash = 'manifest-authority:test-invalidation'
+                 WHERE chain_id = $1 AND phase_name = 'project'",
+            )
+            .bind(ETHEREUM)
+            .execute(&update_pool)
+            .await
+            .expect("second session must invalidate the project generation");
+        })
+        .await;
+
+    let error = result.expect_err("lookup must reject a replaced project generation");
+    assert_eq!(error.kind(), ErrorKind::ConcurrentState);
+    assert_eq!(ledger_count(&pool).await?, 0);
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn manifest_declaration_change_during_rpc_rejects_the_lookup() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let pool = fixture.pool().clone();
+    let update_pool = pool.clone();
+    let logical_name_id = fixture.logical_name_id.clone();
+    let result = lookup_engine(&pool, &rpc_url)?
+        .lookup_with_before_persist(lookup_request(&logical_name_id)?, move || async move {
+            sqlx::query(
+                "UPDATE manifest_contract_instances
+                 SET declared_address = declared_address
+                 WHERE role = 'universal_resolver'",
+            )
+            .execute(&update_pool)
+            .await
+            .expect("second session must replace the selected manifest declaration");
+        })
+        .await;
+
+    let error = result.expect_err("lookup must retain the exact selected manifest declaration");
+    assert_eq!(error.kind(), ErrorKind::ConcurrentState);
+    assert_eq!(ledger_count(&pool).await?, 0);
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn shadow_manifest_sync_is_serialized_with_lookup_revalidation() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    sqlx::query(
+        "UPDATE manifest_versions
+         SET rollout_status = 'shadow',
+             manifest_payload = jsonb_set(
+                 manifest_payload,
+                 '{capability_flags,verified_resolution,status}',
+                 to_jsonb('shadow'::text)
+             )
+         WHERE source_family = 'ens_execution'",
+    )
+    .execute(fixture.pool())
+    .await?;
+
+    let pool = fixture.pool().clone();
+    let sync_pool = pool.clone();
+    let (manifest_changed_tx, manifest_changed_rx) = oneshot::channel();
+    let sync = tokio::spawn(async move {
+        let mut transaction = sync_pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(SCHEMA_V2_MANIFEST_SYNC_LOCK)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(
+            "UPDATE manifest_contract_instances
+             SET declared_address = declared_address
+             WHERE role = 'universal_resolver'",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        let _ = manifest_changed_tx.send(());
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        transaction.commit().await?;
+        Ok::<(), anyhow::Error>(())
+    });
+
+    let logical_name_id = fixture.logical_name_id.clone();
+    let result = lookup_engine(&pool, &rpc_url)?
+        .lookup_with_before_persist(lookup_request(&logical_name_id)?, move || async move {
+            manifest_changed_rx
+                .await
+                .expect("manifest sync must update the shadow declaration");
+        })
+        .await;
+    sync.await.context("manifest sync task was cancelled")??;
+
+    let error = result.expect_err("lookup must not commit across shadow manifest sync");
+    assert_eq!(error.kind(), ErrorKind::ConcurrentState);
+    assert_eq!(
+        error.message(),
+        "lookup manifest authority changed while live lookup was running"
+    );
+    assert_eq!(ledger_count(&pool).await?, 0);
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn projection_publication_lock_order_does_not_deadlock_lookup() -> AnyResult<()> {
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let pool = fixture.pool().clone();
+    let publish_pool = pool.clone();
+    let (name_locked_tx, name_locked_rx) = oneshot::channel();
+    let publisher = tokio::spawn(async move {
+        let mut transaction = publish_pool.begin().await?;
+        sqlx::query("UPDATE name_current SET declared_summary = declared_summary")
+            .execute(&mut *transaction)
+            .await?;
+        let _ = name_locked_tx.send(());
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        sqlx::query("UPDATE record_inventory_current SET entries = entries")
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok::<(), anyhow::Error>(())
+    });
+
+    let logical_name_id = fixture.logical_name_id.clone();
+    let result = lookup_engine(&pool, &rpc_url)?
+        .lookup_with_before_persist(lookup_request(&logical_name_id)?, move || async move {
+            name_locked_rx
+                .await
+                .expect("publication session must lock name_current");
+        })
+        .await;
+    publisher
+        .await
+        .context("publication task was cancelled")??;
+
+    let error = result.expect_err("same-height publication must replace the name-row token");
+    assert_eq!(error.kind(), ErrorKind::ConcurrentState);
+    assert_eq!(
+        error.message(),
+        "projected name state changed while live lookup was running"
+    );
     assert_eq!(ledger_count(&pool).await?, 0);
     fixture.cleanup().await?;
     join_rpc(rpc_handle).await?;
@@ -864,7 +1573,7 @@ async fn mixed_ccip_and_direct_batch_persists_only_the_direct_disagreement() -> 
 }
 
 #[tokio::test]
-async fn ccip_result_bypasses_a_concurrent_inventory_change() -> AnyResult<()> {
+async fn ccip_result_rejects_a_concurrent_inventory_change() -> AnyResult<()> {
     let (gateway_url, gateway_handle) = spawn_gateway(vec![0xca, 0xfe]).await?;
     let sender = Address::from_str(BASE_L1_RESOLVER)?;
     let offchain_data = encode_offchain_lookup_for_test(
@@ -902,11 +1611,10 @@ async fn ccip_result_bypasses_a_concurrent_inventory_change() -> AnyResult<()> {
             .await
             .expect("second session must update the projection row");
         })
-        .await?;
+        .await;
 
-    assert_eq!(result.records[0].value, Some(json!(LIVE_VALUE)));
-    assert!(result.records[0].ccip_read);
-    assert_eq!(result.records[0].ledger_action, LedgerAction::SkippedCcip);
+    let error = result.expect_err("CCIP execution must retain its indexed serving snapshot");
+    assert_eq!(error.kind(), ErrorKind::ConcurrentState);
     assert_eq!(ledger_count(&pool).await?, 0);
 
     fixture.cleanup().await?;
@@ -943,14 +1651,70 @@ async fn basenames_uses_projected_auxiliary_execution_position() -> AnyResult<()
     .execute(fixture.pool())
     .await?;
 
-    let response = run_lookup(&fixture, &rpc_url).await?;
+    let response = lookup_engine(fixture.pool(), &rpc_url)?
+        .lookup_at_positions(
+            lookup_request(&fixture.logical_name_id)?,
+            &[
+                LookupPosition {
+                    chain_id: BASE.to_owned(),
+                    block_number: 10,
+                    block_hash: BASE_HASH.to_owned(),
+                    timestamp: "2026-08-03T00:00:00Z".to_owned(),
+                },
+                LookupPosition {
+                    chain_id: ETHEREUM.to_owned(),
+                    block_number: 11,
+                    block_hash: ETHEREUM_LATER_HASH.to_owned(),
+                    timestamp: "2026-08-03T00:00:01Z".to_owned(),
+                },
+            ],
+        )
+        .await?;
     assert_eq!(
         response.observed_positions["ethereum"]["block_hash"],
         ETHEREUM_HASH
     );
+    assert_eq!(response.execution_position.block_hash, ETHEREUM_HASH);
+    assert_eq!(response.execution_position.block_number, 10);
     fixture.cleanup().await?;
     let requests = join_rpc(rpc_handle).await?;
     assert_hash_pinned(&requests, ETHEREUM_HASH);
+    Ok(())
+}
+
+#[tokio::test]
+async fn basenames_rejects_newer_or_same_height_incompatible_execution_positions_before_rpc()
+-> AnyResult<()> {
+    let fixture = setup_fixture(FixtureKind::Basenames, INDEXED_VALUE).await?;
+    for (block_number, block_hash) in [(9, ETHEREUM_PRIOR_HASH), (10, ETHEREUM_PRIOR_HASH)] {
+        let error = lookup_engine(fixture.pool(), "http://127.0.0.1:1")?
+            .lookup_at_positions(
+                lookup_request(&fixture.logical_name_id)?,
+                &[
+                    LookupPosition {
+                        chain_id: BASE.to_owned(),
+                        block_number: 10,
+                        block_hash: BASE_HASH.to_owned(),
+                        timestamp: "2026-08-03T00:00:00Z".to_owned(),
+                    },
+                    LookupPosition {
+                        chain_id: ETHEREUM.to_owned(),
+                        block_number,
+                        block_hash: block_hash.to_owned(),
+                        timestamp: "2026-08-03T00:00:00Z".to_owned(),
+                    },
+                ],
+            )
+            .await
+            .expect_err("an execution position outside the admitted snapshot must be stale");
+        assert_eq!(error.kind(), ErrorKind::Stale);
+        assert_eq!(
+            error.message(),
+            "lookup execution position is not compatible with the caller's admitted snapshot"
+        );
+    }
+    assert_eq!(ledger_count(fixture.pool()).await?, 0);
+    fixture.cleanup().await?;
     Ok(())
 }
 
@@ -1200,6 +1964,90 @@ async fn primary_name_lookup_uses_manifest_entrypoints_and_readable_head() -> An
     assert_eq!(requests[1]["params"][0]["to"], reverse_resolver);
     assert_eq!(requests[2]["params"][0]["to"], UNIVERSAL_RESOLVER);
     assert_hash_pinned(&requests, ETHEREUM_HASH);
+    Ok(())
+}
+
+#[tokio::test]
+async fn primary_name_revalidates_its_position_after_live_calls() -> AnyResult<()> {
+    let target = "0x8e8db5ccef88cca9d624701db544989c996e3216";
+    let reverse_resolver = "0xa2c122be93b0074270ebee7f6b7292c7deb45047";
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Result(Value::String(hex_string(
+            &Address::from_str(reverse_resolver)?.abi_encode(),
+        ))),
+        RpcResponse::Result(Value::String(hex_string(&"alice.eth".abi_encode()))),
+        RpcResponse::Result(encoded_address_result(target)?),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    seed_manifest(
+        fixture.pool(),
+        ENS_NAMESPACE,
+        "ens_v1_registry_l1",
+        "registry",
+        ENS_REGISTRY,
+        "00000000-0000-0000-0000-000000000104",
+    )
+    .await?;
+    let pool = fixture.pool().clone();
+    let update_pool = pool.clone();
+    let result = lookup_engine(&pool, &rpc_url)?
+        .lookup_ens_primary_name_with_before_revalidate(target, move || async move {
+            advance_head(&update_pool)
+                .await
+                .expect("second session must advance the readable head");
+        })
+        .await;
+
+    let error = result.expect_err("primary-name lookup must reject its replaced readable head");
+    assert_eq!(error.kind(), ErrorKind::ConcurrentState);
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn primary_name_rejects_a_project_generation_change_after_live_calls() -> AnyResult<()> {
+    let target = "0x8e8db5ccef88cca9d624701db544989c996e3216";
+    let reverse_resolver = "0xa2c122be93b0074270ebee7f6b7292c7deb45047";
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Result(Value::String(hex_string(
+            &Address::from_str(reverse_resolver)?.abi_encode(),
+        ))),
+        RpcResponse::Result(Value::String(hex_string(&"alice.eth".abi_encode()))),
+        RpcResponse::Result(encoded_address_result(target)?),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    seed_manifest(
+        fixture.pool(),
+        ENS_NAMESPACE,
+        "ens_v1_registry_l1",
+        "registry",
+        ENS_REGISTRY,
+        "00000000-0000-0000-0000-000000000104",
+    )
+    .await?;
+    let pool = fixture.pool().clone();
+    let update_pool = pool.clone();
+    let result = lookup_engine(&pool, &rpc_url)?
+        .lookup_ens_primary_name_with_before_revalidate(target, move || async move {
+            sqlx::query(
+                "UPDATE chain_phase_state
+                 SET input_content_hash = 'manifest-authority:test-invalidation'
+                 WHERE chain_id = $1 AND phase_name = 'project'",
+            )
+            .bind(ETHEREUM)
+            .execute(&update_pool)
+            .await
+            .expect("second session must invalidate primary-name authority");
+        })
+        .await;
+
+    let error = result.expect_err("primary-name lookup must retain its project generation");
+    assert_eq!(error.kind(), ErrorKind::ConcurrentState);
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
     Ok(())
 }
 
@@ -1496,6 +2344,22 @@ async fn setup_fixture(kind: FixtureKind, indexed_value: &str) -> AnyResult<Fixt
 }
 
 async fn apply_baseline(pool: &PgPool) -> AnyResult<()> {
+    let database_name: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(pool)
+        .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query("CREATE SCHEMA bigname_phase")
+        .execute(&mut *transaction)
+        .await?;
+    raw_sql(&format!(
+        "ALTER DATABASE {} SET search_path TO bigname_phase, public",
+        quote_identifier(&database_name)
+    ))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("SET LOCAL search_path TO bigname_phase, public")
+        .execute(&mut *transaction)
+        .await?;
     for script in [
         include_str!("../../../schema-v2/baseline/01_chain.sql"),
         include_str!("../../../schema-v2/baseline/02_raw_facts.sql"),
@@ -1508,9 +2372,30 @@ async fn apply_baseline(pool: &PgPool) -> AnyResult<()> {
         include_str!("../../../schema-v2/baseline/09_divergence.sql"),
         include_str!("../../../schema-v2/baseline/10_phase_state.sql"),
     ] {
-        raw_sql(script).execute(pool).await?;
+        raw_sql(script).execute(&mut *transaction).await?;
+    }
+    transaction.commit().await?;
+
+    pool.set_connect_options(
+        pool.connect_options()
+            .as_ref()
+            .clone()
+            .options([("search_path", "bigname_phase,public")]),
+    );
+    let mut connections = Vec::new();
+    for _ in 0..pool.options().get_max_connections() {
+        connections.push(pool.acquire().await?);
+    }
+    for connection in &mut connections {
+        sqlx::query("SET search_path TO bigname_phase, public")
+            .execute(&mut **connection)
+            .await?;
     }
     Ok(())
+}
+
+fn quote_identifier(identifier: &str) -> String {
+    format!(r#""{}""#, identifier.replace('"', r#""""#))
 }
 
 async fn seed_heads(pool: &PgPool, kind: FixtureKind) -> AnyResult<()> {
@@ -1559,11 +2444,12 @@ async fn seed_project_state(pool: &PgPool, chain_id: &str, block_hash: &str) -> 
     sqlx::query(
         "INSERT INTO chain_phase_state
             (chain_id, phase_name, phase_status, current_block_number, current_block_hash,
-             target_block_number, target_block_hash, started_at, finished_at)
-         VALUES ($1, 'project', 'completed', 10, $2, 10, $2, now(), now())",
+             target_block_number, target_block_hash, input_content_hash, started_at, finished_at)
+         VALUES ($1, 'project', 'completed', 10, $2, 10, $2, $3, now(), now())",
     )
     .bind(chain_id)
     .bind(block_hash)
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
     .execute(pool)
     .await?;
     Ok(())
@@ -1810,6 +2696,41 @@ async fn spawn_mock_rpc(
             write_rpc_response(&mut socket, response).await?;
         }
         Ok(requests)
+    });
+    Ok((url, handle))
+}
+
+async fn spawn_peak_concurrency_rpc(
+    request_count: usize,
+) -> AnyResult<(String, JoinHandle<AnyResult<usize>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let mut tasks = tokio::task::JoinSet::<AnyResult<()>>::new();
+        for _ in 0..request_count {
+            let (mut socket, _) = listener.accept().await?;
+            let active = Arc::clone(&active);
+            let peak = Arc::clone(&peak);
+            tasks.spawn(async move {
+                read_http_json_body(&mut socket).await?;
+                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(current, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                write_rpc_response(
+                    &mut socket,
+                    RpcResponse::Result(encoded_text_result(LIVE_VALUE)),
+                )
+                .await?;
+                active.fetch_sub(1, Ordering::SeqCst);
+                AnyResult::Ok(())
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            result??;
+        }
+        Ok(peak.load(Ordering::SeqCst))
     });
     Ok((url, handle))
 }
