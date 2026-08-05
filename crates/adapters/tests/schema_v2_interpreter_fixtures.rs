@@ -21,6 +21,7 @@ const RAW_EVENTS: &str = include_str!("fixtures/interpreters/raw-events.json");
 const EXPECTED_OUTPUTS: &str = include_str!("fixtures/interpreters/expected-outputs.json");
 const DENSE_SAME_TRANSACTION: &str =
     include_str!("fixtures/interpreters/dense-same-transaction.json");
+const BINDING_FK_RELEASE: &str = include_str!("fixtures/interpreters/binding-fk-release.json");
 
 sol! {
     event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
@@ -114,6 +115,29 @@ struct ExpectedSuite {
 }
 
 #[derive(Deserialize)]
+struct BindingFkFixture {
+    case: Case,
+    batches: Vec<BlockRange>,
+    expected: BindingFkExpected,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+struct BlockRange {
+    from_block: i64,
+    to_block: i64,
+}
+
+#[derive(Deserialize)]
+struct BindingFkExpected {
+    logical_name_id: String,
+    resource_id: Uuid,
+    surface_binding_id: Uuid,
+    release_block_hash: String,
+    release_block_number: i64,
+    source_manifest_id: i64,
+}
+
+#[derive(Deserialize)]
 struct ExpectedCase {
     id: String,
     normalized_events: Vec<Value>,
@@ -189,6 +213,7 @@ fn schema_v2_output_seam_semantically_matches_the_committed_raw_event_tripwire()
         let input = batch_input(&case, &expected, &checked_in)?;
         let output = interpret_with_incremental_equivalence(&case.id, input)
             .with_context(|| format!("schema-v2 output seam rejected golden case {}", case.id))?;
+        assert_fixture_binding_resources(&case.id, [&output])?;
         assert_semantic_output(&case, &expected, &output)?;
     }
     if !expected_cases.is_empty() {
@@ -216,6 +241,7 @@ fn dense_same_transaction_output_matches_the_slow_path_snapshot() -> Result<()> 
     let input = batch_input(&case.case, &expected_gate, &checked_in_manifests()?)?;
     let started = std::time::Instant::now();
     let output = interpret_with_incremental_equivalence(&case.case.id, input)?;
+    assert_fixture_binding_resources(&case.case.id, [&output])?;
     let elapsed = started.elapsed();
     let registration_count = output
         .normalized_events
@@ -238,6 +264,73 @@ fn dense_same_transaction_output_matches_the_slow_path_snapshot() -> Result<()> 
         case.expected_normalized_event_count
     );
     assert_eq!(output_keccak, case.expected_output_keccak);
+    Ok(())
+}
+
+#[test]
+fn production_lease_release_corpus_materializes_its_registry_fallback() -> Result<()> {
+    let fixture: BindingFkFixture = serde_json::from_str(BINDING_FK_RELEASE)?;
+    let expected_gate = ExpectedCase {
+        id: fixture.case.id.clone(),
+        normalized_events: fixture
+            .case
+            .blocks
+            .iter()
+            .map(|block| serde_json::json!({"block_hash":block.hash}))
+            .collect(),
+        name_surfaces: Vec::new(),
+        surface_bindings: Vec::new(),
+        resources: Vec::new(),
+        token_lineages: Vec::new(),
+    };
+    let input = batch_input(&fixture.case, &expected_gate, &checked_in_manifests()?)?;
+    let outputs = interpret_physical_batches(&fixture.case.id, input, &fixture.batches)?;
+    assert_fixture_binding_resources(&fixture.case.id, &outputs)?;
+    let release = outputs
+        .last()
+        .context("binding-FK fixture has no release batch")?;
+    let expected = fixture.expected;
+
+    let resource = release
+        .resources
+        .iter()
+        .find(|resource| resource.resource_id == expected.resource_id)
+        .context("release batch did not materialize the registry fallback resource")?;
+    assert_eq!(resource.token_lineage_id, None);
+    assert_eq!(resource.block_hash, expected.release_block_hash);
+    assert_eq!(resource.block_number, expected.release_block_number);
+    assert_eq!(
+        resource
+            .provenance
+            .get("source_manifest_id")
+            .and_then(Value::as_i64),
+        Some(expected.source_manifest_id),
+    );
+
+    let binding = release
+        .surface_bindings
+        .iter()
+        .find(|binding| binding.surface_binding_id == expected.surface_binding_id)
+        .context("release batch did not open the registry fallback binding")?;
+    assert_eq!(binding.logical_name_id, expected.logical_name_id);
+    assert_eq!(binding.resource_id, expected.resource_id);
+    assert_eq!(binding.binding_kind, "declared_registry_path");
+    assert!(release.normalized_events.iter().any(|event| {
+        event.event_kind == "SurfaceBound"
+            && event.logical_name_id.as_deref() == Some(expected.logical_name_id.as_str())
+            && event.resource_id == Some(expected.resource_id)
+            && event
+                .after_state
+                .get("source_event")
+                .and_then(Value::as_str)
+                == Some("RegistrationReleased")
+    }));
+    assert!(outputs[..outputs.len() - 1].iter().all(|output| {
+        output
+            .resources
+            .iter()
+            .all(|row| row.resource_id != expected.resource_id)
+    }));
     Ok(())
 }
 
@@ -466,6 +559,110 @@ fn interpret_with_incremental_equivalence(case_id: &str, input: BatchInput) -> R
         "{case_id}: live incremental adapter state differs from a compacted restore"
     );
     Ok(incremental)
+}
+
+fn interpret_physical_batches(
+    case_id: &str,
+    input: BatchInput,
+    ranges: &[BlockRange],
+) -> Result<Vec<BatchOutput>> {
+    let mut live_session = None;
+    let mut retained_prior = input.prior_events.clone();
+    let mut outputs = Vec::new();
+    let mut covered_blocks = HashSet::new();
+    for range in ranges {
+        let blocks = input
+            .blocks
+            .iter()
+            .filter(|block| (range.from_block..=range.to_block).contains(&block.block_number))
+            .cloned()
+            .collect::<Vec<_>>();
+        let block_hashes = blocks
+            .iter()
+            .map(|block| block.block_hash.as_str())
+            .collect::<HashSet<_>>();
+        let raw_logs = input
+            .raw_logs
+            .iter()
+            .filter(|log| block_hashes.contains(log.block_hash.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        covered_blocks.extend(blocks.iter().map(|block| block.block_hash.clone()));
+        let restored_input = BatchInput {
+            chain_id: input.chain_id.clone(),
+            manifests: input.manifests.clone(),
+            discovery_rules: input.discovery_rules.clone(),
+            admissions: input.admissions.clone(),
+            prior_events: retained_prior.clone(),
+            blocks: blocks.clone(),
+            raw_logs: raw_logs.clone(),
+        };
+        let fresh = interpret_schema_v2_batch(restored_input.clone())?;
+        let incremental_input = BatchInput {
+            prior_events: if live_session.is_none() {
+                retained_prior.clone()
+            } else {
+                Vec::new()
+            },
+            ..restored_input.clone()
+        };
+        let (incremental, next_session) =
+            interpret_schema_v2_batch_incremental(incremental_input, live_session)?;
+        assert_eq!(
+            incremental, fresh,
+            "{case_id}: physical-batch incremental output differs from retained-state restore"
+        );
+        retained_prior =
+            seam::fold_prior_events(retained_prior, &incremental.normalized_events, &blocks)?;
+        let (_, restored_session) = interpret_schema_v2_batch_incremental(
+            BatchInput {
+                prior_events: retained_prior.clone(),
+                blocks: Vec::new(),
+                raw_logs: Vec::new(),
+                ..restored_input
+            },
+            None,
+        )?;
+        assert_eq!(
+            next_session, restored_session,
+            "{case_id}: live state differs from retained-state restore after a physical batch"
+        );
+        live_session = Some(next_session);
+        outputs.push(incremental);
+    }
+    if covered_blocks.len() != input.blocks.len() {
+        bail!(
+            "{case_id}: physical ranges cover {} of {} input blocks",
+            covered_blocks.len(),
+            input.blocks.len()
+        );
+    }
+    Ok(outputs)
+}
+
+fn assert_fixture_binding_resources<'a>(
+    case_id: &str,
+    outputs: impl IntoIterator<Item = &'a BatchOutput>,
+) -> Result<()> {
+    let mut available = HashSet::new();
+    for output in outputs {
+        available.extend(
+            output
+                .resources
+                .iter()
+                .map(|resource| (resource.chain_id.as_str(), resource.resource_id)),
+        );
+        for binding in &output.surface_bindings {
+            if !available.contains(&(binding.chain_id.as_str(), binding.resource_id)) {
+                bail!(
+                    "{case_id}: binding {} references resource {} without a current or prior fixture resource row",
+                    binding.surface_binding_id,
+                    binding.resource_id
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn assert_semantic_output(

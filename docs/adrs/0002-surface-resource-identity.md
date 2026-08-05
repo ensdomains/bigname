@@ -56,6 +56,7 @@ ENSv1 authority-anchor rules:
 - keep the active `token_lineage_id` while the same tokenized ENSv1 anchor stays authoritative; rotate it when authority moves to a different tokenized anchor
 - if authority returns to the exact prior tokenized anchor, reuse its prior `token_lineage_id`; exact prior-anchor reuse does not resurrect token lineage after release or across mismatched holder / controller authority
 - ordinary ENSv1 registry-only control, registrar registration, wrap, unwrap, expiry / grace, transfer, and re-registration all use `SurfaceBinding.binding_kind = declared_registry_path`; those lifecycle changes do not require `migration_rebind`
+- a registry-owner observation for a node without a materialized name surface remains retained interpreter state rather than creating public identity rows; if a later materialized registrar lease releases while that retained owner is nonzero, the direct-registry `resource_id` and its replacement `SurfaceBinding` must be materialized together at the release boundary
 
 Resource-centric convenience rule:
 
@@ -90,6 +91,7 @@ Resource-centric convenience rule:
 | Wrap `alice.eth` | keep `logical_name_id`; close the registrar binding; mint a wrapper-anchored `resource_id` and wrapper `token_lineage_id`; the successor binding is still `declared_registry_path` |
 | Unwrap `alice.eth` before the lease ends | keep `logical_name_id`; close the wrapper binding; reactivate the prior registrar `resource_id` and prior registrar `token_lineage_id`; the successor binding is still `declared_registry_path` |
 | `alice.eth` enters expiry or grace while the same authority anchor remains in force | keep the current `resource_id` and current `token_lineage_id`; only status and expiry facts change; `binding_kind` stays `declared_registry_path` |
+| The registrar lease for `alice.eth` releases while its retained registry owner is nonzero | close the registrar binding; materialize the direct-registry `resource_id` with no token lineage and open its `declared_registry_path` binding in the same boundary batch |
 | `alice.eth` transfers while the same authority anchor remains in force | keep the current `resource_id` and current `token_lineage_id`; no new binding row is needed if the anchor did not change; `binding_kind` stays `declared_registry_path` |
 | `alice.eth` fully lapses and is later re-registered | keep `logical_name_id`; once the old authority ends, its binding closes; a later registration mints a new registrar `resource_id` and a new registrar `token_lineage_id`; the new binding is `declared_registry_path` |
 

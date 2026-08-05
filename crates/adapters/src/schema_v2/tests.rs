@@ -6619,6 +6619,17 @@ fn released_registration_restores_registry_authority_across_batches() -> anyhow:
     assert!(released.normalized_events.iter().any(|event| {
         event.event_kind == "SurfaceBound" && event.resource_id == Some(registry_resource)
     }));
+    let persisted_resources = first
+        .resources
+        .iter()
+        .map(|resource| (resource.chain_id.clone(), resource.resource_id))
+        .collect();
+    let persisted_surfaces = first
+        .name_surfaces
+        .iter()
+        .map(|surface| (surface.chain_id.clone(), surface.logical_name_id.clone()))
+        .collect();
+    assert_batch_referential_integrity(&released, &persisted_resources, &persisted_surfaces)?;
 
     let mut prior_events = first
         .normalized_events
