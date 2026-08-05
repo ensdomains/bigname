@@ -9,6 +9,9 @@ use serde_json::Value;
 use tokio::process::{Child, Command};
 
 type ProfileSnapshot = Vec<(PathBuf, Vec<u8>)>;
+const E2E_MANIFEST_PROFILE_ENV: &str = "BIGNAME_E2E_MANIFEST_PROFILE_ROOT";
+const RUNTIME_PROFILE_MIRROR_PREFIX: &str = ".bigname-e2e-runtime-profile-";
+
 struct CachedProfileRunner {
     snapshot: ProfileSnapshot,
     binary: Weak<ProfileRunnerBinary>,
@@ -17,6 +20,43 @@ struct CachedProfileRunner {
 
 struct ProfileRunnerBinary {
     path: PathBuf,
+}
+
+struct ProfileBuildLock {
+    _file: std::fs::File,
+}
+
+impl ProfileBuildLock {
+    fn acquire(path: &Path) -> Result<Self> {
+        let file = open_profile_build_lock(path)?;
+        file.lock()
+            .with_context(|| format!("lock deployment-profile Cargo build at {path:?}"))?;
+        Ok(Self { _file: file })
+    }
+
+    #[cfg(test)]
+    fn try_acquire(path: &Path) -> Result<Option<Self>> {
+        let file = open_profile_build_lock(path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error)
+                .with_context(|| format!("try deployment-profile Cargo build lock at {path:?}")),
+        }
+    }
+}
+
+fn open_profile_build_lock(path: &Path) -> Result<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("open deployment-profile Cargo build lock at {path:?}"))
 }
 
 impl ProfileRunnerBinary {
@@ -164,6 +204,11 @@ async fn build_phase_runner_binary(
     repo_root: &Path,
     manifests_root: Option<&Path>,
 ) -> Result<PathBuf> {
+    let build_lock_path = profile_build_lock_path(repo_root);
+    let _build_lock =
+        tokio::task::spawn_blocking(move || ProfileBuildLock::acquire(&build_lock_path))
+            .await
+            .context("join deployment-profile Cargo build-lock task")??;
     let runtime_profile = match manifests_root {
         Some(profile) => Some(RuntimeProfileMirror::create(repo_root, profile)?),
         None => None,
@@ -179,6 +224,9 @@ async fn build_phase_runner_binary(
         "--bin",
         "phase-runner",
     ]);
+    if let Some(runtime_profile) = runtime_profile.as_ref() {
+        command.env(E2E_MANIFEST_PROFILE_ENV, &runtime_profile.path);
+    }
     let stdout = run_to_completion(command, "phase-runner binary build").await?;
     let executable = parse_phase_runner_binary(repo_root, stdout.as_bytes())?;
     if manifests_root.is_none() {
@@ -187,6 +235,20 @@ async fn build_phase_runner_binary(
     let linked_path = hard_link_profile_binary(&executable)?;
     drop(runtime_profile);
     Ok(linked_path)
+}
+
+fn profile_build_lock_path(repo_root: &Path) -> PathBuf {
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                repo_root.join(path)
+            }
+        })
+        .unwrap_or_else(|| repo_root.join("target"));
+    target_dir.join(".bigname-e2e-phase-runner-build.lock")
 }
 
 fn hard_link_profile_binary(executable: &Path) -> Result<PathBuf> {
@@ -287,8 +349,10 @@ struct RuntimeProfileMirror {
 
 impl RuntimeProfileMirror {
     fn create(repo_root: &Path, source: &Path) -> Result<Self> {
-        let path = repo_root.join("manifests").join(format!(
-            ".bigname-e2e-runtime-profile-{}",
+        let manifest_root = repo_root.join("manifests");
+        sweep_stale_runtime_profile_mirrors(&manifest_root)?;
+        let path = manifest_root.join(format!(
+            "{RUNTIME_PROFILE_MIRROR_PREFIX}{}",
             std::process::id()
         ));
         if path.exists() {
@@ -299,6 +363,38 @@ impl RuntimeProfileMirror {
         copy_profile_tree(source, &path)?;
         Ok(Self { path })
     }
+}
+
+fn sweep_stale_runtime_profile_mirrors(manifest_root: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(manifest_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(pid) = name.strip_prefix(RUNTIME_PROFILE_MIRROR_PREFIX) else {
+            continue;
+        };
+        let is_live = pid
+            .parse::<u32>()
+            .ok()
+            .is_some_and(|pid| Path::new("/proc").join(pid.to_string()).is_dir());
+        if is_live {
+            continue;
+        }
+        let path = entry.path();
+        if let Err(error) = std::fs::remove_dir_all(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error).with_context(|| {
+                format!("remove stale runtime deployment-profile mirror {path:?}")
+            });
+        }
+    }
+    Ok(())
 }
 
 impl Drop for RuntimeProfileMirror {
@@ -1952,10 +2048,30 @@ mod tests {
     }
 
     #[test]
-    fn profile_runner_binary_removes_executable_on_drop() -> Result<()> {
+    fn profile_runner_binary_and_build_lock_have_scoped_lifetimes() -> Result<()> {
         let (source_path, file) =
             create_process_log_file("phase-runner-hard-link-source", "drop-test")?;
         drop(file);
+        let lock_path = source_path.with_extension("profile-build.lock");
+        let first_lock = ProfileBuildLock::acquire(&lock_path)?;
+        assert!(
+            ProfileBuildLock::try_acquire(&lock_path)?.is_none(),
+            "a second e2e process must not enter the shared Cargo build/link window"
+        );
+        let waiter_path = lock_path.clone();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::sync_channel(1);
+        let waiter = std::thread::spawn(move || {
+            let acquired = ProfileBuildLock::acquire(&waiter_path);
+            acquired_tx.send(acquired).ok();
+        });
+        drop(first_lock);
+        let second_lock = acquired_rx
+            .recv_timeout(Duration::from_secs(2))
+            .context("the deployment-profile build lock must release with its scope")??;
+        drop(second_lock);
+        waiter
+            .join()
+            .map_err(|_| anyhow::anyhow!("deployment-profile build-lock waiter panicked"))?;
         let linked_path = hard_link_profile_binary(&source_path)?;
         let source_metadata = std::fs::metadata(&source_path)?;
         let linked_metadata = std::fs::metadata(&linked_path)?;
@@ -1968,6 +2084,7 @@ mod tests {
         let removed = !linked_path.exists();
         let source_retained = source_path.exists();
         std::fs::remove_file(&linked_path).ok();
+        std::fs::remove_file(&lock_path).ok();
         std::fs::remove_file(&source_path).ok();
         assert!(
             shares_inode,

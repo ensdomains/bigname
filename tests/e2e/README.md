@@ -2,8 +2,8 @@
 
 This package exercises ENSv1, ENSv2, and Basenames contract emissions against
 schema-v2 through the production `phase-runner` binary. It does not start the
-deleted indexer or worker, and it does not start the retained v1 API. Assertions
-that previously read HTTP responses now read schema-v2
+deleted indexer or coordinate live intake through the retained worker and v1
+API. Assertions that previously read HTTP responses now read schema-v2
 [projections](../../docs/glossary.md#projection) and phase state directly
 through the test-only `ProjectionReader`.
 
@@ -61,6 +61,9 @@ cannot satisfy CI.
    orphaned lineage as the audit trail, and winning projections must match a
    clean corpus. The composed Base/ENS case also proves the untouched chain
    does not move.
+   The rich-chain case also pins the #305 production history-loader fix: its
+   canonical read excludes the losing event before redo and returns the winning
+   event after redo through the chain-lineage join.
 6. Schema-v2 projections are queried directly. Route-shaped helper inputs are
    retained only to keep each scenario's semantic assertions recognizable;
    no network API server or legacy public-schema read occurs.
@@ -97,8 +100,8 @@ observable rather than being hidden as an ignored test.
 
 The crate contains 85 total tests when 24 harness/support checks are included.
 The pre-retarget crate contained 88; the net change is -3: five obsolete
-Cargo-artifact tests for the deleted API/indexer/worker binary bundle were
-removed, while deployment-profile binary lifecycle and normalized-event
+Cargo-artifact tests for the obsolete indexer/worker/v1-API coordination
+bundle were removed, while deployment-profile binary lifecycle and normalized-event
 parity-completeness regression tests were added. The pure in-memory
 `catchup_equivalence::primary_route_normalization_preserves_contract_instance_identity`
 normalization oracle is counted as support rather than as a contract-backed
@@ -173,7 +176,7 @@ semantic scenario. No semantic scenario was silently removed.
 
 ### Retired with reason (5)
 
-- `register_eth_name::live_worker_applies_registration_and_renewal_while_api_serves` — the continuously running worker/v1 API coordination loop was deleted with the old runtime.
+- `register_eth_name::live_worker_applies_registration_and_renewal_while_api_serves` — deleting `apps/indexer` removed the live intake-to-worker-to-v1-API coordination this scenario required.
 - `provider_faults::transient_get_code_retries_primary_without_using_configured_fallback` — runtime bytecode-hash admission and its `eth_getCode` retry path were deleted in Stage B.
 - `provider_faults::pruned_get_code_fails_closed_then_uses_configured_fallback` — the code-hash archive fallback was deleted with runtime bytecode-hash admission.
 - `resolver_records::byte_identical_public_resolver_copy_converges_to_admitted_profile` — observed-code-hash resolver admission was replaced by declared-list classification.

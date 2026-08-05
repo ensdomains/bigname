@@ -348,8 +348,8 @@ async fn rich_chain_live_reorg_converges_to_winning_branch() -> Result<()> {
         &db.pool,
         bigname_storage::EventHistoryFilter {
             namespace: Some("ens".to_owned()),
-            logical_name_id: Some(logical_name_id),
-            event_kinds: vec!["RecordChanged".to_owned()],
+            logical_name_id: Some(logical_name_id.clone()),
+            event_kinds: vec!["RecordChanged".to_owned(), "ResolverChanged".to_owned()],
             from_block: Some(i64::try_from(losing_event_block)?),
             to_block: Some(i64::try_from(losing_event_block)?),
             ..bigname_storage::EventHistoryFilter::default()
@@ -401,6 +401,25 @@ async fn rich_chain_live_reorg_converges_to_winning_branch() -> Result<()> {
     assert!(
         winning_ready,
         "winning branch was not projected after rewind; post-rewind events: {post_rewind_events}"
+    );
+    let production_winning_history = bigname_storage::load_event_history(
+        &db.pool,
+        bigname_storage::EventHistoryFilter {
+            namespace: Some("ens".to_owned()),
+            logical_name_id: Some(logical_name_id),
+            event_kinds: vec!["RecordChanged".to_owned(), "ResolverChanged".to_owned()],
+            from_block: Some(i64::try_from(winning_event_block)?),
+            to_block: Some(i64::try_from(winning_event_block)?),
+            ..bigname_storage::EventHistoryFilter::default()
+        },
+        true,
+    )
+    .await?;
+    assert!(
+        production_winning_history
+            .iter()
+            .any(|event| event.block_hash.as_deref() == Some(winning_hash.as_str())),
+        "the production canonical-history reader did not return the winning event after stamped redo"
     );
 
     let losing_event_count: i64 = sqlx::query_scalar(

@@ -173,6 +173,10 @@ pub(crate) fn manifest_profile_hash(manifest_root: &Path) -> io::Result<String> 
     Ok(hash_inputs(MANIFEST_PROFILE_HASH_FORMAT, &mut inputs))
 }
 
+pub(crate) fn is_hidden_directory_name(name: &OsStr) -> bool {
+    name.as_encoded_bytes().starts_with(b".")
+}
+
 fn hash_inputs(format: &[u8], inputs: &mut [Input]) -> String {
     inputs.sort();
 
@@ -302,7 +306,19 @@ fn collect_file(workspace_root: &Path, path: &Path, inputs: &mut Vec<Input>) -> 
 fn collect_manifest_event_blocks(workspace_root: &Path, inputs: &mut Vec<Input>) -> io::Result<()> {
     let manifest_root = workspace_root.join(MANIFEST_ROOT);
     let mut files = Vec::new();
-    collect_files_with_extension(&manifest_root, OsStr::new("toml"), &mut files)?;
+    let mut profile_entries = fs::read_dir(&manifest_root)?.collect::<Result<Vec<_>, _>>()?;
+    profile_entries.sort_by_key(|entry| entry.file_name());
+    for entry in profile_entries {
+        let name = entry.file_name();
+        let path = entry.path();
+        if path.is_dir() {
+            if !is_hidden_directory_name(&name) {
+                collect_files_with_extension(&path, OsStr::new("toml"), &mut files)?;
+            }
+        } else if path.extension() == Some(OsStr::new("toml")) {
+            files.push(path);
+        }
+    }
     files.sort();
 
     let mut event_count = 0usize;
