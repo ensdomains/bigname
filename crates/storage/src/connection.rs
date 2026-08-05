@@ -61,18 +61,18 @@ mod tests {
             collect_rust_source_files(&workspace_root.join(directory), &mut source_files);
         }
 
-        // The phase runner is the replacement runtime: it stamps its own
-        // interpretation-input hash and never joins the projection
-        // replay-version scheme this stamp protects.
-        let phase_runner_root = workspace_root.join("apps/phase-runner");
         let mut missing_stamps = Vec::new();
         for path in source_files {
-            if path == this_file || path.starts_with(&phase_runner_root) {
+            if path == this_file {
                 continue;
             }
             let source = fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-            missing_stamps.extend(find_unstamped_connection_constructors(&path, &source));
+            missing_stamps.extend(find_workspace_unstamped_connection_constructors(
+                workspace_root,
+                &path,
+                &source,
+            ));
         }
 
         assert!(
@@ -98,6 +98,48 @@ mod tests {
 
         let missing = find_unstamped_connection_constructors(Path::new("nearby_stamp.rs"), source);
         assert_eq!(missing.len(), 1, "{missing:#?}");
+    }
+
+    #[test]
+    fn workspace_audit_exempts_e2e_phase_runner_clients_but_not_other_tests() {
+        let source = r#"
+            use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+
+            async fn connect(options: PgConnectOptions) {
+                PgPoolOptions::new().connect_with(options).await.unwrap();
+            }
+        "#;
+        let workspace_root = Path::new("/workspace");
+        let e2e_harness = workspace_root.join("tests/e2e/src/harness/pipeline.rs");
+        let other_test = workspace_root.join("tests/conformance/src/harness.rs");
+
+        let exempt =
+            find_workspace_unstamped_connection_constructors(workspace_root, &e2e_harness, source);
+        let rejected =
+            find_workspace_unstamped_connection_constructors(workspace_root, &other_test, source);
+
+        assert!(exempt.is_empty(), "{exempt:#?}");
+        assert_eq!(rejected.len(), 1, "{rejected:#?}");
+    }
+
+    fn find_workspace_unstamped_connection_constructors(
+        workspace_root: &Path,
+        path: &Path,
+        source: &str,
+    ) -> Vec<String> {
+        // The phase runner is the replacement runtime: it stamps its own
+        // interpretation-input hash and never joins the projection
+        // replay-version scheme this stamp protects. The retargeted e2e suite
+        // is a client of that replacement runtime: its PostgreSQL sessions
+        // select schema-v2 projections and phase state and likewise never join
+        // the v1 projection replay-version scheme.
+        let phase_runner_root = workspace_root.join("apps/phase-runner");
+        let e2e_root = workspace_root.join("tests/e2e");
+        if path.starts_with(phase_runner_root) || path.starts_with(e2e_root) {
+            return Vec::new();
+        }
+
+        find_unstamped_connection_constructors(path, source)
     }
 
     fn find_unstamped_connection_constructors(path: &Path, source: &str) -> Vec<String> {
