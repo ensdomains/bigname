@@ -328,7 +328,10 @@ pub(super) async fn load_relevant_events(
               OR ne.resource_id = $7
           )
           AND ne.canonicality_state {CANONICAL_STATE_FILTER}
-          AND rb.canonicality_state {CANONICAL_STATE_FILTER}
+          AND (
+              ne.block_hash IS NULL
+              OR rb.canonicality_state {CANONICAL_STATE_FILTER}
+          )
         ORDER BY
             ne.block_number NULLS FIRST,
             COALESCE(ne.log_index, 2147483647),

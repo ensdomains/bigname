@@ -85,7 +85,7 @@ candidate_keys AS (
          'safe'::canonicality_state,
          'finalized'::canonicality_state
      )
-    JOIN readable_lineage permission_lineage
+    LEFT JOIN readable_lineage permission_lineage
       ON permission_lineage.chain_id = permission.chain_id
      AND permission_lineage.block_hash = permission.block_hash
     CROSS JOIN LATERAL (
@@ -98,6 +98,10 @@ candidate_keys AS (
       AND (
           ne.after_state -> 'scope' ->> 'kind' = 'resource'
           OR ne.before_state -> 'scope' ->> 'kind' = 'resource'
+      )
+      AND (
+          permission.block_hash IS NULL
+          OR permission_lineage.block_hash IS NOT NULL
       )
       AND scope.scope ->> 'kind' = 'resolver'
       AND scope.scope ->> 'chain_id' IS NOT NULL

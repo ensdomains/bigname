@@ -312,7 +312,10 @@ pub(super) async fn load_current_bindings(
               AND ne.resource_id = candidate.resource_id
               AND ne.chain_id = $2
               AND ne.canonicality_state {CANONICAL_STATE_FILTER}
-              AND rb.canonicality_state {CANONICAL_STATE_FILTER}
+              AND (
+                  ne.block_hash IS NULL
+                  OR rb.canonicality_state {CANONICAL_STATE_FILTER}
+              )
             ORDER BY
                 ne.block_number DESC NULLS LAST,
                 ne.log_index DESC NULLS LAST,
@@ -501,7 +504,10 @@ pub(super) async fn load_alias_events(
         WHERE ne.event_kind = $1
           AND ne.chain_id = $2
           AND ne.canonicality_state {CANONICAL_STATE_FILTER}
-          AND rb.canonicality_state {CANONICAL_STATE_FILTER}
+          AND (
+              ne.block_hash IS NULL
+              OR rb.canonicality_state {CANONICAL_STATE_FILTER}
+          )
           AND LOWER(ne.after_state->>'resolver') = $3
         ORDER BY
             ne.after_state->>'from_dns_encoded_name',

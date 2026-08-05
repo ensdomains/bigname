@@ -1422,6 +1422,76 @@ async fn manifest_events_enqueue_manifest_sensitive_projection_keys() -> Result<
 }
 
 #[tokio::test]
+async fn unanchored_events_survive_manifest_invalidation_dependency_queries() -> Result<()> {
+    let database = test_database().await?;
+    let resource_id = Uuid::new_v4();
+
+    insert_resource(&database, resource_id).await?;
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:unanchored-manifest-dependency",
+            namespace: "ens",
+            logical_name_id: Some("ens:unanchored.eth"),
+            resource_id: Some(resource_id),
+            event_kind: "RecordChanged",
+            source_family: "ens_v1_resolver_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: None,
+            block_hash: None,
+            before_state: json!({}),
+            after_state: json!({
+                "record_key": "text:email",
+                "record_family": "text",
+                "selector_key": "email"
+            }),
+            observed_at: timestamp(1_800_000_200),
+        },
+    )
+    .await?;
+    derive_normalized_event_invalidations(database.pool(), 100).await?;
+    sqlx::query("DELETE FROM projection_invalidations")
+        .execute(database.pool())
+        .await
+        .context("failed to clear setup invalidations")?;
+
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:unanchored-manifest-update",
+            namespace: "ens",
+            logical_name_id: None,
+            resource_id: None,
+            event_kind: "SourceManifestUpdated",
+            source_family: "ens_v1_registry_l1",
+            derivation_kind: "manifest_sync",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: None,
+            block_hash: None,
+            before_state: json!({}),
+            after_state: json!({
+                "manifest_version": 2,
+                "normalizer_version": "test"
+            }),
+            observed_at: timestamp(1_800_000_201),
+        },
+    )
+    .await?;
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 1);
+    let invalidations = load_invalidations(&database).await?;
+    assert!(has_key(
+        &invalidations,
+        "record_inventory_current",
+        &resource_id.to_string()
+    ));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn generation_bump_releases_in_flight_claim_for_serialized_reapply() -> Result<()> {
     let database = test_database().await?;
     let resource_id = Uuid::new_v4();

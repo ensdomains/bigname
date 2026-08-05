@@ -54,10 +54,10 @@ target_resource_events AS (
           'safe'::canonicality_state,
           'finalized'::canonicality_state
       )
-    JOIN readable_lineage target_lineage
+    LEFT JOIN readable_lineage target_lineage
       ON target_lineage.chain_id = target.chain_id
      AND target_lineage.block_hash = target.block_hash
-    JOIN readable_lineage resource_lineage
+    LEFT JOIN readable_lineage resource_lineage
       ON resource_lineage.chain_id = resource.chain_id
      AND resource_lineage.block_hash = resource.block_hash
     WHERE target.derivation_kind IN (
@@ -75,6 +75,14 @@ target_resource_events AS (
           'canonical'::canonicality_state,
           'safe'::canonicality_state,
           'finalized'::canonicality_state
+      )
+      AND (
+          target.block_hash IS NULL
+          OR target_lineage.block_hash IS NOT NULL
+      )
+      AND (
+          resource.block_hash IS NULL
+          OR resource_lineage.block_hash IS NOT NULL
       )
 ),
 candidate_keys AS (

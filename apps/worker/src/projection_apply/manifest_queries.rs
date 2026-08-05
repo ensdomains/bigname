@@ -39,10 +39,10 @@ record_inventory_targets AS (
           'safe'::canonicality_state,
           'finalized'::canonicality_state
      )
-    JOIN readable_lineage target_lineage
+    LEFT JOIN readable_lineage target_lineage
       ON target_lineage.chain_id = target.chain_id
      AND target_lineage.block_hash = target.block_hash
-    JOIN readable_lineage resource_lineage
+    LEFT JOIN readable_lineage resource_lineage
       ON resource_lineage.chain_id = resource.chain_id
      AND resource_lineage.block_hash = resource.block_hash
     WHERE target.event_kind IN (
@@ -57,6 +57,14 @@ record_inventory_targets AS (
           'safe'::canonicality_state,
           'finalized'::canonicality_state
       )
+      AND (
+          target.block_hash IS NULL
+          OR target_lineage.block_hash IS NOT NULL
+      )
+      AND (
+          resource.block_hash IS NULL
+          OR resource_lineage.block_hash IS NOT NULL
+      )
 ),
 resolver_targets AS (
     SELECT DISTINCT
@@ -64,7 +72,7 @@ resolver_targets AS (
         target.chain_id,
         lower(resolver.resolver_address) AS resolver_address
     FROM normalized_events target
-    JOIN readable_lineage target_lineage
+    LEFT JOIN readable_lineage target_lineage
       ON target_lineage.chain_id = target.chain_id
      AND target_lineage.block_hash = target.block_hash
     CROSS JOIN LATERAL (
@@ -81,6 +89,10 @@ resolver_targets AS (
           'canonical'::canonicality_state,
           'safe'::canonicality_state,
           'finalized'::canonicality_state
+      )
+      AND (
+          target.block_hash IS NULL
+          OR target_lineage.block_hash IS NOT NULL
       )
 
     UNION
@@ -111,9 +123,11 @@ candidate_keys AS (
           'safe'::canonicality_state,
           'finalized'::canonicality_state
      )
-    JOIN readable_lineage surface_lineage
+    LEFT JOIN readable_lineage surface_lineage
       ON surface_lineage.chain_id = ns.chain_id
      AND surface_lineage.block_hash = ns.block_hash
+    WHERE ns.block_hash IS NULL
+       OR surface_lineage.block_hash IS NOT NULL
 
     UNION ALL
 

@@ -46,7 +46,7 @@ pub(super) fn canonical_declared_child_sources_query<'a>(
         readable_events AS (
             SELECT ne.*
             FROM normalized_events ne
-            JOIN readable_lineage lineage
+            LEFT JOIN readable_lineage lineage
               ON lineage.chain_id = ne.chain_id
              AND lineage.block_hash = ne.block_hash
             WHERE ne.canonicality_state IN (
@@ -54,6 +54,10 @@ pub(super) fn canonical_declared_child_sources_query<'a>(
                 'safe'::canonicality_state,
                 'finalized'::canonicality_state
             )
+              AND (
+                  ne.block_hash IS NULL
+                  OR lineage.block_hash IS NOT NULL
+              )
         ),
         readable_surfaces AS (
             SELECT surface.*
