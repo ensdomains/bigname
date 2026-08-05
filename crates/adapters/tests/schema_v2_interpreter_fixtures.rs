@@ -3,6 +3,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_sol_types::{SolEvent, sol};
 use anyhow::{Context, Result, bail};
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, BatchOutput, DiscoveryRuleInput, ManifestInput,
@@ -17,6 +19,20 @@ use uuid::Uuid;
 
 const RAW_EVENTS: &str = include_str!("fixtures/interpreters/raw-events.json");
 const EXPECTED_OUTPUTS: &str = include_str!("fixtures/interpreters/expected-outputs.json");
+const DENSE_SAME_TRANSACTION: &str =
+    include_str!("fixtures/interpreters/dense-same-transaction.json");
+
+sol! {
+    event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
+    event AddrChanged(bytes32 indexed node, address a);
+    event NameRegistered(
+        string name,
+        bytes32 indexed label,
+        address indexed owner,
+        uint256 cost,
+        uint256 expires
+    );
+}
 #[derive(Deserialize)]
 struct Corpus {
     cases: Vec<Case>,
@@ -63,7 +79,7 @@ struct Block {
     timestamp: i64,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Log {
     chain: String,
     block_hash: String,
@@ -74,6 +90,22 @@ struct Log {
     emitting_address: String,
     topics: Vec<String>,
     data: String,
+}
+
+#[derive(Deserialize)]
+struct DenseFixture {
+    id: String,
+    runner: Runner,
+    transaction_count: usize,
+    register_with_config_per_transaction: usize,
+    register_per_transaction: usize,
+    unrelated_logs_per_transaction: usize,
+    expected_raw_log_count: usize,
+    expected_registration_count: usize,
+    expected_normalized_event_count: usize,
+    expected_output_keccak: String,
+    manifests: Vec<FixtureManifest>,
+    block: Block,
 }
 
 #[derive(Deserialize)]
@@ -166,6 +198,245 @@ fn schema_v2_output_seam_semantically_matches_the_committed_raw_event_tripwire()
         );
     }
     Ok(())
+}
+
+#[test]
+fn dense_same_transaction_output_matches_the_slow_path_snapshot() -> Result<()> {
+    let fixture: DenseFixture = serde_json::from_str(DENSE_SAME_TRANSACTION)?;
+    let case = dense_case(fixture)?;
+    assert_eq!(case.logs.len(), case.expected_raw_log_count);
+    let expected_gate = ExpectedCase {
+        id: case.case.id.clone(),
+        normalized_events: vec![serde_json::json!({"block_hash":case.case.blocks[0].hash})],
+        name_surfaces: Vec::new(),
+        surface_bindings: Vec::new(),
+        resources: Vec::new(),
+        token_lineages: Vec::new(),
+    };
+    let input = batch_input(&case.case, &expected_gate, &checked_in_manifests()?)?;
+    let started = std::time::Instant::now();
+    let output = interpret_with_incremental_equivalence(&case.case.id, input)?;
+    let elapsed = started.elapsed();
+    let registration_count = output
+        .normalized_events
+        .iter()
+        .filter(|event| event.event_kind == "RegistrationGranted")
+        .count();
+    let snapshot = format!("{output:#?}");
+    let output_keccak = format!("{:#x}", keccak256(snapshot.as_bytes()));
+    eprintln!(
+        "dense_corpus raw_logs={} normalized_events={} registrations={} output_keccak={} elapsed_ms={:.3}",
+        case.logs.len(),
+        output.normalized_events.len(),
+        registration_count,
+        output_keccak,
+        elapsed.as_secs_f64() * 1_000.0,
+    );
+    assert_eq!(registration_count, case.expected_registration_count);
+    assert_eq!(
+        output.normalized_events.len(),
+        case.expected_normalized_event_count
+    );
+    assert_eq!(output_keccak, case.expected_output_keccak);
+    Ok(())
+}
+
+struct MaterializedDenseCase {
+    expected_raw_log_count: usize,
+    expected_registration_count: usize,
+    expected_normalized_event_count: usize,
+    expected_output_keccak: String,
+    logs: Vec<Log>,
+    case: Case,
+}
+
+fn dense_case(fixture: DenseFixture) -> Result<MaterializedDenseCase> {
+    const REGISTRATION_CONTROLLER: &str = "0x00000000000000000000000000000000000050aa";
+    const REGISTRY: &str = "0x00000000000000000000000000000000000050bb";
+    const RESOLVER: &str = "0x00000000000000000000000000000000000050cc";
+    const REGISTRANT: &str = "0x0000000000000000000000000000000000005011";
+    let parent_node =
+        "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae".parse::<B256>()?;
+    let controller = REGISTRATION_CONTROLLER.parse::<Address>()?;
+    let registrant = REGISTRANT.parse::<Address>()?;
+    let record_address = REGISTRANT.parse::<Address>()?;
+    let logs_per_transaction = fixture.register_with_config_per_transaction * 4
+        + fixture.register_per_transaction * 2
+        + fixture.unrelated_logs_per_transaction;
+    let mut logs = Vec::with_capacity(fixture.transaction_count * logs_per_transaction);
+    for transaction_index in 0..fixture.transaction_count {
+        let transaction_hash = format!("0x{:064x}", transaction_index + 1);
+        let mut log_index = 0_i64;
+        for registration_index in 0..fixture.register_with_config_per_transaction {
+            let label = format!("bulk-config-{transaction_index:02}-{registration_index:03}");
+            let (labelhash, node) = dense_namehash(parent_node, &label);
+            logs.push(dense_log(
+                &fixture.block,
+                &transaction_hash,
+                transaction_index,
+                log_index,
+                REGISTRY,
+                NewOwner {
+                    node: parent_node,
+                    label: labelhash,
+                    owner: controller,
+                }
+                .encode_log_data(),
+            ));
+            log_index += 1;
+            logs.push(dense_log(
+                &fixture.block,
+                &transaction_hash,
+                transaction_index,
+                log_index,
+                RESOLVER,
+                AddrChanged {
+                    node,
+                    a: record_address,
+                }
+                .encode_log_data(),
+            ));
+            log_index += 1;
+            logs.push(dense_log(
+                &fixture.block,
+                &transaction_hash,
+                transaction_index,
+                log_index,
+                REGISTRY,
+                NewOwner {
+                    node: parent_node,
+                    label: labelhash,
+                    owner: registrant,
+                }
+                .encode_log_data(),
+            ));
+            log_index += 1;
+            logs.push(dense_log(
+                &fixture.block,
+                &transaction_hash,
+                transaction_index,
+                log_index,
+                REGISTRATION_CONTROLLER,
+                NameRegistered {
+                    name: label,
+                    label: labelhash,
+                    owner: registrant,
+                    cost: U256::from(1_u64),
+                    expires: U256::from(1_800_000_000_u64),
+                }
+                .encode_log_data(),
+            ));
+            log_index += 1;
+        }
+        for registration_index in 0..fixture.register_per_transaction {
+            let label = format!("bulk-direct-{transaction_index:02}-{registration_index:03}");
+            let (labelhash, _) = dense_namehash(parent_node, &label);
+            logs.push(dense_log(
+                &fixture.block,
+                &transaction_hash,
+                transaction_index,
+                log_index,
+                REGISTRY,
+                NewOwner {
+                    node: parent_node,
+                    label: labelhash,
+                    owner: registrant,
+                }
+                .encode_log_data(),
+            ));
+            log_index += 1;
+            logs.push(dense_log(
+                &fixture.block,
+                &transaction_hash,
+                transaction_index,
+                log_index,
+                REGISTRATION_CONTROLLER,
+                NameRegistered {
+                    name: label,
+                    label: labelhash,
+                    owner: registrant,
+                    cost: U256::from(1_u64),
+                    expires: U256::from(1_800_000_000_u64),
+                }
+                .encode_log_data(),
+            ));
+            log_index += 1;
+        }
+        for unrelated_index in 0..fixture.unrelated_logs_per_transaction {
+            let node = keccak256(
+                format!("unrelated-{transaction_index:02}-{unrelated_index:03}").as_bytes(),
+            );
+            logs.push(dense_log(
+                &fixture.block,
+                &transaction_hash,
+                transaction_index,
+                log_index,
+                RESOLVER,
+                AddrChanged {
+                    node,
+                    a: record_address,
+                }
+                .encode_log_data(),
+            ));
+            log_index += 1;
+        }
+        assert_eq!(usize::try_from(log_index)?, logs_per_transaction);
+    }
+    let case = Case {
+        id: fixture.id,
+        runner: fixture.runner,
+        manifests: fixture.manifests,
+        blocks: vec![fixture.block],
+        logs: Vec::new(),
+    };
+    let expected_raw_log_count = fixture.expected_raw_log_count;
+    let expected_registration_count = fixture.expected_registration_count;
+    let expected_normalized_event_count = fixture.expected_normalized_event_count;
+    let expected_output_keccak = fixture.expected_output_keccak;
+    Ok(MaterializedDenseCase {
+        expected_raw_log_count,
+        expected_registration_count,
+        expected_normalized_event_count,
+        expected_output_keccak,
+        case: Case {
+            logs: logs.clone(),
+            ..case
+        },
+        logs,
+    })
+}
+
+fn dense_namehash(parent_node: B256, label: &str) -> (B256, B256) {
+    let labelhash = keccak256(label.as_bytes());
+    let mut path = [0_u8; 64];
+    path[..32].copy_from_slice(parent_node.as_slice());
+    path[32..].copy_from_slice(labelhash.as_slice());
+    (labelhash, keccak256(path))
+}
+
+fn dense_log(
+    block: &Block,
+    transaction_hash: &str,
+    transaction_index: usize,
+    log_index: i64,
+    emitting_address: &str,
+    encoded: alloy_primitives::LogData,
+) -> Log {
+    Log {
+        chain: "ethereum-mainnet".to_owned(),
+        block_hash: block.hash.clone(),
+        block_number: block.number,
+        transaction_hash: transaction_hash.to_owned(),
+        transaction_index: i64::try_from(transaction_index).expect("transaction index fits i64"),
+        log_index,
+        emitting_address: emitting_address.to_owned(),
+        topics: encoded
+            .topics()
+            .iter()
+            .map(|topic| format!("{topic:#x}"))
+            .collect(),
+        data: format!("0x{}", alloy_primitives::hex::encode(encoded.data)),
+    }
 }
 
 fn interpret_with_incremental_equivalence(case_id: &str, input: BatchInput) -> Result<BatchOutput> {

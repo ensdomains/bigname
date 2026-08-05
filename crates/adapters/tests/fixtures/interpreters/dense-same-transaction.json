@@ -1,0 +1,52 @@
+{
+  "id": "ens_bulk_same_transaction_registration_density",
+  "runner": "unwrapped_authority",
+  "transaction_count": 4,
+  "register_with_config_per_transaction": 40,
+  "register_per_transaction": 40,
+  "unrelated_logs_per_transaction": 48,
+  "expected_raw_log_count": 1152,
+  "expected_registration_count": 320,
+  "expected_normalized_event_count": 3232,
+  "expected_output_keccak": "0xdea10ee1d168b5444bfba23ed1f9b174c6c926be9b98997c1174bc486199ff02",
+  "manifests": [
+    {
+      "namespace": "ens",
+      "source_family": "ens_v1_registrar_l1",
+      "chain": "ethereum-mainnet",
+      "deployment_epoch": "ens_v1",
+      "file_path": "manifests/mainnet/ethereum/ens/ens_v1_registrar_l1/v1.toml",
+      "declaration_name": "legacy_registrar_controller",
+      "role": "legacy_registrar_controller",
+      "address": "0x00000000000000000000000000000000000050aa",
+      "contract_instance_id": "00000000-0000-0000-0000-000000000031"
+    },
+    {
+      "namespace": "ens",
+      "source_family": "ens_v1_registry_l1",
+      "chain": "ethereum-mainnet",
+      "deployment_epoch": "ens_v1",
+      "file_path": "manifests/mainnet/ethereum/ens/ens_v1_registry_l1/v3.toml",
+      "declaration_name": "registry",
+      "role": "registry",
+      "address": "0x00000000000000000000000000000000000050bb",
+      "contract_instance_id": "00000000-0000-0000-0000-000000000032"
+    },
+    {
+      "namespace": "ens",
+      "source_family": "ens_v1_resolver_l1",
+      "chain": "ethereum-mainnet",
+      "deployment_epoch": "ens_v1",
+      "file_path": "manifests/mainnet/ethereum/ens/ens_v1_resolver_l1/v1.toml",
+      "declaration_name": "resolver",
+      "role": "public_resolver",
+      "address": "0x00000000000000000000000000000000000050cc",
+      "contract_instance_id": "00000000-0000-0000-0000-000000000033"
+    }
+  ],
+  "block": {
+    "hash": "0xd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+    "number": 201,
+    "timestamp": 1700000201
+  }
+}
