@@ -96,25 +96,17 @@ async fn ens_snapshot_position_profile(
         return Ok(("ethereum", "ethereum-mainnet"));
     }
 
-    let mainnet_checkpoint = load_chain_checkpoint(pool, "ethereum-mainnet")
+    let mainnet_has_head = snapshot_chain_has_head(pool, "ethereum-mainnet")
         .await
-        .map_err(|error| {
-            snapshot_selection_api_error(SnapshotSelectionError::internal(format!(
-                "failed to load ethereum-mainnet checkpoint for ENS snapshot selection: {error}"
-            )))
-        })?;
-    if mainnet_checkpoint.is_some() {
+        .map_err(snapshot_selection_api_error)?;
+    if mainnet_has_head {
         return Ok(("ethereum", "ethereum-mainnet"));
     }
 
-    let sepolia_checkpoint = load_chain_checkpoint(pool, "ethereum-sepolia")
+    let sepolia_has_head = snapshot_chain_has_head(pool, "ethereum-sepolia")
         .await
-        .map_err(|error| {
-            snapshot_selection_api_error(SnapshotSelectionError::internal(format!(
-                "failed to load ethereum-sepolia checkpoint for ENS snapshot selection: {error}"
-            )))
-        })?;
-    if sepolia_checkpoint.is_some() {
+        .map_err(snapshot_selection_api_error)?;
+    if sepolia_has_head {
         return Ok(("ethereum-sepolia", "ethereum-sepolia"));
     }
 

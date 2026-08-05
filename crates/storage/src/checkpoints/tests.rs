@@ -525,7 +525,7 @@ async fn checkpoint_promotion_rejects_partial_ancestry_path() -> Result<()> {
 }
 
 #[tokio::test]
-async fn resolves_exact_name_snapshot_from_checkpoint_state() -> Result<()> {
+async fn resolves_exact_name_snapshot_from_phase_state_without_legacy_checkpoints() -> Result<()> {
     let database = TestDatabase::new().await?;
     let base_timestamp = timestamp(1_717_171_717);
 
@@ -538,7 +538,7 @@ async fn resolves_exact_name_snapshot_from_checkpoint_state() -> Result<()> {
                 None,
                 1,
                 base_timestamp,
-                CanonicalityState::Observed,
+                CanonicalityState::Finalized,
             ),
             lineage_block(
                 "ethereum-mainnet",
@@ -546,7 +546,7 @@ async fn resolves_exact_name_snapshot_from_checkpoint_state() -> Result<()> {
                 Some("0x001"),
                 2,
                 timestamp(1_717_171_729),
-                CanonicalityState::Observed,
+                CanonicalityState::Safe,
             ),
             lineage_block(
                 "ethereum-mainnet",
@@ -554,30 +554,60 @@ async fn resolves_exact_name_snapshot_from_checkpoint_state() -> Result<()> {
                 Some("0x002"),
                 3,
                 timestamp(1_717_171_741),
-                CanonicalityState::Observed,
+                CanonicalityState::Canonical,
             ),
         ],
     )
     .await?;
-    advance_chain_checkpoints(
-        database.pool(),
-        &ChainCheckpointUpdate {
-            chain_id: "ethereum-mainnet".to_owned(),
-            canonical: Some(CheckpointBlockRef {
-                block_hash: "0x003".to_owned(),
-                block_number: 3,
-            }),
-            safe: Some(CheckpointBlockRef {
-                block_hash: "0x002".to_owned(),
-                block_number: 2,
-            }),
-            finalized: Some(CheckpointBlockRef {
-                block_hash: "0x001".to_owned(),
-                block_number: 1,
-            }),
-        },
+    sqlx::query(
+        "CREATE TABLE chain_heads (
+            chain_id TEXT PRIMARY KEY,
+            latest_block_hash TEXT NOT NULL,
+            latest_block_number BIGINT NOT NULL,
+            safe_block_hash TEXT,
+            safe_block_number BIGINT,
+            finalized_block_hash TEXT,
+            finalized_block_number BIGINT
+        )",
     )
+    .execute(database.pool())
     .await?;
+    sqlx::query(
+        "CREATE TABLE chain_phase_state (
+            chain_id TEXT NOT NULL,
+            phase_name TEXT NOT NULL,
+            phase_status TEXT NOT NULL,
+            current_block_number BIGINT,
+            current_block_hash TEXT,
+            input_content_hash TEXT,
+            PRIMARY KEY (chain_id, phase_name)
+        )",
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO chain_heads (
+            chain_id, latest_block_hash, latest_block_number,
+            safe_block_hash, safe_block_number,
+            finalized_block_hash, finalized_block_number
+         ) VALUES ('ethereum-mainnet', '0x003', 3, '0x002', 2, '0x001', 1)",
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO chain_phase_state (
+            chain_id, phase_name, phase_status, current_block_number,
+            current_block_hash, input_content_hash
+         ) VALUES ('ethereum-mainnet', 'project', 'completed', 3, '0x003', $1)",
+    )
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .execute(database.pool())
+    .await?;
+
+    let legacy_checkpoint_count: i64 = query_scalar("SELECT COUNT(*) FROM chain_checkpoints")
+        .fetch_one(database.pool())
+        .await?;
+    assert_eq!(legacy_checkpoint_count, 0);
 
     let scope = SnapshotSelectionScope::new(
         vec![SnapshotPositionRequirement::new(
@@ -602,6 +632,24 @@ async fn resolves_exact_name_snapshot_from_checkpoint_state() -> Result<()> {
         snapshot.chain_positions.to_value()["ethereum"]["block_number"],
         3
     );
+
+    for (consistency, block_hash, block_number) in [
+        (SnapshotConsistency::Safe, "0x002", 2),
+        (SnapshotConsistency::Finalized, "0x001", 1),
+    ] {
+        let input = SnapshotSelectorInput::new(None, None, consistency)?;
+        let snapshot =
+            resolve_exact_name_snapshot_selection(database.pool(), &scope, &input).await?;
+        assert_eq!(snapshot.consistency, consistency);
+        assert_eq!(
+            snapshot.chain_positions.to_value()["ethereum"]["block_hash"],
+            block_hash
+        );
+        assert_eq!(
+            snapshot.chain_positions.to_value()["ethereum"]["block_number"],
+            block_number
+        );
+    }
 
     database.cleanup().await
 }

@@ -101,7 +101,7 @@ async fn resolve_diagnostic_name_with_resolution_auxiliary(
     )
     .await?;
     let selected_snapshot = resolve_v2_snapshot_for(
-        &state.pool,
+        &state.lookup_pool,
         &scope,
         params.at.as_ref(),
         params.finality,

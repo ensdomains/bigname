@@ -17,8 +17,7 @@ use super::support::{
 };
 use super::{
     Envelope, RawQueryParams, Source, Status, V2Error, V2Result, api_error_to_v2,
-    load_served_head_meta, shared_product_reason, snapshot_meta,
-    v2_exact_name_snapshot_scope_with_resolution_auxiliary,
+    shared_product_reason, snapshot_meta,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -158,14 +157,7 @@ pub(crate) async fn get_primary_name(
     let mut meta = if let Some(selected_snapshot) = read.selected_snapshot.as_ref() {
         snapshot_meta(selected_snapshot)?
     } else {
-        let snapshot_scope = v2_exact_name_snapshot_scope_with_resolution_auxiliary(
-            &state,
-            &params.namespace,
-            None,
-            false,
-        )
-        .await?;
-        load_served_head_meta(&state.pool, &snapshot_scope).await?
+        Default::default()
     };
     meta.source = params.source.meta_source();
 

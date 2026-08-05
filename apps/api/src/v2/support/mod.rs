@@ -7,9 +7,9 @@ use bigname_storage::{
     NameCurrentRow, PrimaryNameClaimStatus, RecordInventoryCurrentRow, SelectedSnapshot,
     SnapshotConsistency, SnapshotPositionRequirement, SnapshotProjectionRead,
     SnapshotSelectionError, SnapshotSelectionErrorKind, SnapshotSelectionScope,
-    load_chain_checkpoint, load_name_current_for_snapshot, load_primary_name_current_snapshot,
-    load_record_inventory_current, load_record_inventory_current_for_snapshot,
-    load_surface_bindings_by_logical_name_id, parse_rfc3339_utc_timestamp,
+    SnapshotSelectorInput, load_name_current_for_snapshot, load_record_inventory_current,
+    load_record_inventory_current_for_snapshot, load_surface_bindings_by_logical_name_id,
+    parse_rfc3339_utc_timestamp, resolve_exact_name_snapshot_selection, snapshot_chain_has_head,
 };
 use serde_json::json;
 use sqlx::{

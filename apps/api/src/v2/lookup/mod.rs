@@ -4,6 +4,7 @@ use axum::{
     Json,
     extract::{State, rejection::JsonRejection},
 };
+use bigname_storage::SelectedSnapshot;
 use tracing::error;
 
 use super::support::{load_reverse_identity_records_live, load_reverse_identity_records_page_live};
@@ -13,13 +14,16 @@ use super::{
     Envelope, Meta, NoQueryParams, Page, Relation, RelationSet, Status, V2Error, V2Result, encode,
 };
 
+mod admission;
 mod build;
 mod cursor;
 mod dto;
 mod head;
+mod page;
 mod parse;
 mod scope;
 
+use admission::{require_name_records_at_served_head, require_reverse_records_at_served_head};
 use build::{
     build_forward_detail_record, build_forward_feed_record, build_reverse_detail_record,
     build_reverse_feed_record, lookup_address_status,
@@ -29,7 +33,8 @@ use cursor::{
     reverse_identity_storage_cursor,
 };
 use dto::{LookupInput, LookupKind, LookupRecord, LookupRequest, LookupResult};
-pub(crate) use head::load_served_head_meta;
+use head::{load_served_head, revalidate_served_head};
+use page::ReverseLookupPage;
 use parse::{
     LookupProfile, ParsedAddressLookup, ParsedNameLookup, ensure_lookup_batch_limit,
     parse_address_input, parse_lookup_json_body, parse_lookup_namespace, parse_lookup_profile,
@@ -87,13 +92,31 @@ pub(crate) async fn get_lookup(
     let snapshot_scope =
         lookup_snapshot_scope(&state, namespace, &name_inputs, !address_inputs.is_empty()).await?;
     let served_head = match snapshot_scope.as_ref() {
-        Some(scope) => load_served_head_meta(&state.pool, scope).await?,
-        None => Meta::default(),
+        Some(scope) => load_served_head(&state.lookup_pool, scope).await?,
+        None => None,
     };
 
     let mut results = vec![None; body.inputs.len()];
-    render_name_lookup_results(&state, profile, &name_inputs, &mut results).await?;
-    render_reverse_lookup_results(&state, profile, &address_inputs, &mut results).await?;
+    let selected_snapshot = served_head.as_ref().map(head::ServedHead::selected);
+    render_name_lookup_results(
+        &state,
+        profile,
+        &name_inputs,
+        selected_snapshot,
+        &mut results,
+    )
+    .await?;
+    render_reverse_lookup_results(
+        &state,
+        profile,
+        &address_inputs,
+        selected_snapshot,
+        &mut results,
+    )
+    .await?;
+    if let Some(served_head) = served_head.as_ref() {
+        revalidate_served_head(&state.lookup_pool, served_head).await?;
+    }
 
     let data = results
         .into_iter()
@@ -103,7 +126,10 @@ pub(crate) async fn get_lookup(
     Ok(Json(Envelope {
         data,
         page: None,
-        meta: served_head,
+        meta: match served_head {
+            Some(served_head) => served_head.meta()?,
+            None => Meta::default(),
+        },
     }))
 }
 
@@ -111,6 +137,7 @@ async fn render_name_lookup_results(
     state: &AppState,
     profile: LookupProfile,
     inputs: &[ParsedNameLookup],
+    selected_snapshot: Option<&SelectedSnapshot>,
     results: &mut [Option<LookupResult>],
 ) -> V2Result<()> {
     let logical_name_ids = inputs
@@ -124,7 +151,7 @@ async fn render_name_lookup_results(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let records = load_name_records(state, profile, &logical_name_ids).await?;
+    let records = load_name_records(state, profile, &logical_name_ids, selected_snapshot).await?;
 
     for input in inputs {
         let (status, record) = match input.lookup.as_ref() {
@@ -160,6 +187,7 @@ async fn load_name_records(
     state: &AppState,
     profile: LookupProfile,
     logical_name_ids: &[String],
+    selected_snapshot: Option<&SelectedSnapshot>,
 ) -> V2Result<BTreeMap<String, bigname_storage::IdentityNameRecordRow>> {
     let records = match profile {
         LookupProfile::Feed => {
@@ -180,6 +208,9 @@ async fn load_name_records(
         );
         V2Error::internal_error("failed to load lookup name records")
     })?;
+    if let Some(selected_snapshot) = selected_snapshot {
+        require_name_records_at_served_head(&records, selected_snapshot)?;
+    }
 
     Ok(records
         .into_iter()
@@ -191,14 +222,16 @@ async fn render_reverse_lookup_results(
     state: &AppState,
     profile: LookupProfile,
     inputs: &[ParsedAddressLookup],
+    selected_snapshot: Option<&SelectedSnapshot>,
     results: &mut [Option<LookupResult>],
 ) -> V2Result<()> {
-    render_storage_exact_reverse_lookup_results(state, profile, inputs, results).await?;
+    render_storage_exact_reverse_lookup_results(state, profile, inputs, selected_snapshot, results)
+        .await?;
     for input in inputs
         .iter()
         .filter(|input| requires_relation_post_filter(input.relation.as_ref()))
     {
-        let page = load_exact_relation_reverse_page(state, input).await?;
+        let page = load_exact_relation_reverse_page(state, input, selected_snapshot).await?;
         render_reverse_input_result(profile, input, page, results)?;
     }
     Ok(())
@@ -208,6 +241,7 @@ async fn render_storage_exact_reverse_lookup_results(
     state: &AppState,
     profile: LookupProfile,
     inputs: &[ParsedAddressLookup],
+    selected_snapshot: Option<&SelectedSnapshot>,
     results: &mut [Option<LookupResult>],
 ) -> V2Result<()> {
     let storage_exact_inputs = inputs
@@ -236,6 +270,9 @@ async fn render_storage_exact_reverse_lookup_results(
             .get(&key)
             .map(|group| group.entries.clone())
             .unwrap_or_default();
+        if let Some(selected_snapshot) = selected_snapshot {
+            require_reverse_records_at_served_head(&entries, selected_snapshot)?;
+        }
         let total_count = groups
             .get(&key)
             .and_then(|group| group.total_count)
@@ -269,6 +306,7 @@ async fn render_storage_exact_reverse_lookup_results(
 async fn load_exact_relation_reverse_page(
     state: &AppState,
     input: &ParsedAddressLookup,
+    selected_snapshot: Option<&SelectedSnapshot>,
 ) -> V2Result<ReverseLookupPage> {
     let target_len = input.page_size as usize;
     let scan_size = input.page_size.max(50);
@@ -313,6 +351,12 @@ async fn load_exact_relation_reverse_page(
             break;
         }
         for entry in group.entries {
+            if let Some(selected_snapshot) = selected_snapshot {
+                require_reverse_records_at_served_head(
+                    std::slice::from_ref(&entry),
+                    selected_snapshot,
+                )?;
+            }
             let next_scan_cursor = reverse_identity_storage_cursor(&entry);
             rows_examined = rows_examined.saturating_add(1);
             last_examined = Some(entry.clone());
@@ -417,14 +461,6 @@ fn address_lookup_result(
             has_more,
         }),
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ReverseLookupPage {
-    entries: Vec<bigname_storage::ReverseIdentityRecordRow>,
-    next_cursor: Option<String>,
-    total_count: Option<u64>,
-    has_more: bool,
 }
 
 fn result_unsupported_reason<'a>(

@@ -13,6 +13,7 @@ pub use parsing::parse_rfc3339_utc_timestamp;
 pub use selection::{
     SelectedSnapshot, SnapshotAt, SnapshotProjectionRead, SnapshotSelectorInput,
     ensure_projection_chain_positions_match, resolve_exact_name_snapshot_selection,
+    snapshot_chain_has_head,
 };
 
 #[cfg(test)]

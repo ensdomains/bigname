@@ -24,6 +24,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 bigname-domain.workspace = true
+bigname-content-hash.workspace = true
 bigname-lookup.workspace = true
 bigname-manifests.workspace = true
 bigname-metrics.workspace = true
@@ -31,6 +32,5 @@ bigname-storage.workspace = true
 
 [dev-dependencies]
 alloy-sol-types.workspace = true
-bigname-content-hash.workspace = true
 bigname-test-support.workspace = true
 futures-util.workspace = true

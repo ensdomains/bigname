@@ -1305,6 +1305,7 @@ async fn collect_v2_internal_error_violations(violations: &mut Vec<String>) -> R
         };
         let state = database.app_state();
         state.pool.close().await;
+        state.lookup_pool.close().await;
 
         let response = app_router(state)
             .oneshot(v2_conformance_request(method, uri))

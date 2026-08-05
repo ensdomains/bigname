@@ -260,10 +260,10 @@ async fn v2_get_history_empty_and_missing_name_semantics() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_get_history_uses_current_sepolia_anchor_on_mixed_checkpoints() -> Result<()> {
+async fn v2_get_history_uses_current_sepolia_anchor_on_mixed_phase_heads() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_mixed_checkpoint_names(&database).await?;
-    seed_v2_mixed_checkpoint_history(&database).await?;
+    seed_v2_mixed_phase_head_names(&database).await?;
+    seed_v2_mixed_phase_head_history(&database).await?;
 
     let payload = v2_history_payload_for_database(
         &database,
@@ -411,7 +411,7 @@ async fn seed_v2_history_fixture(database: &TestDatabase) -> Result<()> {
     Ok(())
 }
 
-async fn seed_v2_mixed_checkpoint_history(database: &TestDatabase) -> Result<()> {
+async fn seed_v2_mixed_phase_head_history(database: &TestDatabase) -> Result<()> {
     let logical_name_id = format!("ens:{V2_SEPOLIA_SNAPSHOT_NAME}");
     let resource_id = Uuid::from_u128(0x7e20);
     let block_number = V2_SEPOLIA_SNAPSHOT_BLOCK + 1;

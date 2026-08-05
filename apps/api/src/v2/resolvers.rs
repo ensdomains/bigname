@@ -6,14 +6,14 @@ use axum::{
 };
 use bigname_storage::{
     NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder,
-    NameCurrentListRow, NameCurrentListSort, ResolverCurrentRow, SnapshotPositionRequirement,
-    SnapshotSelectionScope,
+    NameCurrentListRow, NameCurrentListSort, ResolverCurrentRow, SelectedSnapshot,
+    SnapshotPositionRequirement, SnapshotSelectionScope, ensure_projection_chain_positions_match,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::error;
 
-use super::support::parse_evm_address;
+use super::support::{parse_evm_address, snapshot_selection_api_error};
 use crate::AppState;
 
 #[path = "resolvers/bound_names_cursor.rs"]
@@ -141,13 +141,18 @@ pub(crate) async fn get_resolver(
 
     let scope = resolver_snapshot_scope(chain_id_slug)?;
     let selected_snapshot = resolve_v2_snapshot_for(
-        &state.pool,
+        &state.lookup_pool,
         &scope,
         params.at.as_ref(),
         params.finality,
         SnapshotReadResource::Resolver,
     )
     .await?;
+    require_projection_snapshot(
+        "resolver overview",
+        &row.chain_positions,
+        &selected_snapshot,
+    )?;
     let snapshot_token = encode_at_token(&selected_snapshot);
     let cursor_binding = BoundNamesCursorBinding {
         chain_id: numeric_chain_id,
@@ -179,6 +184,13 @@ pub(crate) async fn get_resolver(
         &normalized_address,
     )
     .await?;
+    for bound_name_row in &bound_name_rows {
+        require_projection_snapshot(
+            "bound name",
+            &bound_name_row.row.chain_positions,
+            &selected_snapshot,
+        )?;
+    }
 
     let next_cursor = storage_next_cursor
         .as_ref()
@@ -206,6 +218,20 @@ pub(crate) async fn get_resolver(
         page: None,
         meta,
     }))
+}
+
+fn require_projection_snapshot(
+    projection_family: &str,
+    projection_chain_positions: &Value,
+    selected_snapshot: &SelectedSnapshot,
+) -> V2Result<()> {
+    ensure_projection_chain_positions_match(
+        projection_family,
+        projection_chain_positions,
+        &selected_snapshot.chain_positions,
+    )
+    .map_err(snapshot_selection_api_error)
+    .map_err(api_error_to_v2)
 }
 
 pub(crate) fn build_resolver_overview(
@@ -445,7 +471,6 @@ fn projected_section_count(summary: &Value) -> Option<u64> {
     if !summary_is_supported(summary) {
         return None;
     }
-
     summary.get("count").and_then(Value::as_u64).or_else(|| {
         summary
             .get("items")

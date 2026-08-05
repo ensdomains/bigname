@@ -266,10 +266,10 @@ does not read those legacy tables or infer their dynamic cursor seeds.
 
 ## Surviving services
 
-The API keeps a legacy `public`-schema pool for v1 and indexed product reads,
-and a `bigname_phase`-schema pool for v2 verified lookup. Retained v1 routes may
-perform their documented execution-cache-miss persistence. V2 record lookup may
-perform only the schema-v2 guarded
+The API keeps a `public`-schema pool for GraphQL, health and status checks, and
+retained public-schema reads, plus a `bigname_phase`-schema pool for v2 snapshot
+selection, verified lookup, and primary-name projection reads. V2 record lookup
+may perform only the schema-v2 guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) write;
 v2 primary-name lookup writes nothing. The API database role therefore needs
 `USAGE` on `bigname_phase`, `SELECT` on only the schema-v2 lookup relations
@@ -284,8 +284,8 @@ or `UPDATE` on
 projection relations.
 
 After both schemas exist, the schema owner provisions the dedicated login with
-these exact retained-v1 and schema-v2 privileges (substitute database, role,
-and secret through the normal secret-management path):
+these exact retained public-schema and schema-v2 privileges (substitute
+database, role, and secret through the normal secret-management path):
 
 ```sql
 CREATE ROLE bigname_api
@@ -316,6 +316,7 @@ GRANT SELECT ON TABLE
     bigname_phase.surface_bindings,
     bigname_phase.token_lineages,
     bigname_phase.record_inventory_current,
+    bigname_phase.primary_names_current,
     bigname_phase.manifest_versions,
     bigname_phase.manifest_contract_instances
 TO bigname_api;

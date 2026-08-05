@@ -260,7 +260,7 @@ pub use snapshot_selection::{
     SnapshotPositionRequirement, SnapshotProjectionRead, SnapshotSelectionError,
     SnapshotSelectionErrorKind, SnapshotSelectionResult, SnapshotSelectionScope,
     SnapshotSelectorInput, ensure_projection_chain_positions_match, parse_rfc3339_utc_timestamp,
-    resolve_exact_name_snapshot_selection,
+    resolve_exact_name_snapshot_selection, snapshot_chain_has_head,
 };
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};

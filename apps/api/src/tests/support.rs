@@ -40,6 +40,7 @@ static WORKER_CARGO_LOCK: Mutex<()> = Mutex::new(());
 struct TestDatabase {
     database: bigname_test_support::TestDatabase,
     pool: PgPool,
+    lookup_pool: PgPool,
     database_name: String,
 }
 
@@ -452,15 +453,21 @@ impl TestDatabase {
             .context("failed to create execution_cache_outcomes for API tests")?;
         }
 
-        Ok(Self {
+        let mut database = Self {
             database,
+            lookup_pool: pool.clone(),
             pool,
             database_name,
-        })
+        };
+        if initialize_name_current_schema {
+            database.initialize_lookup_schema().await?;
+            database.lookup_pool = database.open_lookup_pool().await?;
+        }
+        Ok(database)
     }
 
     async fn new_migrated() -> Result<Self> {
-        let database = Self::new(false).await?;
+        let mut database = Self::new(false).await?;
         database
             .database
             .apply_migrations(
@@ -468,12 +475,14 @@ impl TestDatabase {
                 "failed to apply checked-in migrations for API tests",
             )
             .await?;
+        database.initialize_lookup_schema().await?;
+        database.lookup_pool = database.open_lookup_pool().await?;
         Ok(database)
     }
 
     async fn initialize_lookup_schema(&self) -> Result<()> {
         let mut transaction = self.pool.begin().await?;
-        sqlx::query("CREATE SCHEMA bigname_phase")
+        sqlx::query("CREATE SCHEMA IF NOT EXISTS bigname_phase")
             .execute(&mut *transaction)
             .await?;
         sqlx::query("SET LOCAL search_path TO bigname_phase, public")
@@ -498,6 +507,10 @@ impl TestDatabase {
     }
 
     async fn lookup_pool(&self) -> Result<PgPool> {
+        Ok(self.lookup_pool.clone())
+    }
+
+    async fn open_lookup_pool(&self) -> Result<PgPool> {
         let config = self.database_config(6)?;
         let options = bigname_storage::stamp_projection_replay_version(
             PgConnectOptions::from_str(
@@ -521,14 +534,15 @@ impl TestDatabase {
     ) -> Result<AppState> {
         Ok(AppState::new_with_rpc_urls(
             self.pool.clone(),
-            self.lookup_pool().await?,
+            self.lookup_pool.clone(),
             chain_rpc_urls,
         ))
     }
 
     fn app_state(&self) -> AppState {
-        AppState::new(
+        AppState::new_with_rpc_urls(
             self.pool.clone(),
+            self.lookup_pool.clone(),
             bigname_lookup::ChainRpcUrls::default(),
         )
     }
@@ -845,10 +859,52 @@ impl TestDatabase {
 
             sqlx::query(
                 r#"
-                INSERT INTO chain_checkpoints (
+                INSERT INTO chain_lineage (
                     chain_id,
-                    canonical_block_hash,
-                    canonical_block_number,
+                    block_hash,
+                    block_number,
+                    block_timestamp,
+                    canonicality_state
+                )
+                VALUES ($1, $2, $3, $4, 'canonical'::canonicality_state)
+                ON CONFLICT (chain_id, block_hash) DO NOTHING
+                "#,
+            )
+            .bind(chain_id)
+            .bind(block_hash)
+            .bind(block_number)
+            .bind(timestamp)
+            .execute(&self.lookup_pool)
+            .await
+            .with_context(|| format!("failed to seed phase lineage for {chain_id}"))?;
+
+            sqlx::query(
+                "UPDATE chain_lineage
+                 SET canonicality_state = 'safe'
+                 WHERE chain_id = $1 AND block_hash = $2
+                   AND canonicality_state = 'canonical'",
+            )
+            .bind(chain_id)
+            .bind(block_hash)
+            .execute(&self.lookup_pool)
+            .await?;
+            sqlx::query(
+                "UPDATE chain_lineage
+                 SET canonicality_state = 'finalized'
+                 WHERE chain_id = $1 AND block_hash = $2
+                   AND canonicality_state = 'safe'",
+            )
+            .bind(chain_id)
+            .bind(block_hash)
+            .execute(&self.lookup_pool)
+            .await?;
+
+            sqlx::query(
+                r#"
+                INSERT INTO chain_heads (
+                    chain_id,
+                    latest_block_hash,
+                    latest_block_number,
                     safe_block_hash,
                     safe_block_number,
                     finalized_block_hash,
@@ -856,8 +912,8 @@ impl TestDatabase {
                 )
                 VALUES ($1, $2, $3, $2, $3, $2, $3)
                 ON CONFLICT (chain_id) DO UPDATE SET
-                    canonical_block_hash = EXCLUDED.canonical_block_hash,
-                    canonical_block_number = EXCLUDED.canonical_block_number,
+                    latest_block_hash = EXCLUDED.latest_block_hash,
+                    latest_block_number = EXCLUDED.latest_block_number,
                     safe_block_hash = EXCLUDED.safe_block_hash,
                     safe_block_number = EXCLUDED.safe_block_number,
                     finalized_block_hash = EXCLUDED.finalized_block_hash,
@@ -868,9 +924,44 @@ impl TestDatabase {
             .bind(chain_id)
             .bind(block_hash)
             .bind(block_number)
-            .execute(&self.pool)
+            .execute(&self.lookup_pool)
             .await
-            .with_context(|| format!("failed to seed chain checkpoint for {chain_id}"))?;
+            .with_context(|| format!("failed to seed phase head for {chain_id}"))?;
+
+            sqlx::query(
+                r#"
+                INSERT INTO chain_phase_state (
+                    chain_id,
+                    phase_name,
+                    phase_status,
+                    current_block_number,
+                    current_block_hash,
+                    target_block_number,
+                    target_block_hash,
+                    input_content_hash,
+                    started_at,
+                    finished_at
+                )
+                VALUES ($1, 'project', 'completed', $2, $3, $2, $3, $4, now(), now())
+                ON CONFLICT (chain_id, phase_name) DO UPDATE SET
+                    phase_status = EXCLUDED.phase_status,
+                    current_block_number = EXCLUDED.current_block_number,
+                    current_block_hash = EXCLUDED.current_block_hash,
+                    target_block_number = EXCLUDED.target_block_number,
+                    target_block_hash = EXCLUDED.target_block_hash,
+                    input_content_hash = EXCLUDED.input_content_hash,
+                    started_at = EXCLUDED.started_at,
+                    finished_at = EXCLUDED.finished_at,
+                    updated_at = now()
+                "#,
+            )
+            .bind(chain_id)
+            .bind(block_number)
+            .bind(block_hash)
+            .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+            .execute(&self.lookup_pool)
+            .await
+            .with_context(|| format!("failed to seed project phase state for {chain_id}"))?;
         }
 
         Ok(())
@@ -1218,9 +1309,11 @@ impl TestDatabase {
         let Self {
             database,
             pool,
+            lookup_pool,
             database_name: _,
         } = self;
         drop(pool);
+        drop(lookup_pool);
         database.cleanup().await
     }
 }
@@ -1251,7 +1344,8 @@ async fn seed_schema_v2_lookup_head(
     sqlx::query(
         "INSERT INTO chain_lineage
             (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
-         VALUES ($1, $2, $3, $4::timestamptz, 'canonical')",
+         VALUES ($1, $2, $3, $4::timestamptz, 'canonical')
+         ON CONFLICT (chain_id, block_hash) DO NOTHING",
     )
     .bind(chain_id)
     .bind(block_hash)
@@ -1261,7 +1355,11 @@ async fn seed_schema_v2_lookup_head(
     .await?;
     sqlx::query(
         "INSERT INTO chain_heads (chain_id, latest_block_hash, latest_block_number)
-         VALUES ($1, $2, $3)",
+         VALUES ($1, $2, $3)
+         ON CONFLICT (chain_id) DO UPDATE SET
+             latest_block_hash = EXCLUDED.latest_block_hash,
+             latest_block_number = EXCLUDED.latest_block_number,
+             updated_at = now()",
     )
     .bind(chain_id)
     .bind(block_hash)
@@ -1272,7 +1370,17 @@ async fn seed_schema_v2_lookup_head(
         "INSERT INTO chain_phase_state
             (chain_id, phase_name, phase_status, current_block_number, current_block_hash,
              target_block_number, target_block_hash, input_content_hash, started_at, finished_at)
-         VALUES ($1, 'project', 'completed', $2, $3, $2, $3, $4, now(), now())",
+         VALUES ($1, 'project', 'completed', $2, $3, $2, $3, $4, now(), now())
+         ON CONFLICT (chain_id, phase_name) DO UPDATE SET
+             phase_status = EXCLUDED.phase_status,
+             current_block_number = EXCLUDED.current_block_number,
+             current_block_hash = EXCLUDED.current_block_hash,
+             target_block_number = EXCLUDED.target_block_number,
+             target_block_hash = EXCLUDED.target_block_hash,
+             input_content_hash = EXCLUDED.input_content_hash,
+             started_at = EXCLUDED.started_at,
+             finished_at = EXCLUDED.finished_at,
+             updated_at = now()",
     )
     .bind(chain_id)
     .bind(block_number)
@@ -3389,6 +3497,40 @@ async fn seed_identity_name(
     relation: bigname_storage::AddressNameRelation,
     block_number: i64,
 ) -> Result<()> {
+    let name_row = address_name_name_current_row(
+        logical_name_id,
+        display_name,
+        normalized_name,
+        namehash,
+        surface_binding_id,
+        resource_id,
+        Some(token_lineage_id),
+        block_number,
+        compact_name_declared_summary(
+            address,
+            address,
+            address,
+            1_900_000_000,
+            "2026-04-17T00:00:21Z",
+            "2026-04-17T00:00:11Z",
+        ),
+    );
+    let publication_positions = name_row.chain_positions.clone();
+    let mut inventory = compact_records_inventory_current_row(logical_name_id, resource_id);
+    inventory.chain_positions = publication_positions.clone();
+    let address_row = address_name_current_row(
+        address,
+        logical_name_id,
+        relation,
+        display_name,
+        normalized_name,
+        namehash,
+        surface_binding_id,
+        resource_id,
+        Some(token_lineage_id),
+        block_number,
+    );
+
     database
         .seed_name_current_binding_migrated(
             logical_name_id,
@@ -3397,48 +3539,28 @@ async fn seed_identity_name(
             surface_binding_id,
         )
         .await?;
+    database.insert_name_current_row(name_row.clone()).await?;
     database
-        .insert_name_current_row(address_name_name_current_row(
-            logical_name_id,
-            display_name,
-            normalized_name,
-            namehash,
-            surface_binding_id,
-            resource_id,
-            Some(token_lineage_id),
-            block_number,
-            compact_name_declared_summary(
-                address,
-                address,
-                address,
-                1_900_000_000,
-                "2026-04-17T00:00:21Z",
-                "2026-04-17T00:00:11Z",
-            ),
-        ))
-        .await?;
-    database
-        .insert_record_inventory_current_row(compact_records_inventory_current_row(
-            logical_name_id,
-            resource_id,
-        ))
+        .insert_record_inventory_current_row(inventory.clone())
         .await?;
     bigname_storage::upsert_address_names_current_rows(
         &database.pool,
-        &[address_name_current_row(
-            address,
-            logical_name_id,
-            relation,
-            display_name,
-            normalized_name,
-            namehash,
-            surface_binding_id,
-            resource_id,
-            Some(token_lineage_id),
-            block_number,
-        )],
+        std::slice::from_ref(&address_row),
     )
     .await?;
+
+    sqlx::query("UPDATE name_current SET chain_positions = $1 WHERE namespace = 'ens'")
+        .bind(&publication_positions)
+        .execute(&database.pool)
+        .await?;
+    sqlx::query("UPDATE record_inventory_current SET chain_positions = $1")
+        .bind(&publication_positions)
+        .execute(&database.pool)
+        .await?;
+    sqlx::query("UPDATE address_names_current SET chain_positions = $1 WHERE namespace = 'ens'")
+        .bind(&publication_positions)
+        .execute(&database.pool)
+        .await?;
     Ok(())
 }
 

@@ -175,10 +175,43 @@ async fn v2_lookup_forward_results_are_in_order_with_head_meta() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_lookup_rejects_forward_projection_from_another_phase_head() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_identity_name(
+        &database,
+        "ens:stale.eth",
+        "stale.eth",
+        "stale.eth",
+        "namehash:stale.eth",
+        Uuid::from_u128(0x5a0111),
+        Uuid::from_u128(0x5a0112),
+        Uuid::from_u128(0x5a0113),
+        "0x0000000000000000000000000000000000000abc",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        38,
+    )
+    .await?;
+    advance_v2_lookup_ethereum_head(&database, 39, "0xlookup-forward-advanced").await?;
+
+    let response = v2_lookup_response_for_database(
+        &database,
+        "/v2/lookup",
+        json!({"inputs": [{"id": "stale", "name": "stale.eth"}]}),
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("stale"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_lookup_internal_head_selection_error_is_sanitized() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let state = database.app_state();
-    state.pool.close().await;
+    state.lookup_pool.close().await;
 
     let response = app_router(state)
         .oneshot(
@@ -314,7 +347,7 @@ async fn v2_lookup_tokens_remain_snapshot_capable_while_collections_reject_at() 
 }
 
 #[tokio::test]
-async fn v2_lookup_reverse_detail_paginates_after_head_advance() -> Result<()> {
+async fn v2_lookup_rejects_reverse_projection_after_head_advance() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
     seed_v2_lookup_reverse_fixture(&database, address).await?;
@@ -359,8 +392,9 @@ async fn v2_lookup_reverse_detail_paginates_after_head_advance() -> Result<()> {
 
     advance_v2_lookup_ethereum_head(&database, 43, "0xlookup-advanced").await?;
 
-    let second_page = v2_lookup_json(
+    let second_page = v2_lookup_response_for_database(
         &database,
+        "/v2/lookup",
         json!({
             "profile": "detail",
             "inputs": [{
@@ -372,25 +406,9 @@ async fn v2_lookup_reverse_detail_paginates_after_head_advance() -> Result<()> {
         }),
     )
     .await?;
-    assert_eq!(
-        second_page["data"][0]["page"]["cursor"],
-        json!(cursor.to_ascii_lowercase())
-    );
-    assert_eq!(
-        second_page["meta"]["as_of"]["1"],
-        json!({
-            "block_number": 43,
-            "block_hash": "0xlookup-advanced",
-            "timestamp": "2026-04-17T00:00:43Z"
-        })
-    );
-    assert_eq!(second_page["data"][0]["records"][0]["name"], json!("bob.eth"));
-    assert_eq!(
-        second_page["data"][0]["records"][0]["relations"],
-        json!(["manager"])
-    );
-    assert_eq!(second_page["data"][0]["page"]["has_more"], json!(false));
-    assert_eq!(second_page["data"][0]["page"]["total_count"], json!(2));
+    assert_eq!(second_page.status(), StatusCode::CONFLICT);
+    let second_page: Value = read_json(second_page).await?;
+    assert_eq!(second_page["error"]["code"], json!("stale"));
 
     let mismatch = v2_lookup_response_for_database(
         &database,
@@ -644,7 +662,7 @@ async fn v2_lookup_reverse_page_and_count_include_primary_when_matching_relation
 }
 
 #[tokio::test]
-async fn v2_lookup_omits_chain_with_missing_head_hash() -> Result<()> {
+async fn v2_lookup_rejects_union_scope_with_missing_phase_head() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database
         .seed_snapshot_selector_chain_positions(&json!({
@@ -656,17 +674,6 @@ async fn v2_lookup_omits_chain_with_missing_head_hash() -> Result<()> {
             }
         }))
         .await?;
-    drop_canonical_checkpoint_pair_check(&database).await?;
-    sqlx::query(
-        r#"
-        INSERT INTO chain_checkpoints (chain_id, canonical_block_number)
-        VALUES ('base-mainnet', 88)
-        "#,
-    )
-    .execute(&database.pool)
-    .await
-    .context("failed to seed checkpoint row without a canonical hash")?;
-
     let public_response = v2_lookup_response_for_database(
         &database,
         "/v2/lookup",
@@ -711,6 +718,74 @@ async fn v2_lookup_omits_chain_with_missing_head_hash() -> Result<()> {
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn v2_lookup_rejects_single_scope_with_incompatible_project_generation() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 78,
+                "block_hash": "0xlookup-incompatible-project",
+                "timestamp": "2026-04-17T00:01:18Z"
+            }
+        }))
+        .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET input_content_hash = 'incompatible-project-generation'
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let response = v2_lookup_response_for_database(
+        &database,
+        "/v2/lookup",
+        json!({"inputs": [{"id": "miss", "name": "missing.eth"}]}),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("stale"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_lookup_reports_stale_when_project_phase_is_behind_head() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 79,
+                "block_hash": "0xlookup-project-behind",
+                "timestamp": "2026-04-17T00:01:19Z"
+            }
+        }))
+        .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET current_block_number = 78, current_block_hash = '0xlookup-previous'
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let response = v2_lookup_response_for_database(
+        &database,
+        "/v2/lookup",
+        json!({"inputs": [{"id": "miss", "name": "missing.eth"}]}),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("stale"));
+
+    database.cleanup().await
 }
 
 #[tokio::test]
@@ -1177,82 +1252,16 @@ async fn advance_v2_lookup_ethereum_head(
     block_number: i64,
     block_hash: &str,
 ) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO chain_lineage (
-            chain_id,
-            block_hash,
-            block_number,
-            block_timestamp,
-            canonicality_state
-        )
-        VALUES (
-            'ethereum-mainnet',
-            $1,
-            $2,
-            $3::TIMESTAMPTZ,
-            'finalized'::canonicality_state
-        )
-        ON CONFLICT (chain_id, block_hash) DO UPDATE SET
-            block_number = EXCLUDED.block_number,
-            block_timestamp = EXCLUDED.block_timestamp,
-            canonicality_state = EXCLUDED.canonicality_state
-        "#,
-    )
-    .bind(block_hash)
-    .bind(block_number)
-    .bind(format!("2026-04-17T00:00:{:02}Z", block_number % 60))
-    .execute(&database.pool)
-    .await
-    .context("failed to seed advanced lookup head lineage")?;
-
-    sqlx::query(
-        r#"
-        UPDATE chain_checkpoints
-        SET
-            canonical_block_hash = $1,
-            canonical_block_number = $2,
-            safe_block_hash = $1,
-            safe_block_number = $2,
-            finalized_block_hash = $1,
-            finalized_block_number = $2,
-            updated_at = now()
-        WHERE chain_id = 'ethereum-mainnet'
-        "#,
-    )
-    .bind(block_hash)
-    .bind(block_number)
-    .execute(&database.pool)
-    .await
-    .context("failed to advance lookup head checkpoint")?;
-
-    Ok(())
-}
-
-async fn drop_canonical_checkpoint_pair_check(database: &TestDatabase) -> Result<()> {
-    let constraint_name: String = sqlx::query_scalar(
-        r#"
-        SELECT conname
-        FROM pg_constraint
-        WHERE conrelid = 'chain_checkpoints'::regclass
-          AND contype = 'c'
-          AND pg_get_constraintdef(oid) LIKE '%canonical_block_hash%'
-          AND pg_get_constraintdef(oid) LIKE '%canonical_block_number%'
-        "#,
-    )
-    .fetch_one(&database.pool)
-    .await
-    .context("failed to find canonical checkpoint pair check")?;
-    let escaped = constraint_name.replace('"', "\"\"");
-
-    sqlx::query(&format!(
-        r#"ALTER TABLE chain_checkpoints DROP CONSTRAINT "{escaped}""#
-    ))
-    .execute(&database.pool)
-    .await
-    .context("failed to drop canonical checkpoint pair check")?;
-
-    Ok(())
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": block_number,
+                "block_hash": block_hash,
+                "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60)
+            }
+        }))
+        .await
 }
 
 async fn seed_v2_lookup_reverse_fixture(database: &TestDatabase, address: &str) -> Result<()> {
@@ -1342,6 +1351,14 @@ async fn seed_v2_lookup_relation_scan_fixture(
 ) -> Result<()> {
     seed_v2_lookup_ethereum_head(database, 10_000, "0xlookup-scan-head").await?;
     seed_v2_lookup_base_head(database).await?;
+    let publication_positions = json!({
+        "ethereum": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 10_000,
+            "block_hash": "0xlookup-scan-head",
+            "timestamp": "2026-04-17T00:00:40Z"
+        }
+    });
 
     let owner_match_indexes = owner_match_indexes
         .iter()
@@ -1420,7 +1437,7 @@ async fn seed_v2_lookup_relation_scan_fixture(
             block_number,
             1_717_180_000 + block_number,
         ));
-        name_rows.push(address_name_name_current_row(
+        let mut name_row = address_name_name_current_row(
             &logical_name_id,
             &name,
             &name,
@@ -1437,8 +1454,10 @@ async fn seed_v2_lookup_relation_scan_fixture(
                 "2026-04-17T00:00:21Z",
                 "2026-04-17T00:00:11Z",
             ),
-        ));
-        address_rows.push(address_name_current_row(
+        );
+        name_row.chain_positions = publication_positions.clone();
+        name_rows.push(name_row);
+        let mut address_row = address_name_current_row(
             address,
             &logical_name_id,
             relation,
@@ -1449,7 +1468,9 @@ async fn seed_v2_lookup_relation_scan_fixture(
             resource_id,
             Some(token_lineage_id),
             block_number,
-        ));
+        );
+        address_row.chain_positions = publication_positions.clone();
+        address_rows.push(address_row);
     }
 
     bigname_storage::upsert_raw_blocks(&database.pool, &raw_blocks)
