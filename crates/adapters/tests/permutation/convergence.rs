@@ -35,17 +35,23 @@ pub struct BatchBoundaryArtifacts {
 impl BatchBoundaryArtifacts {
     /// One flat count per artifact class the run actually produced, for pinning. A class that never
     /// fired is absent rather than zero, so a lane whose interpreter no longer diverges compares
-    /// equal to an empty pin table.
+    /// equal to an empty pin table. Destructured so that a new artifact class cannot be added to the
+    /// struct without being added to the pin.
     pub fn counts(&self) -> BTreeMap<String, usize> {
+        let Self {
+            carried_before_states,
+            rebased_anchors,
+            rebased_attributions,
+        } = self;
         let mut counts = BTreeMap::new();
-        for (direction, count) in &self.carried_before_states {
+        for (direction, count) in carried_before_states {
             counts.insert(format!("carried_before_states:{direction}"), *count);
         }
-        for (family, count) in &self.rebased_anchors {
+        for (family, count) in rebased_anchors {
             counts.insert(format!("rebased_anchors:{family}"), *count);
         }
-        if self.rebased_attributions > 0 {
-            counts.insert("rebased_attributions".to_owned(), self.rebased_attributions);
+        if *rebased_attributions > 0 {
+            counts.insert("rebased_attributions".to_owned(), *rebased_attributions);
         }
         counts
     }

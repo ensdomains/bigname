@@ -1,8 +1,8 @@
 //! The admitted manifests, addresses, and roles a generated scenario runs against.
 //!
 //! Each `SourceSlot` pins one checked-in manifest version file. Superseded versions stay checked
-//! in, so a pin has to advance when its family is bumped — `assert_pins_are_current` is what makes
-//! a bump fail the lane instead of silently generating from the old ABI.
+//! in, so a pin has to advance when its family rolls out a new version — `assert_pins_are_current`
+//! is what makes that fail the lane instead of silently generating from the retired ABI.
 
 use std::{
     collections::BTreeMap,
@@ -14,7 +14,7 @@ use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, DiscoveryRuleInput, ManifestInput, RawBlockInput,
     RawLogInput,
 };
-use bigname_manifests::{LoadedManifest, load_repository};
+use bigname_manifests::{LoadedManifest, RolloutStatus, load_repository};
 use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -339,32 +339,42 @@ fn admitted<'a>(
     })
 }
 
-/// Fails the lane when a pinned version file is no longer the newest one its family has checked in
-/// for this deployment epoch. Scoped to the epoch because a family keeps its superseded epochs'
-/// manifests in the same directory — an ENSv2 pre-audit `sepolia-dev` manifest added today would
-/// take the next version number without being the manifest a post-audit world should generate from.
+/// Fails the lane when a pinned version file is not the one its family currently has rolled out.
+/// Superseded versions stay checked in, so the pin has to be checked against something; the check
+/// is `rollout_status = "active"` rather than the highest version number because a family may also
+/// carry a `draft` or `shadow` version that production does not run, and because at most one
+/// version per family and chain is active (`docs/manifests.md`), across deployment epochs. A bump
+/// that retires the world's epoch therefore reports the epoch it moved to rather than passing.
 pub fn assert_pins_are_current(world: &World, checked_in: &[LoadedManifest]) -> Result<()> {
     let mut stale = Vec::new();
     for slot in world.sources {
-        let newest = admitted(world, slot, checked_in)
-            .filter_map(version_file)
-            .max()
-            .with_context(|| {
-                format!(
-                    "{}: no checked-in {} manifest carries a vN.toml version file",
-                    world.label, slot.family
-                )
-            })?;
-        if newest.1 != slot.version_file {
+        let active = checked_in.iter().find(|loaded| {
+            loaded.manifest.namespace == world.namespace
+                && loaded.manifest.source_family == slot.family
+                && loaded.manifest.chain == world.chain_id
+                && loaded.manifest.rollout_status == RolloutStatus::Active
+        });
+        let Some(active) = active else {
             stale.push(format!(
-                "{} pins {} but {} is checked in",
-                slot.family, slot.version_file, newest.1
+                "{} pins {} but no version of that family is active",
+                slot.family, slot.version_file
+            ));
+            continue;
+        };
+        let file = version_file(active).unwrap_or_default();
+        if file != slot.version_file || active.manifest.deployment_epoch != world.deployment_epoch {
+            stale.push(format!(
+                "{} pins {} ({}) but the active version is {file} ({})",
+                slot.family,
+                slot.version_file,
+                world.deployment_epoch,
+                active.manifest.deployment_epoch
             ));
         }
     }
     if !stale.is_empty() {
         bail!(
-            "{} generates from superseded manifests; advance the pins or state why they stay:\n  {}",
+            "{} does not generate from the manifests its families have rolled out:\n  {}",
             world.label,
             stale.join("\n  ")
         );
@@ -372,14 +382,8 @@ pub fn assert_pins_are_current(world: &World, checked_in: &[LoadedManifest]) -> 
     Ok(())
 }
 
-fn version_file(loaded: &LoadedManifest) -> Option<(u32, String)> {
-    let name = loaded.relative_path.file_name()?.to_str()?;
-    let number = name
-        .strip_prefix('v')?
-        .strip_suffix(".toml")?
-        .parse()
-        .ok()?;
-    Some((number, name.to_owned()))
+fn version_file(loaded: &LoadedManifest) -> Option<String> {
+    Some(loaded.relative_path.file_name()?.to_str()?.to_owned())
 }
 
 /// Topic0 of every event the world's checked-in manifests declare, mapped to the log topic count

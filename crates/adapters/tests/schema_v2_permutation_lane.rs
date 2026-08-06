@@ -12,9 +12,13 @@
 //! Knobs:
 //! - `BIGNAME_PERMUTATION_CASES` — permutations per protocol world. Default 24 (48 sequences per
 //!   run) keeps the lane inside the CI budget; raise it for deeper local sweeps.
-//! - `BIGNAME_PERMUTATION_SEED` — base seed, decimal. Default 1846370029. Reducing the case count
-//!   or changing the seed turns off the interpretation-coverage assertion, which is a property of
-//!   the default corpus rather than of any seed; the invariants themselves still run.
+//! - `BIGNAME_PERMUTATION_SEED` — base seed, decimal. Default 1846370029.
+//!
+//! Changing either knob turns off the assertions about what the corpus reaches, because those are
+//! properties of the default corpus rather than of any seed: a reduced or reseeded run drops the
+//! interpretation-coverage floor, and any run that is not exactly the default corpus also drops the
+//! exact artifact and detach counts, which a deeper sweep would legitimately exceed. The invariants
+//! themselves — the ones a failure would report — run on every sequence whatever the knobs say.
 //!
 //! A failure reports `world=… seed=…`. Replay it with that seed and
 //! `BIGNAME_PERMUTATION_CASES=1`, against the same checked-in manifests — a scenario embeds the
@@ -245,14 +249,21 @@ fn the_dimension_space_emits_every_declared_event() -> Result<()> {
     Ok(())
 }
 
-/// A superseded manifest version stays checked in, so a world that keeps pinning it goes on
-/// generating from the old ABI against an interpreter that has moved to the new one. The lane is
-/// where that has to be loud.
+/// A retired manifest version stays checked in, so a world that keeps pinning it goes on generating
+/// from the old ABI against an interpreter that has moved to the rolled-out one. The lane is where
+/// that has to be loud. It does not check the other direction: an event a newer ABI adds is covered
+/// only once the pools emit it.
 #[test]
-fn worlds_pin_the_newest_checked_in_manifest_version() -> Result<()> {
+fn worlds_pin_the_manifest_version_their_families_have_rolled_out() -> Result<()> {
     let checked_in = checked_in_manifests()?;
-    for world in WORLDS {
-        assert_pins_are_current(world, &checked_in)?;
+    // Reported together: a stale pin in one world should not hide one in the other.
+    let stale = WORLDS
+        .iter()
+        .filter_map(|world| assert_pins_are_current(world, &checked_in).err())
+        .map(|error| format!("{error:?}"))
+        .collect::<Vec<_>>();
+    if !stale.is_empty() {
+        bail!("{}", stale.join("\n\n"));
     }
     Ok(())
 }
@@ -345,9 +356,11 @@ fn check(
     })
 }
 
-/// A subregistry that was attached and is now gone. The corpus reaches this through the terminal
-/// boundary an ENSv2 registry emits when a linked token is unregistered or regenerated, which is a
-/// different interpretation path from the attachment `SubregistryUpdated` takes.
+/// An event that clears a subregistry the name was carrying. The corpus reaches this only through
+/// the terminal boundary the interpreter derives when an ENSv2 registration ends — `LabelUnregistered`,
+/// or a `LabelRegistered` that replaces a live token — which is a different interpretation path from
+/// the one an attaching `SubregistryUpdated` takes. A `SubregistryUpdated` naming the zero address
+/// would also clear a subregistry and would count here; the pools never emit one.
 fn is_subregistry_detach(event: &bigname_adapters::schema_v2::NormalizedEvent) -> bool {
     event.event_kind == "SubregistryChanged"
         && event.after_state.get("subregistry") == Some(&Value::Null)
