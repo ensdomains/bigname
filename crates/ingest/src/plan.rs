@@ -60,6 +60,31 @@ pub fn validate_request(request: &BatchRequest) -> Result<()> {
     Ok(())
 }
 
+/// Refuses a planned range that starts below the lowest block its source can serve.
+///
+/// A pruned node returns no rows and no error below that block, so ingest would otherwise
+/// mark the missing window covered. reth's own `eth_getLogs` fails the equivalent request
+/// with `PrunedHistoryUnavailable`
+/// (upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L584 @ reth@88505c7f)
+/// (upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L586 @ reth@88505c7f).
+pub fn enforce_source_floor(
+    source_key: &str,
+    from: i64,
+    to: Option<i64>,
+    floor: i64,
+) -> Result<()> {
+    if from >= floor {
+        return Ok(());
+    }
+    let requested = to.map_or_else(|| format!("{from}..=head"), |to| format!("{from}..={to}"));
+    Err(IngestError::configuration(format!(
+        "source {source_key} keeps history from block {floor} only and cannot serve the planned \
+         range {requested}: blocks {from}..={} are pruned there, and reading them would record \
+         empty coverage instead of failing",
+        floor.saturating_sub(1)
+    )))
+}
+
 pub fn sort_sources(sources: &mut [SourceDescriptor]) {
     sources.sort_by_key(|source| match normalized_kind(&source.kind) {
         ProviderKind::Coinbase => 0,
@@ -175,6 +200,38 @@ mod tests {
             ))
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_range_starting_below_the_source_floor_is_refused_by_name_and_number() {
+        let error = enforce_source_floor("ethereum-reth", 3_327_417, Some(25_678_800), 15_500_000)
+            .expect_err("a plan below the node's earliest available block must be refused");
+
+        assert_eq!(error.kind(), crate::ErrorKind::Configuration);
+        let message = error.to_string();
+        for expected in [
+            "ethereum-reth",
+            "15500000",
+            "3327417..=25678800",
+            "3327417..=15499999",
+        ] {
+            assert!(message.contains(expected), "{message} must name {expected}");
+        }
+    }
+
+    #[test]
+    fn ranges_at_or_above_the_source_floor_are_planned_normally() {
+        assert!(enforce_source_floor("ethereum-reth", 15_500_000, None, 15_500_000).is_ok());
+        assert!(enforce_source_floor("ethereum-reth", 15_500_001, None, 15_500_000).is_ok());
+    }
+
+    #[test]
+    fn a_normal_batch_names_the_chain_head_as_its_planned_end() {
+        let message = enforce_source_floor("ethereum-reth", 0, None, 15_500_000)
+            .expect_err("a plan below the floor must be refused")
+            .to_string();
+
+        assert!(message.contains("0..=head"), "{message} must name the head");
     }
 
     #[test]
