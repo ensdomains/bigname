@@ -107,8 +107,9 @@ intersects the requested range; without an end block, it is removed. For a
 discovered address, a non-orphaned discovery edge with a known end block can
 supply that bound: a retired address row without its own end remains in
 download planning for the overlap with the edge's bounded history. It is
-removed only when neither the address row nor the discovery edge supplies an
-end block. These retirement rules apply when an explicit historical download
+removed when no end block is available from either side, and likewise when
+the edge itself was retired without one (a retired end-less edge excludes
+its address regardless of the address row's own bound). These retirement rules apply when an explicit historical download
 range overlaps the closed interval. Later live intake does not fetch that
 interval after its end block.
 
