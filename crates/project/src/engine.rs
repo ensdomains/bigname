@@ -64,10 +64,13 @@ impl Engine {
             &mut transaction,
             &request.chain_id,
             &target,
-            request.affected_from_block,
-            request.affected_to_block,
-            full_rebuild,
-            matches!(request.mode, RunMode::Redo),
+            scope::Window {
+                previous: request.resume_current.as_ref(),
+                from_block: request.affected_from_block,
+                to_block: request.affected_to_block,
+                full_rebuild,
+                retain_retracted: matches!(request.mode, RunMode::Redo),
+            },
         )
         .await?;
         stage::inputs(&mut transaction, &request.chain_id, &target, full_rebuild).await?;

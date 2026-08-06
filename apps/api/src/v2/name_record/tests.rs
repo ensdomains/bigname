@@ -95,3 +95,20 @@ fn resolver_omits_unknown_chain_id_instead_of_guessing_mainnet() {
     });
     assert_eq!(resolver(&unknown_chain), None);
 }
+
+#[test]
+fn wrapper_state_accepts_only_contract_values() {
+    assert_eq!(
+        wrapper_state(&json!({"wrapper_state": "wrapped"})),
+        Some(WrapperState::Wrapped)
+    );
+    assert_eq!(
+        wrapper_state(&json!({"wrapper_state": "emancipated"})),
+        Some(WrapperState::Emancipated)
+    );
+    assert_eq!(
+        wrapper_state(&json!({"wrapper_state": "locked"})),
+        Some(WrapperState::Locked)
+    );
+    assert_eq!(wrapper_state(&json!({"wrapper_state": "unknown"})), None);
+}

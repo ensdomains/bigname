@@ -9,18 +9,62 @@ pub(super) async fn build(
 ) -> Result<()> {
     sqlx::query(
         r#"
-        WITH RECURSIVE scope_modifiers AS (
+        WITH RECURSIVE target_time AS (
+            SELECT extract(epoch FROM lineage.block_timestamp) AS epoch_seconds
+            FROM chain_lineage lineage
+            WHERE lineage.chain_id = $1
+              AND lineage.block_number = $2
+              AND lineage.block_hash = $3
+        ),
+        wrapper_constants AS (
+            SELECT 131072::bigint AS is_dot_eth,
+                   7776000::numeric AS grace_period_seconds
+        ),
+        wrapper_expiries AS (
+            SELECT DISTINCT ON (event.resource_id)
+                   event.resource_id,
+                   CASE
+                       WHEN jsonb_typeof(event.after_state -> 'expiry') = 'number'
+                        AND (event.after_state ->> 'expiry')::numeric >= 0
+                        AND (event.after_state ->> 'expiry')::numeric <=
+                            18446744073709551615
+                           THEN (event.after_state ->> 'expiry')::numeric
+                   END AS expiry_seconds
+            FROM project_events event
+            WHERE event.event_kind = 'ExpiryChanged'
+              AND event.resource_id IS NOT NULL
+              AND event.source_family = 'ens_v1_wrapper_l1'
+            ORDER BY event.resource_id,
+                     event.block_number DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST,
+                     event.log_index DESC NULLS LAST,
+                     event.normalized_event_id DESC
+        ),
+        scope_modifiers AS (
             SELECT DISTINCT ON (event.resource_id)
                    event.resource_id,
                    CASE
                        WHEN jsonb_typeof(event.after_state -> 'fuses') = 'number'
                         AND (event.after_state ->> 'fuses')::numeric >= 0
-                        AND (event.after_state ->> 'fuses')::numeric <= 9223372036854775807
-                           THEN (event.after_state ->> 'fuses')::bigint
-                   END AS fuses
+                        AND (event.after_state ->> 'fuses')::numeric <=
+                            9223372036854775807
+                        AND expiry.expiry_seconds IS NOT NULL
+                        AND target_time.epoch_seconds IS NOT NULL
+                           THEN (
+                               (event.after_state ->> 'fuses')::bigint
+                                   & wrapper_constants.is_dot_eth
+                           ) <> 0
+                           AND expiry.expiry_seconds
+                               - wrapper_constants.grace_period_seconds
+                               < target_time.epoch_seconds
+                   END AS in_grace
             FROM project_events event
+            LEFT JOIN wrapper_expiries expiry USING (resource_id)
+            LEFT JOIN target_time ON TRUE
+            CROSS JOIN wrapper_constants
             WHERE event.event_kind = 'PermissionScopeChanged'
               AND event.resource_id IS NOT NULL
+              AND event.source_family = 'ens_v1_wrapper_l1'
             ORDER BY event.resource_id,
                      event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST,
@@ -58,8 +102,9 @@ pub(super) async fn build(
                         AND (
                             modifier.resource_id IS NULL
                             OR (
-                                modifier.fuses IS NOT NULL
-                                AND (modifier.fuses & 127) = 0
+                                name.declared_summary ->> 'wrapper_state'
+                                    IN ('wrapped', 'emancipated')
+                                AND modifier.in_grace IS FALSE
                             )
                         ) THEN 'set'
                        WHEN event.event_kind = 'PermissionChanged'
@@ -167,7 +212,9 @@ pub(super) async fn build(
                    controller.normalized_event_id AS controller_event_id,
                    controller.block_number AS controller_block_number,
                    controller.block_hash AS controller_block_hash,
-                   controller.manifest_version AS controller_manifest_version
+                   controller.manifest_version AS controller_manifest_version,
+                   modifier.resource_id AS wrapper_modifier_resource_id,
+                   modifier.in_grace AS wrapper_in_grace
             FROM project_stage_name_current name
             LEFT JOIN LATERAL (
                 SELECT lower(CASE event.event_kind
@@ -200,6 +247,8 @@ pub(super) async fn build(
             ) token_holder ON TRUE
             LEFT JOIN controllers controller
               ON controller.logical_name_id = name.logical_name_id
+            LEFT JOIN scope_modifiers modifier
+              ON modifier.resource_id = name.resource_id
             WHERE name.surface_binding_id IS NOT NULL
               AND name.resource_id IS NOT NULL
               AND name.binding_kind IS NOT NULL
@@ -225,6 +274,11 @@ pub(super) async fn build(
                             state.registration_manifest_version)
             FROM binding_state state
             WHERE state.token_lineage_id IS NOT NULL
+              AND (
+                  state.wrapper_modifier_resource_id IS NULL
+                  OR state.declared_summary ->> 'wrapper_state'
+                      IN ('wrapped', 'emancipated', 'locked')
+              )
             UNION ALL
             SELECT lower(CASE
                        WHEN state.token_lineage_id IS NOT NULL THEN COALESCE(
@@ -255,6 +309,13 @@ pub(super) async fn build(
                        state.registration_manifest_version
                    )
             FROM binding_state state
+            WHERE state.token_lineage_id IS NULL
+               OR state.wrapper_modifier_resource_id IS NULL
+               OR (
+                   state.declared_summary ->> 'wrapper_state'
+                       IN ('wrapped', 'emancipated')
+                   AND state.wrapper_in_grace IS FALSE
+               )
         ),
         selected AS (
             SELECT * FROM relations

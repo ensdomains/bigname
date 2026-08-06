@@ -180,6 +180,31 @@ from logs. Retained direct-call observations do not carry the changed state —
 the stored transaction shape does not decode which node was touched — they
 only trigger hydration to recheck.
 
+**Emancipated NameWrapper state** — the ENSv1 NameWrapper lifecycle state in
+which `PARENT_CANNOT_CONTROL` is burned and `CANNOT_UNWRAP` is not. The parent
+can no longer replace or modify the wrapped child, while the wrapped owner can
+still unwrap it. (upstream: .refs/ens_v1/contracts/wrapper/README.md:L73 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/README.md:L75 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/README.md:L85 @ ens_v1@91c966f)
+The API exposes this as `wrapper_state="emancipated"` only while the wrapper
+expiry is not earlier than the served block timestamp. After that boundary,
+NameWrapper reads the fuses and owner as zero, so `wrapper_state` is omitted.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L848 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L849 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L852 @ ens_v1@91c966f)
+For a `.eth` second-level name, the 90-day registrar grace period starts before
+the stored wrapper expiry. Entering grace does not change this lifecycle value,
+but the owner can no longer modify or transfer the name; per-token approval
+remains separately governed by `CANNOT_APPROVE` until wrapper expiry.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L48 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L218 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L221 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L820 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L825 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L127 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L132 @ ens_v1@91c966f)
+
 **Exact-name profile** (`exact_name_profile`) — the per-manifest capability
 flag that, when `supported`, makes declared exact-name reads authoritative for
 that deployment profile. Today the only family whose active manifest carries
@@ -232,6 +257,28 @@ that increases whenever head publication moves previously readable blocks to
 `orphaned`. Interpretation uses an unchanged value to reuse prior-state
 lineage checks; a changed value requires every retained prior-state block
 anchor to be checked again.
+
+**Locked NameWrapper state** — the ENSv1 NameWrapper lifecycle state selected
+by the `CANNOT_UNWRAP` fuse. Locking requires emancipation and allows further
+owner-controlled permissions to be revoked. (upstream: .refs/ens_v1/contracts/wrapper/README.md:L87 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/README.md:L91 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/README.md:L93 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/README.md:L95 @ ens_v1@91c966f)
+The API exposes this as `wrapper_state="locked"` only while the wrapper expiry
+is not earlier than the served block timestamp; after that boundary the
+NameWrapper reads both owner and fuses as zero and `wrapper_state` is omitted.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L848 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L849 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L852 @ ens_v1@91c966f)
+For a `.eth` second-level name, entering the registrar grace period does not
+change `wrapper_state`, but it removes the remaining owner modification and
+transfer powers before the later wrapper expiry.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L48 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L218 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L221 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L820 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L825 @ ens_v1@91c966f)
 
 **Normalized event** — the current-interpretation-epoch record of one semantic
 protocol transition, carrying identity, provenance, optional chain position,
@@ -403,3 +450,16 @@ declarations plus indexability-producing discovery edges. Topology-only edges,
 including ENSv2 subregistry edges, do not add targets. A *watched tuple* is one
 such entry; its *watched window* is the active block range. Addresses are
 derived watch targets, never the durable identity.
+
+**Wrapped NameWrapper state** — the ENSv1 NameWrapper lifecycle state in which
+the wrapper manages the name and issues its ERC-1155 token, but neither
+`PARENT_CANNOT_CONTROL` nor `CANNOT_UNWRAP` provides protection. The parent can
+still modify or reclaim the name, and the wrapped owner can unwrap it.
+(upstream: .refs/ens_v1/contracts/wrapper/README.md:L65 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/README.md:L67 @ ens_v1@91c966f)
+The API exposes this as `wrapper_state="wrapped"`. Passing the stored wrapper
+expiry clears effective fuses but does not remove a plain wrapped name or this
+state. (upstream: .refs/ens_v1/contracts/wrapper/README.md:L99 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/README.md:L101 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/README.md:L103 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/README.md:L109 @ ens_v1@91c966f)

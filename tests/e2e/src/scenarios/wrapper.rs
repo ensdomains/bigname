@@ -230,21 +230,15 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
         wrapper_expiry,
         "exact-name registration expiry should follow the current wrapper authority"
     );
+    assert_eq!(
+        pointer(&locked_body, "/declared_state/wrapper_state"),
+        "locked",
+        "locked.eth should expose its effective NameWrapper state"
+    );
 
-    // Pinned observed contract: the wrapper family never emits subject
-    // grants ("without inventing new subject grants" —
-    // docs/architecture.md § Permissions); fuse state arrives as
-    // PermissionScopeChanged scope events carrying the raw fuse bitmap. The
-    // wrapped HOLDER therefore has no published effective-powers row on any
-    // resource. Public docs classify fuse masking and wrapper-holder grants as
-    // unprojected; this assertion pins that current limitation.
-    // Fuse bitmaps validate the pinned upstream constants: wrap burned
-    // PARENT_CANNOT_CONTROL(65536)+IS_DOT_ETH(131072) = 196608; setFuses
-    // added CANNOT_UNWRAP(1)+CANNOT_TRANSFER(4)+CANNOT_SET_RESOLVER(8)
-    // = 196621
-    // (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L10 @ ens_v1@91c966f).
-    let fuse_scopes: Vec<i64> = sqlx::query_scalar(
-        "SELECT (after_state->>'fuses')::BIGINT FROM normalized_events \
+    let fuse_scopes: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT (after_state->>'fuses')::BIGINT, after_state->>'wrapper_state'
+         FROM normalized_events \
          WHERE logical_name_id = 'ens:0x669e8ea725c56427a7bca9ffaed126a8922a2b2baf4ed71a3fe74d871d0dd25b' \
          AND event_kind = 'PermissionScopeChanged' \
          AND source_family = 'ens_v1_wrapper_l1' \
@@ -255,12 +249,9 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
     .await?;
     assert_eq!(
         fuse_scopes,
-        vec![196_608, 196_621],
-        "wrap then setFuses should emit the exact fuse bitmaps as scope events"
+        vec![(196_608, "emancipated".into()), (196_621, "locked".into())],
+        "wrap then setFuses should derive the expected lifecycle states"
     );
-    // The registrar-anchor resource's grants show the NameWrapper contract
-    // itself as the current resource_control subject (it holds the
-    // registrar token while the name is wrapped).
     let wrapper_subject_grants: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM permissions_current \
          WHERE subject = $1 AND scope = 'resource' \
@@ -280,7 +271,7 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
             .await?;
     assert_eq!(
         locked_wrapper_permissions, 0,
-        "wrapper resources must not invent holder grants while fuse masking remains unprojected"
+        "wrapper resources without subject-grant events must not invent holder grants"
     );
     let locked_holder_rows: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM address_names_current \
@@ -295,6 +286,15 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
         locked_holder_rows >= 1,
         "locked.eth must remain in the wrapper holder's schema-v2 address-name projection"
     );
+    let locked_controller_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM address_names_current
+         WHERE raw_name = 'locked.eth' AND resource_id = $1
+           AND relation = 'effective_controller'",
+    )
+    .bind(locked_wrapper_resource)
+    .fetch_one(&wrapped.db.pool)
+    .await?;
+    assert_eq!(locked_controller_rows, 0);
 
     let kid_body = exact_name(&wrapped.api, "ens", "kid.locked.eth").await?;
     assert_eq!(
@@ -312,6 +312,10 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
         format!("{carol:#x}"),
         "wrapped child holder should be the owner passed to setSubnodeOwner"
     );
+    assert_eq!(
+        pointer(&kid_body, "/declared_state/wrapper_state"),
+        "emancipated"
+    );
     let kid_resource: Uuid = pointer(&kid_body, "/data/resource_id")
         .as_str()
         .context("kid.locked.eth resource_id missing")?
@@ -321,9 +325,6 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
         kid_resource, locked_wrapper_resource,
         "wrapped child should have its own resource_id"
     );
-    // Same pinned wrapper-permission contract as the parent: wrapper-anchored
-    // resources publish no subject grants at all — neither the child holder's
-    // nor (correctly, per PARENT_CANNOT_CONTROL) the parent owner's.
     let kid_permissions: i64 =
         sqlx::query_scalar("SELECT count(*) FROM permissions_current WHERE resource_id = $1")
             .bind(kid_resource)
@@ -344,6 +345,10 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
         pointer(&record_body, "/data/resource_id"),
         pointer(&locked_body, "/data/resource_id"),
         "record.locked.eth should be a separate wrapped child resource"
+    );
+    assert_eq!(
+        pointer(&record_body, "/declared_state/wrapper_state"),
+        "emancipated"
     );
 
     wrapped.db.cleanup().await?;

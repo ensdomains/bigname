@@ -45,7 +45,16 @@ The seven A3 additions exercise:
   restores canonical state
   (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L116 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L133 @ ens_v1@91c966f);
-- the ENSv1 `NameWrapped` → `FusesSet` → `NameUnwrapped` lifecycle
+- the ENSv1 `NameWrapped` → `FusesSet` → `NameUnwrapped` lifecycle, with
+  committed `wrapped`, `emancipated`, `locked`, and owner-controlled-fuse
+  outputs. The fixture covers a zero bitmap, `PARENT_CANNOT_CONTROL`,
+  `CANNOT_UNWRAP`, and `CANNOT_SET_RESOLVER`; it intentionally adds no
+  registrar-controller events
+  (upstream: .refs/ens_v1/contracts/wrapper/README.md:L32 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/README.md:L34 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L10 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L13 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L18 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L35 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L37 @ ens_v1@91c966f).

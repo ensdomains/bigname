@@ -26,6 +26,19 @@ sol! {
     event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values);
 }
 
+const CANNOT_UNWRAP: u32 = 1;
+const PARENT_CANNOT_CONTROL: u32 = 1 << 16;
+
+fn wrapper_state(fuses: u32) -> &'static str {
+    if fuses & CANNOT_UNWRAP != 0 {
+        "locked"
+    } else if fuses & PARENT_CANNOT_CONTROL != 0 {
+        "emancipated"
+    } else {
+        "wrapped"
+    }
+}
+
 pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
@@ -60,11 +73,18 @@ pub(super) fn interpret(
             ensure_declared(selected, &["PermissionScopeChanged"])?;
             let node = hex_string(event.node);
             let linked = state.v1_name(&selected.source.namespace, &node);
+            let expiry = linked.as_ref().and_then(|state| state.expiry);
             Ok(single_event(
                 "PermissionScopeChanged",
                 linked.as_ref().map(|state| state.logical_name_id.clone()),
                 linked.as_ref().map(|state| state.resource_id),
-                json!({"source_event":"FusesSet","node":node,"fuses":event.fuses}),
+                json!({
+                    "source_event":"FusesSet",
+                    "node":node,
+                    "fuses":event.fuses,
+                    "wrapper_state":wrapper_state(event.fuses),
+                    "expiry":expiry,
+                }),
             ))
         }
         "TransferSingle" => transfer_single(selected, raw, state),
@@ -280,7 +300,7 @@ fn name_wrapped(
         "PermissionScopeChanged",
     ];
     ensure_declared(selected, &["TokenControlTransferred"])?;
-    let after = json!({"source_event":"NameWrapped","node":raw_namehash,"owner":address_hex(event.owner),"fuses":event.fuses,"expiry":event.expiry,"token_lineage_id":token_lineage_id.to_string(),"authority_kind":"wrapper","authority_key":authority_key.clone(),"surface_known":surface_known});
+    let after = json!({"source_event":"NameWrapped","node":raw_namehash,"owner":address_hex(event.owner),"fuses":event.fuses,"wrapper_state":wrapper_state(event.fuses),"expiry":event.expiry,"token_lineage_id":token_lineage_id.to_string(),"authority_kind":"wrapper","authority_key":authority_key.clone(),"surface_known":surface_known});
     let mut output = events_linked(kinds, logical_name_id, resource_id, after.clone());
     if let Some(transfer) = output
         .events

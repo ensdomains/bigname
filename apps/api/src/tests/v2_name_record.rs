@@ -76,6 +76,17 @@ async fn v2_get_name_returns_flat_name_record_envelope() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_get_name_exposes_projected_wrapper_state() -> Result<()> {
+    let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
+        row.declared_summary["wrapper_state"] = json!("locked");
+    })
+    .await?;
+
+    assert_eq!(payload["data"]["wrapper_state"], json!("locked"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_name_response_omits_banned_v1_spellings() -> Result<()> {
     let payload = v2_name_record_payload("/v2/names/Alice.eth").await?;
     assert_no_banned_v1_spellings(&payload);

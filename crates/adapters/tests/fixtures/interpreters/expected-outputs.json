@@ -3934,7 +3934,8 @@
             "authority_key": "wrapper:ethereum-mainnet:1:0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
             "authority_kind": "wrapper",
             "fuses": 0,
-            "namehash": "0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84"
+            "namehash": "0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84",
+            "wrapper_state": "wrapped"
           }
         },
         {
@@ -4031,8 +4032,59 @@
           "after_state": {
             "authority_key": "wrapper:ethereum-mainnet:1:0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
             "authority_kind": "wrapper",
-            "fuses": 1,
-            "namehash": "0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84"
+            "fuses": 65536,
+            "namehash": "0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84",
+            "wrapper_state": "emancipated"
+          }
+        },
+        {
+          "namespace": "ens",
+          "logical_name_id": "ens:wrapped.eth",
+          "resource_id": "65981806-f1d4-5492-aec4-a0006027c70a",
+          "event_kind": "PermissionScopeChanged",
+          "source_family": "ens_v1_wrapper_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 140,
+          "block_hash": "0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
+          "transaction_hash": "0xb4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4",
+          "raw_fact_ref": {
+            "block_hash": "0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
+            "block_number": 140,
+            "chain_id": "ethereum-mainnet"
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": { "fuses": 65536 },
+          "after_state": {
+            "fuses": 65537,
+            "wrapper_state": "locked"
+          }
+        },
+        {
+          "namespace": "ens",
+          "logical_name_id": "ens:wrapped.eth",
+          "resource_id": "65981806-f1d4-5492-aec4-a0006027c70a",
+          "event_kind": "PermissionScopeChanged",
+          "source_family": "ens_v1_wrapper_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 140,
+          "block_hash": "0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
+          "transaction_hash": "0xb4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4",
+          "raw_fact_ref": {
+            "block_hash": "0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
+            "block_number": 140,
+            "chain_id": "ethereum-mainnet"
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": { "fuses": 65537 },
+          "after_state": {
+            "fuses": 65663,
+            "wrapper_state": "locked"
           }
         },
         {
@@ -4140,7 +4192,7 @@
             "authority_key": "wrapper:ethereum-mainnet:1:0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
             "authority_kind": "wrapper",
             "expiry": 1900000000,
-            "fuses": 1,
+            "fuses": 65663,
             "logical_name_id": "ens:wrapped.eth",
             "namehash": "0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84",
             "owner": "0x0000000000000000000000000000000000002611",
@@ -5361,7 +5413,11 @@
           "source_manifest_id": 3
         },
         {
-          "after_state": {"authority_kind": "wrapper", "fuses": 1},
+          "after_state": {
+            "authority_kind": "wrapper",
+            "fuses": 1,
+            "wrapper_state": "locked"
+          },
           "before_state": {},
           "block_number": 181,
           "canonicality_state": "canonical",

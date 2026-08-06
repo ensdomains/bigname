@@ -110,7 +110,22 @@ pub(super) async fn build(
                            ELSE 'exact_name'
                        END
                    )
-               ),
+               ) || CASE
+                   WHEN wrapper.wrapper_state = 'wrapped'
+                       THEN jsonb_build_object('wrapper_state', 'wrapped')
+                   WHEN wrapper.wrapper_state IN ('emancipated', 'locked')
+                    AND wrapper_expiry.expiry_seconds IS NOT NULL
+                    AND wrapper_expiry.expiry_seconds >= (
+                        SELECT extract(epoch FROM lineage.block_timestamp)
+                        FROM chain_lineage lineage
+                        WHERE lineage.chain_id = $1
+                          AND lineage.block_number = $2
+                          AND lineage.block_hash = $3
+                    ) THEN jsonb_build_object(
+                        'wrapper_state', wrapper.wrapper_state
+                    )
+                   ELSE '{}'::jsonb
+               END,
                support.support_status,
                support.unsupported_reason,
                jsonb_build_object(
@@ -260,6 +275,40 @@ pub(super) async fn build(
                      event.normalized_event_id DESC
             LIMIT 1
         ) expiry ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT CASE event.after_state ->> 'wrapper_state'
+                       WHEN 'wrapped' THEN 'wrapped'
+                       WHEN 'emancipated' THEN 'emancipated'
+                       WHEN 'locked' THEN 'locked'
+                   END AS wrapper_state
+            FROM project_events event
+            WHERE event.resource_id = binding.resource_id
+              AND event.event_kind = 'PermissionScopeChanged'
+              AND event.source_family = 'ens_v1_wrapper_l1'
+            ORDER BY event.block_number DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST,
+                     event.log_index DESC NULLS LAST,
+                     event.normalized_event_id DESC
+            LIMIT 1
+        ) wrapper ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT CASE
+                       WHEN jsonb_typeof(event.after_state -> 'expiry') = 'number'
+                        AND (event.after_state ->> 'expiry')::numeric >= 0
+                        AND (event.after_state ->> 'expiry')::numeric <=
+                            18446744073709551615
+                           THEN (event.after_state ->> 'expiry')::numeric
+                   END AS expiry_seconds
+            FROM project_events event
+            WHERE event.resource_id = binding.resource_id
+              AND event.event_kind = 'ExpiryChanged'
+              AND event.source_family = 'ens_v1_wrapper_l1'
+            ORDER BY event.block_number DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST,
+                     event.log_index DESC NULLS LAST,
+                     event.normalized_event_id DESC
+            LIMIT 1
+        ) wrapper_expiry ON TRUE
         LEFT JOIN LATERAL (
             SELECT lineage.block_timestamp
             FROM project_events event

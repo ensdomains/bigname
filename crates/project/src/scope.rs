@@ -4,25 +4,32 @@ use crate::{Marker, ProjectError, Result};
 
 mod primary;
 mod retracted;
+mod wrapper;
+
+pub(crate) struct Window<'a> {
+    pub(crate) previous: Option<&'a Marker>,
+    pub(crate) from_block: i64,
+    pub(crate) to_block: i64,
+    pub(crate) full_rebuild: bool,
+    pub(crate) retain_retracted: bool,
+}
 
 pub(crate) async fn initialize(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     target: &Marker,
-    from_block: i64,
-    to_block: i64,
-    full_rebuild: bool,
-    retain_retracted_scope: bool,
+    window: Window<'_>,
 ) -> Result<()> {
     create_scope_tables(transaction).await?;
-    if full_rebuild {
+    if window.full_rebuild {
         return Ok(());
     }
 
-    stage_changed_events(transaction, chain_id, from_block, to_block).await?;
-    seed_direct_scope(transaction, chain_id, from_block, to_block).await?;
-    if retain_retracted_scope {
-        retracted::seed(transaction, chain_id, from_block, to_block).await?;
+    stage_changed_events(transaction, chain_id, window.from_block, window.to_block).await?;
+    seed_direct_scope(transaction, chain_id, window.from_block, window.to_block).await?;
+    wrapper::include_time_boundaries(transaction, chain_id, window.previous, target).await?;
+    if window.retain_retracted {
+        retracted::seed(transaction, chain_id, window.from_block, window.to_block).await?;
     }
     include_topology_scope(transaction, chain_id, target.number).await?;
     include_classification_scope(transaction, chain_id, target.number).await?;

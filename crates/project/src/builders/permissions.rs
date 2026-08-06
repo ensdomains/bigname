@@ -9,7 +9,15 @@ pub(super) async fn build(
 ) -> Result<()> {
     sqlx::query(
         r#"
-        WITH decoded AS (
+        WITH target_time AS (
+            SELECT extract(epoch FROM lineage.block_timestamp) AS epoch_seconds
+            FROM chain_lineage lineage
+            WHERE lineage.chain_id = $1
+              AND lineage.block_number = $2
+              AND lineage.block_hash = $3
+        ),
+        wrapper_constants AS (SELECT 131072::bigint AS is_dot_eth, 7776000::numeric AS grace_period_seconds),
+        decoded AS (
             SELECT event.*,
                    lower(event.after_state ->> 'subject') AS subject,
                    event.after_state -> 'scope' AS scope_detail,
@@ -76,10 +84,35 @@ pub(super) async fn build(
                         AND (event.after_state ->> 'fuses')::numeric >= 0
                         AND (event.after_state ->> 'fuses')::numeric <= 9223372036854775807
                            THEN (event.after_state ->> 'fuses')::bigint
-                   END AS fuses
+                   END AS fuses,
+                   CASE event.after_state ->> 'wrapper_state'
+                       WHEN 'wrapped' THEN 'wrapped'
+                       WHEN 'emancipated' THEN 'emancipated'
+                       WHEN 'locked' THEN 'locked'
+                   END AS wrapper_state
             FROM project_events event
             WHERE event.event_kind = 'PermissionScopeChanged'
               AND event.resource_id IS NOT NULL
+              AND event.source_family = 'ens_v1_wrapper_l1'
+            ORDER BY event.resource_id,
+                     event.block_number DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST,
+                     event.log_index DESC NULLS LAST,
+                     event.normalized_event_id DESC
+        ),
+        wrapper_expiries AS (
+            SELECT DISTINCT ON (event.resource_id)
+                   event.*,
+                   CASE
+                       WHEN jsonb_typeof(event.after_state -> 'expiry') = 'number'
+                        AND (event.after_state ->> 'expiry')::numeric >= 0
+                        AND (event.after_state ->> 'expiry')::numeric <= 18446744073709551615
+                           THEN (event.after_state ->> 'expiry')::numeric
+                   END AS expiry_seconds
+            FROM project_events event
+            WHERE event.event_kind = 'ExpiryChanged'
+              AND event.resource_id IS NOT NULL
+              AND event.source_family = 'ens_v1_wrapper_l1'
             ORDER BY event.resource_id,
                      event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST,
@@ -127,12 +160,24 @@ pub(super) async fn build(
                             event.after_state -> 'effective_powers'
                            THEN jsonb_build_array(modifier.normalized_event_id)
                        ELSE '[]'::jsonb
+                   END || CASE
+                       WHEN wrapper_expiry.normalized_event_id IS NOT NULL AND
+                            masked.effective_powers IS DISTINCT FROM
+                            event.after_state -> 'effective_powers'
+                           THEN jsonb_build_array(wrapper_expiry.normalized_event_id)
+                       ELSE '[]'::jsonb
                    END,
                    'raw_fact_refs', evidence.raw_fact_refs || CASE
                        WHEN modifier.normalized_event_id IS NOT NULL
                         AND masked.effective_powers IS DISTINCT FROM
                             event.after_state -> 'effective_powers'
                            THEN jsonb_build_array(modifier.raw_fact_ref)
+                       ELSE '[]'::jsonb
+                   END || CASE
+                       WHEN wrapper_expiry.normalized_event_id IS NOT NULL AND
+                            masked.effective_powers IS DISTINCT FROM
+                            event.after_state -> 'effective_powers'
+                           THEN jsonb_build_array(wrapper_expiry.raw_fact_ref)
                        ELSE '[]'::jsonb
                    END,
                    'manifest_versions', evidence.manifest_versions || CASE
@@ -145,6 +190,16 @@ pub(super) async fn build(
                                'manifest_version', modifier.manifest_version
                            ))
                        ELSE '[]'::jsonb
+                   END || CASE
+                       WHEN wrapper_expiry.normalized_event_id IS NOT NULL AND
+                            masked.effective_powers IS DISTINCT FROM
+                            event.after_state -> 'effective_powers'
+                           THEN jsonb_build_array(jsonb_build_object(
+                               'source_manifest_id', wrapper_expiry.source_manifest_id,
+                               'source_family', wrapper_expiry.source_family,
+                               'manifest_version', wrapper_expiry.manifest_version
+                           ))
+                       ELSE '[]'::jsonb
                    END,
                    'derivation_kind', 'permissions_current_rebuild',
                    'chain_id', $1,
@@ -154,8 +209,17 @@ pub(super) async fn build(
                    )
                ),
                jsonb_strip_nulls(jsonb_build_object(
-                   'block_number', GREATEST(event.block_number, modifier.block_number),
+                   'block_number', GREATEST(
+                       event.block_number,
+                       modifier.block_number,
+                       wrapper_expiry.block_number
+                   ),
                    'block_hash', CASE
+                       WHEN wrapper_expiry.block_number = GREATEST(
+                           event.block_number,
+                           modifier.block_number,
+                           wrapper_expiry.block_number
+                       ) THEN wrapper_expiry.block_hash
                        WHEN modifier.block_number > event.block_number
                            THEN modifier.block_hash
                        ELSE event.block_hash
@@ -177,22 +241,46 @@ pub(super) async fn build(
                             event.after_state -> 'effective_powers'
                            THEN modifier.manifest_version
                    END,
+                   CASE
+                       WHEN masked.effective_powers IS DISTINCT FROM
+                            event.after_state -> 'effective_powers'
+                           THEN wrapper_expiry.manifest_version
+                   END,
                    event.manifest_version
                )
         FROM latest event
         LEFT JOIN modifiers modifier USING (resource_id)
+        LEFT JOIN wrapper_expiries wrapper_expiry USING (resource_id)
+        LEFT JOIN target_time ON TRUE
+        CROSS JOIN wrapper_constants
+        CROSS JOIN LATERAL (SELECT COALESCE(
+                       (modifier.fuses & wrapper_constants.is_dot_eth) <> 0
+                       AND wrapper_expiry.expiry_seconds - wrapper_constants.grace_period_seconds
+                           < target_time.epoch_seconds,
+                       false
+                   ) AS in_grace
+        ) grace
         CROSS JOIN LATERAL (
             SELECT CASE
                 WHEN modifier.normalized_event_id IS NULL
                     THEN event.after_state -> 'effective_powers'
-                WHEN modifier.fuses IS NULL THEN '[]'::jsonb
+                WHEN modifier.fuses IS NULL
+                  OR modifier.wrapper_state IS NULL
+                  OR wrapper_expiry.expiry_seconds IS NULL
+                    THEN '[]'::jsonb
+                WHEN wrapper_expiry.expiry_seconds < target_time.epoch_seconds
+                 AND modifier.wrapper_state IN ('emancipated', 'locked')
+                    THEN '[]'::jsonb
+                WHEN wrapper_expiry.expiry_seconds < target_time.epoch_seconds
+                    THEN event.after_state -> 'effective_powers'
                 ELSE COALESCE((
                     SELECT jsonb_agg(to_jsonb(power.value) ORDER BY power.ordinality)
                     FROM jsonb_array_elements_text(event.after_state -> 'effective_powers')
-                         WITH ORDINALITY AS power(value, ordinality)
-                    WHERE NOT CASE power.value
+                        WITH ORDINALITY AS power(value, ordinality)
+                    WHERE (NOT grace.in_grace OR power.value IN ('approve', 'approve_wrapper'))
+                      AND NOT CASE power.value
                         WHEN 'resource_control' THEN
-                            (modifier.fuses & 127) <> 0
+                            modifier.wrapper_state = 'locked'
                         WHEN 'resolver_control' THEN
                             (modifier.fuses & 8) <> 0
                         WHEN 'set_resolver' THEN
@@ -200,9 +288,9 @@ pub(super) async fn build(
                         WHEN 'set_ttl' THEN
                             (modifier.fuses & 16) <> 0
                         WHEN 'create_subnames' THEN
-                            (modifier.fuses & 65568) <> 0
+                            (modifier.fuses & 32) <> 0
                         WHEN 'create_subdomain' THEN
-                            (modifier.fuses & 65568) <> 0
+                            (modifier.fuses & 32) <> 0
                         WHEN 'transfer' THEN
                             (modifier.fuses & 4) <> 0
                         WHEN 'transfer_name' THEN
