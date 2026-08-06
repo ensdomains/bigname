@@ -12,6 +12,34 @@ pub(super) async fn include_time_boundaries(
         return include_all(transaction, chain_id, target).await;
     };
 
+    let positions_present = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM chain_lineage prior
+            JOIN chain_lineage target ON target.chain_id = prior.chain_id
+            WHERE prior.chain_id = $1
+              AND prior.block_number = $2
+              AND prior.block_hash = $3
+              AND target.block_number = $4
+              AND target.block_hash = $5
+              AND prior.canonicality_state IN ('canonical', 'safe', 'finalized')
+              AND target.canonicality_state IN ('canonical', 'safe', 'finalized')
+        )
+        "#,
+    )
+    .bind(chain_id)
+    .bind(previous.number)
+    .bind(&previous.hash)
+    .bind(target.number)
+    .bind(&target.hash)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database("failed to validate wrapper timestamp positions", error)
+    })?;
+    require_positions(positions_present, previous, target)?;
+
     sqlx::query(
         r#"
         WITH positions AS (
@@ -123,6 +151,17 @@ pub(super) async fn include_time_boundaries(
     Ok(())
 }
 
+fn require_positions(positions_present: bool, previous: &Marker, target: &Marker) -> Result<()> {
+    if positions_present {
+        return Ok(());
+    }
+
+    Err(ProjectError::transient(format!(
+        "wrapper timestamp positions changed before projection: previous {} {}, target {} {}",
+        previous.number, previous.hash, target.number, target.hash
+    )))
+}
+
 async fn include_all(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -153,4 +192,27 @@ async fn include_all(
     .await
     .map_err(|error| ProjectError::database("failed to scope wrapper redo", error))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ErrorKind;
+
+    #[test]
+    fn missing_resume_position_is_transient() {
+        let previous = Marker {
+            number: 41,
+            hash: "0xdisplaced".to_owned(),
+        };
+        let target = Marker {
+            number: 42,
+            hash: "0xtarget".to_owned(),
+        };
+
+        let error = require_positions(false, &previous, &target).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::Transient);
+        assert!(error.to_string().contains("41 0xdisplaced"));
+    }
 }
