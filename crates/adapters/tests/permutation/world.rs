@@ -1,3 +1,9 @@
+//! The admitted manifests, addresses, and roles a generated scenario runs against.
+//!
+//! Each `SourceSlot` pins one checked-in manifest version file. Superseded versions stay checked
+//! in, so a pin has to advance when its family is bumped — `assert_pins_are_current` is what makes
+//! a bump fail the lane instead of silently generating from the old ABI.
+
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -303,25 +309,77 @@ pub struct GeneratedLog {
 }
 
 fn find_checked_in<'a>(
-    world: &World,
-    slot: &SourceSlot,
+    world: &'a World,
+    slot: &'a SourceSlot,
     checked_in: &'a [LoadedManifest],
 ) -> Result<&'a LoadedManifest> {
     let suffix = Path::new(slot.family).join(slot.version_file);
-    let mut matches = checked_in.iter().filter(|loaded| {
+    let mut matches =
+        admitted(world, slot, checked_in).filter(|loaded| loaded.relative_path.ends_with(&suffix));
+    let wanted = suffix.display();
+    let found = matches
+        .next()
+        .with_context(|| format!("no checked-in manifest for {wanted}"))?;
+    if matches.next().is_some() {
+        bail!("more than one checked-in manifest for {wanted}");
+    }
+    Ok(found)
+}
+
+fn admitted<'a>(
+    world: &'a World,
+    slot: &'a SourceSlot,
+    checked_in: &'a [LoadedManifest],
+) -> impl Iterator<Item = &'a LoadedManifest> {
+    checked_in.iter().filter(move |loaded| {
         loaded.manifest.namespace == world.namespace
             && loaded.manifest.source_family == slot.family
             && loaded.manifest.chain == world.chain_id
             && loaded.manifest.deployment_epoch == world.deployment_epoch
-            && loaded.relative_path.ends_with(&suffix)
-    });
-    let found = matches
-        .next()
-        .with_context(|| format!("no checked-in manifest for {}", slot.family))?;
-    if matches.next().is_some() {
-        bail!("more than one checked-in manifest for {}", slot.family);
+    })
+}
+
+/// Fails the lane when a pinned version file is no longer the newest one its family has checked in
+/// for this deployment epoch. Scoped to the epoch because a family keeps its superseded epochs'
+/// manifests in the same directory — an ENSv2 pre-audit `sepolia-dev` manifest added today would
+/// take the next version number without being the manifest a post-audit world should generate from.
+pub fn assert_pins_are_current(world: &World, checked_in: &[LoadedManifest]) -> Result<()> {
+    let mut stale = Vec::new();
+    for slot in world.sources {
+        let newest = admitted(world, slot, checked_in)
+            .filter_map(version_file)
+            .max()
+            .with_context(|| {
+                format!(
+                    "{}: no checked-in {} manifest carries a vN.toml version file",
+                    world.label, slot.family
+                )
+            })?;
+        if newest.1 != slot.version_file {
+            stale.push(format!(
+                "{} pins {} but {} is checked in",
+                slot.family, slot.version_file, newest.1
+            ));
+        }
     }
-    Ok(found)
+    if !stale.is_empty() {
+        bail!(
+            "{} generates from superseded manifests; advance the pins or state why they stay:\n  {}",
+            world.label,
+            stale.join("\n  ")
+        );
+    }
+    Ok(())
+}
+
+fn version_file(loaded: &LoadedManifest) -> Option<(u32, String)> {
+    let name = loaded.relative_path.file_name()?.to_str()?;
+    let number = name
+        .strip_prefix('v')?
+        .strip_suffix(".toml")?
+        .parse()
+        .ok()?;
+    Some((number, name.to_owned()))
 }
 
 /// Topic0 of every event the world's checked-in manifests declare, mapped to the log topic count

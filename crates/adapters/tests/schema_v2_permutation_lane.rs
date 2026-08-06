@@ -34,7 +34,8 @@ use permutation::{
     invariants::{IdentityReferences, converge, split},
     scenario,
     world::{
-        ENS_V1_MAINNET, ENS_V2_SEPOLIA, Wiring, World, checked_in_manifests, declared_event_topics,
+        ENS_V1_MAINNET, ENS_V2_SEPOLIA, Wiring, World, assert_pins_are_current,
+        checked_in_manifests, declared_event_topics,
     },
 };
 
@@ -240,6 +241,18 @@ fn the_dimension_space_emits_every_declared_event() -> Result<()> {
             "the scenario axes emit event signatures that declared_events() does not list, so \
              nothing checks them: {undeclared:?}"
         );
+    }
+    Ok(())
+}
+
+/// A superseded manifest version stays checked in, so a world that keeps pinning it goes on
+/// generating from the old ABI against an interpreter that has moved to the new one. The lane is
+/// where that has to be loud.
+#[test]
+fn worlds_pin_the_newest_checked_in_manifest_version() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    for world in WORLDS {
+        assert_pins_are_current(world, &checked_in)?;
     }
     Ok(())
 }
