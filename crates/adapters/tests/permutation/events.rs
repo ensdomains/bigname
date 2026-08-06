@@ -1,5 +1,5 @@
 use alloy_primitives::LogData;
-use alloy_sol_types::{SolEvent, sol};
+use alloy_sol_types::{SolEvent, TopicList, sol};
 
 sol! {
     interface V1Registry {
@@ -171,56 +171,75 @@ sol! {
     }
 }
 
-/// Every event this lane emits, as (name, solidity signature, topic0). The lane asserts each entry
-/// against the checked-in manifest ABI, so a mistyped fragment fails loudly instead of silently
-/// dropping an axis of coverage. The manifests carry the upstream citations for these fragments.
-pub fn declared_events() -> Vec<(&'static str, &'static str, String)> {
+/// One event fragment this lane emits, checked against the manifest ABI of the world that admits
+/// it. `topics` is the log's topic count, so a fragment that disagrees with the manifest about
+/// which parameters are indexed is caught even though it hashes to the same topic0.
+pub struct DeclaredEvent {
+    pub world: &'static str,
+    pub name: &'static str,
+    pub signature: &'static str,
+    pub topics: usize,
+    pub topic0: String,
+}
+
+pub fn declared_events() -> Vec<DeclaredEvent> {
     macro_rules! declared {
-        ($($event:ty),* $(,)?) => {
-            vec![$((
-                stringify!($event),
-                <$event as SolEvent>::SIGNATURE,
-                format!("{:#x}", <$event as SolEvent>::SIGNATURE_HASH),
-            )),*]
+        ($world:expr, [$($event:ty),* $(,)?]) => {
+            [$(DeclaredEvent {
+                world: $world,
+                name: stringify!($event),
+                signature: <$event as SolEvent>::SIGNATURE,
+                topics: <<$event as SolEvent>::TopicList as TopicList>::COUNT,
+                topic0: format!("{:#x}", <$event as SolEvent>::SIGNATURE_HASH),
+            }),*]
         };
     }
-    declared![
-        V1Registry::NewOwner,
-        V1Registry::Transfer,
-        V1Registry::NewResolver,
-        V1RegistrarToken::Transfer,
-        V1LegacyController::NameRegistered,
-        V1LegacyController::NameRenewed,
-        V1WrappedController::NameRegistered,
-        V1UnwrappedController::NameRegistered,
-        V1UnwrappedController::NameRenewed,
-        V1Wrapper::NameWrapped,
-        V1Wrapper::NameUnwrapped,
-        V1Wrapper::ExpiryExtended,
-        V1Wrapper::TransferSingle,
-        V1Resolver::AddrChanged,
-        V1Resolver::TextChanged,
-        V1Resolver::ContenthashChanged,
-        V1Resolver::NameChanged,
-        V1Reverse::ReverseClaimed,
-        V2Registry::RegistryCreated,
-        V2Registry::LabelRegistered,
-        V2Registry::LabelUnregistered,
-        V2Registry::ExpiryUpdated,
-        V2Registry::SubregistryUpdated,
-        V2Registry::ResolverUpdated,
-        V2Registry::TokenResource,
-        V2Registry::TransferSingle,
-        V2Registry::EACRolesChanged,
-        V2Registry::TokenRegenerated,
-        V2Registry::ParentUpdated,
-        V2Registry::Upgraded,
-        V2Registrar::NameRegistered,
-        V2Registrar::NameRenewed,
-        V2Resolver::AddressChanged,
-        V2Resolver::TextChanged,
-        V2Resolver::NameChanged,
-    ]
+    let v1 = declared!(
+        "ens_v1_mainnet",
+        [
+            V1Registry::NewOwner,
+            V1Registry::Transfer,
+            V1Registry::NewResolver,
+            V1RegistrarToken::Transfer,
+            V1LegacyController::NameRegistered,
+            V1LegacyController::NameRenewed,
+            V1WrappedController::NameRegistered,
+            V1UnwrappedController::NameRegistered,
+            V1UnwrappedController::NameRenewed,
+            V1Wrapper::NameWrapped,
+            V1Wrapper::NameUnwrapped,
+            V1Wrapper::ExpiryExtended,
+            V1Wrapper::TransferSingle,
+            V1Resolver::AddrChanged,
+            V1Resolver::TextChanged,
+            V1Resolver::ContenthashChanged,
+            V1Resolver::NameChanged,
+            V1Reverse::ReverseClaimed,
+        ]
+    );
+    let v2 = declared!(
+        "ens_v2_sepolia",
+        [
+            V2Registry::RegistryCreated,
+            V2Registry::LabelRegistered,
+            V2Registry::LabelUnregistered,
+            V2Registry::ExpiryUpdated,
+            V2Registry::SubregistryUpdated,
+            V2Registry::ResolverUpdated,
+            V2Registry::TokenResource,
+            V2Registry::TransferSingle,
+            V2Registry::EACRolesChanged,
+            V2Registry::TokenRegenerated,
+            V2Registry::ParentUpdated,
+            V2Registry::Upgraded,
+            V2Registrar::NameRegistered,
+            V2Registrar::NameRenewed,
+            V2Resolver::AddressChanged,
+            V2Resolver::TextChanged,
+            V2Resolver::NameChanged,
+        ]
+    );
+    v1.into_iter().chain(v2).collect()
 }
 
 pub fn encoded_topics(encoded: &LogData) -> Vec<String> {

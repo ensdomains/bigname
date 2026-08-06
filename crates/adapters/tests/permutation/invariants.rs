@@ -19,14 +19,17 @@ use super::{
 /// already committed, accumulated in commit order. `crates/interpret/src/write.rs` writes identity
 /// rows, then discovery rows, then normalized events, one transaction per batch — so a row may
 /// reference anything its own batch emits or anything an earlier batch emitted, and nothing else.
+/// A chain position: block number, transaction index, log index.
+type Position = (i64, i64, i64);
+
 pub struct IdentityReferences {
     chain_id: String,
     resources: BTreeSet<(String, Uuid)>,
     lineages: BTreeSet<(String, Uuid)>,
     surfaces: BTreeSet<(String, String)>,
-    bindings: BTreeMap<Uuid, (i64, i64, i64)>,
+    bindings: BTreeMap<Uuid, Position>,
     instances: BTreeSet<(String, Uuid)>,
-    positions: BTreeMap<String, (i64, i64, i64)>,
+    positions: BTreeMap<String, Position>,
 }
 
 impl IdentityReferences {
@@ -118,7 +121,8 @@ impl IdentityReferences {
                 );
             }
             self.bindings
-                .insert(binding.surface_binding_id, binding_position(binding));
+                .entry(binding.surface_binding_id)
+                .or_insert_with(|| binding_position(binding));
         }
         for closure in &output.binding_closures {
             if let Some(binding) = closure.except_surface_binding_id
@@ -180,48 +184,25 @@ impl IdentityReferences {
         self.check_binding_exclusivity(context, output)
     }
 
-    /// `surface_bindings_no_overlap` forbids two live bindings for one name. Replaying the batch's
-    /// bindings and closures in chain order must never leave a name with more than one open.
+    /// `surface_bindings_no_overlap` excludes overlapping `[active_from, active_to)` ranges per
+    /// name. A binding that opens without a preceding closure is not an overlap — the writer caps
+    /// the predecessor's `active_to` on every open, and `seam::binding_open_time` pushes the new
+    /// start past it. Two distinct bindings for one name at the *same* chain position are, because
+    /// they share an `active_from` no clamp can separate.
     fn check_binding_exclusivity(&self, context: &str, output: &BatchOutput) -> Result<()> {
-        let mut open: BTreeMap<&str, BTreeMap<Uuid, (i64, i64, i64)>> = BTreeMap::new();
-        let mut steps = output
-            .surface_bindings
-            .iter()
-            .map(|binding| {
-                (
-                    binding_position(binding),
-                    Some(binding),
-                    Option::<&bigname_adapters::schema_v2::BindingClosure>::None,
-                )
-            })
-            .chain(
-                output
-                    .binding_closures
-                    .iter()
-                    .map(|closure| (closure_position(closure), None, Some(closure))),
-            )
-            .collect::<Vec<_>>();
-        // Closures settle before a binding opened at the same position, which is how a replacement
-        // binding survives its own closure.
-        steps.sort_by_key(|(position, binding, _)| (*position, binding.is_some()));
-        for (position, binding, closure) in steps {
-            if let Some(closure) = closure {
-                if let Some(live) = open.get_mut(closure.logical_name_id.as_str()) {
-                    live.retain(|binding, opened| {
-                        *opened > position || closure.except_surface_binding_id == Some(*binding)
-                    });
-                }
-                continue;
-            }
-            let binding = binding.expect("step is a binding or a closure");
-            let live = open.entry(binding.logical_name_id.as_str()).or_default();
-            live.insert(binding.surface_binding_id, position);
-            if live.len() > 1 {
+        let mut by_position: BTreeMap<(&str, Position), BTreeSet<Uuid>> = BTreeMap::new();
+        for binding in &output.surface_bindings {
+            by_position
+                .entry((binding.logical_name_id.as_str(), binding_position(binding)))
+                .or_default()
+                .insert(binding.surface_binding_id);
+        }
+        for ((logical_name_id, position), bindings) in by_position {
+            if bindings.len() > 1 {
                 bail!(
-                    "{context}: name {} has {} live surface bindings at {position:?}: {:?}",
-                    binding.logical_name_id,
-                    live.len(),
-                    live.keys().collect::<Vec<_>>()
+                    "{context}: name {logical_name_id} opens {} surface bindings at one position {position:?}: {:?}",
+                    bindings.len(),
+                    bindings
                 );
             }
         }
@@ -289,7 +270,7 @@ impl IdentityReferences {
     }
 }
 
-fn binding_position(binding: &bigname_adapters::schema_v2::SurfaceBinding) -> (i64, i64, i64) {
+fn binding_position(binding: &bigname_adapters::schema_v2::SurfaceBinding) -> Position {
     (
         binding.block_number,
         binding
@@ -305,7 +286,7 @@ fn binding_position(binding: &bigname_adapters::schema_v2::SurfaceBinding) -> (i
     )
 }
 
-fn closure_position(closure: &bigname_adapters::schema_v2::BindingClosure) -> (i64, i64, i64) {
+fn closure_position(closure: &bigname_adapters::schema_v2::BindingClosure) -> Position {
     (
         closure.block_number,
         closure.transaction_index,

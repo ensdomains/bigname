@@ -136,6 +136,55 @@ pub struct Dimensions {
 }
 
 impl Dimensions {
+    /// Every reachable combination of the axes, with all perturbations enabled. Used to prove event
+    /// coverage without depending on which combinations a seed happens to draw.
+    pub fn exhaustive() -> Vec<Self> {
+        let mut all = Vec::new();
+        for wrap_state in [
+            WrapState::Unwrapped,
+            WrapState::WrappedUnlocked,
+            WrapState::WrappedLocked,
+        ] {
+            for record_state in [
+                RecordState::NoResolver,
+                RecordState::ResolverWithRecords,
+                RecordState::CustomResolverNoRecords,
+            ] {
+                for subname_shape in [
+                    SubnameShape::None,
+                    SubnameShape::RegistrySubnode,
+                    SubnameShape::WrappedChild,
+                    SubnameShape::DeepSubnode,
+                ] {
+                    for authority_shape in [
+                        AuthorityShape::SelfOwned,
+                        AuthorityShape::OperatorTransfer,
+                        AuthorityShape::GiveAway,
+                    ] {
+                        for registration_path in [
+                            RegistrationPath::Legacy,
+                            RegistrationPath::Wrapped,
+                            RegistrationPath::Unwrapped,
+                        ] {
+                            all.push(Self {
+                                wrap_state,
+                                record_state,
+                                subname_shape,
+                                expiry_window: ExpiryWindow::JustExpired,
+                                authority_shape,
+                                registration_path,
+                                perturbations: PERTURBATIONS.to_vec(),
+                                name_count: 1,
+                                dense_transactions: false,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        all
+    }
+
     fn draw(rng: &mut Rng) -> Self {
         let mut perturbations = PERTURBATIONS.to_vec();
         rng.shuffle(&mut perturbations);
@@ -215,10 +264,7 @@ pub fn generate(world: &'static World, wiring: &Wiring, seed: u64) -> Scenario {
     let dimensions = Dimensions::draw(&mut rng);
     let blocks = draw_blocks(&mut rng);
     let settle_timestamp = blocks.last().expect("scenario has blocks").timestamp;
-    let mut actions = match world.label {
-        "ens_v1_mainnet" => pool_v1::build(wiring, &dimensions, settle_timestamp),
-        _ => pool_v2::build(wiring, &dimensions, settle_timestamp),
-    };
+    let mut actions = pool(world, wiring, &dimensions, settle_timestamp);
     rng.shuffle(&mut actions);
     repair_preconditions(&mut actions);
     let action_names = actions.iter().map(|action| action.name.clone()).collect();
@@ -251,6 +297,18 @@ fn repair_preconditions(actions: &mut [Action]) {
         for (slot, item) in slots.iter().zip(group) {
             actions[*slot] = item;
         }
+    }
+}
+
+pub fn pool(
+    world: &World,
+    wiring: &Wiring,
+    dimensions: &Dimensions,
+    settle_timestamp: i64,
+) -> Vec<Action> {
+    match world.label {
+        "ens_v1_mainnet" => pool_v1::build(wiring, dimensions, settle_timestamp),
+        _ => pool_v2::build(wiring, dimensions, settle_timestamp),
     }
 }
 

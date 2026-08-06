@@ -10,13 +10,16 @@ use uuid::Uuid;
 /// Anything outside these shapes fails the lane.
 #[derive(Default)]
 pub struct BatchBoundaryArtifacts {
-    /// Same-transaction reconciliation rewrites an *earlier* event's interpreter state key on the
-    /// emitted row without rewriting the live state map, so the value that event wrote stays
-    /// visible under the pre-reconciliation key for the rest of the batch but is absent from the
-    /// retained state a later batch restores. A successor event in that scope therefore reports a
-    /// `before_state` in one pass and `{}` in the other. The rewrite leaves no trace on the
-    /// successor itself, so this cannot be pinned tighter than "one side is empty".
-    pub carried_before_states: usize,
+    /// Two batch-local reconciliation behaviours put `before_state` out of step, one per direction.
+    /// Rewriting an *earlier* event's interpreter state key on the emitted row without rewriting the
+    /// live state map leaves that event's value reachable under the pre-reconciliation key for the
+    /// rest of the batch, but absent from the retained state a later batch restores — so the whole
+    /// pass carries a value the split replay leaves empty. Re-threading a resolver scope blanks the
+    /// `before_state` of that scope's first event *in the batch*, and a split gives each batch its
+    /// own first event — so the split replay blanks values the whole pass carries. Neither leaves a
+    /// trace on the row itself, so this cannot be pinned tighter than "one side is empty"; the
+    /// counter is split by direction to keep both visible.
+    pub carried_before_states: BTreeMap<&'static str, usize>,
     /// Reconciliation keeps a superseded identity row only while a retained row in the same batch
     /// output still references it. Where the referencing row lands in a later batch the earlier
     /// emission is dropped, so the two passes anchor the same identity to different blocks. Only
@@ -31,8 +34,10 @@ pub struct BatchBoundaryArtifacts {
 
 impl BatchBoundaryArtifacts {
     pub fn absorb(&mut self, other: Self) {
-        self.carried_before_states += other.carried_before_states;
         self.rebased_attributions += other.rebased_attributions;
+        for (direction, count) in other.carried_before_states {
+            *self.carried_before_states.entry(direction).or_default() += count;
+        }
         for (family, count) in other.rebased_anchors {
             *self.rebased_anchors.entry(family).or_default() += count;
         }
@@ -43,7 +48,7 @@ impl std::fmt::Display for BatchBoundaryArtifacts {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "carried_before_states={} rebased_attributions={} rebased_anchors={:?}",
+            "carried_before_states={:?} rebased_attributions={} rebased_anchors={:?}",
             self.carried_before_states, self.rebased_attributions, self.rebased_anchors
         )
     }
@@ -53,6 +58,16 @@ struct Row {
     key: String,
     body: String,
     anchor: String,
+}
+
+/// Which emission of a repeated key survives the upsert. Most families keep the first writer;
+/// `label_preimages` overwrites whenever the incoming source priority is at least the stored one
+/// (`crates/interpret/src/write/identity_names.rs`), and the adapter writes one priority, so the
+/// last emission wins there.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Keeps {
+    First,
+    Last,
 }
 
 /// Reconciliation can drop a superseded resource row whose only in-batch reference moved to a later
@@ -66,8 +81,8 @@ pub fn assert_converged(
 ) -> Result<BatchBoundaryArtifacts> {
     let mut known = BatchBoundaryArtifacts::default();
     assert_event_stream(context, fresh, replayed, &mut known)?;
-    for (family, whole, split) in families(fresh, replayed) {
-        assert_identity_family(context, family, &whole, &split, &mut known)?;
+    for (family, keeps, whole, split) in families(fresh, replayed) {
+        assert_identity_family(context, family, keeps, &whole, &split, &mut known)?;
     }
     assert_lineage_attachment(context, fresh, replayed)?;
     Ok(known)
@@ -100,8 +115,13 @@ fn assert_event_stream(
         if whole.before_state != split.before_state
             && (split.before_state == empty || whole.before_state == empty)
         {
+            let direction = if split.before_state == empty {
+                "only-the-whole-pass"
+            } else {
+                "only-the-split-replay"
+            };
             rebased.before_state = whole.before_state.clone();
-            known.carried_before_states += 1;
+            *known.carried_before_states.entry(direction).or_default() += 1;
         }
         let mut reattributed = false;
         if whole.logical_name_id != split.logical_name_id
@@ -138,17 +158,17 @@ fn assert_event_stream(
 }
 
 /// Identity rows are upserts keyed by their primary key, so batching changes how many times a row
-/// is replayed but never which rows exist. Only the earliest emission per key is compared, since
-/// that is the emission whose position the persistence layer keeps.
+/// is replayed but never which rows exist. Only the emission the upsert keeps is compared.
 fn assert_identity_family(
     context: &str,
     family: &'static str,
+    keeps: Keeps,
     whole: &[Row],
     split: &[Row],
     known: &mut BatchBoundaryArtifacts,
 ) -> Result<()> {
-    let whole_first = first_by_key(whole);
-    let split_first = first_by_key(split);
+    let whole_first = kept_by_key(whole, keeps);
+    let split_first = kept_by_key(split, keeps);
     let whole_keys = whole_first.keys().cloned().collect::<BTreeSet<_>>();
     let split_keys = split_first.keys().cloned().collect::<BTreeSet<_>>();
     if whole_keys != split_keys {
@@ -182,10 +202,11 @@ fn assert_identity_family(
     Ok(())
 }
 
-/// The resource upsert refuses a re-emission that names a different lineage
-/// (`crates/interpret/src/write/identity.rs`, `token_lineage_id IS NOT DISTINCT FROM EXCLUDED`), and
-/// `resources.token_lineage_id` is UNIQUE. Both are hard write failures, so a pass that violates
-/// either aborts the batch rather than diverging.
+/// The resource upsert refuses any re-emission whose lineage is not null-safe-equal to the stored
+/// one (`crates/interpret/src/write/identity.rs`, `token_lineage_id IS NOT DISTINCT FROM EXCLUDED`)
+/// — that predicate is symmetric, so attaching a lineage to a resource first written without one
+/// fails just as hard as changing it. `resources.token_lineage_id` is also UNIQUE. Both are write
+/// failures, so a pass that violates either aborts the batch rather than diverging.
 pub fn assert_lineage_integrity(context: &str, pass: &str, output: &BatchOutput) -> Result<()> {
     let mut lineage_of_resource: BTreeMap<Uuid, Option<Uuid>> = BTreeMap::new();
     let mut owner_of_lineage: BTreeMap<Uuid, Uuid> = BTreeMap::new();
@@ -193,15 +214,12 @@ pub fn assert_lineage_integrity(context: &str, pass: &str, output: &BatchOutput)
         let seen = lineage_of_resource
             .entry(resource.resource_id)
             .or_insert(resource.token_lineage_id);
-        if seen.is_some() && *seen != resource.token_lineage_id {
+        if *seen != resource.token_lineage_id {
             bail!(
                 "{context}: {pass} re-emits resource {} with a different token lineage: {seen:?} then {:?}",
                 resource.resource_id,
                 resource.token_lineage_id
             );
-        }
-        if seen.is_none() {
-            *seen = resource.token_lineage_id;
         }
         if let Some(lineage) = resource.token_lineage_id
             && let Some(existing) = owner_of_lineage.insert(lineage, resource.resource_id)
@@ -343,12 +361,19 @@ fn event_field_difference(whole: &NormalizedEvent, split: &NormalizedEvent) -> S
         .join("")
 }
 
-fn first_by_key(rows: &[Row]) -> BTreeMap<String, &Row> {
-    let mut first = BTreeMap::new();
+fn kept_by_key(rows: &[Row], keeps: Keeps) -> BTreeMap<String, &Row> {
+    let mut kept = BTreeMap::new();
     for row in rows {
-        first.entry(row.key.clone()).or_insert(row);
+        match keeps {
+            Keeps::First => {
+                kept.entry(row.key.clone()).or_insert(row);
+            }
+            Keeps::Last => {
+                kept.insert(row.key.clone(), row);
+            }
+        }
     }
-    first
+    kept
 }
 
 fn identities(events: &[NormalizedEvent]) -> BTreeSet<String> {
@@ -383,51 +408,65 @@ fn anchor(block_hash: &str, block_number: i64, provenance: &Value) -> String {
 fn families(
     fresh: &BatchOutput,
     replayed: &BatchOutput,
-) -> Vec<(&'static str, Vec<Row>, Vec<Row>)> {
+) -> Vec<(&'static str, Keeps, Vec<Row>, Vec<Row>)> {
     vec![
         (
             "label_preimages",
+            Keeps::Last,
             label_preimages(fresh),
             label_preimages(replayed),
         ),
         (
             "name_surfaces",
+            Keeps::First,
             name_surfaces(fresh),
             name_surfaces(replayed),
         ),
         (
             "token_lineages",
+            Keeps::First,
             token_lineages(fresh),
             token_lineages(replayed),
         ),
-        ("resources", resources(fresh), resources(replayed)),
+        (
+            "resources",
+            Keeps::First,
+            resources(fresh),
+            resources(replayed),
+        ),
         (
             "surface_bindings",
+            Keeps::First,
             surface_bindings(fresh),
             surface_bindings(replayed),
         ),
         (
             "binding_closures",
+            Keeps::First,
             binding_closures(fresh),
             binding_closures(replayed),
         ),
         (
             "contract_instances",
+            Keeps::First,
             contract_instances(fresh),
             contract_instances(replayed),
         ),
         (
             "contract_addresses",
+            Keeps::First,
             contract_addresses(fresh),
             contract_addresses(replayed),
         ),
         (
             "discovery_edges",
+            Keeps::First,
             discovery_edges(fresh),
             discovery_edges(replayed),
         ),
         (
             "discovery_edge_closures",
+            Keeps::First,
             discovery_edge_closures(fresh),
             discovery_edge_closures(replayed),
         ),
@@ -439,13 +478,14 @@ fn label_preimages(output: &BatchOutput) -> Vec<Row> {
         .label_preimages
         .iter()
         .map(|row| Row {
-            key: format!("{}:{}", row.labelhash, row.source_kind),
+            key: row.labelhash.clone(),
             body: format!(
-                "{:?}:{:?}:{}:{}:{}:{:?}",
+                "{:?}:{:?}:{}:{}:{}:{}:{:?}",
                 row.raw_label,
                 row.decoded_label,
                 row.normalizer_version,
                 row.normalized_under_version,
+                row.source_kind,
                 row.source_priority,
                 row.normalization_error
             ),

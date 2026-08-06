@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::{Path, PathBuf},
 };
 
@@ -324,19 +324,26 @@ fn find_checked_in<'a>(
     Ok(found)
 }
 
-/// Topic0 of every event the world's checked-in manifests declare. The lane asserts the event
-/// fragments it emits against this, so a mistyped fragment cannot silently drop coverage.
-pub fn declared_topic0s(world: &World, checked_in: &[LoadedManifest]) -> Result<BTreeSet<String>> {
-    let mut topics = BTreeSet::new();
+/// Topic0 of every event the world's checked-in manifests declare, mapped to the log topic count
+/// that event produces. The lane asserts its own fragments against this, so neither a mistyped
+/// signature nor a wrong `indexed` marking can silently drop coverage.
+pub fn declared_event_topics(
+    world: &World,
+    checked_in: &[LoadedManifest],
+) -> Result<BTreeMap<String, usize>> {
+    let mut declared = BTreeMap::new();
     for slot in world.sources {
         let loaded = find_checked_in(world, slot, checked_in)?;
         for event in &loaded.manifest.abi.events {
-            if let Some(topic) = event.topic0()? {
-                topics.insert(topic.to_ascii_lowercase());
-            }
+            let Some(topic0) = event.topic0()? else {
+                continue;
+            };
+            let parsed = event.parsed_event()?;
+            let indexed = parsed.inputs.iter().filter(|input| input.indexed).count();
+            declared.insert(topic0.to_ascii_lowercase(), indexed + 1);
         }
     }
-    Ok(topics)
+    Ok(declared)
 }
 
 pub fn checked_in_manifests() -> Result<Vec<LoadedManifest>> {

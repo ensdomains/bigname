@@ -186,8 +186,12 @@ impl Directed {
                 .with_context(|| format!("fixture batch {} has no blocks", batch.to_block))?;
             ranges.push(start..end + 1);
         }
-        if ranges.iter().map(|range| range.len()).sum::<usize>() != blocks.len() {
-            bail!("fixture batches do not cover every block exactly once");
+        if ranges
+            .iter()
+            .flat_map(|range| range.clone())
+            .ne(0..blocks.len())
+        {
+            bail!("fixture batches must cover every block exactly once, in order");
         }
         Ok(Self {
             id: case.id,
