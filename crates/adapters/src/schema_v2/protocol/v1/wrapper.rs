@@ -1,3 +1,5 @@
+//! The worker permission copy is legacy and intentionally unchanged pending its removal in #314.
+
 use alloy_primitives::{Address, U256};
 use alloy_sol_types::sol;
 use anyhow::bail;
