@@ -155,24 +155,19 @@ pub(crate) async fn get_resolver(
         .await?;
         if current != project_generations {
             return Err(V2Error::stale(
-                "resolver project publication changed while the request was being served",
+                "served resolver data changed while the request was being read",
             ));
         }
         if !require_selected_head {
             return Err(V2Error::stale(
-                "resolver projection is unavailable at the selected historical position",
+                "resolver data is unavailable at the selected historical position",
             ));
         }
         return Err(V2Error::not_found(format!(
             "resolver {normalized_address} was not found on chain {numeric_chain_id}"
         )));
     };
-    require_phase_target_snapshot(
-        "resolver overview",
-        &row.chain_positions,
-        &row.chain_id,
-        &selected_snapshot,
-    )?;
+    require_phase_target_snapshot(&row.chain_positions, &row.chain_id, &selected_snapshot)?;
     let snapshot_token = encode_at_token(&selected_snapshot);
     let cursor_binding = BoundNamesCursorBinding {
         chain_id: numeric_chain_id,
@@ -211,7 +206,7 @@ pub(crate) async fn get_resolver(
     .await?;
     if current != project_generations {
         return Err(V2Error::stale(
-            "resolver project publication changed while the request was being served",
+            "served resolver data changed while the request was being read",
         ));
     }
 
@@ -523,24 +518,24 @@ fn require_phase_name_snapshot(
     selected_snapshot: &SelectedSnapshot,
 ) -> V2Result<()> {
     let projected = ChainPositions::from_value(&row.row.chain_positions)
-        .map_err(|_| V2Error::stale("bound-name phase projection has unusable chain positions"))?;
+        .map_err(|_| V2Error::stale("resolver data is unavailable at the selected snapshot"))?;
     let slot = match row.row.namespace.as_str() {
         "ens" if projected.get("ethereum-sepolia").is_some() => "ethereum-sepolia",
         "ens" => "ethereum",
         "basenames" => "base",
         _ => {
             return Err(V2Error::stale(
-                "bound-name phase projection has no served position",
+                "resolver data is unavailable at the selected snapshot",
             ));
         }
     };
     let projected = projected
         .get(slot)
-        .ok_or_else(|| V2Error::stale("bound-name phase projection has no served position"))?;
+        .ok_or_else(|| V2Error::stale("resolver data is unavailable at the selected snapshot"))?;
     let selected = selected_snapshot
         .chain_positions
         .get(slot)
-        .ok_or_else(|| V2Error::stale("bound-name phase projection is outside the snapshot"))?;
+        .ok_or_else(|| V2Error::stale("resolver data is unavailable at the selected snapshot"))?;
     if projected.chain_id == selected.chain_id
         && projected.block_number <= selected.block_number
         && (projected.block_number != selected.block_number
@@ -549,13 +544,12 @@ fn require_phase_name_snapshot(
         Ok(())
     } else {
         Err(V2Error::stale(
-            "bound-name phase projection is outside the selected project publication",
+            "resolver data is unavailable at the selected snapshot",
         ))
     }
 }
 
 fn require_phase_target_snapshot(
-    projection_family: &str,
     chain_positions: &Value,
     chain_id: &str,
     selected_snapshot: &SelectedSnapshot,
@@ -563,23 +557,23 @@ fn require_phase_target_snapshot(
     let number = chain_positions
         .get("target_block_number")
         .and_then(Value::as_i64)
-        .ok_or_else(|| V2Error::stale(format!("{projection_family} has no target block number")))?;
+        .ok_or_else(|| V2Error::stale("resolver data is unavailable at the selected snapshot"))?;
     let hash = chain_positions
         .get("target_block_hash")
         .and_then(Value::as_str)
-        .ok_or_else(|| V2Error::stale(format!("{projection_family} has no target block hash")))?;
+        .ok_or_else(|| V2Error::stale("resolver data is unavailable at the selected snapshot"))?;
     let selected = selected_snapshot
         .chain_positions
         .as_map()
         .values()
         .find(|position| position.chain_id == chain_id)
-        .ok_or_else(|| V2Error::stale(format!("{projection_family} is outside the snapshot")))?;
+        .ok_or_else(|| V2Error::stale("resolver data is unavailable at the selected snapshot"))?;
     if number > selected.block_number
         || (number == selected.block_number && hash != selected.block_hash)
     {
-        return Err(V2Error::stale(format!(
-            "{projection_family} is outside the selected project publication"
-        )));
+        return Err(V2Error::stale(
+            "resolver data is unavailable at the selected snapshot",
+        ));
     }
     Ok(())
 }

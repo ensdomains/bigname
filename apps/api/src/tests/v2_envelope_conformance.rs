@@ -1228,6 +1228,47 @@ async fn collect_v2_stale_and_conflict_error_violations(
     database.cleanup().await?;
 
     let database = TestDatabase::new_migrated().await?;
+    seed_identity_name(
+        &database,
+        "ens:alice.eth",
+        "alice.eth",
+        "alice.eth",
+        "namehash:alice.eth",
+        Uuid::from_u128(0x0c23_1201),
+        Uuid::from_u128(0x0c23_1202),
+        Uuid::from_u128(0x0c23_1203),
+        V2_ADDRESS,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        38,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE name_current
+        SET chain_positions = jsonb_set(
+            chain_positions,
+            '{ethereum,block_number}',
+            '39'::jsonb
+        )
+        WHERE raw_name = 'alice.eth'
+        "#,
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let route = v2_conformance_route(V2SuccessFixture::Lookup);
+    let response = v2_conformance_response(
+        &database,
+        V2StrictQueryMethod::PostLookup,
+        "/v2/lookup",
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT, "{}", route.label);
+    let payload: Value = read_json(response).await?;
+    assert_v2_error_envelope(route.label, &payload, "stale");
+    collect_pipeline_vocabulary_in_error_body(route.label, &payload, violations);
+    database.cleanup().await?;
+
+    let database = TestDatabase::new_migrated().await?;
     let resolver_conflict_at = v2_at_token(
         "ethereum",
         "ethereum-mainnet",
@@ -1257,6 +1298,29 @@ async fn collect_v2_stale_and_conflict_error_violations(
         assert_v2_error_envelope(route.label, &payload, expected_code);
         collect_pipeline_vocabulary_in_error_body(route.label, &payload, violations);
     }
+
+    sqlx::query(
+        r#"
+        UPDATE resolver_current
+        SET chain_positions = jsonb_set(
+            chain_positions,
+            '{target_block_number}',
+            '204'::jsonb
+        )
+        WHERE chain_id = 'ethereum-mainnet'
+          AND resolver_address = $1
+        "#,
+    )
+    .bind(V2_RESOLVER_ADDRESS)
+    .execute(&database.lookup_pool)
+    .await?;
+    let route = v2_conformance_route(V2SuccessFixture::Resolver);
+    let uri = format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}");
+    let response = v2_conformance_response(&database, V2StrictQueryMethod::Get, &uri).await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT, "{}", route.label);
+    let payload: Value = read_json(response).await?;
+    assert_v2_error_envelope(route.label, &payload, "stale");
+    collect_pipeline_vocabulary_in_error_body(route.label, &payload, violations);
     database.cleanup().await?;
 
     Ok(())

@@ -31,7 +31,7 @@ pub(super) async fn load_served_head(
     scope: &SnapshotSelectionScope,
 ) -> V2Result<Option<ServedHead>> {
     let input = SnapshotSelectorInput::new(None, None, SnapshotConsistency::Head)
-        .map_err(|_| V2Error::internal_error("failed to build lookup served head selector"))?;
+        .map_err(|_| V2Error::internal_error("failed to select lookup data"))?;
     let selected = match resolve_exact_name_snapshot_selection(pool, scope, &input).await {
         Ok(selected) => selected,
         Err(error) if served_head_scope_conflict(&error) => {
@@ -44,13 +44,11 @@ pub(super) async fn load_served_head(
         }
         Err(error) if error.kind() == SnapshotSelectionErrorKind::Stale => {
             return Err(V2Error::stale(
-                "served data is not available at the current phase head",
+                "served data is not available at the current snapshot",
             ));
         }
         Err(error) if error.kind() == SnapshotSelectionErrorKind::InvalidInput => {
-            return Err(V2Error::internal_error(
-                "failed to build lookup served head selector",
-            ));
+            return Err(V2Error::internal_error("failed to select lookup data"));
         }
         Err(error) => {
             return Err(sanitized_snapshot_internal_error(
@@ -104,8 +102,8 @@ pub(crate) async fn load_project_generations(
         .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
         .fetch_optional(pool)
         .await
-        .map_err(|_| V2Error::internal_error("failed to validate lookup project publication"))?
-        .ok_or_else(|| V2Error::stale("served data is not available at the selected phase head"))?;
+        .map_err(|_| V2Error::internal_error("failed to validate lookup data"))?
+        .ok_or_else(|| V2Error::stale("served data is not available at the selected snapshot"))?;
         generations.insert(position.chain_id.clone(), generation);
     }
     Ok(generations)
@@ -139,8 +137,8 @@ pub(crate) async fn load_selected_project_generations(
         .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
         .fetch_optional(pool)
         .await
-        .map_err(|_| V2Error::internal_error("failed to validate lookup project publication"))?
-        .ok_or_else(|| V2Error::stale("served data is not available at the selected phase head"))?;
+        .map_err(|_| V2Error::internal_error("failed to validate lookup data"))?
+        .ok_or_else(|| V2Error::stale("served data is not available at the selected snapshot"))?;
         generations.insert(position.chain_id.clone(), generation);
     }
     Ok(generations)
