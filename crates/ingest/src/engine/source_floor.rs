@@ -44,11 +44,11 @@ impl Engine {
 
 /// The block range a batch plans for one source, or `None` when it plans nothing.
 ///
-/// A normal batch plans the source's whole declared window up to the chain head, ignoring
-/// cursor progress: planning cannot tell coverage recorded before the node pruned from
-/// coverage recorded through a pruned window, so it refuses both until the node holds the
-/// declared range again or the declared start block moves. A redo plans only its own range,
-/// so a redo above the floor stays available on a pruned node.
+/// A normal batch is judged against the source's whole declared window rather than the
+/// one window it fetches: planning cannot tell coverage recorded before the node pruned
+/// from coverage recorded through a pruned window, so it refuses both until the node holds
+/// the declared range again or the declared start block moves. A redo carries its own
+/// range, so a redo above the floor stays available on a pruned node.
 fn planned_range(
     source: &SourceDescriptor,
     redo_range: Option<(i64, i64)>,

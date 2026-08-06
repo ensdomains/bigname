@@ -20,9 +20,8 @@ pub(super) struct RetentionReadings {
     /// log filter with it
     /// (upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L188 @ reth@88505c7f)
     /// (upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L190 @ reth@88505c7f)
-    /// — whose rows are pruned against a checkpoint this does not read, and it still
-    /// reports the old jars on a datadir that later moved receipts into tables. Both
-    /// configurations are bounded only by `earliest_history_block`.
+    /// — whose rows are pruned against a checkpoint this does not read, leaving that
+    /// configuration bounded only by `earliest_history_block`.
     pub(super) lowest_receipt_block: Option<u64>,
 }
 

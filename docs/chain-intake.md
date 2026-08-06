@@ -141,9 +141,12 @@ refuses an `eth_getLogs` range below its expired-history floor with
 `PrunedHistoryUnavailable`
 (upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L584 @ reth@88505c7f)
 (upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L586 @ reth@88505c7f),
-but a node whose receipts were pruned while its transactions were kept passes
-that guard, and each of its receipt-less blocks then contributes no logs rather
-than an error
+but that floor tracks the lowest transaction static file
+(upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L1221 @ reth@88505c7f)
+(upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L1224 @ reth@88505c7f),
+so a node whose receipts were pruned while its transactions were kept passes the
+guard, and each of its receipt-less blocks then contributes no logs rather than
+an error
 (upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L1265 @ reth@88505c7f)
 (upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L1272 @ reth@88505c7f).
 Intake reads receipts directly, so it refuses there too. That widening is
@@ -152,10 +155,9 @@ from the static files on disk, so it bounds nothing on a node that keeps
 receipts in database tables
 (upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L188 @ reth@88505c7f)
 (upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L190 @ reth@88505c7f),
-whose row-wise prune checkpoints are not read, and it still reports the old jars
-on a datadir that later moved receipts into tables. On those configurations only
-the expired-history floor applies and a pruned receipt window can still be
-recorded as covered.
+whose row-wise prune checkpoints are not read. On that configuration only the
+expired-history floor applies and a pruned receipt window can still be recorded
+as covered.
 
 Historical ingest is judged on the source's declared start block, not on how far
 its cursor has advanced, so a resumed run whose cursor already stands above the
@@ -167,8 +169,9 @@ redo is judged on its own range instead — clipped to the source's declared sta
 ending below a source's declared start plans nothing for that source and is
 unaffected. Work already recorded is not re-examined: a completed ingest phase
 is not planned again, so a chain that recorded a pruned window before this rule
-existed keeps its stored coverage until a resync or an explicit redo re-plans
-that range. Live follow extends the published head rather than planning a
+existed keeps that stored coverage; a resync or a redo over the same range is
+refused rather than silently repeating the empty read, so the node has to hold
+the range before it can be re-indexed. Live follow extends the published head rather than planning a
 declared range and does not consult the floor. Sources that do not read a node's
 database report no floor: an RPC endpoint owns its retention behind the wire,
 and the Coinbase SQL warehouse is not a block provider at all.
