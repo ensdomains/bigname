@@ -1,0 +1,523 @@
+use alloy_primitives::{Address, B256, U256};
+use alloy_sol_types::SolEvent;
+
+use super::{
+    events::{
+        V1LegacyController, V1RegistrarToken, V1Registry, V1Resolver, V1Reverse,
+        V1UnwrappedController, V1WrappedController, V1Wrapper,
+    },
+    names::{child_node, dns_encode, labelhash, namehash, reverse_labels},
+    scenario::{
+        Action, AuthorityShape, Dimensions, ExpiryWindow, Perturbation, RecordState,
+        RegistrationPath, SubnameShape, WrapState, action, emission, ordered_action,
+    },
+    world::Wiring,
+};
+
+const LABELS: [&str; 3] = ["alpha", "bravo", "charlie"];
+const REGISTRY: &str = "ens_v1_registry_l1";
+const REGISTRAR: &str = "ens_v1_registrar_l1";
+const WRAPPER: &str = "ens_v1_wrapper_l1";
+const RESOLVER: &str = "ens_v1_resolver_l1";
+const REVERSE: &str = "ens_v1_reverse_l1";
+
+struct Wires<'a> {
+    registry: &'a str,
+    registrar: &'a str,
+    legacy_controller: &'a str,
+    wrapped_controller: &'a str,
+    unwrapped_controller: &'a str,
+    wrapper: &'a str,
+    resolver: &'a str,
+    reverse: &'a str,
+}
+
+pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) -> Vec<Action> {
+    let wires = Wires {
+        registry: wiring.address(REGISTRY, "registry"),
+        registrar: wiring.address(REGISTRAR, "registrar"),
+        legacy_controller: wiring.address(REGISTRAR, "legacy_registrar_controller"),
+        wrapped_controller: wiring.address(REGISTRAR, "wrapped_registrar_controller"),
+        unwrapped_controller: wiring.address(REGISTRAR, "unwrapped_registrar_controller"),
+        wrapper: wiring.address(WRAPPER, "name_wrapper"),
+        resolver: wiring.address(RESOLVER, "public_resolver"),
+        reverse: wiring.address(REVERSE, "reverse_registrar"),
+    };
+    let wrapper_address = address(wires.wrapper);
+    let resolver_address = address(wires.resolver);
+    let eth_node = namehash(&["eth"]);
+    let expires = expiry(dimensions.expiry_window, settle_timestamp);
+
+    let mut actions = Vec::new();
+    for (index, label) in LABELS.iter().take(dimensions.name_count).enumerate() {
+        let seat = u64::try_from(index).expect("name index fits u64");
+        let owner = actor(seat * 4);
+        let successor = actor(seat * 4 + 1);
+        let operator = actor(seat * 4 + 2);
+        let node = namehash(&[label, "eth"]);
+        let hash = labelhash(label);
+        let token = U256::from_be_bytes(hash.0);
+        let registrant = match dimensions.authority_shape {
+            AuthorityShape::GiveAway => successor,
+            _ => owner,
+        };
+
+        actions.push(registration(
+            &wires,
+            dimensions.registration_path,
+            label,
+            hash,
+            eth_node,
+            registrant,
+            wrapper_address,
+            expires,
+        ));
+
+        if dimensions.registration_path != RegistrationPath::Wrapped {
+            actions.push(action(
+                format!("{label}:token-mint"),
+                vec![emission(
+                    wires.registrar,
+                    V1RegistrarToken::Transfer {
+                        from: Address::ZERO,
+                        to: registrant,
+                        tokenId: token,
+                    }
+                    .encode_log_data(),
+                )],
+            ));
+        }
+
+        match dimensions.record_state {
+            RecordState::NoResolver => {}
+            RecordState::ResolverWithRecords => {
+                actions.push(action(
+                    format!("{label}:resolver-set"),
+                    vec![emission(
+                        wires.registry,
+                        V1Registry::NewResolver {
+                            node,
+                            resolver: resolver_address,
+                        }
+                        .encode_log_data(),
+                    )],
+                ));
+                actions.push(action(
+                    format!("{label}:records"),
+                    vec![
+                        emission(
+                            wires.resolver,
+                            V1Resolver::AddrChanged { node, a: owner }.encode_log_data(),
+                        ),
+                        emission(
+                            wires.resolver,
+                            V1Resolver::TextChanged {
+                                node,
+                                indexedKey: labelhash("url"),
+                                key: "url".to_owned(),
+                                value: format!("https://{label}.example"),
+                            }
+                            .encode_log_data(),
+                        ),
+                    ],
+                ));
+                actions.push(action(
+                    format!("{label}:contenthash"),
+                    vec![emission(
+                        wires.resolver,
+                        V1Resolver::ContenthashChanged {
+                            node,
+                            hash: vec![0xe3, 0x01, seat as u8].into(),
+                        }
+                        .encode_log_data(),
+                    )],
+                ));
+            }
+            RecordState::CustomResolverNoRecords => {
+                actions.push(action(
+                    format!("{label}:custom-resolver"),
+                    vec![emission(
+                        wires.registry,
+                        V1Registry::NewResolver {
+                            node,
+                            resolver: actor(0x100 + seat),
+                        }
+                        .encode_log_data(),
+                    )],
+                ));
+            }
+        }
+
+        if dimensions.wrap_state != WrapState::Unwrapped {
+            let fuses = match dimensions.wrap_state {
+                WrapState::WrappedLocked => 0x0001_0001,
+                _ => 0x0001_0000,
+            };
+            actions.push(ordered_action(
+                format!("{label}:wrap"),
+                format!("{label}:wrapper"),
+                0,
+                vec![
+                    emission(
+                        wires.registry,
+                        V1Registry::Transfer {
+                            node,
+                            owner: wrapper_address,
+                        }
+                        .encode_log_data(),
+                    ),
+                    emission(
+                        wires.wrapper,
+                        V1Wrapper::NameWrapped {
+                            node,
+                            name: dns_encode(&[label, "eth"]).into(),
+                            owner: registrant,
+                            fuses,
+                            expiry: u64::try_from(expires).expect("expiry fits u64"),
+                        }
+                        .encode_log_data(),
+                    ),
+                ],
+            ));
+            actions.push(ordered_action(
+                format!("{label}:wrapper-expiry"),
+                format!("{label}:wrapper"),
+                1,
+                vec![emission(
+                    wires.wrapper,
+                    V1Wrapper::ExpiryExtended {
+                        node,
+                        expiry: u64::try_from(expires + 86_400).expect("expiry fits u64"),
+                    }
+                    .encode_log_data(),
+                )],
+            ));
+            actions.push(ordered_action(
+                format!("{label}:wrapper-transfer"),
+                format!("{label}:wrapper"),
+                1,
+                vec![emission(
+                    wires.wrapper,
+                    V1Wrapper::TransferSingle {
+                        operator,
+                        from: registrant,
+                        to: successor,
+                        id: U256::from_be_bytes(node.0),
+                        value: U256::from(1_u64),
+                    }
+                    .encode_log_data(),
+                )],
+            ));
+            if dimensions.wrap_state == WrapState::WrappedUnlocked {
+                actions.push(ordered_action(
+                    format!("{label}:unwrap"),
+                    format!("{label}:wrapper"),
+                    2,
+                    vec![
+                        emission(
+                            wires.wrapper,
+                            V1Wrapper::NameUnwrapped {
+                                node,
+                                owner: successor,
+                            }
+                            .encode_log_data(),
+                        ),
+                        emission(
+                            wires.registry,
+                            V1Registry::Transfer {
+                                node,
+                                owner: successor,
+                            }
+                            .encode_log_data(),
+                        ),
+                    ],
+                ));
+            }
+        }
+
+        match dimensions.authority_shape {
+            AuthorityShape::SelfOwned => {}
+            AuthorityShape::OperatorTransfer => {
+                actions.push(action(
+                    format!("{label}:registrar-transfer"),
+                    vec![emission(
+                        wires.registrar,
+                        V1RegistrarToken::Transfer {
+                            from: registrant,
+                            to: successor,
+                            tokenId: token,
+                        }
+                        .encode_log_data(),
+                    )],
+                ));
+            }
+            AuthorityShape::GiveAway => {
+                actions.push(action(
+                    format!("{label}:registry-transfer"),
+                    vec![emission(
+                        wires.registry,
+                        V1Registry::Transfer {
+                            node,
+                            owner: operator,
+                        }
+                        .encode_log_data(),
+                    )],
+                ));
+            }
+        }
+
+        match dimensions.subname_shape {
+            SubnameShape::None => {}
+            SubnameShape::RegistrySubnode => {
+                actions.push(subnode(&wires, label, "sub", node, owner));
+            }
+            SubnameShape::WrappedChild => {
+                let child = child_node(node, "kid");
+                actions.push(subnode(&wires, label, "kid", node, wrapper_address));
+                actions.push(action(
+                    format!("{label}:wrapped-child"),
+                    vec![emission(
+                        wires.wrapper,
+                        V1Wrapper::NameWrapped {
+                            node: child,
+                            name: dns_encode(&["kid", label, "eth"]).into(),
+                            owner: successor,
+                            fuses: 0x0001_0000,
+                            expiry: u64::try_from(expires).expect("expiry fits u64"),
+                        }
+                        .encode_log_data(),
+                    )],
+                ));
+            }
+            SubnameShape::DeepSubnode => {
+                let child = child_node(node, "sub");
+                actions.push(subnode(&wires, label, "sub", node, owner));
+                actions.push(subnode(&wires, label, "deep", child, successor));
+            }
+        }
+
+        if dimensions.has(Perturbation::RenewalAfterExpiry) {
+            actions.push(renewal(
+                &wires,
+                dimensions.registration_path,
+                label,
+                hash,
+                expires + 31_536_000,
+            ));
+        }
+        if dimensions.has(Perturbation::LateRegistryWrite) {
+            actions.push(action(
+                format!("{label}:late-registry-write"),
+                vec![emission(
+                    wires.registry,
+                    V1Registry::NewOwner {
+                        node: eth_node,
+                        label: hash,
+                        owner: operator,
+                    }
+                    .encode_log_data(),
+                )],
+            ));
+        }
+        if dimensions.has(Perturbation::LateRecordWrite) {
+            actions.push(action(
+                format!("{label}:late-record"),
+                vec![emission(
+                    wires.resolver,
+                    V1Resolver::AddrChanged { node, a: successor }.encode_log_data(),
+                )],
+            ));
+        }
+        if dimensions.has(Perturbation::Reregistration) {
+            actions.push(registration(
+                &wires,
+                RegistrationPath::Unwrapped,
+                label,
+                hash,
+                eth_node,
+                operator,
+                wrapper_address,
+                expires + 63_072_000,
+            ));
+        }
+        if dimensions.has(Perturbation::ReverseClaim) {
+            let labels = reverse_labels(&format!("{registrant:?}"));
+            let reverse = namehash(&labels.iter().map(String::as_str).collect::<Vec<_>>());
+            actions.push(action(
+                format!("{label}:reverse-claim"),
+                vec![
+                    emission(
+                        wires.reverse,
+                        V1Reverse::ReverseClaimed {
+                            addr: registrant,
+                            node: reverse,
+                        }
+                        .encode_log_data(),
+                    ),
+                    emission(
+                        wires.resolver,
+                        V1Resolver::NameChanged {
+                            node: reverse,
+                            name: format!("{label}.eth"),
+                        }
+                        .encode_log_data(),
+                    ),
+                ],
+            ));
+        }
+    }
+    actions
+}
+
+#[allow(clippy::too_many_arguments)]
+fn registration(
+    wires: &Wires<'_>,
+    path: RegistrationPath,
+    label: &str,
+    hash: B256,
+    eth_node: B256,
+    registrant: Address,
+    wrapper: Address,
+    expires: i64,
+) -> Action {
+    let expires = U256::from(u64::try_from(expires).expect("expiry fits u64"));
+    let emissions = match path {
+        RegistrationPath::Legacy => vec![
+            emission(
+                wires.registry,
+                V1Registry::NewOwner {
+                    node: eth_node,
+                    label: hash,
+                    owner: registrant,
+                }
+                .encode_log_data(),
+            ),
+            emission(
+                wires.legacy_controller,
+                V1LegacyController::NameRegistered {
+                    name: label.to_owned(),
+                    label: hash,
+                    owner: registrant,
+                    cost: U256::from(1_u64),
+                    expires,
+                }
+                .encode_log_data(),
+            ),
+        ],
+        RegistrationPath::Wrapped => vec![
+            emission(
+                wires.registry,
+                V1Registry::NewOwner {
+                    node: eth_node,
+                    label: hash,
+                    owner: wrapper,
+                }
+                .encode_log_data(),
+            ),
+            emission(
+                wires.wrapped_controller,
+                V1WrappedController::NameRegistered {
+                    name: label.to_owned(),
+                    label: hash,
+                    owner: registrant,
+                    baseCost: U256::from(1_u64),
+                    premium: U256::ZERO,
+                    expires,
+                }
+                .encode_log_data(),
+            ),
+        ],
+        RegistrationPath::Unwrapped => vec![
+            emission(
+                wires.registry,
+                V1Registry::NewOwner {
+                    node: eth_node,
+                    label: hash,
+                    owner: registrant,
+                }
+                .encode_log_data(),
+            ),
+            emission(
+                wires.unwrapped_controller,
+                V1UnwrappedController::NameRegistered {
+                    name: label.to_owned(),
+                    label: hash,
+                    owner: registrant,
+                    baseCost: U256::from(1_u64),
+                    premium: U256::ZERO,
+                    expires,
+                    referrer: B256::ZERO,
+                }
+                .encode_log_data(),
+            ),
+        ],
+    };
+    action(format!("{label}:register-{path:?}"), emissions)
+}
+
+fn renewal(
+    wires: &Wires<'_>,
+    path: RegistrationPath,
+    label: &str,
+    hash: B256,
+    expires: i64,
+) -> Action {
+    let expires = U256::from(u64::try_from(expires).expect("expiry fits u64"));
+    let emission = match path {
+        RegistrationPath::Unwrapped => emission(
+            wires.unwrapped_controller,
+            V1UnwrappedController::NameRenewed {
+                name: label.to_owned(),
+                label: hash,
+                cost: U256::from(1_u64),
+                expires,
+                referrer: B256::ZERO,
+            }
+            .encode_log_data(),
+        ),
+        _ => emission(
+            wires.legacy_controller,
+            V1LegacyController::NameRenewed {
+                name: label.to_owned(),
+                label: hash,
+                cost: U256::from(1_u64),
+                expires,
+            }
+            .encode_log_data(),
+        ),
+    };
+    action(format!("{label}:renew"), vec![emission])
+}
+
+fn subnode(wires: &Wires<'_>, label: &str, child: &str, parent: B256, owner: Address) -> Action {
+    action(
+        format!("{label}:subnode-{child}"),
+        vec![emission(
+            wires.registry,
+            V1Registry::NewOwner {
+                node: parent,
+                label: labelhash(child),
+                owner,
+            }
+            .encode_log_data(),
+        )],
+    )
+}
+
+fn expiry(window: ExpiryWindow, settle_timestamp: i64) -> i64 {
+    match window {
+        ExpiryWindow::Active => settle_timestamp + 31_536_000,
+        ExpiryWindow::JustExpired => settle_timestamp - 3_600,
+        ExpiryWindow::PastGrace => settle_timestamp - 17_280_000,
+    }
+}
+
+fn address(value: &str) -> Address {
+    value.parse().expect("world address is well formed")
+}
+
+fn actor(index: u64) -> Address {
+    format!("0x{:040x}", 0xf000_0000_u64 + index)
+        .parse()
+        .expect("actor address is well formed")
+}
