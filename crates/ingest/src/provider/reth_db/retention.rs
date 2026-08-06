@@ -13,6 +13,10 @@ pub(super) struct RetentionReadings {
     /// Pruning receipts deletes whole static-file jars below the configured block
     /// (upstream: .refs/reth/crates/prune/prune/src/segments/mod.rs:L41 @ reth@88505c7f),
     /// which leaves headers readable while every log below the boundary is gone.
+    ///
+    /// A node old enough to keep receipts in database tables rather than static files
+    /// reports nothing here, and its row-wise prune checkpoints are not read: such a
+    /// node is covered only by `earliest_history_block`.
     pub(super) lowest_receipt_block: Option<u64>,
 }
 

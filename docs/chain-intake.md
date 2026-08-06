@@ -135,9 +135,16 @@ reth's own `eth_getLogs` refuses the same request with
 .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L586 @ reth@88505c7f); reading the
 database directly has no such guard, and pruning receipts deletes whole
 static-file ranges while leaving their headers readable (upstream:
-.refs/reth/crates/prune/prune/src/segments/mod.rs:L41 @ reth@88505c7f). An RPC
-source reports no floor here because the endpoint refuses out-of-retention
-ranges itself.
+.refs/reth/crates/prune/prune/src/segments/mod.rs:L41 @ reth@88505c7f).
+
+The refusal is judged on the source's declared start block, not on how far its
+cursor has advanced, so a chain that already recorded the pruned window as
+complete keeps failing every batch — historical, redo, and the live follow that
+runs after them — until the node holds the declared range or the declared start
+block moves. A redo range that ends below a source's declared start plans
+nothing for that source and is unaffected. Sources that do not read a node's
+database report no floor: an RPC endpoint owns its own retention behind the
+wire, and the Coinbase SQL warehouse is not a block provider at all.
 
 ## Reorgs and required downstream redo
 

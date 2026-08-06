@@ -70,8 +70,8 @@ impl ChainProvider {
 
     /// Lowest block this source can still serve, when the source can report one.
     ///
-    /// An RPC endpoint refuses a range below its own retention itself, so only the
-    /// local datadir reader has to answer this.
+    /// Only the datadir reader answers: an RPC endpoint owns its retention behind the
+    /// wire, so a caller cannot read that boundary out of it.
     pub async fn earliest_available_block(&self) -> Result<Option<i64>> {
         match self {
             Self::JsonRpc(_) => Ok(None),
