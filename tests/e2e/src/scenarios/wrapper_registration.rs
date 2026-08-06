@@ -49,6 +49,11 @@ async fn active_binding(
 /// (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L281 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289 @ ens_v1@91c966f)
+/// Its renewal path calls NameWrapper, which stores registrar expiry plus grace
+/// without emitting ExpiryExtended.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L333 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L337 @ ens_v1@91c966f)
 #[tokio::test]
 async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
     let anvil = Anvil::spawn().await?;
@@ -68,6 +73,19 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
     )
     .await?;
     let tx_hash = &registered.register_tx_hash;
+    let wrapper_before = ens_v1::wrapped_name_data(&rpc, &deployment, "bornwrapped.eth").await?;
+    let renewal_tx =
+        ens_v1::renew_wrapped_eth_name(&rpc, &deployment, alice, "bornwrapped", YEAR).await?;
+    let renewed_registrar_expiry =
+        ens_v1::eth_name_expiry(&rpc, &deployment, "bornwrapped").await?;
+    let wrapper_after = ens_v1::wrapped_name_data(&rpc, &deployment, "bornwrapped.eth").await?;
+    assert_eq!(wrapper_after.owner, wrapper_before.owner);
+    assert_eq!(wrapper_after.fuses, wrapper_before.fuses);
+    assert!(wrapper_after.expiry > wrapper_before.expiry);
+    assert_eq!(
+        wrapper_after.expiry,
+        renewed_registrar_expiry + GRACE_PERIOD
+    );
     let ready_sql = format!(
         "SELECT EXISTS (SELECT 1 FROM normalized_events \
            WHERE logical_name_id = 'ens:0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141' \
@@ -86,6 +104,13 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
              AND event_kind = 'AuthorityTransferred' \
              AND lower(after_state->>'owner') = '{wrapper:#x}' \
              AND transaction_hash = '{tx_hash}' \
+             AND canonicality_state = 'canonical') \
+         AND EXISTS (SELECT 1 FROM normalized_events \
+           WHERE logical_name_id = 'ens:0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141' \
+             AND event_kind = 'ExpiryChanged' \
+             AND source_family = 'ens_v1_registrar_l1' \
+             AND after_state->>'authority_kind' = 'wrapper' \
+             AND transaction_hash = '{renewal_tx}' \
              AND canonicality_state = 'canonical')",
         wrapper = deployment.name_wrapper.address,
     );
@@ -136,6 +161,24 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
         wrapper_expiry,
         registrar_expiry + GRACE_PERIOD as i64,
         "born-wrapped NameWrapped expiry should include registrar grace"
+    );
+    let renewal_wrapper_expiry: (i64, i64) = sqlx::query_as(
+        "SELECT (after_state->>'registrar_expiry')::BIGINT, \
+                (after_state->>'expiry')::BIGINT \
+         FROM normalized_events \
+         WHERE logical_name_id = 'ens:0xb30b6bcb9454bce932c3121da769db8cd4a47747b30881b95661b967de6d6141' \
+           AND event_kind = 'ExpiryChanged' \
+           AND source_family = 'ens_v1_registrar_l1' \
+           AND after_state->>'authority_kind' = 'wrapper' \
+           AND transaction_hash = $1 \
+           AND canonicality_state = 'canonical'",
+    )
+    .bind(&renewal_tx)
+    .fetch_one(&run.db.pool)
+    .await?;
+    assert_eq!(
+        renewal_wrapper_expiry,
+        (renewed_registrar_expiry as i64, wrapper_after.expiry as i64)
     );
 
     // Both name-bearing logs retain their own observation, while the durable
@@ -318,7 +361,11 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
     );
     assert_eq!(
         pointer(&body, "/declared_state/registration/expiry"),
-        registrar_expiry
+        wrapper_after.expiry
+    );
+    assert_eq!(
+        pointer(&body, "/declared_state/wrapper_state"),
+        "emancipated"
     );
     assert_eq!(
         pointer(&body, "/declared_state/control/registrant"),
@@ -346,6 +393,17 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L517 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L963 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L443 @ ens_v1@91c966f)
+/// Unwrap retains the fuse and expiry data; an unexpired rewrap restores the
+/// parent-controlled fuse and larger prior expiry even though NameWrapped
+/// carries the wrapping call's arguments.
+/// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L235 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L239 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L242 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L246 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L276 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L901 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L902 @ ens_v1@91c966f)
 #[tokio::test]
 async fn parent_burns_pcc_then_extends_existing_child_expiry() -> Result<()> {
     let anvil = Anvil::spawn().await?;
@@ -416,6 +474,32 @@ async fn parent_burns_pcc_then_extends_existing_child_expiry() -> Result<()> {
     assert_eq!(child_after.fuses, PARENT_CANNOT_CONTROL);
     assert_eq!(child_after.expiry, parent_data.expiry);
 
+    ens_v1::unwrap_registry_name(
+        &rpc,
+        &deployment,
+        carol,
+        "fuseparent.eth",
+        "transition",
+        carol,
+    )
+    .await?;
+    ens_v1::set_registry_approval_for_all(
+        &rpc,
+        &deployment,
+        carol,
+        deployment.name_wrapper.address,
+        true,
+    )
+    .await?;
+    let child_name = "transition.fuseparent.eth";
+    let rewrap_tx =
+        ens_v1::wrap_registry_name(&rpc, &deployment, carol, child_name, carol, Address::ZERO)
+            .await?;
+    let rewrapped = ens_v1::wrapped_name_data(&rpc, &deployment, child_name).await?;
+    assert_eq!(rewrapped.owner, carol);
+    assert_eq!(rewrapped.fuses, PARENT_CANNOT_CONTROL);
+    assert_eq!(rewrapped.expiry, parent_data.expiry);
+
     let ready_sql = format!(
         "SELECT EXISTS (SELECT 1 FROM normalized_events \
            WHERE logical_name_id = 'ens:0xe4704a24a660012d3847315355c68cc41069cecb265cf1cf5e98ef53debb84a3' \
@@ -428,6 +512,13 @@ async fn parent_burns_pcc_then_extends_existing_child_expiry() -> Result<()> {
              AND event_kind = 'ExpiryChanged' \
              AND (after_state->>'expiry')::BIGINT = {final_expiry} \
              AND transaction_hash = '{extend_tx}' \
+             AND canonicality_state = 'canonical') \
+         AND EXISTS (SELECT 1 FROM normalized_events \
+           WHERE logical_name_id = 'ens:0xe4704a24a660012d3847315355c68cc41069cecb265cf1cf5e98ef53debb84a3' \
+             AND event_kind = 'PermissionScopeChanged' \
+             AND (after_state->>'fuses')::BIGINT = {pcc} \
+             AND (after_state->>'expiry')::BIGINT = {final_expiry} \
+             AND transaction_hash = '{rewrap_tx}' \
              AND canonicality_state = 'canonical')",
         pcc = PARENT_CANNOT_CONTROL,
         final_expiry = parent_data.expiry,
@@ -448,7 +539,11 @@ async fn parent_burns_pcc_then_extends_existing_child_expiry() -> Result<()> {
     .await?;
     assert_eq!(
         fuse_transitions,
-        vec![(None, 0), (Some(0), PARENT_CANNOT_CONTROL as i64)]
+        vec![
+            (None, 0),
+            (Some(0), PARENT_CANNOT_CONTROL as i64),
+            (None, PARENT_CANNOT_CONTROL as i64),
+        ]
     );
 
     let expiry_transitions: Vec<(Option<i64>, i64)> = sqlx::query_as(
@@ -468,6 +563,7 @@ async fn parent_burns_pcc_then_extends_existing_child_expiry() -> Result<()> {
         vec![
             (None, registrar_expiry as i64),
             (Some(registrar_expiry as i64), parent_data.expiry as i64),
+            (None, parent_data.expiry as i64),
         ]
     );
     let fuse_tx_expiry_events: i64 = sqlx::query_scalar(
@@ -494,14 +590,27 @@ async fn parent_burns_pcc_then_extends_existing_child_expiry() -> Result<()> {
     )
     .fetch_all(&run.db.pool)
     .await?;
-    assert_eq!(event_resources.len(), 1, "child wrapper resource rotated");
+    assert_eq!(
+        event_resources.len(),
+        2,
+        "rewrap must rotate the wrapper resource"
+    );
+    let rewrap_resource: Uuid = sqlx::query_scalar(
+        "SELECT resource_id FROM normalized_events \
+         WHERE transaction_hash = $1 \
+           AND event_kind = 'PermissionScopeChanged' \
+           AND canonicality_state = 'canonical'",
+    )
+    .bind(&rewrap_tx)
+    .fetch_one(&run.db.pool)
+    .await?;
     let (active_resource, active_lineage, active_kind) = active_binding(
         &run.db.pool,
         "ens:0xe4704a24a660012d3847315355c68cc41069cecb265cf1cf5e98ef53debb84a3",
     )
     .await?;
     assert_eq!(active_kind, "wrapper");
-    assert_eq!(active_resource, event_resources[0]);
+    assert_eq!(active_resource, rewrap_resource);
     assert!(active_lineage.is_some());
 
     let body = exact_name(&run.api, "ens", "transition.fuseparent.eth").await?;
@@ -529,6 +638,10 @@ async fn parent_burns_pcc_then_extends_existing_child_expiry() -> Result<()> {
     assert_eq!(
         pointer(&body, "/declared_state/registration/expiry"),
         parent_data.expiry
+    );
+    assert_eq!(
+        pointer(&body, "/declared_state/wrapper_state"),
+        "emancipated"
     );
 
     run.db.cleanup().await?;

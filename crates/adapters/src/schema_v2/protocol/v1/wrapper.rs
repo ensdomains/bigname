@@ -57,11 +57,9 @@ pub(super) fn interpret(
             )?;
             ensure_declared(selected, &["ExpiryChanged"])?;
             let node = hex_string(event.node);
-            let linked = state.update_v1_expiry(
-                &selected.source.namespace,
-                &node,
-                i64::try_from(event.expiry).unwrap_or(i64::MAX),
-            );
+            let linked = state
+                .update_v1_wrapper_expiry(&selected.source.namespace, &node, event.expiry)
+                .map(|(_, linked)| linked);
             Ok(single_event(
                 "ExpiryChanged",
                 linked.as_ref().map(|state| state.logical_name_id.clone()),
@@ -75,7 +73,9 @@ pub(super) fn interpret(
             ensure_declared(selected, &["PermissionScopeChanged"])?;
             let node = hex_string(event.node);
             let linked = state.v1_name(&selected.source.namespace, &node);
-            let expiry = linked.as_ref().and_then(|state| state.expiry);
+            let wrapper_data =
+                state.set_v1_wrapper_fuses(&selected.source.namespace, &node, event.fuses);
+            let expiry = wrapper_data.map(|data| data.expiry);
             Ok(single_event(
                 "PermissionScopeChanged",
                 linked.as_ref().map(|state| state.logical_name_id.clone()),
@@ -284,6 +284,13 @@ fn name_wrapped(
     let token_lineage_id = stable_uuid(&format!("token-lineage:{authority_key}"));
     let logical_name_id = format!("{}:{raw_namehash}", selected.source.namespace);
     let previous = state.v1_name(&selected.source.namespace, &raw_namehash);
+    let wrapper_data = state.wrap_v1_name(
+        &selected.source.namespace,
+        &raw_namehash,
+        event.fuses,
+        event.expiry,
+        raw.block_timestamp.unix_timestamp(),
+    );
     state.observe_v1_name(
         &selected.source.namespace,
         &raw_namehash,
@@ -292,7 +299,7 @@ fn name_wrapped(
         resource_id,
         Some(token_lineage_id),
         selected.source.source_family.clone(),
-        Some(i64::try_from(event.expiry).unwrap_or(i64::MAX)),
+        Some(i64::try_from(wrapper_data.expiry).unwrap_or(i64::MAX)),
         Some(address_hex(event.owner)),
         Some(authority_key.clone()),
     );
@@ -302,7 +309,7 @@ fn name_wrapped(
         "PermissionScopeChanged",
     ];
     ensure_declared(selected, &["TokenControlTransferred"])?;
-    let after = json!({"source_event":"NameWrapped","node":raw_namehash,"owner":address_hex(event.owner),"fuses":event.fuses,"wrapper_state":wrapper_state(event.fuses),"expiry":event.expiry,"token_lineage_id":token_lineage_id.to_string(),"authority_kind":"wrapper","authority_key":authority_key.clone(),"surface_known":surface_known});
+    let after = json!({"source_event":"NameWrapped","node":raw_namehash,"owner":address_hex(event.owner),"fuses":wrapper_data.fuses,"wrapper_state":wrapper_state(wrapper_data.fuses),"expiry":wrapper_data.expiry,"token_lineage_id":token_lineage_id.to_string(),"authority_kind":"wrapper","authority_key":authority_key.clone(),"surface_known":surface_known});
     let mut output = events_linked(kinds, logical_name_id, resource_id, after.clone());
     if let Some(transfer) = output
         .events

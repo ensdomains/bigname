@@ -105,7 +105,14 @@ pub(super) async fn include_time_boundaries(
             WHERE event.chain_id = $1
               AND event.block_number <= $4
               AND event.event_kind = 'ExpiryChanged'
-              AND event.source_family = 'ens_v1_wrapper_l1'
+              AND (
+                    event.source_family = 'ens_v1_wrapper_l1'
+                 OR (
+                        event.source_family = 'ens_v1_registrar_l1'
+                    AND event.after_state ->> 'source_event' = 'NameRenewed'
+                    AND event.after_state ->> 'authority_kind' = 'wrapper'
+                 )
+              )
               AND event.resource_id IS NOT NULL
               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')

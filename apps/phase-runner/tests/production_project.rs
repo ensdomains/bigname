@@ -1939,8 +1939,8 @@ async fn incremental_project_revisits_wrapper_timestamp_boundaries() -> Result<(
         Some("ens:0xalice"),
         Some(RESOURCE),
         "ExpiryChanged",
-        "ens_v1_wrapper_l1",
-        json!({"expiry":7_776_003}),
+        "ens_v1_registrar_l1",
+        json!({"source_event":"NameRenewed","authority_kind":"wrapper","expiry":7_776_003}),
         json!({}),
     )
     .await?;

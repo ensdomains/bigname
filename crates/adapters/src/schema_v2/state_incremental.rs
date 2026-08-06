@@ -13,6 +13,7 @@ impl State {
         let mut state = Self {
             values: OrdMap::new(),
             v1_names: OrdMap::new(),
+            v1_wrapper_data: OrdMap::new(),
             v1_registrars: OrdMap::new(),
             v1_registry_authorities: OrdMap::new(),
             v1_registry_owners: OrdMap::new(),

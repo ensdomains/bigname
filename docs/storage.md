@@ -552,8 +552,8 @@ values.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L901 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L902 @ ens_v1@91c966f)
 The adapter therefore restores retained wrapper data across batches and uses
-the effective values for a rewrap. The
-schema-v2 project phase, not the adapter, writes the effective value into
+the effective values for a rewrap. The schema-v2 project phase, not the
+adapter, writes the effective value into
 `name_current.declared_summary` and applies the wrapper expiry at its target
 block timestamp. The same target-time calculation gates wrapper-holder rows in
 `permissions_current` and controller membership in `address_names_current`.

@@ -33,7 +33,14 @@ pub(super) async fn build(
             FROM project_events event
             WHERE event.event_kind = 'ExpiryChanged'
               AND event.resource_id IS NOT NULL
-              AND event.source_family = 'ens_v1_wrapper_l1'
+              AND (
+                    event.source_family = 'ens_v1_wrapper_l1'
+                 OR (
+                        event.source_family = 'ens_v1_registrar_l1'
+                    AND event.after_state ->> 'source_event' = 'NameRenewed'
+                    AND event.after_state ->> 'authority_kind' = 'wrapper'
+                 )
+              )
             ORDER BY event.resource_id,
                      event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST,

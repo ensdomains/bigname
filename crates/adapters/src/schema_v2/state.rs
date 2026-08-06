@@ -10,6 +10,9 @@ mod topology;
 #[path = "state_incremental.rs"]
 mod incremental;
 
+#[path = "state_wrapper.rs"]
+mod wrapper;
+
 #[path = "state_surfaces.rs"]
 mod surfaces;
 
@@ -25,6 +28,12 @@ pub(super) struct V1NameState {
     pub expiry: Option<i64>,
     pub owner: Option<String>,
     pub authority_key: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct V1WrapperData {
+    pub fuses: u32,
+    pub expiry: u64,
 }
 
 #[path = "state_v2.rs"]
@@ -51,6 +60,7 @@ pub(super) struct V1Release {
 pub(super) struct State {
     values: OrdMap<String, Value>,
     v1_names: OrdMap<String, V1NameState>,
+    v1_wrapper_data: OrdMap<String, V1WrapperData>,
     v1_registrars: OrdMap<String, V1NameState>,
     v1_registry_authorities: OrdMap<String, V1NameState>,
     v1_registry_owners: OrdMap<String, String>,
@@ -443,17 +453,6 @@ impl State {
                 .cloned();
             self.activate_v1_authority(namespace, namehash, next_authority);
         }
-    }
-
-    pub(super) fn update_v1_expiry(
-        &mut self,
-        namespace: &str,
-        namehash: &str,
-        expiry: i64,
-    ) -> Option<V1NameState> {
-        let state = self.v1_names.get_mut(&v1_key(namespace, namehash))?;
-        state.expiry = Some(expiry);
-        Some(state.clone())
     }
 
     pub(super) fn settle_v1_releases(&mut self, at_unix_timestamp: i64) -> Vec<V1Release> {
