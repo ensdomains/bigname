@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result, bail};
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, BatchOutput, DiscoveryRuleInput, ManifestInput,
@@ -5,7 +7,6 @@ use bigname_adapters::schema_v2::{
 };
 use bigname_manifests::LoadedManifest;
 use serde::Deserialize;
-use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -100,33 +101,43 @@ impl Directed {
         let mut discovery_rules = Vec::new();
         let mut admissions = Vec::new();
         let mut declared_instances = Vec::new();
-        for (index, entry) in case.manifests.iter().enumerate() {
-            let manifest_id = i64::try_from(index + 1)?;
+        // One manifest row per checked-in file, not per role: production keys a manifest on
+        // namespace, family, chain, deployment and version, so the fixture's two roles that share
+        // `ens_v1_registrar_l1/v1.toml` must share its id and its event identities too.
+        let mut manifest_ids: BTreeMap<(String, String, String, String, i64), i64> =
+            BTreeMap::new();
+        for entry in &case.manifests {
             let loaded = find_checked_in(entry, checked_in)?;
             let source = &loaded.manifest;
-            let mut payload = serde_json::to_value(source)?;
-            payload["manifest_version"] = Value::from(1);
-            manifests.push(ManifestInput {
-                manifest_id,
-                manifest_version: 1,
-                namespace: entry.namespace.clone(),
-                source_family: entry.source_family.clone(),
-                chain_id: entry.chain.clone(),
-                deployment_label: entry.deployment_epoch.clone(),
-                normalizer_version: source.normalizer_version.clone(),
-                payload_json: serde_json::to_string(&payload)?,
-            });
-            discovery_rules.extend(
-                source
-                    .discovery_rules
-                    .iter()
-                    .map(|rule| DiscoveryRuleInput {
+            let key = (
+                entry.namespace.clone(),
+                entry.source_family.clone(),
+                entry.chain.clone(),
+                entry.deployment_epoch.clone(),
+                i64::try_from(source.manifest_version)?,
+            );
+            let next = i64::try_from(manifest_ids.len() + 1)?;
+            let manifest_id = *manifest_ids.entry(key).or_insert(next);
+            if manifest_id == next {
+                manifests.push(ManifestInput {
+                    manifest_id,
+                    manifest_version: i64::try_from(source.manifest_version)?,
+                    namespace: entry.namespace.clone(),
+                    source_family: entry.source_family.clone(),
+                    chain_id: entry.chain.clone(),
+                    deployment_label: entry.deployment_epoch.clone(),
+                    normalizer_version: source.normalizer_version.clone(),
+                    payload_json: serde_json::to_string(&serde_json::to_value(source)?)?,
+                });
+                discovery_rules.extend(source.discovery_rules.iter().map(|rule| {
+                    DiscoveryRuleInput {
                         manifest_id,
                         edge_kind: rule.edge_kind.clone(),
                         from_role: Some(rule.from_role.clone()),
                         admission: rule.admission.clone(),
-                    }),
-            );
+                    }
+                }));
+            }
             admissions.push(AddressAdmissionInput {
                 address: entry.address.to_ascii_lowercase(),
                 contract_instance_id: entry.contract_instance_id,

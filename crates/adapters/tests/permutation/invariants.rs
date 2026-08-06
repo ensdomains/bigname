@@ -5,7 +5,8 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use bigname_adapters::schema_v2::{
-    BatchInput, BatchOutput, interpret_schema_v2_batch, interpret_schema_v2_batch_incremental, seam,
+    AddressAdmissionInput, BatchInput, BatchOutput, interpret_schema_v2_batch,
+    interpret_schema_v2_batch_incremental, seam,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -24,6 +25,7 @@ type Position = (i64, i64, i64);
 /// reference anything its own batch emits or anything an earlier batch emitted, and nothing else.
 pub struct IdentityReferences {
     chain_id: String,
+    manifests: BTreeSet<i64>,
     resources: BTreeSet<(String, Uuid)>,
     lineages: BTreeSet<(String, Uuid)>,
     surfaces: BTreeSet<(String, String)>,
@@ -34,8 +36,16 @@ pub struct IdentityReferences {
 
 impl IdentityReferences {
     pub fn new(chain_id: &str, declared_instances: &[Uuid]) -> Self {
+        Self::with_manifests(chain_id, declared_instances, &[])
+    }
+
+    /// `source_manifest_id` is a foreign key on normalized events, contract addresses and discovery
+    /// edges. A stale or unknown id converges fine between the two passes and fails only at the
+    /// writer, so the batch's own manifest ids are carried here and every reference checked.
+    pub fn with_manifests(chain_id: &str, declared_instances: &[Uuid], manifests: &[i64]) -> Self {
         Self {
             chain_id: chain_id.to_owned(),
+            manifests: manifests.iter().copied().collect(),
             resources: BTreeSet::new(),
             lineages: BTreeSet::new(),
             surfaces: BTreeSet::new(),
@@ -171,6 +181,35 @@ impl IdentityReferences {
                     "{context}: discovery closure {} references unknown from contract instance {}",
                     closure.edge_kind,
                     closure.from_contract_instance_id
+                );
+            }
+        }
+        if !self.manifests.is_empty() {
+            let mut unknown = BTreeSet::new();
+            for id in output
+                .normalized_events
+                .iter()
+                .filter_map(|row| row.source_manifest_id)
+                .chain(
+                    output
+                        .contract_addresses
+                        .iter()
+                        .map(|row| row.source_manifest_id),
+                )
+                .chain(
+                    output
+                        .discovery_edges
+                        .iter()
+                        .map(|row| row.source_manifest_id),
+                )
+            {
+                if !self.manifests.contains(&id) {
+                    unknown.insert(id);
+                }
+            }
+            if !unknown.is_empty() {
+                bail!(
+                    "{context}: rows reference manifest ids the batch does not admit: {unknown:?}"
                 );
             }
         }
@@ -382,15 +421,21 @@ pub fn assert_upsert_guards_agree(context: &str, output: &BatchOutput) -> Result
             ),
         );
     }
-    // `active_from` is guarded too, but the writer substitutes a start time it looks up from the
-    // binding's predecessor in the table, so the emitted value is not what the guard compares.
+    // `active_from` is guarded too. The writer substitutes a start it looks up from the binding's
+    // predecessor, so the emitted value is not literally what the guard compares — but two
+    // emissions of one binding id carrying *different* starts cannot both survive that lookup, and
+    // convergence keeps only one of them, so compare it here rather than drop it.
     for row in &output.surface_bindings {
         check(
             "surface_bindings",
             row.surface_binding_id.to_string(),
             format!(
-                "{}:{}:{}:{}",
-                row.logical_name_id, row.resource_id, row.binding_kind, row.chain_id
+                "{}:{}:{}:{}:{}",
+                row.logical_name_id,
+                row.resource_id,
+                row.binding_kind,
+                row.chain_id,
+                row.active_from
             ),
         );
     }
@@ -527,6 +572,12 @@ pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> R
     let mut prior = Vec::new();
     let mut replayed = BatchOutput::default();
     let mut outputs = Vec::new();
+    // Production persists a discovery edge and its contract address, then loads them as admissions
+    // for every later batch (`crates/interpret/src/load.rs`). Replaying each batch from the original
+    // input instead would drop any later-batch log from a resolver or registry an earlier batch
+    // discovered — the split would silently interpret less than the whole pass, and the convergence
+    // comparison would read that as agreement.
+    let mut admitted = input.admissions.clone();
     for (index, range) in split.into_iter().enumerate() {
         let blocks = input.blocks[range.clone()].to_vec();
         let hashes = blocks
@@ -543,6 +594,7 @@ pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> R
             prior_events: prior.clone(),
             blocks: blocks.clone(),
             raw_logs,
+            admissions: admitted.clone(),
             ..input.clone()
         };
         let restored_output = interpret_schema_v2_batch(restored_input.clone())
@@ -558,6 +610,7 @@ pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> R
         if resumed_output != restored_output {
             bail!("{context}: split batch {index} resumed output differs from a restored pass");
         }
+        absorb_discovered_admissions(&mut admitted, &resumed_output);
         prior = seam::fold_prior_events(prior, &resumed_output.normalized_events, &blocks)?;
         let (_, restored_session) = interpret_schema_v2_batch_incremental(
             BatchInput {
@@ -600,6 +653,36 @@ pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> R
         },
         artifacts,
     })
+}
+
+/// Turns the contract addresses a batch admitted into the admissions the next batch starts from,
+/// carrying the discovery edge that justified each one where there is one. Mirrors the join
+/// `crates/interpret/src/load.rs` runs against the persisted rows.
+fn absorb_discovered_admissions(admitted: &mut Vec<AddressAdmissionInput>, from: &BatchOutput) {
+    let known = admitted
+        .iter()
+        .map(|entry| (entry.address.clone(), entry.contract_instance_id))
+        .collect::<BTreeSet<_>>();
+    for address in &from.contract_addresses {
+        if known.contains(&(address.address.clone(), address.contract_instance_id)) {
+            continue;
+        }
+        let edge = from.discovery_edges.iter().find(|edge| {
+            edge.to_contract_instance_id == address.contract_instance_id
+                && edge.chain_id == address.chain_id
+        });
+        admitted.push(AddressAdmissionInput {
+            address: address.address.clone(),
+            contract_instance_id: address.contract_instance_id,
+            source_manifest_id: Some(address.source_manifest_id),
+            role: None,
+            discovery_edge_kind: edge.map(|edge| edge.edge_kind.clone()),
+            discovery_from_contract_instance_id: edge.map(|edge| edge.from_contract_instance_id),
+            discovery_observation_key: edge.map(|edge| edge.observation_key.clone()),
+            active_from_block: Some(address.active_from_block_number),
+            active_to_block: None,
+        });
+    }
 }
 
 /// Destructured so that a row family added to `BatchOutput` stops compiling here. Missing one is

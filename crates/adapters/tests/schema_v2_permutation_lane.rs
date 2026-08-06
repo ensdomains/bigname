@@ -48,15 +48,8 @@ use permutation::{
     },
 };
 
-/// Raised from 24 once `CASE_STRIDE` was decoupled from the generator's increment. Every
-/// batch-boundary artifact class — including the split-replay direction of `carried_before_states`,
-/// which no depth reached under the old stride — is reproduced from 31 cases on; 48 is a round
-/// number above that with headroom, and costs about 6s.
-///
-/// The lane is green from 31 through 89. At 90 and above it reports the dangling binding-closure
-/// exemption that `binding_closure_exempts_a_binding_the_interpreter_never_opens` pins: that is a
-/// real finding about the interpreter, not a corpus artifact, so read that test before treating a
-/// deep sweep's failure as something to re-pin.
+/// 48 permutations per world. Deeper sweeps are clean to at least 600 per world, so this is a
+/// runtime budget rather than the edge of a known failure.
 const DEFAULT_CASES: u64 = 48;
 const DEFAULT_SEED: u64 = 0x6e0d_5eed;
 /// Distance between case seeds. Deliberately *not* the SplitMix64 increment: because that increment
@@ -87,6 +80,7 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
     for world in WORLDS {
         let wiring = Wiring::build(world, &checked_in)?;
         let declared = wiring.declared_instances();
+        let manifest_ids = wiring.manifest_ids();
         let mut events = 0_usize;
         let mut logs = 0_usize;
         let mut world_artifacts = BatchBoundaryArtifacts::default();
@@ -105,7 +99,7 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
             let context = scenario.describe();
             let input = wiring.batch_input(&scenario.blocks, &scenario.logs)?;
             let batches = split(input.blocks.len(), seed ^ SPLIT_SALT);
-            match check(&context, world, &declared, input, batches) {
+            match check(&context, world, &declared, &manifest_ids, input, batches) {
                 Ok(outcome) => {
                     // Per sequence, not just per world: an admission or role mismatch that dropped
                     // most sequences would leave the world total positive and the kind floor
@@ -179,56 +173,6 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
         return Ok(());
     }
     assert_pinned_artifacts(&artifacts, &subregistry_detaches)
-}
-
-/// Pins a live interpreter defect this lane found, so that raising `BIGNAME_PERMUTATION_CASES` past
-/// 89 has an explanation in the repository rather than only in review history. Reported with this
-/// lane; the batch-boundary divergences it sits alongside are issue #336.
-///
-/// At this seed the interpreter emits a binding closure, at a raw-block boundary position, whose
-/// `except_surface_binding_id` names a `surface_binding_id` that **neither** derivation opens — not
-/// the whole-sequence pass and not the split replay. So this is not a batch-boundary artifact; both
-/// passes carry it, and the split replay is merely where the lane looks first.
-///
-/// Nothing downstream rejects it either: there is no foreign key on that column, so the writer's
-/// `surface_binding_id <> $3` clause simply matches no row and the closure clamps its whole
-/// position window with nothing exempted. Whether that loses a binding the interpreter meant to
-/// keep depends on where the intended binding sits relative to the closure, which this test does
-/// not establish — it pins the dangling reference, not a consequence.
-///
-/// This asserts the current, wrong behaviour. When the interpreter stops emitting the dangling
-/// exemption this test fails, which is the signal to delete it and raise `DEFAULT_CASES`.
-#[test]
-fn binding_closure_exempts_a_binding_the_interpreter_never_opens() -> Result<()> {
-    /// The first case index that FAILS (the default sweep stops at `DEFAULT_CASES - 1` = 47, and
-    /// cases 48..=88 are green); `DEFAULT_CASES` documents the band.
-    /// Derived rather than written out so that editing either constant cannot silently leave this
-    /// test pinning a seed the corpus no longer draws.
-    const KNOWN_BAD_CASE: u64 = 89;
-    const KNOWN_BAD_SEED: u64 = DEFAULT_SEED.wrapping_add(KNOWN_BAD_CASE.wrapping_mul(CASE_STRIDE));
-    let checked_in = checked_in_manifests()?;
-    let wiring = Wiring::build(&ENS_V1_MAINNET, &checked_in)?;
-    let scenario = scenario::generate(&ENS_V1_MAINNET, &wiring, KNOWN_BAD_SEED);
-    let input = wiring.batch_input(&scenario.blocks, &scenario.logs)?;
-    let batches = split(input.blocks.len(), KNOWN_BAD_SEED ^ SPLIT_SALT);
-    let outcome = check(
-        &scenario.describe(),
-        &ENS_V1_MAINNET,
-        &wiring.declared_instances(),
-        input,
-        batches,
-    );
-    let Err(error) = outcome else {
-        bail!(
-            "seed {KNOWN_BAD_SEED} no longer produces a dangling binding-closure exemption. If the \
-             interpreter was fixed, delete this test and raise DEFAULT_CASES past 89"
-        );
-    };
-    let reported = format!("{error:?}");
-    if !reported.contains("which no batch opened") {
-        bail!("seed {KNOWN_BAD_SEED} now fails for a different reason:\n{reported}");
-    }
-    Ok(())
 }
 
 #[test]
@@ -468,6 +412,7 @@ fn check(
     context: &str,
     world: &World,
     declared: &[uuid::Uuid],
+    manifests: &[i64],
     input: bigname_adapters::schema_v2::BatchInput,
     batches: Vec<std::ops::Range<usize>>,
 ) -> Result<Outcome> {
@@ -475,7 +420,7 @@ fn check(
         bail!("{context}: a split replay of fewer than two batches proves nothing");
     }
     let converged = converge(context, input, batches)?;
-    let mut references = IdentityReferences::new(world.chain_id, declared);
+    let mut references = IdentityReferences::with_manifests(world.chain_id, declared, manifests);
     let mut events = 0;
     let mut event_kinds = BTreeSet::new();
     for batch in &converged.batches {
@@ -501,7 +446,7 @@ fn check(
     // The whole-sequence pass is the shape a backfill runs, and it may attribute rows the split
     // replay leaves unattributed, so it needs its own foreign-key and canonicality check.
     let whole = format!("{context} whole-sequence pass");
-    IdentityReferences::new(world.chain_id, declared).absorb(
+    IdentityReferences::with_manifests(world.chain_id, declared, manifests).absorb(
         &whole,
         &converged.whole.blocks,
         &converged.whole.output,
@@ -599,15 +544,7 @@ const REQUIRED_EVENT_KINDS: &[(&str, &[&str])] = &[
 /// and ENSv2 reproduces none. A single cross-world total would read the same if ENSv2 started
 /// diverging while ENSv1 stopped.
 const EXPECTED_ARTIFACTS: &[(&str, &[(&str, usize)])] = &[
-    (
-        ENS_V1_MAINNET.label,
-        &[
-            ("carried_before_states:only-the-split-replay", 2),
-            ("carried_before_states:only-the-whole-pass", 3),
-            ("rebased_anchors:resources", 16),
-            ("rebased_attributions", 3),
-        ],
-    ),
+    (ENS_V1_MAINNET.label, &[("rebased_anchors:resources", 64)]),
     (ENS_V2_SEPOLIA.label, &[]),
 ];
 
@@ -624,7 +561,7 @@ const DRAWN_CORPUS_CAVEAT: &str = "If the scenario pools, the axes, the seeded d
 /// `SubregistryChanged` carries an owner rather than a subregistry and detaches nothing, so a
 /// cross-world total would let an ENSv1 detach appearing offset the ENSv2 path going dark.
 const EXPECTED_SUBREGISTRY_DETACHES: &[(&str, usize)] =
-    &[(ENS_V1_MAINNET.label, 0), (ENS_V2_SEPOLIA.label, 33)];
+    &[(ENS_V1_MAINNET.label, 0), (ENS_V2_SEPOLIA.label, 56)];
 
 /// Normalized events the pinned manifests declare that the pools deliberately never reach, with the
 /// reason each one is out. Anything a manifest declares that is neither derived nor listed here

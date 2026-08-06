@@ -6,7 +6,7 @@ use super::{
     names::{labelhash, namehash},
     scenario::{
         Action, AuthorityShape, Dimensions, ExpiryWindow, Perturbation, RecordState,
-        RegistrationPath, SubnameShape, WrapState, action, emission, ordered_action,
+        RegistrationPath, SubnameShape, WrapState, action, emission, stage,
     },
     world::Wiring,
 };
@@ -39,10 +39,9 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
     let eth_hash = labelhash("eth");
     let eth_token = U256::from_be_bytes(eth_hash.0);
     let mut actions = vec![
-        ordered_action(
+        action(
             "root:eth-label",
-            "root:eth",
-            0,
+            stage::BOOTSTRAP,
             vec![emission(
                 wires.root,
                 V2Registry::LabelRegistered {
@@ -56,10 +55,9 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                 .encode_log_data(),
             )],
         ),
-        ordered_action(
+        action(
             "root:eth-subregistry",
-            "root:eth",
-            1,
+            stage::BOOTSTRAP,
             vec![emission(
                 wires.root,
                 V2Registry::SubregistryUpdated {
@@ -82,10 +80,9 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
         let resource = U256::from(0x0100_u64 + seat);
         let node = namehash(&[label, "eth"]);
 
-        actions.push(ordered_action(
+        actions.push(action(
             format!("{label}:label-registered"),
-            format!("{label}:token"),
-            0,
+            stage::REGISTER,
             vec![emission(
                 wires.registry,
                 V2Registry::LabelRegistered {
@@ -119,18 +116,16 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                 .encode_log_data(),
             ));
         }
-        actions.push(ordered_action(
+        actions.push(action(
             format!("{label}:token-resource"),
-            format!("{label}:token"),
-            1,
+            stage::IDENTITY,
             token_link,
         ));
 
         if dimensions.registration_path != RegistrationPath::Legacy {
-            actions.push(ordered_action(
+            actions.push(action(
                 format!("{label}:registrar-registered"),
-                format!("{label}:token"),
-                2,
+                stage::REGISTER,
                 vec![emission(
                     wires.registrar,
                     V2Registrar::NameRegistered {
@@ -150,10 +145,9 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
             ));
         }
         if dimensions.registration_path == RegistrationPath::Unwrapped {
-            actions.push(ordered_action(
+            actions.push(action(
                 format!("{label}:registrar-renewed"),
-                format!("{label}:token"),
-                2,
+                stage::WRITE,
                 vec![emission(
                     wires.registrar,
                     V2Registrar::NameRenewed {
@@ -173,10 +167,9 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
         match dimensions.record_state {
             RecordState::NoResolver => {}
             RecordState::ResolverWithRecords => {
-                actions.push(ordered_action(
+                actions.push(action(
                     format!("{label}:resolver-set"),
-                    format!("{label}:token"),
-                    2,
+                    stage::LINK,
                     vec![emission(
                         wires.registry,
                         V2Registry::ResolverUpdated {
@@ -187,10 +180,9 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                         .encode_log_data(),
                     )],
                 ));
-                actions.push(ordered_action(
+                actions.push(action(
                     format!("{label}:records"),
-                    format!("{label}:token"),
-                    2,
+                    stage::WRITE,
                     vec![
                         emission(
                             wires.resolver,
@@ -215,10 +207,9 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                 ));
             }
             RecordState::CustomResolverNoRecords => {
-                actions.push(ordered_action(
+                actions.push(action(
                     format!("{label}:custom-resolver"),
-                    format!("{label}:token"),
-                    2,
+                    stage::LINK,
                     vec![emission(
                         wires.registry,
                         V2Registry::ResolverUpdated {
@@ -235,10 +226,9 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
         match dimensions.subname_shape {
             SubnameShape::None => {}
             SubnameShape::RegistrySubnode | SubnameShape::DeepSubnode => {
-                actions.push(ordered_action(
+                actions.push(action(
                     format!("{label}:subregistry"),
-                    format!("{label}:token"),
-                    2,
+                    stage::LINK,
                     vec![emission(
                         wires.registry,
                         V2Registry::SubregistryUpdated {
@@ -251,10 +241,9 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                 ));
             }
             SubnameShape::WrappedChild => {
-                actions.push(ordered_action(
+                actions.push(action(
                     format!("{label}:parent-updated"),
-                    format!("{label}:token"),
-                    2,
+                    stage::LINK,
                     vec![emission(
                         wires.registry,
                         V2Registry::ParentUpdated {
@@ -271,10 +260,9 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
         match dimensions.authority_shape {
             AuthorityShape::SelfOwned => {}
             AuthorityShape::OperatorTransfer => {
-                actions.push(ordered_action(
+                actions.push(action(
                     format!("{label}:transfer"),
-                    format!("{label}:token"),
-                    2,
+                    stage::IDENTITY,
                     vec![emission(
                         wires.registry,
                         V2Registry::TransferSingle {
@@ -289,10 +277,9 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                 ));
             }
             AuthorityShape::GiveAway => {
-                actions.push(ordered_action(
+                actions.push(action(
                     format!("{label}:roles"),
-                    format!("{label}:token"),
-                    2,
+                    stage::WRITE,
                     vec![emission(
                         wires.registry,
                         V2Registry::EACRolesChanged {
@@ -308,10 +295,9 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
         }
 
         if dimensions.has(Perturbation::RenewalAfterExpiry) {
-            actions.push(ordered_action(
+            actions.push(action(
                 format!("{label}:expiry-updated"),
-                format!("{label}:token"),
-                2,
+                stage::WRITE,
                 vec![emission(
                     wires.registry,
                     V2Registry::ExpiryUpdated {
@@ -324,10 +310,9 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
             ));
         }
         if dimensions.has(Perturbation::Reregistration) {
-            actions.push(ordered_action(
+            actions.push(action(
                 format!("{label}:unregistered"),
-                format!("{label}:token"),
-                3,
+                stage::LATE,
                 vec![emission(
                     wires.registry,
                     V2Registry::LabelUnregistered {
@@ -339,10 +324,9 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
             ));
         }
         if dimensions.has(Perturbation::LateRecordWrite) {
-            actions.push(ordered_action(
+            actions.push(action(
                 format!("{label}:late-record"),
-                format!("{label}:token"),
-                2,
+                stage::LATE,
                 vec![emission(
                     wires.resolver,
                     V2Resolver::NameChanged {
@@ -358,6 +342,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
     if dimensions.has(Perturbation::RegistryAnnouncement) {
         actions.push(action(
             "registry:announcement",
+            stage::LINK,
             vec![emission(
                 &format!("{:?}", actor(0x400)).to_ascii_lowercase(),
                 V2Registry::RegistryCreated {}.encode_log_data(),
@@ -367,6 +352,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
     if dimensions.has(Perturbation::ProxyUpgrade) {
         actions.push(action(
             "registry:upgraded",
+            stage::LATE,
             vec![emission(
                 wires.registry,
                 V2Registry::Upgraded {
@@ -379,6 +365,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
     if dimensions.has(Perturbation::LateRegistryWrite) {
         actions.push(action(
             "root:late-expiry",
+            stage::LATE,
             vec![emission(
                 wires.root,
                 V2Registry::ExpiryUpdated {

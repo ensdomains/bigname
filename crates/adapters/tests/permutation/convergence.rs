@@ -152,16 +152,19 @@ fn assert_event_stream(
             rebased.before_state = whole.before_state.clone();
             *known.carried_before_states.entry(direction).or_default() += 1;
         }
+        // Allowed only when one side is strictly less attributed than the other. Testing each
+        // identity field on its own would also absorb a swap — a name on one side, a resource on
+        // the other — which is evidence moving between identity kinds rather than one side leaving
+        // it unattributed, and is not a batch-boundary artifact at all.
+        let name_gap = whole.logical_name_id != split.logical_name_id;
+        let resource_gap = whole.resource_id != split.resource_id;
+        let whole_missing = (!name_gap || whole.logical_name_id.is_none())
+            && (!resource_gap || whole.resource_id.is_none());
+        let split_missing = (!name_gap || split.logical_name_id.is_none())
+            && (!resource_gap || split.resource_id.is_none());
         let mut reattributed = false;
-        if whole.logical_name_id != split.logical_name_id
-            && (whole.logical_name_id.is_none() || split.logical_name_id.is_none())
-        {
+        if (name_gap || resource_gap) && (whole_missing || split_missing) {
             rebased.logical_name_id = whole.logical_name_id.clone();
-            reattributed = true;
-        }
-        if whole.resource_id != split.resource_id
-            && (whole.resource_id.is_none() || split.resource_id.is_none())
-        {
             rebased.resource_id = whole.resource_id;
             reattributed = true;
         }

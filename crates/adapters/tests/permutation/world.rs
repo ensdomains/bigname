@@ -15,7 +15,6 @@ use bigname_adapters::schema_v2::{
     RawLogInput,
 };
 use bigname_manifests::{LoadedManifest, RolloutStatus, load_repository};
-use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -167,11 +166,13 @@ impl Wiring {
             let manifest_id = i64::try_from(index + 1)?;
             let loaded = find_checked_in(world, slot, checked_in)?;
             let source = &loaded.manifest;
-            let mut payload = serde_json::to_value(source)?;
-            payload["manifest_version"] = Value::from(1);
+            // The checked-in version, not 1: the adapter copies `manifest_version` into every
+            // normalized event and into retained prior state, so rewriting it here would derive
+            // provenance no production row carries for these active manifests.
+            let payload = serde_json::to_value(source)?;
             manifests.push(ManifestInput {
                 manifest_id,
-                manifest_version: 1,
+                manifest_version: i64::try_from(source.manifest_version)?,
                 namespace: world.namespace.to_owned(),
                 source_family: slot.family.to_owned(),
                 chain_id: world.chain_id.to_owned(),
@@ -237,6 +238,13 @@ impl Wiring {
 
     /// Contract identities the manifest already declares; discovery edges may point out of them
     /// without the batch re-emitting a contract-instance row.
+    pub fn manifest_ids(&self) -> Vec<i64> {
+        self.manifests
+            .iter()
+            .map(|entry| entry.manifest_id)
+            .collect()
+    }
+
     pub fn declared_instances(&self) -> Vec<Uuid> {
         self.instances.values().copied().collect()
     }

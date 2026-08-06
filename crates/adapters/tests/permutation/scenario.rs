@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use alloy_primitives::LogData;
 
 use super::{
@@ -16,13 +14,35 @@ pub struct Emission {
     pub data: Vec<u8>,
 }
 
+/// Dependency stages. A permutation may reorder actions freely *within* a stage, but never across
+/// one, because a later stage names something an earlier stage had to create first. Grouping by
+/// label instead would leave the cross-label and root-to-label preconditions unordered, and an
+/// ungrouped action free to land anywhere at all — which is how the lane came to spend cases on
+/// sequences the chain cannot produce, like renewing a name before registering it.
+pub mod stage {
+    /// Registry bootstrap a namespace needs before any name exists: ENSv2's root label and its
+    /// `.eth` subregistry pointer.
+    pub const BOOTSTRAP: u8 = 0;
+    /// The registration itself.
+    pub const REGISTER: u8 = 1;
+    /// Identity a registration must exist for: token mints, registrar/registry ownership handoffs,
+    /// the immediate child of a name.
+    pub const IDENTITY: u8 = 2;
+    /// Pointers hung off that identity: resolver assignment, subregistry edges, parent claims,
+    /// wrapping, a grandchild under an existing child.
+    pub const LINK: u8 = 3;
+    /// Writes that need the pointer: records, permissions, expiry and renewal, wrapper mutation.
+    pub const WRITE: u8 = 4;
+    /// Perturbations that only mean something after the name is fully set up: unwrap, late writes,
+    /// reverse claims, unregistration and replacement.
+    pub const LATE: u8 = 5;
+}
+
 pub struct Action {
     pub name: String,
     pub emissions: Vec<Emission>,
-    /// Actions sharing a group are re-sorted by `rank` after shuffling, so a permutation cannot
-    /// place a protocol precondition after the event that requires it. Everything else is free.
-    pub group: Option<String>,
-    pub rank: u8,
+    /// The dependency stage this action belongs to; see [`stage`].
+    pub stage: u8,
 }
 
 pub fn emission(emitter: &str, encoded: LogData) -> Emission {
@@ -33,25 +53,11 @@ pub fn emission(emitter: &str, encoded: LogData) -> Emission {
     }
 }
 
-pub fn action(name: impl Into<String>, emissions: Vec<Emission>) -> Action {
+pub fn action(name: impl Into<String>, stage: u8, emissions: Vec<Emission>) -> Action {
     Action {
         name: name.into(),
         emissions,
-        group: None,
-        rank: 0,
-    }
-}
-
-pub fn ordered_action(
-    name: impl Into<String>,
-    group: impl Into<String>,
-    rank: u8,
-    emissions: Vec<Emission>,
-) -> Action {
-    Action {
-        group: Some(group.into()),
-        rank,
-        ..action(name, emissions)
+        stage,
     }
 }
 
@@ -284,23 +290,10 @@ pub fn generate(world: &'static World, wiring: &Wiring, seed: u64) -> Scenario {
 
 /// Reorders each group's actions among the positions the shuffle gave them, so preconditions land
 /// first while the interleaving with every other group stays as permuted.
+/// Stable, so the shuffle still decides the order inside a stage — which is where the permutation
+/// value is. All this removes is orderings the chain could not have produced.
 fn repair_preconditions(actions: &mut [Action]) {
-    let mut positions: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (index, item) in actions.iter().enumerate() {
-        if let Some(group) = item.group.as_ref() {
-            positions.entry(group.clone()).or_default().push(index);
-        }
-    }
-    for slots in positions.into_values().filter(|slots| slots.len() > 1) {
-        let mut group = slots
-            .iter()
-            .map(|slot| std::mem::replace(&mut actions[*slot], action("", Vec::new())))
-            .collect::<Vec<_>>();
-        group.sort_by_key(|item| item.rank);
-        for (slot, item) in slots.iter().zip(group) {
-            actions[*slot] = item;
-        }
-    }
+    actions.sort_by_key(|item| item.stage);
 }
 
 pub fn pool(

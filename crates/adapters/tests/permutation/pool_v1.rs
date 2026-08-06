@@ -9,7 +9,7 @@ use super::{
     names::{child_node, dns_encode, labelhash, namehash, reverse_labels},
     scenario::{
         Action, AuthorityShape, Dimensions, ExpiryWindow, Perturbation, RecordState,
-        RegistrationPath, SubnameShape, WrapState, action, emission, ordered_action,
+        RegistrationPath, SubnameShape, WrapState, action, emission, stage,
     },
     world::Wiring,
 };
@@ -80,11 +80,13 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
             registrant,
             wrapper_address,
             expires,
+            stage::REGISTER,
         ));
 
         if dimensions.registration_path != RegistrationPath::Wrapped {
             actions.push(action(
                 format!("{label}:token-mint"),
+                stage::IDENTITY,
                 vec![emission(
                     wires.registrar,
                     V1RegistrarToken::Transfer {
@@ -102,6 +104,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
             RecordState::ResolverWithRecords => {
                 actions.push(action(
                     format!("{label}:resolver-set"),
+                    stage::LINK,
                     vec![emission(
                         wires.registry,
                         V1Registry::NewResolver {
@@ -113,6 +116,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                 ));
                 actions.push(action(
                     format!("{label}:records"),
+                    stage::WRITE,
                     vec![
                         emission(
                             wires.resolver,
@@ -132,6 +136,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                 ));
                 actions.push(action(
                     format!("{label}:contenthash"),
+                    stage::WRITE,
                     vec![emission(
                         wires.resolver,
                         V1Resolver::ContenthashChanged {
@@ -145,6 +150,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
             RecordState::CustomResolverNoRecords => {
                 actions.push(action(
                     format!("{label}:custom-resolver"),
+                    stage::LINK,
                     vec![emission(
                         wires.registry,
                         V1Registry::NewResolver {
@@ -162,10 +168,9 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                 WrapState::WrappedLocked => WRAPPED_2LD_FUSES | CANNOT_UNWRAP,
                 _ => WRAPPED_2LD_FUSES,
             };
-            actions.push(ordered_action(
+            actions.push(action(
                 format!("{label}:wrap"),
-                format!("{label}:wrapper"),
-                0,
+                stage::LINK,
                 vec![
                     emission(
                         wires.registry,
@@ -188,10 +193,9 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                     ),
                 ],
             ));
-            actions.push(ordered_action(
+            actions.push(action(
                 format!("{label}:wrapper-expiry"),
-                format!("{label}:wrapper"),
-                1,
+                stage::WRITE,
                 vec![emission(
                     wires.wrapper,
                     V1Wrapper::ExpiryExtended {
@@ -201,10 +205,9 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                     .encode_log_data(),
                 )],
             ));
-            actions.push(ordered_action(
+            actions.push(action(
                 format!("{label}:wrapper-transfer"),
-                format!("{label}:wrapper"),
-                1,
+                stage::WRITE,
                 vec![emission(
                     wires.wrapper,
                     V1Wrapper::TransferSingle {
@@ -218,10 +221,9 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                 )],
             ));
             if dimensions.wrap_state == WrapState::WrappedUnlocked {
-                actions.push(ordered_action(
+                actions.push(action(
                     format!("{label}:unwrap"),
-                    format!("{label}:wrapper"),
-                    2,
+                    stage::LATE,
                     vec![
                         emission(
                             wires.wrapper,
@@ -249,6 +251,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
             AuthorityShape::OperatorTransfer => {
                 actions.push(action(
                     format!("{label}:registrar-transfer"),
+                    stage::IDENTITY,
                     vec![emission(
                         wires.registrar,
                         V1RegistrarToken::Transfer {
@@ -263,6 +266,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
             AuthorityShape::GiveAway => {
                 actions.push(action(
                     format!("{label}:registry-transfer"),
+                    stage::IDENTITY,
                     vec![emission(
                         wires.registry,
                         V1Registry::Transfer {
@@ -278,14 +282,22 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
         match dimensions.subname_shape {
             SubnameShape::None => {}
             SubnameShape::RegistrySubnode => {
-                actions.push(subnode(&wires, label, "sub", node, owner));
+                actions.push(subnode(&wires, label, "sub", node, owner, stage::IDENTITY));
             }
             SubnameShape::WrappedChild => {
                 let child_node = child_node(node, "kid");
                 let child = child_wrap(dimensions.wrap_state, expires);
-                actions.push(subnode(&wires, label, "kid", node, wrapper_address));
+                actions.push(subnode(
+                    &wires,
+                    label,
+                    "kid",
+                    node,
+                    wrapper_address,
+                    stage::IDENTITY,
+                ));
                 actions.push(action(
                     format!("{label}:wrapped-child"),
+                    stage::WRITE,
                     vec![emission(
                         wires.wrapper,
                         V1Wrapper::NameWrapped {
@@ -301,8 +313,15 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
             }
             SubnameShape::DeepSubnode => {
                 let child = child_node(node, "sub");
-                actions.push(subnode(&wires, label, "sub", node, owner));
-                actions.push(subnode(&wires, label, "deep", child, successor));
+                actions.push(subnode(&wires, label, "sub", node, owner, stage::IDENTITY));
+                actions.push(subnode(
+                    &wires,
+                    label,
+                    "deep",
+                    child,
+                    successor,
+                    stage::LINK,
+                ));
             }
         }
 
@@ -318,6 +337,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
         if dimensions.has(Perturbation::LateRegistryWrite) {
             actions.push(action(
                 format!("{label}:late-registry-write"),
+                stage::LATE,
                 vec![emission(
                     wires.registry,
                     V1Registry::NewOwner {
@@ -332,6 +352,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
         if dimensions.has(Perturbation::LateRecordWrite) {
             actions.push(action(
                 format!("{label}:late-record"),
+                stage::LATE,
                 vec![emission(
                     wires.resolver,
                     V1Resolver::AddrChanged { node, a: successor }.encode_log_data(),
@@ -348,6 +369,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                 operator,
                 wrapper_address,
                 expires + 63_072_000,
+                stage::LATE,
             ));
         }
         if dimensions.has(Perturbation::ReverseClaim) {
@@ -355,6 +377,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
             let reverse = namehash(&labels.iter().map(String::as_str).collect::<Vec<_>>());
             actions.push(action(
                 format!("{label}:reverse-claim"),
+                stage::LATE,
                 vec![
                     emission(
                         wires.reverse,
@@ -389,6 +412,7 @@ fn registration(
     registrant: Address,
     wrapper: Address,
     expires: i64,
+    stage: u8,
 ) -> Action {
     let expires = U256::from(u64::try_from(expires).expect("expiry fits u64"));
     let emissions = match path {
@@ -462,7 +486,7 @@ fn registration(
             ),
         ],
     };
-    action(format!("{label}:register-{path:?}"), emissions)
+    action(format!("{label}:register-{path:?}"), stage, emissions)
 }
 
 fn renewal(
@@ -485,6 +509,19 @@ fn renewal(
             }
             .encode_log_data(),
         ),
+        // The registrar manifest admits this same four-argument renewal on the wrapped controller
+        // role as well, so a wrapped registration renewing through the legacy controller would
+        // leave the wrapped-controller admission path ungenerated.
+        RegistrationPath::Wrapped => emission(
+            wires.wrapped_controller,
+            V1LegacyController::NameRenewed {
+                name: label.to_owned(),
+                label: hash,
+                cost: U256::from(1_u64),
+                expires,
+            }
+            .encode_log_data(),
+        ),
         _ => emission(
             wires.legacy_controller,
             V1LegacyController::NameRenewed {
@@ -496,12 +533,20 @@ fn renewal(
             .encode_log_data(),
         ),
     };
-    action(format!("{label}:renew"), vec![emission])
+    action(format!("{label}:renew"), stage::WRITE, vec![emission])
 }
 
-fn subnode(wires: &Wires<'_>, label: &str, child: &str, parent: B256, owner: Address) -> Action {
+fn subnode(
+    wires: &Wires<'_>,
+    label: &str,
+    child: &str,
+    parent: B256,
+    owner: Address,
+    stage: u8,
+) -> Action {
     action(
         format!("{label}:subnode-{child}"),
+        stage,
         vec![emission(
             wires.registry,
             V1Registry::NewOwner {
