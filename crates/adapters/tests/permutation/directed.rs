@@ -13,6 +13,11 @@ use uuid::Uuid;
 /// The production lease-release corpus behind the binding foreign-key crash: a registrar lease
 /// that lapses at a bare block boundary and hands authority back to the registry.
 const BINDING_FK_RELEASE: &str = include_str!("../fixtures/interpreters/binding-fk-release.json");
+/// The same corpus with two hand-built logs added in the release block, so that a registration
+/// setup lands where the boundary rows sit. The fixture marks them and says what a real
+/// registration would also emit.
+const BINDING_CLOSURE_DANGLING: &str =
+    include_str!("../fixtures/interpreters/binding-closure-dangling.json");
 
 #[derive(Deserialize)]
 struct Fixture {
@@ -90,7 +95,9 @@ impl Directed {
         Self::from_fixture(BINDING_FK_RELEASE, checked_in)
     }
 
-    /// Accessors for the rows the #339 pin names, so the fixture stays the single source of both.
+    /// The rows the #339 pin names. `surface_binding_id` is the binding the release boundary
+    /// derives — which this fixture's reconciliation then drops, leaving the closure exempting it.
+    /// `assert_release_reached` therefore does not hold for this case and must not be called on it.
     pub fn release_block_number(&self) -> i64 {
         self.expected.release_block_number
     }
@@ -103,10 +110,7 @@ impl Directed {
     /// transaction, where the binding index's `(block, 0, 0)` default for boundary provenance
     /// collides with the pending log.
     pub fn same_transaction_setup(checked_in: &[LoadedManifest]) -> Result<Self> {
-        Self::from_fixture(
-            include_str!("../fixtures/interpreters/binding-closure-dangling.json"),
-            checked_in,
-        )
+        Self::from_fixture(BINDING_CLOSURE_DANGLING, checked_in)
     }
 
     fn from_fixture(raw: &str, checked_in: &[LoadedManifest]) -> Result<Self> {

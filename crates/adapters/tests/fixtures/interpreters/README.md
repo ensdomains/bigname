@@ -16,6 +16,17 @@ live incremental session both materialize the dormant direct-registry resource
 before opening its replacement binding. The original 19 raw-event cases and
 their committed outputs remain byte-identical.
 
+`binding-closure-dangling.json` is that same corpus with two hand-built logs
+added in the release block, sharing one transaction: a registry `Transfer` and
+a legacy-controller `NameRegistered`. It pins issue #339. The lapsed lease
+settles at a bare block boundary, deriving a surface binding whose provenance
+carries no transaction or log index; the reconciler's binding index defaults
+that to `(block, 0, 0)`, which is where the added registry log sits, so the
+binding is dropped, while the closure's own `(-1, -1)` sentinel spares it —
+leaving `except_surface_binding_id` naming a binding the batch no longer
+opens. The fixture's `case.synthetic_logs` says which logs are not production
+and which ones a real registration would also emit.
+
 The original four cases were copied from these now-deleted legacy adapter
 tests:
 
