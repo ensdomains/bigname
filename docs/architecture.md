@@ -378,18 +378,22 @@ boundaries fall. Three rules keep the written rows batch-independent:
   seeded from the pre-batch retained state. Events that same-transaction
   reconciliation later drops or re-keys leave no trace in surviving rows.
   Interpreter-declared explicit befores (deliberate snapshots such as wrapper
-  fuse state or permission grant bodies) are exempt and are written as
-  computed at emission.
+  fuse state or permission grant bodies) are exempt from re-threading and are
+  written as computed at emission, with one carve-out: same-transaction
+  re-attribution to a registration (the second rule) resets the before to
+  `{}`, so the registration's stream starts from an empty snapshot. The
+  block-scoped predecessor-epoch permission closures keep their computed
+  snapshot.
 - Identity attribution is fixed at emission, with one exception:
   same-transaction reconciliation may attribute registry, resolver, and
   permission observations to a registration established later in the same
   transaction, and predecessor-epoch permission closures may be attributed
   when they share the registration's block. Reconciliation never reaches
-  across a block boundary — the block is the atomic unit every batch grid
-  loads — so predecessor-epoch observations that only a later block's
-  registration could identify keep their event-time attribution (null
-  `logical_name_id`/`resource_id` where no authority was known) in every run
-  shape.
+  across a block boundary — batches never split a block, so the block is the
+  atomic unit every grid loads — so predecessor-epoch observations that only
+  a later block's registration could identify keep their event-time
+  attribution (null `logical_name_id`/`resource_id` where no authority was
+  known) in every run shape (fresh, incremental, or resumed).
 - Resource rows anchor at their first derivation block. A superseded
   registry-only resource emission is retained even when no surviving
   same-batch row references it, so the first-committed identity upsert anchors

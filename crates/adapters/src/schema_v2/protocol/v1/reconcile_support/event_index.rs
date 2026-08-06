@@ -190,6 +190,12 @@ impl EventIndex {
                     "RegistrationGranted event {} must carry raw_fact_ref.emitting_address for same-transaction reconciliation",
                     event.event_identity,
                 );
+                let position = event_position(event);
+                debug_assert!(
+                    position.is_some(),
+                    "RegistrationGranted event {} must carry a full chain position for block-scoped reconciliation",
+                    event.event_identity,
+                );
                 registrant?;
                 Some(Registration {
                     key: TargetKey {
@@ -211,7 +217,7 @@ impl EventIndex {
                         .and_then(Value::as_str)
                         .map(str::to_owned),
                     emitter: emitter?.to_ascii_lowercase(),
-                    position: event_position(event)?,
+                    position: position?,
                 })
             })
             .collect()

@@ -16,8 +16,8 @@ use super::{refresh_interpreter_state_key, retarget_permission_authority};
 use crate::schema_v2::model::BatchOutput;
 
 pub(super) fn reconcile(output: &mut BatchOutput) {
-    // Extract JSON-backed comparison fields and build the transaction/name, position, resource,
-    // and resolver-state indexes once. Reconciliation below visits only matching candidates.
+    // Extract JSON-backed comparison fields and build the transaction/name, position, and
+    // resource indexes once. Reconciliation below visits only matching candidates.
     let mut events = EventIndex::new(&output.normalized_events);
     let registrations = events.registrations(&output.normalized_events);
     let mut bindings = BindingIndex::new(output);
