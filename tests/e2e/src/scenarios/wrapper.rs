@@ -227,8 +227,8 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
     );
     assert_eq!(
         pointer(&locked_body, "/declared_state/registration/expiry"),
-        wrapper_expiry,
-        "exact-name registration expiry should follow the current wrapper authority"
+        registrar_expiry,
+        "exact-name registration expiry should follow the registrar lease"
     );
     assert_eq!(
         pointer(&locked_body, "/declared_state/wrapper_state"),
