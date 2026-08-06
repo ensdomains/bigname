@@ -30,10 +30,29 @@ and make the canonical reth database path readable before using the overlay.
 
 ## Planned migration and fingerprint boundary
 
-Apply append-only SQLx migrations through the deployment's migration runner;
-the image has no generic `migrate` command. A migration that drops legacy
-`public`-schema tables is destructive and requires a verified backup and an
-explicit maintenance window.
+The image has no generic `migrate` command, so migrations are an operator step
+run outside the containers. The migration runner is `sqlx-cli` against the
+checked-in `migrations/` directory, from a checkout of the exact commit being
+deployed and with the writer database URL:
+
+```sh
+cargo install sqlx-cli --no-default-features --features rustls,postgres  # once
+git -C /path/to/bigname checkout <deployed-commit>
+pg_dump "$BIGNAME_DATABASE_URL" > /var/backups/bigname-pre-migrate.sql
+sqlx migrate info --source migrations --database-url "$BIGNAME_DATABASE_URL"
+sqlx migrate run  --source migrations --database-url "$BIGNAME_DATABASE_URL"
+```
+
+Take and verify the backup first: `sqlx migrate run` applies every pending
+version in order and has no down step. Run `sqlx migrate info` again afterwards
+and confirm no version is still pending. Do not hand-apply the SQL files with
+`psql`: the applied set is tracked in `_sqlx_migrations`, and a file applied
+outside the runner leaves that ledger out of sync. The runner still treats that
+version as pending, re-applying it fails against the objects it already
+created, and the deploy stays down until the ledger is reconciled by hand. A
+migration
+that drops legacy `public`-schema tables is destructive and additionally
+requires an explicit maintenance window.
 
 Deleting interpreter inputs rotates the compiled interpreter content hash. Do
 not mix new interpretation output with rows published under the old hash. For

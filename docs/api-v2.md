@@ -505,6 +505,14 @@ returned `is_primary` is computed from the current name and primary-name claim
 even when a different primary-matching relation row is unreadable. The retired
 v1 page/sidecar pair disagreed on this case; the v2 live page and count joins
 share the same eligibility rule.
+Reverse address results additionally require each name's projection row to be
+[readable](glossary.md#readable--read-safe) *and* supported: a name whose
+`name_current` support status is unsupported is absent from both the page and
+`total_count` rather than listed with an unsupported reason. Reverse results
+therefore answer which supported names an address holds. This deliberately
+narrows earlier behavior, which listed unsupported names and left the caller to
+read the reason; per-name unsupported detail now lives on the name-shaped
+routes and diagnostics, which read the row directly.
 
 ## Error Model
 

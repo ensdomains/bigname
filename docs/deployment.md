@@ -41,12 +41,19 @@ cp .env.server.example .env.server
 docker compose --env-file .env.server -f docker-compose.server.yml up -d
 ```
 
-Before the full `up`, apply reviewed versioned migrations with the deployment's
-migration runner, initialize or replace `bigname_phase` as described below,
-then provision the non-owner `bigname_api` login. Set
-`BIGNAME_API_DATABASE_URL` to that login; Compose deliberately does not fall
-back to `BIGNAME_DATABASE_URL` for the API. The phase runner and migration
-automation use the writer URL.
+Before the full `up`, apply reviewed versioned migrations with the migration
+runner — `sqlx migrate run --source migrations` from the deployed commit, named
+step by step in
+[`runbooks/production-docker.md`](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
+— initialize or replace `bigname_phase` as described below, then provision the
+non-owner `bigname_api` login. Set `BIGNAME_API_DATABASE_URL` to that login;
+Compose deliberately does not fall back to `BIGNAME_DATABASE_URL` for the API.
+The phase runner and migration automation use the writer URL.
+
+Preflight every release with `sqlx migrate info --source migrations` against
+the writer URL and confirm no version is pending. Neither the API nor the
+phase runner reports the applied schema version, so a forgotten migration
+surfaces only as a runtime query failure.
 
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current

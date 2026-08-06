@@ -318,7 +318,19 @@ Field ownership:
   `record_family_not_supported`.
   `source=auto` blends per key: indexed answers are used where they satisfy the
   requested key, and only the remaining supported keys fall back to verified
-  lookup. A Basenames auto read remains Base-scoped when no fallback key
+  lookup. An indexed answer — including an indexed `not_found` — is admitted
+  only from a record inventory whose coverage carries no unsupported reason and
+  whose coverage `status` is `full` or `projected`. `projected` is admitted
+  because a supported schema-v2 inventory is complete by construction: the
+  project phase derives its entries from the whole interpreted event set
+  retained for the name's current record-version boundary under a classified
+  resolver, so a key's absence from that inventory is absence in the retained
+  history rather than an unfinished build. The row's
+  `exhaustiveness: not_asserted` disclaims a claim about complete *history*,
+  which is a weaker statement than `full` and does not weaken this admission.
+  An inventory in any other coverage state is not authoritative, and the
+  request falls through to verified lookup or an explicit unsupported answer
+  rather than reporting absence from the index as absence on chain. A Basenames auto read remains Base-scoped when no fallback key
   remains; it selects the Ethereum resolution-auxiliary position only when it
   will attempt that verified fallback. If projection movement removes the last
   fallback key while the expanded snapshot is being selected, the request
@@ -739,6 +751,13 @@ Diagnostic snapshot rules:
   omits snapshot metadata and rejects `at` and historical `finality`.
 - `/v2/diagnostics/namespaces/{namespace}/manifests` omits `meta.as_of` and
   `meta.as_of_token`; it is control-plane metadata.
+
+`GET /v2/diagnostics/names/{name}/execution` is removed. The persisted-explain
+capability it served is retired with the C2 cutover, not deferred to a later
+slice: the execution traces, steps, and cache outcomes it read no longer exist
+and no replacement route is planned. Verified resolution now runs per request,
+so there is no persisted artifact to explain. See
+[`execution.md`](execution.md#removed-legacy-artifacts).
 
 ### `GET /v2/diagnostics/names/{name}/coverage`
 
