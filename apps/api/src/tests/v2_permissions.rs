@@ -488,6 +488,42 @@ async fn v2_get_permissions_decodes_and_serves_a_stored_reserved_scope() -> Resu
 }
 
 #[tokio::test]
+async fn v2_permissions_serve_unprojected_authority_resources_as_partial() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    let resource_id = v2_permissions_current_resource_id();
+    let uri = format!("/v2/permissions?address={V2_PERMISSIONS_SUBJECT}&page_size=10");
+
+    // The projection records an unprojected authority for every kind it cannot enumerate,
+    // including a NULL kind; those rows must degrade the page rather than fail its read.
+    for authority_kind in [None, Some("subregistry")] {
+        upsert_phase_permissions_current_resource_summary(
+            &database.pool,
+            &permission_current_resource_summary(resource_id, authority_kind),
+        )
+        .await?;
+
+        let response = v2_permissions_response_for_database(&database, &uri).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: Value = read_json(response).await?;
+        assert_eq!(
+            payload["data"]
+                .as_array()
+                .expect("permissions data must be an array")
+                .len(),
+            5
+        );
+        assert_eq!(payload["meta"]["completeness"], json!("partial"));
+        assert_eq!(
+            payload["meta"]["unsupported_reason"],
+            json!("permission_support_unknown")
+        );
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_permissions_admit_project_vocabulary_and_exclude_orphaned_projection_targets()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

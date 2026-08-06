@@ -8,6 +8,10 @@ use super::{
     canonicality::CURRENT_PERMISSION_SUMMARY_READ_FILTER, types::PermissionsCurrentResourceSummary,
 };
 
+/// The phase table stores `support_status`/`unsupported_reason`, so the typed coverage is
+/// synthesized here. Every branch must reproduce one of the combinations
+/// `ResourcePermissionCoverage::validate` accepts; anything else fails JSON decoding and turns
+/// one such row into a failed page read.
 const SUMMARY_SELECT_COLUMNS: &str = r#"
     summary.resource_id,
     summary.authority_kind,
@@ -20,16 +24,22 @@ const SUMMARY_SELECT_COLUMNS: &str = r#"
             'enumeration_basis', 'resource_permissions',
             'unsupported_reason', NULL
         )
-        ELSE jsonb_build_object(
+        WHEN summary.unsupported_reason = 'ensv1_wrapper_holder_permissions_not_projected'
+        THEN jsonb_build_object(
             'status', 'unsupported',
             'exhaustiveness', 'not_applicable',
+            'source_classes_considered', jsonb_build_array(
+                'permissions_current', 'ens_v1_wrapper_l1'
+            ),
+            'enumeration_basis', 'resource_permissions',
+            'unsupported_reason', 'ensv1_wrapper_holder_permissions_not_projected'
+        )
+        ELSE jsonb_build_object(
+            'status', 'partial',
+            'exhaustiveness', 'best_effort',
             'source_classes_considered', jsonb_build_array('permissions_current'),
             'enumeration_basis', 'resource_permissions',
-            'unsupported_reason', CASE
-                WHEN summary.unsupported_reason = 'ensv1_wrapper_holder_permissions_not_projected'
-                    THEN 'ensv1_wrapper_holder_permissions_not_projected'
-                ELSE 'resource_permission_authority_not_projected'
-            END
+            'unsupported_reason', 'resource_permission_authority_not_projected'
         )
     END AS coverage,
     summary.provenance,

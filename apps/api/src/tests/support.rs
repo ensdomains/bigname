@@ -601,12 +601,45 @@ async fn upsert_phase_permissions_current_rows(
     Ok(rows.to_vec())
 }
 
+/// Authority kinds the permission projection builder treats as projected authority.
+const PHASE_PROJECTED_PERMISSION_AUTHORITY_KINDS: &[&str] = &[
+    "registrar",
+    "registry",
+    "registry_only",
+    "registry_owner",
+    "registrant",
+    "resolver",
+    "ens_v2_registry",
+];
+
+/// Mirror `crates/project/src/builders/permissions.rs`: the projected support columns come from
+/// the resource's authority kind, not from the coverage the reader synthesizes back out of them.
+/// Deriving them from the fixture's coverage instead would keep the unknown-authority state that
+/// production writes out of the typed read path.
+fn phase_permission_summary_support(
+    authority_kind: Option<&str>,
+) -> (&'static str, Option<&'static str>) {
+    match authority_kind {
+        Some(kind) if PHASE_PROJECTED_PERMISSION_AUTHORITY_KINDS.contains(&kind) => {
+            ("supported", None)
+        }
+        Some("wrapper") => (
+            "unsupported",
+            Some("ensv1_wrapper_holder_permissions_not_projected"),
+        ),
+        _ => (
+            "unsupported",
+            Some("resource_permission_authority_not_projected"),
+        ),
+    }
+}
+
 async fn upsert_phase_permissions_current_resource_summary(
     pool: &PgPool,
     row: &bigname_storage::PermissionsCurrentResourceSummary,
 ) -> Result<()> {
-    let coverage = serde_json::to_value(&row.coverage)?;
-    let (support_status, unsupported_reason) = phase_support_from_coverage(&coverage);
+    let (support_status, unsupported_reason) =
+        phase_permission_summary_support(row.authority_kind.as_deref());
     let (chain_id, block_number, block_hash) =
         phase_permission_projection_target(pool, row.resource_id, &row.chain_positions).await?;
     let mut provenance = row.provenance.clone();
@@ -2656,9 +2689,11 @@ fn permission_current_resource_summary(
 ) -> bigname_storage::PermissionsCurrentResourceSummary {
     let authority_kind = authority_kind.map(str::to_owned);
     let coverage = match authority_kind.as_deref() {
+        Some(kind) if PHASE_PROJECTED_PERMISSION_AUTHORITY_KINDS.contains(&kind) => {
+            bigname_storage::ResourcePermissionCoverage::authoritative(["permissions_current"])
+        }
         Some("wrapper") => bigname_storage::ResourcePermissionCoverage::ensv1_wrapper_holder_permissions_not_projected(),
-        Some(_) => bigname_storage::ResourcePermissionCoverage::authoritative(["permissions_current"]),
-        None => bigname_storage::ResourcePermissionCoverage::resource_authority_not_projected(),
+        _ => bigname_storage::ResourcePermissionCoverage::resource_authority_not_projected(),
     };
     bigname_storage::PermissionsCurrentResourceSummary {
         resource_id,
