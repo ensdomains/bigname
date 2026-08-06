@@ -13,8 +13,7 @@ It retains the exact `NameRenewed`, registrar transfers, registry `NewOwner`,
 block hashes, timestamps, and expected release-side resource and binding IDs.
 The physical-batch harness proves that compacted prior-state restoration and a
 live incremental session both materialize the dormant direct-registry resource
-before opening its replacement binding. The original 19 raw-event cases and
-their committed outputs remain byte-identical.
+before opening its replacement binding.
 
 The original four cases were copied from these now-deleted legacy adapter
 tests:
