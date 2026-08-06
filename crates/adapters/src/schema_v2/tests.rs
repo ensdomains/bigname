@@ -1525,6 +1525,7 @@ fn wrapped_controller_renewal_updates_the_wrapper_resource_expiry() -> anyhow::R
     assert_eq!(expiry.source_family, "ens_v1_registrar_l1");
     assert_eq!(expiry.after_state["source_event"], "NameRenewed");
     assert_eq!(expiry.after_state["authority_kind"], "wrapper");
+    assert_eq!(expiry.before_state["expiry"], 7_776_100);
     assert_eq!(expiry.after_state["expiry"], 7_776_200);
     Ok(())
 }

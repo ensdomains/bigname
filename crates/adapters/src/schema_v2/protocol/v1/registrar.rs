@@ -384,7 +384,9 @@ fn name_event(
                 "RegistrationRenewed" | "ExpiryChanged"
             )
         }) {
-            event.explicit_before = Some(json!({"expiry":before_expiry}));
+            if event.explicit_before.is_none() {
+                event.explicit_before = Some(json!({"expiry":before_expiry}));
+            }
         }
     }
     if registration
