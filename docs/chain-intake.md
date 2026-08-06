@@ -96,6 +96,34 @@ block; only a local reth source can report `node_checked`. Unsupported
 combinations fail as configuration errors rather than falling back to another
 provider or range.
 
+## Download range planning
+
+The ingest [watch plan](glossary.md#watch-plan--watched-tuple) gives each
+contract address an inclusive block window. When a manifest version or
+discovery update retires an address, that is local indexing bookkeeping, not an
+onchain event. A retired manifest-declared address with a known end block
+remains in download planning for the part of its bounded history that
+intersects the requested range; without an end block, it is removed. For a
+discovered address, a non-orphaned discovery edge with a known end block can
+supply that bound: a retired address row without its own end remains in
+download planning for the overlap with the edge's bounded history. It is
+removed when no end block is available from either side, and likewise when
+the edge itself was retired without one (a retired end-less edge excludes
+its address regardless of the address row's own bound). These retirement rules apply when an explicit historical download
+range overlaps the closed interval. Later live intake does not fetch that
+interval after its end block.
+
+The planner validates stored windows before clipping them to the requested
+range. Orphaned discovery edges do not participate in fetching or validation.
+A manifest declaration is a configuration error only when none of the stored
+address ranges considered by planning has an effective start at or before its
+end. When one contract instance has multiple non-overlapping address ranges,
+one valid range is enough for the declaration to pass validation; any range
+whose effective start remains after its end is omitted from fetching. A
+non-orphaned discovery edge whose window does not overlap the discovered
+address window is also a configuration error. Planning stops and names the
+governing manifest and inconsistent bounds for either error.
+
 ## Reorgs and required downstream redo
 
 Head publication marks a displaced readable suffix orphaned and invalidates

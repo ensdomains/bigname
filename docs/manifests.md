@@ -55,7 +55,23 @@ fallback for an omitted value. That fallback is a documented port gap, not
 historical provenance or authority to run an unbounded ingest; the phase range
 must still be admitted explicitly.
 
-For `[[contracts]]`, `proxy_kind` is required. `proxy_kind = "none"` omits `implementation`. Any non-`none` `proxy_kind` includes `implementation` as the current implementation address for that manifest version.
+For `[[contracts]]`, `proxy_kind` is required. `proxy_kind = "none"` omits
+`implementation`. Any non-`none` `proxy_kind` includes `implementation` as the
+expected implementation address for that manifest version. Manifest
+synchronization stores that expectation as a
+[proxy/implementation discovery edge](glossary.md#discovery-graph--discovery-edge).
+When no current `Upgraded` observation exists, the manifest-declared edge is the
+active baseline. An `Upgraded` observation naming a different implementation
+closes that baseline and makes the observed edge current. An observation naming
+the same implementation records event-derived evidence alongside the baseline.
+Later manifest synchronization preserves either current observed edge instead
+of resetting it to the declaration. The declared implementation remains
+deployment metadata used to seed the baseline. The live manifest-drift audit
+can emit a `proxy_implementation_drift` observation when the declaration and
+persisted manifest-declared proxy edge diverge; that comparison joins the
+`manifest_declared_proxy` edge, not the current `Upgraded` edge. Baseline
+materialization and handling of upgrade observations are the schema-v2
+consumers that keep `proxy_kind` in the manifest schema.
 
 `resolver_implementations` is a list of `{ role, address }` entries with unique
 addresses; several implementation generations may share one role. It
