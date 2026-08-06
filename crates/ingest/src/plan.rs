@@ -62,13 +62,9 @@ pub fn validate_request(request: &BatchRequest) -> Result<()> {
 
 /// Refuses a planned range that starts below the lowest block its source can serve.
 ///
-/// A deleted static-file range reads back as no rows and no error
-/// (upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L1996 @ reth@88505c7f)
-/// (upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L1998 @ reth@88505c7f),
-/// so ingest would otherwise mark the missing window covered. reth's own `eth_getLogs`
-/// fails the equivalent request with `PrunedHistoryUnavailable`
-/// (upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L584 @ reth@88505c7f)
-/// (upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L586 @ reth@88505c7f).
+/// A source reading below its own retention reports an empty window rather than an error,
+/// which ingest would otherwise record as covered. `docs/chain-intake.md` § Download range
+/// planning carries the rule and its upstream evidence.
 pub fn enforce_source_floor(
     source_key: &str,
     from: i64,

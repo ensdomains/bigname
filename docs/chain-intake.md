@@ -142,30 +142,36 @@ refuses an `eth_getLogs` range below its expired-history floor with
 (upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L584 @ reth@88505c7f)
 (upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L586 @ reth@88505c7f),
 but a node whose receipts were pruned while its transactions were kept passes
-that guard and serves empty logs
-(upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L1141 @ reth@88505c7f)
-(upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L1144 @ reth@88505c7f);
-intake reads receipts directly, so it refuses there too. That widening is
-recorded in `docs/upstream.md` § Known divergences. A node that writes receipts
-to database tables rather than static files reports no receipt floor at all
+that guard, and each of its receipt-less blocks then contributes no logs rather
+than an error
+(upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L1265 @ reth@88505c7f)
+(upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L1272 @ reth@88505c7f).
+Intake reads receipts directly, so it refuses there too. That widening is
+recorded in `docs/upstream.md` § Known divergences. The receipt floor is read
+from the static files on disk, so it bounds nothing on a node that keeps
+receipts in database tables
 (upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L188 @ reth@88505c7f)
-(upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L190 @ reth@88505c7f);
-its row-wise prune checkpoints are not read, so on that configuration only the
-expired-history floor applies and a pruned receipt window can still be recorded
-as covered.
+(upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L190 @ reth@88505c7f),
+whose row-wise prune checkpoints are not read, and it still reports the old jars
+on a datadir that later moved receipts into tables. On those configurations only
+the expired-history floor applies and a pruned receipt window can still be
+recorded as covered.
 
-The refusal is judged on the source's declared start block, not on how far its
-cursor has advanced, so a resumed run whose cursor already stands above the
-floor is refused too. It fires wherever a batch is planned: historical ingest
-and redo. It does not re-examine work already recorded — a completed ingest
-phase is not planned again, so a chain that recorded the pruned window before
-this rule existed keeps its stored coverage until a resync or an explicit redo
-re-plans that range — and live follow, which extends the published head rather
-than planning a declared range, does not consult the floor. A redo range that
-ends below a source's declared start plans nothing for that source and is
-unaffected. Sources that do not read a node's database report no floor: an RPC
-endpoint owns its retention behind the wire, and the Coinbase SQL warehouse is
-not a block provider at all.
+Historical ingest is judged on the source's declared start block, not on how far
+its cursor has advanced, so a resumed run whose cursor already stands above the
+floor is refused too: planning cannot tell coverage recorded before the node
+pruned from coverage recorded through a pruned window, and refuses both until
+the node holds the declared range again or the declared start block moves. A
+redo is judged on its own range instead — clipped to the source's declared start
+— so a redo entirely above the floor still runs on a pruned node, and a redo
+ending below a source's declared start plans nothing for that source and is
+unaffected. Work already recorded is not re-examined: a completed ingest phase
+is not planned again, so a chain that recorded a pruned window before this rule
+existed keeps its stored coverage until a resync or an explicit redo re-plans
+that range. Live follow extends the published head rather than planning a
+declared range and does not consult the floor. Sources that do not read a node's
+database report no floor: an RPC endpoint owns its retention behind the wire,
+and the Coinbase SQL warehouse is not a block provider at all.
 
 ## Reorgs and required downstream redo
 

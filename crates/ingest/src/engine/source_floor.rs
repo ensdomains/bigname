@@ -8,8 +8,6 @@ use crate::{
 impl Engine {
     /// Refuses, before any ingest work, a plan whose range starts below what a source holds.
     ///
-    /// The refusal is judged on the source's declared start block rather than on cursor
-    /// progress: a cursor standing above the floor recorded coverage the node never had.
     /// Only a source reading a node's database directly reports a floor at all.
     pub(super) async fn enforce_source_floors(&self, request: &BatchRequest) -> Result<()> {
         for source in &request.sources {
@@ -46,9 +44,11 @@ impl Engine {
 
 /// The block range a batch plans for one source, or `None` when it plans nothing.
 ///
-/// A normal batch plans the source's whole declared window up to the chain head, cursor
-/// progress included: a cursor that already advanced past a pruned window recorded coverage
-/// the node never had, so the plan stays refusable until the node or the window changes.
+/// A normal batch plans the source's whole declared window up to the chain head, ignoring
+/// cursor progress: planning cannot tell coverage recorded before the node pruned from
+/// coverage recorded through a pruned window, so it refuses both until the node holds the
+/// declared range again or the declared start block moves. A redo plans only its own range,
+/// so a redo above the floor stays available on a pruned node.
 fn planned_range(
     source: &SourceDescriptor,
     redo_range: Option<(i64, i64)>,
@@ -98,6 +98,7 @@ mod tests {
     // these as threads in one process.
     const PRUNED_DATADIR: &str = "/var/lib/reth/pruned-datadir-fixture";
     const UNREADABLE_DATADIR: &str = "/var/lib/reth/absent-datadir-fixture";
+    const REDO_DATADIR: &str = "/var/lib/reth/pruned-redo-datadir-fixture";
     const V1_REGISTRY_START: i64 = 3_327_417;
     const MERGE_RECEIPT_SEGMENT_START: i64 = 15_500_000;
 
@@ -190,6 +191,26 @@ mod tests {
                 .contains("failed to read the earliest available block for source ethereum-reth"),
             "{error}"
         );
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn a_redo_range_above_the_floor_is_planned_on_a_pruned_node() -> AnyResult<()> {
+        let database =
+            TestDatabase::create(TestDatabaseConfig::new("ingest_source_floor_redo")).await?;
+        let _floor = test_floors::install(REDO_DATADIR, MERGE_RECEIPT_SEGMENT_START);
+        let engine = Engine::new(database.pool().clone());
+
+        // The declared window starts below the floor, but this redo range does not.
+        engine
+            .enforce_source_floors(&request(
+                REDO_DATADIR,
+                Some((
+                    MERGE_RECEIPT_SEGMENT_START,
+                    MERGE_RECEIPT_SEGMENT_START + 100,
+                )),
+            ))
+            .await?;
         database.cleanup().await
     }
 

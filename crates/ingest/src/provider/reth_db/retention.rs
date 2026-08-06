@@ -15,12 +15,14 @@ pub(super) struct RetentionReadings {
     /// (upstream: .refs/reth/crates/prune/prune/src/segments/mod.rs:L41 @ reth@88505c7f),
     /// which leaves headers readable while every log below the boundary is gone.
     ///
-    /// A node that writes receipts to database tables instead — receipt pruning without
-    /// `storage_v2`, or a receipt log filter with it
+    /// This reports the lowest jar on disk, so it bounds nothing on a node that keeps
+    /// receipts in database tables — receipt pruning without `storage_v2`, or a receipt
+    /// log filter with it
     /// (upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L188 @ reth@88505c7f)
     /// (upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L190 @ reth@88505c7f)
-    /// — reports nothing here and prunes rows against a checkpoint we do not read, so only
-    /// `earliest_history_block` bounds it.
+    /// — whose rows are pruned against a checkpoint this does not read, and it still
+    /// reports the old jars on a datadir that later moved receipts into tables. Both
+    /// configurations are bounded only by `earliest_history_block`.
     pub(super) lowest_receipt_block: Option<u64>,
 }
 
