@@ -1813,3 +1813,63 @@ fn flatten_outputs(outputs: &[BatchOutput]) -> BatchOutput {
     }
     merged
 }
+
+#[test]
+fn dense_output_is_purely_additive_over_the_pre_retention_snapshot() -> Result<()> {
+    // Retaining superseded registry-only resource emissions at their first derivation block
+    // must leave every pre-retention row byte-for-byte intact: the only permitted dense-corpus
+    // differences are the non-persisted `before_state_explicit` debug flag and the retained
+    // resource rows themselves (exactly the rows no surviving normalized event or surface
+    // binding references). Remove both and the output must collapse to the pre-retention
+    // snapshot — pinned here by that snapshot's own committed keccak.
+    let fixture: DenseFixture = serde_json::from_str(DENSE_SAME_TRANSACTION)?;
+    let case = dense_case(fixture)?;
+    let expected_gate = ExpectedCase {
+        id: case.case.id.clone(),
+        normalized_events: vec![serde_json::json!({"block_hash":case.case.blocks[0].hash})],
+        name_surfaces: Vec::new(),
+        surface_bindings: Vec::new(),
+        resources: Vec::new(),
+        token_lineages: Vec::new(),
+    };
+    let input = batch_input(&case.case, &expected_gate, &checked_in_manifests()?)?;
+    let mut reduced = interpret_with_incremental_equivalence(&case.case.id, input)?;
+    let mut referenced = std::collections::BTreeSet::new();
+    for event in &reduced.normalized_events {
+        if let Some(resource_id) = event.resource_id {
+            referenced.insert(resource_id);
+        }
+    }
+    for binding in &reduced.surface_bindings {
+        referenced.insert(binding.resource_id);
+    }
+    let retained_ids = reduced
+        .resources
+        .iter()
+        .filter(|resource| !referenced.contains(&resource.resource_id))
+        .map(|resource| resource.resource_id)
+        .collect::<Vec<_>>();
+    let distinct_retained = retained_ids
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    assert_eq!(
+        (retained_ids.len(), distinct_retained),
+        (480, 320),
+        "the retention change adds exactly the unreferenced superseded registry-only rows"
+    );
+    reduced
+        .resources
+        .retain(|resource| referenced.contains(&resource.resource_id));
+    let snapshot = format!("{reduced:#?}")
+        .lines()
+        .filter(|line| !line.trim().starts_with("before_state_explicit:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        format!("{:#x}", keccak256(snapshot.as_bytes())),
+        "0xdea10ee1d168b5444bfba23ed1f9b174c6c926be9b98997c1174bc486199ff02",
+        "output minus the debug-only flag and the retained rows must equal the pre-retention snapshot"
+    );
+    Ok(())
+}
