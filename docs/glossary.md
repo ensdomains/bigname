@@ -258,19 +258,28 @@ and no owner, while ENSv1 is still the authority for it. Reserved entries are
 not registrations.
 
 **Migration controller** — an ENSv2 contract that accepts a transferred ENSv1
-token and performs that name's migration. There are two, split by whether the
-wrapped name can still be unwrapped: `UnlockedMigrationController` takes
-unwrapped registrar ERC-721s
+token and performs that name's migration. There are two, and the split is by
+name shape and lock state rather than by whether the name can still be
+unwrapped. `UnlockedMigrationController` takes unwrapped registrar ERC-721s
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92 @ ens_v2@ccaeb58)
-and unlocked NameWrapper tokens, and `LockedMigrationController` takes locked
-ones; both inherit their ERC-1155 receiver from a shared base
+and unlocked wrapped `.eth` 2LDs — it rejects a locked name, and it also
+rejects anything whose token id is not the namehash of a `.eth` second-level
+label, so subnames never reach it
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L143 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L144 @ ens_v2@ccaeb58).
+`LockedMigrationController` takes locked 2LDs *and* emancipated children, which
+is why a still-unwrappable emancipated subname migrates through the locked side
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L176 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L85 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L88 @ ens_v2@ccaeb58).
+Both inherit their ERC-1155 receiver from a shared base
 (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L101 @ ens_v2@ccaeb58).
 A separate `MigrationHelper` batches many names through operator approval
 (upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L94 @ ens_v2@ccaeb58).
-Name collision worth guarding against: ENSv1 also ships a `MigrationHelper`, an
-owner-controlled wrapper-migration tool with an entirely different interface
-(upstream: .refs/ens_v1/contracts/utils/MigrationHelper.sol:L28 @ ens_v1@91c966f)
-(upstream: .refs/ens_v1/contracts/utils/MigrationHelper.sol:L47 @ ens_v1@91c966f),
+Name collision worth guarding against: ENSv1 also ships a `MigrationHelper`, a
+controller-gated wrapper-migration tool with an entirely different interface
+(upstream: .refs/ens_v1/contracts/utils/MigrationHelper.sol:L32 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/utils/MigrationHelper.sol:L51 @ ens_v1@91c966f),
 and it has its own mainnet deployment artifact
 (upstream: .refs/ens_v1/deployments/mainnet/MigrationHelper.json:L2 @ ens_v1@91c966f),
 so harness or manifest tooling that keys contracts by artifact basename across
@@ -295,15 +304,18 @@ declaration.
 has not migrated yet. Its parent's
 [migration registry](#migration-registry-wrapperregistry) refuses to let anyone
 register that label
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58),
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L170 @ ens_v2@ccaeb58),
 so the child cannot be taken on the ENSv2 side and keeps resolving through
 ENSv1 for as long as it stays unmigrated. This is a legitimate steady state,
 not a transient one: a name tree can have a parent whose registration is
 ENSv2-authoritative and a child whose control and records stay
 ENSv1-authoritative, and nothing terminates that split automatically — it ends
 only when the child itself migrates, or when it is abandoned. Note the test is
-on fuses, not on being currently wrapped, and NameWrapper preserves fuses
-across a burn, so a child that unwraps after its parent migrated still counts
+on fuses, not on being currently wrapped, and NameWrapper deliberately keeps
+fuses and expiry when it burns a token
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L276 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L277 @ ens_v1@91c966f),
+so a child that unwraps after its parent migrated still counts
 as migratable — and is stuck, because migration needs a NameWrapper token to
 transfer and it no longer has one. It stays blocked until its ENSv1 registry
 owner is zeroed, which is the condition that releases the label
@@ -346,6 +358,7 @@ registrar controller
 (upstream: .refs/ens_v2/contracts/script/setup.ts:L860 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/script/setup.ts:L866 @ ens_v2@ccaeb58)
 and adds the Graveyard and this contract in their place
+(upstream: .refs/ens_v2/contracts/script/setup.ts:L873 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/script/setup.ts:L877 @ ens_v2@ccaeb58).
 Renewal writes both sides: the shared registrar base extends the ENSv2 entry
 (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L91 @ ens_v2@ccaeb58)
