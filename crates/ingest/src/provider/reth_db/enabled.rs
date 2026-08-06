@@ -24,10 +24,12 @@ mod convert;
 mod head;
 #[path = "logs.rs"]
 mod logs;
+#[path = "retention.rs"]
+mod retention;
 
 use convert::{
     hash_hex, i64_to_u64, parse_b256, provider_block_from_header,
-    provider_receipts_and_logs_from_recovered, provider_transactions_from_recovered,
+    provider_receipts_and_logs_from_recovered, provider_transactions_from_recovered, u64_to_i64,
 };
 
 use crate::provider::{Block, BlockBundle, HeadSnapshot, Log, ResolvedBlock};
@@ -63,6 +65,14 @@ impl RethDbProvider {
     pub async fn heads(&self) -> Result<HeadSnapshot> {
         self.blocking("fetch heads", RethDbReader::fetch_heads)
             .await
+    }
+
+    pub async fn earliest_available_block(&self) -> Result<i64> {
+        self.blocking(
+            "read the earliest available block",
+            RethDbReader::earliest_available_block,
+        )
+        .await
     }
 
     pub async fn resolve(&self, numbers: &[i64]) -> Result<Vec<ResolvedBlock>> {
@@ -151,6 +161,22 @@ impl RethDbReader {
                 .map(|number| self.block_by_number(&factory, number, "finalized"))
                 .transpose()?,
         })
+    }
+
+    /// Reads the lowest block this datadir can still serve logs for.
+    ///
+    /// A pruned node answers reads below that block with no rows and no error, so an
+    /// intake that only reads the database would record the range as covered. reth's
+    /// own `eth_getLogs` refuses such a range instead
+    /// (upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L584 @ reth@88505c7f)
+    /// (upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L586 @ reth@88505c7f).
+    fn earliest_available_block(&self) -> Result<i64> {
+        let factory = self.factory()?;
+        let readings = retention::read_retention(&factory)?;
+        u64_to_i64(
+            retention::earliest_servable_block(readings),
+            "earliest available block",
+        )
     }
 
     fn resolve(&self, numbers: &[i64]) -> Result<Vec<ResolvedBlock>> {
