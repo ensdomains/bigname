@@ -105,6 +105,7 @@ include!("tests/v2_permissions.rs");
 include!("tests/v2_resolvers.rs");
 include!("tests/v2_primary_name.rs");
 include!("tests/v2_lookup.rs");
+include!("tests/v2_search.rs");
 include!("tests/v2_query_params.rs");
 include!("tests/v2_status.rs");
 include!("tests/v2_envelope_conformance.rs");
