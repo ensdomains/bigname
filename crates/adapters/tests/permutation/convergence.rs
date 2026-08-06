@@ -18,10 +18,16 @@ pub struct BatchBoundaryArtifacts {
     /// `before_state` of that scope's first event *in the batch*, and a split gives each batch its
     /// own first event — so the split replay blanks values the whole pass carries. Neither leaves a
     /// trace on the row itself, so this cannot be pinned tighter than "one side is empty"; the
-    /// counter is split by direction to keep both visible. Only the whole-pass direction is
-    /// witnessed by the default corpus and pinned in `EXPECTED_ARTIFACTS` — the resolver-scope
-    /// direction is a mechanism read out of the interpreter, not something the lane has reproduced,
-    /// so it would arrive as a new key and fail the pin rather than pass unnoticed.
+    /// counter is split by direction to keep both visible.
+    ///
+    /// Both directions are witnessed by the default corpus and pinned in `EXPECTED_ARTIFACTS`, but
+    /// not by the two mechanisms above — those both blank the *split replay*. The events counted
+    /// `only-the-split-replay` are the reverse: ENSv1 `SubregistryChanged` derived from `NewOwner`,
+    /// where the whole pass carries an empty `before_state` and the split replay carries the prior
+    /// owner. `reconcile_same_transaction_setups` collapses an earlier setup event for the same node
+    /// when both land in one batch, so the survivor has no predecessor left to read; splitting puts
+    /// the predecessor in an earlier batch, where it survives as retained prior state. So the whole
+    /// pass — the shape a backfill runs — is the side that loses state here.
     pub carried_before_states: BTreeMap<&'static str, usize>,
     /// Reconciliation keeps a superseded identity row only while a retained row in the same batch
     /// output still references it. Where the referencing row lands in a later batch the earlier

@@ -124,15 +124,9 @@ impl IdentityReferences {
                 .entry(binding.surface_binding_id)
                 .or_insert(binding_position(binding)?);
         }
+        // An exemption naming a binding no batch opened is `check_canonicality`'s, which can also
+        // report where the closure sits; checking it here too would only shadow that message.
         for closure in &output.binding_closures {
-            if let Some(binding) = closure.except_surface_binding_id
-                && !self.bindings.contains_key(&binding)
-            {
-                bail!(
-                    "{context}: binding closure for {} exempts unknown binding {binding}",
-                    closure.logical_name_id
-                );
-            }
             if !self
                 .surfaces
                 .contains(&(self.chain_id.clone(), closure.logical_name_id.clone()))

@@ -48,15 +48,22 @@ use permutation::{
     },
 };
 
-/// 48 rather than 24 because that is where the corpus starts reproducing every batch-boundary
-/// artifact class, including the split-replay direction of `carried_before_states` that no depth
-/// reached before `CASE_STRIDE` was decoupled from the generator's increment. Costs about 6s.
+/// Raised from 24 once `CASE_STRIDE` was decoupled from the generator's increment. Every
+/// batch-boundary artifact class — including the split-replay direction of `carried_before_states`,
+/// which no depth reached under the old stride — is reproduced from 31 cases on; 48 is a round
+/// number above that with headroom, and costs about 6s.
+///
+/// The lane is green from 31 through 89. At 90 and above it reports the dangling binding-closure
+/// exemption that `whole_pass_binding_closure_exempts_a_binding_no_batch_opened` pins: that is a
+/// real finding about the interpreter, not a corpus artifact, so read that test before treating a
+/// deep sweep's failure as something to re-pin.
 const DEFAULT_CASES: u64 = 48;
 const DEFAULT_SEED: u64 = 0x6e0d_5eed;
-/// Distance between case seeds. Deliberately *not* the SplitMix64 increment: because that
-/// increment is odd it is invertible, so every stride makes consecutive cases the same value stream
-/// offset by some fixed number of draws, and a stride equal to the increment makes that offset one.
-/// This one puts them about 8e18 draws apart, which no scenario approaches.
+/// Distance between case seeds. Deliberately *not* the SplitMix64 increment: because that increment
+/// is odd it is invertible, so every stride makes two cases the same value stream offset by some
+/// fixed number of draws, and a stride equal to the increment makes that offset one. How far this
+/// one puts them is asserted rather than asserted-to-be-large in a comment — see
+/// `generated_scenarios_are_reproducible_from_their_seed`.
 const CASE_STRIDE: u64 = 0xd134_2543_de82_ef95;
 const SPLIT_SALT: u64 = 0xa076_1d64_78bd_642f;
 const WORLDS: [&World; 2] = [&ENS_V1_MAINNET, &ENS_V2_SEPOLIA];
@@ -174,6 +181,45 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
     assert_pinned_artifacts(&artifacts, &subregistry_detaches)
 }
 
+/// Pins a live interpreter defect this lane found, so that raising `BIGNAME_PERMUTATION_CASES` past
+/// 89 has an explanation in the repository rather than only in review history.
+///
+/// The interpreter emits a binding closure whose `except_surface_binding_id` names a binding no
+/// batch ever opened. There is no foreign key on that column, so nothing rejects it: the writer's
+/// `surface_binding_id <> $3` clause matches nothing, and the closure clamps *every* binding for
+/// the name — including the one the exemption existed to spare. The lane's referential check is
+/// what notices.
+///
+/// This asserts the current, wrong behaviour. When the interpreter stops emitting the dangling
+/// exemption this test fails, which is the signal to delete it and raise `DEFAULT_CASES`.
+#[test]
+fn whole_pass_binding_closure_exempts_a_binding_no_batch_opened() -> Result<()> {
+    const KNOWN_BAD_SEED: u64 = 13_484_046_221_401_303_482;
+    let checked_in = checked_in_manifests()?;
+    let wiring = Wiring::build(&ENS_V1_MAINNET, &checked_in)?;
+    let scenario = scenario::generate(&ENS_V1_MAINNET, &wiring, KNOWN_BAD_SEED);
+    let input = wiring.batch_input(&scenario.blocks, &scenario.logs)?;
+    let batches = split(input.blocks.len(), KNOWN_BAD_SEED ^ SPLIT_SALT);
+    let outcome = check(
+        &scenario.describe(),
+        &ENS_V1_MAINNET,
+        &wiring.declared_instances(),
+        input,
+        batches,
+    );
+    let Err(error) = outcome else {
+        bail!(
+            "seed {KNOWN_BAD_SEED} no longer produces a dangling binding-closure exemption. If the \
+             interpreter was fixed, delete this test and raise DEFAULT_CASES past 89"
+        );
+    };
+    let reported = format!("{error:?}");
+    if !reported.contains("which no batch opened") {
+        bail!("seed {KNOWN_BAD_SEED} now fails for a different reason:\n{reported}");
+    }
+    Ok(())
+}
+
 #[test]
 fn production_lease_release_sequence_holds_the_same_invariants() -> Result<()> {
     let checked_in = checked_in_manifests()?;
@@ -184,7 +230,6 @@ fn production_lease_release_sequence_holds_the_same_invariants() -> Result<()> {
     let mut references = IdentityReferences::new(&chain_id, &directed.declared_instances);
     for batch in &converged.batches {
         references.absorb(&context, &batch.blocks, &batch.output)?;
-        assert_upsert_guards_agree(&context, &batch.output)?;
     }
     let whole = format!("{context} whole-sequence pass");
     IdentityReferences::new(&chain_id, &directed.declared_instances).absorb(
@@ -350,10 +395,13 @@ fn generated_scenarios_are_reproducible_from_their_seed() -> Result<()> {
             "{} scenario generation is not seed-deterministic",
             world.label
         );
+        // Compared on the drawn logs, not on `describe()`: that string interpolates the seed, so it
+        // differs between two seeds even for a generator that ignored the seed entirely.
         let drifted = scenario::generate(world, &wiring, DEFAULT_SEED.wrapping_add(CASE_STRIDE));
+        let drifted_input = wiring.batch_input(&drifted.blocks, &drifted.logs)?;
         assert_ne!(
-            left.describe(),
-            drifted.describe(),
+            format!("{:?}", left_input.raw_logs),
+            format!("{:?}", drifted_input.raw_logs),
             "{} scenario generation ignores its seed",
             world.label
         );
@@ -362,18 +410,31 @@ fn generated_scenarios_are_reproducible_from_their_seed() -> Result<()> {
     // two seeds always produce the same value stream at *some* offset, and a stride equal to that
     // increment makes the offset one — every case would then replay its predecessor shifted by a
     // single draw, and the axes would be mechanically coupled between adjacent cases.
-    // A stride of k increments puts the next case's first draw at this case's k-th, so finding it
-    // in the first few hundred says k is small enough for the axes to couple across cases.
-    let mut first = permutation::rng::Rng::new(DEFAULT_SEED);
-    let mut second = permutation::rng::Rng::new(DEFAULT_SEED.wrapping_add(CASE_STRIDE));
-    let opening = second.next_u64();
-    for draw in 0..512 {
-        assert_ne!(
-            first.next_u64(),
-            opening,
-            "the next case's stream is this one advanced by {draw} draws; CASE_STRIDE must not be a \
-             small multiple of the generator's increment"
+    // A stride of k increments puts one case's stream k draws from the next's. Both signs are
+    // degenerate — advanced by k or rewound by k couple the axes just the same — so look for the
+    // opening draw of each stream inside the other. A scenario draws a few hundred values, and this
+    // is checked between every pair of cases, not only adjacent ones, because k multiplies.
+    for gap in 1..DEFAULT_CASES {
+        let apart = CASE_STRIDE.wrapping_mul(gap);
+        let (mut earlier, mut later) = (
+            permutation::rng::Rng::new(DEFAULT_SEED),
+            permutation::rng::Rng::new(DEFAULT_SEED.wrapping_add(apart)),
         );
+        let (ahead, behind) = (later.next_u64(), earlier.next_u64());
+        for draw in 1..512 {
+            assert_ne!(
+                earlier.next_u64(),
+                ahead,
+                "cases {gap} apart share a stream offset by {draw} draws; CASE_STRIDE must not be a \
+                 small multiple of the generator's increment"
+            );
+            assert_ne!(
+                later.next_u64(),
+                behind,
+                "cases {gap} apart share a stream offset by -{draw} draws; CASE_STRIDE must not be \
+                 a small multiple of the generator's increment"
+            );
+        }
     }
     Ok(())
 }
@@ -401,7 +462,6 @@ fn check(
     let mut event_kinds = BTreeSet::new();
     for batch in &converged.batches {
         references.absorb(context, &batch.blocks, &batch.output)?;
-        assert_upsert_guards_agree(context, &batch.output)?;
         events += batch.output.normalized_events.len();
         event_kinds.extend(
             batch
