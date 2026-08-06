@@ -12,7 +12,9 @@
 //! Knobs:
 //! - `BIGNAME_PERMUTATION_CASES` — permutations per protocol world. Default 24 (48 sequences per
 //!   run) keeps the lane inside the CI budget; raise it for deeper local sweeps.
-//! - `BIGNAME_PERMUTATION_SEED` — base seed, decimal. Default 1846370029.
+//! - `BIGNAME_PERMUTATION_SEED` — base seed, decimal. Default 1846370029. Overriding either knob
+//!   turns off the interpretation-coverage assertion, which is a property of the default corpus
+//!   rather than of any seed; the invariants themselves still run.
 //!
 //! A failure reports `world=… seed=…`. Replay it with that seed and
 //! `BIGNAME_PERMUTATION_CASES=1`, against the same checked-in manifests — a scenario embeds the
@@ -109,9 +111,9 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
             bail!("{label}: derived no normalized events from {logs} raw logs");
         }
     }
-    // A reduced run is a reproduction tool, not a coverage gate: one scenario per world cannot
-    // reach every interpretation path, so only a full run asserts coverage.
-    if cases < DEFAULT_CASES {
+    // Which interpretation paths a run reaches is a property of the corpus it drew, so only the
+    // default corpus asserts it. A reduced or reseeded run is a reproduction tool, not a gate.
+    if cases < DEFAULT_CASES || base != DEFAULT_SEED {
         return Ok(());
     }
     assert_interpretation_coverage(&event_kinds, emitted_topic0s.len())
@@ -199,8 +201,12 @@ fn the_dimension_space_emits_every_declared_event() -> Result<()> {
             }
         }
     }
-    let missing = declared_events()
+    let declared = declared_events()
         .into_iter()
+        .map(|event| (event.topic0.to_ascii_lowercase(), event))
+        .collect::<BTreeMap<_, _>>();
+    let missing = declared
+        .values()
         .filter(|event| !emitted.contains(&event.topic0.to_ascii_lowercase()))
         .map(|event| format!("{} ({})", event.name, event.signature))
         .collect::<Vec<_>>();
@@ -209,6 +215,18 @@ fn the_dimension_space_emits_every_declared_event() -> Result<()> {
             "no combination of the scenario axes emits these declared events, so they cover \
              nothing:\n  {}",
             missing.join("\n  ")
+        );
+    }
+    // The other direction keeps the declaration list from falling behind the pools: an emission it
+    // does not list is checked against neither the manifest ABI nor coverage.
+    let undeclared = emitted
+        .iter()
+        .filter(|topic0| !declared.contains_key(*topic0))
+        .collect::<Vec<_>>();
+    if !undeclared.is_empty() {
+        bail!(
+            "the scenario axes emit event signatures that declared_events() does not list, so \
+             nothing checks them: {undeclared:?}"
         );
     }
     Ok(())

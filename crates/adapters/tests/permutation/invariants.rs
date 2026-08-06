@@ -15,13 +15,13 @@ use super::{
     rng::Rng,
 };
 
+/// A chain position: block number, transaction index, log index.
+type Position = (i64, i64, i64);
+
 /// Models the identity rows a batch may reference: everything the persistence transport has
 /// already committed, accumulated in commit order. `crates/interpret/src/write.rs` writes identity
 /// rows, then discovery rows, then normalized events, one transaction per batch — so a row may
 /// reference anything its own batch emits or anything an earlier batch emitted, and nothing else.
-/// A chain position: block number, transaction index, log index.
-type Position = (i64, i64, i64);
-
 pub struct IdentityReferences {
     chain_id: String,
     resources: BTreeSet<(String, Uuid)>,
@@ -122,7 +122,7 @@ impl IdentityReferences {
             }
             self.bindings
                 .entry(binding.surface_binding_id)
-                .or_insert_with(|| binding_position(binding));
+                .or_insert(binding_position(binding)?);
         }
         for closure in &output.binding_closures {
             if let Some(binding) = closure.except_surface_binding_id
@@ -193,7 +193,7 @@ impl IdentityReferences {
         let mut by_position: BTreeMap<(&str, Position), BTreeSet<Uuid>> = BTreeMap::new();
         for binding in &output.surface_bindings {
             by_position
-                .entry((binding.logical_name_id.as_str(), binding_position(binding)))
+                .entry((binding.logical_name_id.as_str(), binding_position(binding)?))
                 .or_default()
                 .insert(binding.surface_binding_id);
         }
@@ -270,20 +270,27 @@ impl IdentityReferences {
     }
 }
 
-fn binding_position(binding: &bigname_adapters::schema_v2::SurfaceBinding) -> Position {
-    (
-        binding.block_number,
-        binding
-            .provenance
-            .get(seam::TRANSACTION_INDEX_KEY)
-            .and_then(Value::as_i64)
-            .unwrap_or(-1),
-        binding
-            .provenance
-            .get(seam::LOG_INDEX_KEY)
-            .and_then(Value::as_i64)
-            .unwrap_or(-1),
-    )
+/// The writer fails a batch whose binding carries only half a position, a negative index, or no
+/// position without raw-block provenance (`crates/interpret/src/write/identity.rs`), so a lane that
+/// silently defaulted those to -1 would model a batch the database rejects.
+fn binding_position(binding: &bigname_adapters::schema_v2::SurfaceBinding) -> Result<Position> {
+    let index = |key| binding.provenance.get(key).and_then(Value::as_i64);
+    match (
+        index(seam::TRANSACTION_INDEX_KEY),
+        index(seam::LOG_INDEX_KEY),
+    ) {
+        (Some(transaction_index), Some(log_index)) if transaction_index >= 0 && log_index >= 0 => {
+            Ok((binding.block_number, transaction_index, log_index))
+        }
+        (None, None) if seam::is_raw_block_provenance(&binding.provenance) => {
+            Ok((binding.block_number, -1, -1))
+        }
+        _ => bail!(
+            "surface binding {} has a position the writer would reject: {}",
+            binding.surface_binding_id,
+            binding.provenance
+        ),
+    }
 }
 
 fn closure_position(closure: &bigname_adapters::schema_v2::BindingClosure) -> Position {

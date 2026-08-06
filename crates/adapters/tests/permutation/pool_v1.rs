@@ -15,6 +15,16 @@ use super::{
 };
 
 const LABELS: [&str; 3] = ["alpha", "bravo", "charlie"];
+/// (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L10 @ ens_v1@91c966f)
+const CANNOT_UNWRAP: u32 = 1;
+/// (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L18 @ ens_v1@91c966f)
+const PARENT_CANNOT_CONTROL: u32 = 1 << 16;
+/// (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L19 @ ens_v1@91c966f)
+const IS_DOT_ETH: u32 = 1 << 17;
+/// Wrapping a .eth 2LD always burns both, so no other word is reachable for one
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1013 @ ens_v1@91c966f). An
+/// emancipated 3LD child carries PARENT_CANNOT_CONTROL alone.
+const WRAPPED_2LD_FUSES: u32 = PARENT_CANNOT_CONTROL | IS_DOT_ETH;
 const REGISTRY: &str = "ens_v1_registry_l1";
 const REGISTRAR: &str = "ens_v1_registrar_l1";
 const WRAPPER: &str = "ens_v1_wrapper_l1";
@@ -150,8 +160,8 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
 
         if dimensions.wrap_state != WrapState::Unwrapped {
             let fuses = match dimensions.wrap_state {
-                WrapState::WrappedLocked => 0x0001_0001,
-                _ => 0x0001_0000,
+                WrapState::WrappedLocked => WRAPPED_2LD_FUSES | CANNOT_UNWRAP,
+                _ => WRAPPED_2LD_FUSES,
             };
             actions.push(ordered_action(
                 format!("{label}:wrap"),
@@ -282,7 +292,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                             node: child,
                             name: dns_encode(&["kid", label, "eth"]).into(),
                             owner: successor,
-                            fuses: 0x0001_0000,
+                            fuses: PARENT_CANNOT_CONTROL,
                             expiry: u64::try_from(expires).expect("expiry fits u64"),
                         }
                         .encode_log_data(),

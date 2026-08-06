@@ -340,7 +340,15 @@ pub fn declared_event_topics(
             };
             let parsed = event.parsed_event()?;
             let indexed = parsed.inputs.iter().filter(|input| input.indexed).count();
-            declared.insert(topic0.to_ascii_lowercase(), indexed + 1);
+            if let Some(existing) = declared.insert(topic0.to_ascii_lowercase(), indexed + 1)
+                && existing != indexed + 1
+            {
+                bail!(
+                    "{} declares topic0 {topic0} with {existing} topics and with {} topics",
+                    world.label,
+                    indexed + 1
+                );
+            }
         }
     }
     Ok(declared)

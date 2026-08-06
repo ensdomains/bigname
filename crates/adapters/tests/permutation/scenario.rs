@@ -136,8 +136,11 @@ pub struct Dimensions {
 }
 
 impl Dimensions {
-    /// Every reachable combination of the axes, with all perturbations enabled. Used to prove event
-    /// coverage without depending on which combinations a seed happens to draw.
+    /// Every combination of the axes that decides *which* events a pool contains — wrap state,
+    /// record state, subname shape, authorization shape, and registration path — with all
+    /// perturbations enabled. The expiry window, name count, and transaction density only change
+    /// event payloads and layout, never the set of fragments, so they stay pinned. Used to prove
+    /// event coverage without depending on which combinations a seed happens to draw.
     pub fn exhaustive() -> Vec<Self> {
         let mut all = Vec::new();
         for wrap_state in [
