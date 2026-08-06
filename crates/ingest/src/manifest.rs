@@ -4,6 +4,7 @@ use bigname_manifests::SourceManifest;
 use sqlx::PgPool;
 
 mod announcements;
+mod ranges;
 #[cfg(test)]
 mod tests;
 
@@ -257,6 +258,8 @@ pub async fn load_watch_filter(
             scoped_topic0s: announced_registry_topics.into_iter().collect(),
         });
 
+    ranges::validate(pool, chain_id).await?;
+
     let address_rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
         "
         WITH declared_intervals AS (
@@ -331,6 +334,7 @@ pub async fn load_watch_filter(
              AND address.chain_id = edge.chain_id
             WHERE edge.chain_id = $1
               AND source_manifest.rollout_status = 'active'
+              AND edge.canonicality_state <> 'orphaned'
               AND edge.edge_kind IN ('resolver', 'registry_announcement')
               AND (
                   edge.edge_kind <> 'resolver'

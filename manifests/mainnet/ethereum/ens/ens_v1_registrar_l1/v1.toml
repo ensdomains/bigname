@@ -72,7 +72,11 @@ fragment = "event Transfer(address indexed from, address indexed to, uint256 ind
 emitter_roles = ["registrar"]
 normalized_events = ["TokenControlTransferred", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged"]
 
-# NameRegistered legacy-controller admission follows the pinned ENS subgraph:
+# NameRegistered uses the canonical legacy-controller event shape:
+# (upstream: .refs/ens_v1/deployments/archive/ETHRegistrarController_mainnet_9380471.sol/ETHRegistrarController_mainnet_9380471.json:L35 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/archive/ETHRegistrarController_mainnet_9380471.sol/ETHRegistrarController_mainnet_9380471.json:L38 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/archive/ETHRegistrarController_mainnet_9380471.sol/ETHRegistrarController_mainnet_9380471.json:L67 @ ens_v1@91c966f)
+# Admission follows the pinned ENS subgraph cross-check:
 # (upstream: .refs/ens_subgraph/subgraph.yaml:L162 @ ens_subgraph@723f1b6)
 # (upstream: .refs/ens_subgraph/subgraph.yaml:L163 @ ens_subgraph@723f1b6)
 # (upstream: .refs/ens_subgraph/subgraph.yaml:L164 @ ens_subgraph@723f1b6).
@@ -108,7 +112,11 @@ fragment = "event NameRegistered(string name, bytes32 indexed label, address ind
 emitter_roles = ["unwrapped_registrar_controller"]
 normalized_events = ["RegistrationGranted", "ExpiryChanged", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PreimageObserved"]
 
-# NameRenewed legacy-controller admission follows the pinned ENS subgraph:
+# NameRenewed uses the canonical legacy-controller event shape:
+# (upstream: .refs/ens_v1/deployments/archive/ETHRegistrarController_mainnet_9380471.sol/ETHRegistrarController_mainnet_9380471.json:L72 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/archive/ETHRegistrarController_mainnet_9380471.sol/ETHRegistrarController_mainnet_9380471.json:L75 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/archive/ETHRegistrarController_mainnet_9380471.sol/ETHRegistrarController_mainnet_9380471.json:L98 @ ens_v1@91c966f)
+# Admission follows the pinned ENS subgraph cross-check:
 # (upstream: .refs/ens_subgraph/subgraph.yaml:L166 @ ens_subgraph@723f1b6).
 [[abi.events]]
 name = "NameRenewed"

@@ -96,6 +96,23 @@ block; only a local reth source can report `node_checked`. Unsupported
 combinations fail as configuration errors rather than falling back to another
 provider or range.
 
+## Download range planning
+
+The ingest [watch plan](glossary.md#watch-plan--watched-tuple) gives each
+contract address an inclusive block window. When a manifest version or
+discovery update retires an address, that is local indexing bookkeeping, not an
+onchain event. A retired address with a known end block remains in download
+planning for the part of its bounded history that intersects the requested
+range. A retired address without an end block is removed from fetching.
+
+The planner validates stored windows before clipping them to the requested
+range. Orphaned discovery edges do not participate in fetching or validation.
+A manifest declaration whose effective start is after its address end, or a
+non-orphaned discovery edge whose window does not overlap the discovered
+address window, is a configuration error. Planning stops and names the
+governing manifest and inconsistent bounds instead of silently dropping or
+trimming the address.
+
 ## Reorgs and required downstream redo
 
 Head publication marks a displaced readable suffix orphaned and invalidates

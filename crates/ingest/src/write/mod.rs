@@ -6,7 +6,7 @@ mod tests;
 use sqlx::PgPool;
 
 use crate::{
-    Result, coinbase_sql::evidence::recount_loaded_window, fetching::FetchedBatch,
+    IngestError, Result, coinbase_sql::evidence::recount_loaded_window, fetching::FetchedBatch,
     manifest::WatchQuery, provider::Log,
 };
 
@@ -16,6 +16,7 @@ pub async fn store(
     facts: &FetchedBatch,
     coinbase_window: Option<(i64, i64, &[Log], &[WatchQuery])>,
 ) -> Result<()> {
+    validate_address_case(facts)?;
     let mut transaction = pool.begin().await.map_err(|error| {
         crate::IngestError::database(
             format!("failed to begin raw-fact write for chain {chain_id}"),
@@ -50,4 +51,31 @@ pub async fn store(
             error,
         )
     })
+}
+
+fn validate_address_case(facts: &FetchedBatch) -> Result<()> {
+    for transaction in &facts.transactions {
+        require_lowercase("transaction sender", &transaction.from)?;
+        if let Some(address) = transaction.to.as_deref() {
+            require_lowercase("transaction recipient", address)?;
+        }
+    }
+    for receipt in &facts.receipts {
+        if let Some(address) = receipt.contract_address.as_deref() {
+            require_lowercase("created contract", address)?;
+        }
+    }
+    for log in &facts.logs {
+        require_lowercase("log emitter", &log.address)?;
+    }
+    Ok(())
+}
+
+fn require_lowercase(label: &str, address: &str) -> Result<()> {
+    if address != address.to_ascii_lowercase() {
+        return Err(IngestError::data_integrity(format!(
+            "{label} address must use lowercase hex: {address}"
+        )));
+    }
+    Ok(())
 }

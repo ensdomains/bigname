@@ -143,6 +143,30 @@ async fn immutable_raw_fact_conflict_is_terminal() -> Result<()> {
     database.cleanup().await
 }
 
+#[tokio::test]
+async fn raw_fact_write_rejects_mixed_case_emitter_addresses() -> Result<()> {
+    let database = database("ingest_address_case").await?;
+    let mut mixed_case = facts(vec![log(0, vec![1])]);
+    mixed_case.logs[0].address = "0x00000000000000000000000000000000000000Aa".to_owned();
+
+    let error = store(database.pool(), CHAIN_ID, &mixed_case, None)
+        .await
+        .expect_err("mixed-case emitter addresses must not reach raw storage");
+
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error
+            .to_string()
+            .contains("log emitter address must use lowercase hex"),
+        "unexpected error: {error}"
+    );
+    let lineage_count: i64 = sqlx::query_scalar("SELECT count(*) FROM chain_lineage")
+        .fetch_one(database.pool())
+        .await?;
+    assert_eq!(lineage_count, 0);
+    database.cleanup().await
+}
+
 async fn database(name: &str) -> Result<TestDatabase> {
     let database = TestDatabase::create(TestDatabaseConfig::new(name)).await?;
     sqlx::raw_sql(include_str!("../../../../schema-v2/baseline/01_chain.sql"))
