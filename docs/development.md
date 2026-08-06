@@ -159,10 +159,21 @@ also evaluates the phase runner's heartbeats, judged on the worst expected
 chain rather than the single freshest row: an expected chain with no
 phase-runner heartbeat, or whose newest heartbeat is older than
 `BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS`, reports `stale` even while another
-chain keeps writing heartbeats. Expected chains are the ones the phase schema
-knows: stored heads, chain phase state, and any chain already writing
-phase-runner heartbeats. A phase runner that has written no heartbeat at all
-reports `not_started`. A standalone API therefore reports `status="degraded"`
-with `api_status="ready"`; current heartbeats on every expected chain make the
-aggregate ready. The server compose healthcheck tests `api_status` so API
-liveness does not depend on an indexing loop restart.
+chain keeps writing heartbeats. A phase runner that has written no heartbeat at
+all reports `not_started`. A standalone API therefore reports
+`status="degraded"` with `api_status="ready"`; current heartbeats on every
+expected chain make the aggregate ready. The server compose healthcheck tests
+`api_status` so API liveness does not depend on an indexing loop restart.
+
+Expected chains are the same set `/v2/status` reports: every chain with a
+stored head or any phase state. Two consequences worth knowing before paging on
+this endpoint:
+
+- The runner writes heartbeats between batches, so a batch or an inter-phase
+  transition longer than the configured max age reports `stale` on that chain
+  even though it is working. Raise
+  `BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS` above the slowest expected batch
+  rather than reading the endpoint as a liveness proof for every chain.
+- Nothing removes a chain from the expected set on its own. A decommissioned
+  chain keeps `stale` latched until its `chain_heads` and `chain_phase_state`
+  rows are deleted, which is the same removal `/v2/status` needs.

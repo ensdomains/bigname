@@ -330,7 +330,8 @@ Field ownership:
   which is a weaker statement than `full` and does not weaken this admission.
   An inventory in any other coverage state is not authoritative, and the
   request falls through to verified lookup or an explicit unsupported answer
-  rather than reporting absence from the index as absence on chain. A Basenames auto read remains Base-scoped when no fallback key
+  rather than reporting absence from the index as absence on chain.
+  A Basenames auto read remains Base-scoped when no fallback key
   remains; it selects the Ethereum resolution-auxiliary position only when it
   will attempt that verified fallback. If projection movement removes the last
   fallback key while the expanded snapshot is being selected, the request

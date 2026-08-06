@@ -3,6 +3,7 @@ include!("tests/support.rs");
 #[tokio::test]
 async fn healthz_reports_phase_runner_health_from_the_phase_schema() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
+    seed_expected_phase_chains(&database, &["1"]).await?;
     seed_phase_runner_heartbeat(&database, "1", "now()").await?;
 
     let payload = healthz_payload(&database).await?;
@@ -19,24 +20,42 @@ async fn healthz_reports_phase_runner_health_from_the_phase_schema() -> Result<(
 }
 
 #[tokio::test]
+async fn healthz_reports_not_started_without_any_phase_runner_heartbeat() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_expected_phase_chains(&database, &["1", "8453"]).await?;
+
+    let payload = healthz_payload(&database).await?;
+    assert_eq!(
+        payload["loops"]["phase_runner"]["status"],
+        json!("not_started")
+    );
+    assert_eq!(payload["status"], json!("degraded"));
+    assert_eq!(payload["api_status"], json!("ready"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn healthz_judges_the_worst_expected_chain_not_the_freshest_heartbeat() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    sqlx::query(
-        r#"
-        INSERT INTO bigname_phase.chain_phase_state (
-            chain_id, phase_name, phase_status, started_at
-        )
-        VALUES ('1', 'live', 'running', now()), ('8453', 'live', 'running', now())
-        "#,
-    )
-    .execute(&database.lookup_pool)
-    .await?;
+    seed_expected_phase_chains(&database, &["1", "8453"]).await?;
     seed_phase_runner_heartbeat(&database, "1", "now()").await?;
 
     let missing = healthz_payload(&database).await?;
-    assert_eq!(missing["loops"]["phase_runner"]["status"], json!("stale"));
+    let missing_loop = &missing["loops"]["phase_runner"];
+    assert_eq!(missing_loop["status"], json!("stale"));
     assert_eq!(missing["status"], json!("degraded"));
     assert_eq!(missing["api_status"], json!("ready"));
+    // A chain with no heartbeat is not described by another chain's evidence.
+    for field in [
+        "phase",
+        "started_at",
+        "heartbeat_at",
+        "heartbeat_age_seconds",
+    ] {
+        assert_eq!(missing_loop[field], Value::Null, "{field}");
+    }
+    assert_eq!(missing_loop["max_age_seconds"], json!(60));
 
     seed_phase_runner_heartbeat(&database, "8453", "now() - interval '10 minutes'").await?;
     let stalled = healthz_payload(&database).await?;
@@ -62,6 +81,22 @@ async fn healthz_judges_the_worst_expected_chain_not_the_freshest_heartbeat() ->
     assert_eq!(recovered["status"], json!("ready"));
 
     database.cleanup().await
+}
+
+/// The phase runner only ever heartbeats a chain that already has a running phase row, so every
+/// heartbeat fixture needs the phase state that admits it.
+async fn seed_expected_phase_chains(database: &TestDatabase, chain_ids: &[&str]) -> Result<()> {
+    for chain_id in chain_ids {
+        sqlx::query(
+            "INSERT INTO bigname_phase.chain_phase_state ( \
+                 chain_id, phase_name, phase_status, started_at \
+             ) VALUES ($1, 'live', 'running', now())",
+        )
+        .bind(chain_id)
+        .execute(&database.lookup_pool)
+        .await?;
+    }
+    Ok(())
 }
 
 async fn seed_phase_runner_heartbeat(

@@ -150,22 +150,16 @@ pub(crate) async fn health(
 /// Judge the phase runner by its worst expected chain, not by the single freshest heartbeat row.
 /// One stalled chain must not be masked by another chain still writing heartbeats, so an expected
 /// chain with no heartbeat at all, or a freshest-per-chain heartbeat older than the configured
-/// age, reports `stale`. Expected chains are the ones the phase schema knows: stored heads, phase
-/// state, and any chain already writing phase-runner heartbeats.
+/// age, reports `stale`. The expected chain set is the one `/v2/status` reads, so the two
+/// readiness surfaces cannot disagree about which chains a missing heartbeat is missing from.
 async fn load_phase_runner_health(
     pool: &PgPool,
     max_age_seconds: i64,
 ) -> anyhow::Result<HealthLoopResponse> {
-    let row = sqlx::query(
+    let expected_chains = bigname_storage::PHASE_EXPECTED_CHAIN_IDS_SELECT;
+    let row = sqlx::query(&format!(
         r#"
-        WITH expected_chains AS (
-            SELECT chain_id FROM bigname_phase.chain_heads
-            UNION
-            SELECT chain_id FROM bigname_phase.chain_phase_state
-            UNION
-            SELECT chain_id FROM bigname_phase.service_heartbeats
-            WHERE service_name = 'phase-runner'
-        ),
+        WITH expected_chains AS ({expected_chains}),
         chain_heartbeats AS (
             SELECT expected.chain_id, freshest.phase_name, freshest.started_at,
                    freshest.heartbeat_at
@@ -198,8 +192,8 @@ async fn load_phase_runner_health(
             )::BIGINT AS age_seconds
         FROM (SELECT 1) probe
         LEFT JOIN oldest ON TRUE
-        "#,
-    )
+        "#
+    ))
     .fetch_one(pool)
     .await?;
     let not_started = HealthLoopResponse {

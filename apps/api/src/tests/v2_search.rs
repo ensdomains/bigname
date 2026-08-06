@@ -132,7 +132,9 @@ async fn v2_search_escapes_like_metacharacters() -> Result<()> {
         vec!["_under.eth"]
     );
 
-    // `al%` matches every `al`-prefixed name only if the percent stays a wildcard.
+    // `al%` matches every `al`-prefixed name only if the percent stays a wildcard. The percent is
+    // exercised query-side only: the phase fixtures recompute identity through ENSIP-15, which
+    // rejects a literal `%` label, so a stored `percent%name.eth` cannot be seeded here.
     let percent =
         v2_search_payload_for_database(&database, "/v2/search?q=al%25&namespace=ens").await?;
     assert_eq!(percent["data"], json!([]));
@@ -151,7 +153,11 @@ async fn v2_search_paginates_without_overlap_or_gap() -> Result<()> {
 
     let mut page = first;
     let mut seen = vec!["alpha.base.eth".to_owned()];
-    while let Some(cursor) = page["page"]["next_cursor"].as_str().map(str::to_owned) {
+    // Bounded so a cursor that stops advancing fails the assertion instead of looping forever.
+    for _ in 0..8 {
+        let Some(cursor) = page["page"]["next_cursor"].as_str().map(str::to_owned) else {
+            break;
+        };
         page = v2_search_payload_for_database(
             &database,
             &format!("/v2/search?q=a&page_size=1&cursor={cursor}"),

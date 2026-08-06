@@ -38,21 +38,24 @@ deployed and with the writer database URL:
 ```sh
 cargo install sqlx-cli --no-default-features --features rustls,postgres  # once
 git -C /path/to/bigname checkout <deployed-commit>
-pg_dump "$BIGNAME_DATABASE_URL" > /var/backups/bigname-pre-migrate.sql
 sqlx migrate info --source migrations --database-url "$BIGNAME_DATABASE_URL"
 sqlx migrate run  --source migrations --database-url "$BIGNAME_DATABASE_URL"
 ```
 
-Take and verify the backup first: `sqlx migrate run` applies every pending
-version in order and has no down step. Run `sqlx migrate info` again afterwards
-and confirm no version is still pending. Do not hand-apply the SQL files with
-`psql`: the applied set is tracked in `_sqlx_migrations`, and a file applied
-outside the runner leaves that ledger out of sync. The runner still treats that
-version as pending, re-applying it fails against the objects it already
-created, and the deploy stays down until the ledger is reconciled by hand. A
-migration
-that drops legacy `public`-schema tables is destructive and additionally
-requires an explicit maintenance window.
+Take and verify a backup first: `sqlx migrate run` applies every pending
+version in order and has no down step. Raw facts dominate this database, so a
+logical `pg_dump` is neither fast nor small; use the deployment's storage
+snapshot or a filesystem-level base backup, sized against the current data
+directory, and do not write it to the root filesystem. Run `sqlx migrate info`
+again afterwards and confirm no version is still pending.
+
+Do not hand-apply the SQL files with `psql`: the applied set is tracked in
+`_sqlx_migrations`, and a file applied outside the runner leaves that ledger
+out of sync. The runner still treats that version as pending, re-applying it
+fails against the objects it already created, and the deploy stays down until
+the ledger is reconciled by hand. A migration that drops legacy
+`public`-schema tables is destructive and additionally requires an explicit
+maintenance window.
 
 Deleting interpreter inputs rotates the compiled interpreter content hash. Do
 not mix new interpretation output with rows published under the old hash. For
