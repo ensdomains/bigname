@@ -2082,6 +2082,78 @@ async fn unwrapped_registration_ignores_the_prior_wrapper_grace_expiry() -> Resu
 }
 
 #[tokio::test]
+async fn wrapped_registration_separates_registrar_and_wrapper_expiry() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_wrapped_expiry_split").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    let wrapper_resource = Uuid::new_v4();
+    let wrapper_resource_text = wrapper_resource.to_string();
+    sqlx::query(
+        "INSERT INTO resources (
+             resource_id, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1, $2, $3, 2, 'canonical')",
+    )
+    .bind(wrapper_resource)
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 2))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET resource_id = $1
+         WHERE logical_name_id = 'ens:0xalice'",
+    )
+    .bind(wrapper_resource)
+    .execute(scratch.pool())
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        2,
+        Some("ens:0xalice"),
+        Some(&wrapper_resource_text),
+        "ExpiryChanged",
+        "ens_v1_wrapper_l1",
+        json!({"authority_kind":"wrapper","expiry":500}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        2,
+        Some("ens:0xalice"),
+        Some(&wrapper_resource_text),
+        "PermissionScopeChanged",
+        "ens_v1_wrapper_l1",
+        json!({"fuses":196_609,"wrapper_state":"locked"}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "ExpiryChanged",
+        "ens_v1_registrar_l1",
+        json!({"source_event":"NameRenewed","authority_kind":"registrar","expiry":1_000}),
+        json!({}),
+    )
+    .await?;
+
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let summary: Value = sqlx::query_scalar(
+        "SELECT declared_summary FROM name_current
+         WHERE logical_name_id = 'ens:0xalice'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(summary["registration"]["expiry"], 1_000);
+    assert_eq!(summary["wrapper_state"], "locked");
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn project_redo_without_resume_revisits_wrapper_timestamp_boundaries() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_wrapper_redo_time_scope").await?;
     seed_project_fixture(scratch.pool()).await?;

@@ -262,9 +262,21 @@ pub(super) async fn build(
                    END AS expiry_seconds
             FROM project_events event
             WHERE event.logical_name_id = surface.logical_name_id
-              AND event.resource_id = binding.resource_id
               AND event.event_kind IN (
                   'RegistrationGranted', 'RegistrationRenewed', 'ExpiryChanged'
+              )
+              AND NOT (
+                  event.event_kind = 'ExpiryChanged'
+                  AND (
+                      event.source_family = 'ens_v1_wrapper_l1'
+                      OR (
+                          event.source_family = 'ens_v1_registrar_l1'
+                          AND COALESCE(event.after_state ->> 'source_event', '') =
+                              'NameRenewed'
+                          AND COALESCE(event.after_state ->> 'authority_kind', '') =
+                              'wrapper'
+                      )
+                  )
               )
               AND (
                   event.event_kind = 'RegistrationGranted'
