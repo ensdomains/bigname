@@ -5,15 +5,14 @@ use axum::{
     extract::{Path, State},
 };
 use bigname_storage::{
-    NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder,
-    NameCurrentListRow, NameCurrentListSort, ResolverCurrentRow, SelectedSnapshot,
-    SnapshotPositionRequirement, SnapshotSelectionScope, ensure_projection_chain_positions_match,
+    ChainPositions, NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentListRow,
+    ResolverCurrentRow, SelectedSnapshot, SnapshotPositionRequirement, SnapshotSelectionScope,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::error;
 
-use super::support::{parse_evm_address, snapshot_selection_api_error};
+use super::support::parse_evm_address;
 use crate::AppState;
 
 #[path = "resolvers/bound_names_cursor.rs"]
@@ -27,15 +26,13 @@ mod overview_items;
 use overview_items::{projected_section_items, summary_is_supported};
 
 use super::{
-    Envelope, Meta, NameRecord, PRODUCT_PIPELINE_TERMS, Page, QueryParamAllowlist,
+    Envelope, Finality, Meta, NameRecord, PRODUCT_PIPELINE_TERMS, Page, QueryParamAllowlist,
     SnapshotReadResource, StrictQueryParams, V2Error, V2Result, api_error_to_v2, build_name_record,
     contains_boundary_vocabulary, decode, encode, encode_at_token, name_record, numeric_to_slug,
     resolve_v2_snapshot_for, snapshot_meta, snapshot_slot_for_slug,
     vocab::{Completeness, Status},
 };
 
-const BOUND_NAMES_SORT: NameCurrentListSort = NameCurrentListSort::Name;
-const BOUND_NAMES_ORDER: NameCurrentListOrder = NameCurrentListOrder::Asc;
 const BOUND_NAMES_SORT_TOKEN: &str = "name_asc";
 const RESOLVER_SECTIONS: [(&str, &str, &str); 4] = [
     ("nodes", "nodes", "bindings"),
@@ -122,8 +119,24 @@ pub(crate) async fn get_resolver(
     let normalized_address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let include = resolver_overview_include(&params.include)?;
 
-    let row = bigname_storage::load_resolver_current(
-        &state.pool,
+    let scope = resolver_snapshot_scope(chain_id_slug)?;
+    let require_selected_head = params.at.is_none() && params.finality == Finality::Latest;
+    let selected_snapshot = resolve_v2_snapshot_for(
+        &state.lookup_pool,
+        &scope,
+        params.at.as_ref(),
+        params.finality,
+        SnapshotReadResource::Resolver,
+    )
+    .await?;
+    let project_generations = load_resolver_project_generations(
+        &state.lookup_pool,
+        &selected_snapshot,
+        require_selected_head,
+    )
+    .await?;
+    let row = bigname_storage::load_phase_resolver_current(
+        &state.lookup_pool,
         chain_id_slug,
         &normalized_address,
     )
@@ -134,23 +147,30 @@ pub(crate) async fn get_resolver(
         ))
     })?;
     let Some(row) = row else {
+        let current = load_resolver_project_generations(
+            &state.lookup_pool,
+            &selected_snapshot,
+            require_selected_head,
+        )
+        .await?;
+        if current != project_generations {
+            return Err(V2Error::stale(
+                "resolver project publication changed while the request was being served",
+            ));
+        }
+        if !require_selected_head {
+            return Err(V2Error::stale(
+                "resolver projection is unavailable at the selected historical position",
+            ));
+        }
         return Err(V2Error::not_found(format!(
             "resolver {normalized_address} was not found on chain {numeric_chain_id}"
         )));
     };
-
-    let scope = resolver_snapshot_scope(chain_id_slug)?;
-    let selected_snapshot = resolve_v2_snapshot_for(
-        &state.lookup_pool,
-        &scope,
-        params.at.as_ref(),
-        params.finality,
-        SnapshotReadResource::Resolver,
-    )
-    .await?;
-    require_projection_snapshot(
+    require_phase_target_snapshot(
         "resolver overview",
         &row.chain_positions,
+        &row.chain_id,
         &selected_snapshot,
     )?;
     let snapshot_token = encode_at_token(&selected_snapshot);
@@ -170,14 +190,10 @@ pub(crate) async fn get_resolver(
         })
         .transpose()?;
 
-    let filter = NameCurrentListFilter {
-        namespace: params.namespace.clone(),
-        resolver: Some(normalized_address.clone()),
-        ..NameCurrentListFilter::default()
-    };
     let (bound_name_rows, storage_next_cursor) = load_bound_name_rows(
-        &state.pool,
-        &filter,
+        &state.lookup_pool,
+        chain_id_slug,
+        params.namespace.as_deref(),
         storage_cursor.as_ref(),
         params.page_size,
         numeric_chain_id,
@@ -185,11 +201,18 @@ pub(crate) async fn get_resolver(
     )
     .await?;
     for bound_name_row in &bound_name_rows {
-        require_projection_snapshot(
-            "bound name",
-            &bound_name_row.row.chain_positions,
-            &selected_snapshot,
-        )?;
+        require_phase_name_snapshot(bound_name_row, &selected_snapshot)?;
+    }
+    let current = load_resolver_project_generations(
+        &state.lookup_pool,
+        &selected_snapshot,
+        require_selected_head,
+    )
+    .await?;
+    if current != project_generations {
+        return Err(V2Error::stale(
+            "resolver project publication changed while the request was being served",
+        ));
     }
 
     let next_cursor = storage_next_cursor
@@ -220,18 +243,16 @@ pub(crate) async fn get_resolver(
     }))
 }
 
-fn require_projection_snapshot(
-    projection_family: &str,
-    projection_chain_positions: &Value,
-    selected_snapshot: &SelectedSnapshot,
-) -> V2Result<()> {
-    ensure_projection_chain_positions_match(
-        projection_family,
-        projection_chain_positions,
-        &selected_snapshot.chain_positions,
-    )
-    .map_err(snapshot_selection_api_error)
-    .map_err(api_error_to_v2)
+async fn load_resolver_project_generations(
+    pool: &sqlx::PgPool,
+    selected: &SelectedSnapshot,
+    require_selected_head: bool,
+) -> V2Result<BTreeMap<String, String>> {
+    if require_selected_head {
+        super::lookup::head::load_selected_project_generations(pool, selected).await
+    } else {
+        super::lookup::head::load_project_generations(pool, selected).await
+    }
 }
 
 pub(crate) fn build_resolver_overview(
@@ -286,51 +307,49 @@ pub(crate) fn build_bound_name_record(row: &NameCurrentListRow, chain_id: u64) -
 
 async fn load_bound_name_rows(
     pool: &sqlx::PgPool,
-    filter: &NameCurrentListFilter,
+    chain_id_slug: &str,
+    namespace: Option<&str>,
     cursor: Option<&NameCurrentListCursor>,
     page_size: u64,
     chain_id: u64,
     resolver_address: &str,
 ) -> V2Result<(Vec<NameCurrentListRow>, Option<NameCurrentListCursor>)> {
+    let loaded = bigname_storage::load_phase_resolver_bound_name_rows(
+        pool,
+        chain_id_slug,
+        resolver_address,
+        namespace,
+        cursor,
+        page_size.saturating_add(1) as i64,
+    )
+    .await
+    .map_err(|_| {
+        V2Error::internal_error(format!(
+            "failed to load bound names for resolver {resolver_address} on chain {chain_id}"
+        ))
+    })?;
+    let mut rows = loaded
+        .into_iter()
+        .map(|row| NameCurrentListRow {
+            row,
+            labelhash: None,
+            token_id: None,
+            owner: None,
+            registrant: None,
+            created_at: None,
+            registration_date: None,
+            expiry_date: None,
+            resolver_address: Some(resolver_address.to_owned()),
+        })
+        .filter(|row| bound_name_row_matches_chain(row, chain_id))
+        .collect::<Vec<_>>();
     let target_len = page_size as usize;
-    let scan_size = page_size.max(50);
-    let mut rows = Vec::with_capacity(target_len);
-    let mut page_cursor = cursor.cloned();
-    let mut last_match_cursor = None;
-
-    loop {
-        let storage_page = bigname_storage::load_name_current_list_page(
-            pool,
-            filter,
-            BOUND_NAMES_SORT,
-            BOUND_NAMES_ORDER,
-            page_cursor.as_ref(),
-            scan_size,
-            false,
-        )
-        .await
-        .map_err(|_| {
-            V2Error::internal_error(format!(
-                "failed to load bound names for resolver {resolver_address} on chain {chain_id}"
-            ))
-        })?;
-        let storage_has_more = storage_page.next_cursor.is_some();
-
-        for row in storage_page.rows {
-            let row_cursor = bound_name_cursor_from_row(&row);
-            if bound_name_row_matches_chain(&row, chain_id) {
-                if rows.len() == target_len {
-                    return Ok((rows, last_match_cursor));
-                }
-                last_match_cursor = Some(row_cursor.clone());
-                rows.push(row);
-            }
-            page_cursor = Some(row_cursor);
-        }
-        if !storage_has_more {
-            return Ok((rows, None));
-        }
-    }
+    let has_more = rows.len() > target_len;
+    rows.truncate(target_len);
+    let next_cursor = has_more
+        .then(|| rows.last().map(bound_name_cursor_from_row))
+        .flatten();
+    Ok((rows, next_cursor))
 }
 
 fn apply_resolver_support_meta(
@@ -497,4 +516,70 @@ fn product_resolver_reason(reason: &str) -> V2Result<String> {
 fn bound_name_row_matches_chain(row: &NameCurrentListRow, chain_id: u64) -> bool {
     name_record::resolver(&row.row.declared_summary)
         .is_some_and(|resolver| resolver.chain_id == chain_id)
+}
+
+fn require_phase_name_snapshot(
+    row: &NameCurrentListRow,
+    selected_snapshot: &SelectedSnapshot,
+) -> V2Result<()> {
+    let projected = ChainPositions::from_value(&row.row.chain_positions)
+        .map_err(|_| V2Error::stale("bound-name phase projection has unusable chain positions"))?;
+    let slot = match row.row.namespace.as_str() {
+        "ens" if projected.get("ethereum-sepolia").is_some() => "ethereum-sepolia",
+        "ens" => "ethereum",
+        "basenames" => "base",
+        _ => {
+            return Err(V2Error::stale(
+                "bound-name phase projection has no served position",
+            ));
+        }
+    };
+    let projected = projected
+        .get(slot)
+        .ok_or_else(|| V2Error::stale("bound-name phase projection has no served position"))?;
+    let selected = selected_snapshot
+        .chain_positions
+        .get(slot)
+        .ok_or_else(|| V2Error::stale("bound-name phase projection is outside the snapshot"))?;
+    if projected.chain_id == selected.chain_id
+        && projected.block_number <= selected.block_number
+        && (projected.block_number != selected.block_number
+            || projected.block_hash == selected.block_hash)
+    {
+        Ok(())
+    } else {
+        Err(V2Error::stale(
+            "bound-name phase projection is outside the selected project publication",
+        ))
+    }
+}
+
+fn require_phase_target_snapshot(
+    projection_family: &str,
+    chain_positions: &Value,
+    chain_id: &str,
+    selected_snapshot: &SelectedSnapshot,
+) -> V2Result<()> {
+    let number = chain_positions
+        .get("target_block_number")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| V2Error::stale(format!("{projection_family} has no target block number")))?;
+    let hash = chain_positions
+        .get("target_block_hash")
+        .and_then(Value::as_str)
+        .ok_or_else(|| V2Error::stale(format!("{projection_family} has no target block hash")))?;
+    let selected = selected_snapshot
+        .chain_positions
+        .as_map()
+        .values()
+        .find(|position| position.chain_id == chain_id)
+        .ok_or_else(|| V2Error::stale(format!("{projection_family} is outside the snapshot")))?;
+    if number > selected.block_number
+        || (number == selected.block_number && hash != selected.block_hash)
+    {
+        return Err(V2Error::stale(format!(
+            "{projection_family} is outside the selected project publication"
+        )));
+    }
+    Ok(())
 }

@@ -355,7 +355,8 @@ async fn load_identity_address_relations_by_logical_names(
         SELECT
             anc.address,
             anc.logical_name_id,
-            anc.relation
+            anc.relation,
+            anc.chain_positions
         FROM address_names_current anc
         JOIN name_surfaces surface
           ON surface.logical_name_id = anc.logical_name_id
@@ -396,6 +397,7 @@ async fn load_identity_address_relations_by_logical_names(
                 address: crate::sql_row::get::<String>(&row, "address")?.to_ascii_lowercase(),
                 logical_name_id: crate::sql_row::get(&row, "logical_name_id")?,
                 relation: parse_address_name_relation(&relation)?,
+                chain_positions: crate::sql_row::get(&row, "chain_positions")?,
             })
         })
         .collect()
@@ -450,6 +452,8 @@ fn identity_record_inventory_boundary_key(
 fn decode_record_inventory_current_row(row: PgRow) -> Result<IdentityRecordInventoryRow> {
     Ok(IdentityRecordInventoryRow {
         resource_id: crate::sql_row::get(&row, "resource_id")?,
+        support_status: "supported".to_owned(),
+        unsupported_reason: None,
         unsupported_families: crate::sql_row::get(&row, "unsupported_families")?,
         entries: crate::sql_row::get(&row, "entries")?,
         chain_positions: crate::sql_row::get(&row, "chain_positions")?,

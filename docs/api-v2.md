@@ -319,23 +319,37 @@ The post-call guard also revalidates the Ethereum project generation and both
 selected ENS manifest declarations; a concurrent replacement returns `409
 stale` and no verified answer.
 
-The exact-head and post-call generation fences fail safe under schema-v2
-projection lag. If head following or project publication remains behind the
-readable chain head,
-verified reads degrade to `409 stale` instead of executing against mixed
-generations. Snapshot selection and verified lookup now read the same
-`chain_heads` and `chain_phase_state` project row, so the exact-head fence
-detects only a concurrent head, rewind, or project-publication change between
-their reads; it no longer waits for an independently updated legacy
-checkpoint. This removes the persistent `409 stale` case caused only by the old
-worker lagging or not running. A fast-moving chain can still advance during a
-provider or CCIP round trip, so the post-call generation checks remain
-necessary.
+The exact-head and post-call generation fences on verified reads fail safe
+under schema-v2 projection lag. If head following or project publication
+remains behind the readable chain head, verified reads degrade to `409 stale`
+instead of executing against mixed generations. Snapshot selection and
+verified lookup now read the same `chain_heads` and `chain_phase_state` project
+row, so this exact-head fence detects only a concurrent head, rewind, or
+project-publication change between their reads; it no longer waits for an
+independently updated legacy checkpoint. This removes the persistent `409
+stale` case on the verified path caused only by the old worker lagging or not
+running. A fast-moving chain can still advance during a provider or CCIP round
+trip, so the post-call generation checks remain necessary.
 
-The resolver overview and every bound-name row returned with it must record the
-same chain position as the selected schema-v2 snapshot. A mismatch returns
-`409 stale`; the route never combines a current projection row with historical,
-safe, finalized, or newer phase metadata.
+Indexed lookup names, record inventories, address-name relations, resolver
+overviews, and resolver bound names now come from `bigname_phase` projections.
+Projection publication is incremental, so an unchanged row retains the target of
+the last projection-phase run that rebuilt it. A row target may therefore be earlier
+than the selected position; it may not be later, and a target at the same
+height must carry the selected hash. The API captures and revalidates the
+completed projection-phase generation around each indexed read. Current lookup and
+latest resolver reads also bind that generation to the selected
+`chain_heads` position; historical resolver reads bind to the current
+generation while admitting only rows at or before the requested position.
+
+This is now a single-source projection consistency check rather than a comparison
+between independently advanced phase and public-schema pipelines. It rejects
+future or same-height wrong-fork rows while serving unchanged rows after an
+unrelated head advance. Moving these indexed routes removes both the
+old-worker-lag `409` class and the counterproductive exact-per-row-head `409`
+class from lookup and resolver serving. A real phase lag,
+interpreter-hash mismatch, concurrent publication change, or row ahead of the
+selected position still fails closed.
 
 ### Tier 3: Diagnostics
 
@@ -404,13 +418,21 @@ route's snapshot scope and must not carry extra slots outside that scope.
 The API selects current `latest`, `safe`, and `finalized` positions from
 `bigname_phase.chain_heads` and obtains their timestamps from readable
 `bigname_phase.chain_lineage`; it does not read the legacy public-schema
-checkpoint table. A current selection is available only when the matching
+checkpoint table. Every selection is available only when the current
 `project` phase is completed at the exact latest head with the API's compiled
-interpreter content hash. Timestamp `at` selection and opaque-token replay keep
-their existing behavior: every supplied or resolved position must exist in
-`bigname_phase.chain_lineage` and satisfy the requested finality floor, and an
-authoritative cross-chain selection bounds auxiliary positions by its
-timestamp.
+interpreter content hash. Timestamp `at` selection and opaque-token replay
+still choose historical positions: every supplied or resolved position must
+exist in `bigname_phase.chain_lineage` and satisfy the requested finality
+floor, and an authoritative cross-chain selection bounds auxiliary positions
+by its timestamp. The current project-publication check also applies to those
+historical selectors.
+During this source transition, a token or timestamp that selects a block older
+than the retained schema-v2 lineage walk returns `409 conflict`, even if a
+pre-transition public-schema lineage row once covered that block.
+
+This source move is limited to snapshot selection. API startup still reads
+`public.chain_checkpoints` to discover the status chain set, and `/v2/status`
+still reads those checkpoints for retained-worker progress and finality.
 
 Top-level collections page over mutable latest-state tables. They therefore
 omit `meta.as_of` and `meta.as_of_token`, and their cursors do not claim a
@@ -433,9 +455,11 @@ restrictions lift and collection snapshot metadata can be restored.
 `meta.as_of_token` record the served positions for staleness attribution and
 shadow-diff correlation. Lookup rejects partial scoped heads instead of
 emitting a token that cannot replay on a compatible snapshot-read route. Each
-forward and reverse row's authoritative chain position must match the selected
-phase head, and the completed schema-v2 project publication must remain
-unchanged across the read; either mismatch returns `409 stale`.
+returned forward or reverse phase row must have a projection target at or before
+the selected position; a target at the same height must have the same hash. The
+selected `chain_heads` rows and completed schema-v2 projection generations must
+remain unchanged across the read. An ahead, same-height wrong-hash, or
+publication-generation mismatch returns `409 stale`.
 
 `GET /v2/addresses/{address}/primary-name` is also a current-state read. It
 does not accept `at` or `finality`; when a served head is available, its

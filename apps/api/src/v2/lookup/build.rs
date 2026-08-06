@@ -219,8 +219,12 @@ fn identity_content_hash(
 fn identity_unsupported_fields(
     record: &bigname_storage::IdentityNameRecordRow,
 ) -> BTreeSet<String> {
+    let inventory_supported = record
+        .record_inventory_current
+        .as_ref()
+        .is_some_and(|inventory| inventory.support_status == "supported");
     record_unsupported_fields(
-        record.record_inventory_current.is_some(),
+        inventory_supported,
         record
             .record_inventory_current
             .as_ref()

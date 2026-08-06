@@ -26,7 +26,7 @@ impl ServedHead {
     }
 }
 
-pub(crate) async fn load_served_head(
+pub(super) async fn load_served_head(
     pool: &PgPool,
     scope: &SnapshotSelectionScope,
 ) -> V2Result<Option<ServedHead>> {
@@ -59,7 +59,9 @@ pub(crate) async fn load_served_head(
             ));
         }
     };
-    let project_generations = load_project_generations(pool, &selected).await?;
+    #[cfg(test)]
+    served_head_initial_validation_test_hooks::run(pool).await?;
+    let project_generations = load_selected_project_generations(pool, &selected).await?;
     Ok(Some(ServedHead {
         selected,
         project_generations,
@@ -67,7 +69,9 @@ pub(crate) async fn load_served_head(
 }
 
 pub(super) async fn revalidate_served_head(pool: &PgPool, served: &ServedHead) -> V2Result<()> {
-    let current = load_project_generations(pool, &served.selected).await?;
+    #[cfg(test)]
+    served_head_revalidation_test_hooks::run(pool).await?;
+    let current = load_selected_project_generations(pool, &served.selected).await?;
     if current != served.project_generations {
         return Err(V2Error::stale(
             "served data changed while the lookup was being read",
@@ -76,7 +80,7 @@ pub(super) async fn revalidate_served_head(pool: &PgPool, served: &ServedHead) -
     Ok(())
 }
 
-async fn load_project_generations(
+pub(crate) async fn load_project_generations(
     pool: &PgPool,
     selected: &SelectedSnapshot,
 ) -> V2Result<BTreeMap<String, String>> {
@@ -84,14 +88,49 @@ async fn load_project_generations(
     for position in selected.chain_positions.as_map().values() {
         let generation = sqlx::query_scalar::<_, String>(
             r#"
-            SELECT xmin::TEXT
-            FROM chain_phase_state
-            WHERE chain_id = $1
-              AND phase_name = 'project'
-              AND phase_status = 'completed'
-              AND current_block_number = $2
-              AND current_block_hash = $3
-              AND input_content_hash = $4
+            SELECT project.xmin::TEXT
+            FROM chain_heads head
+            JOIN chain_phase_state project
+              ON project.chain_id = head.chain_id
+             AND project.phase_name = 'project'
+             AND project.phase_status = 'completed'
+             AND project.current_block_number = head.latest_block_number
+             AND project.current_block_hash = head.latest_block_hash
+             AND project.input_content_hash = $2
+            WHERE head.chain_id = $1
+            "#,
+        )
+        .bind(&position.chain_id)
+        .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| V2Error::internal_error("failed to validate lookup project publication"))?
+        .ok_or_else(|| V2Error::stale("served data is not available at the selected phase head"))?;
+        generations.insert(position.chain_id.clone(), generation);
+    }
+    Ok(generations)
+}
+
+pub(crate) async fn load_selected_project_generations(
+    pool: &PgPool,
+    selected: &SelectedSnapshot,
+) -> V2Result<BTreeMap<String, String>> {
+    let mut generations = BTreeMap::new();
+    for position in selected.chain_positions.as_map().values() {
+        let generation = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT project.xmin::TEXT
+            FROM chain_heads head
+            JOIN chain_phase_state project
+              ON project.chain_id = head.chain_id
+             AND project.phase_name = 'project'
+             AND project.phase_status = 'completed'
+             AND project.current_block_number = head.latest_block_number
+             AND project.current_block_hash = head.latest_block_hash
+             AND project.input_content_hash = $4
+            WHERE head.chain_id = $1
+              AND head.latest_block_number = $2
+              AND head.latest_block_hash = $3
             "#,
         )
         .bind(&position.chain_id)
@@ -126,4 +165,138 @@ async fn served_head_absent_for_single_scope(
 fn served_head_scope_conflict(error: &SnapshotSelectionError) -> bool {
     error.kind() == SnapshotSelectionErrorKind::Conflict
         || error.message().contains("mismatched hash and number")
+}
+
+#[cfg(test)]
+pub(crate) mod served_head_revalidation_test_hooks {
+    use std::sync::Arc;
+
+    use anyhow::Result;
+    use bigname_test_support::{
+        ScopedTestHookGuard, ScopedTestHookRegistry, current_test_database,
+    };
+    use sqlx::PgPool;
+    use tokio::sync::Barrier;
+
+    use crate::v2::{V2Error, V2Result};
+
+    #[derive(Clone)]
+    pub(crate) struct RevalidationHook {
+        reached: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    }
+
+    pub(crate) struct RevalidationControl {
+        reached: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    }
+
+    impl RevalidationControl {
+        pub(crate) async fn wait_until_reached(&self) {
+            self.reached.wait().await;
+        }
+
+        pub(crate) async fn resume(&self) {
+            self.resume.wait().await;
+        }
+    }
+
+    static HOOKS: ScopedTestHookRegistry<String, RevalidationHook> = ScopedTestHookRegistry::new();
+
+    pub(crate) async fn install(
+        pool: &PgPool,
+    ) -> Result<(
+        ScopedTestHookGuard<String, RevalidationHook>,
+        RevalidationControl,
+    )> {
+        let database = current_test_database(pool).await?;
+        let reached = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let guard = HOOKS.install(
+            database,
+            RevalidationHook {
+                reached: Arc::clone(&reached),
+                resume: Arc::clone(&resume),
+            },
+        );
+        Ok((guard, RevalidationControl { reached, resume }))
+    }
+
+    pub(super) async fn run(pool: &PgPool) -> V2Result<()> {
+        let database = current_test_database(pool)
+            .await
+            .map_err(|_| V2Error::internal_error("failed to run lookup served-head test hook"))?;
+        if let Some(hook) = HOOKS.take(&database) {
+            hook.reached.wait().await;
+            hook.resume.wait().await;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod served_head_initial_validation_test_hooks {
+    use std::sync::Arc;
+
+    use anyhow::Result;
+    use bigname_test_support::{
+        ScopedTestHookGuard, ScopedTestHookRegistry, current_test_database,
+    };
+    use sqlx::PgPool;
+    use tokio::sync::Barrier;
+
+    use crate::v2::{V2Error, V2Result};
+
+    #[derive(Clone)]
+    pub(crate) struct ValidationHook {
+        reached: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    }
+
+    pub(crate) struct ValidationControl {
+        reached: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    }
+
+    impl ValidationControl {
+        pub(crate) async fn wait_until_reached(&self) {
+            self.reached.wait().await;
+        }
+
+        pub(crate) async fn resume(&self) {
+            self.resume.wait().await;
+        }
+    }
+
+    static HOOKS: ScopedTestHookRegistry<String, ValidationHook> = ScopedTestHookRegistry::new();
+
+    pub(crate) async fn install(
+        pool: &PgPool,
+    ) -> Result<(
+        ScopedTestHookGuard<String, ValidationHook>,
+        ValidationControl,
+    )> {
+        let database = current_test_database(pool).await?;
+        let reached = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let guard = HOOKS.install(
+            database,
+            ValidationHook {
+                reached: Arc::clone(&reached),
+                resume: Arc::clone(&resume),
+            },
+        );
+        Ok((guard, ValidationControl { reached, resume }))
+    }
+
+    pub(super) async fn run(pool: &PgPool) -> V2Result<()> {
+        let database = current_test_database(pool).await.map_err(|_| {
+            V2Error::internal_error("failed to resolve lookup initial-validation hook")
+        })?;
+        if let Some(hook) = HOOKS.get_cloned(&database) {
+            hook.reached.wait().await;
+            hook.resume.wait().await;
+        }
+        Ok(())
+    }
 }

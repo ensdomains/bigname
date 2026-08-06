@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::Result;
+use serde_json::json;
 use sqlx::types::time::OffsetDateTime;
 use sqlx::{
     PgPool,
@@ -14,7 +15,7 @@ use sqlx::{
 
 use super::*;
 use crate::{
-    CanonicalityState, ChainLineageBlock, ChainPositions, SnapshotConsistency,
+    CanonicalityState, ChainLineageBlock, ChainPositions, SnapshotAt, SnapshotConsistency,
     SnapshotPositionRequirement, SnapshotSelectionErrorKind, SnapshotSelectionScope,
     SnapshotSelectorInput, default_database_url, resolve_exact_name_snapshot_selection,
     upsert_chain_lineage_blocks,
@@ -650,6 +651,44 @@ async fn resolves_exact_name_snapshot_from_phase_state_without_legacy_checkpoint
             block_number
         );
     }
+
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET input_content_hash = 'outdated-interpreter-hash'
+         WHERE chain_id = 'ethereum-mainnet'
+           AND phase_name = 'project'",
+    )
+    .execute(database.pool())
+    .await?;
+
+    let resolved_positions = ChainPositions::from_value(&json!({
+        "ethereum": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 1,
+            "block_hash": "0x001",
+            "timestamp": crate::time::format_timestamp(base_timestamp),
+        }
+    }))?;
+    let token_input = SnapshotSelectorInput::new(
+        Some(SnapshotAt::ResolvedPositions(resolved_positions)),
+        None,
+        SnapshotConsistency::Finalized,
+    )?;
+    let token_error = resolve_exact_name_snapshot_selection(database.pool(), &scope, &token_input)
+        .await
+        .expect_err("resolved-position token must require the compiled project hash");
+    assert_eq!(token_error.kind(), SnapshotSelectionErrorKind::Stale);
+
+    let timestamp_input = SnapshotSelectorInput::new(
+        Some(SnapshotAt::Timestamp(base_timestamp)),
+        None,
+        SnapshotConsistency::Finalized,
+    )?;
+    let timestamp_error =
+        resolve_exact_name_snapshot_selection(database.pool(), &scope, &timestamp_input)
+            .await
+            .expect_err("timestamp selection must require the compiled project hash");
+    assert_eq!(timestamp_error.kind(), SnapshotSelectionErrorKind::Stale);
 
     database.cleanup().await
 }

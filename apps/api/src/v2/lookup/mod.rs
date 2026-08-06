@@ -18,7 +18,11 @@ mod admission;
 mod build;
 mod cursor;
 mod dto;
-mod head;
+pub(super) mod head;
+#[cfg(test)]
+pub(crate) use head::{
+    served_head_initial_validation_test_hooks, served_head_revalidation_test_hooks,
+};
 mod page;
 mod parse;
 mod scope;
@@ -29,8 +33,8 @@ use build::{
     build_reverse_feed_record, lookup_address_status,
 };
 use cursor::{
-    LookupReverseCursorBinding, lookup_reverse_cursor_payload, reverse_identity_sort,
-    reverse_identity_storage_cursor,
+    LookupReverseCursorBinding, ReverseCursorKey, ReverseStorageKey, lookup_reverse_cursor_payload,
+    reverse_identity_sort, reverse_identity_storage_cursor,
 };
 use dto::{LookupInput, LookupKind, LookupRecord, LookupRequest, LookupResult};
 use head::{load_served_head, revalidate_served_head};
@@ -43,24 +47,6 @@ use parse::{
 use scope::lookup_snapshot_scope;
 
 const EXACT_RELATION_SCAN_MULTIPLIER: u64 = 10;
-
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct ReverseStorageKey {
-    address: String,
-    coin_type: u64,
-    roles: bigname_storage::ReverseIdentityRoles,
-    page_size: u64,
-    cursor: Option<ReverseCursorKey>,
-}
-
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct ReverseCursorKey {
-    is_primary: bool,
-    role_rank: i16,
-    normalized_name: String,
-    namespace: String,
-    namehash: String,
-}
 
 pub(crate) async fn get_lookup(
     _query: NoQueryParams,
@@ -117,12 +103,10 @@ pub(crate) async fn get_lookup(
     if let Some(served_head) = served_head.as_ref() {
         revalidate_served_head(&state.lookup_pool, served_head).await?;
     }
-
     let data = results
         .into_iter()
         .map(|result| result.expect("every parsed lookup input must render a result"))
         .collect::<Vec<_>>();
-
     Ok(Json(Envelope {
         data,
         page: None,
@@ -179,7 +163,6 @@ async fn render_name_lookup_results(
             page: None,
         });
     }
-
     Ok(())
 }
 
@@ -191,11 +174,18 @@ async fn load_name_records(
 ) -> V2Result<BTreeMap<String, bigname_storage::IdentityNameRecordRow>> {
     let records = match profile {
         LookupProfile::Feed => {
-            bigname_storage::load_identity_name_feed_records_by_names(&state.pool, logical_name_ids)
-                .await
+            bigname_storage::load_phase_identity_name_feed_records_by_ids(
+                &state.lookup_pool,
+                logical_name_ids,
+            )
+            .await
         }
         LookupProfile::Detail => {
-            bigname_storage::load_identity_records_by_names(&state.pool, logical_name_ids).await
+            bigname_storage::load_phase_identity_records_by_ids(
+                &state.lookup_pool,
+                logical_name_ids,
+            )
+            .await
         }
     }
     .map_err(|load_error| {
@@ -211,7 +201,6 @@ async fn load_name_records(
     if let Some(selected_snapshot) = selected_snapshot {
         require_name_records_at_served_head(&records, selected_snapshot)?;
     }
-
     Ok(records
         .into_iter()
         .map(|record| (record.row.logical_name_id.clone(), record))
@@ -249,7 +238,7 @@ async fn render_storage_exact_reverse_lookup_results(
         .filter(|input| !requires_relation_post_filter(input.relation.as_ref()))
         .collect::<Vec<_>>();
     let storage_inputs = deduped_reverse_storage_inputs(storage_exact_inputs.iter().copied());
-    let groups = load_reverse_identity_records_live(&state.pool, &storage_inputs)
+    let groups = load_reverse_identity_records_live(&state.lookup_pool, &storage_inputs)
         .await
         .map_err(|load_error| {
             error!(
@@ -327,7 +316,7 @@ async fn load_exact_relation_reverse_page(
             cursor: cursor.clone(),
         };
         let mut groups = load_reverse_identity_records_page_live(
-            &state.pool,
+            &state.lookup_pool,
             std::slice::from_ref(&storage_input),
         )
         .await
@@ -558,41 +547,5 @@ fn reverse_group_key(group: &bigname_storage::ReverseIdentityGroup) -> ReverseSt
         roles: group.input.roles,
         page_size: group.input.page_size as u64,
         cursor: group.input.cursor.clone().map(ReverseCursorKey::from),
-    }
-}
-
-impl From<&ParsedAddressLookup> for ReverseStorageKey {
-    fn from(value: &ParsedAddressLookup) -> Self {
-        Self {
-            address: value.address.clone(),
-            coin_type: value.coin_type,
-            roles: value.roles,
-            page_size: value.page_size,
-            cursor: value.page_cursor.clone().map(ReverseCursorKey::from),
-        }
-    }
-}
-
-impl From<bigname_storage::ReverseIdentityCursor> for ReverseCursorKey {
-    fn from(value: bigname_storage::ReverseIdentityCursor) -> Self {
-        Self {
-            is_primary: value.is_primary,
-            role_rank: value.role_rank,
-            normalized_name: value.normalized_name,
-            namespace: value.namespace,
-            namehash: value.namehash,
-        }
-    }
-}
-
-impl From<ReverseCursorKey> for bigname_storage::ReverseIdentityCursor {
-    fn from(value: ReverseCursorKey) -> Self {
-        Self {
-            is_primary: value.is_primary,
-            role_rank: value.role_rank,
-            normalized_name: value.normalized_name,
-            namespace: value.namespace,
-            namehash: value.namehash,
-        }
     }
 }

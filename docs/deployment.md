@@ -268,7 +268,12 @@ does not read those legacy tables or infer their dynamic cursor seeds.
 
 The API keeps a `public`-schema pool for GraphQL, health and status checks, and
 retained public-schema reads, plus a `bigname_phase`-schema pool for v2 snapshot
-selection, verified lookup, and primary-name projection reads. V2 record lookup
+selection, verified lookup, primary-name projection reads, and the indexed
+lookup/resolver projections. In particular, startup and `/v2/status` still
+read `public.chain_checkpoints`. V2 projection routes that remain on the public
+pool join `public.chain_lineage`, so those status and lineage reads still need
+an explicit successor owner before the retained worker and tables can be
+removed. V2 record lookup
 may perform only the schema-v2 guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) write;
 v2 primary-name lookup writes nothing. The API database role therefore needs
@@ -311,6 +316,8 @@ GRANT SELECT ON TABLE
     bigname_phase.chain_lineage,
     bigname_phase.chain_phase_state,
     bigname_phase.name_current,
+    bigname_phase.address_names_current,
+    bigname_phase.resolver_current,
     bigname_phase.name_surfaces,
     bigname_phase.resources,
     bigname_phase.surface_bindings,
@@ -379,8 +386,10 @@ The project-at-head guard also binds the API's compiled interpreter content
 hash. `bigname-api` and `phase-runner` must therefore come from the same commit.
 After any interpreter-hash rotation, deploy the new phase runner and finish its
 required re-walk before deploying the matching API; deploying the API first
-makes v2 verified reads return `409 stale` until the new project generation is
-published.
+makes all v2 snapshot-selected reads return `409 stale` until the new project
+generation is published. This includes indexed reads because snapshot
+selection itself requires the matching project publication before any
+projection row is admitted.
 
 Configure
 `BIGNAME_API_CHAIN_RPC_URLS` for status and both verified engines as described

@@ -2,6 +2,7 @@ mod chain_position;
 mod consistency;
 mod error;
 mod parsing;
+mod project;
 mod selection;
 
 pub use chain_position::{

@@ -251,8 +251,13 @@ fn parse_identity_name_lookup_with_namespace(
 ) -> Result<IdentityNameLookup, RouteNameNormalizationError> {
     let parsed = normalize_inferred_route_name(name)?;
     let namespace = namespace.unwrap_or(parsed.namespace).to_owned();
+    let namehash = bigname_lookup::ens_namehash_hex(&parsed.normalized_name).map_err(|error| {
+        RouteNameNormalizationError {
+            message: error.to_string(),
+        }
+    })?;
     Ok(IdentityNameLookup {
-        logical_name_id: format!("{}:{}", namespace, parsed.normalized_name),
+        logical_name_id: format!("{namespace}:{namehash}"),
         corrected_input_normalization: parsed.corrected_input_normalization,
     })
 }

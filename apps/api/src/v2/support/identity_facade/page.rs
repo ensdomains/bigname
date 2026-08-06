@@ -1,17 +1,17 @@
 use anyhow::{Context, Result};
 use bigname_storage::ReverseIdentityStorageInput;
+use serde_json::{Map, Value};
 use sqlx::{PgPool, Row};
 
-use super::{
-    DEFAULT_ADDRESS_NAMES_CURRENT_LINEAGE_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
-    DEFAULT_IDENTITY_NAME_CURRENT_LINEAGE_JOINS, DEFAULT_IDENTITY_NAME_CURRENT_READ_FILTER,
-    ReverseIdentityPageRow, roles_storage_value,
-};
+use super::{ReverseIdentityPageRow, roles_storage_value};
 
 pub(super) async fn load_reverse_identity_page_rows(
     pool: &PgPool,
     inputs: &[ReverseIdentityStorageInput],
 ) -> Result<Vec<ReverseIdentityPageRow>> {
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
     let input_indexes = (0..inputs.len() as i32).collect::<Vec<_>>();
     let addresses = inputs
         .iter()
@@ -25,15 +25,20 @@ pub(super) async fn load_reverse_identity_page_rows(
         .iter()
         .map(|input| roles_storage_value(input.roles).to_owned())
         .collect::<Vec<_>>();
+    let primary_names = load_normalized_primary_names(pool, inputs).await?;
     let page_sizes = inputs
         .iter()
-        .map(|input| input.page_size)
+        .map(|input| input.page_size.max(0))
+        .collect::<Vec<_>>();
+    let cursor_present = inputs
+        .iter()
+        .map(|input| input.cursor.is_some())
         .collect::<Vec<_>>();
     let cursor_is_primary = inputs
         .iter()
         .map(|input| input.cursor.as_ref().map(|cursor| cursor.is_primary))
         .collect::<Vec<_>>();
-    let cursor_role_rank = inputs
+    let cursor_role_ranks = inputs
         .iter()
         .map(|input| input.cursor.as_ref().map(|cursor| cursor.role_rank))
         .collect::<Vec<_>>();
@@ -55,155 +60,86 @@ pub(super) async fn load_reverse_identity_page_rows(
         .map(|input| input.cursor.as_ref().map(|cursor| cursor.namehash.clone()))
         .collect::<Vec<_>>();
 
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(
         r#"
         WITH requested AS (
-            SELECT *
-            FROM UNNEST(
-                $1::INT[],
-                $2::TEXT[],
-                $3::TEXT[],
-                $4::TEXT[],
-                $5::BIGINT[],
-                $6::BOOLEAN[],
-                $7::SMALLINT[],
-                $8::TEXT[],
-                $9::TEXT[],
-                $10::TEXT[]
+            SELECT * FROM UNNEST(
+                $1::INT[], $2::TEXT[], $3::TEXT[], $4::TEXT[], $5::JSONB[],
+                $6::BIGINT[], $7::BOOLEAN[], $8::BOOLEAN[], $9::SMALLINT[],
+                $10::TEXT[], $11::TEXT[], $12::TEXT[]
             ) AS requested(
-                input_index,
-                address,
-                coin_type,
-                roles,
-                page_size,
-                cursor_is_primary,
-                cursor_role_rank,
-                cursor_normalized_name,
-                cursor_namespace,
-                cursor_namehash
+                input_index, address, coin_type, roles, primary_names, page_size,
+                cursor_present, cursor_is_primary, cursor_role_rank,
+                cursor_normalized_name, cursor_namespace, cursor_namehash
             )
-        ),
-        page_rows AS (
-            SELECT
-                requested.input_index,
-                page.logical_name_id,
-                page.is_primary,
-                page.role_rank,
-                page.normalized_name,
-                page.namespace,
-                page.namehash
-            FROM requested
-            CROSS JOIN LATERAL (
-                SELECT deduped.*
-                FROM (
-                    SELECT DISTINCT ON (candidate.logical_name_id)
-                        candidate.*
-                    FROM (
-                        SELECT
-                            anc.logical_name_id,
-                            anc.normalized_name,
-                            anc.namespace,
-                            anc.namehash,
-                            CASE
-                                WHEN anc.relation IN ('registrant', 'token_holder') THEN 0::SMALLINT
-                                ELSE 1::SMALLINT
-                            END AS role_rank,
-                            CASE
-                                WHEN pnc.normalized_claim_name = anc.normalized_name THEN TRUE
-                                ELSE FALSE
-                            END AS is_primary
-                        FROM address_names_current anc
-                        JOIN name_surfaces surface
-                          ON surface.logical_name_id = anc.logical_name_id
-                        JOIN resources resource
-                          ON resource.resource_id = anc.resource_id
-                        JOIN surface_bindings binding
-                          ON binding.surface_binding_id = anc.surface_binding_id
-                        LEFT JOIN token_lineages token_lineage
-                          ON token_lineage.token_lineage_id = anc.token_lineage_id
-                        {DEFAULT_ADDRESS_NAMES_CURRENT_LINEAGE_JOINS}
-                        JOIN name_current identity_nc
-                          ON identity_nc.logical_name_id = anc.logical_name_id
-                        JOIN name_surfaces identity_nc_surface
-                          ON identity_nc_surface.logical_name_id = identity_nc.logical_name_id
-                        LEFT JOIN resources identity_nc_resource
-                          ON identity_nc_resource.resource_id = identity_nc.resource_id
-                        LEFT JOIN surface_bindings identity_nc_binding
-                          ON identity_nc_binding.surface_binding_id = identity_nc.surface_binding_id
-                        LEFT JOIN token_lineages identity_nc_token_lineage
-                          ON identity_nc_token_lineage.token_lineage_id = identity_nc.token_lineage_id
-                        {DEFAULT_IDENTITY_NAME_CURRENT_LINEAGE_JOINS}
-                        LEFT JOIN primary_names_current pnc
-                          ON pnc.address = requested.address
-                         AND pnc.coin_type = requested.coin_type
-                         AND pnc.namespace = anc.namespace
-                         AND pnc.claim_status = 'success'
-                        WHERE anc.address = requested.address
-                          AND (
-                              requested.roles = 'both'
-                              OR (
-                                  requested.roles = 'owned'
-                                  AND anc.relation IN ('registrant', 'token_holder')
-                              )
-                              OR (
-                                  requested.roles = 'managed'
-                                  AND anc.relation = 'effective_controller'
-                              )
-                          )
-                        {DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER}
-                        {DEFAULT_IDENTITY_NAME_CURRENT_READ_FILTER}
-                    ) candidate
-                    ORDER BY
-                        candidate.logical_name_id ASC,
-                        candidate.is_primary DESC,
-                        candidate.role_rank ASC
-                ) deduped
-                WHERE
-                    requested.cursor_is_primary IS NULL
-                    OR (
-                        (
-                            NOT deduped.is_primary,
-                            deduped.role_rank,
-                            deduped.normalized_name,
-                            deduped.namespace,
-                            deduped.namehash
-                        )
-                        >
-                        (
-                            NOT requested.cursor_is_primary,
-                            requested.cursor_role_rank,
-                            requested.cursor_normalized_name,
-                            requested.cursor_namespace,
-                            requested.cursor_namehash
-                        )
-                    )
-                ORDER BY
-                    deduped.is_primary DESC,
-                    deduped.role_rank ASC,
-                    deduped.normalized_name ASC,
-                    deduped.namespace ASC,
-                    deduped.namehash ASC
-                LIMIT requested.page_size + 1
-            ) page
         )
-        SELECT input_index, logical_name_id
-        FROM page_rows
-        ORDER BY
-            input_index ASC,
-            is_primary DESC,
-            role_rank ASC,
-            normalized_name ASC,
-            namespace ASC,
-            namehash ASC
+        SELECT requested.input_index, candidate.logical_name_id,
+               candidate.relation_chain_positions
+        FROM requested
+        JOIN LATERAL (
+            SELECT grouped.*
+            FROM (
+                SELECT anc.logical_name_id,
+                       bool_or(COALESCE(
+                           requested.primary_names ->> anc.namespace = anc.raw_name,
+                           false
+                       )) AS is_primary,
+                       min(CASE
+                           WHEN anc.relation IN ('registrant', 'token_holder') THEN 0
+                           ELSE 1
+                       END)::SMALLINT AS role_rank,
+                       anc.raw_name AS normalized_name,
+                       anc.namespace,
+                       anc.namehash,
+                       array_agg(anc.chain_positions ORDER BY anc.relation)
+                           AS relation_chain_positions
+                FROM address_names_current anc
+                JOIN name_current identity_nc
+                  ON identity_nc.logical_name_id = anc.logical_name_id
+                WHERE lower(anc.address) = lower(requested.address)
+                  AND anc.support_status = 'supported'
+                  AND identity_nc.support_status IN ('supported', 'unsupported')
+                  AND (
+                      requested.roles = 'both'
+                      OR (requested.roles = 'owned'
+                          AND anc.relation IN ('registrant', 'token_holder'))
+                      OR (requested.roles = 'managed'
+                          AND anc.relation = 'effective_controller')
+                  )
+                GROUP BY anc.logical_name_id, anc.raw_name, anc.namespace, anc.namehash
+            ) grouped
+            WHERE NOT requested.cursor_present
+               OR (
+                    NOT grouped.is_primary,
+                    grouped.role_rank,
+                    grouped.normalized_name,
+                    grouped.namespace,
+                    grouped.namehash
+               ) > (
+                    NOT requested.cursor_is_primary,
+                    requested.cursor_role_rank,
+                    requested.cursor_normalized_name,
+                    requested.cursor_namespace,
+                    requested.cursor_namehash
+               )
+            ORDER BY NOT grouped.is_primary, grouped.role_rank,
+                     grouped.normalized_name, grouped.namespace, grouped.namehash
+            LIMIT requested.page_size + 1
+        ) candidate ON TRUE
+        ORDER BY requested.input_index, NOT candidate.is_primary,
+                 candidate.role_rank, candidate.normalized_name,
+                 candidate.namespace, candidate.namehash
         "#,
-    ))
+    )
     .bind(&input_indexes)
     .bind(&addresses)
     .bind(&coin_types)
     .bind(&roles)
+    .bind(&primary_names)
     .bind(&page_sizes)
+    .bind(&cursor_present)
     .bind(&cursor_is_primary)
-    .bind(&cursor_role_rank)
+    .bind(&cursor_role_ranks)
     .bind(&cursor_normalized_names)
     .bind(&cursor_namespaces)
     .bind(&cursor_namehashes)
@@ -211,7 +147,7 @@ pub(super) async fn load_reverse_identity_page_rows(
     .await
     .with_context(|| {
         format!(
-            "failed to live-load reverse identity page rows for {} inputs",
+            "failed to load phase reverse candidates for {} inputs",
             inputs.len()
         )
     })?;
@@ -221,7 +157,55 @@ pub(super) async fn load_reverse_identity_page_rows(
             Ok(ReverseIdentityPageRow {
                 input_index: row.try_get::<i32, _>("input_index")? as usize,
                 logical_name_id: row.try_get("logical_name_id")?,
+                relation_chain_positions: row.try_get("relation_chain_positions")?,
             })
         })
         .collect()
+}
+
+async fn load_normalized_primary_names(
+    pool: &PgPool,
+    inputs: &[ReverseIdentityStorageInput],
+) -> Result<Vec<Value>> {
+    let addresses = inputs
+        .iter()
+        .map(|input| input.address.clone())
+        .collect::<Vec<_>>();
+    let coin_types = inputs
+        .iter()
+        .map(|input| input.coin_type.clone())
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        r#"
+        WITH requested AS (
+            SELECT * FROM UNNEST($1::INT[], $2::TEXT[], $3::TEXT[])
+                AS requested(input_index, address, coin_type)
+        )
+        SELECT requested.input_index, primary_name.namespace,
+               primary_name.raw_claim_name
+        FROM requested
+        JOIN primary_names_current primary_name
+          ON lower(primary_name.address) = lower(requested.address)
+         AND primary_name.coin_type = requested.coin_type
+         AND primary_name.claim_status = 'success'
+        ORDER BY requested.input_index, primary_name.namespace
+        "#,
+    )
+    .bind((0..inputs.len() as i32).collect::<Vec<_>>())
+    .bind(addresses)
+    .bind(coin_types)
+    .fetch_all(pool)
+    .await
+    .context("failed to load phase primary names for reverse pagination")?;
+
+    let mut by_input = vec![Map::new(); inputs.len()];
+    for row in rows {
+        let input_index = row.try_get::<i32, _>("input_index")? as usize;
+        let namespace: String = row.try_get("namespace")?;
+        let raw_name: String = row.try_get("raw_claim_name")?;
+        let normalized = bigname_domain::normalization::normalize_name(&raw_name)
+            .with_context(|| format!("successful phase primary name {raw_name} is invalid"))?;
+        by_input[input_index].insert(namespace, Value::String(normalized.normalized_name));
+    }
+    Ok(by_input.into_iter().map(Value::Object).collect())
 }

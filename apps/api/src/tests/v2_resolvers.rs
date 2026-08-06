@@ -90,7 +90,7 @@ fn v2_resolver_include_controls_overview_sections_and_rejects_unknown() {
             {
                 "namespace": "ens",
                 "name": "beta.eth",
-                "display_name": "Beta.eth",
+                "display_name": "beta.eth",
                 "namehash": "namehash:beta.eth"
             },
             {
@@ -245,8 +245,8 @@ fn v2_resolver_alias_summary_preserves_null_targets_for_removed_and_unknown() {
 async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
-    bigname_storage::upsert_resolver_current_rows(
-        &database.pool,
+    upsert_test_resolver_current_rows(
+        &database,
         &[resolver_current_row_with_writer_alias(
             "ethereum-mainnet",
             V2_RESOLVER_ADDRESS,
@@ -261,7 +261,7 @@ async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()
     .await?;
 
     assert!(first_page.get("page").is_none());
-    assert_eq!(first_page["meta"]["as_of"]["1"]["block_number"], json!(202));
+    assert_eq!(first_page["meta"]["as_of"]["1"]["block_number"], json!(203));
     assert_eq!(first_page["data"]["chain_id"], json!(1));
     assert_eq!(first_page["data"]["address"], json!(V2_RESOLVER_ADDRESS));
     assert_eq!(
@@ -280,7 +280,7 @@ async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()
     assert_eq!(first_page["data"]["nodes"][0]["name"], json!("alice.eth"));
     assert_eq!(
         first_page["data"]["nodes"][0]["display_name"],
-        json!("Alice.eth")
+        json!("alice.eth")
     );
     assert!(first_page["data"]["nodes"][0].get("normalized_name").is_none());
 
@@ -295,7 +295,10 @@ async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()
     assert_eq!(bound_names["data"][0]["name"], json!("alpha.eth"));
     assert_eq!(bound_names["data"][0]["display_name"], json!("alpha.eth"));
     assert_eq!(bound_names["data"][0]["namespace"], json!("ens"));
-    assert_eq!(bound_names["data"][0]["namehash"], json!("node:alpha.eth"));
+    assert_eq!(
+        bound_names["data"][0]["namehash"],
+        json!(bigname_lookup::ens_namehash_hex("alpha.eth")?)
+    );
     assert_eq!(
         bound_names["data"][0]["owner"],
         json!("0x00000000000000000000000000000000000000a1")
@@ -331,8 +334,8 @@ async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()
 async fn v2_get_resolver_rejects_pre_unification_cursor_snapshot_binding() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
-    bigname_storage::upsert_resolver_current_rows(
-        &database.pool,
+    upsert_test_resolver_current_rows(
+        &database,
         &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
     )
     .await?;
@@ -370,8 +373,8 @@ async fn v2_get_resolver_returns_empty_bound_names_when_overview_exists() -> Res
     database
         .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
         .await?;
-    bigname_storage::upsert_resolver_current_rows(
-        &database.pool,
+    upsert_test_resolver_current_rows(
+        &database,
         &[resolver],
     )
     .await?;
@@ -391,11 +394,11 @@ async fn v2_get_resolver_returns_empty_bound_names_when_overview_exists() -> Res
 }
 
 #[tokio::test]
-async fn v2_get_resolver_rejects_overview_from_another_phase_snapshot() -> Result<()> {
+async fn v2_get_resolver_serves_phase_rows_with_zero_legacy_rows() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
-    bigname_storage::upsert_resolver_current_rows(
-        &database.pool,
+    upsert_test_resolver_current_rows(
+        &database,
         &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
     )
     .await?;
@@ -403,12 +406,75 @@ async fn v2_get_resolver_rejects_overview_from_another_phase_snapshot() -> Resul
         .seed_snapshot_selector_chain_positions(&json!({
             "ethereum": {
                 "chain_id": "ethereum-mainnet",
-                "block_number": 203,
-                "block_hash": "0xresolvercb",
-                "timestamp": "2026-04-17T00:00:23Z",
+                "block_number": 204,
+                "block_hash": "0xresolvercc",
+                "timestamp": "2026-04-17T00:00:24Z",
             }
         }))
         .await?;
+    sqlx::query("DELETE FROM resolver_current")
+        .execute(&database.pool)
+        .await?;
+    sqlx::query("DELETE FROM name_current")
+        .execute(&database.pool)
+        .await?;
+    let legacy_row_count: i64 = sqlx::query_scalar(
+        "SELECT (SELECT COUNT(*) FROM resolver_current)
+              + (SELECT COUNT(*) FROM name_current)
+              + (SELECT COUNT(*) FROM chain_checkpoints)",
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(legacy_row_count, 0);
+
+    let payload = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+    )
+    .await?;
+
+    assert_eq!(payload["data"]["address"], json!(V2_RESOLVER_ADDRESS));
+    assert_eq!(payload["meta"]["as_of"]["1"]["block_number"], json!(204));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_resolver_ignores_unapplied_legacy_resolver_input() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_bound_names_fixture(&database).await?;
+    upsert_test_resolver_current_rows(
+        &database,
+        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
+    )
+    .await?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[NormalizedEvent {
+            event_identity: "api-test:resolver-newer-input".to_owned(),
+            namespace: "ens".to_owned(),
+            logical_name_id: None,
+            resource_id: None,
+            event_kind: "ResolverChanged".to_owned(),
+            source_family: "ens_v1_registry_l1".to_owned(),
+            manifest_version: 1,
+            source_manifest_id: None,
+            chain_id: Some("ethereum-mainnet".to_owned()),
+            block_number: Some(203),
+            block_hash: Some("0xresolvercb".to_owned()),
+            transaction_hash: Some("0xresolvernewerinput".to_owned()),
+            log_index: Some(0),
+            raw_fact_ref: json!({"kind": "raw_log", "fixture": "resolver-newer-input"}),
+            derivation_kind: "resolver_changed".to_owned(),
+            canonicality_state: CanonicalityState::Canonical,
+            before_state: json!({
+                "resolver": "0x0000000000000000000000000000000000000bbb"
+            }),
+            after_state: json!({"resolver": V2_RESOLVER_ADDRESS}),
+        }],
+    )
+    .await?;
 
     let response = v2_resolver_response_for_database(
         &database,
@@ -416,9 +482,9 @@ async fn v2_get_resolver_rejects_overview_from_another_phase_snapshot() -> Resul
     )
     .await?;
 
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let payload: ErrorResponse = read_json(response).await?;
-    assert_eq!(payload.error.code, "stale");
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["data"]["address"], json!(V2_RESOLVER_ADDRESS));
 
     database.cleanup().await?;
     Ok(())
@@ -428,8 +494,8 @@ async fn v2_get_resolver_rejects_overview_from_another_phase_snapshot() -> Resul
 async fn v2_get_resolver_rejects_bound_name_from_another_phase_snapshot() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
-    bigname_storage::upsert_resolver_current_rows(
-        &database.pool,
+    upsert_test_resolver_current_rows(
+        &database,
         &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
     )
     .await?;
@@ -440,15 +506,15 @@ async fn v2_get_resolver_rejects_bound_name_from_another_phase_snapshot() -> Res
             jsonb_set(
                 chain_positions,
                 '{ethereum,block_number}',
-                '201'::jsonb
+                '204'::jsonb
             ),
             '{ethereum,block_hash}',
-            '"0xresolverc9"'::jsonb
+            '"0xresolvercc"'::jsonb
         )
-        WHERE logical_name_id = 'ens:alpha.eth'
+        WHERE raw_name = 'alpha.eth'
         "#,
     )
-    .execute(&database.pool)
+    .execute(&database.lookup_pool)
     .await?;
 
     let response = v2_resolver_response_for_database(
@@ -481,8 +547,8 @@ async fn v2_get_resolver_uses_dictionary_owner_and_registrant_precedence_for_bou
         ],
     )
     .await?;
-    bigname_storage::upsert_resolver_current_rows(
-        &database.pool,
+    upsert_test_resolver_current_rows(
+        &database,
         &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
     )
     .await?;
@@ -515,8 +581,8 @@ async fn v2_get_resolver_reports_unsupported_requested_sections_in_meta() -> Res
     database
         .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
         .await?;
-    bigname_storage::upsert_resolver_current_rows(
-        &database.pool,
+    upsert_test_resolver_current_rows(
+        &database,
         &[resolver],
     )
     .await?;
@@ -559,8 +625,8 @@ async fn v2_get_resolver_reports_narrowed_unsupported_sections_as_unsupported() 
     database
         .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
         .await?;
-    bigname_storage::upsert_resolver_current_rows(
-        &database.pool,
+    upsert_test_resolver_current_rows(
+        &database,
         &[resolver],
     )
     .await?;
@@ -587,8 +653,8 @@ async fn v2_get_resolver_filters_bound_names_by_declared_resolver_chain() -> Res
         &["ethereum-mainnet", "base-mainnet"],
     )
     .await?;
-    bigname_storage::upsert_resolver_current_rows(
-        &database.pool,
+    upsert_test_resolver_current_rows(
+        &database,
         &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
     )
     .await?;
@@ -616,8 +682,8 @@ async fn v2_get_resolver_paginates_route_chain_rows_across_interleaved_chains() 
         &["ethereum-mainnet", "base-mainnet", "ethereum-mainnet"],
     )
     .await?;
-    bigname_storage::upsert_resolver_current_rows(
-        &database.pool,
+    upsert_test_resolver_current_rows(
+        &database,
         &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
     )
     .await?;
@@ -670,8 +736,8 @@ async fn v2_get_resolver_does_not_advertise_wrong_chain_lookahead_as_more() -> R
         &["ethereum-mainnet", "base-mainnet"],
     )
     .await?;
-    bigname_storage::upsert_resolver_current_rows(
-        &database.pool,
+    upsert_test_resolver_current_rows(
+        &database,
         &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
     )
     .await?;
@@ -706,7 +772,8 @@ async fn v2_get_resolver_maps_unsupported_reason_to_product_vocabulary() -> Resu
         "status": "unsupported",
         "unsupported_reason": "resolver_binding_enumeration_not_projected"
     });
-    bigname_storage::upsert_resolver_current_rows(&database.pool, &[resolver]).await?;
+    upsert_test_resolver_current_rows(
+        &database, &[resolver]).await?;
 
     let payload = v2_resolver_payload_for_database(
         &database,
@@ -734,7 +801,8 @@ async fn v2_get_resolver_rejects_pipeline_unsupported_reason() -> Result<()> {
         "status": "unsupported",
         "unsupported_reason": "resolver_sidecar_missing"
     });
-    bigname_storage::upsert_resolver_current_rows(&database.pool, &[resolver]).await?;
+    upsert_test_resolver_current_rows(
+        &database, &[resolver]).await?;
 
     let response = v2_resolver_response_for_database(
         &database,
@@ -762,7 +830,8 @@ async fn v2_get_resolver_supplies_reason_when_unsupported_summary_omits_one() ->
     resolver.declared_summary["bindings"] = json!({
         "status": "unsupported"
     });
-    bigname_storage::upsert_resolver_current_rows(&database.pool, &[resolver]).await?;
+    upsert_test_resolver_current_rows(
+        &database, &[resolver]).await?;
 
     let payload = v2_resolver_payload_for_database(
         &database,
@@ -783,6 +852,11 @@ async fn v2_get_resolver_supplies_reason_when_unsupported_summary_omits_one() ->
 #[tokio::test]
 async fn v2_get_resolver_missing_overview_returns_not_found() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_snapshot_selector_chain_positions(
+            &resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS).chain_positions,
+        )
+        .await?;
 
     let response = v2_resolver_response_for_database(
         &database,
@@ -796,6 +870,43 @@ async fn v2_get_resolver_missing_overview_returns_not_found() -> Result<()> {
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_resolver_missing_historical_projection_returns_stale() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_bound_names_fixture(&database).await?;
+    upsert_test_resolver_current_rows(
+        &database,
+        &[resolver_current_row(
+            "ethereum-mainnet",
+            V2_RESOLVER_ADDRESS,
+        )],
+    )
+    .await?;
+    let initial = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+    )
+    .await?;
+    let token = initial["meta"]["as_of_token"]
+        .as_str()
+        .expect("resolver response must include a snapshot token");
+    sqlx::query("DELETE FROM resolver_current WHERE chain_id = 'ethereum-mainnet'")
+        .execute(&database.lookup_pool)
+        .await?;
+
+    let response = v2_resolver_response_for_database(
+        &database,
+        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?at={token}"),
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "stale");
+
+    database.cleanup().await
 }
 
 #[tokio::test]
@@ -820,8 +931,10 @@ async fn v2_get_resolver_rejects_malformed_input() -> Result<()> {
 
 async fn v2_resolver_payload_for_database(database: &TestDatabase, uri: &str) -> Result<Value> {
     let response = v2_resolver_response_for_database(database, uri).await?;
-    assert_eq!(response.status(), StatusCode::OK);
-    read_json(response).await
+    let status = response.status();
+    let payload = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{payload:#}");
+    Ok(payload)
 }
 
 async fn v2_resolver_response_for_database(
@@ -839,6 +952,99 @@ async fn v2_resolver_response_for_database(
         .context("v2 resolver request failed")
 }
 
+async fn upsert_test_resolver_current_rows(
+    database: &TestDatabase,
+    rows: &[ResolverCurrentRow],
+) -> Result<()> {
+    bigname_storage::upsert_resolver_current_rows(&database.pool, rows).await?;
+    for row in rows {
+        let mut declared_summary = row.declared_summary.clone();
+        if let Some(items) = declared_summary
+            .pointer_mut("/bindings/items")
+            .and_then(Value::as_array_mut)
+        {
+            for item in items {
+                let Some(namespace) = item.get("namespace").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(name) = item
+                    .get("normalized_name")
+                    .or_else(|| item.get("raw_name"))
+                    .and_then(Value::as_str)
+                else {
+                    continue;
+                };
+                let namehash = bigname_lookup::ens_namehash_hex(name)?;
+                item["logical_name_id"] = json!(format!("{namespace}:{namehash}"));
+                item["namehash"] = json!(namehash);
+            }
+        }
+        let (target_number, target_hash): (i64, String) = sqlx::query_as(
+            r#"
+            SELECT target_block_number, target_block_hash
+            FROM chain_phase_state
+            WHERE chain_id = $1
+              AND phase_name = 'project'
+              AND phase_status = 'completed'
+            "#,
+        )
+        .bind(&row.chain_id)
+        .fetch_one(&database.lookup_pool)
+        .await?;
+        let support_status = if row.coverage["status"] == json!("unsupported") {
+            "unsupported"
+        } else {
+            "supported"
+        };
+        let unsupported_reason = (support_status == "unsupported")
+            .then(|| row.coverage["unsupported_reason"].as_str().map(str::to_owned))
+            .flatten()
+            .or_else(|| (support_status == "unsupported").then(|| "resolver_overview_not_supported".to_owned()));
+        sqlx::query(
+            r#"
+            INSERT INTO resolver_current (
+                chain_id, resolver_address, declared_summary, support_status,
+                unsupported_reason, provenance, chain_positions,
+                canonicality_summary, manifest_version
+            ) VALUES (
+                $1, lower($2), $3, $4, $5, $6,
+                jsonb_build_object(
+                    'target_block_number', $7::BIGINT,
+                    'target_block_hash', $8::TEXT
+                ),
+                jsonb_build_object(
+                    'state', 'canonical_lineage',
+                    'target_block_number', $7::BIGINT,
+                    'target_block_hash', $8::TEXT
+                ),
+                $9
+            )
+            ON CONFLICT (chain_id, resolver_address) DO UPDATE SET
+                declared_summary = EXCLUDED.declared_summary,
+                support_status = EXCLUDED.support_status,
+                unsupported_reason = EXCLUDED.unsupported_reason,
+                provenance = EXCLUDED.provenance,
+                chain_positions = EXCLUDED.chain_positions,
+                canonicality_summary = EXCLUDED.canonicality_summary,
+                manifest_version = EXCLUDED.manifest_version,
+                last_recomputed_at = now()
+            "#,
+        )
+        .bind(&row.chain_id)
+        .bind(&row.resolver_address)
+        .bind(&declared_summary)
+        .bind(support_status)
+        .bind(unsupported_reason)
+        .bind(&row.provenance)
+        .bind(target_number)
+        .bind(&target_hash)
+        .bind(row.manifest_version)
+        .execute(&database.lookup_pool)
+        .await?;
+    }
+    Ok(())
+}
+
 async fn seed_v2_resolver_bound_names_fixture(database: &TestDatabase) -> Result<()> {
     seed_v2_resolver_bound_names_fixture_with_chains(
         database,
@@ -853,6 +1059,9 @@ async fn seed_v2_resolver_bound_names_fixture_with_chains(
 ) -> Result<()> {
     let resolver_snapshot = resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)
         .chain_positions;
+    database
+        .seed_snapshot_selector_chain_positions(&resolver_snapshot)
+        .await?;
     let mut specs = v2_address_name_specs();
     specs.push(V2AddressNameSpec {
         logical_name_id: "ens:precedence.eth",
@@ -881,7 +1090,7 @@ async fn seed_v2_resolver_bound_names_fixture_with_chains(
             spec.registrant
         };
 
-        let mut row = address_name_name_current_row(
+        let row = address_name_name_current_row(
             spec.logical_name_id,
             spec.name,
             spec.name,
@@ -912,16 +1121,40 @@ async fn seed_v2_resolver_bound_names_fixture_with_chains(
                     }
             }),
         );
-        row.chain_positions = resolver_snapshot.clone();
-        database.insert_name_current_row(row).await?;
+        database.insert_name_current_row(row.clone()).await?;
+        let inventory = compact_records_inventory_current_row(spec.logical_name_id, spec.resource_id);
+        seed_phase_identity_name(
+            database,
+            spec.name,
+            spec.name,
+            spec.resource_id,
+            spec.token_lineage_id,
+            spec.surface_binding_id,
+            spec.owner,
+            bigname_storage::AddressNameRelation::TokenHolder,
+            &row.declared_summary,
+            &inventory,
+        )
+        .await?;
     }
+
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 203,
+                "block_hash": "0xresolvercb",
+                "timestamp": "2026-04-17T00:00:23Z",
+            }
+        }))
+        .await?;
 
     Ok(())
 }
 
 fn v2_bound_names_cursor() -> bigname_storage::NameCurrentListCursor {
     bigname_storage::NameCurrentListCursor {
-        sort_value: bigname_storage::NameCurrentListCursorValue::Name("Alice.eth".to_owned()),
+        sort_value: bigname_storage::NameCurrentListCursorValue::Name("alice.eth".to_owned()),
         namespace: "ens".to_owned(),
         normalized_name: "alice.eth".to_owned(),
         namehash: "node:alice.eth".to_owned(),

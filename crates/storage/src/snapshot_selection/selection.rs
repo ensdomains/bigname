@@ -9,6 +9,7 @@ use super::chain_position::{
 };
 use super::consistency::SnapshotConsistency;
 use super::error::{SnapshotSelectionError, SnapshotSelectionResult};
+use super::project::validate_current_project_publications;
 use crate::lineage::{CanonicalityState, load_chain_lineage_block};
 use crate::time::format_timestamp;
 
@@ -91,6 +92,7 @@ pub async fn resolve_exact_name_snapshot_selection(
     };
 
     validate_cross_chain_positions(scope, &chain_positions)?;
+    validate_current_project_publications(pool, &chain_positions).await?;
     Ok(SelectedSnapshot {
         chain_positions,
         consistency: input.consistency,

@@ -131,6 +131,14 @@ Field ownership:
   vocabulary before serialization; current values include `read_failed`,
   `exact_name_profile_not_supported`, `mixed_exact_name_corpus`, and
   `unsupported_reason_missing`.
+- Snapshot behavior: lookup selects the current schema-v2 phase head and reads
+  `bigname_phase` name, inventory, and address-name projections published for
+  one completed projection-phase generation. Because projection publication is
+  incremental, an unchanged row target may precede the selected head; it may
+  not be ahead, and a same-height target must match the selected hash. Lookup
+  revalidates both `chain_heads` and that generation after the read. An
+  invalid target, phase lag, or mid-request head/projection change returns `409
+  stale`.
 - Replaces (v1): `POST /v1/identity:lookup`.
 
 ### `GET /v2/status`
@@ -617,14 +625,18 @@ Field ownership:
   remain included in `count` but are excluded from `by_type`.
 - Pagination behavior: standard collection pagination applies to the
   nested `bound_names.page` object. The top-level response has no `page`.
-- Snapshot behavior: the resolver overview and each returned bound-name row
-  must match the selected schema-v2 chain position. A mismatch returns `409
-  stale` rather than serving projection data with metadata from another
-  position.
-- Status semantics: an otherwise valid resolver with no overview row returns
-  `404 not_found`. A resolver overview with no bound names returns `200` with
-  an empty bound-names section. Malformed `chain_id` or `address` returns
-  `400 invalid_input`.
+- Snapshot behavior: the resolver overview and bound names read
+  `bigname_phase` projections from one completed projection-phase generation. A row
+  target may precede the selected position when the row was unchanged by later
+  incremental publications; it may not be ahead, and a same-height target must
+  match the selected hash. The projection-phase generation is revalidated after the
+  read, and an invalid target or changed generation returns `409 stale`.
+- Status semantics: an otherwise valid current/latest resolver with no overview
+  row returns `404 not_found`. For `at`, `safe`, or `finalized`, a missing
+  current projection cannot prove historical absence and returns `409 stale`.
+  A resolver overview with no bound names returns `200` with an empty
+  bound-names section. Malformed `chain_id` or `address` returns `400
+  invalid_input`.
 - Replaces (v1): `GET /v1/resolvers/{chain_id}/{resolver_address}/overview`
   and the `GET /v1/names?resolver=...` filter.
 

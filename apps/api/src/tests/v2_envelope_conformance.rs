@@ -493,8 +493,8 @@ async fn v2_success_responses_omit_banned_v1_dictionary_fields_family_wide() -> 
 async fn v2_single_resource_as_of_token_replays_without_enabling_collection_replay() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
-    bigname_storage::upsert_resolver_current_rows(
-        &database.pool,
+    upsert_test_resolver_current_rows(
+        &database,
         &[resolver_current_row_with_writer_alias(
             "ethereum-mainnet",
             V2_RESOLVER_ADDRESS,
@@ -606,6 +606,7 @@ async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result
     let resource_id = Uuid::from_u128(0x5a0101);
     let token_lineage_id = Uuid::from_u128(0x5a0102);
     let surface_binding_id = Uuid::from_u128(0x5a0103);
+    let namehash = bigname_lookup::ens_namehash_hex("case.eth")?;
     let record_boundary = json!({
         "logical_name_id": logical_name_id,
         "resource_id": resource_id.to_string(),
@@ -622,9 +623,9 @@ async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result
     seed_identity_name(
         &database,
         logical_name_id,
-        "Case.eth",
         "case.eth",
-        "namehash:case.eth",
+        "case.eth",
+        &namehash,
         resource_id,
         token_lineage_id,
         surface_binding_id,
@@ -639,9 +640,9 @@ async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result
             token_holder_address,
             logical_name_id,
             bigname_storage::AddressNameRelation::TokenHolder,
-            "Case.eth",
             "case.eth",
-            "namehash:case.eth",
+            "case.eth",
+            &namehash,
             surface_binding_id,
             resource_id,
             Some(token_lineage_id),
@@ -686,6 +687,34 @@ async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result
     database
         .insert_record_inventory_current_row(record_inventory)
         .await?;
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.name_current phase
+        SET declared_summary = legacy.declared_summary
+        FROM public.name_current legacy
+        WHERE legacy.logical_name_id = $1
+          AND phase.raw_name = 'case.eth'
+        "#,
+    )
+    .bind(logical_name_id)
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.record_inventory_current phase
+        SET record_version_boundary_key = legacy.record_version_boundary_key,
+            record_version_boundary = legacy.record_version_boundary,
+            selectors = legacy.selectors,
+            unsupported_families = legacy.unsupported_families,
+            entries = legacy.entries
+        FROM public.record_inventory_current legacy
+        WHERE legacy.resource_id = $1
+          AND phase.resource_id = legacy.resource_id
+        "#,
+    )
+    .bind(resource_id)
+    .execute(&database.lookup_pool)
+    .await?;
 
     let profile = v2_conformance_get_json(&database, "/v2/names/Case.eth").await?;
     let lookup = v2_lookup_json(
@@ -733,6 +762,10 @@ async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result
     .bind(unbacked_resource_id)
     .execute(&database.pool)
     .await?;
+    sqlx::query("DELETE FROM record_inventory_current WHERE resource_id = $1")
+        .bind(unbacked_resource_id)
+        .execute(&database.lookup_pool)
+        .await?;
     let unbacked_profile = v2_conformance_get_json(&database, "/v2/names/Unbacked.eth").await?;
     let unbacked_lookup = v2_lookup_json(
         &database,
@@ -1048,11 +1081,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
                 resolver_current_row_with_writer_alias("ethereum-mainnet", V2_RESOLVER_ADDRESS);
             resolver_row.declared_summary["role_holders"]["items"][0]["effective_powers"] =
                 json!(["resource_control", "set_resolver"]);
-            bigname_storage::upsert_resolver_current_rows(
-                &database.pool,
-                &[resolver_row],
-            )
-            .await?;
+            upsert_test_resolver_current_rows(&database, &[resolver_row]).await?;
             let uri = format!(
                 "/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes,aliases,roles,events&page_size=5"
             );
@@ -1206,14 +1235,12 @@ async fn collect_v2_stale_and_conflict_error_violations(
         "0xmissing-conflict",
         "2026-04-17T00:00:01Z",
     )?;
-    bigname_storage::upsert_resolver_current_rows(
-        &database.pool,
-        &[resolver_current_row_with_writer_alias(
-            "ethereum-mainnet",
-            V2_RESOLVER_ADDRESS,
-        )],
-    )
-    .await?;
+    let resolver_row =
+        resolver_current_row_with_writer_alias("ethereum-mainnet", V2_RESOLVER_ADDRESS);
+    database
+        .seed_snapshot_selector_chain_positions(&resolver_row.chain_positions)
+        .await?;
+    upsert_test_resolver_current_rows(&database, &[resolver_row]).await?;
     for (route, uri, expected_code) in [(
         v2_conformance_route(V2SuccessFixture::Resolver),
         format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?at={resolver_conflict_at}"),

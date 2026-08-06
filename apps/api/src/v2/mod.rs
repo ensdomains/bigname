@@ -53,6 +53,10 @@ pub(crate) use history::{
     v2_exact_name_snapshot_scope, v2_exact_name_snapshot_scope_with_resolution_auxiliary,
 };
 pub(crate) use lookup::get_lookup;
+#[cfg(test)]
+pub(crate) use lookup::served_head_initial_validation_test_hooks as lookup_served_head_initial_validation_test_hooks;
+#[cfg(test)]
+pub(crate) use lookup::served_head_revalidation_test_hooks as lookup_served_head_revalidation_test_hooks;
 pub(crate) use name_record::{NameRecord, build_name_record, get_name_record};
 pub(crate) use name_records::{
     RecordAnswer, build_indexed_name_records, build_verified_name_records, get_name_records,

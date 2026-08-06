@@ -17,6 +17,7 @@ mod migration_indexes;
 mod name_current;
 mod normalized_events;
 mod permissions;
+mod phase_projection_reads;
 mod primary_name;
 mod projection_helpers;
 pub mod projection_staging;
@@ -175,6 +176,11 @@ pub use permissions::{
     publish_permissions_current_compatibility_in_transaction,
     replace_permissions_current_resource_projection, upsert_permissions_current_resource_summary,
     upsert_permissions_current_rows,
+};
+pub use phase_projection_reads::{
+    load_phase_identity_name_feed_records_by_ids, load_phase_identity_records_by_ids,
+    load_phase_name_current_rows_by_ids, load_phase_resolver_bound_name_rows,
+    load_phase_resolver_current,
 };
 pub use primary_name::{
     PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot,

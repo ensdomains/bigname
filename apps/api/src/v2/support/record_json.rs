@@ -78,9 +78,8 @@ pub(crate) fn record_value_string_from_entry(
     field: JsonFieldAccessor,
 ) -> Option<String> {
     let value = field(entry, "value")?;
-    field(value, "value")
-        .and_then(value_to_string)
-        .or_else(|| value_to_string(value))
+    let value = field(value, "value").unwrap_or(value);
+    value_to_string(value).or_else(|| field(value, "bytes").and_then(value_to_string))
 }
 
 pub(crate) fn record_unsupported_fields(
