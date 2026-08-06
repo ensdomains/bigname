@@ -2133,6 +2133,87 @@ async fn v2_subname_collections_exclude_orphaned_project_target_before_redo() ->
         3
     );
 
+    // The counted summary must fail closed on the same orphaned projection target as the page it
+    // annotates, even though both identity anchors are still canonical.
+    let summaries = bigname_storage::load_children_current_summaries(
+        &database.pool,
+        std::slice::from_ref(&parent_logical_name_id),
+    )
+    .await?;
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].child_count, 0);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_subname_counts_agree_with_the_page_when_a_child_target_is_orphaned() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+
+    let counted = v2_subnames_payload_for_database(
+        &database,
+        "/v2/names/parent.eth/subnames?include=counts",
+    )
+    .await?;
+    assert_eq!(counted["data"][0]["name"], json!("alpha.parent.eth"));
+    assert_eq!(counted["data"][0]["subname_count"], json!(1));
+
+    // Move only the grandchild row onto an orphaned projection target. Its parent and child
+    // identity anchors stay canonical, so nothing but the target fence can exclude it.
+    let child_logical_name_id: String = sqlx::query_scalar(
+        "SELECT logical_name_id FROM bigname_phase.name_surfaces \
+         WHERE raw_name = 'delta.alpha.parent.eth'",
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO bigname_phase.chain_lineage (
+            chain_id, block_hash, block_number, block_timestamp, canonicality_state
+        ) VALUES (
+            'ethereum-mainnet', '0xorphaned-grandchild-target', 2011,
+            '2026-04-17T02:00:11Z', 'orphaned'::bigname_phase.canonicality_state
+        );
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.children_current \
+         SET chain_positions = jsonb_build_object( \
+                 'block_number', 2011, \
+                 'block_hash', '0xorphaned-grandchild-target', \
+                 'target_block_number', 2011, \
+                 'target_block_hash', '0xorphaned-grandchild-target' \
+             ), \
+             canonicality_summary = jsonb_build_object( \
+                 'state', 'canonical', \
+                 'target_block_number', 2011, \
+                 'target_block_hash', '0xorphaned-grandchild-target' \
+             ) \
+         WHERE child_logical_name_id = $1",
+    )
+    .bind(&child_logical_name_id)
+    .execute(&database.pool)
+    .await?;
+
+    let page = v2_subnames_payload_for_database(
+        &database,
+        "/v2/names/alpha.parent.eth/subnames?page_size=10",
+    )
+    .await?;
+    assert_eq!(page["data"], json!([]));
+
+    let recounted = v2_subnames_payload_for_database(
+        &database,
+        "/v2/names/parent.eth/subnames?include=counts",
+    )
+    .await?;
+    assert_eq!(recounted["data"][0]["name"], json!("alpha.parent.eth"));
+    assert_eq!(recounted["data"][0]["subname_count"], json!(0));
+
     database.cleanup().await?;
     Ok(())
 }

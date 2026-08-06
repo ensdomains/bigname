@@ -103,7 +103,10 @@ pub async fn load_children_current_summaries(
     if parent_logical_name_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let rows = sqlx::query(
+    // The summary annotates the page, so it has to admit exactly the rows the page admits —
+    // including the projection-target lineage fence that fails closed on an orphaned target whose
+    // identity anchors are still canonical.
+    let rows = sqlx::query(&format!(
         r#"
         WITH requested AS (
             SELECT parent_logical_name_id, ordinal
@@ -113,43 +116,9 @@ pub async fn load_children_current_summaries(
         readable_children AS (
             SELECT cc.*
             FROM bigname_phase.children_current cc
-            JOIN bigname_phase.name_surfaces parent
-              ON parent.logical_name_id = cc.parent_logical_name_id
-            LEFT JOIN bigname_phase.name_surfaces child
-              ON child.logical_name_id = cc.child_logical_name_id
-            JOIN bigname_phase.chain_lineage parent_lineage
-              ON parent_lineage.chain_id = parent.chain_id
-             AND parent_lineage.block_hash = parent.block_hash
-            LEFT JOIN bigname_phase.chain_lineage child_lineage
-              ON child_lineage.chain_id = child.chain_id
-             AND child_lineage.block_hash = child.block_hash
+            {DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS}
             WHERE cc.surface_class = $2
-              AND parent.canonicality_state IN (
-                  'canonical'::bigname_phase.canonicality_state,
-                  'safe'::bigname_phase.canonicality_state,
-                  'finalized'::bigname_phase.canonicality_state
-              )
-              AND parent_lineage.canonicality_state IN (
-                  'canonical'::bigname_phase.canonicality_state,
-                  'safe'::bigname_phase.canonicality_state,
-                  'finalized'::bigname_phase.canonicality_state
-              )
-              AND (
-                  child.logical_name_id IS NULL
-                  OR cc.provenance #>> '{label,source}' = 'label_preimage'
-                  OR (
-                      child.canonicality_state IN (
-                          'canonical'::bigname_phase.canonicality_state,
-                          'safe'::bigname_phase.canonicality_state,
-                          'finalized'::bigname_phase.canonicality_state
-                      )
-                      AND child_lineage.canonicality_state IN (
-                          'canonical'::bigname_phase.canonicality_state,
-                          'safe'::bigname_phase.canonicality_state,
-                          'finalized'::bigname_phase.canonicality_state
-                      )
-                  )
-              )
+            {DEFAULT_CHILDREN_CURRENT_READ_FILTER}
         )
         SELECT requested.parent_logical_name_id,
                COUNT(cc.child_logical_name_id)::bigint AS child_count,
@@ -168,8 +137,8 @@ pub async fn load_children_current_summaries(
           ON cc.parent_logical_name_id = requested.parent_logical_name_id
         GROUP BY requested.ordinal, requested.parent_logical_name_id
         ORDER BY requested.ordinal
-        "#,
-    )
+        "#
+    ))
     .bind(parent_logical_name_ids)
     .bind(DECLARED_SURFACE_CLASS)
     .fetch_all(pool)
