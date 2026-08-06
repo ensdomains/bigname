@@ -4027,7 +4027,9 @@
           "derivation_kind": "ens_v1_unwrapped_authority",
           "canonicality_state": "Canonical",
           "before_state": {
-            "fuses": 0
+            "expiry": 1900000000,
+            "fuses": 0,
+            "wrapper_state": "wrapped"
           },
           "after_state": {
             "authority_key": "wrapper:ethereum-mainnet:1:0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
@@ -4056,7 +4058,11 @@
           },
           "derivation_kind": "ens_v1_unwrapped_authority",
           "canonicality_state": "Canonical",
-          "before_state": { "fuses": 65536 },
+          "before_state": {
+            "expiry": 1900000000,
+            "fuses": 65536,
+            "wrapper_state": "emancipated"
+          },
           "after_state": {
             "fuses": 65537,
             "wrapper_state": "locked"
@@ -4081,7 +4087,11 @@
           },
           "derivation_kind": "ens_v1_unwrapped_authority",
           "canonicality_state": "Canonical",
-          "before_state": { "fuses": 65537 },
+          "before_state": {
+            "expiry": 1900000000,
+            "fuses": 65537,
+            "wrapper_state": "locked"
+          },
           "after_state": {
             "fuses": 65663,
             "wrapper_state": "locked"

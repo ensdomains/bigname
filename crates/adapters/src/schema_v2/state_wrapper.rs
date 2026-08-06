@@ -48,10 +48,11 @@ impl State {
         namespace: &str,
         namehash: &str,
         fuses: u32,
-    ) -> Option<V1WrapperData> {
+    ) -> Option<(V1WrapperData, V1WrapperData)> {
         let data = self.v1_wrapper_data.get_mut(&v1_key(namespace, namehash))?;
+        let previous = *data;
         data.fuses = fuses;
-        Some(*data)
+        Some((previous, *data))
     }
 
     pub(in crate::schema_v2) fn update_v1_wrapper_expiry(
