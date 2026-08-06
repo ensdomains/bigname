@@ -12,14 +12,14 @@ pub(super) fn decode_primary_name_current_snapshot(
     let claim_status =
         PrimaryNameClaimStatus::parse(&crate::sql_row::get::<String>(&row, "claim_status")?)?;
     let raw_claim_name = crate::sql_row::get::<Option<String>>(&row, "raw_claim_name")?;
+    let claim_name_is_normalized = crate::sql_row::get::<bool>(&row, "claim_name_is_normalized")?;
     Ok(PrimaryNameCurrentSnapshot {
         normalized_claim_name: normalized_claim_name(
             claim_status,
+            claim_name_is_normalized,
             raw_claim_name.as_deref(),
-            &address,
-            &namespace,
-            &coin_type,
-        )?,
+        )
+        .with_context(|| format!("primary_names_current row {address}:{namespace}:{coin_type}"))?,
         row: PrimaryNameCurrentRow {
             address,
             namespace,
@@ -28,22 +28,26 @@ pub(super) fn decode_primary_name_current_snapshot(
             raw_claim_name,
             claim_provenance: crate::sql_row::get(&row, "claim_provenance")?,
         },
-        claim_name_is_normalized: crate::sql_row::get(&row, "claim_name_is_normalized")?,
+        claim_name_is_normalized,
     })
 }
 
 /// The projection stores the raw claim spelling plus a marker for whether those bytes were already
-/// normalized; it does not store the normalized form. A successful claim is normalizable by
-/// construction, so derive it here rather than leaving each caller to repair a null.
-fn normalized_claim_name(
+/// normalized; it stores no normalized column. When the marker is set the stored bytes are the
+/// normalized form and are returned as published, so a later normalizer revision cannot silently
+/// restate an already-published name. Otherwise a successful claim is normalizable by construction
+/// — the projection classifies anything else `invalid_name` — so derive it once here rather than
+/// leaving each reader to repair a null or re-derive the rule.
+pub fn normalized_claim_name(
     claim_status: PrimaryNameClaimStatus,
+    claim_name_is_normalized: bool,
     raw_claim_name: Option<&str>,
-    address: &str,
-    namespace: &str,
-    coin_type: &str,
 ) -> Result<Option<String>> {
     if claim_status != PrimaryNameClaimStatus::Success {
         return Ok(None);
+    }
+    if claim_name_is_normalized {
+        return Ok(raw_claim_name.map(str::to_owned));
     }
     raw_claim_name
         .map(|raw_claim_name| {
@@ -52,9 +56,5 @@ fn normalized_claim_name(
                 .map_err(anyhow::Error::from)
         })
         .transpose()
-        .with_context(|| {
-            format!(
-                "primary_names_current row {address}:{namespace}:{coin_type} has a successful claim whose raw name does not normalize"
-            )
-        })
+        .context("successful primary-name claim whose raw name does not normalize")
 }

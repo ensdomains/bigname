@@ -322,10 +322,12 @@ Field ownership:
   only from a record inventory whose coverage carries no unsupported reason and
   whose coverage `status` is `full` or `projected`. `projected` is admitted
   because a supported schema-v2 inventory is complete by construction: the
-  project phase derives its entries from the whole interpreted event set
-  retained for the name's current record-version boundary under a classified
-  resolver, so a key's absence from that inventory is absence in the retained
-  history rather than an unfinished build. The row's
+  project phase derives its entries from every interpreted record event the
+  name still has under a classified resolver — everything since that resolver
+  last bumped the name's record version and thereby cleared its earlier records
+  (the `record_version_boundary` reported below). A key's absence from that
+  inventory is therefore absence in the retained history rather than an
+  unfinished build. The row's
   `exhaustiveness: not_asserted` disclaims a claim about complete *history*,
   which is a weaker statement than `full` and does not weaken this admission.
   An inventory in any other coverage state is not authoritative, and the

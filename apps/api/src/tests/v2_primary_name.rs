@@ -348,6 +348,52 @@ async fn v2_get_primary_name_normalizes_schema_v2_successful_claim() -> Result<(
 }
 
 #[tokio::test]
+async fn v2_get_primary_name_publishes_an_already_normalized_claim_as_stored() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_005,
+                "block_hash": "0xprimary-prenormalized",
+                "timestamp": "2026-04-17T00:00:05Z"
+            }
+        }))
+        .await?;
+    // The marker asserts the stored bytes are the projection's normalized form, so the read path
+    // publishes them unchanged. Seeding bytes the current normalizer would rewrite is what makes
+    // the two branches distinguishable: a re-normalizing reader would answer "taytems.eth" and
+    // silently restate an already-published name after a normalizer revision.
+    seed_schema_v2_primary_name_claim(
+        &database.lookup_pool,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        "ens",
+        "60",
+        "Taytems.eth",
+        true,
+    )
+    .await?;
+
+    let payload = v2_primary_name_payload_for_database(
+        &database,
+        &format!(
+            "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
+        ),
+    )
+    .await?;
+    assert_eq!(
+        payload["data"]["answers"],
+        json!([{
+            "source": "indexed",
+            "status": "ok",
+            "name": "Taytems.eth"
+        }])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_primary_name_excludes_lower_height_orphaned_project_target() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database

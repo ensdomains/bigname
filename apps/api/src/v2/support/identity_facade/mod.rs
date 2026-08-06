@@ -317,6 +317,7 @@ async fn load_identity_primary_name_snapshots(
         r#"
         SELECT primary_name.address, primary_name.namespace, primary_name.coin_type,
                primary_name.claim_status, primary_name.raw_claim_name,
+               primary_name.claim_name_is_normalized,
                CASE
                    WHEN lineage.block_hash IS NULL THEN NULL
                    ELSE jsonb_build_object(
@@ -370,19 +371,12 @@ async fn load_identity_primary_name_snapshots(
             let claim_status =
                 parse_primary_name_claim_status(&row.try_get::<String, _>("claim_status")?)?;
             let raw_claim_name: Option<String> = row.try_get("raw_claim_name")?;
-            let normalized_claim_name = if claim_status == PrimaryNameClaimStatus::Success {
-                raw_claim_name
-                    .map(|raw_name| bigname_domain::normalization::normalize_name(&raw_name))
-                    .transpose()
-                    .with_context(|| {
-                        format!(
-                            "phase primary-name row {address}:{namespace}:{coin_type} has invalid successful raw_claim_name"
-                        )
-                    })?
-                    .map(|name| name.normalized_name)
-            } else {
-                None
-            };
+            let normalized_claim_name = bigname_storage::normalized_claim_name(
+                claim_status,
+                row.try_get("claim_name_is_normalized")?,
+                raw_claim_name.as_deref(),
+            )
+            .with_context(|| format!("phase primary-name row {address}:{namespace}:{coin_type}"))?;
             let snapshot = IdentityPrimaryNameSnapshot {
                 address: address.clone(),
                 namespace: namespace.clone(),

@@ -38,8 +38,9 @@ const SEMANTIC_SOURCE_FILES: &[&str] = &[
     // Namehash, DNS encoding, resolver-call encoding, and result decoding shared by the hydration
     // multicalls below.
     "crates/lookup/src/abi.rs",
-    // Record-selector vocabulary those calls encode.
-    "crates/lookup/src/types.rs",
+    // Record-selector vocabulary those calls encode. Deliberately not `crates/lookup/src/types.rs`,
+    // which is otherwise the request-scoped verified-lookup response shape.
+    "crates/lookup/src/record_selector.rs",
     // Reverse-name and text-record multicall encode/decode used by project hydration before rows
     // are persisted.
     "crates/lookup/src/reverse_names.rs",

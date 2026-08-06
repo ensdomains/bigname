@@ -231,7 +231,10 @@ fn semantic_dependencies_of_the_watched_roots_affect_the_hash() {
             "crates/lookup/src/abi.rs",
             "pub fn namehash() -> bool { false }\n",
         ),
-        ("crates/lookup/src/types.rs", "pub struct RecordSelector;\n"),
+        (
+            "crates/lookup/src/record_selector.rs",
+            "pub struct RecordSelector;\n",
+        ),
     ] {
         let tree = SampleTree::new();
         let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
@@ -251,6 +254,7 @@ fn request_scoped_lookup_sources_do_not_change_hash() {
 
     for relative_path in [
         "crates/lookup/src/engine.rs",
+        "crates/lookup/src/types.rs",
         "crates/lookup/src/ccip/gateway.rs",
         "crates/lookup/src/store/indexed.rs",
         "crates/lookup/src/rpc.rs",

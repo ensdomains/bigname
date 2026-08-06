@@ -14,28 +14,16 @@ pub(crate) async fn load_primary_name_lookup_state(
     match row {
         Ok(Some(snapshot)) => {
             let row = snapshot.row;
-            let claim_status = row.claim_status;
-            let normalized_claim_name = if claim_status == PrimaryNameClaimStatus::Success {
-                let raw_claim_name = row.raw_claim_name.as_deref().ok_or_else(|| {
-                    ApiError::internal_error(
-                        "schema-v2 successful primary-name tuple omitted its claim",
-                    )
-                })?;
-                Some(
-                    bigname_domain::normalization::normalize_name(raw_claim_name)
-                        .map_err(|_| {
-                            ApiError::internal_error(
-                                "schema-v2 successful primary-name tuple has an invalid claim",
-                            )
-                        })?
-                        .normalized_name,
-                )
-            } else {
-                None
-            };
+            // Storage derives the normalized spelling; a successful claim with no raw name is a
+            // projection defect that would otherwise read as "no primary name".
+            if row.claim_status == PrimaryNameClaimStatus::Success && row.raw_claim_name.is_none() {
+                return Err(ApiError::internal_error(
+                    "schema-v2 successful primary-name tuple omitted its claim",
+                ));
+            }
             Ok(PrimaryNameLookupState {
                 tuple_state: PrimaryNameTupleState::TuplePresent(row),
-                normalized_claim_name,
+                normalized_claim_name: snapshot.normalized_claim_name,
                 claim_name_is_normalized: snapshot.claim_name_is_normalized,
                 on_demand_claim: OnDemandPrimaryNameClaimState::NotAttempted,
                 on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
