@@ -10,24 +10,21 @@ use uuid::Uuid;
 /// Anything outside these shapes fails the lane.
 #[derive(Default)]
 pub struct BatchBoundaryArtifacts {
-    /// Two batch-local reconciliation behaviours put `before_state` out of step, one per direction.
-    /// Rewriting an *earlier* event's interpreter state key on the emitted row without rewriting the
-    /// live state map leaves that event's value reachable under the pre-reconciliation key for the
-    /// rest of the batch, but absent from the retained state a later batch restores — so the whole
-    /// pass carries a value the split replay leaves empty. Re-threading a resolver scope blanks the
-    /// `before_state` of that scope's first event *in the batch*, and a split gives each batch its
-    /// own first event — so the split replay blanks values the whole pass carries. Neither leaves a
-    /// trace on the row itself, so this cannot be pinned tighter than "one side is empty"; the
-    /// counter is split by direction to keep both visible.
+    /// Batch-local reconciliation puts `before_state` out of step in both directions, and the
+    /// default corpus reproduces both. None of it leaves a trace on the row, so this cannot be
+    /// pinned tighter than "one side is empty"; the counter is keyed by which side.
     ///
-    /// Both directions are witnessed by the default corpus and pinned in `EXPECTED_ARTIFACTS`, but
-    /// not by the two mechanisms above — those both blank the *split replay*. The events counted
-    /// `only-the-split-replay` are the reverse: ENSv1 `SubregistryChanged` derived from `NewOwner`,
-    /// where the whole pass carries an empty `before_state` and the split replay carries the prior
-    /// owner. `reconcile_same_transaction_setups` collapses an earlier setup event for the same node
-    /// when both land in one batch, so the survivor has no predecessor left to read; splitting puts
-    /// the predecessor in an earlier batch, where it survives as retained prior state. So the whole
-    /// pass — the shape a backfill runs — is the side that loses state here.
+    /// `only-the-whole-pass` — the split replay is the empty side. Two behaviours do it. Rewriting
+    /// an earlier event's interpreter state key on the emitted row without rewriting the live state
+    /// map leaves the value reachable under the pre-reconciliation key for the rest of the batch but
+    /// absent from the state a later batch restores. Re-threading a resolver scope blanks the first
+    /// event of that scope *in the batch*, and a split gives each batch its own first event.
+    ///
+    /// `only-the-split-replay` — the whole pass is the empty side, which is the shape a backfill
+    /// runs. Every one the corpus reaches is an ENSv1 `SubregistryChanged` derived from `NewOwner`:
+    /// `reconcile_same_transaction_setups` collapses an earlier setup for the same node when both
+    /// land in one batch, leaving the survivor no predecessor to read, while splitting puts that
+    /// predecessor in an earlier batch where it survives as retained prior state.
     pub carried_before_states: BTreeMap<&'static str, usize>,
     /// Reconciliation keeps a superseded identity row only while a retained row in the same batch
     /// output still references it. Where the referencing row lands in a later batch the earlier

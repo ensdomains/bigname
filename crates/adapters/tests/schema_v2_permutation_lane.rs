@@ -54,7 +54,7 @@ use permutation::{
 /// number above that with headroom, and costs about 6s.
 ///
 /// The lane is green from 31 through 89. At 90 and above it reports the dangling binding-closure
-/// exemption that `whole_pass_binding_closure_exempts_a_binding_no_batch_opened` pins: that is a
+/// exemption that `binding_closure_exempts_a_binding_the_interpreter_never_opens` pins: that is a
 /// real finding about the interpreter, not a corpus artifact, so read that test before treating a
 /// deep sweep's failure as something to re-pin.
 const DEFAULT_CASES: u64 = 48;
@@ -182,19 +182,29 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
 }
 
 /// Pins a live interpreter defect this lane found, so that raising `BIGNAME_PERMUTATION_CASES` past
-/// 89 has an explanation in the repository rather than only in review history.
+/// 89 has an explanation in the repository rather than only in review history. Reported with this
+/// lane; the batch-boundary divergences it sits alongside are issue #336.
 ///
-/// The interpreter emits a binding closure whose `except_surface_binding_id` names a binding no
-/// batch ever opened. There is no foreign key on that column, so nothing rejects it: the writer's
-/// `surface_binding_id <> $3` clause matches nothing, and the closure clamps *every* binding for
-/// the name — including the one the exemption existed to spare. The lane's referential check is
-/// what notices.
+/// At this seed the interpreter emits a binding closure, at a raw-block boundary position, whose
+/// `except_surface_binding_id` names a `surface_binding_id` that **neither** derivation opens — not
+/// the whole-sequence pass and not the split replay. So this is not a batch-boundary artifact; both
+/// passes carry it, and the split replay is merely where the lane looks first.
+///
+/// Nothing downstream rejects it either: there is no foreign key on that column, so the writer's
+/// `surface_binding_id <> $3` clause simply matches no row and the closure clamps its whole
+/// position window with nothing exempted. Whether that loses a binding the interpreter meant to
+/// keep depends on where the intended binding sits relative to the closure, which this test does
+/// not establish — it pins the dangling reference, not a consequence.
 ///
 /// This asserts the current, wrong behaviour. When the interpreter stops emitting the dangling
 /// exemption this test fails, which is the signal to delete it and raise `DEFAULT_CASES`.
 #[test]
-fn whole_pass_binding_closure_exempts_a_binding_no_batch_opened() -> Result<()> {
-    const KNOWN_BAD_SEED: u64 = 13_484_046_221_401_303_482;
+fn binding_closure_exempts_a_binding_the_interpreter_never_opens() -> Result<()> {
+    /// The first case index the default sweep does not reach; `DEFAULT_CASES` documents the band.
+    /// Derived rather than written out so that editing either constant cannot silently leave this
+    /// test pinning a seed the corpus no longer draws.
+    const KNOWN_BAD_CASE: u64 = 89;
+    const KNOWN_BAD_SEED: u64 = DEFAULT_SEED.wrapping_add(KNOWN_BAD_CASE.wrapping_mul(CASE_STRIDE));
     let checked_in = checked_in_manifests()?;
     let wiring = Wiring::build(&ENS_V1_MAINNET, &checked_in)?;
     let scenario = scenario::generate(&ENS_V1_MAINNET, &wiring, KNOWN_BAD_SEED);
@@ -412,8 +422,9 @@ fn generated_scenarios_are_reproducible_from_their_seed() -> Result<()> {
     // single draw, and the axes would be mechanically coupled between adjacent cases.
     // A stride of k increments puts one case's stream k draws from the next's. Both signs are
     // degenerate — advanced by k or rewound by k couple the axes just the same — so look for the
-    // opening draw of each stream inside the other. A scenario draws a few hundred values, and this
-    // is checked between every pair of cases, not only adjacent ones, because k multiplies.
+    // opening draw of each stream inside the other. A scenario draws well under a hundred values,
+    // so 512 is ample, and this runs over every pair of cases rather than adjacent ones because k
+    // multiplies with the gap.
     for gap in 1..DEFAULT_CASES {
         let apart = CASE_STRIDE.wrapping_mul(gap);
         let (mut earlier, mut later) = (
@@ -421,6 +432,12 @@ fn generated_scenarios_are_reproducible_from_their_seed() -> Result<()> {
             permutation::rng::Rng::new(DEFAULT_SEED.wrapping_add(apart)),
         );
         let (ahead, behind) = (later.next_u64(), earlier.next_u64());
+        // Offset zero: identical openings mean the stride vanished for this gap.
+        assert_ne!(
+            ahead, behind,
+            "cases {gap} apart draw the same stream; CASE_STRIDE must not be a small multiple of \
+             the generator's increment"
+        );
         for draw in 1..512 {
             assert_ne!(
                 earlier.next_u64(),
