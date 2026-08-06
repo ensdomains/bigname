@@ -128,7 +128,16 @@ Planning also refuses a range the source cannot serve. Before any window is
 fetched, a local reth source reports its earliest available block — reth's
 expired-history floor, raised to the lowest block its receipt static files still
 cover — and planning fails as a configuration error naming that floor and the
-requested range instead of reading a pruned window as empty coverage. Pruning
+requested range instead of reading a pruned window as empty coverage. The floor
+is read a second time after a window is fetched and before it is stored, because
+a node can prune while a batch is in flight; a window whose floor rose under it
+fails the same way rather than being recorded. Neither read is instantaneous —
+the node deletes files before committing the transaction that makes a read-only
+reader refresh its view
+(upstream: .refs/reth/crates/storage/provider/src/providers/database/mod.rs:L279 @ reth@88505c7f)
+(upstream: .refs/reth/crates/prune/prune/src/pruner.rs:L363 @ reth@88505c7f) —
+so the log read also fails any fetched block whose receipt count does not match
+the transaction count its retained body indices declare. Pruning
 receipts deletes whole static-file ranges while leaving their headers readable
 (upstream: .refs/reth/crates/prune/prune/src/segments/receipts.rs:L34 @ reth@88505c7f)
 (upstream: .refs/reth/crates/prune/prune/src/segments/mod.rs:L41 @ reth@88505c7f),

@@ -74,6 +74,21 @@ impl RethDbReader {
                 .with_context(|| {
                     format!("Reth DB omitted block body indices for {}", header.number())
                 })?;
+            // The planning floor can be stale: the pruner deletes static files before it
+            // commits the transaction whose id makes a read-only provider re-read its index
+            // (upstream: .refs/reth/crates/storage/provider/src/providers/database/mod.rs:L279 @ reth@88505c7f)
+            // (upstream: .refs/reth/crates/prune/prune/src/pruner.rs:L363 @ reth@88505c7f).
+            // A block missing its receipts reads as an empty list, so compare against the
+            // body indices, which pruning receipts leaves in place.
+            if receipts.len() as u64 != indices.tx_count {
+                bail!(
+                    "Reth DB returned {} receipts for block {} holding {} transactions; its \
+                     receipts are pruned or incomplete",
+                    receipts.len(),
+                    expected.number,
+                    indices.tx_count
+                );
+            }
             let transaction_hashes =
                 transaction_hashes(&factory, indices.first_tx_num, receipts.len(), &header_hash)?;
             let mut next_log_index = 0usize;
