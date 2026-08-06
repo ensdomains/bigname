@@ -129,9 +129,16 @@ Outside that orphan replacement, a name surface's `deactivated_at` moves only
 for a strictly lower incoming block, so the stored value does not depend on the
 order emissions arrive in.
 
-The interpreter content hash covers the current interpretation inputs. A hash
-rotation requires a planned full-history interpretation and projection walk;
-the system refuses to mix generations from different hashes.
+The interpreter content hash covers the current interpretation inputs: the
+adapter, manifest-authority, and project sources, the manifest ABI event
+declarations, and the named semantic dependencies those sources call to decide
+a persisted row — ENS normalization and the resolver-call encode/decode used by
+project hydration. Request-scoped serving, RPC transport, and phase
+orchestration are deliberately outside it, so a serving-only change does not
+force a re-derivation. A hash rotation requires a planned full-history
+interpretation and projection walk; the system refuses to mix generations from
+different hashes. Moving a covered semantic source without updating the covered
+set fails the build rather than silently narrowing the fingerprint.
 
 ## Projection publication
 

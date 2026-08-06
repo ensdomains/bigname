@@ -9,7 +9,9 @@ use super::{
     HASHED_MANIFEST_PROFILES, INTERPRETER_CONTENT_HASH, interpreter_content_hash,
     manifest_profile_hash,
 };
-use crate::compute::{cfg_test_source_exclusions, excluded_source_reason, hashed_source_paths};
+use crate::compute::{
+    cfg_test_source_exclusions, excluded_source_reason, hashed_source_paths, semantic_source_files,
+};
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -208,6 +210,97 @@ fn interpret_runtime_and_schema_writers_do_not_change_hash() {
         first, changed,
         "phase orchestration and schema-v2 writers must remain outside the interpreter hash"
     );
+}
+
+#[test]
+fn semantic_dependencies_of_the_watched_roots_affect_the_hash() {
+    for (relative_path, changed_source) in [
+        (
+            "crates/domain/src/normalization.rs",
+            "pub fn normalize_name() -> bool { false }\n",
+        ),
+        (
+            "crates/lookup/src/reverse_names.rs",
+            "pub fn decode_reverse_names() -> bool { false }\n",
+        ),
+        (
+            "crates/lookup/src/text_records.rs",
+            "pub fn decode_text_records() -> bool { false }\n",
+        ),
+        (
+            "crates/lookup/src/abi.rs",
+            "pub fn namehash() -> bool { false }\n",
+        ),
+        ("crates/lookup/src/types.rs", "pub struct RecordSelector;\n"),
+    ] {
+        let tree = SampleTree::new();
+        let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+        tree.write(relative_path, changed_source);
+        let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
+        assert_ne!(
+            first, changed,
+            "{relative_path} decides persisted rows and must rotate the interpreter hash"
+        );
+    }
+}
+
+#[test]
+fn request_scoped_lookup_sources_do_not_change_hash() {
+    let tree = SampleTree::new();
+    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+
+    for relative_path in [
+        "crates/lookup/src/engine.rs",
+        "crates/lookup/src/ccip/gateway.rs",
+        "crates/lookup/src/store/indexed.rs",
+        "crates/lookup/src/rpc.rs",
+        "crates/domain/src/block_interval.rs",
+    ] {
+        tree.write(relative_path, "fn serving_only_change() {}\n");
+    }
+
+    let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
+    assert_eq!(
+        first, changed,
+        "request-scoped serving, transport, and ingest-range sources must stay outside the hash"
+    );
+}
+
+#[test]
+fn a_moved_semantic_source_fails_the_hash_instead_of_narrowing_it() {
+    let tree = SampleTree::new();
+    interpreter_content_hash(tree.path()).expect("baseline must hash");
+    fs::remove_file(tree.path().join("crates/domain/src/normalization.rs"))
+        .expect("semantic source must be removable");
+
+    let error = interpreter_content_hash(tree.path())
+        .expect_err("a missing semantic source must fail loudly");
+    assert!(
+        error
+            .to_string()
+            .contains("crates/domain/src/normalization.rs"),
+        "missing semantic source must name the path: {error}"
+    );
+}
+
+#[test]
+fn checked_in_semantic_sources_are_hash_covered() {
+    let workspace_root = workspace_root();
+    let hashed = hashed_source_paths(&workspace_root)
+        .expect("checked-in source paths must be collectable")
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+
+    for relative_path in semantic_source_files() {
+        assert!(
+            workspace_root.join(relative_path).is_file(),
+            "semantic source {relative_path} must exist on disk"
+        );
+        assert!(
+            hashed.contains(*relative_path),
+            "semantic source {relative_path} is not content-hash covered"
+        );
+    }
 }
 
 #[test]
@@ -438,6 +531,9 @@ impl SampleTree {
             "crates/project/src/projection.rs",
             "fn derive_invalidations() {}\n",
         );
+        for relative_path in semantic_source_files() {
+            tree.write(relative_path, "pub fn semantics() -> bool { true }\n");
+        }
         tree.write_manifest_floor();
         tree
     }

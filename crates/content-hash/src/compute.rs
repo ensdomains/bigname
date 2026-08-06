@@ -21,6 +21,31 @@ const MANIFEST_PROFILE_HASH_FORMAT: &[u8] = b"bigname-manifest-profile-v1\0";
 // `apps/phase-runner` is deliberately outside these roots: it may orchestrate phase work, but
 // semantic interpretation or projection code must never live there.
 
+/// Sources outside the watched roots that those roots call to decide persisted interpretation and
+/// projection output. Without them a change to, say, ENS normalization would alter projected
+/// primary-name rows while leaving the fingerprint — and therefore the redo the phase guard
+/// demands — unchanged.
+///
+/// This is a file list rather than a crate root on purpose. `bigname-lookup` also holds the
+/// request-scoped serving engine, CCIP-Read, storage, and RPC transport, none of which decide a
+/// persisted row; watching the whole crate would rotate the fingerprint (and force a full
+/// re-derivation) for serving-only edits. A missing entry is a hard error so moving one of these
+/// modules fails the build instead of silently narrowing the fingerprint.
+const SEMANTIC_SOURCE_FILES: &[&str] = &[
+    // ENS normalization decides primary-name claim status, the stored spelling, label sets, and
+    // DNS encoding for identity, discovery, and primary-name projection.
+    "crates/domain/src/normalization.rs",
+    // Namehash, DNS encoding, resolver-call encoding, and result decoding shared by the hydration
+    // multicalls below.
+    "crates/lookup/src/abi.rs",
+    // Record-selector vocabulary those calls encode.
+    "crates/lookup/src/types.rs",
+    // Reverse-name and text-record multicall encode/decode used by project hydration before rows
+    // are persisted.
+    "crates/lookup/src/reverse_names.rs",
+    "crates/lookup/src/text_records.rs",
+];
+
 #[allow(dead_code)]
 struct CfgTestSourceExclusion {
     relative_path: &'static str,
@@ -39,12 +64,18 @@ struct Input {
 
 #[allow(dead_code)]
 pub(crate) fn watched_paths(workspace_root: &Path) -> Vec<PathBuf> {
-    vec![
+    let mut paths = vec![
         workspace_root.join(ADAPTER_SOURCE_ROOT),
         workspace_root.join(MANIFEST_AUTHORITY_SOURCE_ROOT),
         workspace_root.join(MANIFEST_ROOT),
         workspace_root.join(PROJECT_SOURCE_ROOT),
-    ]
+    ];
+    paths.extend(
+        SEMANTIC_SOURCE_FILES
+            .iter()
+            .map(|relative_path| workspace_root.join(relative_path)),
+    );
+    paths
 }
 
 pub(crate) fn compute(workspace_root: &Path) -> io::Result<String> {
@@ -137,7 +168,25 @@ fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
         &mut inputs,
     )?;
     collect_manifest_event_blocks(workspace_root, &mut inputs)?;
+    collect_semantic_sources(workspace_root, &mut inputs)?;
     Ok(inputs)
+}
+
+fn collect_semantic_sources(workspace_root: &Path, inputs: &mut Vec<Input>) -> io::Result<()> {
+    for relative_path in SEMANTIC_SOURCE_FILES {
+        let path = workspace_root.join(relative_path);
+        if !path.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "interpreter content hash requires semantic source {relative_path}; if those \
+                     semantics moved, update SEMANTIC_SOURCE_FILES in the same change"
+                ),
+            ));
+        }
+        collect_file(workspace_root, &path, inputs)?;
+    }
+    Ok(())
 }
 
 fn collect_rust_sources(
@@ -344,6 +393,11 @@ fn append_bytes(output: &mut Vec<u8>, value: &[u8]) {
 
 fn append_usize(output: &mut Vec<u8>, value: usize) {
     output.extend_from_slice(&(value as u64).to_be_bytes());
+}
+
+#[cfg(test)]
+pub(crate) fn semantic_source_files() -> &'static [&'static str] {
+    SEMANTIC_SOURCE_FILES
 }
 
 #[cfg(test)]
