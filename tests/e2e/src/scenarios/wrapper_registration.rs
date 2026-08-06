@@ -361,7 +361,7 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
     );
     assert_eq!(
         pointer(&body, "/declared_state/registration/expiry"),
-        wrapper_after.expiry
+        renewed_registrar_expiry
     );
     assert_eq!(
         pointer(&body, "/declared_state/wrapper_state"),

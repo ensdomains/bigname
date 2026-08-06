@@ -3834,8 +3834,8 @@
         {
           "event_identity": "ens_v1_unwrapped_authority:TokenControlTransferred:wrapper-token:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0xb4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4:0",
           "namespace": "ens",
-          "logical_name_id": "ens:wrapped.eth",
-          "resource_id": "65981806-f1d4-5492-aec4-a0006027c70a",
+          "logical_name_id": "ens:wrapped.xyz",
+          "resource_id": "d8e91e79-2955-5d4a-880c-555a1a7de209",
           "event_kind": "TokenControlTransferred",
           "source_family": "ens_v1_wrapper_l1",
           "manifest_version": 1,
@@ -3861,17 +3861,17 @@
             "from": null
           },
           "after_state": {
-            "authority_key": "wrapper:ethereum-mainnet:1:0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
+            "authority_key": "wrapper:ethereum-mainnet:1:0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
             "authority_kind": "wrapper",
-            "namehash": "0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84",
+            "namehash": "0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c",
             "to": "0x0000000000000000000000000000000000002611"
           }
         },
         {
           "event_identity": "ens_v1_unwrapped_authority:ExpiryChanged:wrapper-expiry:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0xb4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4:0",
           "namespace": "ens",
-          "logical_name_id": "ens:wrapped.eth",
-          "resource_id": "65981806-f1d4-5492-aec4-a0006027c70a",
+          "logical_name_id": "ens:wrapped.xyz",
+          "resource_id": "d8e91e79-2955-5d4a-880c-555a1a7de209",
           "event_kind": "ExpiryChanged",
           "source_family": "ens_v1_wrapper_l1",
           "manifest_version": 1,
@@ -3896,17 +3896,17 @@
             "expiry": null
           },
           "after_state": {
-            "authority_key": "wrapper:ethereum-mainnet:1:0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
+            "authority_key": "wrapper:ethereum-mainnet:1:0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
             "authority_kind": "wrapper",
             "expiry": 1900000000,
-            "namehash": "0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84"
+            "namehash": "0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c"
           }
         },
         {
           "event_identity": "ens_v1_unwrapped_authority:PermissionScopeChanged:wrapper-fuses:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0xb4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4:0",
           "namespace": "ens",
-          "logical_name_id": "ens:wrapped.eth",
-          "resource_id": "65981806-f1d4-5492-aec4-a0006027c70a",
+          "logical_name_id": "ens:wrapped.xyz",
+          "resource_id": "d8e91e79-2955-5d4a-880c-555a1a7de209",
           "event_kind": "PermissionScopeChanged",
           "source_family": "ens_v1_wrapper_l1",
           "manifest_version": 1,
@@ -3931,18 +3931,18 @@
             "fuses": null
           },
           "after_state": {
-            "authority_key": "wrapper:ethereum-mainnet:1:0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
+            "authority_key": "wrapper:ethereum-mainnet:1:0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
             "authority_kind": "wrapper",
             "fuses": 0,
-            "namehash": "0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84",
+            "namehash": "0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c",
             "wrapper_state": "wrapped"
           }
         },
         {
-          "event_identity": "ens_v1_unwrapped_authority:SurfaceBound:surface-bound:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:ens:wrapped.eth:58a1dcf5-a915-5adf-849b-ca8926e38b67",
+          "event_identity": "ens_v1_unwrapped_authority:SurfaceBound:surface-bound:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:ens:wrapped.xyz:e6700490-9166-54e7-9255-173c98056747",
           "namespace": "ens",
-          "logical_name_id": "ens:wrapped.eth",
-          "resource_id": "65981806-f1d4-5492-aec4-a0006027c70a",
+          "logical_name_id": "ens:wrapped.xyz",
+          "resource_id": "d8e91e79-2955-5d4a-880c-555a1a7de209",
           "event_kind": "SurfaceBound",
           "source_family": "ens_v1_wrapper_l1",
           "manifest_version": 1,
@@ -3964,16 +3964,16 @@
           "before_state": {},
           "after_state": {
             "active_from": 1700000140,
-            "authority_key": "wrapper:ethereum-mainnet:1:0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
+            "authority_key": "wrapper:ethereum-mainnet:1:0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
             "authority_kind": "wrapper",
             "binding_kind": "declared_registry_path"
           }
         },
         {
-          "event_identity": "ens_v1_unwrapped_authority:AuthorityEpochChanged:authority-epoch:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:ens:wrapped.eth:1700000140:none:wrapper:ethereum-mainnet:1:0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
+          "event_identity": "ens_v1_unwrapped_authority:AuthorityEpochChanged:authority-epoch:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:ens:wrapped.xyz:1700000140:none:wrapper:ethereum-mainnet:1:0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
           "namespace": "ens",
-          "logical_name_id": "ens:wrapped.eth",
-          "resource_id": "65981806-f1d4-5492-aec4-a0006027c70a",
+          "logical_name_id": "ens:wrapped.xyz",
+          "resource_id": "d8e91e79-2955-5d4a-880c-555a1a7de209",
           "event_kind": "AuthorityEpochChanged",
           "source_family": "ens_v1_wrapper_l1",
           "manifest_version": 1,
@@ -3997,15 +3997,15 @@
             "authority_kind": null
           },
           "after_state": {
-            "authority_key": "wrapper:ethereum-mainnet:1:0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
+            "authority_key": "wrapper:ethereum-mainnet:1:0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
             "authority_kind": "wrapper"
           }
         },
         {
           "event_identity": "ens_v1_unwrapped_authority:PermissionScopeChanged:wrapper-fuses:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0xb4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4:1",
           "namespace": "ens",
-          "logical_name_id": "ens:wrapped.eth",
-          "resource_id": "65981806-f1d4-5492-aec4-a0006027c70a",
+          "logical_name_id": "ens:wrapped.xyz",
+          "resource_id": "d8e91e79-2955-5d4a-880c-555a1a7de209",
           "event_kind": "PermissionScopeChanged",
           "source_family": "ens_v1_wrapper_l1",
           "manifest_version": 1,
@@ -4032,17 +4032,17 @@
             "wrapper_state": "wrapped"
           },
           "after_state": {
-            "authority_key": "wrapper:ethereum-mainnet:1:0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
+            "authority_key": "wrapper:ethereum-mainnet:1:0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
             "authority_kind": "wrapper",
             "fuses": 65536,
-            "namehash": "0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84",
+            "namehash": "0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c",
             "wrapper_state": "emancipated"
           }
         },
         {
           "namespace": "ens",
-          "logical_name_id": "ens:wrapped.eth",
-          "resource_id": "65981806-f1d4-5492-aec4-a0006027c70a",
+          "logical_name_id": "ens:wrapped.xyz",
+          "resource_id": "d8e91e79-2955-5d4a-880c-555a1a7de209",
           "event_kind": "PermissionScopeChanged",
           "source_family": "ens_v1_wrapper_l1",
           "manifest_version": 1,
@@ -4070,8 +4070,8 @@
         },
         {
           "namespace": "ens",
-          "logical_name_id": "ens:wrapped.eth",
-          "resource_id": "65981806-f1d4-5492-aec4-a0006027c70a",
+          "logical_name_id": "ens:wrapped.xyz",
+          "resource_id": "d8e91e79-2955-5d4a-880c-555a1a7de209",
           "event_kind": "PermissionScopeChanged",
           "source_family": "ens_v1_wrapper_l1",
           "manifest_version": 1,
@@ -4098,10 +4098,10 @@
           }
         },
         {
-          "event_identity": "ens_v1_unwrapped_authority:SurfaceUnbound:surface-unbound:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:ens:wrapped.eth:58a1dcf5-a915-5adf-849b-ca8926e38b67",
+          "event_identity": "ens_v1_unwrapped_authority:SurfaceUnbound:surface-unbound:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:ens:wrapped.xyz:e6700490-9166-54e7-9255-173c98056747",
           "namespace": "ens",
-          "logical_name_id": "ens:wrapped.eth",
-          "resource_id": "65981806-f1d4-5492-aec4-a0006027c70a",
+          "logical_name_id": "ens:wrapped.xyz",
+          "resource_id": "d8e91e79-2955-5d4a-880c-555a1a7de209",
           "event_kind": "SurfaceUnbound",
           "source_family": "ens_v1_wrapper_l1",
           "manifest_version": 1,
@@ -4121,20 +4121,20 @@
           "derivation_kind": "ens_v1_unwrapped_authority",
           "canonicality_state": "Canonical",
           "before_state": {
-            "authority_key": "wrapper:ethereum-mainnet:1:0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
+            "authority_key": "wrapper:ethereum-mainnet:1:0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
             "authority_kind": "wrapper"
           },
           "after_state": {
             "active_to": 1700000140,
-            "authority_key": "wrapper:ethereum-mainnet:1:0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
+            "authority_key": "wrapper:ethereum-mainnet:1:0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
             "authority_kind": "wrapper"
           }
         },
         {
-          "event_identity": "ens_v1_unwrapped_authority:AuthorityEpochChanged:authority-epoch:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:ens:wrapped.eth:1700000140:wrapper:ethereum-mainnet:1:0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0:none",
+          "event_identity": "ens_v1_unwrapped_authority:AuthorityEpochChanged:authority-epoch:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:ens:wrapped.xyz:1700000140:wrapper:ethereum-mainnet:1:0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0:none",
           "namespace": "ens",
-          "logical_name_id": "ens:wrapped.eth",
-          "resource_id": "65981806-f1d4-5492-aec4-a0006027c70a",
+          "logical_name_id": "ens:wrapped.xyz",
+          "resource_id": "d8e91e79-2955-5d4a-880c-555a1a7de209",
           "event_kind": "AuthorityEpochChanged",
           "source_family": "ens_v1_wrapper_l1",
           "manifest_version": 1,
@@ -4154,7 +4154,7 @@
           "derivation_kind": "ens_v1_unwrapped_authority",
           "canonicality_state": "Canonical",
           "before_state": {
-            "authority_key": "wrapper:ethereum-mainnet:1:0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
+            "authority_key": "wrapper:ethereum-mainnet:1:0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
             "authority_kind": "wrapper"
           },
           "after_state": {
@@ -4167,25 +4167,25 @@
         {
           "block_hash": "0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
           "block_number": 140,
-          "canonical_display_name": "wrapped.eth",
+          "canonical_display_name": "wrapped.xyz",
           "canonicality_state": "canonical",
           "chain_id": "ethereum-mainnet",
-          "dns_encoded_name": "\\x07777261707065640365746800",
-          "input_name": "wrapped.eth",
+          "dns_encoded_name": "\\x07777261707065640378797a00",
+          "input_name": "wrapped.xyz",
           "labelhashes": [
             "0x4ca938ec1b323ca71c4fb47a712abb68cce1cabf39ea4d6789e42fbc1f95459b",
-            "0x4f5b812789fc606be1b3b16908db13fc7a9adf7ca72641f84d75b47069d3d7f0"
+            "0x9dd2c369a187b4e6b9c402f030e50743e619301ea62aa4c0737d4ef7e10a3d49"
           ],
-          "logical_name_id": "ens:wrapped.eth",
-          "namehash": "0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84",
+          "logical_name_id": "ens:wrapped.xyz",
+          "namehash": "0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c",
           "namespace": "ens",
           "normalization_errors": [],
           "normalization_warnings": [],
-          "normalized_name": "wrapped.eth",
+          "normalized_name": "wrapped.xyz",
           "normalizer_version": "ensip15@ens-normalize-0.1.1",
           "provenance": {
             "adapter": "ens_v1_unwrapped_authority",
-            "logical_name_id": "ens:wrapped.eth",
+            "logical_name_id": "ens:wrapped.xyz",
             "source_event": "registrar_name_observation"
           }
         }
@@ -4199,17 +4199,17 @@
           "chain_id": "ethereum-mainnet",
           "provenance": {
             "adapter": "ens_v1_unwrapped_authority",
-            "authority_key": "wrapper:ethereum-mainnet:1:0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
+            "authority_key": "wrapper:ethereum-mainnet:1:0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
             "authority_kind": "wrapper",
             "expiry": 1900000000,
             "fuses": 65663,
-            "logical_name_id": "ens:wrapped.eth",
-            "namehash": "0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84",
+            "logical_name_id": "ens:wrapped.xyz",
+            "namehash": "0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c",
             "owner": "0x0000000000000000000000000000000000002611",
             "unwrapped_at": 1700000140
           },
-          "resource_id": "65981806-f1d4-5492-aec4-a0006027c70a",
-          "token_lineage_id": "1fc69df6-e291-5ea9-821a-bd9d8aee9da8"
+          "resource_id": "d8e91e79-2955-5d4a-880c-555a1a7de209",
+          "token_lineage_id": "d34c685f-2410-51ae-ac59-d7f9d9da824d"
         }
       ],
       "token_lineages": [
@@ -4220,12 +4220,12 @@
           "chain_id": "ethereum-mainnet",
           "provenance": {
             "adapter": "ens_v1_unwrapped_authority",
-            "authority_key": "wrapper:ethereum-mainnet:1:0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
+            "authority_key": "wrapper:ethereum-mainnet:1:0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c:0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3:0",
             "authority_kind": "wrapper",
-            "logical_name_id": "ens:wrapped.eth",
-            "namehash": "0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84"
+            "logical_name_id": "ens:wrapped.xyz",
+            "namehash": "0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c"
           },
-          "token_lineage_id": "1fc69df6-e291-5ea9-821a-bd9d8aee9da8"
+          "token_lineage_id": "d34c685f-2410-51ae-ac59-d7f9d9da824d"
         }
       ]
     },
