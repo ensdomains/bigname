@@ -64,6 +64,13 @@ old-runtime backfill job fetched all matching logs over one block interval.
 The tables remain in schema-migration history, but the Stage B runtime has no writer,
 repair path, or checkpoint-promotion consumer for these records.
 
+**Batch grid** — the partition of one interpret walk into consecutive physical
+batches (today 500-block ranges). Grids never split a block: the block is the
+atomic unit every grid loads. Where the boundaries fall is an execution
+detail, not an input to interpretation — surviving identity rows, discovery
+edges, and normalized events must be identical across grids over identical
+input.
+
 **Stored-history verification** — the read-only phase that compares canonical
 selected raw logs with the chain's configured reference source through a
 finalized block. Base uses dRPC to cross-check the Coinbase-loaded history and
@@ -756,6 +763,11 @@ consumer for this proof.
 **Rewind horizon** — the earliest chain position reorg repair might need to
 rewind to. Compaction and pruning must never delete data needed at or behind
 it.
+
+**Run shape** — how one interpret walk executes over its input: fresh (from
+the start of the chain), incremental (continuing from retained prior events),
+or resumed (continuing persisted redo state). Batch-independence rules
+require identical surviving rows in every run shape over identical input.
 
 **Shadow** — (1) manifest rollout/capability value: facts and traces are
 written but general public reads are not enabled; (2) *shadow comparison*:

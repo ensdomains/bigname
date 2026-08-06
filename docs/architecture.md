@@ -379,24 +379,29 @@ boundaries fall. Three rules keep the written rows batch-independent:
   `before_state` is the `after_state` of the previous retained event under the
   same final `raw_fact_ref.interpreter_state_key` (`{}` at stream start),
   seeded from the pre-batch retained state. Events that same-transaction
-  reconciliation later drops or re-keys leave no trace in surviving rows.
-  Interpreter-declared explicit befores (deliberate snapshots such as wrapper
-  fuse state or permission grant bodies) are exempt from re-threading and are
-  written as computed at emission, with one carve-out: same-transaction
-  re-attribution to a registration (the second rule) resets the before to
-  `{}`, so the registration's stream starts from an empty snapshot. The
-  block-scoped predecessor-epoch permission closures keep their computed
-  snapshot.
+  reconciliation later drops or re-keys leave no trace in surviving
+  stream-chained state: each retained `before_state` is re-derived from the
+  surviving stream alone. Interpreter-declared explicit befores (deliberate
+  snapshots such as wrapper fuse state or permission grant bodies) are exempt
+  from re-threading and are written as computed at emission, with one
+  carve-out: same-transaction re-attribution to a registration (the second
+  rule) resets the before to `{}`, so the registration's stream starts from
+  an empty snapshot. A surviving explicit before may quote in-memory state a
+  later-dropped same-transaction event wrote; that snapshot is computed
+  identically in every run shape. The block-scoped predecessor-epoch
+  permission closures keep their computed snapshot.
 - Identity attribution is fixed at emission, with one exception:
   same-transaction reconciliation may attribute registry, resolver, and
   permission observations to a registration established later in the same
   transaction, and predecessor-epoch permission closures may be attributed
   when they share the registration's block. Reconciliation never reaches
   across a block boundary — batches never split a block, so the block is the
-  atomic unit every grid loads — so predecessor-epoch observations that only
+  atomic unit every [batch grid](glossary.md#batch-grid) loads — so
+  predecessor-epoch observations that only
   a later block's registration could identify keep their event-time
   attribution (null `logical_name_id`/`resource_id` where no authority was
-  known) in every run shape (fresh, incremental, or resumed).
+  known) in every [run shape](glossary.md#run-shape) (fresh, incremental, or
+  resumed).
 - Resource rows anchor at their first derivation block. A superseded
   registry-only resource emission is retained even when no surviving
   same-batch row references it, so the first-committed identity upsert anchors
