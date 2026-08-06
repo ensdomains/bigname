@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, BatchOutput, interpret_schema_v2_batch,
-    interpret_schema_v2_batch_incremental, seam,
+    interpret_schema_v2_batch_incremental, seam, seam::ADMISSION_DISCOVERY_EDGE_KINDS,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -663,19 +663,34 @@ fn absorb_discovered_admissions(admitted: &mut Vec<AddressAdmissionInput>, from:
         if known.contains(&(address.address.clone(), address.contract_instance_id)) {
             continue;
         }
-        let edge = from.discovery_edges.iter().find(|edge| {
+        // Production joins an address to a discovery edge and admits only what that join yields,
+        // so an address with no admitting edge is not admitted at all, the edge supplies the
+        // manifest id and leaves the role null, and the range starts at the later of the two
+        // (`crates/interpret/src/load.rs`). Modelling any of that more loosely would admit in the
+        // split replay what production would not, which reads as convergence.
+        let Some(edge) = from.discovery_edges.iter().find(|edge| {
             edge.to_contract_instance_id == address.contract_instance_id
                 && edge.chain_id == address.chain_id
-        });
+                && ADMISSION_DISCOVERY_EDGE_KINDS.contains(&edge.edge_kind.as_str())
+                && matches!(
+                    edge.canonicality_state.as_str(),
+                    "canonical" | "safe" | "finalized"
+                )
+        }) else {
+            continue;
+        };
         admitted.push(AddressAdmissionInput {
             address: address.address.clone(),
             contract_instance_id: address.contract_instance_id,
-            source_manifest_id: Some(address.source_manifest_id),
+            source_manifest_id: Some(edge.source_manifest_id),
             role: None,
-            discovery_edge_kind: edge.map(|edge| edge.edge_kind.clone()),
-            discovery_from_contract_instance_id: edge.map(|edge| edge.from_contract_instance_id),
-            discovery_observation_key: edge.map(|edge| edge.observation_key.clone()),
-            active_from_block: Some(address.active_from_block_number),
+            discovery_edge_kind: Some(edge.edge_kind.clone()),
+            discovery_from_contract_instance_id: Some(edge.from_contract_instance_id),
+            discovery_observation_key: Some(edge.observation_key.clone()),
+            active_from_block: Some(
+                edge.active_from_block_number
+                    .max(address.active_from_block_number),
+            ),
             active_to_block: None,
         });
     }
