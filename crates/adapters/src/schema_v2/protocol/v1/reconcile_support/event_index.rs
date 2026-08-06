@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::schema_v2::{model::NormalizedEvent, seam::INTERPRETER_STATE_KEY};
+use crate::schema_v2::model::NormalizedEvent;
 
 pub(super) type Position = (i64, i64, i64);
 
@@ -45,7 +45,6 @@ pub(super) struct EventFields {
     pub(super) resource_scope: bool,
     pub(super) grant: bool,
     pub(super) revocation: bool,
-    pub(super) state_key: Option<String>,
 }
 
 impl EventFields {
@@ -95,11 +94,6 @@ impl EventFields {
             revocation: state
                 .get("revocation_source")
                 .is_some_and(|source| !source.is_null()),
-            state_key: event
-                .raw_fact_ref
-                .get(INTERPRETER_STATE_KEY)
-                .and_then(Value::as_str)
-                .map(str::to_owned),
         }
     }
 }
@@ -112,6 +106,9 @@ pub(super) struct Registration {
     pub(super) log_index: i64,
     pub(super) authority_key: Option<String>,
     pub(super) emitter: String,
+    /// Chain position of the registration event; the block number scopes how far reconciliation
+    /// may reach back for predecessor-epoch observations.
+    pub(super) position: Position,
 }
 
 pub(super) struct EventIndex {
@@ -120,7 +117,6 @@ pub(super) struct EventIndex {
     pub(super) by_target: HashMap<TargetKey, Vec<usize>>,
     pub(super) by_position: HashMap<Position, Vec<usize>>,
     pub(super) by_resource: HashMap<Uuid, Vec<usize>>,
-    pub(super) by_state_key: HashMap<String, Vec<usize>>,
 }
 
 impl EventIndex {
@@ -132,7 +128,6 @@ impl EventIndex {
             by_target: HashMap::new(),
             by_position: HashMap::new(),
             by_resource: HashMap::new(),
-            by_state_key: HashMap::new(),
         };
         for (event_index, event) in events.iter().enumerate() {
             let fields = &index.fields[event_index];
@@ -164,13 +159,6 @@ impl EventIndex {
                 index
                     .by_resource
                     .entry(resource_id)
-                    .or_default()
-                    .push(event_index);
-            }
-            if let Some(state_key) = fields.state_key.as_ref() {
-                index
-                    .by_state_key
-                    .entry(state_key.clone())
                     .or_default()
                     .push(event_index);
             }
@@ -223,6 +211,7 @@ impl EventIndex {
                         .and_then(Value::as_str)
                         .map(str::to_owned),
                     emitter: emitter?.to_ascii_lowercase(),
+                    position: event_position(event)?,
                 })
             })
             .collect()
@@ -238,16 +227,6 @@ impl EventIndex {
             .entry(resource_id)
             .or_default()
             .push(event_index);
-    }
-
-    pub(super) fn update_state_key(&mut self, event_index: usize, state_key: Option<String>) {
-        self.fields[event_index].state_key.clone_from(&state_key);
-        if let Some(state_key) = state_key {
-            self.by_state_key
-                .entry(state_key)
-                .or_default()
-                .push(event_index);
-        }
     }
 }
 

@@ -122,6 +122,10 @@ pub struct NormalizedEvent {
     pub canonicality_state: String,
     pub before_state: Value,
     pub after_state: Value,
+    /// True when the interpreter deliberately computed `before_state` as a snapshot (rather than
+    /// chaining it from the previous emitted event under the same interpreter state key). Not
+    /// persisted; it steers the post-reconciliation before-state re-thread only.
+    pub before_state_explicit: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

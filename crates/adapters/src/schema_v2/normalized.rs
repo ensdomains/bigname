@@ -18,6 +18,7 @@ pub(super) fn materialize(
     output: &mut BatchOutput,
 ) {
     for (ordinal, draft) in events.into_iter().enumerate() {
+        let before_state_explicit = draft.explicit_before.is_some();
         let before_state = state.transition(
             &selected.source.namespace,
             draft.logical_name_id.as_deref(),
@@ -79,6 +80,7 @@ pub(super) fn materialize(
             canonicality_state: raw.canonicality_state.clone(),
             before_state,
             after_state: draft.after_state,
+            before_state_explicit,
         });
     }
 }
@@ -92,6 +94,7 @@ pub(super) fn materialize_boundary(
 ) {
     for (ordinal, draft) in events.into_iter().enumerate() {
         let derivation = derivation_kind(&source.source_family, &draft.event_kind);
+        let before_state_explicit = draft.explicit_before.is_some();
         let state_key = interpreter_state_key(
             &source.namespace,
             draft.logical_name_id.as_deref(),
@@ -141,6 +144,7 @@ pub(super) fn materialize_boundary(
             canonicality_state: block.canonicality_state.clone(),
             before_state,
             after_state: draft.after_state,
+            before_state_explicit,
         });
     }
 }
@@ -222,5 +226,8 @@ pub(super) fn preimage_event(
         canonicality_state: raw.canonicality_state.clone(),
         before_state: json!({}),
         after_state,
+        // Preimage observations never enter the interpreter state stream; their empty before is
+        // fixed, so the re-thread must leave it alone.
+        before_state_explicit: true,
     }
 }

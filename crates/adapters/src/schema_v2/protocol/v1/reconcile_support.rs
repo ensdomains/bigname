@@ -3,7 +3,6 @@ mod side_index;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde_json::Value;
 use uuid::Uuid;
 
 use self::{
@@ -14,10 +13,7 @@ use self::{
     side_index::{BindingIndex, ClosureIndex},
 };
 use super::{refresh_interpreter_state_key, retarget_permission_authority};
-use crate::schema_v2::{
-    model::{BatchOutput, NormalizedEvent},
-    seam::INTERPRETER_STATE_KEY,
-};
+use crate::schema_v2::model::BatchOutput;
 
 pub(super) fn reconcile(output: &mut BatchOutput) {
     // Extract JSON-backed comparison fields and build the transaction/name, position, resource,
@@ -26,7 +22,6 @@ pub(super) fn reconcile(output: &mut BatchOutput) {
     let registrations = events.registrations(&output.normalized_events);
     let mut bindings = BindingIndex::new(output);
     let mut closures = ClosureIndex::new(output);
-    let mut stale_resources_seen = BTreeSet::new();
 
     for registration in registrations {
         reconcile_registration(
@@ -34,7 +29,6 @@ pub(super) fn reconcile(output: &mut BatchOutput) {
             &mut events,
             &mut bindings,
             &mut closures,
-            &mut stale_resources_seen,
             &registration,
         );
     }
@@ -42,21 +36,10 @@ pub(super) fn reconcile(output: &mut BatchOutput) {
     retain_by_flags(&mut output.normalized_events, &events.active);
     retain_by_flags(&mut output.surface_bindings, &bindings.active);
     retain_by_flags(&mut output.binding_closures, &closures.active);
-    let retained_resource_references = output
-        .normalized_events
-        .iter()
-        .filter_map(|event| event.resource_id)
-        .chain(
-            output
-                .surface_bindings
-                .iter()
-                .map(|binding| binding.resource_id),
-        )
-        .collect::<BTreeSet<_>>();
-    output.resources.retain(|resource| {
-        !stale_resources_seen.contains(&resource.resource_id)
-            || retained_resource_references.contains(&resource.resource_id)
-    });
+    // Superseded registry-only resource emissions are always retained at their first derivation
+    // block, whether or not a surviving row in this batch references them: dropping an
+    // unreferenced emission and re-emitting at a later referencing event would anchor the same
+    // resource at different blocks depending on where batch boundaries fall.
 }
 
 fn reconcile_registration(
@@ -64,7 +47,6 @@ fn reconcile_registration(
     events: &mut EventIndex,
     bindings: &mut BindingIndex,
     closures: &mut ClosureIndex,
-    stale_resources_seen: &mut BTreeSet<Uuid>,
     registration: &Registration,
 ) {
     let target_candidates = events
@@ -92,7 +74,6 @@ fn reconcile_registration(
         .filter(|index| events.fields[**index].registry_only)
         .filter_map(|index| events.fields[*index].resource_id)
         .collect::<BTreeSet<_>>();
-    stale_resources_seen.extend(&stale_resources);
     let first_ownership_log_index = pending
         .iter()
         .filter(|index| {
@@ -155,8 +136,12 @@ fn reconcile_registration(
     let setup_revocations = setup_revocations(events, &pending_positions, &stale_resources);
     // Revocations that close preceding registry-only permission grants, plus those grants, remain
     // attached to the preceding resource. Other incoming grants may move to the registration.
+    // Attachment never reaches across a block boundary: the block is the atomic unit every batch
+    // grid loads, while a registration from a later block cannot identify an observation in every
+    // run shape.
     let predecessor_events = predecessor_candidates(
         events,
+        registration,
         &stale_resources,
         &predecessor_owner_positions,
         &setup_revocations,
@@ -165,11 +150,9 @@ fn reconcile_registration(
         let event = &mut output.normalized_events[index];
         event.logical_name_id = Some(registration.logical_name_id.clone());
         refresh_interpreter_state_key(event);
-        events.update_state_key(index, event_state_key(event));
     }
 
     let retarget_candidates = retarget_candidates(events, &target_candidates, &pending_positions);
-    let mut resolver_starts = BTreeMap::new();
     for index in retarget_candidates {
         if concerns_predecessor_epoch(
             &events.fields[index],
@@ -206,7 +189,6 @@ fn reconcile_registration(
         if !(targets_registry || targets_resolver || references_pending_resource) {
             continue;
         }
-        let resolver_event = fields.family == SourceFamily::Resolver;
         let event = &mut output.normalized_events[index];
         event.logical_name_id = Some(registration.logical_name_id.clone());
         event.resource_id = Some(registration.resource_id);
@@ -218,20 +200,13 @@ fn reconcile_registration(
             state.remove("authority_key");
         }
         refresh_interpreter_state_key(event);
+        // Stream-chained befores are re-derived from the surviving rows after reconciliation;
+        // this blank only survives on interpreter-declared explicit befores, which the re-thread
+        // leaves alone.
         event.before_state = serde_json::json!({});
-        let state_key = event_state_key(event);
-        let position = events.fields[index].position;
         events.fields[index].registry_only = false;
         events.update_resource(index, registration.resource_id);
-        events.update_state_key(index, state_key.clone());
-        if resolver_event && let (Some(state_key), Some(position)) = (state_key, position) {
-            resolver_starts
-                .entry(state_key)
-                .and_modify(|start: &mut Position| *start = (*start).min(position))
-                .or_insert(position);
-        }
     }
-    rethread_resolver_state(output, events, resolver_starts);
     bindings.remove(&stale_resources, &pending_positions);
     closures.remove(&registration.logical_name_id, &pending_positions);
 }
@@ -311,6 +286,7 @@ fn setup_revocations(
 
 fn predecessor_candidates(
     events: &EventIndex,
+    registration: &Registration,
     stale_resources: &BTreeSet<Uuid>,
     predecessor_positions: &BTreeSet<Position>,
     setup_revocations: &[PermissionRevocation],
@@ -320,7 +296,18 @@ fn predecessor_candidates(
         .flat_map(|position| events.candidates_at(*position))
         .collect::<Vec<_>>();
     for resource_id in stale_resources {
-        candidates.extend(events.by_resource.get(resource_id).into_iter().flatten());
+        candidates.extend(
+            events
+                .by_resource
+                .get(resource_id)
+                .into_iter()
+                .flatten()
+                .filter(|index| {
+                    events.fields[**index]
+                        .position
+                        .is_some_and(|position| position.0 == registration.position.0)
+                }),
+        );
     }
     sort_unique(&mut candidates);
     candidates.retain(|index| {
@@ -383,43 +370,6 @@ fn retarget_candidates(
     sort_unique(&mut candidates);
     candidates.retain(|index| events.active[*index]);
     candidates
-}
-
-fn rethread_resolver_state(
-    output: &mut BatchOutput,
-    events: &EventIndex,
-    resolver_starts: BTreeMap<String, Position>,
-) {
-    for (state_key, start) in resolver_starts {
-        let mut candidates = events
-            .by_state_key
-            .get(&state_key)
-            .cloned()
-            .unwrap_or_default();
-        sort_unique(&mut candidates);
-        let mut previous = None;
-        for index in candidates {
-            let fields = &events.fields[index];
-            if !events.active[index]
-                || fields.state_key.as_deref() != Some(&state_key)
-                || fields.position.is_none_or(|position| position < start)
-            {
-                continue;
-            }
-            let event = &mut output.normalized_events[index];
-            event.before_state = previous
-                .replace(event.after_state.clone())
-                .unwrap_or_else(|| serde_json::json!({}));
-        }
-    }
-}
-
-fn event_state_key(event: &NormalizedEvent) -> Option<String> {
-    event
-        .raw_fact_ref
-        .get(INTERPRETER_STATE_KEY)
-        .and_then(Value::as_str)
-        .map(str::to_owned)
 }
 
 fn sort_unique(values: &mut Vec<usize>) {

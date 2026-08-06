@@ -383,12 +383,13 @@ boundaries fall. Three rules keep the written rows batch-independent:
 - Identity attribution is fixed at emission, with one exception:
   same-transaction reconciliation may attribute registry, resolver, and
   permission observations to a registration established later in the same
-  transaction. It never attaches an observation to a registration from a
-  different transaction — that identity is not computable when the observation
-  is interpreted — so predecessor-epoch observations that only a later
-  transaction's registration could identify keep their event-time attribution
-  (null `logical_name_id`/`resource_id` where no authority was known) in every
-  run shape.
+  transaction, and predecessor-epoch permission closures may be attributed
+  when they share the registration's block. Reconciliation never reaches
+  across a block boundary — the block is the atomic unit every batch grid
+  loads — so predecessor-epoch observations that only a later block's
+  registration could identify keep their event-time attribution (null
+  `logical_name_id`/`resource_id` where no authority was known) in every run
+  shape.
 - Resource rows anchor at their first derivation block. A superseded
   registry-only resource emission is retained even when no surviving
   same-batch row references it, so the first-committed identity upsert anchors

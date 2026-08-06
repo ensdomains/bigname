@@ -5950,6 +5950,14 @@
           "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
           "block_number": 200,
           "canonicality_state": "canonical"
+        },
+        {
+          "resource_id": "dad7d3be-1453-5013-b56b-3f05c0a1e2fc",
+          "token_lineage_id": null,
+          "chain_id": "ethereum-mainnet",
+          "block_hash": "0xf4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+          "block_number": 200,
+          "canonicality_state": "canonical"
         }
       ],
       "token_lineages": [
