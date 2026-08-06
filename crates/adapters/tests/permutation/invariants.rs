@@ -279,8 +279,17 @@ impl IdentityReferences {
 /// unchecked, and a sequence that agrees on the surviving row while disagreeing on a dropped one
 /// looks convergent here and aborts in production.
 ///
-/// Scoped to one batch because that is one write transaction. `deactivated_at` is deliberately not
-/// compared: it is absent from the writer's guard, which is the divergence tracked by issue #336.
+/// The guard compares against the row already in the table, not against the batch, so this holds
+/// over any set of rows the writer would apply in sequence — one batch, or a whole split replay
+/// concatenated. Comparing against the first emission is right in both cases because none of the
+/// three `SET` clauses ever rewrites a guarded column, so the stored values are frozen at insert.
+/// `deactivated_at` is deliberately not compared: it is absent from the writer's guard, which is
+/// the divergence tracked by issue #336.
+///
+/// Only `name_surfaces` and `label_preimages` actually repeat a key in this corpus. The other three
+/// are covered on the same rule rather than assumed unique — `normalized_events` in particular
+/// keys on an `event_identity` the adapter builds by hand, so a repeat there is reachable by
+/// construction even though nothing generates one today.
 pub fn assert_upsert_guards_agree(context: &str, output: &BatchOutput) -> Result<()> {
     // One report per key: a key emitted N times conflicting is one rejected batch, not N.
     let mut conflicts = BTreeMap::new();
@@ -336,16 +345,55 @@ pub fn assert_upsert_guards_agree(context: &str, output: &BatchOutput) -> Result
             ),
         );
     }
-    // The lineage guard also passes when the stored row is orphaned, so only a repeat that lands on
-    // a different anchor while both rows are live is a batch the writer would reject.
+    // The lineage guard also passes when the *stored* row is orphaned. That escape is not modelled
+    // here because `check_canonicality` already fails any output carrying a non-canonical row, so
+    // an orphaned lineage never reaches this function; modelling it would be an untested branch.
     for row in &output.token_lineages {
-        if row.canonicality_state == "orphaned" {
-            continue;
-        }
         check(
             "token_lineages",
             format!("{}:{}", row.chain_id, row.token_lineage_id),
             format!("{}:{}:{}", row.block_hash, row.block_number, row.provenance),
+        );
+    }
+    // The strictest guard in the schema: every column but `canonicality_state` must match, and the
+    // conflict target is `event_identity`, which the adapter builds by hand rather than from a
+    // sequence — so two emissions that build the same identity from different data fail the batch.
+    for row in &output.normalized_events {
+        check(
+            "normalized_events",
+            row.event_identity.clone(),
+            format!(
+                "{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{}:{}",
+                row.namespace,
+                row.logical_name_id,
+                row.resource_id,
+                row.event_kind,
+                row.source_family,
+                row.manifest_version,
+                row.source_manifest_id,
+                row.chain_id,
+                row.block_number,
+                row.block_hash,
+                row.transaction_hash,
+                row.transaction_index,
+                row.log_index,
+                row.raw_fact_ref,
+                row.derivation_kind,
+                row.before_state,
+                row.after_state,
+            ),
+        );
+    }
+    // `active_from` is guarded too, but the writer substitutes a start time it looks up from the
+    // binding's predecessor in the table, so the emitted value is not what the guard compares.
+    for row in &output.surface_bindings {
+        check(
+            "surface_bindings",
+            row.surface_binding_id.to_string(),
+            format!(
+                "{}:{}:{}:{}",
+                row.logical_name_id, row.resource_id, row.binding_kind, row.chain_id
+            ),
         );
     }
     if !conflicts.is_empty() {
@@ -535,6 +583,13 @@ pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> R
     let artifacts = assert_converged(context, &fresh, &replayed)?;
     assert_lineage_integrity(context, "the whole-sequence pass", &fresh)?;
     assert_lineage_integrity(context, "the split replay", &replayed)?;
+    assert_upsert_guards_agree(
+        &format!("{context}: split replay across batches"),
+        &replayed,
+    )?;
+    // The guard compares against whatever is already in the table, so a row first written by batch 0
+    // still guards batch 2's re-emission. Checking each batch alone would miss exactly that.
+
     Ok(Converged {
         batches: outputs,
         whole: Replayed {

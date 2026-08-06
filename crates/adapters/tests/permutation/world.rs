@@ -348,9 +348,12 @@ fn admitted<'a>(
 /// highest version number, because a family may also carry a `draft` or `shadow` version that
 /// production does not run. `docs/manifests.md` allows at most one active version per namespace,
 /// family, and chain *within one deployment-profile root*, and allows a family to have none; this
-/// lane loads two roots and is stricter — a family it pins with no active version, or with more than
-/// one, leaves the pin unjustifiable, so both fail here. The pinned direction looks across epochs so
-/// that a rollout which retires this world's epoch reports where it went.
+/// lane loads every root and is stricter — a family it pins with no active version, or with more
+/// than one, leaves the pin unjustifiable, so both fail here. Two roots carrying an active version
+/// of the same family on the same chain is legal by that doc and would fail this check; the lane
+/// would need to learn which root each world belongs to before it could allow that. The pinned
+/// direction looks across epochs so that a rollout which retires this world's epoch reports where
+/// it went.
 pub fn assert_pins_are_current(world: &World, checked_in: &[LoadedManifest]) -> Result<()> {
     let mut active: BTreeMap<&str, Vec<&LoadedManifest>> = BTreeMap::new();
     for loaded in checked_in {
@@ -372,7 +375,9 @@ pub fn assert_pins_are_current(world: &World, checked_in: &[LoadedManifest]) -> 
                 slot.family, slot.version_file
             )),
             Some([_, _, ..]) => drift.push(format!(
-                "{} has more than one active version, so a pin cannot be checked against it",
+                "{} has more than one active version, so a pin cannot be checked against it — if \
+                 they are in different deployment-profile roots that is legal, and this check is \
+                 what needs to change",
                 slot.family
             )),
             Some([current]) => {

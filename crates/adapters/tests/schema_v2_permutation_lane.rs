@@ -65,8 +65,8 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
         bail!("BIGNAME_PERMUTATION_CASES must be at least 1");
     }
     let mut failures = Vec::new();
-    let mut artifacts = BatchBoundaryArtifacts::default();
-    let mut subregistry_detaches = 0;
+    let mut artifacts: BTreeMap<&str, BatchBoundaryArtifacts> = BTreeMap::new();
+    let mut subregistry_detaches: BTreeMap<&str, usize> = BTreeMap::new();
     let mut emitted_topic0s = BTreeSet::new();
     let mut event_kinds: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     let mut derived = Vec::new();
@@ -75,6 +75,8 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
         let declared = wiring.declared_instances();
         let mut events = 0_usize;
         let mut logs = 0_usize;
+        let mut world_artifacts = BatchBoundaryArtifacts::default();
+        let mut world_detaches = 0_usize;
         for case in 0..cases {
             let seed = base.wrapping_add(case.wrapping_mul(CASE_STRIDE));
             let scenario = scenario::generate(world, &wiring, seed);
@@ -91,13 +93,22 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
             let batches = split(input.blocks.len(), seed ^ SPLIT_SALT);
             match check(&context, world, &declared, input, batches) {
                 Ok(outcome) => {
+                    // Per sequence, not just per world: an admission or role mismatch that dropped
+                    // most sequences would leave the world total positive and the kind floor
+                    // satisfied by whichever few still derived anything.
+                    if outcome.events == 0 && !scenario.logs.is_empty() {
+                        failures.push(format!(
+                            "{context}: derived no normalized events from {} raw logs",
+                            scenario.logs.len()
+                        ));
+                    }
                     events += outcome.events;
                     event_kinds
                         .entry(world.label)
                         .or_default()
                         .extend(outcome.event_kinds);
-                    subregistry_detaches += outcome.subregistry_detaches;
-                    artifacts.absorb(outcome.artifacts);
+                    world_artifacts.absorb(outcome.artifacts);
+                    world_detaches += outcome.subregistry_detaches;
                 }
                 Err(error) => failures.push(format!("{error:?}")),
             }
@@ -106,11 +117,14 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
             "permutation_lane world={} sequences={cases} raw_logs={logs} normalized_events={events}",
             world.label
         );
+        eprintln!(
+            "permutation_lane world={} batch_boundary_artifacts: {world_artifacts} subregistry_detaches={world_detaches}",
+            world.label
+        );
+        artifacts.insert(world.label, world_artifacts);
+        subregistry_detaches.insert(world.label, world_detaches);
         derived.push((world.label, events, logs));
     }
-    eprintln!(
-        "permutation_lane batch_boundary_artifacts: {artifacts} subregistry_detaches={subregistry_detaches}"
-    );
     for (world, kinds) in &event_kinds {
         eprintln!(
             "permutation_lane world={world} derived_event_kinds={:?}",
@@ -150,7 +164,7 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
     if cases != DEFAULT_CASES {
         return Ok(());
     }
-    assert_pinned_artifacts(&artifacts, subregistry_detaches)
+    assert_pinned_artifacts(&artifacts, &subregistry_detaches)
 }
 
 #[test]
@@ -476,10 +490,19 @@ const REQUIRED_EVENT_KINDS: &[(&str, &[&str])] = &[
 /// or dropped attribution wholesale, would stay inside an allowed shape and pass. Each count is an
 /// interpreter divergence tracked by issue #336: fixing those makes the counts fall, and emptying
 /// this table is that fix's acceptance test.
-const EXPECTED_ARTIFACTS: &[(&str, usize)] = &[
-    ("carried_before_states:only-the-whole-pass", 3),
-    ("rebased_anchors:resources", 8),
-    ("rebased_attributions", 4),
+/// Pinned per world, because the two are disjoint: every artifact the corpus reproduces is ENSv1,
+/// and ENSv2 reproduces none. A single cross-world total would read the same if ENSv2 started
+/// diverging while ENSv1 stopped.
+const EXPECTED_ARTIFACTS: &[(&str, &[(&str, usize)])] = &[
+    (
+        ENS_V1_MAINNET.label,
+        &[
+            ("carried_before_states:only-the-whole-pass", 3),
+            ("rebased_anchors:resources", 8),
+            ("rebased_attributions", 4),
+        ],
+    ),
+    (ENS_V2_SEPOLIA.label, &[]),
 ];
 
 /// The first thing to rule out when a pinned count moves: these are counts over the sequences one
@@ -491,32 +514,46 @@ const DRAWN_CORPUS_CAVEAT: &str = "If the scenario pools, the axes, the seeded d
 
 /// Terminal-boundary subregistry detaches the default corpus reaches. `SubregistryChanged` on its
 /// own is satisfiable by attachment alone, so without this the detach path could go dark while the
-/// coverage floor above stayed green.
-const EXPECTED_SUBREGISTRY_DETACHES: usize = 13;
+/// coverage floor above stayed green. Per world for the same reason as the artifacts: ENSv1's
+/// `SubregistryChanged` carries an owner rather than a subregistry and detaches nothing, so a
+/// cross-world total would let an ENSv1 detach appearing offset the ENSv2 path going dark.
+const EXPECTED_SUBREGISTRY_DETACHES: &[(&str, usize)] =
+    &[(ENS_V1_MAINNET.label, 0), (ENS_V2_SEPOLIA.label, 13)];
 
 /// Normalized events the pinned manifests declare that the pools deliberately never reach, with the
 /// reason each one is out. Anything a manifest declares that is neither derived nor listed here
 /// fails the lane, so adding an event to a manifest forces a decision instead of silently widening
 /// the gap between what the manifests promise and what this lane covers.
-const UNREACHED_EVENT_KINDS: &[(&str, &str)] = &[
+/// Keyed by world, because a reason true of one protocol is not automatically true of the other —
+/// three of these are ENSv2-only today, and a flat list would excuse ENSv1 on ENSv2's reasoning.
+const UNREACHED_EVENT_KINDS: &[(&str, &str, &str)] = &[
     (
+        ENS_V1_MAINNET.label,
+        "RecordVersionChanged",
+        "the resolver pool emits no VersionChanged, so no record-version bump is generated",
+    ),
+    (
+        ENS_V2_SEPOLIA.label,
         "AliasChanged",
         "the resolver pool emits no AliasChanged; alias resolution has no interpreter state the \
          convergence checks here would exercise",
     ),
     (
+        ENS_V2_SEPOLIA.label,
         "RecordVersionChanged",
-        "the resolver pools emit no VersionChanged, so no record-version bump is generated",
+        "the resolver pool emits no VersionChanged, so no record-version bump is generated",
     ),
     (
+        ENS_V2_SEPOLIA.label,
         "RegistrationReserved",
-        "the v2 pools emit no LabelReserved; reservation is a registrar-side path with no \
-         registration to permute",
+        "the pools emit no LabelReserved; reservation is a registrar-side path with no registration \
+         to permute",
     ),
     (
+        ENS_V2_SEPOLIA.label,
         "RootPermissionChanged",
         "EACRolesChanged derives this only when it names resource zero on a registry or root, and \
-         the v2 pool always names a non-zero resource",
+         the pool always names a non-zero resource",
     ),
 ];
 
@@ -527,19 +564,34 @@ fn assert_declared_kinds_are_reached(
     declared: &BTreeSet<String>,
     derived: Option<&BTreeSet<String>>,
 ) -> Result<()> {
+    let excluded = UNREACHED_EVENT_KINDS
+        .iter()
+        .filter(|(excluded_world, ..)| *excluded_world == world)
+        .map(|(_, kind, _)| *kind)
+        .collect::<BTreeSet<_>>();
     let unreached = declared
         .iter()
         .filter(|kind| !derived.is_some_and(|kinds| kinds.contains(*kind)))
-        .filter(|kind| {
-            !UNREACHED_EVENT_KINDS
-                .iter()
-                .any(|(excluded, _)| excluded == *kind)
-        })
+        .filter(|kind| !excluded.contains(kind.as_str()))
         .collect::<Vec<_>>();
     if !unreached.is_empty() {
         bail!(
             "{world}'s manifests declare {unreached:?}, which no scenario reaches; emit the event \
              that derives it, or add it to UNREACHED_EVENT_KINDS with the reason it is out"
+        );
+    }
+    // Without this an entry silently outlives its reason — the pools start emitting the event, or
+    // the manifest stops declaring it, and the excuse stays on the books unchallenged.
+    let stale = excluded
+        .iter()
+        .filter(|kind| {
+            !declared.contains(**kind) || derived.is_some_and(|kinds| kinds.contains(**kind))
+        })
+        .collect::<Vec<_>>();
+    if !stale.is_empty() {
+        bail!(
+            "{world} lists {stale:?} in UNREACHED_EVENT_KINDS, but its manifests no longer declare \
+             them or the corpus now reaches them; drop those entries"
         );
     }
     Ok(())
@@ -570,26 +622,37 @@ fn assert_interpretation_coverage(
     Ok(())
 }
 
-fn assert_pinned_artifacts(artifacts: &BatchBoundaryArtifacts, detaches: usize) -> Result<()> {
-    let expected = EXPECTED_ARTIFACTS
-        .iter()
-        .map(|(key, count)| ((*key).to_owned(), *count))
-        .collect::<BTreeMap<_, _>>();
-    let observed = artifacts.counts();
-    if observed != expected {
-        bail!(
-            "the default corpus produced batch-boundary artifacts {observed:?}, not the pinned \
-             {expected:?}. {DRAWN_CORPUS_CAVEAT} Otherwise: a count that fell is a divergence fixed \
-             (retire it here), and one that rose or is newly named is a regression"
-        );
+fn assert_pinned_artifacts(
+    artifacts: &BTreeMap<&str, BatchBoundaryArtifacts>,
+    detaches: &BTreeMap<&str, usize>,
+) -> Result<()> {
+    for (world, pinned) in EXPECTED_ARTIFACTS {
+        let expected = pinned
+            .iter()
+            .map(|(key, count)| ((*key).to_owned(), *count))
+            .collect::<BTreeMap<_, _>>();
+        let observed = artifacts
+            .get(world)
+            .map(BatchBoundaryArtifacts::counts)
+            .unwrap_or_default();
+        if observed != expected {
+            bail!(
+                "{world} produced batch-boundary artifacts {observed:?}, not the pinned \
+                 {expected:?}. {DRAWN_CORPUS_CAVEAT} Otherwise: a count that fell is a divergence \
+                 fixed (retire it here), and one that rose or is newly named is a regression"
+            );
+        }
     }
-    if detaches != EXPECTED_SUBREGISTRY_DETACHES {
-        bail!(
-            "the default corpus reached {detaches} terminal-boundary subregistry detaches, not the \
-             pinned {EXPECTED_SUBREGISTRY_DETACHES}. {DRAWN_CORPUS_CAVEAT} Otherwise a fall means \
-             the sequences stopped reaching the path, and a rise means something now clears a \
-             subregistry that did not — check what `is_subregistry_detach` is matching"
-        );
+    for (world, pinned) in EXPECTED_SUBREGISTRY_DETACHES {
+        let observed = detaches.get(world).copied().unwrap_or_default();
+        if observed != *pinned {
+            bail!(
+                "{world} reached {observed} terminal-boundary subregistry detaches, not the pinned \
+                 {pinned}. {DRAWN_CORPUS_CAVEAT} Otherwise a fall means the sequences stopped \
+                 reaching the path, and a rise means something now clears a subregistry that did \
+                 not — check what `is_subregistry_detach` is matching"
+            );
+        }
     }
     Ok(())
 }
