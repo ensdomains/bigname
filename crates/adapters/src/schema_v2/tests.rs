@@ -9397,3 +9397,126 @@ fn reconciliation_probe_event(
         after_state,
     }
 }
+
+/// Permission scope kinds the schema and the typed reader accept but no adapter
+/// emits. They are retained rather than deleted; `docs/glossary.md` § Reserved
+/// surface and `docs/architecture.md` § Permissions carry the reasoning and the
+/// upstream citations.
+const RESERVED_PERMISSION_SCOPES: [&str; 4] = [
+    "transport_derived",
+    "TransportDerived",
+    "migration_derived",
+    "MigrationDerived",
+];
+
+/// A scope kind adapters really do emit, used as a positive control so the guard
+/// cannot pass by scanning a tree that no longer contains the emitting code.
+const EMITTED_PERMISSION_SCOPE: &str = "registry_root";
+
+/// Walks production Rust sources under `root`, reporting every line naming one of
+/// `needles` and whether `anchor` was seen at all. `tests.rs` modules are skipped
+/// because a test may name a forbidden token precisely to assert its absence.
+fn scan_production_sources(
+    root: &std::path::Path,
+    needles: &[&str],
+    anchor: &str,
+) -> (Vec<String>, bool) {
+    let mut pending = vec![root.to_path_buf()];
+    let mut offenders = Vec::new();
+    let mut saw_anchor = false;
+
+    while let Some(directory) = pending.pop() {
+        let entries = std::fs::read_dir(&directory).expect("source directory is readable");
+        for entry in entries {
+            let path = entry.expect("source entry is readable").path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|extension| extension != "rs") {
+                continue;
+            }
+            if path.file_name().is_some_and(|name| name == "tests.rs") {
+                continue;
+            }
+            let contents = std::fs::read_to_string(&path).expect("source is readable");
+            for (offset, line) in contents.lines().enumerate() {
+                if needles.iter().any(|needle| line.contains(needle)) {
+                    offenders.push(format!("{}:{}", path.display(), offset + 1));
+                }
+                saw_anchor |= line.contains(anchor);
+            }
+        }
+    }
+
+    (offenders, saw_anchor)
+}
+
+/// Adapters are the only origin of `PermissionChanged` / `RootPermissionChanged`
+/// events, and the worker and project layers pass through whatever scope the
+/// adapter put on the event. So an adapter that cannot name a reserved scope kind
+/// cannot put one into a projection row.
+///
+/// Two limits worth knowing before trusting this. It reads source text, so it
+/// binds "no adapter names the value" rather than "no adapter can construct one" —
+/// a kind assembled by `format!`, or read from a manifest, would pass. And the
+/// invariant really lives on `normalized_events.after_state.scope.kind`: a
+/// hand-written repair migration that set that field would reach
+/// `permissions_current` without touching adapter source at all.
+#[test]
+fn adapters_never_produce_reserved_permission_scopes() {
+    let (offenders, saw_anchor) = scan_production_sources(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &RESERVED_PERMISSION_SCOPES,
+        EMITTED_PERMISSION_SCOPE,
+    );
+
+    assert!(
+        saw_anchor,
+        "guard never saw {EMITTED_PERMISSION_SCOPE}, so permission-scope construction \
+         has moved out of the scanned tree and the guard is now vacuous"
+    );
+    assert!(
+        offenders.is_empty(),
+        "adapters must not produce a reserved permission scope, but one is named at {offenders:?}"
+    );
+}
+
+/// Keeps the guard above honest: a planted producer must be reported. Without
+/// this, a scan that silently stopped matching would look like a passing guard.
+#[test]
+fn reserved_permission_scope_guard_reports_a_planted_producer() {
+    let root = std::env::temp_dir().join(format!(
+        "bigname-reserved-scope-guard-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let nested = root.join("protocol");
+    std::fs::create_dir_all(&nested).expect("planted source tree is creatable");
+    std::fs::write(
+        nested.join("permissions.rs"),
+        "let scope = json!({\"kind\":\"registry_root\"});\nlet bad = json!({\"kind\":\"transport_derived\"});\n",
+    )
+    .expect("planted source is writable");
+    // A tests.rs naming the value must stay invisible to the guard.
+    std::fs::write(
+        nested.join("tests.rs"),
+        "assert_eq!(scope, \"transport_derived\");\n",
+    )
+    .expect("planted test source is writable");
+
+    let (offenders, saw_anchor) =
+        scan_production_sources(&root, &RESERVED_PERMISSION_SCOPES, EMITTED_PERMISSION_SCOPE);
+    std::fs::remove_dir_all(&root).expect("planted source tree is removable");
+
+    assert!(saw_anchor, "planted tree contains the positive control");
+    assert_eq!(
+        offenders.len(),
+        1,
+        "guard must report the planted producer and ignore the planted test module, got {offenders:?}"
+    );
+    assert!(
+        offenders[0].ends_with("permissions.rs:2"),
+        "guard must report the planted producer's line, got {offenders:?}"
+    );
+}

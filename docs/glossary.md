@@ -559,7 +559,12 @@ reserved should say so where it is documented, so a reader does not mistake it
 for coverage. Don't add new fixtures or exemplars that make reserved surface
 look produced; existing `migration_derived` exemplars are retained deliberately
 because that scope has a real mechanism it may yet bind to, while
-`transport_derived` does not.
+`transport_derived` does not. A test that pins the *read* path is not an
+exemplar in that sense: proving a stored row carrying a reserved value still
+decodes asserts that the retained surface keeps working, not that anything
+produces it. Guarding the absence of a producer, and guarding that the retained
+reader still accepts the value, are both fair game — publishing the value as
+expected output is not.
 
 **Resolver profile** — a declared resolver classification. ENSv1 and
 Basenames use an exact resolver-address declaration; ENSv2 requires the
