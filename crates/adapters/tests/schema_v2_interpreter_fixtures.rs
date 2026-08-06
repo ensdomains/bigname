@@ -39,7 +39,7 @@ struct Corpus {
     cases: Vec<Case>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Case {
     id: String,
     runner: Runner,
@@ -61,7 +61,7 @@ enum Runner {
     EnsV2Registrar,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct FixtureManifest {
     namespace: String,
     source_family: String,
@@ -73,7 +73,7 @@ struct FixtureManifest {
     contract_instance_id: Uuid,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Block {
     hash: String,
     number: i64,
@@ -139,7 +139,7 @@ struct BindingFkExpected {
     authority_epoch_changed: Value,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ExpectedCase {
     id: String,
     normalized_events: Vec<Value>,
@@ -1659,4 +1659,151 @@ fn workspace_root() -> Result<PathBuf> {
         .and_then(Path::parent)
         .map(Path::to_path_buf)
         .context("adapters crate must be two directories below the workspace root")
+}
+
+#[test]
+fn interpreter_output_is_identical_across_batch_grids() -> Result<()> {
+    let corpus: Corpus = serde_json::from_str(RAW_EVENTS)?;
+    let expected: ExpectedSuite = serde_json::from_str(EXPECTED_OUTPUTS)?;
+    let checked_in = checked_in_manifests()?;
+    const CASE_ID: &str =
+        "basenames_same_transaction_registration_preserves_prior_owner_revocation";
+    let case = corpus
+        .cases
+        .iter()
+        .find(|case| case.id == CASE_ID)
+        .with_context(|| format!("{CASE_ID} missing from the golden corpus"))?
+        .clone();
+    let expected_case = expected
+        .cases
+        .iter()
+        .find(|case| case.id == CASE_ID)
+        .with_context(|| format!("{CASE_ID} missing from the golden outputs"))?;
+
+    // Move the predecessor-epoch grant transaction one block earlier than its registration.
+    // Reconciliation never reaches across a block boundary — the block is the atomic unit every
+    // batch grid loads — so the grant's permission observation must keep its event-time
+    // attribution in every grid.
+    let predecessor_hash = "0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef";
+    let mut cross_block = case;
+    cross_block.id = format!("{CASE_ID}_cross_block");
+    let registration_block = cross_block.blocks[0].clone();
+    let predecessor_number = registration_block.number - 1;
+    cross_block.blocks.insert(
+        0,
+        Block {
+            hash: predecessor_hash.to_owned(),
+            number: predecessor_number,
+            timestamp: registration_block.timestamp - 1,
+        },
+    );
+    for log in &mut cross_block.logs {
+        if log.transaction_hash.starts_with("0xf1f1") {
+            log.block_hash = predecessor_hash.to_owned();
+            log.block_number = predecessor_number;
+        }
+    }
+
+    // batch_input admits only blocks a canonical expected row references, and the golden
+    // expected case covers just the registration block; reference the predecessor block so the
+    // moved grant log stays in the interpreted input.
+    let mut expected_cross = expected_case.clone();
+    expected_cross.normalized_events.push(serde_json::json!({
+        "block_hash": predecessor_hash,
+        "block_number": predecessor_number,
+    }));
+
+    let input = batch_input(&cross_block, &expected_cross, &checked_in)?;
+    let whole = interpret_physical_batches(
+        &cross_block.id,
+        input.clone(),
+        &[BlockRange {
+            from_block: predecessor_number,
+            to_block: registration_block.number,
+        }],
+    )?;
+    let split = interpret_physical_batches(
+        &cross_block.id,
+        input,
+        &[
+            BlockRange {
+                from_block: predecessor_number,
+                to_block: predecessor_number,
+            },
+            BlockRange {
+                from_block: registration_block.number,
+                to_block: registration_block.number,
+            },
+        ],
+    )?;
+    assert_eq!(
+        flatten_outputs(&whole),
+        flatten_outputs(&split),
+        "interpreter output must not depend on where batch boundaries fall"
+    );
+    assert!(
+        whole
+            .iter()
+            .flat_map(|output| &output.normalized_events)
+            .any(|event| event.block_number == Some(predecessor_number)),
+        "the cross-block corpus must emit events in the predecessor block"
+    );
+    for event in whole
+        .iter()
+        .flat_map(|output| &output.normalized_events)
+        .filter(|event| event.block_number == Some(predecessor_number))
+    {
+        assert_eq!(
+            event.logical_name_id, None,
+            "only a later block's registration could identify this observation, so it must \
+             keep its event-time attribution: {event:?}"
+        );
+    }
+    assert!(
+        whole
+            .iter()
+            .flat_map(|output| &output.normalized_events)
+            .any(|event| event.event_kind == "RegistrationGranted"
+                && event.logical_name_id.is_some()),
+        "the corpus must still exercise registration attribution"
+    );
+    Ok(())
+}
+
+fn flatten_outputs(outputs: &[BatchOutput]) -> BatchOutput {
+    let mut merged = BatchOutput::default();
+    for output in outputs {
+        merged
+            .normalized_events
+            .extend(output.normalized_events.iter().cloned());
+        merged
+            .label_preimages
+            .extend(output.label_preimages.iter().cloned());
+        merged
+            .name_surfaces
+            .extend(output.name_surfaces.iter().cloned());
+        merged
+            .token_lineages
+            .extend(output.token_lineages.iter().cloned());
+        merged.resources.extend(output.resources.iter().cloned());
+        merged
+            .surface_bindings
+            .extend(output.surface_bindings.iter().cloned());
+        merged
+            .binding_closures
+            .extend(output.binding_closures.iter().cloned());
+        merged
+            .contract_instances
+            .extend(output.contract_instances.iter().cloned());
+        merged
+            .contract_addresses
+            .extend(output.contract_addresses.iter().cloned());
+        merged
+            .discovery_edges
+            .extend(output.discovery_edges.iter().cloned());
+        merged
+            .discovery_edge_closures
+            .extend(output.discovery_edge_closures.iter().cloned());
+    }
+    merged
 }
