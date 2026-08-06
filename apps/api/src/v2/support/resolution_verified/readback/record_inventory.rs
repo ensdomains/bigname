@@ -91,19 +91,19 @@ async fn load_record_inventory_current_matching_selected_snapshot_by_resource(
         FROM record_inventory_current ric
         JOIN resources resource
           ON resource.resource_id = ric.resource_id
-        JOIN chain_lineage resource_lineage
+        JOIN bigname_phase.chain_lineage resource_lineage
           ON resource_lineage.chain_id = resource.chain_id
          AND resource_lineage.block_hash = resource.block_hash
         WHERE ric.resource_id = $1
           AND resource.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
+              'canonical'::bigname_phase.canonicality_state,
+              'safe'::bigname_phase.canonicality_state,
+              'finalized'::bigname_phase.canonicality_state
           )
           AND resource_lineage.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
+              'canonical'::bigname_phase.canonicality_state,
+              'safe'::bigname_phase.canonicality_state,
+              'finalized'::bigname_phase.canonicality_state
           )
         "#,
     )
@@ -167,34 +167,30 @@ async fn probe_record_inventory_current_candidate_for_snapshot(
                     "record_inventory_current lookup for resource_id {resource_id} returned a row without chain_positions: {error}"
                 ))
             })?;
-        let projected = ChainPositions::from_value(&chain_positions).map_err(|error| {
-            SnapshotSelectionError::stale(format!(
-                "record_inventory_current projection has unusable chain_positions: {}",
-                error.message()
-            ))
-        })?;
         if !record_inventory_chain_positions_match_selected_snapshot(
-            &projected,
+            &record_version_boundary,
+            &chain_positions,
             selected_snapshot,
             true,
         ) {
             return Ok(None);
         }
 
-        let record_inventory_row =
-            load_record_inventory_current(pool, resource_id, &record_version_boundary)
-                .await
-                .map_err(|error| {
-                    SnapshotSelectionError::internal(format!(
-                        "failed to load record_inventory_current row for resource_id {resource_id}: {error}"
-                    ))
-                })?
-                .ok_or_else(|| {
-                    SnapshotSelectionError::internal(format!(
-                        "matched record_inventory_current boundary for resource_id {resource_id} but the projection row was not loadable"
-                    ))
-                })?;
-        return Ok(Some(record_inventory_row));
+        return match load_record_inventory_current_for_snapshot(
+            pool,
+            resource_id,
+            &record_version_boundary,
+            &selected_snapshot.chain_positions,
+        )
+        .await?
+        {
+            SnapshotProjectionRead::Found(record_inventory_row) => {
+                Ok(Some(record_inventory_row))
+            }
+            SnapshotProjectionRead::NotFound => Err(SnapshotSelectionError::internal(format!(
+                "matched record_inventory_current boundary for resource_id {resource_id} but the projection row was not loadable"
+            ))),
+        };
     }
 
     match load_record_inventory_current_for_snapshot(
@@ -215,14 +211,46 @@ async fn probe_record_inventory_current_candidate_for_snapshot(
 }
 
 pub(super) fn record_inventory_chain_positions_match_selected_snapshot(
-    projected: &ChainPositions,
+    record_version_boundary: &JsonValue,
+    projected_value: &JsonValue,
     selected_snapshot: &SelectedSnapshot,
     allow_selected_superset: bool,
 ) -> bool {
+    if let Some(target_block_number) = projected_value
+        .get("target_block_number")
+        .and_then(JsonValue::as_i64)
+    {
+        let Some(target_block_hash) = projected_value
+            .get("target_block_hash")
+            .and_then(JsonValue::as_str)
+        else {
+            return false;
+        };
+        let Some(chain_id) = record_version_boundary
+            .pointer("/chain_position/chain_id")
+            .and_then(JsonValue::as_str)
+        else {
+            return false;
+        };
+        return selected_snapshot
+            .chain_positions
+            .as_map()
+            .values()
+            .any(|selected_position| {
+                selected_position.chain_id == chain_id
+                    && (selected_position.block_number > target_block_number
+                        || (selected_position.block_number == target_block_number
+                            && selected_position.block_hash == target_block_hash))
+            });
+    }
+
+    let Ok(projected) = ChainPositions::from_value(projected_value) else {
+        return false;
+    };
     if !allow_selected_superset {
         return selected_snapshot
             .chain_positions
-            .equivalent_by_chain_id(projected);
+            .equivalent_by_chain_id(&projected);
     }
 
     let Some(projected_authoritative_position) = projected
@@ -264,13 +292,6 @@ pub(super) fn record_inventory_chain_positions_match_selected_snapshot(
 
 pub(super) fn record_inventory_lookup_key(row: &NameCurrentRow) -> Option<(Uuid, JsonValue)> {
     bigname_storage::resolution_record_inventory_lookup_key(row)
-}
-
-pub(super) fn resolution_verified_support_boundary(
-    row: &NameCurrentRow,
-    record_inventory_row: Option<&RecordInventoryCurrentRow>,
-) -> Option<bigname_storage::VerifiedResolutionSupportBoundary> {
-    bigname_storage::resolution_verified_support_boundary(row, record_inventory_row)
 }
 
 pub(super) fn record_version_boundary_has_pointer(record_version_boundary: &JsonValue) -> bool {

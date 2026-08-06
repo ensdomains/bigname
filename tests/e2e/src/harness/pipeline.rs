@@ -141,9 +141,8 @@ static PHASE_RUNNER_BINARY: tokio::sync::OnceCell<std::result::Result<PathBuf, S
 static PROFILE_PHASE_RUNNERS: OnceLock<tokio::sync::Mutex<Vec<CachedProfileRunner>>> =
     OnceLock::new();
 
-/// Initialize the fresh phase schema through the shipped binary. The legacy
-/// public schema remains present until C2, but e2e scenario pools select only
-/// `bigname_phase` after this command succeeds.
+/// Initialize the fresh phase schema through the shipped binary. E2e scenario
+/// pools select only `bigname_phase` after this command succeeds.
 pub async fn phase_runner_init_schema(repo_root: &Path, database_url: &str) -> Result<()> {
     let binary = canonical_phase_runner(repo_root).await?;
     let mut command = pipeline_command(repo_root, binary);
@@ -1479,9 +1478,9 @@ pub async fn phase_runner_replay_current_projections(
     Ok("phase-runner projection replay completed".to_owned())
 }
 
-/// Direct schema-v2 projection reader used while the retained v1 API still
-/// reads the legacy public schema. The route-shaped methods are temporary
-/// call-site compatibility for scenario assertions; no API process starts.
+/// Direct schema-v2 projection reader. The route-shaped methods preserve
+/// recognizable scenario assertions; no API process starts and no public API
+/// behavior is implied.
 pub struct ProjectionReader {
     pool: sqlx::PgPool,
 }
@@ -1535,7 +1534,7 @@ impl ProjectionReader {
             reqwest::StatusCode::NOT_FOUND,
             serde_json::json!({
                 "error": {
-                    "code": "deferred_to_c2",
+                    "code": "unsupported_projection_reader_route",
                     "message": format!("projection reader has no mapping for {path}")
                 }
             }),
@@ -1549,7 +1548,7 @@ impl ProjectionReader {
     ) -> Result<(reqwest::StatusCode, serde_json::Value)> {
         Ok((
             reqwest::StatusCode::NOT_FOUND,
-            serde_json::json!({"error":{"code":"deferred_to_c2"}}),
+            serde_json::json!({"error":{"code":"unsupported_projection_reader_route"}}),
         ))
     }
 
@@ -1907,7 +1906,7 @@ impl ProjectionReader {
         let mode = query.get("mode").copied().unwrap_or("declared");
         anyhow::ensure!(
             mode == "declared",
-            "ProjectionReader only exposes persisted declared primary-name state; mode={mode} is deferred to C2/C3"
+            "ProjectionReader exposes only persisted declared primary-name state; mode={mode} requires API lookup coverage"
         );
         let row: Option<PrimaryNameProjectionRow> = sqlx::query_as(
             "SELECT claim_status, raw_claim_name, claim_name_is_normalized,

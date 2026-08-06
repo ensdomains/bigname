@@ -394,7 +394,7 @@ async fn v2_get_resolver_returns_empty_bound_names_when_overview_exists() -> Res
 }
 
 #[tokio::test]
-async fn v2_get_resolver_serves_phase_rows_with_zero_legacy_rows() -> Result<()> {
+async fn v2_get_resolver_serves_phase_rows() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
     upsert_test_resolver_current_rows(
@@ -412,21 +412,6 @@ async fn v2_get_resolver_serves_phase_rows_with_zero_legacy_rows() -> Result<()>
             }
         }))
         .await?;
-    sqlx::query("DELETE FROM resolver_current")
-        .execute(&database.pool)
-        .await?;
-    sqlx::query("DELETE FROM name_current")
-        .execute(&database.pool)
-        .await?;
-    let legacy_row_count: i64 = sqlx::query_scalar(
-        "SELECT (SELECT COUNT(*) FROM resolver_current)
-              + (SELECT COUNT(*) FROM name_current)
-              + (SELECT COUNT(*) FROM chain_checkpoints)",
-    )
-    .fetch_one(&database.pool)
-    .await?;
-    assert_eq!(legacy_row_count, 0);
-
     let payload = v2_resolver_payload_for_database(
         &database,
         &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}"),
@@ -435,56 +420,6 @@ async fn v2_get_resolver_serves_phase_rows_with_zero_legacy_rows() -> Result<()>
 
     assert_eq!(payload["data"]["address"], json!(V2_RESOLVER_ADDRESS));
     assert_eq!(payload["meta"]["as_of"]["1"]["block_number"], json!(204));
-
-    database.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn v2_get_resolver_ignores_unapplied_legacy_resolver_input() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_v2_resolver_bound_names_fixture(&database).await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
-    )
-    .await?;
-    bigname_storage::insert_normalized_event_fixtures(
-        &database.pool,
-        &[NormalizedEvent {
-            event_identity: "api-test:resolver-newer-input".to_owned(),
-            namespace: "ens".to_owned(),
-            logical_name_id: None,
-            resource_id: None,
-            event_kind: "ResolverChanged".to_owned(),
-            source_family: "ens_v1_registry_l1".to_owned(),
-            manifest_version: 1,
-            source_manifest_id: None,
-            chain_id: Some("ethereum-mainnet".to_owned()),
-            block_number: Some(203),
-            block_hash: Some("0xresolvercb".to_owned()),
-            transaction_hash: Some("0xresolvernewerinput".to_owned()),
-            log_index: Some(0),
-            raw_fact_ref: json!({"kind": "raw_log", "fixture": "resolver-newer-input"}),
-            derivation_kind: "resolver_changed".to_owned(),
-            canonicality_state: CanonicalityState::Canonical,
-            before_state: json!({
-                "resolver": "0x0000000000000000000000000000000000000bbb"
-            }),
-            after_state: json!({"resolver": V2_RESOLVER_ADDRESS}),
-        }],
-    )
-    .await?;
-
-    let response = v2_resolver_response_for_database(
-        &database,
-        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}"),
-    )
-    .await?;
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let payload: Value = read_json(response).await?;
-    assert_eq!(payload["data"]["address"], json!(V2_RESOLVER_ADDRESS));
 
     database.cleanup().await?;
     Ok(())
@@ -672,6 +607,80 @@ async fn v2_get_resolver_filters_bound_names_by_declared_resolver_chain() -> Res
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_resolver_excludes_lower_height_orphaned_project_targets() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_bound_names_fixture_with_chains(
+        &database,
+        &["ethereum-mainnet", "base-mainnet"],
+    )
+    .await?;
+    upsert_test_resolver_current_rows(
+        &database,
+        &[resolver_current_row(
+            "ethereum-mainnet",
+            V2_RESOLVER_ADDRESS,
+        )],
+    )
+    .await?;
+    sqlx::raw_sql(
+        r#"
+        INSERT INTO bigname_phase.chain_lineage (
+            chain_id, block_hash, block_number, block_timestamp, canonicality_state
+        ) VALUES
+            ('ethereum-mainnet', '0xorphaned-bound-name-target', 201,
+             '2026-04-17T00:00:21Z', 'orphaned'),
+            ('ethereum-mainnet', '0xorphaned-resolver-target', 202,
+             '2026-04-17T00:00:22Z', 'orphaned');
+        UPDATE bigname_phase.name_current
+        SET canonicality_summary = jsonb_build_object(
+                'state', 'canonical_lineage',
+                'target_block_number', 201,
+                'target_block_hash', '0xorphaned-bound-name-target'
+            )
+        WHERE lower(raw_name) = 'alpha.eth';
+        "#,
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let names_payload = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes"),
+    )
+    .await?;
+    assert_eq!(names_payload["data"]["bound_names"]["data"], json!([]));
+
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.resolver_current
+        SET chain_positions = jsonb_build_object(
+                'target_block_number', 202,
+                'target_block_hash', '0xorphaned-resolver-target'
+            ),
+            canonicality_summary = jsonb_build_object(
+                'state', 'canonical_lineage',
+                'target_block_number', 202,
+                'target_block_hash', '0xorphaned-resolver-target'
+            )
+        WHERE chain_id = 'ethereum-mainnet'
+          AND lower(resolver_address) = lower($1)
+        "#,
+    )
+    .bind(V2_RESOLVER_ADDRESS)
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let response = v2_resolver_response_for_database(
+        &database,
+        &format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    database.cleanup().await
 }
 
 #[tokio::test]
@@ -956,7 +965,7 @@ async fn upsert_test_resolver_current_rows(
     database: &TestDatabase,
     rows: &[ResolverCurrentRow],
 ) -> Result<()> {
-    bigname_storage::upsert_resolver_current_rows(&database.pool, rows).await?;
+    upsert_phase_resolver_current_rows(&database.pool, rows).await?;
     for row in rows {
         let mut declared_summary = row.declared_summary.clone();
         if let Some(items) = declared_summary
@@ -1122,7 +1131,6 @@ async fn seed_v2_resolver_bound_names_fixture_with_chains(
             }),
         );
         database.insert_name_current_row(row.clone()).await?;
-        let inventory = compact_records_inventory_current_row(spec.logical_name_id, spec.resource_id);
         seed_phase_identity_name(
             database,
             spec.name,
@@ -1133,7 +1141,6 @@ async fn seed_v2_resolver_bound_names_fixture_with_chains(
             spec.owner,
             bigname_storage::AddressNameRelation::TokenHolder,
             &row.declared_summary,
-            &inventory,
         )
         .await?;
     }

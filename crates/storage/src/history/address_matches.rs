@@ -127,7 +127,7 @@ async fn load_historical_address_history_matches(
         FROM normalized_events ne
         LEFT JOIN resources r
           ON r.resource_id = ne.resource_id
-        LEFT JOIN chain_lineage resource_lineage
+        LEFT JOIN bigname_phase.chain_lineage resource_lineage
           ON resource_lineage.chain_id = r.chain_id
          AND resource_lineage.block_hash = r.block_hash
         "#,

@@ -586,15 +586,13 @@ coverage consumer for this counter.
 **Hydration** — a projection-owned repair pass that fills current-state values
 by making hash-pinned RPC calls (for example legacy reverse-resolver names or
 missing text values). Hydration writes only projection rows: no normalized
-events, no verified output, no execution traces. A hydration write or delete
-that changes a primary-name claim also invalidates the matching persisted
-verified answer, so verified readback re-verifies instead of serving a stale
-outcome.
+events, verified output, reusable outcomes, or execution traces. Verified
+lookup always reads the newly selected projection state and executes for that
+request.
 
 **Input revision** (raw-log input revision) — a schema-migration-era per-chain counter
 used by the old runtime's raw-log mutation fence and replay caches. Its Rust
-writer and consumers were deleted in Stage B. This is distinct from projection
-input revisions that surviving worker replay still uses.
+writer and consumers were deleted before the legacy schema was dropped.
 
 **Block-revision evidence floor** — the schema-migration-era lower bound used by the
 old runtime's raw-log revision evidence. Its tables remain historical; the
@@ -606,10 +604,7 @@ resolver state).
 
 **Lease** — (1) an ENS registrar registration with an expiry (standard ENS
 usage)
-(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L10 @ ens_v1@91c966f);
-(2) a worker's time-limited, reclaimable claim on a unit of work such as a
-backfill range or projection invalidation (standard distributed-systems
-usage). Context disambiguates; both senses are intentional.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L10 @ ens_v1@91c966f).
 
 **Lineage mutation revision** — a schema-migration-era per-chain counter and evidence
 trail used by old-runtime stored-lineage coverage and adapter checkpoint reuse.
@@ -683,40 +678,16 @@ record, or primary-name truth.
 **Projection** — a disposable read-model table rebuilt deterministically from
 canonical facts and normalized events (standard event-sourcing usage);
 resource-keyed rows additionally require the event's resource to resolve to a
-canonical identity row at rebuild time. Only projection workers write
-projections, with the documented sidecar exception.
-
-**Projection replay-version fence** — the database-enforced minimum compiled
-replay version for transactions that claim or write current projection work.
-Each process stamps its database connections with its compiled version.
-Projection writers hold the shared side of the singleton lock; a replay
-transaction holds the exclusive side while it activates or raises the minimum.
-This exclusive step is called *replay admission*, and a process that implements
-the connection stamp and transaction checks is *fence-aware*. A stamp below the
-committed minimum or a missing stamp cannot commit protected writes. Stamped
-invalidation-queue DML running at `READ COMMITTED` is the narrow lock-free
-exception: it checks the committed minimum without waiting for concurrent
-replay admission because its durable row and generation journal make it
-post-replay apply work. The database rejects this exception at transaction
-isolation levels with a longer-lived snapshot. A fence-aware worker exits on an
-outdated-version refusal or any other fatal fence failure, including missing
-singleton state and an invalid stamp. Only a current, validly stamped writer
-that loses the non-waiting admission race retries. A binary from before the
-fence existed cannot acquire a stamp and remains blocked, but may keep retrying
-until its operator or supervisor replaces it.
-
-**Raw-code baseline** — the capped per-chain sweep that records at least one
-non-orphaned code observation for each address in the active watch plan. Each
-chain receives the configured address budget per poll tick. Observations are
-durable; the process-local cursor may safely restart by rechecking the stored
-prefix without repeating provider calls for observations already present.
+canonical identity row at rebuild time. The schema-v2 Project phase is the only
+projection writer.
 
 **Raw facts** — the stored record of what was observed on chain: selected
-logs, the minimal transaction/receipt fields needed to decode them, code-hash
-observations, and pinned call snapshots. Their content is append-only, edited
-only by explicit, documented corrections; `canonicality_state` is mutable
-operational state — ordinary reorg repair reclassifies a losing branch's rows
-as `orphaned` without touching content.
+logs and the transaction/receipt fields needed to decode them. Their content is
+append-only, edited only by explicit, documented corrections;
+`canonicality_state` is mutable operational state — ordinary reorg repair
+reclassifies a losing branch's rows as `orphaned` without touching content.
+Provider responses used by hydration or request-scoped lookup are not raw
+facts.
 
 **Readable / read-safe** — a row whose canonicality is `canonical`, `safe`, or
 `finalized`. `observed` and `orphaned` rows are excluded from public reads and
@@ -789,15 +760,15 @@ keeps and a walk continued across a batch boundary does not reproduce;
 boundary-carry artifact — the uninterrupted walk under-derives a wrapper
 authority lapse that a walk split into two shapes derives.
 
-**Shadow** — (1) manifest rollout/capability value: facts and traces are
-written but general public reads are not enabled; (2) *shadow comparison*:
+**Shadow** — (1) manifest rollout/capability value: facts may be interpreted
+but general public reads are not enabled; (2) *shadow comparison*:
 running a new read surface in parallel with an existing one and diffing
 responses during a migration (the identity route's `profile=shadow`).
 
-**Sidecar** — a small companion table maintained by database triggers (the
-reverse-identity count and feed rows) that precomputes hot-path answers. A
-bounded, documented exception to the projection-worker-only write rule; never
-protocol truth. See ADR 0005.
+**Sidecar** — a retired legacy companion-table pattern that precomputed
+reverse-identity counts and feed rows with database triggers. Those tables were
+operational summaries, never protocol truth, and were removed with the old
+schema. See the superseded ADR 0005.
 
 **Source family** — a named group of contracts on one chain that owns one slice
 of protocol authority (for example `ens_v1_registrar_l1`). The unit of manifest
@@ -840,21 +811,11 @@ before persistence), and the `transport_derived` permission scope, which is
 [reserved surface](#reserved-surface) from an abandoned cross-chain ENSv2
 design and has no producer. There is no `transport` discovery edge kind.
 
-**Verified execution / execution trace** — verified execution runs actual
-resolution calls. An execution trace is the unserved legacy subsystem's
-durable step-by-step audit record (entrypoint, calls, CCIP steps, proofs,
-result).
-Those traces are permanent except for the bounded ENS/60 missing-tuple
-retention rule in [`storage.md`](storage.md#execution-storage); otherwise only
-legacy cache reusability expires. A retained legacy outcome is reusable only while
-its request tuple, selected chain positions, manifest versions, topology
-boundary, and record boundary still match; reorgs and manifest, resolver,
-topology, record, or primary-claim changes evict affected entries. A
-legacy verified-primary result for an absent projection tuple has no
-projected topology or record identity; its two execution-cache boundary fields
-explicitly carry the selected checkpoint instead. The v2 lookup engine
-creates neither traces nor reusable outcomes; its only durable execution-side
-output is the resolution divergence ledger.
+**Verified lookup** — request-scoped resolution or primary-name verification
+that calls admitted contracts at the selected block identity. It creates no
+durable execution trace or reusable outcome. Its only possible durable output
+is the guarded resolution divergence ledger for an eligible direct
+live/indexed comparison.
 
 **Walking skeleton** — the standard XP term for a minimal end-to-end path
 proving all layers connect. In this repo it names the first e2e scenario

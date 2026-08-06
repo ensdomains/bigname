@@ -29,7 +29,6 @@ enum V2SuccessFixture {
     DiagnosticsBinding,
     DiagnosticsAuthority,
     DiagnosticsRecords,
-    DiagnosticsExecution,
     DiagnosticsNamespaceManifests,
     DiagnosticsEvents,
 }
@@ -99,7 +98,6 @@ const BANNED_V1_FIELD_NAMES: &[&str] = &[
     "view",
     "contains_nocase",
     "resolved_address",
-    "execution_checkpoint",
 ];
 
 const BANNED_V1_EXACT_FIELD_NAMES: &[&str] = &[
@@ -322,15 +320,6 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         as_of: V2AsOfExpectation::Present,
         tier: V2RouteTier::Diagnostics,
         dictionary_allowlist: DIAGNOSTICS_RECORDS_DICTIONARY_ALLOWLIST,
-    },
-    V2ConformanceRoute {
-        label: "GET /v2/diagnostics/names/{name}/execution",
-        error_uri: "/v2/diagnostics/names/alice.eth/execution",
-        success: V2SuccessFixture::DiagnosticsExecution,
-        envelope: V2TopLevelEnvelope::DataMeta,
-        as_of: V2AsOfExpectation::Present,
-        tier: V2RouteTier::Diagnostics,
-        dictionary_allowlist: &[],
     },
     V2ConformanceRoute {
         label: "GET /v2/diagnostics/namespaces/{namespace}/manifests",
@@ -573,11 +562,12 @@ async fn v2_product_routes_hide_pipeline_vocabulary_family_wide() -> Result<()> 
         .iter()
         .find(|route| route.success == V2SuccessFixture::NameRecords)
         .expect("name-records conformance route must be registered");
-    let verified_stale_records = v2_conformance_name_records_verified_stale_payload().await?;
-    assert_v2_name_records_verified_stale_fixture(&verified_stale_records);
+    let verified_unsupported_records =
+        v2_conformance_name_records_verified_unsupported_payload().await?;
+    assert_v2_name_records_verified_unsupported_fixture(&verified_unsupported_records);
     collect_pipeline_vocabulary_in_product_response(
         records_route,
-        &verified_stale_records,
+        &verified_unsupported_records,
         &mut violations,
     );
 
@@ -634,7 +624,7 @@ async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result
         38,
     )
     .await?;
-    bigname_storage::upsert_address_names_current_rows(
+    upsert_phase_address_names_current_rows(
         &database.pool,
         &[address_name_current_row(
             token_holder_address,
@@ -687,35 +677,6 @@ async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result
     database
         .insert_record_inventory_current_row(record_inventory)
         .await?;
-    sqlx::query(
-        r#"
-        UPDATE bigname_phase.name_current phase
-        SET declared_summary = legacy.declared_summary
-        FROM public.name_current legacy
-        WHERE legacy.logical_name_id = $1
-          AND phase.raw_name = 'case.eth'
-        "#,
-    )
-    .bind(logical_name_id)
-    .execute(&database.lookup_pool)
-    .await?;
-    sqlx::query(
-        r#"
-        UPDATE bigname_phase.record_inventory_current phase
-        SET record_version_boundary_key = legacy.record_version_boundary_key,
-            record_version_boundary = legacy.record_version_boundary,
-            selectors = legacy.selectors,
-            unsupported_families = legacy.unsupported_families,
-            entries = legacy.entries
-        FROM public.record_inventory_current legacy
-        WHERE legacy.resource_id = $1
-          AND phase.resource_id = legacy.resource_id
-        "#,
-    )
-    .bind(resource_id)
-    .execute(&database.lookup_pool)
-    .await?;
-
     let profile = v2_conformance_get_json(&database, "/v2/names/Case.eth").await?;
     let lookup = v2_lookup_json(
         &database,
@@ -733,10 +694,9 @@ async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result
         lookup["data"][0]["record"].get("manager").is_none(),
         "forward relation context must not synthesize the flat manager field"
     );
+    assert!(profile["data"].get("unsupported_fields").is_none());
     assert_eq!(profile["data"]["addresses"], json!({}));
     assert_eq!(profile["data"]["text_records"], json!({}));
-    assert_eq!(lookup["data"][0]["record"]["addresses"], json!({}));
-    assert_eq!(lookup["data"][0]["record"]["text_records"], json!({}));
 
     let unbacked_resource_id = Uuid::from_u128(0x5a0111);
     seed_identity_name(
@@ -919,16 +879,12 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
             .await?;
             sqlx::query(
                 r#"
-                UPDATE name_current
-                SET coverage = $2::jsonb
-                WHERE logical_name_id = $1
+                UPDATE bigname_phase.name_current
+                SET support_status = 'unsupported', unsupported_reason = $1
+                WHERE lower(raw_name) = 'unsupported.eth'
                 "#,
             )
-            .bind("ens:unsupported.eth")
-            .bind(json!({
-                "status": "unsupported",
-                "unsupported_reason": "ensv2_exact_name_profile_shadow"
-            }))
+            .bind("ensv2_exact_name_profile_shadow")
             .execute(&database.pool)
             .await?;
             let payload = v2_lookup_json(
@@ -1025,7 +981,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
                     "ens",
                     "60",
                     PrimaryNameClaimStatus::Success,
-                    None,
+                    Some("alice.eth"),
                 )
                 .await?;
             database
@@ -1118,37 +1074,6 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
             let database = TestDatabase::new_with_schemas(false, true).await?;
             seed_v2_alice_name_records_fixture(&database, |_, _, _| {}).await?;
             let uri = "/v2/diagnostics/names/Alice.eth/records";
-            let payload = request_v2_diagnostics_json(&database, uri, StatusCode::OK).await?;
-            assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
-            database.cleanup().await?;
-            Ok(payload)
-        }
-        V2SuccessFixture::DiagnosticsExecution => {
-            let database = TestDatabase::new_with_schemas(false, true).await?;
-            let (logical_name_id, resource_id, _) =
-                seed_v2_diagnostics_execution_name(&database, false).await?;
-            let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000002001);
-            let request_key = resolution_execution_request_key(&["addr:60"]);
-            let verified_queries = v2_execution_verified_queries(
-                execution_trace_id,
-                "0x00000000000000000000000000000000000000aa",
-            );
-            let trace = resolution_execution_trace(
-                execution_trace_id,
-                &request_key,
-                &["addr:60"],
-                verified_queries.clone(),
-            );
-            let outcome = resolution_execution_outcome(
-                execution_trace_id,
-                &request_key,
-                verified_queries,
-                &logical_name_id,
-                resource_id,
-            );
-            upsert_execution_trace(&database.pool, &trace).await?;
-            upsert_execution_outcome(&database.pool, &outcome).await?;
-            let uri = "/v2/diagnostics/names/alice.eth/execution?keys=addr:60";
             let payload = request_v2_diagnostics_json(&database, uri, StatusCode::OK).await?;
             assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
             database.cleanup().await?;
@@ -1396,7 +1321,7 @@ async fn collect_v2_internal_error_violations(violations: &mut Vec<String>) -> R
         };
         let state = database.app_state();
         state.pool.close().await;
-        state.lookup_pool.close().await;
+        state.pool.close().await;
 
         let response = app_router(state)
             .oneshot(v2_conformance_request(method, uri))
@@ -1461,7 +1386,6 @@ fn v2_internal_error_probe(
         | V2SuccessFixture::DiagnosticsBinding
         | V2SuccessFixture::DiagnosticsAuthority
         | V2SuccessFixture::DiagnosticsRecords
-        | V2SuccessFixture::DiagnosticsExecution
         | V2SuccessFixture::DiagnosticsNamespaceManifests
         | V2SuccessFixture::DiagnosticsEvents => None,
     }
@@ -1518,7 +1442,7 @@ fn v2_conformance_request(method: V2StrictQueryMethod, uri: &str) -> Request<Bod
     request.body(body).expect("request must build")
 }
 
-async fn v2_conformance_name_records_verified_stale_payload() -> Result<Value> {
+async fn v2_conformance_name_records_verified_unsupported_payload() -> Result<Value> {
     v2_name_records_payload_with_setup(
         "/v2/names/Alice.eth/records?source=verified&keys=addr:60",
         |_, _, _| {},
@@ -1766,19 +1690,19 @@ fn assert_v2_exercised_expansions_non_empty(route: &V2ConformanceRoute, payload:
     }
 }
 
-fn assert_v2_name_records_verified_stale_fixture(payload: &Value) {
+fn assert_v2_name_records_verified_unsupported_fixture(payload: &Value) {
     assert_non_empty_json(
         &payload["data"]["records"],
-        "GET /v2/names/{name}/records verified stale",
+        "GET /v2/names/{name}/records verified unsupported",
         "$.data.records",
     );
     assert_eq!(
         payload["data"]["records"]["addr:60"],
         json!({
-            "status": "stale",
-            "failure_reason": "verified_answer_stale_for_snapshot"
+            "status": "unsupported",
+            "unsupported_reason": "verified_records_not_supported"
         }),
-        "verified-stale records fixture must exercise the product stale reason"
+        "verified records fixture must expose the retired execution path as unsupported"
     );
 }
 

@@ -17,7 +17,12 @@ async fn v2_get_name_returns_flat_name_record_envelope() -> Result<()> {
     assert_eq!(data.get("name"), Some(&json!("alice.eth")));
     assert_eq!(data.get("display_name"), Some(&json!("Alice.eth")));
     assert_eq!(data.get("namespace"), Some(&json!("ens")));
-    assert_eq!(data.get("namehash"), Some(&json!("namehash:alice.eth")));
+    assert_eq!(
+        data.get("namehash"),
+        Some(&json!(
+            "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec"
+        ))
+    );
     assert_eq!(data.get("registration_status"), Some(&json!("active")));
     assert_eq!(data.get("status"), Some(&json!("ok")));
     assert_eq!(data.get("chain_id"), Some(&json!(1)));
@@ -243,7 +248,10 @@ async fn v2_get_name_verified_source_reports_stale_when_lookup_state_is_unavaila
 #[tokio::test]
 async fn v2_get_name_verified_source_reports_unsupported_without_verified_boundary() -> Result<()> {
     let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth?source=verified", |row| {
-        row.binding_kind = Some(bigname_storage::SurfaceBindingKind::ObservedOnly);
+        row.binding_kind = None;
+        row.surface_binding_id = None;
+        row.resource_id = None;
+        row.token_lineage_id = None;
     })
     .await?;
 
@@ -429,14 +437,6 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
             })
         );
     }
-    let legacy_outcome_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM execution_cache_outcomes")
-            .fetch_one(&database.pool)
-            .await?;
-    let legacy_trace_count: i64 = sqlx::query_scalar("SELECT count(*) FROM execution_traces")
-        .fetch_one(&database.pool)
-        .await?;
-    assert_eq!((legacy_outcome_count, legacy_trace_count), (0, 0));
     let ledger_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM resolution_divergences WHERE cleared_at IS NULL",
     )
@@ -747,46 +747,6 @@ async fn v2_get_name_rejects_trailing_dot() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_get_name_reads_basenames_record_with_base_network() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    let logical_name_id = "basenames:alice.base.eth";
-    let resource_id = Uuid::from_u128(0x9200);
-    let token_lineage_id = Uuid::from_u128(0x9201);
-    let surface_binding_id = Uuid::from_u128(0x9202);
-
-    database
-        .seed_basenames_exact_name_rebuild_inputs(
-            logical_name_id,
-            resource_id,
-            token_lineage_id,
-            surface_binding_id,
-        )
-        .await?;
-    database.rebuild_name_current(logical_name_id).await?;
-
-    let response = app_router(database.app_state())
-        .oneshot(
-            Request::builder()
-                .uri("/v2/names/alice.base.eth")
-                .body(Body::empty())
-                .expect("request must build"),
-        )
-        .await
-        .context("v2 basenames name record request failed")?;
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let payload: Value = read_json(response).await?;
-    assert_eq!(payload["data"]["namespace"], json!("basenames"));
-    assert_eq!(payload["data"]["network"], json!("base"));
-    assert_eq!(payload["data"]["chain_id"], json!(8453));
-    assert_eq!(payload["data"]["registration_status"], json!("active"));
-    assert_eq!(payload["data"]["resolver"]["chain_id"], json!(8453));
-
-    database.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
 async fn v2_get_name_uses_sepolia_positioned_at_token_on_mixed_phase_heads() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_mixed_phase_head_names(&database).await?;
@@ -886,15 +846,9 @@ async fn v2_get_name_without_at_keeps_mainnet_preference_on_mixed_phase_heads() 
 }
 
 #[tokio::test]
-async fn v2_get_name_uses_phase_snapshot_with_zero_legacy_checkpoint_rows() -> Result<()> {
+async fn v2_get_name_uses_phase_snapshot() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_mixed_phase_head_names(&database).await?;
-
-    let legacy_checkpoint_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM chain_checkpoints")
-            .fetch_one(&database.pool)
-            .await?;
-    assert_eq!(legacy_checkpoint_count, 0);
 
     let payload = v2_name_record_payload_for_database(
         &database,
@@ -1094,8 +1048,7 @@ async fn v2_get_name_records_reports_unset_and_unsupported_per_key() -> Result<(
         payload["data"]["records"],
         json!({
             "contenthash": {
-                "status": "not_found",
-                "failure_reason": "not_observed_on_current_resolver"
+                "status": "not_found"
             },
             "text:email": {
                 "status": "unsupported",
@@ -1169,7 +1122,7 @@ async fn v2_get_name_records_include_inventory_uses_product_key_lists() -> Resul
         payload["data"]["inventory"],
         json!({
             "known_keys": ["addr:60", "avatar"],
-            "unset_keys": ["contenthash"],
+            "unset_keys": [],
             "unsupported_keys": ["text:email"]
         })
     );
@@ -1252,7 +1205,7 @@ async fn v2_get_name_records_inventory_absence_is_unknown_not_unsupported() -> R
 }
 
 #[tokio::test]
-async fn v2_get_name_records_source_verified_reports_stale_when_lookup_state_is_unavailable(
+async fn v2_get_name_records_source_verified_reports_unsupported_without_lookup_topology(
 ) -> Result<()> {
     let payload = v2_name_records_payload_with_setup(
         "/v2/names/Alice.eth/records?source=verified&keys=addr:60",
@@ -1264,8 +1217,8 @@ async fn v2_get_name_records_source_verified_reports_stale_when_lookup_state_is_
     assert_eq!(
         payload["data"]["records"]["addr:60"],
         json!({
-            "status": "stale",
-            "failure_reason": "verified_answer_stale_for_snapshot"
+            "status": "unsupported",
+            "unsupported_reason": "verified_records_not_supported"
         })
     );
 
@@ -1581,7 +1534,7 @@ async fn v2_get_name_records_source_verified_executes_basenames_with_auxiliary_p
     let database = TestDatabase::new_with_schemas(false, true).await?;
     database.initialize_lookup_schema().await?;
     let lookup_pool = database.lookup_pool().await?;
-    let namehash = seed_schema_v2_basenames_record_lookup(
+    let _namehash = seed_schema_v2_basenames_record_lookup(
         &lookup_pool,
         21_000_003,
         "0xbase-binding",
@@ -1590,108 +1543,6 @@ async fn v2_get_name_records_source_verified_executes_basenames_with_auxiliary_p
         "0x0000000000000000000000000000000000000def",
     )
     .await?;
-    let logical_name_id = "basenames:alice.base.eth";
-    let resource_id = Uuid::from_u128(0x9220);
-    let token_lineage_id = Uuid::from_u128(0x9221);
-    let surface_binding_id = Uuid::from_u128(0x9222);
-
-    database
-        .seed_name_current_binding(
-            logical_name_id,
-            "basenames",
-            "alice.base.eth",
-            "Alice.base.eth",
-            &namehash,
-            resource_id,
-            token_lineage_id,
-            surface_binding_id,
-        )
-        .await?;
-    database
-        .insert_name_current_row({
-            let mut row = exact_name_row(
-                logical_name_id,
-                surface_binding_id,
-                resource_id,
-                token_lineage_id,
-            );
-            row.namespace = "basenames".to_owned();
-            row.canonical_display_name = "Alice.base.eth".to_owned();
-            row.normalized_name = "alice.base.eth".to_owned();
-            row.namehash = namehash;
-            row.declared_summary = json!({
-                "registration": {
-                    "status": "active",
-                    "authority_kind": "registrar"
-                },
-                "resolver": {
-                    "chain_id": "base-mainnet",
-                    "address": "0x0000000000000000000000000000000000000abc",
-                    "latest_event_kind": "ResolverChanged"
-                }
-            });
-            row.provenance = json!({
-                "manifest_versions": [
-                    {
-                        "manifest_version": 2,
-                        "source_family": "basenames_execution",
-                        "chain": "ethereum-mainnet",
-                        "deployment_epoch": "basenames_v1"
-                    }
-                ]
-            });
-            row.chain_positions = json!({
-                "base": {
-                    "chain_id": "base-mainnet",
-                    "block_number": 21_000_003,
-                    "block_hash": "0xbase-binding",
-                    "timestamp": "2026-04-17T00:00:03Z"
-                },
-                "ethereum": {
-                    "chain_id": "ethereum-mainnet",
-                    "block_number": 21_000_003,
-                    "block_hash": "0xbinding",
-                    "timestamp": "2026-04-17T00:00:03Z"
-                }
-            });
-            row.canonicality_summary = json!({
-                "status": "finalized",
-                "chains": {
-                    "base-mainnet": "finalized",
-                    "ethereum-mainnet": "finalized"
-                }
-            });
-            row
-        })
-        .await?;
-    database
-        .insert_record_inventory_current_row({
-            let mut inventory =
-                basenames_l2resolver_record_inventory_current_row(logical_name_id, resource_id);
-            inventory.chain_positions = json!({
-                "base": {
-                    "chain_id": "base-mainnet",
-                    "block_number": 21_000_003,
-                    "block_hash": "0xbase-binding",
-                    "timestamp": "2026-04-17T00:00:03Z"
-                },
-                "ethereum": {
-                    "chain_id": "ethereum-mainnet",
-                    "block_number": 21_000_003,
-                    "block_hash": "0xbinding",
-                    "timestamp": "2026-04-17T00:00:03Z"
-                }
-            });
-            inventory.canonicality_summary = json!({
-                "status": "finalized",
-                "chains": {
-                    "base-mainnet": "finalized",
-                    "ethereum-mainnet": "finalized"
-                }
-            });
-            inventory
-        })
-        .await?;
     database
         .seed_snapshot_selector_chain_positions(&json!({
             "base": {
@@ -1759,11 +1610,6 @@ async fn v2_get_name_records_source_verified_executes_basenames_with_auxiliary_p
             "requireCanonical": true
         })
     );
-    let legacy_outcome_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM execution_cache_outcomes")
-            .fetch_one(&database.pool)
-            .await?;
-    assert_eq!(legacy_outcome_count, 0);
     let ledger_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM resolution_divergences WHERE cleared_at IS NULL",
     )
@@ -1782,7 +1628,10 @@ async fn v2_get_name_records_source_verified_reports_unsupported_without_verifie
     let payload = v2_name_records_payload_with_row_and_setup(
         "/v2/names/Alice.eth/records?source=verified&keys=avatar",
         |row| {
-            row.binding_kind = Some(bigname_storage::SurfaceBindingKind::ObservedOnly);
+            row.binding_kind = None;
+            row.surface_binding_id = None;
+            row.resource_id = None;
+            row.token_lineage_id = None;
         },
         |_, _, _| {},
     )
@@ -1830,8 +1679,8 @@ async fn v2_get_name_records_source_auto_blends_indexed_and_verified_per_key() -
                 "value": "0x0000000000000000000000000000000000000def"
             },
             "text:email": {
-                "status": "stale",
-                "failure_reason": "verified_answer_stale_for_snapshot"
+                "status": "unsupported",
+                "unsupported_reason": "verified_records_not_supported"
             }
         })
     );
@@ -1909,7 +1758,10 @@ async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> R
     assert_eq!(data[2]["name"], json!("gamma.parent.eth"));
     assert_eq!(data[0]["display_name"], json!("Alpha.Parent.eth"));
     assert_eq!(data[0]["namespace"], json!("ens"));
-    assert_eq!(data[0]["namehash"], json!("node:alpha.parent.eth"));
+    assert_eq!(
+        data[0]["namehash"],
+        json!(bigname_lookup::ens_namehash_hex("alpha.parent.eth")?)
+    );
     assert_eq!(
         data[0]["labelhash"],
         json!(labelhash_for_display_name("alpha.parent.eth"))
@@ -1989,7 +1841,7 @@ async fn v2_get_subnames_uses_current_sepolia_anchor_on_mixed_phase_heads() -> R
     seed_v2_subnames_bound_child(
         &database,
         &child_logical_name_id,
-        "Child.SepoliaPin.eth",
+        "Child.Sepolia-Pin.eth",
         "namehash:child.sepolia-pin.eth",
         91,
         Uuid::from_u128(0x7e23),
@@ -2003,12 +1855,12 @@ async fn v2_get_subnames_uses_current_sepolia_anchor_on_mixed_phase_heads() -> R
         }),
     )
     .await?;
-    bigname_storage::upsert_children_current_rows(
+    upsert_phase_children_current_rows(
         &database.pool,
         &[v2_subnames_declared_child_row(
             &format!("ens:{V2_SEPOLIA_SNAPSHOT_NAME}"),
             &child_logical_name_id,
-            "Child.SepoliaPin.eth",
+            "Child.Sepolia-Pin.eth",
             "namehash:child.sepolia-pin.eth",
             905,
             91,
@@ -2071,7 +1923,7 @@ async fn v2_get_subnames_rejects_cursor_reused_for_different_parent() -> Result<
         }),
     )
     .await?;
-    bigname_storage::upsert_children_current_rows(
+    upsert_phase_children_current_rows(
         &database.pool,
         &[v2_subnames_declared_child_row(
             "ens:other.eth",
@@ -2121,6 +1973,346 @@ async fn v2_get_subnames_include_counts_adds_child_subname_count_only_when_reque
     assert_eq!(with_counts["data"][0]["subname_count"], json!(1));
     assert_eq!(with_counts["data"][1]["subname_count"], json!(0));
     assert_eq!(with_counts["data"][2]["subname_count"], json!(0));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_subname_collections_filter_orphaned_phase_lineage_and_keep_preimage_rows()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+
+    let parent_logical_name_id: String = sqlx::query_scalar(
+        "SELECT logical_name_id FROM bigname_phase.name_surfaces WHERE raw_name = 'parent.eth'",
+    )
+    .fetch_one(&database.pool)
+    .await?;
+
+    sqlx::raw_sql(
+        r#"
+        INSERT INTO bigname_phase.chain_lineage (
+            chain_id, block_hash, block_number, block_timestamp, canonicality_state
+        ) VALUES
+            ('ethereum-mainnet', '0xreorg-beta-child', 1003, '2026-04-17T01:00:03Z',
+             'canonical'::bigname_phase.canonicality_state),
+            ('ethereum-mainnet', '0xreorg-gamma-child', 1004, '2026-04-17T01:00:04Z',
+             'canonical'::bigname_phase.canonicality_state);
+        UPDATE bigname_phase.name_surfaces
+        SET block_hash = CASE raw_name
+                WHEN 'beta.parent.eth' THEN '0xreorg-beta-child'
+                ELSE '0xreorg-gamma-child'
+            END,
+            block_number = CASE raw_name
+                WHEN 'beta.parent.eth' THEN 1003
+                ELSE 1004
+            END,
+            canonicality_state = 'canonical'::bigname_phase.canonicality_state
+        WHERE raw_name IN ('beta.parent.eth', 'gamma.parent.eth');
+        UPDATE bigname_phase.chain_lineage lineage
+        SET canonicality_state = 'orphaned'::bigname_phase.canonicality_state
+        FROM bigname_phase.name_surfaces surface
+        WHERE surface.raw_name IN ('beta.parent.eth', 'gamma.parent.eth')
+          AND lineage.chain_id = surface.chain_id
+          AND lineage.block_hash = surface.block_hash
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.children_current
+        SET provenance = jsonb_set(provenance, '{label}',
+            '{"source":"label_preimage"}'::jsonb)
+        WHERE decoded_name = 'gamma.parent.eth'
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let page = bigname_storage::load_children_current_page(
+        &database.pool,
+        &parent_logical_name_id,
+        None,
+        10,
+    )
+    .await?;
+    assert_eq!(
+        page.rows
+            .iter()
+            .map(|row| row.normalized_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha.parent.eth", "gamma.parent.eth"]
+    );
+    assert_eq!(page.summary.child_count, 2);
+
+    let audit_rows = bigname_storage::load_children_current_including_noncanonical(
+        &database.pool,
+        &parent_logical_name_id,
+    )
+    .await?;
+    assert_eq!(audit_rows.len(), 3);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_subname_collections_exclude_orphaned_project_target_before_redo() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+    let parent_logical_name_id: String = sqlx::query_scalar(
+        "SELECT logical_name_id FROM bigname_phase.name_surfaces WHERE raw_name = 'parent.eth'",
+    )
+    .fetch_one(&database.pool)
+    .await?;
+
+    sqlx::raw_sql(
+        r#"
+        INSERT INTO bigname_phase.chain_lineage (
+            chain_id, block_hash, block_number, block_timestamp, canonicality_state
+        ) VALUES (
+            'ethereum-mainnet', '0xproject-children-target', 2010,
+            '2026-04-17T02:00:10Z', 'canonical'
+        );
+        UPDATE bigname_phase.children_current
+        SET chain_positions = jsonb_build_object(
+                'block_number', 2010,
+                'block_hash', '0xproject-children-target',
+                'target_block_number', 2010,
+                'target_block_hash', '0xproject-children-target'
+            ),
+            canonicality_summary = jsonb_build_object(
+                'state', 'canonical',
+                'target_block_number', 2010,
+                'target_block_hash', '0xproject-children-target'
+            );
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let target_is_not_an_identity_anchor: bool = sqlx::query_scalar(
+        "SELECT NOT EXISTS ( \
+             SELECT 1 FROM bigname_phase.name_surfaces \
+             WHERE block_hash = '0xproject-children-target' \
+         )",
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    assert!(target_is_not_an_identity_anchor);
+    assert_eq!(
+        bigname_storage::load_children_current(&database.pool, &parent_logical_name_id)
+            .await?
+            .len(),
+        3
+    );
+
+    sqlx::query(
+        "UPDATE bigname_phase.chain_lineage \
+         SET canonicality_state = 'orphaned' \
+         WHERE chain_id = 'ethereum-mainnet' \
+           AND block_hash = '0xproject-children-target'",
+    )
+    .execute(&database.pool)
+    .await?;
+
+    assert!(
+        bigname_storage::load_children_current(&database.pool, &parent_logical_name_id)
+            .await?
+            .is_empty()
+    );
+    assert_eq!(
+        bigname_storage::load_children_current_including_noncanonical(
+            &database.pool,
+            &parent_logical_name_id,
+        )
+        .await?
+        .len(),
+        3
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_record_inventory_reads_exclude_orphaned_phase_resource_lineage() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_alice_name_record_fixture(&database, |_| {}, |_, _, _| {}).await?;
+    let resource_id = Uuid::from_u128(0x2200);
+    let boundary: Value = sqlx::query_scalar(
+        "SELECT record_version_boundary FROM bigname_phase.record_inventory_current \
+         WHERE resource_id = $1",
+    )
+    .bind(resource_id)
+    .fetch_one(&database.pool)
+    .await?;
+    let mut pointerless_boundary = boundary.clone();
+    let pointerless_boundary_object = pointerless_boundary
+        .as_object_mut()
+        .context("record inventory boundary must be an object")?;
+    pointerless_boundary_object.insert("normalized_event_id".to_owned(), Value::Null);
+    pointerless_boundary_object.insert("event_kind".to_owned(), Value::Null);
+    assert!(
+        bigname_storage::load_record_inventory_current_with_anchor_fallback(
+            &database.pool,
+            resource_id,
+            &pointerless_boundary,
+        )
+        .await?
+        .is_some()
+    );
+
+    sqlx::raw_sql(
+        r#"
+        INSERT INTO bigname_phase.chain_lineage (
+            chain_id, block_hash, block_number, block_timestamp, canonicality_state
+        ) VALUES (
+            'ethereum-mainnet', '0xreorg-record-resource', 1005,
+            '2026-04-17T01:00:05Z', 'canonical'::bigname_phase.canonicality_state
+        );
+        UPDATE bigname_phase.resources
+        SET block_hash = '0xreorg-record-resource', block_number = 1005,
+            canonicality_state = 'canonical'::bigname_phase.canonicality_state
+        WHERE resource_id = '00000000-0000-0000-0000-000000002200'::uuid;
+        UPDATE bigname_phase.chain_lineage
+        SET canonicality_state = 'orphaned'::bigname_phase.canonicality_state
+        WHERE chain_id = 'ethereum-mainnet' AND block_hash = '0xreorg-record-resource'
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+
+    assert!(
+        bigname_storage::load_record_inventory_current(&database.pool, resource_id, &boundary)
+            .await?
+            .is_none()
+    );
+    assert!(
+        bigname_storage::load_record_inventory_current_with_anchor_fallback(
+            &database.pool,
+            resource_id,
+            &pointerless_boundary,
+        )
+        .await?
+        .is_none()
+    );
+    assert_eq!(
+        bigname_storage::count_record_inventory_selectors_by_lookup_keys(
+            &database.pool,
+            &[(resource_id, boundary)],
+        )
+        .await?,
+        vec![None]
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_record_inventory_reads_exclude_orphaned_project_target_before_redo() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_alice_name_record_fixture(&database, |_| {}, |_, _, _| {}).await?;
+    let resource_id = Uuid::from_u128(0x2200);
+    let boundary: Value = sqlx::query_scalar(
+        "SELECT record_version_boundary FROM bigname_phase.record_inventory_current \
+         WHERE resource_id = $1",
+    )
+    .bind(resource_id)
+    .fetch_one(&database.pool)
+    .await?;
+    let mut pointerless_boundary = boundary.clone();
+    let pointerless_boundary_object = pointerless_boundary
+        .as_object_mut()
+        .context("record inventory boundary must be an object")?;
+    pointerless_boundary_object.insert("normalized_event_id".to_owned(), Value::Null);
+    pointerless_boundary_object.insert("event_kind".to_owned(), Value::Null);
+
+    sqlx::raw_sql(
+        r#"
+        INSERT INTO bigname_phase.chain_lineage (
+            chain_id, block_hash, block_number, block_timestamp, canonicality_state
+        ) VALUES (
+            'ethereum-mainnet', '0xproject-record-target', 2020,
+            '2026-04-17T02:00:20Z', 'canonical'
+        );
+        UPDATE bigname_phase.record_inventory_current
+        SET chain_positions = jsonb_build_object(
+                'block_number', 2020,
+                'block_hash', '0xproject-record-target',
+                'target_block_number', 2020,
+                'target_block_hash', '0xproject-record-target'
+            ),
+            canonicality_summary = jsonb_build_object(
+                'state', 'canonical_lineage',
+                'target_block_number', 2020,
+                'target_block_hash', '0xproject-record-target'
+            )
+        WHERE resource_id = '00000000-0000-0000-0000-000000002200'::uuid;
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let target_is_not_the_resource_anchor: bool = sqlx::query_scalar(
+        "SELECT NOT EXISTS ( \
+             SELECT 1 FROM bigname_phase.resources \
+             WHERE resource_id = $1 AND block_hash = '0xproject-record-target' \
+         )",
+    )
+    .bind(resource_id)
+    .fetch_one(&database.pool)
+    .await?;
+    assert!(target_is_not_the_resource_anchor);
+    assert!(
+        bigname_storage::load_record_inventory_current(&database.pool, resource_id, &boundary)
+            .await?
+            .is_some()
+    );
+    assert!(
+        bigname_storage::load_record_inventory_current_with_anchor_fallback(
+            &database.pool,
+            resource_id,
+            &pointerless_boundary,
+        )
+        .await?
+        .is_some()
+    );
+
+    sqlx::query(
+        "UPDATE bigname_phase.chain_lineage \
+         SET canonicality_state = 'orphaned' \
+         WHERE chain_id = 'ethereum-mainnet' \
+           AND block_hash = '0xproject-record-target'",
+    )
+    .execute(&database.pool)
+    .await?;
+
+    assert!(
+        bigname_storage::load_record_inventory_current(&database.pool, resource_id, &boundary)
+            .await?
+            .is_none()
+    );
+    assert!(
+        bigname_storage::load_record_inventory_current_with_anchor_fallback(
+            &database.pool,
+            resource_id,
+            &pointerless_boundary,
+        )
+        .await?
+        .is_none()
+    );
+    assert_eq!(
+        bigname_storage::count_record_inventory_selectors_by_lookup_keys(
+            &database.pool,
+            &[(resource_id, boundary)],
+        )
+        .await?,
+        vec![None]
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -2225,13 +2417,16 @@ async fn v2_get_subnames_rejects_wrong_sort_but_ignores_legacy_snapshot_componen
         "display_name_asc",
         BTreeMap::from([
             ("namespace".to_owned(), "ens".to_owned()),
-            ("parent".to_owned(), "ens:parent.eth".to_owned()),
+            (
+                "parent".to_owned(),
+                bigname_storage::logical_name_id_for_name("ens", "parent.eth"),
+            ),
         ]),
         BTreeMap::from([
             ("display_name".to_owned(), "alpha.parent.eth".to_owned()),
             (
                 "child_logical_name_id".to_owned(),
-                "ens:alpha.parent.eth".to_owned(),
+                bigname_storage::logical_name_id_for_name("ens", "alpha.parent.eth"),
             ),
         ]),
         Some("legacy-snapshot".to_owned()),
@@ -2344,17 +2539,62 @@ async fn seed_v2_snapshot_profile_name(
     block_hash: &str,
     timestamp: &str,
 ) -> Result<()> {
-    let logical_name_id = format!("ens:{normalized_name}");
-    seed_v2_subnames_bound_child(
-        database,
-        &logical_name_id,
+    let fixture_logical_name_id = format!("ens:{normalized_name}");
+    let identity_block_number = block_number.rem_euclid(100);
+    let mut surface = collection_name_surface(
+        &fixture_logical_name_id,
         display_name,
         namehash,
-        block_number.rem_euclid(100),
-        resource_id,
+        identity_block_number,
+    );
+    surface.normalized_name = normalized_name.to_owned();
+    surface.dns_encoded_name = normalized_name.as_bytes().to_vec();
+    surface.labelhashes = labelhash_for_display_name(normalized_name)
+        .into_iter()
+        .collect();
+    surface.chain_id = chain_id.to_owned();
+    surface.block_hash = format!("0xsurface{identity_block_number:02x}");
+    upsert_test_name_surfaces(&database.pool, &[surface]).await?;
+
+    let mut token_lineage = address_name_token_lineage(
         token_lineage_id,
+        &format!("0xtoken{identity_block_number:02x}"),
+        identity_block_number,
+    );
+    token_lineage.chain_id = chain_id.to_owned();
+    upsert_test_token_lineages(&database.pool, &[token_lineage]).await?;
+
+    let mut resource = address_name_resource(
+        resource_id,
+        Some(token_lineage_id),
+        &format!("0xresource{identity_block_number:02x}"),
+        identity_block_number,
+    );
+    resource.chain_id = chain_id.to_owned();
+    upsert_test_resources(&database.pool, &[resource]).await?;
+
+    let mut binding = address_name_surface_binding(
         surface_binding_id,
-        json!({
+        &fixture_logical_name_id,
+        resource_id,
+        &format!("0xbinding{identity_block_number:02x}"),
+        identity_block_number,
+        1_717_176_000 + identity_block_number,
+    );
+    binding.chain_id = chain_id.to_owned();
+    upsert_test_surface_bindings(&database.pool, &[binding]).await?;
+
+    upsert_phase_name_current_rows(
+        &database.pool,
+        &[v2_subnames_name_current_row(
+            &fixture_logical_name_id,
+            display_name,
+            namehash,
+            identity_block_number,
+            Some(surface_binding_id),
+            Some(resource_id),
+            Some(token_lineage_id),
+            json!({
             "registration": {
                 "status": "active",
                 "authority_kind": "ens_v2_registry"
@@ -2367,10 +2607,12 @@ async fn seed_v2_snapshot_profile_name(
                 "address": "0x0000000000000000000000000000000000000abc",
                 "latest_event_kind": "ResolverChanged"
             }
-        }),
+            }),
+        )],
     )
     .await?;
 
+    let logical_name_id = bigname_storage::logical_name_id_for_name("ens", normalized_name);
     let mut row = bigname_storage::load_name_current(&database.pool, &logical_name_id)
         .await
         .with_context(|| format!("failed to load v2 snapshot fixture row {logical_name_id}"))?
@@ -2489,8 +2731,10 @@ async fn v2_name_record_payload_for_database(
         .await
         .context("v2 name record request failed")?;
 
-    assert_eq!(response.status(), StatusCode::OK);
-    read_json(response).await
+    let status = response.status();
+    let payload = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {payload}");
+    Ok(payload)
 }
 
 async fn v2_name_record_payload_with_row(
@@ -2541,20 +2785,19 @@ async fn seed_v2_alice_name_record_fixture_with_binding_mode(
     migrated_binding: bool,
 ) -> Result<()> {
     let logical_name_id = "ens:alice.eth";
-    let resource_id = Uuid::from_u128(0x2200);
-    let token_lineage_id = Uuid::from_u128(0x1100);
-    let surface_binding_id = Uuid::from_u128(0x3300);
-
-    if migrated_binding {
-        database
-            .seed_name_current_binding_migrated(
-                logical_name_id,
-                resource_id,
-                token_lineage_id,
-                surface_binding_id,
-            )
-            .await?;
+    let resource_id = if migrated_binding {
+        Uuid::from_u128(0xc200_0000_0000_0000_0000_0000_0000_0101)
     } else {
+        Uuid::from_u128(0x2200)
+    };
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = if migrated_binding {
+        Uuid::from_u128(0xc200_0000_0000_0000_0000_0000_0000_0102)
+    } else {
+        Uuid::from_u128(0x3300)
+    };
+
+    if !migrated_binding {
         database
             .seed_name_current_binding(
             logical_name_id,
@@ -2575,6 +2818,17 @@ async fn seed_v2_alice_name_record_fixture_with_binding_mode(
         resource_id,
         token_lineage_id,
     );
+    if migrated_binding {
+        let (declared_summary, provenance): (Value, Value) = sqlx::query_as(
+            "SELECT declared_summary, provenance FROM bigname_phase.name_current
+             WHERE namespace = 'ens' AND lower(raw_name) = 'alice.eth'",
+        )
+        .fetch_one(&database.pool)
+        .await?;
+        row.declared_summary = declared_summary;
+        row.provenance = provenance;
+        row.token_lineage_id = None;
+    }
     row.declared_summary["registration"] = json!({
         "status": "active",
         "authority_kind": "registrar",
@@ -2596,6 +2850,67 @@ async fn seed_v2_alice_name_record_fixture_with_binding_mode(
     row.declared_summary["primary_name"] = json!("alice.eth");
     configure_row(&mut row);
     database.insert_name_current_row(row).await?;
+
+    if migrated_binding {
+        sqlx::query("DELETE FROM bigname_phase.record_inventory_current WHERE resource_id = $1")
+            .bind(resource_id)
+            .execute(&database.pool)
+            .await?;
+    } else {
+        let phase_logical_name_id =
+            bigname_storage::logical_name_id_for_name("ens", "alice.eth");
+        let chain_position: Value = sqlx::query_scalar(
+            "SELECT chain_positions -> 'ethereum' FROM bigname_phase.name_current
+             WHERE logical_name_id = $1",
+        )
+        .bind(&phase_logical_name_id)
+        .fetch_one(&database.pool)
+        .await?;
+        let boundary = json!({
+            "logical_name_id": phase_logical_name_id.clone(),
+            "resource_id": resource_id,
+            "normalized_event_id": null,
+            "event_kind": null,
+            "chain_position": chain_position,
+        });
+        let topology = json!({
+            "registry_path": [],
+            "subregistry_path": [],
+            "resolver_path": [{
+                "logical_name_id": phase_logical_name_id.clone(),
+                "resource_id": resource_id,
+                "chain_id": "ethereum-mainnet",
+                "address": "0x0000000000000000000000000000000000000abc"
+            }],
+            "wildcard": { "source": null, "matched_labels": [] },
+            "alias": { "final_target": null, "hops": [] },
+            "version_boundaries": { "record_version_boundary": boundary },
+            "transport": {
+                "source_chain_id": null,
+                "target_chain_id": null,
+                "contract_address": null,
+                "latest_event_kind": null
+            }
+        });
+        sqlx::query(
+            "UPDATE bigname_phase.name_current
+             SET declared_summary = jsonb_set(declared_summary, '{topology}', $2)
+             WHERE logical_name_id = $1",
+        )
+        .bind(&phase_logical_name_id)
+        .bind(topology)
+        .execute(&database.pool)
+        .await?;
+        seed_schema_v2_ens_manifest(
+            &database.pool,
+            "ens_execution",
+            "universal_resolver",
+            "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+            Uuid::from_u128(0xc200_0000_0000_0000_0000_0000_0000_0103),
+            true,
+        )
+        .await?;
+    }
 
     let mut inventory = record_inventory_current_row(logical_name_id, resource_id);
     inventory.selectors = json!([
@@ -2667,6 +2982,15 @@ async fn seed_v2_alice_name_record_fixture_with_binding_mode(
         }
     ]);
     configure_inventory(logical_name_id, resource_id, &mut inventory);
+    if migrated_binding {
+        inventory.record_version_boundary = sqlx::query_scalar(
+            "SELECT declared_summary #> '{topology,version_boundaries,record_version_boundary}'
+             FROM bigname_phase.name_current
+             WHERE namespace = 'ens' AND lower(raw_name) = 'alice.eth'",
+        )
+        .fetch_one(&database.pool)
+        .await?;
+    }
     database.insert_record_inventory_current_row(inventory).await?;
 
     Ok(())
@@ -2989,7 +3313,7 @@ async fn seed_v2_subnames_fixture(database: &TestDatabase) -> Result<()> {
     )
     .await?;
 
-    bigname_storage::upsert_children_current_rows(
+    upsert_phase_children_current_rows(
         &database.pool,
         &[
             v2_subnames_declared_child_row(
@@ -3083,11 +3407,14 @@ async fn seed_v2_subnames_bound_child(
     declared_summary: Value,
 ) -> Result<()> {
     let normalized_name = normalized_name_from_logical_name_id(logical_name_id);
+    let surface_block_number = block_number.saturating_sub(3);
+    let token_block_number = block_number.saturating_sub(2);
+    let resource_block_number = block_number.saturating_sub(1);
     let mut surface = collection_name_surface(
         logical_name_id,
         display_name,
         namehash,
-        block_number,
+        surface_block_number,
     );
     surface.normalized_name = normalized_name.to_owned();
     surface.dns_encoded_name = normalized_name.as_bytes().to_vec();
@@ -3104,8 +3431,8 @@ async fn seed_v2_subnames_bound_child(
         &database.pool,
         &[address_name_token_lineage(
             token_lineage_id,
-            &format!("0xtoken{block_number:02x}"),
-            block_number,
+            &format!("0xtoken{token_block_number:02x}"),
+            token_block_number,
         )],
     )
     .await?;
@@ -3114,8 +3441,8 @@ async fn seed_v2_subnames_bound_child(
         &[address_name_resource(
             resource_id,
             Some(token_lineage_id),
-            &format!("0xresource{block_number:02x}"),
-            block_number,
+            &format!("0xresource{resource_block_number:02x}"),
+            resource_block_number,
         )],
     )
     .await?;
@@ -3125,7 +3452,7 @@ async fn seed_v2_subnames_bound_child(
             surface_binding_id,
             logical_name_id,
             resource_id,
-            &format!("0xbinding{block_number:02x}"),
+            &format!("0xname{block_number:02x}"),
             block_number,
             1_717_176_000 + block_number,
         )],
@@ -3205,7 +3532,6 @@ fn v2_subnames_name_current_row(
                 "source_family": source_family_for_namespace(namespace),
                 "source_manifest_id": null,
             }],
-            "execution_trace_id": null,
             "derivation_kind": "name_current_rebuild",
         }),
         coverage: json!({

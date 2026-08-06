@@ -44,14 +44,6 @@ impl AddressNameRelation {
         }
     }
 
-    pub(super) const fn sort_rank(self) -> u8 {
-        match self {
-            Self::Registrant => 0,
-            Self::TokenHolder => 1,
-            Self::EffectiveController => 2,
-        }
-    }
-
     pub(super) fn parse(value: &str) -> Result<Self> {
         match value {
             "registrant" => Ok(Self::Registrant),

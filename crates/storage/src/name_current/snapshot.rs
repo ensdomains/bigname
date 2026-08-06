@@ -131,14 +131,14 @@ async fn position_is_canonical_lineage_member(
         r#"
         SELECT EXISTS (
             SELECT 1
-            FROM chain_lineage
+            FROM bigname_phase.chain_lineage
             WHERE chain_id = $1
               AND block_hash = $2
               AND block_number = $3
               AND canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
+                  'canonical'::bigname_phase.canonicality_state,
+                  'safe'::bigname_phase.canonicality_state,
+                  'finalized'::bigname_phase.canonicality_state
               )
         )
         "#,
@@ -168,21 +168,21 @@ async fn name_current_has_newer_projection_inputs(
         SELECT EXISTS (
             SELECT 1
             FROM normalized_events ne
-            JOIN chain_lineage ne_lineage
+            JOIN bigname_phase.chain_lineage ne_lineage
               ON ne_lineage.chain_id = ne.chain_id
              AND ne_lineage.block_hash = ne.block_hash
             WHERE ne.chain_id = $1
               AND ne.block_number > $2
               AND ne.block_number <= $3
               AND ne.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
+                  'canonical'::bigname_phase.canonicality_state,
+                  'safe'::bigname_phase.canonicality_state,
+                  'finalized'::bigname_phase.canonicality_state
               )
               AND ne_lineage.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
+                  'canonical'::bigname_phase.canonicality_state,
+                  'safe'::bigname_phase.canonicality_state,
+                  'finalized'::bigname_phase.canonicality_state
               )
               AND (
                   ne.logical_name_id = $4
@@ -214,7 +214,7 @@ async fn name_current_has_newer_projection_inputs(
         SELECT EXISTS (
             SELECT 1
             FROM surface_bindings sb
-            JOIN chain_lineage sb_lineage
+            JOIN bigname_phase.chain_lineage sb_lineage
               ON sb_lineage.chain_id = sb.chain_id
              AND sb_lineage.block_hash = sb.block_hash
             WHERE sb.logical_name_id = $1
@@ -222,14 +222,14 @@ async fn name_current_has_newer_projection_inputs(
               AND sb.block_number > $3
               AND sb.block_number <= $4
               AND sb.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
+                  'canonical'::bigname_phase.canonicality_state,
+                  'safe'::bigname_phase.canonicality_state,
+                  'finalized'::bigname_phase.canonicality_state
               )
               AND sb_lineage.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
+                  'canonical'::bigname_phase.canonicality_state,
+                  'safe'::bigname_phase.canonicality_state,
+                  'finalized'::bigname_phase.canonicality_state
               )
             LIMIT 1
         )

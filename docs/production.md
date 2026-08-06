@@ -40,9 +40,9 @@ https://app.ens.dev`, requested method `POST`, and requested header
 replays that real browser origin against the candidate edge. Recheck this
 evidence before cutover: if Manager moves behind a private or same-origin
 backend, the public GraphQL matcher can be removed. Otherwise the compatibility
-endpoint sunsets when Manager migrates to the re-baselined v1 REST contract;
-retaining it beyond that point requires an explicit decision to support the SDL
-independently.
+endpoint sunsets when Manager migrates to the v2 REST contract after the C3
+edge flip; retaining it beyond that point requires an explicit decision to
+support the SDL independently.
 
 Requests outside these method and path matcher groups return `404` at the edge.
 In particular, Caddy does not expose `/healthz`; the compose probe reaches it
@@ -52,9 +52,8 @@ helper allowlist introduced by #203 and prevents public traffic from competing
 for the health-specific concurrency ceiling.
 The API returns `404` for the removed v1 and helper paths that Caddy still
 proxies. `/v2/*` remains internal cutover staging and returns `404` publicly.
-`GET /graphql` is also denied, so GraphiQL is not exposed. Worker,
-migration, PostgreSQL, and indexer control surfaces are not routed through
-Caddy.
+`GET /graphql` is also denied, so GraphiQL is not exposed. Phase-runner and
+PostgreSQL control surfaces are not routed through Caddy.
 
 ## Environment
 
@@ -99,9 +98,9 @@ recommended starting point before the public edge is undrained.
 | `BIGNAME_API_VERIFIED_RATE_LIMIT_MAX_CLIENTS` | `65536` | `65536` | In-memory client-bucket ceiling per API process. |
 | `BIGNAME_API_TRUST_X_FORWARDED_FOR` | `false` | `true` | Whether the client-IP key may use the rightmost valid `X-Forwarded-For` address instead of the TCP peer. |
 
-The API process attaches its two RPC deadlines when it constructs its execution
-provider configuration. Worker projection RPC clients do not read these API
-variables and retain their previous behavior with no client-level timeout.
+The API process attaches its two RPC deadlines when it constructs its lookup
+provider configuration. Phase-runner hydration uses its own provider
+configuration.
 
 Rate limiting is off in the binary by default because the public contract has
 no authenticated or otherwise stable client identity, and IP addresses may be
@@ -135,11 +134,10 @@ backstop on `/healthz` and `/v2/status`; the status route remains
 bounded by the phase lookup pool's statement timeout. `/healthz` alone bypasses
 the process-wide concurrency limiter and load shedding, and its `SELECT 1` uses
 a persistent one-connection readiness pool with a two-second check limit. The
-retained `public`-schema request pool and the schema-v2 lookup request pool each
-use `BIGNAME_DATABASE_MAX_CONNECTIONS`; the readiness connection is additional,
-so the API process can open at most
-`2 * BIGNAME_DATABASE_MAX_CONNECTIONS + 1` PostgreSQL connections.
-HTTP-concurrency saturation and exhaustion of either request pool therefore
+phase request pool uses `BIGNAME_DATABASE_MAX_CONNECTIONS`; the readiness
+connection is additional, so the API process can open at most
+`BIGNAME_DATABASE_MAX_CONNECTIONS + 1` PostgreSQL connections.
+HTTP-concurrency saturation and exhaustion of the request pool therefore
 cannot queue the probe past the compose healthcheck's five-second window: a
 healthy but busy process returns `200` with `status="ready"`. A readiness
 connection failure or timeout instead returns `503` with `status="degraded"`,

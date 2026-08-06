@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use axum::{Json, extract::State};
 use bigname_storage::{HistoryEvent as StorageHistoryEvent, HistorySummaryMode};
 use serde::{Deserialize, Serialize};
@@ -94,6 +96,7 @@ pub(crate) async fn get_diagnostic_events(
         {
             invalid_cursor_error()
         } else {
+            tracing::error!(error = ?error, "failed to load diagnostic events");
             V2Error::internal_error("failed to load diagnostic events")
         }
     })?;
@@ -103,10 +106,33 @@ pub(crate) async fn get_diagnostic_events(
         .as_ref()
         .map(|cursor| encode(&events_cursor_payload(cursor, &parsed.cursor_filters)));
     let has_more = next_cursor.is_some();
+    let logical_name_ids = storage_page
+        .rows
+        .iter()
+        .filter_map(|row| row.logical_name_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let names = bigname_storage::load_name_current_by_logical_name_ids(
+        &state.pool,
+        &logical_name_ids,
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(error = ?error, "failed to load diagnostic event names from phase projections");
+        V2Error::internal_error("failed to load diagnostic events")
+    })?;
     let data = storage_page
         .rows
         .iter()
-        .map(build_diagnostic_event)
+        .map(|row| {
+            let name = row
+                .logical_name_id
+                .as_ref()
+                .and_then(|logical_name_id| names.get(logical_name_id))
+                .map(|row| row.normalized_name.as_str());
+            build_diagnostic_event(row, name)
+        })
         .collect();
     Ok(Json(Envelope {
         data,
@@ -121,12 +147,15 @@ pub(crate) async fn get_diagnostic_events(
     }))
 }
 
-pub(crate) fn build_diagnostic_event(row: &StorageHistoryEvent) -> DiagnosticEvent {
+pub(crate) fn build_diagnostic_event(
+    row: &StorageHistoryEvent,
+    name: Option<&str>,
+) -> DiagnosticEvent {
     DiagnosticEvent {
         normalized_event_id: row.normalized_event_id.to_string(),
         event_identity: row.event_identity.clone(),
         namespace: row.namespace.clone(),
-        name: event_name(row),
+        name: name.map(str::to_owned),
         registration_id: row.resource_id.map(|resource_id| resource_id.to_string()),
         event_kind: row.event_kind.clone(),
         source_family: row.source_family.clone(),
@@ -143,14 +172,6 @@ pub(crate) fn build_diagnostic_event(row: &StorageHistoryEvent) -> DiagnosticEve
         provenance: ensure_object(&row.provenance),
         coverage: build_coverage(&row.coverage),
     }
-}
-
-fn event_name(row: &StorageHistoryEvent) -> Option<String> {
-    row.logical_name_id
-        .as_deref()
-        .and_then(|logical_name_id| logical_name_id.split_once(':').map(|(_, name)| name.trim()))
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned)
 }
 
 fn build_chain_position(row: &StorageHistoryEvent) -> Value {
@@ -239,7 +260,7 @@ mod tests {
             }),
         };
 
-        let event = build_diagnostic_event(&row);
+        let event = build_diagnostic_event(&row, Some("alice.eth"));
 
         assert_eq!(event.normalized_event_id, "12");
         assert_eq!(event.event_identity, "diag:surface-bound");

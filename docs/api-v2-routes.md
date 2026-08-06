@@ -183,8 +183,7 @@ Field ownership:
   Missing phase-runner heartbeat evidence is `degraded`; a heartbeat older
   than `BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS` is `stale`. This phase-only
   threshold defaults to 60 seconds so a long database statement between
-  five-second runner heartbeat opportunities does not reuse the stricter
-  legacy worker-health threshold.
+  five-second runner heartbeat opportunities.
 - `lag_blocks` and `lag_seconds` are independently nonnegative. Each field
   clamps its own canonical-versus-projected difference at `0`.
 - Pagination behavior: none.
@@ -447,12 +446,10 @@ Field ownership:
 - Status semantics: no matching permission rows returns `200` with empty
   `data`, including when a `name` filter has no registration anchor in the
   current state. Unsupported filter combinations return `422 unsupported`.
-  An absent or older projection-owned permission
-  publication version returns `409 stale` before permission rows are decoded.
-  A publication revision change while rows and summaries are read also returns
-  `409 stale`. The version and revision are schema/publication compatibility and
-  request-coherence guards, not freshness watermarks. When `name` or
-  `registration_id` binds the read to a registration, the projection-owned
+  The route reads current permission rows and summaries without claiming a
+  request-wide immutable projection generation; current-state generation changes
+  do not produce `409 stale`. When `name` or `registration_id` binds the read to a
+  registration, the projection-owned
   per-registration permission summary classifies the result: full support adds
   no completeness metadata, missing or partial support returns
   `meta.completeness=partial` with
@@ -512,11 +509,9 @@ Field ownership:
   revision-bound storage follow-up.
 - Status semantics: no related names returns `200` with empty `data`.
   Malformed addresses return `400 invalid_input`. `include=role_summary`
-  conditionally returns `409 stale` when the compatible projection-owned
-  permission publication version is absent or old; the same address-name read
-  without that expansion remains available. The expansion also returns `409
-  stale` when the permission publication revision changes while it is assembled.
-  The expansion batch-loads projection-owned permission summaries for every
+  does not claim a request-wide immutable projection generation, and current-state
+  generation changes do not produce `409 stale`. The expansion batch-loads
+  projection-owned permission summaries for every
   registration on the served page. If all are full, no completeness metadata is
   added. A missing or partial summary returns `meta.completeness=partial`,
   `meta.unsupported_fields=["role_summary"]`, and
@@ -737,18 +732,11 @@ Diagnostic snapshot rules:
 - `/v2/diagnostics/names/{name}/coverage`,
   `/v2/diagnostics/names/{name}/binding`,
   `/v2/diagnostics/names/{name}/authority`,
-  `/v2/diagnostics/names/{name}/records`,
-  and `/v2/diagnostics/names/{name}/execution` accept `at` and `finality` and
+  and `/v2/diagnostics/names/{name}/records` accept `at` and `finality` and
   carry `meta.as_of`/`meta.as_of_token` because they explain one selected
   snapshot.
 - `/v2/diagnostics/events` follows the shared latest-state collection rule: it
   omits snapshot metadata and rejects `at` and historical `finality`.
-- Diagnostics execution selection uses the exact name, `keys`, and selected
-  snapshot. Omitting `at` selects the latest persisted execution artifact.
-  RFC 3339 `at` selects the newest persisted artifact whose requested chain
-  positions are at or before the selected positions. If multiple artifacts
-  match, the deterministic tie-break is newest `finished_at`, then greatest
-  `execution_trace_id`.
 - `/v2/diagnostics/namespaces/{namespace}/manifests` omits `meta.as_of` and
   `meta.as_of_token`; it is control-plane metadata.
 
@@ -828,26 +816,6 @@ Diagnostic snapshot rules:
   `GET /v1/profiles/names/{name}` and
   `GET /v1/names/{namespace}/{name}/records`, including the former
   `mode=both` comparison.
-
-### `GET /v2/diagnostics/names/{name}/execution`
-
-- Method/path: `GET /v2/diagnostics/names/{name}/execution`
-- Tier: diagnostics.
-- Purpose: persisted verified-execution explain.
-- Request parameters: path `name`; query `namespace`, `at`, `finality`, and
-  required `keys`.
-  `keys` uses the same record-key grammar as `/v2/names/{name}/records`. The
-  route is verified-only; callers select the persisted artifact by exact name,
-  requested keys, and selected snapshot. The route rejects duplicate or
-  malformed keys with `400 invalid_input`.
-- Response shape: `data` includes trace id, steps, digests, and CCIP
-  participation. Identity objects in the payload use dictionary spellings
-  (`namespace`, `name`, `display_name`, `registration_id`), while pipeline-only
-  identifiers keep their pipeline names per the tier-3 rule.
-- Pagination behavior: none.
-- Status semantics: missing persisted execution artifacts return
-  `404 not_found`.
-- Replaces (v1): `GET /v1/explain/resolutions/{namespace}/{name}/execution`.
 
 ### `GET /v2/diagnostics/namespaces/{namespace}/manifests`
 

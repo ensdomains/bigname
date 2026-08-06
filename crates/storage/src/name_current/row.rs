@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde_json::Value;
 use sqlx::postgres::PgRow;
 use sqlx::types::time::OffsetDateTime;
@@ -39,102 +39,6 @@ impl NameCurrentRow {
     ) -> Result<std::collections::BTreeMap<String, NameCurrentRow>> {
         super::load_name_current_by_logical_name_ids(pool, logical_name_ids).await
     }
-}
-
-pub(super) fn validate_name_current_row(row: &NameCurrentRow) -> Result<()> {
-    if row.logical_name_id.trim().is_empty() {
-        bail!("name_current row must include logical_name_id");
-    }
-    if row.namespace.trim().is_empty() {
-        bail!(
-            "name_current row {} must include namespace",
-            row.logical_name_id
-        );
-    }
-    if row.normalized_name.trim().is_empty() {
-        bail!(
-            "name_current row {} must include normalized_name",
-            row.logical_name_id
-        );
-    }
-    if row.canonical_display_name.trim().is_empty() {
-        bail!(
-            "name_current row {} must include canonical_display_name",
-            row.logical_name_id
-        );
-    }
-    if row.namehash.trim().is_empty() {
-        bail!(
-            "name_current row {} must include namehash",
-            row.logical_name_id
-        );
-    }
-    if row.logical_name_id != format!("{}:{}", row.namespace, row.normalized_name) {
-        bail!(
-            "name_current row {} does not match namespace {} and normalized_name {}",
-            row.logical_name_id,
-            row.namespace,
-            row.normalized_name
-        );
-    }
-    if row.manifest_version <= 0 {
-        bail!(
-            "name_current row {} has non-positive manifest_version {}",
-            row.logical_name_id,
-            row.manifest_version
-        );
-    }
-
-    let has_binding_ref =
-        row.surface_binding_id.is_some() || row.resource_id.is_some() || row.binding_kind.is_some();
-    if has_binding_ref
-        && (row.surface_binding_id.is_none()
-            || row.resource_id.is_none()
-            || row.binding_kind.is_none())
-    {
-        bail!(
-            "name_current row {} must provide surface_binding_id, resource_id, and binding_kind together",
-            row.logical_name_id
-        );
-    }
-    if row.token_lineage_id.is_some() && row.resource_id.is_none() {
-        bail!(
-            "name_current row {} cannot set token_lineage_id without resource_id",
-            row.logical_name_id
-        );
-    }
-
-    ensure_json_object(
-        &row.declared_summary,
-        "declared_summary",
-        &row.logical_name_id,
-    )?;
-    ensure_json_object(&row.provenance, "provenance", &row.logical_name_id)?;
-    ensure_json_object(&row.coverage, "coverage", &row.logical_name_id)?;
-    ensure_json_object(
-        &row.chain_positions,
-        "chain_positions",
-        &row.logical_name_id,
-    )?;
-    ensure_json_object(
-        &row.canonicality_summary,
-        "canonicality_summary",
-        &row.logical_name_id,
-    )?;
-
-    Ok(())
-}
-
-fn ensure_json_object(value: &Value, field_name: &str, logical_name_id: &str) -> Result<()> {
-    if !value.is_object() {
-        bail!(
-            "name_current row {} field {} must be a JSON object",
-            logical_name_id,
-            field_name
-        );
-    }
-
-    Ok(())
 }
 
 pub(super) fn decode_name_current_row(row: PgRow) -> Result<NameCurrentRow> {

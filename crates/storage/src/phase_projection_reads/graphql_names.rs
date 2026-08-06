@@ -7,6 +7,10 @@ use uuid::Uuid;
 use crate::{
     NameCurrentAddressRelationFilter, NameCurrentListFilter, NameCurrentListOrder,
     NameCurrentListRow, NameCurrentListSort, NameCurrentRow, SurfaceBindingKind,
+    name_current::{
+        DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER, DEFAULT_NAME_CURRENT_LINEAGE_JOINS,
+        DEFAULT_NAME_CURRENT_READ_FILTER,
+    },
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -189,10 +193,36 @@ fn push_filtered_names<'a>(
     builder.push("WITH ");
     if let Some(address) = filter.address.as_ref() {
         builder.push(
-            "address_membership AS (SELECT names.logical_name_id, \
-             JSONB_AGG(chain_positions ORDER BY address, relation) AS membership_targets \
-             FROM address_names_current names \
-             WHERE names.support_status = 'supported' AND ",
+            "address_membership AS (SELECT anc.logical_name_id, \
+             JSONB_AGG( \
+                 chain_positions || JSONB_BUILD_OBJECT( \
+                     'chain_id', anc.provenance ->> 'chain_id' \
+                 ) ORDER BY address, relation \
+             ) AS membership_targets \
+             FROM bigname_phase.address_names_current anc \
+             JOIN bigname_phase.name_surfaces membership_surface \
+               ON membership_surface.logical_name_id = anc.logical_name_id \
+             JOIN bigname_phase.resources membership_resource \
+               ON membership_resource.resource_id = anc.resource_id \
+             JOIN bigname_phase.surface_bindings membership_binding \
+               ON membership_binding.surface_binding_id = anc.surface_binding_id \
+             LEFT JOIN bigname_phase.token_lineages membership_token_lineage \
+               ON membership_token_lineage.token_lineage_id = anc.token_lineage_id \
+             JOIN bigname_phase.chain_lineage membership_surface_lineage \
+               ON membership_surface_lineage.chain_id = membership_surface.chain_id \
+              AND membership_surface_lineage.block_hash = membership_surface.block_hash \
+             JOIN bigname_phase.chain_lineage membership_resource_lineage \
+               ON membership_resource_lineage.chain_id = membership_resource.chain_id \
+              AND membership_resource_lineage.block_hash = membership_resource.block_hash \
+             JOIN bigname_phase.chain_lineage membership_binding_lineage \
+               ON membership_binding_lineage.chain_id = membership_binding.chain_id \
+              AND membership_binding_lineage.block_hash = membership_binding.block_hash \
+             LEFT JOIN bigname_phase.chain_lineage membership_token_lineage_lineage \
+               ON membership_token_lineage_lineage.chain_id = \
+                  membership_token_lineage.chain_id \
+              AND membership_token_lineage_lineage.block_hash = \
+                  membership_token_lineage.block_hash \
+             WHERE anc.support_status = 'supported' AND ",
         );
         match address.addresses.as_ref() {
             Some(addresses) => {
@@ -210,11 +240,12 @@ fn push_filtered_names<'a>(
             builder.push_bind(relation.as_str());
         }
         if let Some(chain_ids) = snapshot_chain_ids {
-            builder.push(" AND names.provenance ->> 'chain_id' = ANY(");
+            builder.push(" AND anc.provenance ->> 'chain_id' = ANY(");
             builder.push_bind(chain_ids);
             builder.push(")");
         }
-        builder.push(" GROUP BY names.logical_name_id), ");
+        builder.push(DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER);
+        builder.push(" GROUP BY anc.logical_name_id), ");
     }
     builder.push(
         r#"filtered_names AS (
@@ -265,11 +296,26 @@ fn push_filtered_names<'a>(
     } else {
         builder.push(" '[]'::JSONB AS membership_targets");
     }
-    builder.push(" FROM name_current nc");
+    builder.push(
+        " FROM bigname_phase.name_current nc \
+          JOIN bigname_phase.name_surfaces surface \
+            ON surface.logical_name_id = nc.logical_name_id \
+          LEFT JOIN bigname_phase.resources resource \
+            ON resource.resource_id = nc.resource_id \
+          LEFT JOIN bigname_phase.surface_bindings binding \
+            ON binding.surface_binding_id = nc.surface_binding_id \
+          LEFT JOIN bigname_phase.token_lineages token_lineage \
+            ON token_lineage.token_lineage_id = nc.token_lineage_id ",
+    );
+    builder.push(DEFAULT_NAME_CURRENT_LINEAGE_JOINS);
     if filter.address.is_some() {
-        builder.push(" JOIN address_membership USING (logical_name_id)");
+        builder.push(
+            " JOIN address_membership \
+               ON address_membership.logical_name_id = nc.logical_name_id",
+        );
     }
     builder.push(" WHERE nc.support_status = 'supported'");
+    builder.push(DEFAULT_NAME_CURRENT_READ_FILTER);
     if let Some(chain_ids) = snapshot_chain_ids {
         builder.push(
             " AND nc.chain_positions <> '{}'::JSONB \

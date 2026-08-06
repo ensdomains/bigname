@@ -1,10 +1,9 @@
+mod canonicality;
 mod decode;
 mod paging;
 mod reads;
 mod resource_summary;
 mod types;
-mod validation;
-mod writes;
 
 pub use paging::{
     load_permissions_current_account_resource_page,
@@ -16,28 +15,11 @@ pub use reads::{
 };
 pub use resource_summary::{
     load_permissions_current_resource_summaries, load_permissions_current_resource_summary,
-    publish_permissions_current_compatibility_in_transaction,
-    replace_permissions_current_resource_projection, upsert_permissions_current_resource_summary,
 };
 pub use types::{
-    PERMISSIONS_CURRENT_PUBLICATION_VERSION, PermissionCoverageExhaustiveness,
-    PermissionCoverageStatus, PermissionCoverageUnsupportedReason, PermissionScope,
-    PermissionsCurrentAccountResourceCursor, PermissionsCurrentAccountResourcePage,
-    PermissionsCurrentFullFilterSummary, PermissionsCurrentKeysetCursor, PermissionsCurrentPage,
-    PermissionsCurrentResourceSummary, PermissionsCurrentRow, ResourcePermissionCoverage,
+    PermissionCoverageExhaustiveness, PermissionCoverageStatus,
+    PermissionCoverageUnsupportedReason, PermissionScope, PermissionsCurrentAccountResourceCursor,
+    PermissionsCurrentAccountResourcePage, PermissionsCurrentFullFilterSummary,
+    PermissionsCurrentKeysetCursor, PermissionsCurrentPage, PermissionsCurrentResourceSummary,
+    PermissionsCurrentRow, ResourcePermissionCoverage,
 };
-pub use writes::{
-    clear_permissions_current, delete_permissions_current, upsert_permissions_current_rows,
-};
-
-#[cfg(test)]
-use anyhow::{Context, Result};
-#[cfg(test)]
-use serde_json::json;
-#[cfg(test)]
-use sqlx::{PgPool, types::time::OffsetDateTime};
-#[cfg(test)]
-use uuid::Uuid;
-
-#[cfg(test)]
-mod tests;

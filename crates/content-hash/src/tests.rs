@@ -115,7 +115,7 @@ fn projection_and_whole_manifest_event_blocks_change_the_hash() {
     let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
 
     tree.write(
-        "apps/worker/src/projection_apply/derive.rs",
+        "crates/project/src/projection.rs",
         "fn derive_invalidations() { let changed = true; }\n",
     );
     let projection_change =
@@ -126,7 +126,7 @@ fn projection_and_whole_manifest_event_blocks_change_the_hash() {
     );
 
     tree.write(
-        "apps/worker/src/projection_apply/derive.rs",
+        "crates/project/src/projection.rs",
         "fn derive_invalidations() {}\n",
     );
     tree.write_example_manifest_details(
@@ -183,10 +183,7 @@ fn normalizer_version_and_test_only_sources_do_not_change_hash() {
             1,
         ),
     );
-    tree.write(
-        "apps/worker/src/name_current/tests.rs",
-        "fn test_only_change() {}\n",
-    );
+    tree.write("crates/project/src/tests.rs", "fn test_only_change() {}\n");
     tree.write_example_manifest_with_normalizer("ensip15@new", "[\"RecordChanged\"]");
     let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
     assert_eq!(first, changed);
@@ -214,7 +211,7 @@ fn interpret_runtime_and_schema_writers_do_not_change_hash() {
 }
 
 #[test]
-fn newly_added_adapter_worker_and_project_modules_affect_the_hash() {
+fn newly_added_adapter_and_project_modules_affect_the_hash() {
     let adapter_tree = SampleTree::new();
     let adapter_before =
         interpreter_content_hash(adapter_tree.path()).expect("adapter baseline must hash");
@@ -227,20 +224,6 @@ fn newly_added_adapter_worker_and_project_modules_affect_the_hash() {
     assert_ne!(
         adapter_before, adapter_after,
         "a new adapter source file must enter the hash automatically"
-    );
-
-    let worker_tree = SampleTree::new();
-    let worker_before =
-        interpreter_content_hash(worker_tree.path()).expect("worker baseline must hash");
-    worker_tree.write(
-        "apps/worker/src/future_projection.rs",
-        "fn build_future_projection() {}\n",
-    );
-    let worker_after =
-        interpreter_content_hash(worker_tree.path()).expect("new worker module must hash");
-    assert_ne!(
-        worker_before, worker_after,
-        "a new non-excluded worker source file must enter the hash automatically"
     );
 
     let project_tree = SampleTree::new();
@@ -279,32 +262,12 @@ fn excluded_sources_are_insensitive_but_production_support_is_hashed() {
     let tree = SampleTree::new();
     let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
 
-    tree.write("apps/worker/src/cli.rs", "struct ChangedCli;\n");
-    tree.write(
-        "apps/worker/src/inspect/canonicality.rs",
-        "fn changed_inspection() {}\n",
-    );
-    tree.write(
-        "apps/worker/src/name_current/tests.rs",
-        "fn changed_projection_test() {}\n",
-    );
-    tree.write(
-        "apps/worker/src/primary_name/projection/test_hooks.rs",
-        "fn changed_projection_hook() {}\n",
-    );
-    tree.write(
-        "apps/worker/src/primary_name/hydration/test_hooks.rs",
-        "fn changed_hydration_hook() {}\n",
-    );
-    tree.write(
-        "apps/worker/src/record_inventory/hydration_tests_support.rs",
-        "fn changed_hydration_support() {}\n",
-    );
+    tree.write("crates/project/src/tests.rs", "fn changed_test() {}\n");
     let excluded_change =
         interpreter_content_hash(tree.path()).expect("excluded sources must be inspectable");
     assert_eq!(
         first, excluded_change,
-        "CLI, inspection, and cfg(test)-only sources must be excluded"
+        "cfg(test)-only sources must be excluded"
     );
 
     tree.write(
@@ -323,17 +286,17 @@ fn excluded_sources_are_insensitive_but_production_support_is_hashed() {
 fn conventionally_named_source_is_hashed_without_a_cfg_test_gate() {
     let tree = SampleTree::new();
     tree.write(
-        "apps/worker/src/name_current.rs",
+        "crates/project/src/conventional.rs",
         "mod tests;\npub fn project() -> bool { true }\n",
     );
     tree.write(
-        "apps/worker/src/name_current/tests.rs",
+        "crates/project/src/conventional/tests.rs",
         "pub fn interpret() -> bool { false }\n",
     );
     let first = interpreter_content_hash(tree.path()).expect("production module must hash");
 
     tree.write(
-        "apps/worker/src/name_current/tests.rs",
+        "crates/project/src/conventional/tests.rs",
         "pub fn interpret() -> bool { true }\n",
     );
     let changed = interpreter_content_hash(tree.path()).expect("changed module must hash");
@@ -343,62 +306,19 @@ fn conventionally_named_source_is_hashed_without_a_cfg_test_gate() {
 #[test]
 fn descendants_of_a_cfg_test_module_are_excluded() {
     let tree = SampleTree::new();
+    tree.write("crates/project/src/tests/mod.rs", "mod support;\n");
     tree.write(
-        "apps/worker/src/name_current/tests/mod.rs",
-        "mod support;\n",
-    );
-    tree.write(
-        "apps/worker/src/name_current/tests/support.rs",
+        "crates/project/src/tests/support.rs",
         "pub fn fixture() -> bool { false }\n",
     );
     let first = interpreter_content_hash(tree.path()).expect("test module tree must hash");
 
     tree.write(
-        "apps/worker/src/name_current/tests/support.rs",
+        "crates/project/src/tests/support.rs",
         "pub fn fixture() -> bool { true }\n",
     );
     let changed = interpreter_content_hash(tree.path()).expect("changed test helper must hash");
     assert_eq!(first, changed);
-}
-
-#[test]
-fn every_worker_source_on_disk_is_hashed_or_has_a_documented_exclusion() {
-    let workspace_root = workspace_root();
-    let hashed = hashed_source_paths(&workspace_root)
-        .expect("checked-in source paths must be collectable")
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    let mut disk_sources = Vec::new();
-    collect_rust_files(&workspace_root.join("apps/worker/src"), &mut disk_sources);
-
-    for source in disk_sources {
-        let relative_path = workspace_relative(&workspace_root, &source);
-        if hashed.contains(&relative_path) {
-            assert!(
-                excluded_source_reason(&workspace_root, &source)
-                    .expect("source exclusion must be inspectable")
-                    .is_none(),
-                "hashed worker source {relative_path} must not also be excluded"
-            );
-        } else {
-            let reason = excluded_source_reason(&workspace_root, &source)
-                .expect("source exclusion must be inspectable")
-                .unwrap_or_else(|| {
-                    panic!(
-                        "worker source {relative_path} is neither hashed nor explicitly excluded"
-                    )
-                });
-            assert!(
-                !reason.trim().is_empty(),
-                "worker source exclusion {relative_path} must have a justification"
-            );
-        }
-    }
-
-    assert!(
-        hashed.contains("apps/worker/src/projection_apply/derive.rs"),
-        "invalidation derivation is projection rebuild semantics and must be hashed"
-    );
 }
 
 #[test]
@@ -466,7 +386,6 @@ fn cfg_test_gated_sources_are_excluded_and_hashed_sources_are_not_test_gated() {
 fn manifest_parser_fails_loudly_below_the_checked_in_floor() {
     let tree = SampleTree::empty();
     tree.write("crates/adapters/src/lib.rs", "fn interpret() {}\n");
-    tree.write("apps/worker/src/name_current.rs", "fn project() {}\n");
     tree.write(
         "manifests/mainnet/undersized.toml",
         concat!(
@@ -508,15 +427,15 @@ impl SampleTree {
             "pub fn admit() -> bool { true }\n",
         );
         tree.write(
-            "apps/worker/src/name_current.rs",
+            "crates/project/src/lib.rs",
             "#[cfg(test)]\nmod tests;\npub fn project() -> bool { true }\n",
         );
         tree.write(
-            "apps/worker/src/name_current/tests.rs",
+            "crates/project/src/tests.rs",
             "fn test_only_baseline() {}\n",
         );
         tree.write(
-            "apps/worker/src/projection_apply/derive.rs",
+            "crates/project/src/projection.rs",
             "fn derive_invalidations() {}\n",
         );
         tree.write_manifest_floor();
@@ -720,7 +639,6 @@ fn discover_cfg_test_module_sources(workspace_root: &Path) -> BTreeSet<String> {
         &workspace_root.join("crates/project/src"),
         &mut source_files,
     );
-    collect_rust_files(&workspace_root.join("apps/worker/src"), &mut source_files);
     let mut gated_sources = BTreeSet::new();
 
     for parent_module in source_files {

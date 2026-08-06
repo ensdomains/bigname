@@ -1,5 +1,3 @@
-//! The raw-fuse permission logic in `apps/worker/src/permissions/project.rs` is legacy and intentionally unchanged because #314 retires the worker tree.
-
 use alloy_primitives::{Address, U256};
 use alloy_sol_types::sol;
 use anyhow::bail;

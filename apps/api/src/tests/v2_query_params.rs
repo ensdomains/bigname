@@ -220,11 +220,6 @@ const V2_STRICT_QUERY_CASES: &[V2StrictQueryCase] = &[
     },
     V2StrictQueryCase {
         method: V2StrictQueryMethod::Get,
-        uri: "/v2/diagnostics/names/alice.eth/execution",
-        expected_message: "unknown query parameter: bogus_param",
-    },
-    V2StrictQueryCase {
-        method: V2StrictQueryMethod::Get,
         uri: "/v2/diagnostics/namespaces/ens/manifests",
         expected_message: "query parameters are not supported on this route",
     },

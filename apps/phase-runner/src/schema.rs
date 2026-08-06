@@ -85,8 +85,7 @@ const BASELINE: &[(&str, &str)] = &[
 
 /// Install the fresh schema-v2 baseline into an empty phase schema.
 ///
-/// The retained API and worker continue to use `public` in the same PostgreSQL
-/// database. Until schema-v2 has an upgrade mechanism, this installer refuses
+/// Until schema-v2 has an upgrade mechanism, this installer refuses
 /// every nonempty `bigname_phase` schema rather than treating a matching table
 /// list as proof that the table definitions are current.
 pub async fn initialize_schema_v2(pool: &PgPool) -> Result<()> {

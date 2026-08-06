@@ -34,7 +34,7 @@ impl HarnessDb {
         let name = unique_database_name("bigname_e2e")?;
         let url = replace_database(&base_url, &name)?;
 
-        let admin_options = bigname_storage::stamp_projection_replay_version(base_url.parse()?);
+        let admin_options = base_url.parse::<sqlx::postgres::PgConnectOptions>()?;
         let mut admin = PgConnection::connect_with(&admin_options)
             .await
             .with_context(|| {
@@ -67,7 +67,8 @@ impl HarnessDb {
         };
         admin.close().await?;
         super::pipeline::phase_runner_init_schema(&super::repo_root(), &url).await?;
-        let connect_options = bigname_storage::stamp_projection_replay_version(url.parse()?)
+        let connect_options = url
+            .parse::<sqlx::postgres::PgConnectOptions>()?
             .options([("search_path", "bigname_phase")]);
         let pool = PgPoolOptions::new()
             .max_connections(5)
@@ -146,7 +147,7 @@ impl Drop for DatabaseCleanupGuard {
 }
 
 async fn drop_database(admin_url: &str, name: &str) -> Result<()> {
-    let admin_options = bigname_storage::stamp_projection_replay_version(admin_url.parse()?);
+    let admin_options = admin_url.parse::<sqlx::postgres::PgConnectOptions>()?;
     let mut admin = PgConnection::connect_with(&admin_options).await?;
     drop_database_with_connection(&mut admin, name).await?;
     admin.close().await?;
@@ -297,9 +298,7 @@ async fn setup_migration_template(
     let build_url = replace_database(base_url, build_name)?;
     let build_pool = PgPoolOptions::new()
         .max_connections(1)
-        .connect_with(bigname_storage::stamp_projection_replay_version(
-            build_url.parse()?,
-        ))
+        .connect_with(build_url.parse::<sqlx::postgres::PgConnectOptions>()?)
         .await
         .context("connect e2e migration template build database")?;
     let migration_result = bigname_storage::MIGRATOR
@@ -423,9 +422,7 @@ mod tests {
         let name = database.cleanup_guard.name.clone();
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
-            .connect_with(bigname_storage::stamp_projection_replay_version(
-                admin_url.parse()?,
-            ))
+            .connect_with(admin_url.parse::<sqlx::postgres::PgConnectOptions>()?)
             .await?;
         let exists: bool =
             sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")

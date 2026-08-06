@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "apps/api",
     "apps/phase-runner",
-    "apps/worker",
     "crates/ingest",
     "crates/interpret",
     "crates/lookup",
@@ -14,13 +13,11 @@ members = [
     "crates/manifests",
     "crates/adapters",
     "crates/content-hash",
-    "crates/execution",
     "crates/test-support",
 ]
 default-members = [
     "apps/api",
     "apps/phase-runner",
-    "apps/worker",
 ]
 
 [workspace.package]
@@ -55,7 +52,6 @@ uuid = { version = "1.18.1", features = ["serde", "v4"] }
 bigname-adapters = { path = "crates/adapters" }
 bigname-content-hash = { path = "crates/content-hash" }
 bigname-domain = { path = "crates/domain" }
-bigname-execution = { path = "crates/execution" }
 bigname-ingest = { path = "crates/ingest" }
 bigname-interpret = { path = "crates/interpret" }
 bigname-lookup = { path = "crates/lookup" }

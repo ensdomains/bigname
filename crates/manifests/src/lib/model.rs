@@ -3,18 +3,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde::{Deserialize, Deserializer, Serialize, de};
 
 use crate::REACHABLE_FROM_ROOT_ADMISSION;
 
 #[path = "model/abi.rs"]
 mod abi;
-#[path = "model/watched.rs"]
-mod watched;
 
 pub use abi::{ParsedManifestAbiEvent, ParsedManifestAbiFunction};
-pub use watched::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManifestRepository {
@@ -84,12 +81,6 @@ pub struct ActiveManifestVersion {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ExecutionOwnerManifestVersion {
-    pub manifest_version: u64,
-    pub source_family: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NamespaceManifestSnapshot {
     pub manifests: Vec<ActiveManifestVersion>,
     pub last_updated: String,
@@ -152,15 +143,6 @@ impl CapabilitySupportStatus {
             Self::Unsupported => "unsupported",
             Self::Shadow => "shadow",
             Self::Supported => "supported",
-        }
-    }
-
-    pub(crate) fn from_db_value(value: &str) -> Result<Self> {
-        match value {
-            "unsupported" => Ok(Self::Unsupported),
-            "shadow" => Ok(Self::Shadow),
-            "supported" => Ok(Self::Supported),
-            _ => bail!("unsupported capability status {value}"),
         }
     }
 }

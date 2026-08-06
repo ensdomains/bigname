@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::{
     Json,
@@ -16,7 +16,6 @@ use crate::AppState;
 use super::cursor::{cursor_value, invalid_cursor_error};
 use super::support::{
     ExactNameSnapshotSelector, exact_name_snapshot_scope, normalize_inferred_route_name,
-    resource_ids_for_name,
 };
 use super::{
     AtSelector, CursorPayload, Envelope, HistoryEventType, HistoryScope, Meta, Page,
@@ -74,10 +73,12 @@ pub(crate) async fn get_history(
         .clone()
         .unwrap_or_else(|| normalized.namespace.to_owned());
 
-    let logical_name_id = format!("{namespace}:{}", normalized.normalized_name);
+    let logical_name_id =
+        bigname_storage::logical_name_id_for_name(&namespace, &normalized.normalized_name);
     let parent = bigname_storage::load_name_current(&state.pool, &logical_name_id)
         .await
-        .map_err(|_| {
+        .map_err(|error| {
+            tracing::error!(error = ?error, "failed to load history parent projection");
             V2Error::internal_error(format!(
                 "failed to load history for {}/{}",
                 namespace, normalized.normalized_name
@@ -93,9 +94,27 @@ pub(crate) async fn get_history(
     let resource_ids = if matches!(params.scope, HistoryScope::Name) {
         Vec::new()
     } else {
-        resource_ids_for_name(&state.pool, &parent.logical_name_id)
-            .await
-            .map_err(api_error_to_v2)?
+        bigname_storage::load_surface_bindings_by_logical_name_id(
+            &state.pool,
+            &parent.logical_name_id,
+        )
+        .await
+        .map_err(|error| {
+            tracing::error!(
+                logical_name_id = %parent.logical_name_id,
+                error = ?error,
+                "failed to load history registration bindings"
+            );
+            V2Error::internal_error(format!(
+                "failed to load history for {}/{}",
+                namespace, normalized.normalized_name
+            ))
+        })?
+        .into_iter()
+        .map(|binding| binding.resource_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
     };
     let storage_scope = history_storage_scope(params.scope);
     let storage_cursor = params
@@ -119,6 +138,7 @@ pub(crate) async fn get_history(
     )
     .await
     .map_err(|error| {
+        tracing::error!(error = ?error, "failed to load normalized-event history page");
         if error
             .downcast_ref::<bigname_storage::InvalidHistoryCursor>()
             .is_some()
@@ -254,12 +274,8 @@ pub(crate) fn history_storage_cursor(
 }
 
 fn history_event_name(row: &StorageHistoryEvent, anchor_name: &str) -> String {
-    row.logical_name_id
-        .as_deref()
-        .and_then(|logical_name_id| logical_name_id.split_once(':').map(|(_, name)| name))
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or(anchor_name)
-        .to_owned()
+    let _ = row;
+    anchor_name.to_owned()
 }
 
 pub(crate) fn history_storage_scope(scope: HistoryScope) -> bigname_storage::HistoryScope {
@@ -291,7 +307,7 @@ pub(crate) async fn v2_exact_name_snapshot_scope_with_resolution_auxiliary(
         .unwrap_or_default();
 
     exact_name_snapshot_scope(
-        &state.lookup_pool,
+        &state.pool,
         namespace,
         selector,
         include_resolution_auxiliary,

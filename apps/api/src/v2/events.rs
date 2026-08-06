@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::{Json, extract::State};
 use bigname_storage::{
@@ -115,7 +115,34 @@ pub(crate) async fn get_events(
         .as_ref()
         .map(|cursor| encode(&events_cursor_payload(cursor, &parsed.cursor_filters)));
     let has_more = next_cursor.is_some();
-    let data = storage_page.rows.iter().filter_map(build_event).collect();
+    let logical_name_ids = storage_page
+        .rows
+        .iter()
+        .filter_map(|row| row.logical_name_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let names = bigname_storage::load_name_current_by_logical_name_ids(
+        &state.pool,
+        &logical_name_ids,
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(error = ?error, "failed to load event names from phase projections");
+        V2Error::internal_error("failed to load events")
+    })?;
+    let data = storage_page
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let name = row
+                .logical_name_id
+                .as_ref()
+                .and_then(|logical_name_id| names.get(logical_name_id))
+                .map(|row| row.normalized_name.as_str());
+            build_event(row, name)
+        })
+        .collect();
     Ok(Json(Envelope {
         data,
         page: Some(Page {
@@ -129,12 +156,12 @@ pub(crate) async fn get_events(
     }))
 }
 
-pub(crate) fn build_event(row: &StorageHistoryEvent) -> Option<Event> {
+pub(crate) fn build_event(row: &StorageHistoryEvent, name: Option<&str>) -> Option<Event> {
     let event_type = history_event_type(&row.event_kind)?;
 
     Some(Event {
         event_type,
-        name: event_name(row),
+        name: name.map(str::to_owned),
         namespace: row.namespace.clone(),
         registration_id: row.resource_id.map(|resource_id| resource_id.to_string()),
         block_number: row.block_number,
@@ -222,7 +249,12 @@ pub(crate) fn parse_events_filter(
         .as_deref()
         .map(|name| {
             normalize_inferred_route_name(name)
-                .map(|normalized| format!("{namespace}:{}", normalized.normalized_name))
+                .map(|normalized| {
+                    bigname_storage::logical_name_id_for_name(
+                        namespace,
+                        &normalized.normalized_name,
+                    )
+                })
                 .map_err(|error| V2Error::invalid_input(error.message))
         })
         .transpose()?;
@@ -287,14 +319,6 @@ pub(crate) fn parse_events_filter(
         },
         cursor_filters,
     })
-}
-
-fn event_name(row: &StorageHistoryEvent) -> Option<String> {
-    row.logical_name_id
-        .as_deref()
-        .and_then(|logical_name_id| logical_name_id.split_once(':').map(|(_, name)| name.trim()))
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -450,8 +474,11 @@ mod tests {
 
     #[test]
     fn build_event_derives_name_and_drops_non_product_kinds() {
-        let event = build_event(&storage_event("RegistrationGranted", Some("ens:alice.eth")))
-            .expect("product event must build");
+        let event = build_event(
+            &storage_event("RegistrationGranted", Some("ens:alice.eth")),
+            Some("alice.eth"),
+        )
+        .expect("product event must build");
 
         assert_eq!(event.event_type, HistoryEventType::Registration);
         assert_eq!(event.name, Some("alice.eth".to_owned()));
@@ -461,11 +488,17 @@ mod tests {
         assert_eq!(event.transaction_hash, Some("0xtx".to_owned()));
         assert_eq!(event.log_index, Some(5));
 
-        let event = build_event(&storage_event("RecordChanged", None))
+        let event = build_event(&storage_event("RecordChanged", None), None)
             .expect("product event without name must build");
         assert_eq!(event.name, None);
 
-        assert!(build_event(&storage_event("SurfaceBound", Some("ens:alice.eth"))).is_none());
+        assert!(
+            build_event(
+                &storage_event("SurfaceBound", Some("ens:alice.eth")),
+                Some("alice.eth")
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -501,7 +534,10 @@ mod tests {
             BTreeMap::from([
                 ("address".to_owned(), ADDRESS.to_owned()),
                 ("from_block".to_owned(), "10".to_owned()),
-                ("name".to_owned(), "basenames:alice.base.eth".to_owned()),
+                (
+                    "name".to_owned(),
+                    bigname_storage::logical_name_id_for_name("basenames", "alice.base.eth"),
+                ),
                 ("namespace".to_owned(), "basenames".to_owned()),
                 ("registration_id".to_owned(), REGISTRATION_ID.to_owned()),
                 ("to_block".to_owned(), "20".to_owned()),
@@ -519,7 +555,10 @@ mod tests {
         );
         assert_eq!(
             parsed.storage_filter.logical_name_id,
-            Some("basenames:alice.base.eth".to_owned())
+            Some(bigname_storage::logical_name_id_for_name(
+                "basenames",
+                "alice.base.eth"
+            ))
         );
         assert_eq!(parsed.storage_filter.from_block, Some(10));
         assert_eq!(parsed.storage_filter.to_block, Some(20));

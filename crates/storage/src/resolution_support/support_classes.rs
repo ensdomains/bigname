@@ -55,13 +55,6 @@ pub(crate) fn resolution_projection_chain_position_from_value(
     })
 }
 
-pub(crate) fn array_or_empty(value: Option<&Value>) -> Value {
-    value
-        .and_then(Value::as_array)
-        .map(|items| Value::Array(items.clone()))
-        .unwrap_or_else(|| Value::Array(Vec::new()))
-}
-
 pub(crate) fn summary_is_unsupported(section: Option<&Value>) -> bool {
     matches!(
         json_string_field(section.and_then(|value| json_field(value, "status"))).as_deref(),

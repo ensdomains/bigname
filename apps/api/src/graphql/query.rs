@@ -39,12 +39,12 @@ impl QueryRoot {
     async fn domain(&self, ctx: &Context<'_>, id: String) -> Result<Option<Domain>> {
         let state = ctx.data::<AppState>()?;
         let head = load_graphql_head(state, "domain").await?;
-        let row = match load_phase_graphql_name_row_by_name(&state.lookup_pool, NAMESPACE, &id)
+        let row = match load_phase_graphql_name_row_by_name(&state.pool, NAMESPACE, &id)
             .await
             .map_err(|error| internal_error("domain", error))?
         {
             Some(row) => Some(row),
-            None => load_phase_graphql_name_row_by_namehash(&state.lookup_pool, NAMESPACE, &id)
+            None => load_phase_graphql_name_row_by_namehash(&state.pool, NAMESPACE, &id)
                 .await
                 .map_err(|error| internal_error("domain", error))?,
         };
@@ -80,7 +80,7 @@ impl QueryRoot {
         let head = load_graphql_head(state, "domains").await?;
         let snapshot_chain_ids = graphql_snapshot_chain_ids(head.as_ref());
         let rows = load_phase_graphql_name_list_page_offset(
-            &state.lookup_pool,
+            &state.pool,
             &domain_filter_to_storage(filter),
             &snapshot_chain_ids,
             sort,
@@ -124,7 +124,7 @@ impl QueryRoot {
         let head = load_graphql_head(state, "registrationConnection").await?;
         let snapshot_chain_ids = graphql_snapshot_chain_ids(head.as_ref());
         let count =
-            count_phase_graphql_name_list(&state.lookup_pool, &storage_filter, &snapshot_chain_ids)
+            count_phase_graphql_name_list(&state.pool, &storage_filter, &snapshot_chain_ids)
                 .await
                 .map_err(|error| internal_error("registrationConnection", error))?;
         require_count_at_head(&count, head.as_ref(), "registrationConnection")?;
@@ -146,7 +146,7 @@ impl QueryRoot {
         let head = load_graphql_head(state, "domainConnection").await?;
         let snapshot_chain_ids = graphql_snapshot_chain_ids(head.as_ref());
         let count = count_phase_graphql_name_list(
-            &state.lookup_pool,
+            &state.pool,
             &domain_filter_to_storage(filter),
             &snapshot_chain_ids,
         )

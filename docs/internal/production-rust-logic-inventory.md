@@ -5,7 +5,9 @@ Status: initial audit snapshot, 2026-05-05.
 > **Historical snapshot after Stage B:** this inventory is frozen at its
 > 2026-05-05 audit state and no longer describes the current source tree. The
 > old `apps/indexer` runtime and the legacy adapter/storage paths named below
-> were co-deleted as the ingest and interpret phases landed. Use the public
+> were co-deleted as the ingest and interpret phases landed. The later C2
+> cutover also deleted `apps/worker`, `crates/execution`, and their storage
+> paths. Use the public
 > architecture, storage, manifest, deployment, and consumer-capability docs for
 > current ownership; the maintenance rules below apply only if this snapshot is
 > deliberately refreshed.
@@ -303,20 +305,20 @@ Near-term replacement candidates:
 - Keep adapter output types string-shaped for storage compatibility, but parse
   EVM values through `Address`, `B256`, `U256`, and `Bytes` first.
 - Move shared `namehash`, `child_namehash`, `dns_encode`, `dns_decode`, `hex_32`,
-  and `hex_string` helpers into one adapter/execution support module. Do not put
+  and `hex_string` helpers into one adapter/lookup support module. Do not put
   ENS behavior claims in that module without upstream citations.
 
 Provider-side candidates:
 
 - Continue typed JSON-RPC response structs around the current
   `JsonRpcProvider` request/batch transport; prefer narrow DTOs where
-  `alloy-rpc-types-eth` full block or receipt types would reject sparse cached
+  `alloy-rpc-types-eth` full block or receipt types would reject sparse provider
   payloads.
 - Normalize once at conversion boundaries: `alloy` typed response to existing
   `ProviderBlock`, `ProviderTransaction`, `ProviderReceipt`, and `ProviderLog`.
 - After typed decoding is stable, consider whether `alloy-provider` can replace
   custom transport pieces. This is a second slice because the current transport
-  preserves payload-cache and hash-pinned revalidation behavior.
+  preserves the phase runner's hash-pinned request and revalidation behavior.
 
 Dependency note:
 

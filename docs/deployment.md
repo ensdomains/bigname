@@ -1,13 +1,9 @@
 # Deployment
 
-The old `bigname-indexer` runtime has been deleted. The phase runner implements
-`ingest`, `interpret`, `project`, read-only `verify`, and continuous `live`
-follow, and the first Stage C slice moves v2 verified execution onto its lookup
-engine. The public edge flip and deletion of the retained v1 plane remain
-outstanding, so production must remain on the last pre-cut release until those
-gates land. Commands and environment variables for the old
-indexer, backfill scheduler, reconciliation replay, and repair tools are no
-longer supported by this source tree.
+The deployable runtime consists of the API and the phase runner. The phase
+runner implements `ingest`, `interpret`, `project`, read-only `verify`, and
+continuous `live` follow. The deleted indexer, worker, legacy execution crate,
+and their operational commands are not present in the image.
 
 ## Container contents
 
@@ -15,7 +11,6 @@ The image contains these runnable binaries:
 
 - `bigname-api`
 - `phase-runner`
-- `bigname-worker`
 
 The entrypoint selectors are:
 
@@ -23,13 +18,9 @@ The entrypoint selectors are:
 docker run --rm ghcr.io/ensdomains/bigname:latest api
 docker run --rm ghcr.io/ensdomains/bigname:latest phases-migrate
 docker run --rm ghcr.io/ensdomains/bigname:latest phases
-docker run --rm ghcr.io/ensdomains/bigname:latest worker
-docker run --rm ghcr.io/ensdomains/bigname:latest migrate
 ```
 
-`migrate` applies the retained migration history consumed by API and worker; it
-prepares `public` but not the phase namespace. The one-time `phases-migrate`
-command invokes `phase-runner init-schema` against the same database and
+The one-time `phases-migrate` command invokes `phase-runner init-schema` and
 requires an empty `bigname_phase` schema. It refuses every nonempty phase schema
 until a reviewed upgrade or rebuild mechanism exists. `phases` then invokes
 `phase-runner run` with `bigname_phase` as its search path. It can
@@ -37,32 +28,29 @@ persist ingest-through-project output and continuously follow provider heads,
 including reorg-driven downstream redo and canonical-head hydration. Its
 read-only verification phase compares Base's Coinbase-loaded range with dRPC
 through the `48,428,000` ingest seam and compares Ethereum with local reth only
-through the finalized head. The v2 verified name, record, and ENS/60
-primary-name paths consume its schema-v2 projection output through the lookup
-engine. Retained v1 handlers and the worker continue to use `public`.
+through the finalized head. V2, GraphQL, and operational paths consume its
+phase projections and lookup output. Apply append-only SQLx migrations through
+deployment automation; there is no application migration command in the image.
 
-## Server Compose during Stage B
+## Server Compose
 
-`docker-compose.server.yml` starts PostgreSQL, migrations, the surviving API,
-and the surviving worker. It intentionally has no indexer or phase-runner
-service. The stack can exercise existing read models and worker behavior, but
-without the Stage C API cutover it is not the replacement fresh indexing
-deployment.
+`docker-compose.server.yml` starts PostgreSQL, the API, and the phase runner.
 
 ```sh
 cp .env.server.example .env.server
 docker compose --env-file .env.server -f docker-compose.server.yml up -d
 ```
 
-Before the full `up`, use the writer URL to apply `migrate` and
-`phases-migrate`, then provision the non-owner `bigname_api` login below. Set
+Before the full `up`, apply reviewed versioned migrations with the deployment's
+migration runner, initialize or replace `bigname_phase` as described below,
+then provision the non-owner `bigname_api` login. Set
 `BIGNAME_API_DATABASE_URL` to that login; Compose deliberately does not fall
-back to `BIGNAME_DATABASE_URL` for the API. Migrations, the worker, and explicit
-phase-runner commands continue to use the writer URL.
+back to `BIGNAME_DATABASE_URL` for the API. The phase runner and migration
+automation use the writer URL.
 
 The API binds to the configured `BIGNAME_API_HOST` and
-`BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. The API
-and worker configuration that still applies is documented in
+`BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
+runtime configuration is documented in
 [`production.md`](production.md) and [`development.md`](development.md).
 
 ## Phase-runner configuration
@@ -123,6 +111,11 @@ Each `BIGNAME_PHASE_RUNNER_SOURCES` entry has the form
 `CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV`; the named environment variable
 contains the provider URL. Capacity, retry, and polling controls use the
 `BIGNAME_PHASE_RUNNER_*` names exposed by `phase-runner --help`.
+The server Compose file forwards the documented `RETH_DATA_DIR` source and the
+hydration URL map. Its reth overlay bind-mounts `RETH_DATA_DIR` read-only at the
+same container path. Add any differently named provider environment variable
+to the phase-runner service explicitly; `docker compose --env-file` supplies
+interpolation values but does not expose arbitrary variables to a container.
 For production verification, `base-mainnet` must configure its independent RPC
 source with kind `drpc`; that source can record only `cross_checked`, and its
 start block and independent verification extent are fixed at the block
@@ -201,7 +194,7 @@ retraction rather than a direct flag write. Project redo,
 `--hydration-rpc CHAIN=HTTP_URL`) for the same current-head enrichment as the
 supervised project phase. `phase-runner rewind` moves the
 published latest marker to an exact stored readable ancestor and uses normal
-head publication to orphan the suffix, invalidate affected cache eligibility,
+head publication to orphan the suffix, clear affected divergence observations,
 and stamp downstream redo.
 
 `phase-runner inspect block-canonicality`, `stored-lineage`, and `raw-events`
@@ -210,12 +203,10 @@ expose API routes. No drift, cache, execution-trace, or watch-plan inspection
 surface is ported to the phase runner.
 
 Before these schema-v2 operator commands are first used, run
-`phase-runner init-schema` once after
-the retained migrations have prepared `public`. The phase runner owns the
-`bigname_phase` namespace in that database. Keeping both namespaces in one
-transaction domain is required while head publication atomically marks phase
-lineage orphaned and removes cache eligibility from affected retained
-`public.execution_cache_outcomes`; durable traces remain in `public`.
+`phase-runner init-schema` once. The phase runner owns the `bigname_phase`
+namespace in that database. Head publication atomically marks phase lineage
+orphaned, clears affected resolution-divergence observations, and stamps
+downstream redo within that namespace.
 
 ## Verification mismatch repair
 
@@ -245,47 +236,18 @@ state-preserving alternative, a failed verify redo retains its marker and is
 resumed by rerunning the same redo command after repair. After a full
 phase-state reset, rerun the normal pipeline instead.
 
-## Carried-raw cutover gate
-
-Build-plan amendment B is a separate one-time Stage D1 operation. B1 supplied
-the ingest cursor model but did not run this production-data check. Before the
-legacy coverage and job tables are retired, the cutover must:
-
-1. compare every carried `(address, topic, range)` raw-log set with the retired
-   coverage records that describe what the old runtime fetched;
-2. record and review every disagreement before copying or deleting data;
-3. seed schema-v2 ingest cursors explicitly at the Base `48,428,000` seam, at
-   the reviewed historical starts for the three newly watched signature sets,
-   and at the observed Ethereum carry-over head; and
-4. run the production verifier over the carried Base and Ethereum raw history
-   before live follow is admitted.
-
-This repository cannot truthfully mark that gate complete without the stopped
-production dataset and its retired coverage rows. The steady-state B4 verifier
-does not read those legacy tables or infer their dynamic cursor seeds.
-
 ## Surviving services
 
-The API keeps a `public`-schema pool for health checks and retained
-public-schema reads, plus a `bigname_phase`-schema pool for GraphQL, startup
-status-chain discovery, `/v2/status`, v2 snapshot selection, verified lookup,
-primary-name projection reads, and the indexed lookup/resolver projections.
-GraphQL reads `name_current`, `address_names_current`, and
-`record_inventory_current` through that phase pool. Startup and status read
-`chain_heads`, `chain_phase_state`, `chain_lineage`, and `service_heartbeats`;
-they do not read
-`public.chain_checkpoints`. The `/v2/status` phase-runner heartbeat threshold
-uses `BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS` (60 seconds by default),
-independently of the retained legacy worker-health threshold. V2 projection
-routes that remain on the public pool
-retain their existing successor work. V2 record lookup
-may perform only the schema-v2 guarded
+The API uses one `bigname_phase` request pool plus a reserved readiness
+connection. GraphQL, `/v2/status`, snapshot selection, verified lookup, and all
+projection reads use phase relations. The `/v2/status` phase-runner heartbeat
+threshold uses `BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS` (60 seconds by
+default). V2 record lookup may perform only the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) write;
 v2 primary-name lookup writes nothing. The API database role therefore needs
-`USAGE` on `bigname_phase`, `SELECT` on only the schema-v2 lookup relations
-enumerated below,
-and `EXECUTE` on the three guarded functions below in addition to its retained
-legacy grants. These fixed-`search_path`, security-definer functions are owned
+`USAGE` on `bigname_phase`, `SELECT` on only the serving relations enumerated
+below, and `EXECUTE` on the guarded functions below. These fixed-`search_path`,
+security-definer functions are owned
 by their schema owner; their installers revoke default `PUBLIC` execution.
 Grant them only to the API role, and do not grant that role `CREATE` on
 `bigname_phase` or `public`. In particular, the API receives no direct `INSERT`
@@ -293,8 +255,8 @@ or `UPDATE` on
 `resolution_divergences` and no `UPDATE` on the guarded head, lineage, or
 projection relations.
 
-After both schemas exist, the schema owner provisions the dedicated login with
-these exact retained public-schema and schema-v2 privileges (substitute
+After the phase schema exists, the schema owner provisions the dedicated login
+with these privileges (substitute
 database, role, and secret through the normal secret-management path):
 
 ```sql
@@ -302,27 +264,19 @@ CREATE ROLE bigname_api
     LOGIN PASSWORD '<secret>'
     NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
 GRANT CONNECT ON DATABASE bigname TO bigname_api;
-GRANT USAGE ON SCHEMA public, bigname_phase TO bigname_api;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO bigname_api;
-GRANT INSERT ON TABLE
-    public.execution_traces,
-    public.execution_steps,
-    public.execution_cache_outcomes
-TO bigname_api;
-GRANT UPDATE ON TABLE public.execution_cache_outcomes TO bigname_api;
-GRANT INSERT, UPDATE ON TABLE public.raw_call_snapshots TO bigname_api;
-GRANT USAGE ON SEQUENCE public.raw_call_snapshots_raw_call_snapshot_id_seq
-TO bigname_api;
-GRANT EXECUTE ON FUNCTION public.bigname_lock_primary_name_anchor(
-    text, text, text
-) TO bigname_api;
+GRANT USAGE ON SCHEMA bigname_phase TO bigname_api;
 GRANT SELECT ON TABLE
     bigname_phase.chain_heads,
+    bigname_phase.chain_header_audit,
     bigname_phase.chain_lineage,
     bigname_phase.chain_phase_state,
     bigname_phase.service_heartbeats,
+    bigname_phase.normalized_events,
     bigname_phase.name_current,
     bigname_phase.address_names_current,
+    bigname_phase.children_current,
+    bigname_phase.permissions_current,
+    bigname_phase.permissions_current_resource_summary,
     bigname_phase.resolver_current,
     bigname_phase.name_surfaces,
     bigname_phase.resources,
@@ -342,19 +296,18 @@ GRANT EXECUTE ON FUNCTION bigname_phase.write_resolution_divergence(
 ) TO bigname_api;
 ```
 
-This role cannot read raw facts, normalized events, discovery state, the
-divergence table, or unrelated operational tables directly. Reapply these
-explicit relation and function grants after a reviewed public migration or
-phase-schema replacement; do not use ownership or schema-wide write grants as
-a shortcut.
+This role cannot read raw facts, discovery state, the divergence table, or
+unrelated operational tables directly. Reapply these explicit relation and
+function grants after a reviewed phase-schema replacement; do not use ownership
+or schema-wide write grants as a shortcut.
 
-### Replacing an initialized phase schema for the v2 cutover
+### Replacing an initialized phase schema
 
 The current installer cannot upgrade a nonempty `bigname_phase` schema. For an
 existing initialized database, this cutover therefore requires an offline
 replacement and full pipeline walk:
 
-1. Build `phase-runner` and `bigname-api` from the same commit. Stop the old
+1. Build `phase-runner` and `bigname-api` from the same commit. Stop the
    phase runner and every API process that can open the phase schema, and retain
    a database backup.
 2. As the phase-schema owner, move the old namespace aside and create the empty
@@ -398,22 +351,15 @@ selection itself requires the matching project publication before any
 projection row is admitted.
 
 Configure
-`BIGNAME_API_CHAIN_RPC_URLS` for status and both verified engines as described
-in the API docs. The retained and schema-v2 request pools each use
-`BIGNAME_DATABASE_MAX_CONNECTIONS`; together with the reserved readiness
-connection, one API process can open at most
-`2 * BIGNAME_DATABASE_MAX_CONNECTIONS + 1` PostgreSQL connections.
-
-The worker continues to own projection rebuild/apply, hydration, verified
-execution, pruning, and read-only inspection. Its continued use of projection
-tables, execution artifacts, service heartbeats, historical backfill-job reads,
-and normalized replay cursor reads is the reason those storage paths remain in
-Stage B. They are deferred to the worker/API port; this PR does not change their
-behavior.
+`BIGNAME_API_CHAIN_RPC_URLS` for status and verified lookup as described in the
+API docs. The request pool uses `BIGNAME_DATABASE_MAX_CONNECTIONS`; together
+with the reserved readiness connection, one API process can open at most
+`BIGNAME_DATABASE_MAX_CONNECTIONS + 1` PostgreSQL connections.
 
 ## Removed operational surfaces
 
-This source tree has no command for:
+This source tree has no command for the deleted indexer or worker planes,
+including:
 
 - old-indexer startup, live polling, or head-following
 - persisted `backfill_*` job creation, leasing, advancement, or repair
@@ -422,8 +368,9 @@ This source tree has no command for:
 - the Base drop-and-rederive correction
 - resolver-profile reconciliation or authority-journal draining
 - old raw-code and name-normalization indexer repair commands
+- legacy projection replay, hydration, migration, or inspection commands
+- persisted legacy execution-cache or trace inspection
 
-The corresponding SQL migrations remain immutable history. Existing rows are
-not current readiness or replay authority. Where a surviving worker inspection
-command still reads one of those tables, the read is historical and does not
-reactivate its old writer.
+The corresponding SQL migrations remain immutable history, followed by the
+append-only migration that drops their `public`-schema tables. Existing rows
+are not current readiness or replay authority during the planned transition.

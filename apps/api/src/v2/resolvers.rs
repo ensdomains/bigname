@@ -122,21 +122,18 @@ pub(crate) async fn get_resolver(
     let scope = resolver_snapshot_scope(chain_id_slug)?;
     let require_selected_head = params.at.is_none() && params.finality == Finality::Latest;
     let selected_snapshot = resolve_v2_snapshot_for(
-        &state.lookup_pool,
+        &state.pool,
         &scope,
         params.at.as_ref(),
         params.finality,
         SnapshotReadResource::Resolver,
     )
     .await?;
-    let project_generations = load_resolver_project_generations(
-        &state.lookup_pool,
-        &selected_snapshot,
-        require_selected_head,
-    )
-    .await?;
+    let project_generations =
+        load_resolver_project_generations(&state.pool, &selected_snapshot, require_selected_head)
+            .await?;
     let row = bigname_storage::load_phase_resolver_current(
-        &state.lookup_pool,
+        &state.pool,
         chain_id_slug,
         &normalized_address,
     )
@@ -148,7 +145,7 @@ pub(crate) async fn get_resolver(
     })?;
     let Some(row) = row else {
         let current = load_resolver_project_generations(
-            &state.lookup_pool,
+            &state.pool,
             &selected_snapshot,
             require_selected_head,
         )
@@ -186,7 +183,7 @@ pub(crate) async fn get_resolver(
         .transpose()?;
 
     let (bound_name_rows, storage_next_cursor) = load_bound_name_rows(
-        &state.lookup_pool,
+        &state.pool,
         chain_id_slug,
         params.namespace.as_deref(),
         storage_cursor.as_ref(),
@@ -198,12 +195,9 @@ pub(crate) async fn get_resolver(
     for bound_name_row in &bound_name_rows {
         require_phase_name_snapshot(bound_name_row, &selected_snapshot)?;
     }
-    let current = load_resolver_project_generations(
-        &state.lookup_pool,
-        &selected_snapshot,
-        require_selected_head,
-    )
-    .await?;
+    let current =
+        load_resolver_project_generations(&state.pool, &selected_snapshot, require_selected_head)
+            .await?;
     if current != project_generations {
         return Err(V2Error::stale(
             "served resolver data changed while the request was being read",

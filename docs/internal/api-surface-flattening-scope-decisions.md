@@ -1,6 +1,9 @@
 # API Surface Flattening Scope Decisions
 
-Working sheet behind ADR 0003. These answers informed the API surface flattening plan; the accepted contract remains the checked-in public docs and ADRs.
+Historical working sheet behind ADR 0003. These answers informed the API
+surface flattening plan; they do not describe the current worker-free,
+trace-free runtime. The accepted contract remains the checked-in public docs
+and ADRs.
 
 Legend:
 

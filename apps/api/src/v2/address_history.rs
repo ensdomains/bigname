@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::{
     Json,
@@ -101,7 +101,34 @@ pub(crate) async fn get_address_history(
         .as_ref()
         .map(|cursor| encode(&address_history_cursor_payload(cursor, &cursor_binding)));
     let has_more = next_cursor.is_some();
-    let data = storage_page.rows.iter().filter_map(build_event).collect();
+    let logical_name_ids = storage_page
+        .rows
+        .iter()
+        .filter_map(|row| row.logical_name_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let names = bigname_storage::load_name_current_by_logical_name_ids(
+        &state.pool,
+        &logical_name_ids,
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(error = ?error, "failed to load address-history names from phase projections");
+        V2Error::internal_error("failed to load address history")
+    })?;
+    let data = storage_page
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let name = row
+                .logical_name_id
+                .as_ref()
+                .and_then(|logical_name_id| names.get(logical_name_id))
+                .map(|row| row.normalized_name.as_str());
+            build_event(row, name)
+        })
+        .collect();
     Ok(Json(Envelope {
         data,
         page: Some(Page {

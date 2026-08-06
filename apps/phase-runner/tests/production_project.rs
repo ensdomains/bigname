@@ -1865,6 +1865,29 @@ async fn wrapper_states_and_expiry_gate_permissions_and_controller_relations() -
             power_count,
             "{label}"
         );
+        let stored_permissions = bigname_storage::load_permissions_current(
+            scratch.pool(),
+            Uuid::parse_str(RESOURCE)?,
+            None,
+            None,
+        )
+        .await?;
+        assert_eq!(
+            stored_permissions
+                .first()
+                .map(|permission| permission.effective_powers.clone()),
+            effective_powers,
+            "Project-built permission rows must pass phase canonicality admission for {label}"
+        );
+        assert!(
+            bigname_storage::load_permissions_current_resource_summary(
+                scratch.pool(),
+                Uuid::parse_str(RESOURCE)?,
+            )
+            .await?
+            .is_some(),
+            "Project-built permission summaries must pass phase canonicality admission for {label}"
+        );
         if label == "dot_eth_grace" {
             assert_eq!(effective_powers, Some(json!(["approve"])));
         }

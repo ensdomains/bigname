@@ -117,7 +117,7 @@ impl Domain {
             Some((resource_id, boundary)) => {
                 let state = ctx.data::<crate::AppState>()?;
                 #[cfg(test)]
-                super::snapshot::nested_inventory_test_hooks::run(&state.lookup_pool)
+                super::snapshot::nested_inventory_test_hooks::run(&state.pool)
                     .await
                     .map_err(|error| internal_error("Domain.resolver", error))?;
                 let loader = ctx.data::<DataLoader<RecordInventoryLoader>>()?;
@@ -135,6 +135,7 @@ impl Domain {
                 if let Some(inventory) = inventory.as_ref() {
                     require_inventory_at_head(
                         &inventory.chain_positions,
+                        inventory.chain_id.as_deref(),
                         self.served_head.as_ref(),
                         "Domain.resolver",
                     )?;

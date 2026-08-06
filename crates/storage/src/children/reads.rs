@@ -1,5 +1,4 @@
 use anyhow::{Context, Result, bail};
-use serde_json::Value;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
 
 use crate::projection_helpers::{
@@ -7,7 +6,7 @@ use crate::projection_helpers::{
 };
 
 use super::{
-    DECLARED_SURFACE_CLASS, DEFAULT_CHILDREN_CURRENT_LINEAGE_JOINS,
+    DECLARED_SURFACE_CLASS, DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS,
     DEFAULT_CHILDREN_CURRENT_READ_FILTER,
     types::{
         ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCurrentRow,
@@ -15,7 +14,17 @@ use super::{
     },
 };
 
-/// Load declared direct child rows for one parent from the default canonical read set.
+const CHILD_SELECT: &str = r#"
+    SELECT cc.parent_logical_name_id, cc.child_logical_name_id, cc.surface_class,
+           cc.namespace,
+           COALESCE(cc.decoded_name, encode(cc.raw_name, 'escape')) AS canonical_display_name,
+           lower(COALESCE(cc.decoded_name, encode(cc.raw_name, 'escape'))) AS normalized_name,
+           cc.namehash, cc.labelhash, cc.owner, cc.registrant, cc.provenance,
+           cc.chain_positions, cc.canonicality_summary, cc.manifest_version,
+           cc.last_recomputed_at
+    FROM bigname_phase.children_current cc
+"#;
+
 pub async fn load_children_current(
     pool: &PgPool,
     parent_logical_name_id: &str,
@@ -23,7 +32,6 @@ pub async fn load_children_current(
     load_children_current_internal(pool, parent_logical_name_id, false).await
 }
 
-/// Load declared direct child rows for one parent, including noncanonical parent or child surfaces.
 pub async fn load_children_current_including_noncanonical(
     pool: &PgPool,
     parent_logical_name_id: &str,
@@ -31,7 +39,6 @@ pub async fn load_children_current_including_noncanonical(
     load_children_current_internal(pool, parent_logical_name_id, true).await
 }
 
-/// Load one bounded declared direct-child page from the default canonical read set.
 pub async fn load_children_current_page(
     pool: &PgPool,
     parent_logical_name_id: &str,
@@ -48,83 +55,40 @@ pub async fn load_children_current_page(
         "children_current page_size must be positive",
         "children_current page_size does not fit in usize",
     )?;
-
-    let mut builder = QueryBuilder::<Postgres>::new(
-        r#"
-        SELECT
-            cc.parent_logical_name_id,
-            cc.child_logical_name_id,
-            cc.surface_class,
-            cc.namespace,
-            cc.canonical_display_name,
-            cc.normalized_name,
-            cc.namehash,
-            cc.labelhash,
-            cc.owner,
-            cc.registrant,
-            cc.provenance,
-            cc.chain_positions,
-            cc.canonicality_summary,
-            cc.manifest_version,
-            cc.last_recomputed_at
-        FROM children_current cc
-        JOIN name_surfaces parent
-          ON parent.logical_name_id = cc.parent_logical_name_id
-        LEFT JOIN name_surfaces child
-          ON child.logical_name_id = cc.child_logical_name_id
-        "#,
-    );
-    builder.push(DEFAULT_CHILDREN_CURRENT_LINEAGE_JOINS);
+    let mut builder = QueryBuilder::<Postgres>::new(CHILD_SELECT);
+    builder.push(DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS);
     builder.push(" WHERE cc.parent_logical_name_id = ");
     builder.push_bind(parent_logical_name_id);
     builder.push(" AND cc.surface_class = ");
     builder.push_bind(DECLARED_SURFACE_CLASS);
     builder.push(DEFAULT_CHILDREN_CURRENT_READ_FILTER);
-
     if let Some(cursor) = cursor {
         builder.push(
-            r#"
-            AND (
-                cc.canonical_display_name,
-                cc.child_logical_name_id
-            ) > (
-            "#,
+            " AND (COALESCE(cc.decoded_name, encode(cc.raw_name, 'escape')), \
+             cc.child_logical_name_id) > (",
         );
         builder.push_bind(&cursor.canonical_display_name);
         builder.push(", ");
         builder.push_bind(&cursor.child_logical_name_id);
         builder.push(")");
     }
-
     builder.push(
-        r#"
-        ORDER BY
-            cc.canonical_display_name ASC,
-            cc.child_logical_name_id ASC
-        LIMIT
-        "#,
+        " ORDER BY COALESCE(cc.decoded_name, encode(cc.raw_name, 'escape')), \
+         cc.child_logical_name_id LIMIT ",
     );
     builder.push_bind(limit);
-
     let rows = builder
         .build()
         .fetch_all(pool)
         .await
-        .with_context(|| {
-            format!(
-                "failed to load children_current page for parent_logical_name_id {parent_logical_name_id}"
-            )
-        })?
+        .context("failed to load phase children_current page")?
         .into_iter()
         .map(decode_children_current_row)
         .collect::<Result<Vec<_>>>()?;
-
     let (rows, next_cursor) = split_keyset_page(rows, page_size, |row| {
         ChildrenCurrentKeysetCursor::from(row)
     });
-
     let summary = load_children_current_summary(pool, parent_logical_name_id).await?;
-
     Ok(ChildrenCurrentPage {
         rows,
         next_cursor,
@@ -132,7 +96,6 @@ pub async fn load_children_current_page(
     })
 }
 
-/// Load compact declared direct-child summaries for parent collection keys in input order.
 pub async fn load_children_current_summaries(
     pool: &PgPool,
     parent_logical_name_ids: &[String],
@@ -140,172 +103,92 @@ pub async fn load_children_current_summaries(
     if parent_logical_name_ids.is_empty() {
         return Ok(Vec::new());
     }
-
     let rows = sqlx::query(
         r#"
         WITH requested AS (
-            SELECT
-                input.parent_logical_name_id,
-                input.ordinal
-            FROM UNNEST($1::TEXT[]) WITH ORDINALITY AS input(parent_logical_name_id, ordinal)
+            SELECT parent_logical_name_id, ordinal
+            FROM unnest($1::text[]) WITH ORDINALITY
+              AS input(parent_logical_name_id, ordinal)
+        ),
+        readable_children AS (
+            SELECT cc.*
+            FROM bigname_phase.children_current cc
+            JOIN bigname_phase.name_surfaces parent
+              ON parent.logical_name_id = cc.parent_logical_name_id
+            LEFT JOIN bigname_phase.name_surfaces child
+              ON child.logical_name_id = cc.child_logical_name_id
+            JOIN bigname_phase.chain_lineage parent_lineage
+              ON parent_lineage.chain_id = parent.chain_id
+             AND parent_lineage.block_hash = parent.block_hash
+            LEFT JOIN bigname_phase.chain_lineage child_lineage
+              ON child_lineage.chain_id = child.chain_id
+             AND child_lineage.block_hash = child.block_hash
+            WHERE cc.surface_class = $2
+              AND parent.canonicality_state IN (
+                  'canonical'::bigname_phase.canonicality_state,
+                  'safe'::bigname_phase.canonicality_state,
+                  'finalized'::bigname_phase.canonicality_state
+              )
+              AND parent_lineage.canonicality_state IN (
+                  'canonical'::bigname_phase.canonicality_state,
+                  'safe'::bigname_phase.canonicality_state,
+                  'finalized'::bigname_phase.canonicality_state
+              )
+              AND (
+                  child.logical_name_id IS NULL
+                  OR cc.provenance #>> '{label,source}' = 'label_preimage'
+                  OR (
+                      child.canonicality_state IN (
+                          'canonical'::bigname_phase.canonicality_state,
+                          'safe'::bigname_phase.canonicality_state,
+                          'finalized'::bigname_phase.canonicality_state
+                      )
+                      AND child_lineage.canonicality_state IN (
+                          'canonical'::bigname_phase.canonicality_state,
+                          'safe'::bigname_phase.canonicality_state,
+                          'finalized'::bigname_phase.canonicality_state
+                      )
+                  )
+              )
         )
-        SELECT
-            requested.parent_logical_name_id,
-            COUNT(cc.child_logical_name_id) FILTER (
-                WHERE cc.child_logical_name_id IS NOT NULL
-                  AND (
-                      child.logical_name_id IS NULL
-                      OR cc.provenance #>> '{label,source}' = 'label_preimage'
-                      OR (
-                          child.canonicality_state IN (
-                              'canonical'::canonicality_state,
-                              'safe'::canonicality_state,
-                              'finalized'::canonicality_state
-                          )
-                          AND child_lineage.canonicality_state IN (
-                              'canonical'::canonicality_state,
-                              'safe'::canonicality_state,
-                              'finalized'::canonicality_state
-                          )
-                      )
-                  )
-            )::BIGINT AS child_count,
-            COALESCE(
-                jsonb_agg(
-                    cc.provenance
-                    ORDER BY cc.canonical_display_name ASC, cc.child_logical_name_id ASC
-                ) FILTER (
-                    WHERE cc.child_logical_name_id IS NOT NULL
-                      AND (
-                          child.logical_name_id IS NULL
-                          OR cc.provenance #>> '{label,source}' = 'label_preimage'
-                          OR (
-                              child.canonicality_state IN (
-                                  'canonical'::canonicality_state,
-                                  'safe'::canonicality_state,
-                                  'finalized'::canonicality_state
-                              )
-                              AND child_lineage.canonicality_state IN (
-                                  'canonical'::canonicality_state,
-                                  'safe'::canonicality_state,
-                                  'finalized'::canonicality_state
-                              )
-                          )
-                      )
-                ),
-                '[]'::jsonb
-            ) AS provenance_inputs,
-            COALESCE(
-                jsonb_agg(
-                    cc.chain_positions
-                    ORDER BY cc.canonical_display_name ASC, cc.child_logical_name_id ASC
-                ) FILTER (
-                    WHERE cc.child_logical_name_id IS NOT NULL
-                      AND (
-                          child.logical_name_id IS NULL
-                          OR cc.provenance #>> '{label,source}' = 'label_preimage'
-                          OR (
-                              child.canonicality_state IN (
-                                  'canonical'::canonicality_state,
-                                  'safe'::canonicality_state,
-                                  'finalized'::canonicality_state
-                              )
-                              AND child_lineage.canonicality_state IN (
-                                  'canonical'::canonicality_state,
-                                  'safe'::canonicality_state,
-                                  'finalized'::canonicality_state
-                              )
-                          )
-                      )
-                ),
-                '[]'::jsonb
-            ) AS chain_positions,
-            COALESCE(
-                jsonb_agg(
-                    cc.canonicality_summary
-                    ORDER BY cc.canonical_display_name ASC, cc.child_logical_name_id ASC
-                ) FILTER (
-                    WHERE cc.child_logical_name_id IS NOT NULL
-                      AND (
-                          child.logical_name_id IS NULL
-                          OR cc.provenance #>> '{label,source}' = 'label_preimage'
-                          OR (
-                              child.canonicality_state IN (
-                                  'canonical'::canonicality_state,
-                                  'safe'::canonicality_state,
-                                  'finalized'::canonicality_state
-                              )
-                              AND child_lineage.canonicality_state IN (
-                                  'canonical'::canonicality_state,
-                                  'safe'::canonicality_state,
-                                  'finalized'::canonicality_state
-                              )
-                          )
-                      )
-                ),
-                '[]'::jsonb
-            ) AS canonicality_summaries,
-            MAX(cc.last_recomputed_at) FILTER (
-                WHERE cc.child_logical_name_id IS NOT NULL
-                  AND (
-                      child.logical_name_id IS NULL
-                      OR cc.provenance #>> '{label,source}' = 'label_preimage'
-                      OR (
-                          child.canonicality_state IN (
-                              'canonical'::canonicality_state,
-                              'safe'::canonicality_state,
-                              'finalized'::canonicality_state
-                          )
-                          AND child_lineage.canonicality_state IN (
-                              'canonical'::canonicality_state,
-                              'safe'::canonicality_state,
-                              'finalized'::canonicality_state
-                          )
-                      )
-                  )
-            )
-                AS last_recomputed_at
+        SELECT requested.parent_logical_name_id,
+               COUNT(cc.child_logical_name_id)::bigint AS child_count,
+               COALESCE(jsonb_agg(cc.provenance ORDER BY cc.raw_name, cc.child_logical_name_id)
+                        FILTER (WHERE cc.child_logical_name_id IS NOT NULL), '[]'::jsonb)
+                    AS provenance_inputs,
+               COALESCE(jsonb_agg(cc.chain_positions ORDER BY cc.raw_name, cc.child_logical_name_id)
+                        FILTER (WHERE cc.child_logical_name_id IS NOT NULL), '[]'::jsonb)
+                    AS chain_positions,
+               COALESCE(jsonb_agg(cc.canonicality_summary ORDER BY cc.raw_name, cc.child_logical_name_id)
+                        FILTER (WHERE cc.child_logical_name_id IS NOT NULL), '[]'::jsonb)
+                    AS canonicality_summaries,
+               MAX(cc.last_recomputed_at) AS last_recomputed_at
         FROM requested
-        LEFT JOIN name_surfaces parent
-          ON parent.logical_name_id = requested.parent_logical_name_id
-         AND parent.canonicality_state IN (
-                'canonical'::canonicality_state,
-                'safe'::canonicality_state,
-                'finalized'::canonicality_state
-         )
-        LEFT JOIN chain_lineage parent_lineage
-          ON parent_lineage.chain_id = parent.chain_id
-         AND parent_lineage.block_hash = parent.block_hash
-         AND parent_lineage.canonicality_state IN (
-                'canonical'::canonicality_state,
-                'safe'::canonicality_state,
-                'finalized'::canonicality_state
-         )
-        LEFT JOIN children_current cc
+        LEFT JOIN readable_children cc
           ON cc.parent_logical_name_id = requested.parent_logical_name_id
-         AND cc.surface_class = $2
-         AND parent.logical_name_id IS NOT NULL
-         AND parent_lineage.block_hash IS NOT NULL
-        LEFT JOIN name_surfaces child
-          ON child.logical_name_id = cc.child_logical_name_id
-        LEFT JOIN chain_lineage child_lineage
-          ON child_lineage.chain_id = child.chain_id
-         AND child_lineage.block_hash = child.block_hash
-        GROUP BY
-            requested.ordinal,
-            requested.parent_logical_name_id
-        ORDER BY requested.ordinal ASC
+        GROUP BY requested.ordinal, requested.parent_logical_name_id
+        ORDER BY requested.ordinal
         "#,
     )
     .bind(parent_logical_name_ids)
     .bind(DECLARED_SURFACE_CLASS)
     .fetch_all(pool)
     .await
-    .context("failed to load children_current summaries")?;
-
+    .context("failed to load phase children_current summaries")?;
     rows.into_iter()
         .map(decode_children_current_summary)
         .collect()
+}
+
+async fn load_children_current_summary(
+    pool: &PgPool,
+    parent_logical_name_id: &str,
+) -> Result<ChildrenCurrentSummary> {
+    load_children_current_summaries(pool, &[parent_logical_name_id.to_owned()])
+        .await?
+        .into_iter()
+        .next()
+        .context("phase children summary must preserve its requested key")
 }
 
 async fn load_children_current_internal(
@@ -313,83 +196,29 @@ async fn load_children_current_internal(
     parent_logical_name_id: &str,
     include_noncanonical: bool,
 ) -> Result<Vec<ChildrenCurrentRow>> {
-    let read_filter = if include_noncanonical {
-        ""
-    } else {
-        DEFAULT_CHILDREN_CURRENT_READ_FILTER
-    };
-    let lineage_joins = if include_noncanonical {
-        ""
-    } else {
-        DEFAULT_CHILDREN_CURRENT_LINEAGE_JOINS
-    };
-
-    let query = format!(
-        r#"
-        SELECT
-            cc.parent_logical_name_id,
-            cc.child_logical_name_id,
-            cc.surface_class,
-            cc.namespace,
-            cc.canonical_display_name,
-            cc.normalized_name,
-            cc.namehash,
-            cc.labelhash,
-            cc.owner,
-            cc.registrant,
-            cc.provenance,
-            cc.chain_positions,
-            cc.canonicality_summary,
-            cc.manifest_version,
-            cc.last_recomputed_at
-        FROM children_current cc
-        JOIN name_surfaces parent
-          ON parent.logical_name_id = cc.parent_logical_name_id
-        LEFT JOIN name_surfaces child
-          ON child.logical_name_id = cc.child_logical_name_id
-        {lineage_joins}
-        WHERE cc.parent_logical_name_id = $1
-          AND cc.surface_class = $2
-        {read_filter}
-        ORDER BY
-            cc.canonical_display_name ASC,
-            cc.child_logical_name_id ASC
-        "#
-    );
-
+    let mut query = CHILD_SELECT.to_owned();
+    if !include_noncanonical {
+        query.push_str(DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS);
+    }
+    query.push_str(" WHERE cc.parent_logical_name_id = $1 AND cc.surface_class = $2");
+    if !include_noncanonical {
+        query.push_str(DEFAULT_CHILDREN_CURRENT_READ_FILTER);
+    }
+    query.push_str(" ORDER BY cc.raw_name, cc.child_logical_name_id");
     let rows = sqlx::query(&query)
         .bind(parent_logical_name_id)
         .bind(DECLARED_SURFACE_CLASS)
         .fetch_all(pool)
         .await
-        .with_context(|| {
-            format!(
-                "failed to load children_current rows for parent_logical_name_id {parent_logical_name_id}"
-            )
-        })?;
-
+        .context("failed to load phase children_current rows")?;
     rows.into_iter().map(decode_children_current_row).collect()
 }
 
-async fn load_children_current_summary(
-    pool: &PgPool,
-    parent_logical_name_id: &str,
-) -> Result<ChildrenCurrentSummary> {
-    let parent_logical_name_ids = [parent_logical_name_id.to_owned()];
-    let summaries = load_children_current_summaries(pool, &parent_logical_name_ids).await?;
-    summaries.into_iter().next().with_context(|| {
-        format!(
-            "failed to load children_current summary for parent_logical_name_id {parent_logical_name_id}"
-        )
-    })
-}
-
-pub(super) fn decode_children_current_row(row: PgRow) -> Result<ChildrenCurrentRow> {
-    let surface_class = crate::sql_row::get::<String>(&row, "surface_class")?;
+fn decode_children_current_row(row: PgRow) -> Result<ChildrenCurrentRow> {
+    let surface_class: String = crate::sql_row::get(&row, "surface_class")?;
     if surface_class != DECLARED_SURFACE_CLASS {
-        bail!("unknown children_current surface_class {surface_class}");
+        bail!("children_current row has unsupported surface_class {surface_class}");
     }
-
     Ok(ChildrenCurrentRow {
         parent_logical_name_id: crate::sql_row::get(&row, "parent_logical_name_id")?,
         child_logical_name_id: crate::sql_row::get(&row, "child_logical_name_id")?,
@@ -411,20 +240,17 @@ pub(super) fn decode_children_current_row(row: PgRow) -> Result<ChildrenCurrentR
 
 fn decode_children_current_summary(row: PgRow) -> Result<ChildrenCurrentSummary> {
     Ok(ChildrenCurrentSummary {
-        parent_logical_name_id: crate::sql_row::get(&row, "parent_logical_name_id")?,
-        child_count: crate::sql_row::get(&row, "child_count")?,
-        provenance_inputs: json_array_field(&row, "provenance_inputs")?,
-        chain_positions: json_array_field(&row, "chain_positions")?,
-        canonicality_summaries: json_array_field(&row, "canonicality_summaries")?,
-        last_recomputed_at: crate::sql_row::get(&row, "last_recomputed_at")?,
-    })
-}
-
-fn json_array_field(row: &PgRow, field_name: &str) -> Result<Vec<Value>> {
-    let value: Value = row
-        .try_get(field_name)
-        .with_context(|| format!("children_current summary row missing {field_name}"))?;
-    take_json_array(value, || {
-        format!("children_current summary field {field_name} must be a JSON array")
+        parent_logical_name_id: row.try_get("parent_logical_name_id")?,
+        child_count: row.try_get("child_count")?,
+        provenance_inputs: take_json_array(row.try_get("provenance_inputs")?, || {
+            "children summary provenance_inputs must be a JSON array".to_owned()
+        })?,
+        chain_positions: take_json_array(row.try_get("chain_positions")?, || {
+            "children summary chain_positions must be a JSON array".to_owned()
+        })?,
+        canonicality_summaries: take_json_array(row.try_get("canonicality_summaries")?, || {
+            "children summary canonicality_summaries must be a JSON array".to_owned()
+        })?,
+        last_recomputed_at: row.try_get("last_recomputed_at")?,
     })
 }

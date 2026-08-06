@@ -9,7 +9,7 @@ pub(super) async fn load_current_name_row(
     namespace: &str,
     normalized_name: &str,
 ) -> V2Result<Option<NameCurrentRow>> {
-    let logical_name_id = format!("{namespace}:{normalized_name}");
+    let logical_name_id = bigname_storage::logical_name_id_for_name(namespace, normalized_name);
     bigname_storage::load_name_current(&state.pool, &logical_name_id)
         .await
         .map_err(|_| {

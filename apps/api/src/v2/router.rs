@@ -9,9 +9,8 @@ use super::{
     get_address_history, get_address_names, get_diagnostic_events,
     get_diagnostic_namespace_manifests, get_events, get_history, get_lookup,
     get_name_authority_diagnostic, get_name_binding_diagnostic, get_name_coverage_diagnostic,
-    get_name_execution_diagnostic, get_name_record, get_name_records, get_name_records_diagnostic,
-    get_namespace, get_permissions, get_primary_name, get_resolver, get_search, get_status,
-    get_subnames,
+    get_name_record, get_name_records, get_name_records_diagnostic, get_namespace, get_permissions,
+    get_primary_name, get_resolver, get_search, get_status, get_subnames,
 };
 
 pub(super) fn router() -> Router<AppState> {
@@ -50,10 +49,6 @@ pub(super) fn router() -> Router<AppState> {
             get(get_name_records_diagnostic),
         )
         .route(
-            "/v2/diagnostics/names/{name}/execution",
-            get(get_name_execution_diagnostic),
-        )
-        .route(
             "/v2/diagnostics/namespaces/{namespace}/manifests",
             get(get_diagnostic_namespace_manifests),
         )
@@ -77,11 +72,11 @@ mod tests {
     #[tokio::test]
     async fn status_route_rejects_query_params_with_v2_error_envelope() {
         let state = AppState::new(
-            PgPool::connect_lazy_with(bigname_storage::stamp_projection_replay_version(
+            PgPool::connect_lazy_with(
                 "postgres://bigname:bigname@127.0.0.1:5432/bigname"
                     .parse()
                     .expect("static test database URL must parse"),
-            )),
+            ),
             bigname_lookup::ChainRpcUrls::default(),
         );
 

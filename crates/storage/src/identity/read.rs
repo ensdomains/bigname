@@ -7,20 +7,20 @@ use uuid::Uuid;
 use super::types::{NameSurface, Resource, SurfaceBinding, TokenLineage};
 
 const DEFAULT_IDENTITY_LINEAGE_JOIN: &str = r#"
-  JOIN chain_lineage identity_lineage
+  JOIN bigname_phase.chain_lineage identity_lineage
     ON identity_lineage.chain_id = identity_row.chain_id AND identity_lineage.block_hash = identity_row.block_hash
 "#;
 
 const DEFAULT_IDENTITY_READ_FILTER: &str = r#"
   AND identity_row.canonicality_state IN (
-      'canonical'::canonicality_state,
-      'safe'::canonicality_state,
-      'finalized'::canonicality_state
+      'canonical'::bigname_phase.canonicality_state,
+      'safe'::bigname_phase.canonicality_state,
+      'finalized'::bigname_phase.canonicality_state
   )
   AND identity_lineage.canonicality_state IN (
-      'canonical'::canonicality_state,
-      'safe'::canonicality_state,
-      'finalized'::canonicality_state
+      'canonical'::bigname_phase.canonicality_state,
+      'safe'::bigname_phase.canonicality_state,
+      'finalized'::bigname_phase.canonicality_state
   )
 "#;
 
@@ -75,14 +75,14 @@ pub async fn load_name_surfaces_by_logical_name_ids(
         SELECT
             identity_row.logical_name_id,
             identity_row.namespace,
-            identity_row.input_name,
-            identity_row.canonical_display_name,
-            identity_row.normalized_name,
+            identity_row.raw_name AS input_name,
+            identity_row.raw_name AS canonical_display_name,
+            lower(identity_row.raw_name) AS normalized_name,
             identity_row.dns_encoded_name,
             identity_row.namehash,
             identity_row.labelhashes,
             identity_row.normalizer_version,
-            identity_row.normalization_warnings,
+            '[]'::jsonb AS normalization_warnings,
             identity_row.normalization_errors,
             identity_row.chain_id,
             identity_row.block_hash,
@@ -256,14 +256,14 @@ where
         SELECT
             identity_row.logical_name_id,
             identity_row.namespace,
-            identity_row.input_name,
-            identity_row.canonical_display_name,
-            identity_row.normalized_name,
+            identity_row.raw_name AS input_name,
+            identity_row.raw_name AS canonical_display_name,
+            lower(identity_row.raw_name) AS normalized_name,
             identity_row.dns_encoded_name,
             identity_row.namehash,
             identity_row.labelhashes,
             identity_row.normalizer_version,
-            identity_row.normalization_warnings,
+            '[]'::jsonb AS normalization_warnings,
             identity_row.normalization_errors,
             identity_row.chain_id,
             identity_row.block_hash,
@@ -446,7 +446,10 @@ pub(super) fn decode_token_lineage(row: PgRow) -> Result<TokenLineage> {
         block_hash: crate::sql_row::get(&row, "block_hash")?,
         block_number: crate::sql_row::get(&row, "block_number")?,
         provenance: crate::sql_row::get(&row, "provenance")?,
-        canonicality_state: crate::sql_row::get(&row, "canonicality_state")?,
+        canonicality_state: crate::CanonicalityState::parse(&crate::sql_row::get::<String>(
+            &row,
+            "canonicality_state",
+        )?)?,
     })
 }
 
@@ -458,7 +461,10 @@ pub(super) fn decode_resource(row: PgRow) -> Result<Resource> {
         block_hash: crate::sql_row::get(&row, "block_hash")?,
         block_number: crate::sql_row::get(&row, "block_number")?,
         provenance: crate::sql_row::get(&row, "provenance")?,
-        canonicality_state: crate::sql_row::get(&row, "canonicality_state")?,
+        canonicality_state: crate::CanonicalityState::parse(&crate::sql_row::get::<String>(
+            &row,
+            "canonicality_state",
+        )?)?,
     })
 }
 
@@ -479,7 +485,10 @@ pub(super) fn decode_name_surface(row: PgRow) -> Result<NameSurface> {
         block_hash: crate::sql_row::get(&row, "block_hash")?,
         block_number: crate::sql_row::get(&row, "block_number")?,
         provenance: crate::sql_row::get(&row, "provenance")?,
-        canonicality_state: crate::sql_row::get(&row, "canonicality_state")?,
+        canonicality_state: crate::CanonicalityState::parse(&crate::sql_row::get::<String>(
+            &row,
+            "canonicality_state",
+        )?)?,
     })
 }
 
@@ -495,6 +504,9 @@ pub(super) fn decode_surface_binding(row: PgRow) -> Result<SurfaceBinding> {
         block_hash: crate::sql_row::get(&row, "block_hash")?,
         block_number: crate::sql_row::get(&row, "block_number")?,
         provenance: crate::sql_row::get(&row, "provenance")?,
-        canonicality_state: crate::sql_row::get(&row, "canonicality_state")?,
+        canonicality_state: crate::CanonicalityState::parse(&crate::sql_row::get::<String>(
+            &row,
+            "canonicality_state",
+        )?)?,
     })
 }

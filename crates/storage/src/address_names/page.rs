@@ -422,17 +422,6 @@ async fn ensure_address_names_current_cursor_exists(
     }
 }
 
-#[cfg(test)]
-pub(super) fn address_names_current_cursor_from_entry(
-    entry: &AddressNameCurrentEntry,
-) -> AddressNamesCurrentCursor {
-    AddressNamesCurrentCursor {
-        canonical_display_name: entry.canonical_display_name.clone(),
-        logical_name_id: entry.logical_name_id.clone(),
-        resource_id: entry.resource_id,
-    }
-}
-
 struct AddressNameCurrentSortedEntry {
     entry: AddressNameCurrentEntry,
     sort_timestamp: Option<OffsetDateTime>,

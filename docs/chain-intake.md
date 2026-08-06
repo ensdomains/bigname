@@ -201,11 +201,11 @@ and the Coinbase SQL warehouse is not a block provider at all.
 
 ## Reorgs and required downstream redo
 
-Head publication marks a displaced readable suffix orphaned and invalidates
-affected execution-cache eligibility atomically. If that suffix starts at or
-below the recorded `interpret` or `project` cursor, the same transaction stamps
-the affected phase's existing redo state from the first orphaned block through
-that cursor. The next live cycle runs the stamped `interpret` range and then the
+Head publication marks a displaced readable suffix orphaned. If that suffix
+starts at or below the recorded `interpret` or `project` cursor, the same
+transaction stamps the affected phase's existing redo state from the first
+orphaned block through that cursor and clears affected resolution-divergence
+rows. The next live cycle runs the stamped `interpret` range and then the
 stamped `project` range before either phase advances normally. If a provider's
 latest marker temporarily falls below the old downstream cursor, live keeps
 polling and fills the winning path through the stamped upper bound before redo
@@ -368,24 +368,14 @@ recreated by an explicit interpret redo over a complete ingested range.
 Current projections can be rebuilt from those canonical inputs without
 hydration; hydration is a separately reproducible head-only enrichment.
 
-Execution may persist exact block-anchored call snapshots through the admitted
-raw-fact boundary. That surviving path does not make execution a general chain
-intake owner.
+Hydration and verified lookup call providers only at their documented block
+position. Those request-scoped responses are not raw facts and do not make the
+API a general chain-intake owner.
 
-## Current Stage B limitation
+## Runtime boundary
 
-The phase runner is now a continuously supervised ingest-through-live writer
-with finalized
-[stored-history verification](glossary.md#stored-history-verification), but it
-is not yet the complete
-replacement deployment. The API continues to read legacy public-schema
-projections until the Stage C cutover. The surviving worker therefore
-continues to serve its documented public-schema duties; it does not write the
-schema-v2 project tables.
-
-The historical `backfill_*`, `normalized_replay_*`, resolver-profile
-reconciliation, raw-log revision/proof, and startup-checkpoint SQL tables remain
-in migration history. This source tree has no old-runtime writer for them.
-Storage exposes only the read paths still used by the worker or API, including
-historical backfill-job inspection and the normalized replay cursor reads used
-by the surviving public-schema projection and compaction boundary.
+The phase runner is the only continuously supervised ingest-through-live
+writer. The API reads `bigname_phase` projections and lookup state; no serving
+path reads the retired `public` lineage, projection, replay, or execution
+tables. Historical migrations remain append-only evidence, while the legacy
+tables themselves are removed by a schema-qualified versioned migration.

@@ -3,11 +3,9 @@
 Status: Accepted
 Date: 2026-04-16
 
-Amended: 2026-08-03. Stage B replaced the `apps/indexer` intake and
-interpretation runtime with `apps/phase-runner`, `crates/ingest`, and
-`crates/interpret`. The API and projection worker remain while their later
-phase ports are pending. The repository shape below records the original
-baseline rather than the current executable inventory.
+Amended: 2026-08-06. The phase runner now owns ingest, interpretation,
+projection, verification, live follow, and redo. The old indexer, worker, and
+legacy execution crate have been deleted.
 
 ## Context
 
@@ -20,14 +18,16 @@ Use a Rust modular monolith for the first production version.
 Repository shape:
 
 - `apps/api`
-- `apps/indexer`
-- `apps/worker`
+- `apps/phase-runner`
 - `crates/domain`
 - `crates/storage`
 - `crates/manifests`
 - `crates/adapters`
-- `crates/execution`
-- `tests/conformance`
+- `crates/ingest`
+- `crates/interpret`
+- `crates/lookup`
+- `crates/project`
+- `tests/e2e`
 
 Baseline technology choices:
 
@@ -42,7 +42,7 @@ Local development baseline:
 
 - Docker Compose for PostgreSQL
 - checked-in migrations
-- one command to boot API, indexer, and worker processes in development
+- one command to boot the API and configured phase runner in development
 
 Testing baseline:
 
@@ -50,12 +50,12 @@ Testing baseline:
 - `cargo clippy`
 - `cargo test` or `cargo nextest`
 - migration verification in CI
-- a standalone Rust conformance package under `tests/conformance`
+- a standalone Rust end-to-end package under `tests/e2e`
 
 Operational baseline:
 
-- no separate message bus in v1
-- background work is coordinated through the database plus worker polling
+- no separate message bus
+- phase progress, redo, and heartbeat state are coordinated through PostgreSQL
 - introduce separate queueing infrastructure only if measured load demands it
 
 ## Consequences

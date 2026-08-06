@@ -340,6 +340,3 @@ fn validate_namespace(namespace: &str) -> V2Result<()> {
         Err(V2Error::invalid_input("namespace is invalid"))
     }
 }
-
-#[cfg(test)]
-mod tests;

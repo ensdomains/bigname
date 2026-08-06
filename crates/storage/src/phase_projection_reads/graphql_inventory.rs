@@ -12,6 +12,7 @@ pub struct PhaseGraphqlRecordInventoryRow {
     pub selectors: Value,
     pub entries: Value,
     pub chain_positions: Value,
+    pub chain_id: Option<String>,
 }
 
 struct InventoryCandidate {
@@ -34,11 +35,39 @@ pub async fn load_phase_graphql_record_inventory_batch(
 
     let rows = sqlx::query(
         r#"
-        SELECT resource_id, record_version_boundary, selectors, entries,
-               chain_positions, support_status
-        FROM record_inventory_current
-        WHERE resource_id = ANY($1::UUID[])
-        ORDER BY resource_id, record_version_boundary_key
+        SELECT ric.resource_id, ric.record_version_boundary, ric.selectors, ric.entries,
+               ric.chain_positions, ric.support_status
+        FROM bigname_phase.record_inventory_current ric
+        JOIN bigname_phase.resources resource
+          ON resource.resource_id = ric.resource_id
+        JOIN bigname_phase.chain_lineage resource_lineage
+          ON resource_lineage.chain_id = resource.chain_id
+         AND resource_lineage.block_hash = resource.block_hash
+        WHERE ric.resource_id = ANY($1::UUID[])
+          AND ric.canonicality_summary ->> 'state' = 'canonical_lineage'
+          AND resource.canonicality_state IN (
+              'canonical'::bigname_phase.canonicality_state,
+              'safe'::bigname_phase.canonicality_state,
+              'finalized'::bigname_phase.canonicality_state
+          )
+          AND resource_lineage.canonicality_state IN (
+              'canonical'::bigname_phase.canonicality_state,
+              'safe'::bigname_phase.canonicality_state,
+              'finalized'::bigname_phase.canonicality_state
+          )
+          AND EXISTS (
+              SELECT 1
+              FROM bigname_phase.chain_lineage projection_lineage
+              WHERE projection_lineage.chain_id = ric.provenance ->> 'chain_id'
+                AND projection_lineage.block_hash =
+                    ric.chain_positions ->> 'target_block_hash'
+                AND projection_lineage.canonicality_state IN (
+                    'canonical'::bigname_phase.canonicality_state,
+                    'safe'::bigname_phase.canonicality_state,
+                    'finalized'::bigname_phase.canonicality_state
+                )
+          )
+        ORDER BY ric.resource_id, ric.record_version_boundary_key
         "#,
     )
     .bind(resource_ids.into_iter().collect::<Vec<_>>())
@@ -59,6 +88,11 @@ pub async fn load_phase_graphql_record_inventory_batch(
                     selectors: row.try_get("selectors")?,
                     entries: row.try_get("entries")?,
                     chain_positions: row.try_get("chain_positions")?,
+                    chain_id: row
+                        .try_get::<Value, _>("record_version_boundary")?
+                        .pointer("/chain_position/chain_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
                 },
             });
     }

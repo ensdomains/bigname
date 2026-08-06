@@ -37,7 +37,6 @@ WORKDIR /app
 
 COPY --from=builder /app/target/release/bigname-api /usr/local/bin/bigname-api
 COPY --from=builder /app/target/release/phase-runner /usr/local/bin/phase-runner
-COPY --from=builder /app/target/release/bigname-worker /usr/local/bin/bigname-worker
 COPY --from=builder --chown=bigname:bigname /app/manifests /app/manifests
 COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/bigname
 

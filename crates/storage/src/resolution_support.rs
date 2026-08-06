@@ -1,6 +1,5 @@
 mod boundaries;
 mod record_keys;
-mod request_keys;
 mod support_classes;
 mod topology;
 
@@ -13,14 +12,8 @@ pub use boundaries::{
 };
 pub use record_keys::{
     SupportedVerifiedResolutionRecordKey, canonical_addr_coin_type, is_resolution_avatar_record,
-    parse_supported_verified_resolution_record_key, resolution_execution_cache_lookup_records,
-    supported_resolution_verified_lookup_records, supported_resolution_verified_readback_records,
-    supports_resolution_verified_lookup_record,
-};
-pub use request_keys::{
-    build_resolution_execution_cache_key, build_resolution_requested_chain_positions,
-    normalized_resolution_request_key, normalized_resolution_request_key_from_record_keys,
-    resolution_requested_chain_positions_from_projection,
+    parse_supported_verified_resolution_record_key, supported_resolution_verified_lookup_records,
+    supported_resolution_verified_readback_records, supports_resolution_verified_lookup_record,
 };
 pub use support_classes::{
     BASE_MAINNET_CHAIN_ID, BASENAMES_L1_RESOLVER_ADDRESS, BASENAMES_NAMESPACE,

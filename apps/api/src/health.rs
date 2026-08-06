@@ -1,6 +1,6 @@
 use axum::{Json, extract::State, http::StatusCode};
 use serde::Serialize;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row, types::time::OffsetDateTime};
 use tracing::warn;
 
 use crate::{AppState, BUILD_SHA, SOFTWARE_VERSION, v2::format_timestamp};
@@ -26,28 +26,7 @@ pub(crate) struct HealthResponse {
 pub(crate) struct HealthIdentityResponse {
     pub(crate) version: &'static str,
     pub(crate) build_sha: &'static str,
-    pub(crate) schema_migration_version: i64,
-    pub(crate) projection_replay_version: i32,
-    pub(crate) projection_publication_versions: HealthProjectionPublicationVersions,
-}
-
-impl HealthIdentityResponse {
-    fn current() -> Self {
-        Self {
-            version: SOFTWARE_VERSION,
-            build_sha: BUILD_SHA,
-            schema_migration_version: bigname_storage::latest_migration_version(),
-            projection_replay_version: bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION,
-            projection_publication_versions: HealthProjectionPublicationVersions {
-                permissions_current: bigname_storage::PERMISSIONS_CURRENT_PUBLICATION_VERSION,
-            },
-        }
-    }
-}
-
-#[derive(Serialize)]
-pub(crate) struct HealthProjectionPublicationVersions {
-    pub(crate) permissions_current: i32,
+    pub(crate) interpreter_content_hash: &'static str,
 }
 
 #[derive(Serialize)]
@@ -65,8 +44,7 @@ pub(crate) struct HealthDatabaseResponse {
 
 #[derive(Serialize)]
 pub(crate) struct HealthLoopsResponse {
-    pub(crate) indexer: HealthLoopResponse,
-    pub(crate) worker: HealthLoopResponse,
+    pub(crate) phase_runner: HealthLoopResponse,
 }
 
 #[derive(Serialize)]
@@ -90,11 +68,11 @@ pub(crate) async fn health(
     .await
     {
         Ok(Ok(_)) => true,
-        Ok(Err(readiness_error)) => {
+        Ok(Err(error)) => {
             warn!(
                 service = "api",
                 build_sha = BUILD_SHA,
-                error = ?readiness_error,
+                ?error,
                 "database readiness probe failed"
             );
             false
@@ -110,192 +88,118 @@ pub(crate) async fn health(
         }
     };
 
-    let (database, loops, loops_ready) = match database_reachable {
-        true => {
-            let database = HealthDatabaseResponse {
-                status: "reachable",
-                reachable: true,
-                check: "select_1",
-                error: None,
-            };
-            let indexer_chain_max_age_secs = state.indexer_chain_heartbeat_max_age_secs;
-            match bigname_storage::load_preferred_service_loop_heartbeats_with_indexer_chain_max_age(
-                &health_pool.0,
-                &[
-                    bigname_storage::INDEXER_SERVICE_NAME,
-                    bigname_storage::WORKER_SERVICE_NAME,
-                ],
-                state.heartbeat_max_age_secs,
-                state.worker_rebuild_phase_max_age_secs,
-                indexer_chain_max_age_secs,
-            )
-            .await
-            {
-                Ok(heartbeats) => {
-                    let indexer = loop_health_response(
-                        heartbeats.iter().find(|heartbeat| {
-                            heartbeat.service_name == bigname_storage::INDEXER_SERVICE_NAME
-                        }),
-                        state.heartbeat_max_age_secs,
-                        state.heartbeat_max_age_secs,
-                        Some(indexer_chain_max_age_secs),
-                    );
-                    let worker = loop_health_response(
-                        heartbeats.iter().find(|heartbeat| {
-                            heartbeat.service_name == bigname_storage::WORKER_SERVICE_NAME
-                        }),
-                        state.heartbeat_max_age_secs,
-                        state.worker_rebuild_phase_max_age_secs,
-                        None,
-                    );
-                    let loops_ready = indexer.status == "running" && worker.status == "running";
-                    (database, HealthLoopsResponse { indexer, worker }, loops_ready)
-                }
-                Err(readiness_error) => {
-                    warn!(
-                        service = "api",
-                        build_sha = BUILD_SHA,
-                        error = ?readiness_error,
-                        "service loop heartbeat readiness probe failed"
-                    );
-                    (
-                        database,
-                        unavailable_loop_health(state.heartbeat_max_age_secs),
-                        false,
-                    )
-                }
-            }
+    let database = if database_reachable {
+        HealthDatabaseResponse {
+            status: "reachable",
+            reachable: true,
+            check: "select_1",
+            error: None,
         }
-        false => {
-            let database = HealthDatabaseResponse {
-                status: "unreachable",
-                reachable: false,
-                check: "select_1",
-                error: Some("database readiness query failed"),
-            };
-            (
-                database,
-                unavailable_loop_health(state.heartbeat_max_age_secs),
-                false,
-            )
+    } else {
+        HealthDatabaseResponse {
+            status: "unreachable",
+            reachable: false,
+            check: "select_1",
+            error: Some("database readiness query failed"),
         }
     };
+
+    let phase_runner = if database_reachable {
+        match load_phase_runner_health(&health_pool.0, state.phase_heartbeat_max_age_secs).await {
+            Ok(health) => health,
+            Err(error) => {
+                warn!(
+                    service = "api",
+                    build_sha = BUILD_SHA,
+                    ?error,
+                    "phase-runner heartbeat readiness probe failed"
+                );
+                unavailable_phase_runner(state.phase_heartbeat_max_age_secs)
+            }
+        }
+    } else {
+        unavailable_phase_runner(state.phase_heartbeat_max_age_secs)
+    };
+
     let api_ready = database.reachable;
-    let aggregate_ready = api_ready && loops_ready;
+    let aggregate_ready = api_ready && phase_runner.status == "running";
     let http_status = if api_ready {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-    let status = if aggregate_ready { "ready" } else { "degraded" };
-    let api_status = if api_ready { "ready" } else { "degraded" };
 
     (
         http_status,
         Json(HealthResponse {
             service: "api",
-            identity: HealthIdentityResponse::current(),
-            status,
-            api_status,
+            identity: HealthIdentityResponse {
+                version: SOFTWARE_VERSION,
+                build_sha: BUILD_SHA,
+                interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH,
+            },
+            status: if aggregate_ready { "ready" } else { "degraded" },
+            api_status: if api_ready { "ready" } else { "degraded" },
             process: HealthProcessResponse { status: "running" },
             database,
-            loops,
+            loops: HealthLoopsResponse { phase_runner },
         }),
     )
 }
 
-fn loop_health_response(
-    heartbeat: Option<&bigname_storage::ServiceLoopHeartbeat>,
+async fn load_phase_runner_health(
+    pool: &PgPool,
     max_age_seconds: i64,
-    phase_max_age_seconds: i64,
-    chain_max_age_seconds: Option<i64>,
-) -> HealthLoopResponse {
-    let Some(heartbeat) = heartbeat else {
-        return HealthLoopResponse {
+) -> anyhow::Result<HealthLoopResponse> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            phase_name,
+            started_at,
+            heartbeat_at,
+            FLOOR(EXTRACT(EPOCH FROM (clock_timestamp() - heartbeat_at)))::BIGINT AS age_seconds
+        FROM bigname_phase.service_heartbeats
+        WHERE service_name = 'phase-runner'
+        ORDER BY heartbeat_at DESC, instance_id, chain_id, phase_name
+        LIMIT 1
+        "#,
+    )
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        return Ok(HealthLoopResponse {
             status: "not_started",
             phase: None,
             started_at: None,
             heartbeat_at: None,
             heartbeat_age_seconds: None,
             max_age_seconds,
-        };
+        });
     };
-    if heartbeat.missing_expected_chain_id.is_some()
-        && let Some(chain_max_age_seconds) = chain_max_age_seconds
-    {
-        return HealthLoopResponse {
-            status: "stale",
-            phase: None,
-            started_at: None,
-            heartbeat_at: None,
-            heartbeat_age_seconds: None,
-            max_age_seconds: chain_max_age_seconds,
-        };
-    }
-    if let (Some(chain), Some(chain_max_age_seconds)) =
-        (heartbeat.oldest_chain.as_ref(), chain_max_age_seconds)
-        && chain.age_seconds > chain_max_age_seconds
-    {
-        return HealthLoopResponse {
-            status: "stale",
-            phase: None,
-            started_at: Some(format_timestamp(chain.started_at)),
-            heartbeat_at: Some(format_timestamp(chain.heartbeat_at)),
-            heartbeat_age_seconds: Some(chain.age_seconds),
-            max_age_seconds: chain_max_age_seconds,
-        };
-    }
-    if let Some(phase) = heartbeat.active_phase.as_ref() {
-        return HealthLoopResponse {
-            status: if phase.age_seconds <= phase_max_age_seconds {
-                "running"
-            } else {
-                "stale"
-            },
-            phase: Some(phase.phase.clone()),
-            started_at: Some(format_timestamp(phase.started_at)),
-            heartbeat_at: Some(format_timestamp(phase.heartbeat_at)),
-            heartbeat_age_seconds: Some(phase.age_seconds),
-            max_age_seconds: phase_max_age_seconds,
-        };
-    }
-    if let (Some(chain), Some(chain_max_age_seconds)) =
-        (heartbeat.oldest_chain.as_ref(), chain_max_age_seconds)
-    {
-        return HealthLoopResponse {
-            status: "running",
-            phase: None,
-            started_at: Some(format_timestamp(chain.started_at)),
-            heartbeat_at: Some(format_timestamp(chain.heartbeat_at)),
-            heartbeat_age_seconds: Some(chain.age_seconds),
-            max_age_seconds: chain_max_age_seconds,
-        };
-    }
-    HealthLoopResponse {
-        status: if heartbeat.age_seconds <= max_age_seconds {
+    let age_seconds: i64 = row.try_get("age_seconds")?;
+    let started_at: OffsetDateTime = row.try_get("started_at")?;
+    let heartbeat_at: OffsetDateTime = row.try_get("heartbeat_at")?;
+    Ok(HealthLoopResponse {
+        status: if age_seconds <= max_age_seconds {
             "running"
         } else {
             "stale"
         },
-        phase: None,
-        started_at: Some(format_timestamp(heartbeat.started_at)),
-        heartbeat_at: Some(format_timestamp(heartbeat.heartbeat_at)),
-        heartbeat_age_seconds: Some(heartbeat.age_seconds),
+        phase: Some(row.try_get("phase_name")?),
+        started_at: Some(format_timestamp(started_at)),
+        heartbeat_at: Some(format_timestamp(heartbeat_at)),
+        heartbeat_age_seconds: Some(age_seconds),
         max_age_seconds,
-    }
+    })
 }
 
-fn unavailable_loop_health(max_age_seconds: i64) -> HealthLoopsResponse {
-    let unavailable = || HealthLoopResponse {
+fn unavailable_phase_runner(max_age_seconds: i64) -> HealthLoopResponse {
+    HealthLoopResponse {
         status: "unavailable",
         phase: None,
         started_at: None,
         heartbeat_at: None,
         heartbeat_age_seconds: None,
         max_age_seconds,
-    };
-    HealthLoopsResponse {
-        indexer: unavailable(),
-        worker: unavailable(),
     }
 }

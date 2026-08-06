@@ -6,52 +6,17 @@ pub(crate) async fn load_primary_name_lookup_state(
     namespace: &str,
     coin_type: &str,
 ) -> ApiResult<PrimaryNameLookupState> {
-    type PhasePrimaryNameRow = (
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        bool,
-        JsonValue,
-    );
-
     let coin_type = canonical_primary_name_coin_type(coin_type)?;
-    let row = sqlx::query_as::<_, PhasePrimaryNameRow>(
-        r#"
-        SELECT
-            address,
-            namespace,
-            coin_type,
-            claim_status,
-            raw_claim_name,
-            claim_name_is_normalized,
-            claim_provenance
-        FROM primary_names_current
-        WHERE address = $1
-          AND namespace = $2
-          AND coin_type = $3
-        "#,
-    )
-    .bind(address.to_ascii_lowercase())
-    .bind(namespace)
-    .bind(&coin_type)
-    .fetch_optional(pool)
-    .await;
+    let row =
+        bigname_storage::load_primary_name_current_snapshot(pool, address, namespace, &coin_type)
+            .await;
 
     match row {
-        Ok(Some((
-            address,
-            namespace,
-            coin_type,
-            claim_status,
-            raw_claim_name,
-            claim_name_is_normalized,
-            claim_provenance,
-        ))) => {
-            let claim_status = phase_primary_name_claim_status(&claim_status)?;
+        Ok(Some(snapshot)) => {
+            let row = snapshot.row;
+            let claim_status = row.claim_status;
             let normalized_claim_name = if claim_status == PrimaryNameClaimStatus::Success {
-                let raw_claim_name = raw_claim_name.as_deref().ok_or_else(|| {
+                let raw_claim_name = row.raw_claim_name.as_deref().ok_or_else(|| {
                     ApiError::internal_error(
                         "schema-v2 successful primary-name tuple omitted its claim",
                     )
@@ -69,18 +34,9 @@ pub(crate) async fn load_primary_name_lookup_state(
                 None
             };
             Ok(PrimaryNameLookupState {
-                tuple_state: PrimaryNameTupleState::TuplePresent(
-                    bigname_storage::PrimaryNameCurrentRow {
-                        address,
-                        namespace,
-                        coin_type,
-                        claim_status,
-                        raw_claim_name,
-                        claim_provenance,
-                    },
-                ),
+                tuple_state: PrimaryNameTupleState::TuplePresent(row),
                 normalized_claim_name,
-                claim_name_is_normalized,
+                claim_name_is_normalized: snapshot.claim_name_is_normalized,
                 on_demand_claim: OnDemandPrimaryNameClaimState::NotAttempted,
                 on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
             })
@@ -92,7 +48,11 @@ pub(crate) async fn load_primary_name_lookup_state(
             on_demand_claim: OnDemandPrimaryNameClaimState::NotAttempted,
             on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
         }),
-        Err(load_error) if primary_name_projection_sqlx_unavailable(&load_error) => {
+        Err(load_error)
+            if load_error
+                .downcast_ref::<sqlx::Error>()
+                .is_some_and(primary_name_projection_sqlx_unavailable) =>
+        {
             Ok(PrimaryNameLookupState {
                 tuple_state: PrimaryNameTupleState::ProjectionUnavailable,
                 normalized_claim_name: None,
@@ -114,18 +74,6 @@ pub(crate) async fn load_primary_name_lookup_state(
                 "failed to load primary-name tuple for address {address}"
             )))
         }
-    }
-}
-
-fn phase_primary_name_claim_status(value: &str) -> ApiResult<PrimaryNameClaimStatus> {
-    match value {
-        "success" => Ok(PrimaryNameClaimStatus::Success),
-        "not_found" => Ok(PrimaryNameClaimStatus::NotFound),
-        "unsupported" => Ok(PrimaryNameClaimStatus::Unsupported),
-        "invalid_name" => Ok(PrimaryNameClaimStatus::InvalidName),
-        _ => Err(ApiError::internal_error(
-            "schema-v2 primary-name tuple has an unknown claim status",
-        )),
     }
 }
 

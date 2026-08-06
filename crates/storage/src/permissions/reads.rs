@@ -5,13 +5,10 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 
 use super::{
+    canonicality::DEFAULT_PERMISSIONS_CURRENT_READ_FILTER,
     decode::decode_permissions_current_row,
     types::{PermissionScope, PermissionsCurrentRow},
 };
-
-pub(super) const DEFAULT_PERMISSIONS_CURRENT_READ_FILTER: &str = r#"
-  AND pc.canonicality_summary ->> 'status' IN ('canonical', 'safe', 'finalized')
-"#;
 
 /// Load resource-centric permission rows with optional exact subject and scope filters.
 pub async fn load_permissions_current(
@@ -35,12 +32,12 @@ pub async fn load_permissions_current(
             pc.inheritance_path,
             pc.transfer_behavior,
             pc.provenance,
-            pc.coverage,
+            jsonb_build_object('status', 'projected', 'exhaustiveness', 'not_asserted') AS coverage,
             pc.chain_positions,
             pc.canonicality_summary,
             pc.manifest_version,
             pc.last_recomputed_at
-        FROM permissions_current pc
+        FROM bigname_phase.permissions_current pc
         WHERE "#,
     );
     push_permissions_current_filters(
@@ -90,12 +87,12 @@ pub async fn load_permissions_current_by_resource_ids(
             pc.inheritance_path,
             pc.transfer_behavior,
             pc.provenance,
-            pc.coverage,
+            jsonb_build_object('status', 'projected', 'exhaustiveness', 'not_asserted') AS coverage,
             pc.chain_positions,
             pc.canonicality_summary,
             pc.manifest_version,
             pc.last_recomputed_at
-        FROM permissions_current pc
+        FROM bigname_phase.permissions_current pc
         WHERE pc.resource_id IN ("#,
     );
     {
@@ -134,7 +131,7 @@ pub async fn load_permissions_current_for_resolver_scope(
         resolver_address: resolver_address.to_ascii_lowercase(),
     }
     .storage_key();
-    let rows = sqlx::query(
+    let rows = sqlx::query(&format!(
         r#"
         SELECT
             pc.resource_id,
@@ -148,18 +145,18 @@ pub async fn load_permissions_current_for_resolver_scope(
             pc.inheritance_path,
             pc.transfer_behavior,
             pc.provenance,
-            pc.coverage,
+            jsonb_build_object('status', 'projected', 'exhaustiveness', 'not_asserted') AS coverage,
             pc.chain_positions,
             pc.canonicality_summary,
             pc.manifest_version,
             pc.last_recomputed_at
-        FROM permissions_current pc
+        FROM bigname_phase.permissions_current pc
         WHERE pc.scope = $1
           AND pc.scope_kind = 'resolver'
-          AND pc.canonicality_summary ->> 'status' IN ('canonical', 'safe', 'finalized')
+          {DEFAULT_PERMISSIONS_CURRENT_READ_FILTER}
         ORDER BY pc.subject ASC, pc.resource_id ASC, pc.manifest_version ASC
         "#,
-    )
+    ))
     .bind(scope)
     .fetch_all(pool)
     .await
@@ -178,21 +175,21 @@ pub async fn load_permissions_current_for_resolver_scope(
 pub async fn load_permissions_current_resolver_targets(
     pool: &PgPool,
 ) -> Result<Vec<(String, String)>> {
-    let rows = sqlx::query(
+    let rows = sqlx::query(&format!(
         r#"
         SELECT DISTINCT
             pc.scope_detail->>'chain_id' AS chain_id,
             LOWER(pc.scope_detail->>'resolver_address') AS resolver_address
-        FROM permissions_current pc
+        FROM bigname_phase.permissions_current pc
         WHERE pc.scope_kind = 'resolver'
           AND pc.scope_detail->>'chain_id' IS NOT NULL
           AND pc.scope_detail->>'chain_id' <> ''
           AND pc.scope_detail->>'resolver_address' IS NOT NULL
           AND pc.scope_detail->>'resolver_address' <> ''
-          AND pc.canonicality_summary ->> 'status' IN ('canonical', 'safe', 'finalized')
+          {DEFAULT_PERMISSIONS_CURRENT_READ_FILTER}
         ORDER BY chain_id, resolver_address
         "#,
-    )
+    ))
     .fetch_all(pool)
     .await
     .context("failed to load resolver targets from permissions_current")?;

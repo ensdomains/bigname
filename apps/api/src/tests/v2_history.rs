@@ -217,6 +217,66 @@ async fn v2_get_history_scope_filters_name_registration_and_both() -> Result<()>
 }
 
 #[tokio::test]
+async fn v2_get_history_keeps_prior_registration_resources_after_rebinding() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    let logical_name_id = "ens:history.eth";
+    let prior_resource_id = Uuid::from_u128(0x7101);
+    let prior_token_lineage_id = Uuid::from_u128(0x8101);
+    upsert_test_token_lineages(
+        &database.pool,
+        &[address_name_token_lineage(
+            prior_token_lineage_id,
+            "0xprior-token",
+            75,
+        )],
+    )
+    .await?;
+    upsert_test_resources(
+        &database.pool,
+        &[address_name_resource(
+            prior_resource_id,
+            Some(prior_token_lineage_id),
+            "0xprior-resource",
+            76,
+        )],
+    )
+    .await?;
+    let mut prior_binding = address_name_surface_binding(
+        Uuid::from_u128(0x9101),
+        logical_name_id,
+        prior_resource_id,
+        "0xprior-binding",
+        77,
+        1_717_176_077,
+    );
+    prior_binding.active_to = Some(timestamp(1_717_176_079));
+    upsert_test_surface_bindings(&database.pool, &[prior_binding]).await?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[v2_history_event(
+            "history-prior-registration",
+            None,
+            Some(prior_resource_id),
+            "RegistrationGranted",
+            101,
+        )],
+    )
+    .await?;
+
+    let payload = v2_history_payload_for_database(
+        &database,
+        "/v2/names/history.eth/history?scope=registration&page_size=20",
+    )
+    .await?;
+    assert!(payload["data"].as_array().expect("history data").iter().any(
+        |row| row["registration_id"] == json!(prior_resource_id.to_string())
+    ));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_history_empty_and_missing_name_semantics() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_name(
@@ -288,8 +348,10 @@ async fn v2_history_payload(uri: &str) -> Result<(TestDatabase, Value)> {
 
 async fn v2_history_payload_for_database(database: &TestDatabase, uri: &str) -> Result<Value> {
     let response = v2_history_response_for_database(database, uri).await?;
-    assert_eq!(response.status(), StatusCode::OK);
-    read_json(response).await
+    let status = response.status();
+    let payload = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {payload}");
+    Ok(payload)
 }
 
 async fn v2_history_response_for_database(
@@ -417,7 +479,7 @@ async fn seed_v2_mixed_phase_head_history(database: &TestDatabase) -> Result<()>
     let block_number = V2_SEPOLIA_SNAPSHOT_BLOCK + 1;
     let block_hash = "0xv2-sepolia-history-event";
 
-    bigname_storage::upsert_raw_blocks(
+    upsert_phase_raw_blocks(
         &database.pool,
         &[raw_block(
             "ethereum-sepolia",
@@ -504,7 +566,7 @@ async fn seed_v2_history_blocks(
             )
         })
         .collect::<Vec<_>>();
-    bigname_storage::upsert_raw_blocks(&database.pool, &blocks).await?;
+    upsert_phase_raw_blocks(&database.pool, &blocks).await?;
     Ok(())
 }
 

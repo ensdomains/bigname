@@ -3,7 +3,7 @@ use bigname_storage::ReverseIdentityStorageInput;
 use serde_json::{Map, Value};
 use sqlx::{PgPool, Row};
 
-use super::{ReverseIdentityPageRow, roles_storage_value};
+use super::{READABLE_REVERSE_IDENTITY_CTES, ReverseIdentityPageRow, roles_storage_value};
 
 pub(super) async fn load_reverse_identity_page_rows(
     pool: &PgPool,
@@ -60,9 +60,9 @@ pub(super) async fn load_reverse_identity_page_rows(
         .map(|input| input.cursor.as_ref().map(|cursor| cursor.namehash.clone()))
         .collect::<Vec<_>>();
 
-    let rows = sqlx::query(
+    let query = format!(
         r#"
-        WITH requested AS (
+        WITH {READABLE_REVERSE_IDENTITY_CTES}, requested AS (
             SELECT * FROM UNNEST(
                 $1::INT[], $2::TEXT[], $3::TEXT[], $4::TEXT[], $5::JSONB[],
                 $6::BIGINT[], $7::BOOLEAN[], $8::BOOLEAN[], $9::SMALLINT[],
@@ -80,7 +80,7 @@ pub(super) async fn load_reverse_identity_page_rows(
             FROM (
                 SELECT anc.logical_name_id,
                        bool_or(COALESCE(
-                           requested.primary_names ->> anc.namespace = anc.raw_name,
+                           lower(requested.primary_names ->> anc.namespace) = lower(anc.raw_name),
                            false
                        )) AS is_primary,
                        min(CASE
@@ -90,12 +90,10 @@ pub(super) async fn load_reverse_identity_page_rows(
                        anc.raw_name AS normalized_name,
                        anc.namespace,
                        anc.namehash
-                FROM address_names_current anc
-                JOIN name_current identity_nc
+                FROM readable_relations anc
+                JOIN readable_names identity_nc
                   ON identity_nc.logical_name_id = anc.logical_name_id
                 WHERE lower(anc.address) = lower(requested.address)
-                  AND anc.support_status = 'supported'
-                  AND identity_nc.support_status IN ('supported', 'unsupported')
                   AND (
                       requested.roles = 'both'
                       OR (requested.roles = 'owned'
@@ -126,28 +124,29 @@ pub(super) async fn load_reverse_identity_page_rows(
         ORDER BY requested.input_index, NOT candidate.is_primary,
                  candidate.role_rank, candidate.normalized_name,
                  candidate.namespace, candidate.namehash
-        "#,
-    )
-    .bind(&input_indexes)
-    .bind(&addresses)
-    .bind(&coin_types)
-    .bind(&roles)
-    .bind(&primary_names)
-    .bind(&page_sizes)
-    .bind(&cursor_present)
-    .bind(&cursor_is_primary)
-    .bind(&cursor_role_ranks)
-    .bind(&cursor_normalized_names)
-    .bind(&cursor_namespaces)
-    .bind(&cursor_namehashes)
-    .fetch_all(pool)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to load phase reverse candidates for {} inputs",
-            inputs.len()
-        )
-    })?;
+        "#
+    );
+    let rows = sqlx::query(&query)
+        .bind(&input_indexes)
+        .bind(&addresses)
+        .bind(&coin_types)
+        .bind(&roles)
+        .bind(&primary_names)
+        .bind(&page_sizes)
+        .bind(&cursor_present)
+        .bind(&cursor_is_primary)
+        .bind(&cursor_role_ranks)
+        .bind(&cursor_normalized_names)
+        .bind(&cursor_namespaces)
+        .bind(&cursor_namehashes)
+        .fetch_all(pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load phase reverse candidates for {} inputs",
+                inputs.len()
+            )
+        })?;
 
     rows.into_iter()
         .map(|row| {
@@ -180,10 +179,21 @@ async fn load_normalized_primary_names(
         SELECT requested.input_index, primary_name.namespace,
                primary_name.raw_claim_name
         FROM requested
-        JOIN primary_names_current primary_name
+        JOIN bigname_phase.primary_names_current primary_name
           ON lower(primary_name.address) = lower(requested.address)
          AND primary_name.coin_type = requested.coin_type
          AND primary_name.claim_status = 'success'
+         AND EXISTS (
+             SELECT 1
+             FROM bigname_phase.chain_lineage projection_lineage
+             WHERE projection_lineage.chain_id =
+                   primary_name.claim_provenance ->> 'chain_id'
+               AND projection_lineage.block_hash =
+                   primary_name.claim_provenance ->> 'target_block_hash'
+               AND projection_lineage.canonicality_state IN (
+                   'canonical', 'safe', 'finalized'
+               )
+         )
         ORDER BY requested.input_index, primary_name.namespace
         "#,
     )

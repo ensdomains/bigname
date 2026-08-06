@@ -54,14 +54,14 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
         LEFT JOIN chain_phase_state project
           ON project.chain_id = known_chains.chain_id
          AND project.phase_name = 'project'
-        LEFT JOIN chain_lineage latest_lineage
+        LEFT JOIN bigname_phase.chain_lineage latest_lineage
           ON latest_lineage.chain_id = head.chain_id
          AND latest_lineage.block_number = head.latest_block_number
          AND latest_lineage.block_hash = head.latest_block_hash
          AND latest_lineage.canonicality_state IN (
              'canonical', 'safe', 'finalized'
          )
-        LEFT JOIN chain_lineage projected_lineage
+        LEFT JOIN bigname_phase.chain_lineage projected_lineage
           ON projected_lineage.chain_id = project.chain_id
          AND projected_lineage.block_number = project.current_block_number
          AND projected_lineage.block_hash = project.current_block_hash

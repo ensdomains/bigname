@@ -13,20 +13,18 @@ pub fn ens_namehash_label_bytes(labels: &[&[u8]]) -> B256 {
     })
 }
 
+/// Derive the phase-schema logical name identity for a UTF-8 name.
+pub fn logical_name_id_for_name(namespace: &str, name: &str) -> String {
+    let labels = name.split('.').map(str::as_bytes).collect::<Vec<_>>();
+    format!("{namespace}:{:#x}", ens_namehash_label_bytes(&labels))
+}
+
 pub fn normalize_evm_address(value: &str) -> String {
     normalize_standard_address(value).unwrap_or_else(|| value.to_ascii_lowercase())
 }
 
-pub(crate) fn normalize_optional_evm_address(value: &Option<String>) -> Option<String> {
-    value.as_deref().map(normalize_evm_address)
-}
-
 pub fn normalize_evm_b256(value: &str) -> String {
     normalize_standard_b256(value).unwrap_or_else(|| normalize_evm_hex_bytes(value))
-}
-
-pub(crate) fn normalize_optional_evm_b256(value: &Option<String>) -> Option<String> {
-    value.as_deref().map(normalize_evm_b256)
 }
 
 pub(crate) fn normalize_evm_hex_bytes(value: &str) -> String {

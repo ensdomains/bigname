@@ -5,7 +5,7 @@ use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use phase_runner::{database::RunnerDatabase, schema::initialize_schema_v2};
 
 #[tokio::test]
-async fn bootstrap_coexists_with_legacy_public_schema_and_reaches_manifest_sync() -> Result<()> {
+async fn bootstrap_after_legacy_schema_drop_reaches_manifest_sync() -> Result<()> {
     let database = TestDatabase::create(
         TestDatabaseConfig::new("phase_runner_supported_bootstrap")
             .pool_max_connections(4)
@@ -14,11 +14,101 @@ async fn bootstrap_coexists_with_legacy_public_schema_and_reaches_manifest_sync(
             .pool_connect_context("failed to connect phase-runner bootstrap pool"),
     )
     .await?;
+    initialize_schema_v2(database.pool()).await?;
+    let phase_structure_before = load_phase_schema_structure(database.pool()).await?;
     bigname_storage::MIGRATOR.run(database.pool()).await?;
+    let phase_structure_after = load_phase_schema_structure(database.pool()).await?;
+    assert_eq!(
+        phase_structure_after, phase_structure_before,
+        "legacy public-schema deletion changed the installed phase schema"
+    );
+    let residual_public_objects = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT object_kind || ':' || object_name
+        FROM (
+            SELECT 'function' AS object_kind,
+                   format(
+                       '%I.%I(%s)',
+                       namespace.nspname,
+                       procedure.proname,
+                       pg_get_function_identity_arguments(procedure.oid)
+                   ) AS object_name
+            FROM pg_proc procedure
+            JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
+            WHERE namespace.nspname = 'public'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM pg_depend dependency
+                  JOIN pg_extension extension ON extension.oid = dependency.refobjid
+                  WHERE dependency.classid = 'pg_proc'::regclass
+                    AND dependency.objid = procedure.oid
+                    AND dependency.refclassid = 'pg_extension'::regclass
+                    AND dependency.deptype = 'e'
+              )
+
+            UNION ALL
+
+            SELECT 'sequence', format('%I.%I', namespace.nspname, relation.relname)
+            FROM pg_class relation
+            JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = 'public'
+              AND relation.relkind = 'S'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM pg_depend dependency
+                  JOIN pg_extension extension ON extension.oid = dependency.refobjid
+                  WHERE dependency.classid = 'pg_class'::regclass
+                    AND dependency.objid = relation.oid
+                    AND dependency.refclassid = 'pg_extension'::regclass
+                    AND dependency.deptype = 'e'
+              )
+
+            UNION ALL
+
+            SELECT 'enum', format('%I.%I', namespace.nspname, enum_type.typname)
+            FROM pg_type enum_type
+            JOIN pg_namespace namespace ON namespace.oid = enum_type.typnamespace
+            WHERE namespace.nspname = 'public'
+              AND enum_type.typtype = 'e'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM pg_depend dependency
+                  JOIN pg_extension extension ON extension.oid = dependency.refobjid
+                  WHERE dependency.classid = 'pg_type'::regclass
+                    AND dependency.objid = enum_type.oid
+                    AND dependency.refclassid = 'pg_extension'::regclass
+                    AND dependency.deptype = 'e'
+              )
+
+            UNION ALL
+
+            SELECT 'relation', format('%I.%I', namespace.nspname, relation.relname)
+            FROM pg_class relation
+            JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = 'public'
+              AND relation.relname NOT IN ('_sqlx_migrations', '_sqlx_migrations_pkey')
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM pg_depend dependency
+                  JOIN pg_extension extension ON extension.oid = dependency.refobjid
+                  WHERE dependency.classid = 'pg_class'::regclass
+                    AND dependency.objid = relation.oid
+                    AND dependency.refclassid = 'pg_extension'::regclass
+                    AND dependency.deptype = 'e'
+              )
+        ) residual
+        ORDER BY object_kind, object_name
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert!(
+        residual_public_objects.is_empty(),
+        "legacy public-schema objects survived migration: {residual_public_objects:?}"
+    );
     let runner =
         RunnerDatabase::connect_with_options(database.pool().connect_options().as_ref().clone(), 4)
             .await?;
-    initialize_schema_v2(runner.pool()).await?;
     let manifests_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("manifests/mainnet");
@@ -32,7 +122,7 @@ async fn bootstrap_coexists_with_legacy_public_schema_and_reaches_manifest_sync(
     )
     .fetch_one(database.pool())
     .await?;
-    assert!(legacy_table_exists);
+    assert!(!legacy_table_exists);
     assert!(phase_table_exists);
     let active_schema: String = sqlx::query_scalar("SELECT current_schema()")
         .fetch_one(runner.pool())
@@ -41,6 +131,87 @@ async fn bootstrap_coexists_with_legacy_public_schema_and_reaches_manifest_sync(
 
     runner.pool().close().await;
     database.cleanup().await
+}
+
+async fn load_phase_schema_structure(pool: &sqlx::PgPool) -> Result<Vec<String>> {
+    sqlx::query_scalar(
+        r#"
+        SELECT object_identity
+        FROM (
+            SELECT format('relation:%s:%s', relation.relkind, relation.relname)
+                       AS object_identity
+            FROM pg_class relation
+            JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = 'bigname_phase'
+
+            UNION ALL
+
+            SELECT format(
+                       'column:%s:%s:%s:%s:%s:%s',
+                       relation.relname,
+                       attribute.attnum,
+                       attribute.attname,
+                       pg_catalog.format_type(attribute.atttypid, attribute.atttypmod),
+                       attribute.attnotnull,
+                       COALESCE(pg_get_expr(default_value.adbin, default_value.adrelid), '')
+                   )
+            FROM pg_class relation
+            JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+            JOIN pg_attribute attribute ON attribute.attrelid = relation.oid
+            LEFT JOIN pg_attrdef default_value
+              ON default_value.adrelid = relation.oid
+             AND default_value.adnum = attribute.attnum
+            WHERE namespace.nspname = 'bigname_phase'
+              AND relation.relkind IN ('r', 'p', 'v', 'm')
+              AND attribute.attnum > 0
+              AND NOT attribute.attisdropped
+
+            UNION ALL
+
+            SELECT format(
+                       'constraint:%s:%s:%s',
+                       relation.relname,
+                       constraint_row.conname,
+                       pg_get_constraintdef(constraint_row.oid)
+                   )
+            FROM pg_constraint constraint_row
+            JOIN pg_class relation ON relation.oid = constraint_row.conrelid
+            JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = 'bigname_phase'
+
+            UNION ALL
+
+            SELECT format('index:%s', pg_get_indexdef(index_row.indexrelid))
+            FROM pg_index index_row
+            JOIN pg_class relation ON relation.oid = index_row.indrelid
+            JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = 'bigname_phase'
+
+            UNION ALL
+
+            SELECT format(
+                       'function:%s(%s):%s',
+                       procedure.proname,
+                       pg_get_function_identity_arguments(procedure.oid),
+                       pg_get_functiondef(procedure.oid)
+                   )
+            FROM pg_proc procedure
+            JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
+            WHERE namespace.nspname = 'bigname_phase'
+
+            UNION ALL
+
+            SELECT format('type:%s:%s', type_row.typtype, type_row.typname)
+            FROM pg_type type_row
+            JOIN pg_namespace namespace ON namespace.oid = type_row.typnamespace
+            WHERE namespace.nspname = 'bigname_phase'
+        ) structure
+        ORDER BY object_identity
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(Into::into)
 }
 
 #[tokio::test]

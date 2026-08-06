@@ -2,23 +2,6 @@ use std::fmt::Display;
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value};
-use sqlx::{Row, postgres::PgRow};
-
-pub(crate) const POSTGRES_MAX_BIND_PARAMETERS: usize = 65_535;
-
-pub(crate) fn serialize_jsonb_field(value: &Value, context: &'static str) -> Result<String> {
-    serde_json::to_string(value).context(context)
-}
-
-pub(crate) fn serialize_optional_jsonb_field(
-    value: Option<&Value>,
-    context: &'static str,
-) -> Result<Option<String>> {
-    value
-        .map(serde_json::to_string)
-        .transpose()
-        .context(context)
-}
 
 pub(crate) fn require_json_object(
     value: &Value,
@@ -115,43 +98,4 @@ pub(crate) fn split_keyset_page<T, C>(
         .then(|| rows.last().map(cursor_from_row))
         .flatten();
     (rows, next_cursor)
-}
-
-pub(crate) fn remap_input_indexed_rows<T>(
-    rows: Vec<PgRow>,
-    expected_len: usize,
-    projection_name: &str,
-    mut decode: impl FnMut(PgRow) -> Result<T>,
-) -> Result<Vec<T>> {
-    let mut snapshots = Vec::with_capacity(expected_len);
-    snapshots.resize_with(expected_len, || None);
-
-    for row in rows {
-        let input_index = row
-            .try_get::<i64, _>("input_index")
-            .with_context(|| format!("missing {projection_name} input_index"))?;
-        let input_index = usize::try_from(input_index)
-            .with_context(|| format!("{projection_name} input_index is negative"))?;
-        if input_index >= expected_len {
-            bail!(
-                "{projection_name} batch returned input_index {} beyond expected row count {}",
-                input_index,
-                expected_len
-            );
-        }
-        let snapshot = decode(row)?;
-        if snapshots[input_index].replace(snapshot).is_some() {
-            bail!("{projection_name} batch returned duplicate input_index {input_index}");
-        }
-    }
-
-    snapshots
-        .into_iter()
-        .enumerate()
-        .map(|(input_index, snapshot)| {
-            snapshot.with_context(|| {
-                format!("{projection_name} batch did not return input_index {input_index}")
-            })
-        })
-        .collect()
 }

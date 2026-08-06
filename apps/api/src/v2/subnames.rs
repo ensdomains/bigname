@@ -78,7 +78,8 @@ pub(crate) async fn get_subnames(
         .unwrap_or_else(|| normalized.namespace.to_owned());
     let include_counts = subnames_include_counts(&params.include)?;
 
-    let logical_name_id = format!("{namespace}:{}", normalized.normalized_name);
+    let logical_name_id =
+        bigname_storage::logical_name_id_for_name(&namespace, &normalized.normalized_name);
     let parent = bigname_storage::load_name_current(&state.pool, &logical_name_id)
         .await
         .map_err(|_| {

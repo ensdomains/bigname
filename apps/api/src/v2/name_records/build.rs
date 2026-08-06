@@ -408,7 +408,10 @@ fn indexed_inventory_is_authoritative(
         return false;
     };
     string_field(record_inventory.coverage.get("unsupported_reason")).is_none()
-        && string_field(record_inventory.coverage.get("status")).as_deref() == Some("full")
+        && matches!(
+            string_field(record_inventory.coverage.get("status")).as_deref(),
+            Some("full" | "projected")
+        )
 }
 
 fn terminal_no_declared_resolver(row: &NameCurrentRow) -> bool {

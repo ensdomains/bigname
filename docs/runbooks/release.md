@@ -16,11 +16,14 @@ scripts/release-smoke --no-network
 The gate checks, in order:
 
 1. local pinned upstream refs;
-2. checked-in database migrations;
-3. live manifest-drift audit;
-4. runtime watch-plan inspection;
-5. a prebuilt API binary and `/healthz` readiness contract; and
-6. the public-edge policy through an ephemeral Caddy container.
+2. a prebuilt API binary and `/healthz` readiness contract; and
+3. the public-edge policy through an ephemeral Caddy container.
+
+The target database must already have the `bigname_phase` schema installed.
+For a fresh database, run `phase-runner init-schema` once before this gate. The
+installer deliberately refuses a nonempty phase schema, so schema initialization
+is a separate deployment step rather than part of the repeatable smoke check. CI
+performs that setup immediately before invoking this script.
 
 The edge check reflects the C2/C3 transition. The API binary serves `/v2`,
 GraphQL, and `/healthz`, while the checked-in public edge still denies `/v2`.
@@ -38,9 +41,9 @@ Required environment:
 - `BIGNAME_SMOKE_PUBLIC_EDGE_URL` when the default `127.0.0.1:3001` is occupied;
 - `BIGNAME_SMOKE_CADDY_IMAGE` to override `caddy:2-alpine`.
 
-Do not promote when any check fails. Fix the checked-in ref, migration,
-manifest/watch-plan state, API readiness issue, or edge-policy mismatch and
-rerun the entire gate.
+Do not promote when any check fails. Fix the checked-in ref, API readiness
+issue, or edge-policy mismatch and rerun the entire gate. Apply reviewed
+versioned migrations separately at the planned deployment boundary.
 
 Before promotion, also require the workspace test, format, lint, build, and
 e2e check gates from CI to be green.

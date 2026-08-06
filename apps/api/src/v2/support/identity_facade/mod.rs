@@ -10,6 +10,108 @@ use sqlx::{PgPool, Row};
 
 mod page;
 
+const READABLE_REVERSE_IDENTITY_CTES: &str = r#"
+readable_names AS (
+    SELECT nc.logical_name_id, nc.raw_name, nc.namespace, nc.namehash
+    FROM bigname_phase.name_current nc
+    JOIN bigname_phase.name_surfaces surface
+      ON surface.logical_name_id = nc.logical_name_id
+    LEFT JOIN bigname_phase.resources resource
+      ON resource.resource_id = nc.resource_id
+    LEFT JOIN bigname_phase.surface_bindings binding
+      ON binding.surface_binding_id = nc.surface_binding_id
+    LEFT JOIN bigname_phase.token_lineages token_lineage
+      ON token_lineage.token_lineage_id = nc.token_lineage_id
+    JOIN bigname_phase.chain_lineage surface_lineage
+      ON surface_lineage.chain_id = surface.chain_id
+     AND surface_lineage.block_hash = surface.block_hash
+    LEFT JOIN bigname_phase.chain_lineage resource_lineage
+      ON resource_lineage.chain_id = resource.chain_id
+     AND resource_lineage.block_hash = resource.block_hash
+    LEFT JOIN bigname_phase.chain_lineage binding_lineage
+      ON binding_lineage.chain_id = binding.chain_id
+     AND binding_lineage.block_hash = binding.block_hash
+    LEFT JOIN bigname_phase.chain_lineage token_lineage_lineage
+      ON token_lineage_lineage.chain_id = token_lineage.chain_id
+     AND token_lineage_lineage.block_hash = token_lineage.block_hash
+    WHERE nc.support_status = 'supported'
+      AND nc.canonicality_summary ->> 'state' = 'canonical_lineage'
+      AND EXISTS (
+          SELECT 1 FROM bigname_phase.chain_lineage projection_lineage
+          WHERE projection_lineage.chain_id = nc.provenance ->> 'chain_id'
+            AND projection_lineage.block_hash =
+                nc.canonicality_summary ->> 'target_block_hash'
+            AND projection_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+      )
+      AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND surface_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND (
+          nc.surface_binding_id IS NULL
+          OR (
+              resource.canonicality_state IN ('canonical', 'safe', 'finalized')
+              AND resource_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+              AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')
+              AND binding_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+              AND binding.active_to IS NULL
+              AND (
+                  nc.token_lineage_id IS NULL
+                  OR (
+                      token_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+                      AND token_lineage_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+                  )
+              )
+          )
+      )
+), readable_relations AS (
+    SELECT anc.*
+    FROM bigname_phase.address_names_current anc
+    JOIN readable_names readable_name
+      ON readable_name.logical_name_id = anc.logical_name_id
+    JOIN bigname_phase.name_surfaces surface
+      ON surface.logical_name_id = anc.logical_name_id
+    JOIN bigname_phase.resources resource
+      ON resource.resource_id = anc.resource_id
+    JOIN bigname_phase.surface_bindings binding
+      ON binding.surface_binding_id = anc.surface_binding_id
+    LEFT JOIN bigname_phase.token_lineages token_lineage
+      ON token_lineage.token_lineage_id = anc.token_lineage_id
+    JOIN bigname_phase.chain_lineage surface_lineage
+      ON surface_lineage.chain_id = surface.chain_id
+     AND surface_lineage.block_hash = surface.block_hash
+    JOIN bigname_phase.chain_lineage resource_lineage
+      ON resource_lineage.chain_id = resource.chain_id
+     AND resource_lineage.block_hash = resource.block_hash
+    JOIN bigname_phase.chain_lineage binding_lineage
+      ON binding_lineage.chain_id = binding.chain_id
+     AND binding_lineage.block_hash = binding.block_hash
+    LEFT JOIN bigname_phase.chain_lineage token_lineage_lineage
+      ON token_lineage_lineage.chain_id = token_lineage.chain_id
+     AND token_lineage_lineage.block_hash = token_lineage.block_hash
+    WHERE anc.support_status = 'supported'
+      AND anc.canonicality_summary ->> 'state' = 'canonical_lineage'
+      AND EXISTS (
+          SELECT 1 FROM bigname_phase.chain_lineage projection_lineage
+          WHERE projection_lineage.chain_id = anc.provenance ->> 'chain_id'
+            AND projection_lineage.block_hash = anc.chain_positions ->> 'target_block_hash'
+            AND projection_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+      )
+      AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND surface_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND resource.canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND resource_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND binding_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND binding.active_to IS NULL
+      AND (
+          anc.token_lineage_id IS NULL
+          OR (
+              token_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+              AND token_lineage_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+          )
+      )
+)
+"#;
+
 #[cfg(test)]
 pub(crate) mod test_hooks {
     use std::sync::{
@@ -213,12 +315,39 @@ async fn load_identity_primary_name_snapshots(
 
     let rows = sqlx::query(
         r#"
-        SELECT address, namespace, coin_type, claim_status, raw_claim_name,
-               claim_provenance
-        FROM primary_names_current
-        WHERE address = ANY($1::TEXT[])
-          AND coin_type = ANY($2::TEXT[])
-        ORDER BY address, namespace, coin_type
+        SELECT primary_name.address, primary_name.namespace, primary_name.coin_type,
+               primary_name.claim_status, primary_name.raw_claim_name,
+               CASE
+                   WHEN lineage.block_hash IS NULL THEN NULL
+                   ELSE jsonb_build_object(
+                       CASE primary_name.claim_provenance ->> 'chain_id'
+                           WHEN 'ethereum-mainnet' THEN 'ethereum'
+                           WHEN 'ethereum-sepolia' THEN 'ethereum-sepolia'
+                           WHEN 'base-mainnet' THEN 'base'
+                           WHEN 'base-sepolia' THEN 'base-sepolia'
+                           ELSE primary_name.claim_provenance ->> 'chain_id'
+                       END,
+                       jsonb_build_object(
+                           'chain_id', lineage.chain_id,
+                           'block_number', lineage.block_number,
+                           'block_hash', lineage.block_hash,
+                           'timestamp', to_char(
+                               lineage.block_timestamp AT TIME ZONE 'UTC',
+                               'YYYY-MM-DD"T"HH24:MI:SS"Z"'
+                           )
+                       )
+                   )
+               END AS chain_positions
+        FROM bigname_phase.primary_names_current primary_name
+        JOIN bigname_phase.chain_lineage lineage
+          ON lineage.chain_id = primary_name.claim_provenance ->> 'chain_id'
+         AND lineage.block_number =
+             (primary_name.claim_provenance ->> 'target_block_number')::BIGINT
+         AND lineage.block_hash = primary_name.claim_provenance ->> 'target_block_hash'
+         AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+        WHERE primary_name.address = ANY($1::TEXT[])
+          AND primary_name.coin_type = ANY($2::TEXT[])
+        ORDER BY primary_name.address, primary_name.namespace, primary_name.coin_type
         "#,
     )
     .bind(&addresses)
@@ -260,7 +389,7 @@ async fn load_identity_primary_name_snapshots(
                 coin_type: coin_type.clone(),
                 claim_status,
                 normalized_claim_name,
-                chain_positions: Some(row.try_get("claim_provenance")?),
+                chain_positions: row.try_get("chain_positions")?,
             };
             Ok(((address, namespace, coin_type), snapshot))
         })
@@ -287,9 +416,9 @@ async fn load_reverse_identity_total_counts_live(
         .map(|(_, roles)| roles_storage_value(*roles).to_owned())
         .collect::<Vec<_>>();
 
-    let rows = sqlx::query(
+    let query = format!(
         r#"
-        WITH requested AS (
+        WITH {READABLE_REVERSE_IDENTITY_CTES}, requested AS (
             SELECT *
             FROM UNNEST($1::TEXT[], $2::TEXT[]) AS requested(address, roles)
         )
@@ -298,34 +427,28 @@ async fn load_reverse_identity_total_counts_live(
             requested.roles,
             COUNT(DISTINCT anc.logical_name_id)::BIGINT AS total_count
         FROM requested
-        LEFT JOIN address_names_current anc
+        LEFT JOIN readable_relations anc
           ON anc.address = requested.address
          AND (
              requested.roles = 'both'
              OR (requested.roles = 'owned' AND anc.relation IN ('registrant', 'token_holder'))
              OR (requested.roles = 'managed' AND anc.relation = 'effective_controller')
          )
-        LEFT JOIN name_current identity_nc
-          ON identity_nc.logical_name_id = anc.logical_name_id
-        WHERE anc.logical_name_id IS NULL
-           OR (
-               anc.support_status = 'supported'
-               AND identity_nc.support_status IN ('supported', 'unsupported')
-           )
         GROUP BY requested.address, requested.roles
         ORDER BY requested.address, requested.roles
-        "#,
-    )
-    .bind(&addresses)
-    .bind(&roles)
-    .fetch_all(pool)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to live-count reverse identity rows for {} inputs",
-            inputs.len()
-        )
-    })?;
+        "#
+    );
+    let rows = sqlx::query(&query)
+        .bind(&addresses)
+        .bind(&roles)
+        .fetch_all(pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to live-count reverse identity rows for {} inputs",
+                inputs.len()
+            )
+        })?;
 
     rows.into_iter()
         .map(|row| {

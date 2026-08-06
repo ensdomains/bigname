@@ -15,12 +15,9 @@ use serde_json::Value;
 
 use super::cursor::invalid_cursor_error;
 use super::permission_support::{
-    apply_role_summary_support_meta, permission_read_error_to_v2, permission_support_for_resources,
+    apply_role_summary_support_meta, permission_support_for_resources,
 };
 use super::support::parse_evm_address;
-use super::support::permissions_support::{
-    begin_permissions_current_read, finish_permissions_current_read,
-};
 use super::{
     AddressNamesDedupe, AddressNamesSort, Envelope, Meta, Page, QueryParamAllowlist,
     RegistrationStatus, Relation, RelationSet, SortOrder, StrictQueryParams, V2Error, V2Result,
@@ -118,18 +115,6 @@ pub(crate) async fn get_address_names(
     let storage_order = order_to_storage(params.order);
     let normalized_q = params.q.as_deref().map(str::to_lowercase);
 
-    let permission_read = if include_role_summary {
-        Some(
-            begin_permissions_current_read(
-                &state.pool,
-                "/v2/addresses/{address}/names?include=role_summary",
-            )
-            .await
-            .map_err(permission_read_error_to_v2)?,
-        )
-    } else {
-        None
-    };
     let cursor_binding = AddressNamesCursorBinding {
         address: &normalized_address,
         namespace: namespace_filter.as_deref(),
@@ -278,7 +263,7 @@ pub(crate) async fn get_address_names(
         apply_role_summary_support_meta(&mut meta, permission_support);
     }
 
-    let response = Json(Envelope {
+    Ok(Json(Envelope {
         data,
         page: Some(Page {
             cursor: params.cursor.clone(),
@@ -288,17 +273,7 @@ pub(crate) async fn get_address_names(
             has_more,
         }),
         meta,
-    });
-    if let Some(permission_read) = permission_read {
-        finish_permissions_current_read(
-            &state.pool,
-            "/v2/addresses/{address}/names?include=role_summary",
-            permission_read,
-        )
-        .await
-        .map_err(permission_read_error_to_v2)?;
-    }
-    Ok(response)
+    }))
 }
 
 async fn load_primary_names_by_namespace<'a>(

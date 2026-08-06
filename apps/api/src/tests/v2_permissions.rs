@@ -1,29 +1,4 @@
 #[tokio::test]
-async fn v2_permissions_require_compatible_permission_publication() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_v2_permissions_fixture(&database).await?;
-    sqlx::query("DELETE FROM permissions_current_publication")
-        .execute(&database.pool)
-        .await?;
-
-    let response = v2_permissions_response_for_database(
-        &database,
-        &format!("/v2/permissions?address={V2_PERMISSIONS_SUBJECT}"),
-    )
-    .await?;
-
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let payload: Value = read_json(response).await?;
-    assert_eq!(payload["error"]["code"], json!("stale"));
-    assert_eq!(
-        payload["error"]["message"],
-        json!("permission data publication is not compatible")
-    );
-
-    database.cleanup().await
-}
-
-#[tokio::test]
 async fn v2_get_permissions_requires_at_least_one_filter() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
 
@@ -254,12 +229,9 @@ async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result
 }
 
 #[tokio::test]
-async fn v2_get_permissions_non_name_filters_do_not_require_chain_checkpoint() -> Result<()> {
+async fn v2_get_permissions_non_name_filters_do_not_require_snapshot_metadata() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_permissions_fixture(&database).await?;
-    sqlx::query("DELETE FROM chain_checkpoints")
-        .execute(&database.pool)
-        .await?;
 
     for uri in [
         format!("/v2/permissions?address={V2_PERMISSIONS_SUBJECT}"),
@@ -309,7 +281,7 @@ async fn v2_get_permissions_name_filter_uses_current_sepolia_anchor_on_mixed_pha
     let database = TestDatabase::new_migrated().await?;
     seed_v2_mixed_phase_head_names(&database).await?;
     let resource_id = Uuid::from_u128(0x7e20);
-    bigname_storage::upsert_permissions_current_rows(
+    upsert_phase_permissions_current_rows(
         &database.pool,
         &[permission_current_row(
             resource_id,
@@ -320,12 +292,11 @@ async fn v2_get_permissions_name_filter_uses_current_sepolia_anchor_on_mixed_pha
         )],
     )
     .await?;
-    bigname_storage::upsert_permissions_current_resource_summary(
+    upsert_phase_permissions_current_resource_summary(
         &database.pool,
         &permission_current_resource_summary(resource_id, Some("registrar")),
     )
     .await?;
-    mark_permissions_current_projection_ready(&database).await?;
 
     let payload = v2_permissions_payload_for_database(
         &database,
@@ -397,7 +368,6 @@ async fn v2_get_permissions_empty_results_return_empty_page() -> Result<()> {
     database
         .seed_default_ens_snapshot_selector_position()
         .await?;
-    mark_permissions_current_projection_ready(&database).await?;
 
     let by_address = v2_permissions_payload_for_database(
         &database,
@@ -431,7 +401,6 @@ async fn v2_permissions_empty_resource_fails_closed_from_typed_support_summary()
         .await?;
     let resource_id = Uuid::from_u128(0xe400);
     upsert_test_resources(&database.pool, &[resource(resource_id)]).await?;
-    mark_permissions_current_projection_ready(&database).await?;
     let uri = format!("/v2/permissions?registration_id={resource_id}");
 
     let missing = v2_permissions_payload_for_database(&database, &uri).await?;
@@ -442,23 +411,21 @@ async fn v2_permissions_empty_resource_fails_closed_from_typed_support_summary()
         json!("permission_support_unknown")
     );
 
-    bigname_storage::upsert_permissions_current_resource_summary(
+    upsert_phase_permissions_current_resource_summary(
         &database.pool,
         &permission_current_resource_summary(resource_id, Some("registrar")),
     )
     .await?;
-    mark_permissions_current_projection_ready(&database).await?;
     let full = v2_permissions_payload_for_database(&database, &uri).await?;
     assert_eq!(full["data"], json!([]));
     assert!(full["meta"].get("completeness").is_none());
     assert!(full["meta"].get("unsupported_reason").is_none());
 
-    bigname_storage::upsert_permissions_current_resource_summary(
+    upsert_phase_permissions_current_resource_summary(
         &database.pool,
         &permission_current_resource_summary(resource_id, Some("wrapper")),
     )
     .await?;
-    mark_permissions_current_projection_ready(&database).await?;
     let wrapper = v2_permissions_payload_for_database(&database, &uri).await?;
     assert_eq!(wrapper["data"], json!([]));
     assert_eq!(wrapper["meta"]["completeness"], json!("unsupported"));
@@ -516,6 +483,50 @@ async fn v2_get_permissions_decodes_and_serves_a_stored_reserved_scope() -> Resu
         .expect("permissions data must be an array");
     let residual = permission_row_by_scope_kind(rows, "transport_derived");
     assert_eq!(residual["grant_scope"]["detail"]["transport"], json!("retired"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_permissions_admit_project_vocabulary_and_exclude_orphaned_projection_targets()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    let resource_id = v2_permissions_current_resource_id();
+    let uri = format!("/v2/permissions?registration_id={resource_id}");
+
+    let readable = v2_permissions_payload_for_database(&database, &uri).await?;
+    assert!(!readable["data"].as_array().is_none_or(Vec::is_empty));
+    assert!(readable["meta"].get("completeness").is_none());
+
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.chain_lineage lineage
+        SET canonicality_state = 'orphaned'::bigname_phase.canonicality_state
+        WHERE (lineage.chain_id, lineage.block_hash) IN (
+            SELECT pc.provenance ->> 'chain_id',
+                   pc.chain_positions ->> 'target_block_hash'
+            FROM bigname_phase.permissions_current pc
+            WHERE pc.resource_id = $1
+            UNION
+            SELECT summary.provenance ->> 'chain_id',
+                   summary.chain_positions ->> 'target_block_hash'
+            FROM bigname_phase.permissions_current_resource_summary summary
+            WHERE summary.resource_id = $1
+        )
+        "#,
+    )
+    .bind(resource_id)
+    .execute(&database.pool)
+    .await?;
+
+    let orphaned = v2_permissions_payload_for_database(&database, &uri).await?;
+    assert_eq!(orphaned["data"], json!([]));
+    assert_eq!(orphaned["meta"]["completeness"], json!("partial"));
+    assert_eq!(
+        orphaned["meta"]["unsupported_reason"],
+        json!("permission_support_unknown")
+    );
 
     database.cleanup().await
 }
@@ -669,7 +680,7 @@ async fn seed_v2_permissions_fixture(database: &TestDatabase) -> Result<()> {
     );
     apply_raw_log_permission_lineage(&mut migration_derived_row, "set_records", 112);
 
-    bigname_storage::upsert_permissions_current_rows(
+    upsert_phase_permissions_current_rows(
         &database.pool,
         &[
             current_row,
@@ -687,13 +698,12 @@ async fn seed_v2_permissions_fixture(database: &TestDatabase) -> Result<()> {
     )
     .await?;
     for resource_id in [current_resource_id, stale_resource_id] {
-        bigname_storage::upsert_permissions_current_resource_summary(
+        upsert_phase_permissions_current_resource_summary(
             &database.pool,
             &permission_current_resource_summary(resource_id, Some("registrar")),
         )
         .await?;
     }
-    mark_permissions_current_projection_ready(database).await?;
 
     Ok(())
 }

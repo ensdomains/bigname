@@ -120,7 +120,7 @@ The A3 content hash covers decode and mapping semantics. For every
 `[[abi.events]]` entry it hashes the entire block, including `fragment`,
 `emitter_roles`, and `normalized_events`, together with production adapter
 sources, manifest-authority sources used to persist declarations and select
-interpretation inputs, and worker projection sources. A change that only
+interpretation inputs, and project projection sources. A change that only
 expands the watched signature set is an ingest concern: build-plan amendment A
 requires fetching the new
 signature's historical [raw facts](../../../../../docs/glossary.md) before

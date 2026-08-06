@@ -10,13 +10,9 @@ use crate::AppState;
 
 use super::cursor::{cursor_value, invalid_cursor_error};
 use super::permission_support::{
-    apply_permissions_collection_support_meta, permission_read_error_to_v2,
-    permission_support_for_resources,
+    apply_permissions_collection_support_meta, permission_support_for_resources,
 };
 use super::support::normalize_inferred_route_name;
-use super::support::permissions_support::{
-    begin_permissions_current_read, finish_permissions_current_read,
-};
 use super::{
     AddressNameGrant, CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, QueryParams,
     StrictQueryParams, V2Error, V2Result, decode, encode, permission_powers_value,
@@ -110,9 +106,6 @@ pub(crate) async fn get_permissions(
     let include_lineage = permissions_include_lineage(&params.include)?;
     let filter_inputs = permissions_filter_inputs(&params)?;
 
-    let permission_read = begin_permissions_current_read(&state.pool, "/v2/permissions")
-        .await
-        .map_err(permission_read_error_to_v2)?;
     let resolved =
         resolve_permissions_filter(&state, &params, include_lineage, &filter_inputs).await?;
     let storage_cursor = params
@@ -125,11 +118,7 @@ pub(crate) async fn get_permissions(
         .transpose()?;
 
     if resolved.known_empty {
-        let response = empty_permissions_response(&params);
-        finish_permissions_current_read(&state.pool, "/v2/permissions", permission_read)
-            .await
-            .map_err(permission_read_error_to_v2)?;
-        return Ok(response);
+        return Ok(empty_permissions_response(&params));
     }
 
     let storage_page = bigname_storage::load_permissions_current_account_resource_page(
@@ -185,7 +174,7 @@ pub(crate) async fn get_permissions(
         resolved.resource_id.is_some(),
     );
 
-    let response = Json(Envelope {
+    Ok(Json(Envelope {
         data,
         page: Some(Page {
             cursor: params.cursor.clone(),
@@ -195,11 +184,7 @@ pub(crate) async fn get_permissions(
             has_more,
         }),
         meta,
-    });
-    finish_permissions_current_read(&state.pool, "/v2/permissions", permission_read)
-        .await
-        .map_err(permission_read_error_to_v2)?;
-    Ok(response)
+    }))
 }
 
 fn empty_permissions_response(params: &QueryParams) -> Json<Envelope<Vec<PermissionRow>>> {

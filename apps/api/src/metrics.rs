@@ -24,8 +24,7 @@ impl ApiMetrics {
     fn new() -> anyhow::Result<Self> {
         let registry = MetricsRegistry::new(BuildInfo {
             build_sha: crate::BUILD_SHA,
-            replay_version: bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION,
-            schema_version: bigname_storage::latest_migration_version(),
+            interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH,
         })?;
         let http_requests = registry.int_counter_vec(
             "http_requests_total",

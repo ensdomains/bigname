@@ -15,8 +15,21 @@ pub async fn load_phase_resolver_current(
         SELECT chain_id, resolver_address, declared_summary, support_status,
                unsupported_reason, provenance, chain_positions,
                canonicality_summary, manifest_version, last_recomputed_at
-        FROM resolver_current
+        FROM bigname_phase.resolver_current resolver
         WHERE chain_id = $1 AND lower(resolver_address) = $2
+          AND resolver.canonicality_summary ->> 'state' = 'canonical_lineage'
+          AND EXISTS (
+              SELECT 1
+              FROM bigname_phase.chain_lineage projection_lineage
+              WHERE projection_lineage.chain_id = resolver.chain_id
+                AND projection_lineage.block_hash =
+                    resolver.chain_positions ->> 'target_block_hash'
+                AND projection_lineage.canonicality_state IN (
+                    'canonical'::bigname_phase.canonicality_state,
+                    'safe'::bigname_phase.canonicality_state,
+                    'finalized'::bigname_phase.canonicality_state
+                )
+          )
         "#,
     )
     .bind(chain_id)

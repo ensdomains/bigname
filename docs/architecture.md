@@ -243,7 +243,11 @@ Phases per chain:
 5. `live` — continuous provider-head walk, bounded gap fill, chain-head
    publication, and downstream re-derivation after a reorg
 
-Postgres is the hot indexed and replay-focused store. Lineage anchors, selected target logs and their same-transaction sibling replay context, replay-required call snapshots, and compact payload-cache metadata are durable. Legacy public-schema code-hash observations remain available to the old worker but are not schema-v2 project-phase inputs. Large block payloads, non-indexed transaction or receipt bodies, and non-audit raw-log staging rows are evictable cache once their replay contract is satisfied. Empty historical blocks retain only lineage anchors and audit metadata.
+Postgres is the hot indexed and replay-focused store. Lineage anchors plus
+selected transactions, receipts, target logs, and same-transaction sibling
+replay context are durable. The phase schema has no generic provider-payload
+cache or retained call-snapshot family. Empty historical blocks retain only
+lineage anchors and audit metadata.
 
 The phase runner persists exact per-source and per-phase block-hash cursors.
 Historical work is an explicit finite `ingest`, `interpret`, `project`, or
@@ -278,21 +282,16 @@ hydration planner. When a hydration RPC is configured, the same project run
 refreshes eligible Ethereum legacy reverse-name and text values at the exact
 published canonical head after its event-derived projection work. A redo whose
 event-derived publication target is behind that head defers hydration until
-project catches up. The existing
-worker remains only so the API can read the legacy public-schema projections
-until the Stage C cutover; it does not write schema-v2 projections.
+  project catches up.
 
 Current ingest, interpretation, projection, live follow, redo, and rewind
 boundaries are described in [`chain-intake.md`](chain-intake.md).
 
 ## Immutable facts and rebuildable state
 
-Immutable schema-v2 raw facts: blocks, transactions, receipts, logs, preimage
-observations, and selected `eth_call` snapshots. Legacy code-hash observations
-remain in the public schema but are not project inputs. For large payloads
-the durable fact may be selected replay fields plus optional cache metadata or
-a digest, not the full body — compaction can evict non-critical bytes after
-replay facts are extracted.
+Immutable schema-v2 raw facts are lineage rows, selected transactions,
+receipts, logs, and preimage observations. Provider calls used for hydration or
+request-scoped lookup do not become raw facts.
 
 Interpretation output is replay-derived: schema-v2 identity rows, discovery
 edges, and normalized events can be replaced by an explicit bounded
@@ -304,7 +303,9 @@ hydration values are execution-derived current-state enrichment layered into
 `record_inventory_current` and `primary_names_current` only after that
 rebuildable event-derived publication; they are never raw facts, identity rows,
 or normalized events.
-Execution traces and outcomes remain durable execution artifacts.
+Provider lookup responses are request-scoped and are not persisted as reusable
+outcomes or durable execution traces. Guarded resolution disagreements may be
+recorded in the [resolution divergence ledger](glossary.md#resolution-divergence-ledger).
 
 Every projected row carries provenance pointers, manifest version, canonicality state, and chain-position context.
 
@@ -475,9 +476,8 @@ Other ENS classes (non-alias ancestor-selected, linked-subregistry ancestor-sele
 
 Basenames supports the exact-surface transport-assisted direct path through active `basenames_execution` v2 at the L1 Resolver. Other Basenames verified [path classes](glossary.md) return selector-local `unsupported`.[^bn-readme-l69][^bn-readme-l70][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
 
-Legacy execution artifacts remain available to diagnostics and worker code,
-but no v1 route serves them. V2 verified name and record routes execute through
-the schema-v2 lookup engine without a durable trace or reusable outcome. A
+V2 verified name and record routes execute through the schema-v2 lookup engine
+without a durable trace or reusable outcome. A
 guarded direct live/indexed disagreement may
 create or replace an active
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) row;
@@ -503,13 +503,9 @@ Required indexes: by resource, by account, by resolver; permission history by re
 ## Primary and reverse names
 
 The primary-name projection is address- and `coin_type`-centric, not just a
-reverse-record projection. The public-schema persistence, cache, fallback, and
-provenance rules below describe legacy worker and storage artifacts retained
-until slice 3; no v1 API route serves them.
-
-That retained legacy plane persists `claimed_primary_name`,
-`verified_primary_name`, `reverse_namespace`, `coin_type`, `resolver`,
-provenance, and coverage.
+reverse-record projection. `bigname_phase.primary_names_current` stores the
+declared claim, namespace, coin type, resolver evidence, provenance, support,
+and publication position. It does not store verified output.
 
 - Both objects use `ResultStatus`. `mismatch` applies to verified only; `execution_failed` also applies to a route-local claimed lookup when its provider fails.
 - `claimed_primary_name` is candidate-only; `verified_primary_name` is authoritative only when `success`.
@@ -517,25 +513,24 @@ provenance, and coverage.
 - Verified success additionally requires the untrimmed on-chain claim to byte-equal its ENSIP-15 normalized form. A normalizable claim with a different raw spelling remains a successful claimed candidate, but `verified_primary_name` returns `status=invalid_name` with `failure_reason=claim_not_normalized` instead of resolving the normalized variant.
 - Reverse claims alone don't verify — verification must resolve back to the requested address.[^v1-aur-l217][^v1-aur-l226][^v1-aur-l263][^v1-aur-l269]
 
-For ENS, declared claim precedence is reverse-only through `ens_v1_reverse_l1`.[^v1-revreg-deploy][^v1-revreg-l74][^v1-revreg-l83][^v1-revreg-l84] Persisted `claimed_primary_name.name` comes only from the exact requested `primary_names_current(address, coin_type, namespace)` row's declared normalized claim-identity source, including the projection-owned legacy reverse-resolver [hydration](glossary.md) exception documented for configured [event-silent](glossary.md) ENSv1 reverse resolvers. Admitted reverse tuples remain eligible when the hydrated claim normalizes but differs in raw spelling; their row records `claim_name_is_normalized=false`. For current registry resolver edges, resolver-edge-only hydration may persist the exact row only when the untrimmed hydrated name first byte-equals its normalized form and the candidate node hash then forward-confirms through `addr:60` on the ENS Universal Resolver to the recovered address at the same [hash-pinned](glossary.md) checkpoint; the forward check only recovers the address preimage for the reverse node and does not persist verified-primary state.[^v1-revreg-l137][^v1-registry-l137][^v1-nameresolver-l7][^v1-iaddrres-l11][^v1-iur-l44][^v1-iur-l52] The app default tuple (`namespace=ens`, `coin_type=60`) may use a route-local Ethereum Mainnet reverse RPC fallback when that persisted tuple is missing: select the stored head checkpoint, build the `addr.reverse` node, read its ENS registry resolver, call resolver `name(bytes32)` at that block hash, normalize the result, and publish claim provenance as `ens_reverse_rpc` without populating `primary_names_current`.[^v1-registry-deploy][^v1-revreg-l137][^v1-registry-l137][^v1-nameresolver-l7][^v1-nameresolver-l11][^v1-nameresolverimpl-l25] In `mode=verified|both`, that route-local fallback applies the normalization gate before verifying `addr:60` through the ENS Universal Resolver proxy at the same block hash, then persists the complete `verified_primary_name` execution trace and outcome.[^v1-ur-deploy][^v1-iur-l44][^v1-iur-l52] Expiration of a configured provider or CCIP-Read gateway response deadline remains a persisted in-band execution failure. Provider or gateway connect-phase timeouts, DNS failures, TLS failures, connection resets, and other transport failures abort with `409 stale` before persistence so a later read retries. Outside exact-row hydration and that fallback, `claimed_primary_name.name` is never synthesized from manifest presence, resolver identity alone, or verified execution.
+For ENS, declared claim precedence is reverse-only through
+`ens_v1_reverse_l1`.[^v1-revreg-deploy][^v1-revreg-l74][^v1-revreg-l83][^v1-revreg-l84]
+Project may refresh an existing ENS/60 tuple through the configured
+[event-silent](glossary.md) reverse resolver at the exact published head. It
+retains the raw spelling and whether that spelling byte-equals its ENSIP-15
+normalization; it never manufactures a claim from manifest presence, resolver
+identity alone, or verified lookup.
 
 For Basenames, declared primary-name value intake is `basenames_base_primary` at the ENSv1 Base `L2ReverseRegistrar` (`0x0000000000D8e504002cC26E3Ec46D81971C1664`), using the `NameForAddrChanged(address,string)` event and Base coin type `2147492101`.[^v1-l2rev-base-deploy][^v1-l2rev-base-args][^v1-l2rev-event][^v1-l2rev-nameforaddr] It does not replace the Base registry/registrar/resolver families for declared truth on exact-name, address-name, or children reads, and it does not use the Basenames `ReverseRegistrar` as the primary-name value source. Verified primary names enter through `basenames_execution` against the L1 Resolver.[^bn-readme-l22][^bn-l1resolver-l13]
 
-V2 reads an indexed claim from `primary_names_current` but obtains ENS/60
-verification from a fresh hash-pinned schema-v2 lookup. It writes no legacy
-trace or reusable outcome and no divergence row. Provider transport failure
-aborts v2 with `500 internal_error`. V2 Basenames primary-name verification is
-unsupported; its indexed response remains Base-scoped.
-
-Verified-primary cache identity is `request_type=verified_primary_name` with key `{namespace}:{normalized_address}:{coin_type}`. Materialized results are fenced by the matching `primary_names_current` row. The route-local ENS/60 exception is fenced by that exact row remaining absent and by an exact selected-checkpoint match; its topology and record dependency fields carry the explicit selected checkpoint rather than fabricated projected name/resource identities. Route-local and materialized traces do not satisfy each other's readback fence.
-
-Retained legacy section-local provenance, not currently served:
-
-- `claimed_primary_name.provenance` is exact-tuple declared-only provenance from the requested row, optionally with projection-owned legacy reverse-resolver hydration metadata, or route-local `ens_reverse_rpc` resolver provenance for the ENS/60 on-demand fallback. No `execution_trace_id`.
-- `verified_primary_name.provenance` (when present) is `{execution_trace_id, manifest_versions}` for persisted readback and must equal the top-level `execution_trace_id`, including persisted ENS/60 fallback results. The v1 fallback also exposes the selected positions through `chain_positions`.
-
-V2 publishes no execution-trace provenance. Its fresh ENS/60 response uses
-snapshot metadata for the actual lookup position.
+V2 reads the indexed claim from the phase projection and obtains ENS/60
+verification from a fresh [hash-pinned](glossary.md) schema-v2 lookup. A raw
+claim that cannot be normalized returns `invalid_name`; a normalizable claim
+whose original spelling differs from its normalized form is not verified.
+Reverse claims alone do not verify: forward resolution must return the requested
+address.[^v1-aur-l217][^v1-aur-l226][^v1-aur-l263][^v1-aur-l269] The request
+writes no reusable outcome, trace, or divergence row. V2 Basenames primary-name
+verification is unsupported; its indexed response remains Base-scoped.
 
 ## Collection semantics
 
@@ -608,11 +603,6 @@ Default verified entrypoints:
 - ENS: `ens_execution` at the official Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`.[^ens-docs-univ][^v1-aur-l90][^v1-aur-l106]
 - Basenames: active `basenames_execution` v2 at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` supports only the exact-surface transport-assisted direct path; other Basenames verified path classes stay `unsupported`.[^bn-readme-l22][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
 
-The legacy execution engine retained for worker use supports onchain calls,
-wildcard resolution, alias-aware execution, nested CCIP-Read, batch/multicall,
-proof and verification persistence. Its artifacts carry `ExecutionTrace` and
-cache identity, but no v1 API route serves them.
-
 The v2 lookup engine executes afresh at the schema-v2 current readable position.
 It has no trace or cache identity. It may compare a direct record answer with
 the exact projected record row and perform the guarded divergence-ledger write;
@@ -626,12 +616,10 @@ branch; interpretation selects raw facts through that lineage rather than
 rewriting immutable raw rows. An explicit `interpret` redo replaces derived
 identity, discovery, and normalized-event output for its selected range.
 
-The old synchronous reorg-repair tree, normalized-event repair/replay driver,
-and its broad orphan-repair sweep have been deleted. The live phase uses the
-same head-publication transaction as ingest. That transaction orphans the
-displaced suffix, removes cache eligibility for affected rows in
-`public.execution_cache_outcomes` while leaving durable traces intact, and
-stamps `interpret` and `project` for bounded redo when the orphaned suffix
+The live phase uses the same head-publication transaction as ingest. That
+transaction orphans the displaced suffix, clears affected active resolution
+divergence observations, and stamps `interpret` and `project` for bounded redo
+when the orphaned suffix
 starts at or below their recorded cursors. The live loop consumes those stamps
 in dependency order before advancing downstream work, so projections cannot
 silently retain output from the losing fork. Successful `interpret` redo also
@@ -653,7 +641,7 @@ retryable snapshot change, not a terminal lineage failure.
 The `phase-runner rewind` command is a thin head-publication operation. It takes
 the ingest, interpret, project, and live advisory locks so it cannot race a head
 publisher or downstream writer, selects an exact stored readable ancestor at or
-above the safe head, and invokes the same atomic orphaning, cache invalidation,
+above the safe head, and invokes the same atomic orphaning, divergence cleanup,
 and redo-stamping path. The next supervised live cycle fills the winning path,
 then runs the required downstream redo.
 
@@ -671,8 +659,7 @@ discovery/observed-answer based rather than exhaustively enumerable.
 
 ## Operations
 
-The old indexer metrics and backfill-capacity checks retired with that binary.
-API and worker metrics remain available. The live phase records its phase state,
+API metrics remain available. The live phase records its phase state,
 exact block-hash progress, and heartbeat through the shared runner control
 plane; dedicated chain-lag and reorg metrics remain deferred.
 
@@ -691,7 +678,9 @@ schema-v2 phase-runner replacements. Schema-v2 projection maintenance remains
 an explicit project-phase normal run or bounded redo; there is no independent
 projection replay command.
 
-Live manifest drift / proxy upgrade alerting is a worker-owned operational loop. It does not write `normalized_events`, mutate manifests, rewrite discovery, or expose a public route.
+There is no live manifest-drift or proxy-upgrade alert loop. Manifest and
+discovery authority remain explicit, and changes require the normal manifest
+synchronization and phase redo path.
 
 ## Constraints
 
@@ -711,13 +700,17 @@ Live manifest drift / proxy upgrade alerting is a worker-owned operational loop.
 
 ## Implementation shape
 
-Rust modular monolith. PostgreSQL is the hot indexed/replay store for durable replay facts, projections, retained payload metadata, and execution artifacts. Workers handle ingestion, projection, replay, and retained execution work. The API serves v2 projection and lookup reads, GraphQL compatibility reads, health, and diagnostic readback.
+Rust modular monolith. PostgreSQL is the hot indexed/replay store for durable
+selected facts, projections, and guarded divergence observations. The phase
+runner handles ingestion, interpretation, projection, verification, live
+follow, and bounded redo. The API serves v2 projection and lookup reads,
+GraphQL compatibility reads, health, and diagnostic readback.
 
 Repository layout:
 
-- `apps/api`, `apps/phase-runner`, `apps/worker`
+- `apps/api`, `apps/phase-runner`
 - `crates/domain`, `crates/storage`, `crates/manifests`, `crates/adapters`,
-  `crates/ingest`, `crates/interpret`, `crates/execution`,
+  `crates/ingest`, `crates/interpret`, `crates/lookup`, `crates/project`, and
   `crates/test-support`
 
 ## Test matrix
@@ -740,7 +733,7 @@ DNS / wildcard / offchain: imported DNS name, gasless DNS or metadata-discovered
 
 Basenames: NFT-only transfer, management-only transfer, address-resolution change, full transfer, primary-name set/unset, L1 compatibility resolution, current single-address capability.
 
-Operational: reorg across authority events, reorg across verified execution cache, replay determinism from raw facts, replay determinism from normalized events, proxy implementation change, manifest version change.
+Operational: reorg across authority events, reorg repair of divergence observations, replay determinism from raw facts, replay determinism from normalized events, proxy implementation change, manifest version change.
 
 End-to-end cases validate every schema-v2 layer material to their claim: raw
 facts, normalized events, projections, and, once a contract-backed caller
@@ -750,9 +743,6 @@ the API; route behavior remains owned by API crate tests.
 ## Open decisions
 
 - exact Postgres partitioning strategy
-- exact cache invalidation granularity for verified queries
-- whether any execution artifacts should move out of inline Postgres
-- exact raw-payload cache retention windows and which payload classes are durable
 - whether subscriptions ship in the first stable read milestone or after
 
 ---
