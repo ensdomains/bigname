@@ -200,7 +200,8 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
 /// exemption this test fails, which is the signal to delete it and raise `DEFAULT_CASES`.
 #[test]
 fn binding_closure_exempts_a_binding_the_interpreter_never_opens() -> Result<()> {
-    /// The first case index the default sweep does not reach; `DEFAULT_CASES` documents the band.
+    /// The first case index that FAILS (the default sweep stops at `DEFAULT_CASES - 1` = 47, and
+    /// cases 48..=88 are green); `DEFAULT_CASES` documents the band.
     /// Derived rather than written out so that editing either constant cannot silently leave this
     /// test pinning a seed the corpus no longer draws.
     const KNOWN_BAD_CASE: u64 = 89;
