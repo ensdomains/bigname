@@ -766,7 +766,8 @@ it.
 
 **Run shape** — how one interpret walk executes over its input: fresh (from
 the start of the chain), incremental (continuing from retained prior events),
-or resumed (continuing persisted redo state). Batch-independence rules
+or resumed (continuing from a persisted progress marker after an interruption,
+including an interrupted redo's persisted intermediate state). Batch-independence rules
 require identical surviving rows in every run shape over identical input.
 
 **Shadow** — (1) manifest rollout/capability value: facts and traces are

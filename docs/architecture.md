@@ -366,7 +366,9 @@ an identity's derivation block cannot move that anchor forward; an identity
 the replay re-observes keeps its anchor at its first derivation block, and
 only an identity still
 orphaned after the replay is re-anchored to the earliest surviving reference
-outside the redone range. The
+outside the redone range — for a name surface, the earliest surviving
+body-carrying `PreimageObserved` observation of that name, and a surface with
+no surviving body-carrying observation stays orphaned. The
 deleted old-schema storage layer no longer provides general field repair,
 payload arbitration, supersession, full-closure proof, or adapter-checkpoint
 reuse.
