@@ -1622,8 +1622,8 @@ async fn seed_v2_conformance_namespace_manifests(database: &TestDatabase) -> Res
         .insert_manifest(
             "ens",
             "ens_v2_registry_l1",
-            "ethereum-mainnet",
-            "ens_v2",
+            "ethereum-sepolia",
+            "ens_v2_sepolia_post_audit",
             1,
             "active",
             "ensip15@ens-normalize-0.1.1",
@@ -1636,19 +1636,19 @@ async fn seed_v2_conformance_namespace_manifests(database: &TestDatabase) -> Res
         .insert_capability_flag(ens_l1, "verified_resolution", "supported", None)
         .await?;
 
-    let ens_l2 = database
+    let ens_v1 = database
         .insert_manifest(
             "ens",
-            "ens_v2_registry_l2",
-            "base-mainnet",
-            "ens_v2_base",
+            "ens_v1_registry_l1",
+            "ethereum-mainnet",
+            "ens_v1",
             2,
             "active",
             "ensip15@ens-normalize-0.1.1",
         )
         .await?;
     database
-        .insert_capability_flag(ens_l2, "declared_children", "unsupported", Some("pending"))
+        .insert_capability_flag(ens_v1, "declared_children", "unsupported", Some("pending"))
         .await?;
     Ok(())
 }

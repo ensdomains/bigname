@@ -89,8 +89,10 @@ This table records partner-1's requested product coverage and wording. It is not
 | Domain | Required | Notes |
 | --- | --- | --- |
 | L1 ENS canonical names | Yes | partner-1 requests Ethereum Mainnet coverage. |
-| ENSv2 names with onchain records | Yes | partner-1 requests coverage for records on L1 or on ENSv2 L2 destination chains once those source families are admitted. |
+| ENSv2 names with onchain records | Yes | partner-1 requests coverage for ENSv2 records on Ethereum L1 once those source families are admitted. |
 | Basenames | Yes | partner-1 requests Base Mainnet coverage. |
+
+The original ask named "ENSv2 L2 destination chains" as a second ENSv2 coverage target. That target does not exist: ENSv2 is an Ethereum L1 system and its migration from ENSv1 is single-chain, so there is no ENSv2 deployment on another chain to index. (The only ENSv2 contracts bigname admits today are the Sepolia deployment, so ENSv2 coverage on any chain remains unbuilt rather than merely undeclared.) Base Mainnet coverage is Basenames, a separate namespace that is unaffected. See [`upstream.md`](../upstream.md#known-divergences) for why upstream source still carries stale wording about a second chain.
 
 The caller should not need to fan out by namespace. A single API call should be able to span L1 ENS, ENSv2, and Basenames where applicable.
 
@@ -304,7 +306,7 @@ Confirm whether a single API call can span:
 
 - L1 ENS,
 - Basenames,
-- ENSv2 onchain records on L1 and partner-1-requested L2 destinations.
+- ENSv2 onchain records on Ethereum L1.
 
 The desired behavior is no per-namespace fan-out by the caller for either forward or reverse resolution.
 
@@ -337,7 +339,7 @@ The agent should answer or route these questions.
 
 1. What is the current ENS API surface? Provide the GraphQL schema or REST endpoint catalog.
 2. What namespace and chain coverage already exists?
-3. What is net-new for this scope, especially Basenames and ENSv2 onchain records on partner-1-requested L2 destinations?
+3. What is net-new for this scope, especially Basenames and ENSv2 onchain records on Ethereum L1?
 4. Can forward and reverse queries span L1 ENS, Basenames, and ENSv2 without caller-side fan-out?
 5. What is the buildout timeline for missing functionality?
 6. Should the API be exposed as a public good, and if so, what operational/SLA boundaries are needed?

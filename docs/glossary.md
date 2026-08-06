@@ -6,10 +6,14 @@ names and enum values are contract, not prose; this glossary explains concepts,
 it does not rename fields. Docs should link here on a term's first use instead
 of re-defining or assuming it.
 
-Two terms are overloaded enough that bare use is discouraged: **promotion**
-(always qualify: checkpoint promotion vs. capability promotion) and **profile**
+Three terms are overloaded enough that bare use is discouraged: **promotion**
+(always qualify: checkpoint promotion vs. capability promotion), **profile**
 (always qualify: deployment profile, resolver profile, exact-name profile, or
-the `/v2/lookup` `profile=` parameter).
+the `/v2/lookup` `profile=` parameter), and **migration** (always qualify:
+bigname's own schema migration, written here as *schema-migration*, vs. the
+on-chain [ENSv1→ENSv2 migration](#ensv1ensv2-migration)). Entries below that
+describe retired bigname database state say *schema-migration-era*; they have
+nothing to do with ENS's protocol migration.
 
 ---
 
@@ -28,9 +32,9 @@ source is *admitted* when a manifest declares it or a discovery rule reaches it
 from a declared root; only admitted inputs can produce normalized events or
 public coverage. Cross-reference: allowlisting.
 
-**Admission epoch** (discovery-admission epoch) — a migration-era per-chain
+**Admission epoch** (discovery-admission epoch) — a schema-migration-era per-chain
 counter used to fence old-runtime watch-plan reconciliation. The table remains
-in immutable migration history, but Stage B manifest synchronization and
+in immutable schema-migration history, but Stage B manifest synchronization and
 interpretation have no Rust writer or consumer for this counter; phase locks,
 content hashes, and explicit redo state now fence derived work.
 
@@ -40,7 +44,7 @@ anchor* is the registry entry, registrar lease
 wrapper position
 (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27 @ ens_v1@91c966f),
 or ENSv2 resource
-(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L38 @ ens_v2@48b3e2d)
+(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L38 @ ens_v2@ccaeb58)
 behind a `resource_id`; the id survives changes within one anchor and rotates
 when authority moves to a different anchor. An *observation anchor* is the
 exact chain/block identity a stored row was observed at.
@@ -55,9 +59,9 @@ normalized event is broader than an era flip: it records every move of a
 name's authority anchor (registry-, registrar-, or wrapper-held), so most such
 rows — millions on Basenames alone — mark within-era anchor transitions.
 
-**Backfill coverage fact** — a migration-era record that asserted one completed
+**Backfill coverage fact** — a schema-migration-era record that asserted one completed
 old-runtime backfill job fetched all matching logs over one block interval.
-The tables remain in migration history, but the Stage B runtime has no writer,
+The tables remain in schema-migration history, but the Stage B runtime has no writer,
 repair path, or checkpoint-promotion consumer for these records.
 
 **Stored-history verification** — the read-only phase that compares canonical
@@ -123,9 +127,9 @@ watched contract. Addresses are time-ranged attributes of an instance, a proxy
 keeps its instance across implementation changes, and re-admitting an old
 address reuses its prior instance with a new active range.
 
-**Coverage frontier** (stored-lineage coverage frontier) — a migration-era,
+**Coverage frontier** (stored-lineage coverage frontier) — a schema-migration-era,
 revision-checked old-runtime proof of which watched block intervals had
-complete log-fetch coverage. Its tables remain in migration history, but its
+complete log-fetch coverage. Its tables remain in schema-migration history, but its
 Rust writers, readers, and checkpoint-promotion path were deleted in Stage B.
 
 **Declared vs verified** — *declared* state is what protocol-side observation
@@ -157,12 +161,24 @@ and control for ENSv1 and Basenames names alike, whether the name is registry-,
 registrar-, or NameWrapper-held.
 
 **Discovery graph / discovery edge** — the time-versioned indexability and
-relationship graph (resolver, registry announcement, subregistry, parent,
-alias, metadata, proxy/implementation, migration, transport edges) that extends
-the manifest-declared contract graph. An edge's kind decides whether it admits
-an emitter or only records topology. In particular, a registry announcement
-admits an ENSv2 registry independently of parent reachability, while a
-subregistry edge records parent-child reachability without admitting its target.
+relationship graph that extends the manifest-declared contract graph. The
+schema-v2 baseline constrains an edge's kind to five values: `resolver`,
+`subregistry`, `proxy_implementation`, `registry_announcement`, and
+[`migration`](#migration-edge-migration). An edge's kind decides whether it
+admits an emitter or only records topology. In particular, a registry
+announcement admits an ENSv2 registry independently of parent reachability,
+while a subregistry edge records parent-child reachability without admitting
+its target.
+
+**Migration edge** (`migration`) — the fifth discovery edge kind. It is
+[reserved surface](#reserved-surface): the schema-v2 baseline accepts the
+value, and three manifest views explicitly exclude it from watch-plan,
+resolver-profile, and code-hash-drift reasoning, but no adapter writes one. Why
+it was allocated is not recorded anywhere; only the absence of a producer is
+provable. Do not read its presence in the enum as evidence that migration
+topology is tracked. Note that the older `public` schema built from
+`migrations/` puts no constraint on the column at all, so this five-value list
+describes the schema-v2 baseline rather than every row that has ever existed.
 
 **Registry announcement edge** (`registry_announcement`) — an ENSv2 discovery
 edge created when a contract emits `RegistryCreated()`. It makes the emitting
@@ -205,15 +221,174 @@ remains separately governed by `CANNOT_APPROVE` until wrapper expiry.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L127 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L132 @ ens_v1@91c966f)
 
+**ENSv1→ENSv2 migration** — the on-chain move of an existing ENS name from the
+ENSv1 contracts to the ENSv2 registries. It happens entirely on one chain, it
+is per-name rather than a global state copy, and it is driven by a token
+transfer: the holder sends the name's ENSv1 token (the registrar ERC-721, or
+the NameWrapper ERC-1155) to a [migration controller](#migration-controller),
+which retires the name's ENSv1 presence into the [Graveyard](#graveyard) and
+claims its [premigrated](#premigration-reservation) ENSv2 entry in the same
+transaction.
+Nothing about it is cross-chain; see [`upstream.md`](upstream.md#known-divergences)
+for the stale upstream comment that says otherwise. **No bigname source family
+is admitted for any of this yet** — the terms below describe the upstream
+mechanism an adapter would have to handle, not implemented behavior. Distinct
+from bigname's own *schema-migration* history; see the note at the top of this
+file.
+
+**Premigration reservation** — the pre-launch step that writes every existing
+`.eth` second-level name into the new ENSv2 `.eth` registry as a placeholder
+before anyone migrates. A batch tool registers each label with owner
+`address(0)`
+(upstream: .refs/ens_v2/contracts/src/registrar/BatchRegistrar.sol:L65 @ ens_v2@ccaeb58),
+which makes the entry `RESERVED`: it has an expiry, a subregistry, and a
+resolver, but no ERC-1155 token and no roles, and it emits `LabelReserved`
+rather than `LabelRegistered`
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L462 @ ens_v2@ccaeb58).
+The reserved expiry is the ENSv1 registrar expiry plus a bonus period of 62 days
+and 1 second — the difference between ENSv1's 90-day grace and ENSv2's 28-day
+grace, plus a second
+(upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L218 @ ens_v2@ccaeb58);
+`ETHRenewerV1` recovers the ENSv1 expiry by subtracting that bonus back off the
+reservation
+(upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L119 @ ens_v2@ccaeb58),
+so the ENSv2 reservation outlives the whole ENSv1 lifetime including grace. The
+consequence for an indexer: a name can carry ENSv2 expiry and resolver facts,
+and no owner, while ENSv1 is still the authority for it. Reserved entries are
+not registrations.
+
+**Migration controller** — an ENSv2 contract that accepts a transferred ENSv1
+token and performs that name's migration. There are two, split by whether the
+wrapped name can still be unwrapped: `UnlockedMigrationController` takes
+unwrapped registrar ERC-721s
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92 @ ens_v2@ccaeb58)
+and unlocked NameWrapper tokens, and `LockedMigrationController` takes locked
+ones; both inherit their ERC-1155 receiver from a shared base
+(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L101 @ ens_v2@ccaeb58).
+A separate `MigrationHelper` batches many names through operator approval
+(upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L94 @ ens_v2@ccaeb58).
+Name collision worth guarding against: ENSv1 also ships a `MigrationHelper`, an
+owner-controlled wrapper-migration tool with an entirely different interface
+(upstream: .refs/ens_v1/contracts/utils/MigrationHelper.sol:L28 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/utils/MigrationHelper.sol:L47 @ ens_v1@91c966f),
+and it has its own mainnet deployment artifact
+(upstream: .refs/ens_v1/deployments/mainnet/MigrationHelper.json:L2 @ ens_v1@91c966f),
+so harness or manifest tooling that keys contracts by artifact basename across
+both pins will resolve the wrong one.
+
+**Migration registry** (`WrapperRegistry`) — the ENSv2 registry contract
+deployed for one specific migrated name to hold that name's children. When a
+locked wrapped name migrates, the controller deploys a proxy through
+`VerifiableFactory.deployProxy`
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2@ccaeb58)
+using the name's namehash as the salt
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L151 @ ens_v2@ccaeb58),
+and binds it as the name's subregistry, which emits `SubregistryUpdated`
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L472 @ ens_v2@ccaeb58).
+Each one is a token receiver in its own right, so it is where that name's
+children migrate to. For discovery this means the set of ENSv2 registries is
+open-ended and grows by contract deployment — one per migrated locked name, all
+sharing a single implementation — rather than being fixed by manifest
+declaration.
+
+**Migratable child** — an emancipated child of an already-migrated name that
+has not migrated yet. Its parent's
+[migration registry](#migration-registry-wrapperregistry) refuses to let anyone
+register that label
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58),
+so the child cannot be taken on the ENSv2 side and keeps resolving through
+ENSv1 for as long as it stays unmigrated. This is a legitimate steady state,
+not a transient one: a name tree can have a parent whose registration is
+ENSv2-authoritative and a child whose control and records stay
+ENSv1-authoritative, and nothing terminates that split automatically — it ends
+only when the child itself migrates, or when it is abandoned. Note the test is
+on fuses, not on being currently wrapped, and NameWrapper preserves fuses
+across a burn, so a child that unwraps after its parent migrated still counts
+as migratable — and is stuck, because migration needs a NameWrapper token to
+transfer and it no longer has one. It stays blocked until its ENSv1 registry
+owner is zeroed, which is the condition that releases the label
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58).
+
+**Graveyard** — the ENSv2 contract that ends up holding the dead ENSv1 side of
+every migrated name: migration rewrites the ENSv1 registry record to make the
+Graveyard the owner and to clear the resolver
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L114 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L115 @ ens_v2@ccaeb58),
+then sends it the ENSv1 registrar token
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58).
+The deployment script's activation sequence also adds it as an ENSv1 registrar
+controller alongside `ETHRenewerV1`
+(upstream: .refs/ens_v2/contracts/script/setup.ts:L873 @ ens_v2@ccaeb58),
+which is what lets its permissionless `clear` entrypoint
+(upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L99 @ ens_v2@ccaeb58)
+tidy leftover ENSv1 registry state.
+
+Two traps for an ENSv1 adapter. First, what happens to the NameWrapper position
+depends on the path: an unlocked wrapped 2LD is unwrapped into the Graveyard
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L147 @ ens_v2@ccaeb58),
+as is an emancipated child
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58),
+but a **locked** name stays wrapped — its ERC-1155 is transferred to the
+Graveyard with fuses intact and no unwrap or burn
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58),
+so a wrapper adapter watching only transfers would keep calling that name
+`wrapped` after it has migrated. Second, for a fully expired name `clear`
+self-claims it from the registrar with a duration chosen to pin expiry at
+`uint64` max minus the ENSv1 grace period
+(upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L164 @ ens_v2@ccaeb58),
+which surfaces as an ENSv1 `NameRegistered` naming the Graveyard as registrant
+with an absurdly distant expiry.
+
+**ETHRenewerV1** — the only renewal path left for a name that was
+[premigrated](#premigration-reservation) but has not migrated. The deployment
+script's activation sequence revokes every ENSv1 registration path as a
+registrar controller
+(upstream: .refs/ens_v2/contracts/script/setup.ts:L860 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/script/setup.ts:L866 @ ens_v2@ccaeb58)
+and adds the Graveyard and this contract in their place
+(upstream: .refs/ens_v2/contracts/script/setup.ts:L877 @ ens_v2@ccaeb58).
+Renewal writes both sides: the shared registrar base extends the ENSv2 entry
+(upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L91 @ ens_v2@ccaeb58)
+and this contract's hook extends the ENSv1 registrar expiry by the same
+duration
+(upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L134 @ ens_v2@ccaeb58),
+so the two stay in step until the name migrates — after which only the ENSv2
+expiry moves and the ENSv1 value freezes forever. Its `syncWrapper` entrypoint
+(upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2@ccaeb58)
+pushes registrar expiry into NameWrapper by adding NameWrapper as an ENSv1
+registrar controller and removing it again within the same call
+(upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2@ccaeb58).
+Any code that treats the ENSv1 controller set as static, or `ControllerAdded`
+as a rare governance event, is wrong once this is live.
+
+**v1 fallback resolver** (`ENSV1Resolver`, exposed as `V1_RESOLVER`) — the
+ENSv2-side resolver that answers by reading ENSv1. It looks the name up in the
+ENSv1 registry
+(upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L40 @ ens_v2@ccaeb58)
+and forwards the resolve call to whatever resolver it finds there
+(upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L69 @ ens_v2@ccaeb58).
+It is the resolver the premigration tooling writes onto every reservation
+(upstream: .refs/ens_v2/contracts/script/preMigrationUtils.ts:L52 @ ens_v2@ccaeb58),
+and a
+[migration registry](#migration-registry-wrapperregistry) returns it for any
+child that has not migrated
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L183 @ ens_v2@ccaeb58),
+where it is held as an immutable set at deploy time
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L40 @ ens_v2@ccaeb58).
+Its effect is that a name resolves correctly through the ENSv2 tree while ENSv1
+is still its authority, so attributing which version served a resolution is
+time-dependent and cannot be read off the resolver pointer alone.
+
 **Exact-name profile** (`exact_name_profile`) — the per-manifest capability
 flag that, when `supported`, makes declared exact-name reads authoritative for
 that deployment profile. Today the only family whose active manifest carries
 `supported` is the ENSv2 Sepolia registrar; the flag also exists in `shadow`
 elsewhere (for example the mainnet ENSv1 registrar). It promotes nothing else.
 
-**Generation** (raw-log retention generation) — a migration-era per-chain
+**Generation** (raw-log retention generation) — a schema-migration-era per-chain
 counter used by old-runtime destructive raw-log repair and backfill coverage.
-The schema remains in migration history, but Stage B has no Rust writer or
+The schema remains in schema-migration history, but Stage B has no Rust writer or
 coverage consumer for this counter.
 
 **Hash-pinned** — anchored to an exact block hash rather than a block number or
@@ -227,12 +402,12 @@ that changes a primary-name claim also invalidates the matching persisted
 verified answer, so verified readback re-verifies instead of serving a stale
 outcome.
 
-**Input revision** (raw-log input revision) — a migration-era per-chain counter
+**Input revision** (raw-log input revision) — a schema-migration-era per-chain counter
 used by the old runtime's raw-log mutation fence and replay caches. Its Rust
 writer and consumers were deleted in Stage B. This is distinct from projection
 input revisions that surviving worker replay still uses.
 
-**Block-revision evidence floor** — the migration-era lower bound used by the
+**Block-revision evidence floor** — the schema-migration-era lower bound used by the
 old runtime's raw-log revision evidence. Its tables remain historical; the
 Stage B runtime no longer computes or consumes this floor.
 
@@ -247,7 +422,7 @@ usage)
 backfill range or projection invalidation (standard distributed-systems
 usage). Context disambiguates; both senses are intentional.
 
-**Lineage mutation revision** — a migration-era per-chain counter and evidence
+**Lineage mutation revision** — a schema-migration-era per-chain counter and evidence
 trail used by old-runtime stored-lineage coverage and adapter checkpoint reuse.
 The migration-owned database objects remain, but their Rust consumers were
 deleted in Stage B.
@@ -359,6 +534,20 @@ as `orphaned` without touching content.
 kept as audit input; internal invalidation and reorg-repair machinery still
 consumes them.
 
+**Reserved surface** — a schema value, enum variant, or documented field that
+the system accepts and can render but that no code path ever produces. It
+exists because some earlier design allocated it, and removing it would cost a
+schema migration or an API-contract change for no behavioral gain. Reserved
+surface is not deferred work and not a partially built feature: absent a named
+producer, it will never appear in a response. Current examples are the
+[`migration` discovery edge](#migration-edge-migration) and the
+`migration_derived` and `transport_derived` permission scopes. Anything
+reserved should say so where it is documented, so a reader does not mistake it
+for coverage. Don't add new fixtures or exemplars that make reserved surface
+look produced; existing `migration_derived` exemplars are retained deliberately
+because that scope has a real mechanism it may yet bind to, while
+`transport_derived` does not.
+
 **Resolver profile** — a declared resolver classification. ENSv1 and
 Basenames use an exact resolver-address declaration; ENSv2 requires the
 proxy's latest canonical ERC-1967 `Upgraded` event to name a declared
@@ -378,11 +567,11 @@ the compared projection row and its canonical block lineage remain unchanged.
 **Resource** (backing resource, `resource_id`) — the authority object behind a
 name: a registry entry, registrar lease, wrapper position, or ENSv2 EAC
 resource
-(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L38 @ ens_v2@48b3e2d).
+(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L38 @ ens_v2@ccaeb58).
 Permissions and control history key to the resource, never to the name string
 or token id.
 
-**Retained-history proof** — a migration-era ENSv2 tuple (retention generation,
+**Retained-history proof** — a schema-migration-era ENSv2 tuple (retention generation,
 discovery-admission epoch, proven-through block) used by the deleted
 full-closure replay. Its SQL history remains, but Stage B has no Rust writer or
 consumer for this proof.
@@ -413,16 +602,34 @@ not identity; display names are derived when read, following the audit's
 A **surface binding** is the time-ranged record of which resource backed a
 surface when. Surfaces survive re-registration; resources rotate.
 
+
 **Token lineage** (`token_lineage_id`) — the continuity of tokenized ownership
 across token-id changes (for example ENSv2 token regeneration, where a role
 change burns and mints a replacement token while leaving the resource unchanged
-(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L82 @ ens_v2@48b3e2d)
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L528 @ ens_v2@48b3e2d)).
+(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L82 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L528 @ ens_v2@ccaeb58)).
 It rotates only when authority moves to a different tokenized anchor. A return
 to the exact prior tokenized anchor — for example unwrapping back to a
 still-live lease — resumes that anchor's prior lineage, but not after release
 or across mismatched holder/controller authority: a name that fully lapses and
 is re-registered mints a new lineage.
+
+**Transport** — in `/v2/lookup` topology, the field describing a resolution
+that was served across a chain boundary: `{source_chain_id, target_chain_id,
+contract_address, latest_event_kind}`, all `null` when no chain boundary was
+crossed. The only path that populates it is Basenames, whose names live on Base
+while an L1 Resolver on Ethereum Mainnet answers for them
+(upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc),
+answering `base.eth` directly
+(upstream: .refs/basenames/src/L1/L1Resolver.sol:L166 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L1/L1Resolver.sol:L167 @ basenames@1809bbc)
+and reverting `OffchainLookup` for anything below it
+(upstream: .refs/basenames/src/L1/L1Resolver.sol:L173 @ basenames@1809bbc).
+Do not confuse this with two unrelated uses of the same word: network transport
+failures (a provider's DNS, TLS, or connection error, which abort a request
+before persistence), and the `transport_derived` permission scope, which is
+[reserved surface](#reserved-surface) from an abandoned cross-chain ENSv2
+design and has no producer. There is no `transport` discovery edge kind.
 
 **Verified execution / execution trace** — verified execution runs actual
 resolution calls. An execution trace is the unserved legacy subsystem's

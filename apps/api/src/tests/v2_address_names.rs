@@ -603,15 +603,6 @@ async fn v2_get_address_names_include_role_summary_groups_permissions_by_address
                             }
                         },
                         "powers": ["set_resolver", "set_records"]
-                    },
-                    {
-                        "grant_scope": {
-                            "kind": "transport_derived",
-                            "detail": {
-                                "transport": "l1_to_l2"
-                            }
-                        },
-                        "powers": ["set_resolver", "create_subnames"]
                     }
                 ]
             }
@@ -948,15 +939,6 @@ async fn seed_v2_address_name_permissions(
                 },
                 11,
                 111,
-            ),
-            permission_current_row(
-                alpha_resource_id,
-                V2_PERMISSION_OTHER_SUBJECT,
-                PermissionScope::TransportDerived {
-                    transport: "l1_to_l2".to_owned(),
-                },
-                12,
-                112,
             ),
         ],
     )
