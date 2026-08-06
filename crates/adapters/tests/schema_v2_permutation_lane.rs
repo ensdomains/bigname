@@ -25,6 +25,8 @@ mod permutation;
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
+use serde_json::Value;
+
 use permutation::{
     convergence::BatchBoundaryArtifacts,
     directed::Directed,
@@ -54,6 +56,7 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
     }
     let mut failures = Vec::new();
     let mut artifacts = BatchBoundaryArtifacts::default();
+    let mut subregistry_detaches = 0;
     let mut emitted_topic0s = BTreeSet::new();
     let mut event_kinds = BTreeSet::new();
     let mut derived = Vec::new();
@@ -80,6 +83,7 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
                 Ok(outcome) => {
                     events += outcome.events;
                     event_kinds.extend(outcome.event_kinds);
+                    subregistry_detaches += outcome.subregistry_detaches;
                     artifacts.absorb(outcome.artifacts);
                 }
                 Err(error) => failures.push(format!("{error:?}")),
@@ -91,7 +95,9 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
         );
         derived.push((world.label, events, logs));
     }
-    eprintln!("permutation_lane batch_boundary_artifacts: {artifacts}");
+    eprintln!(
+        "permutation_lane batch_boundary_artifacts: {artifacts} subregistry_detaches={subregistry_detaches}"
+    );
     eprintln!(
         "permutation_lane derived_event_kinds={:?}",
         event_kinds.iter().collect::<Vec<_>>()
@@ -116,7 +122,13 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
     if cases < DEFAULT_CASES || base != DEFAULT_SEED {
         return Ok(());
     }
-    assert_interpretation_coverage(&event_kinds, emitted_topic0s.len())
+    assert_interpretation_coverage(&event_kinds, emitted_topic0s.len())?;
+    // Coverage only grows with a deeper sweep, but the pinned counts below are exact, so a sweep
+    // that draws more sequences than the default reports them rather than gating on them.
+    if cases != DEFAULT_CASES {
+        return Ok(());
+    }
+    assert_pinned_artifacts(&artifacts, subregistry_detaches)
 }
 
 #[test]
@@ -267,6 +279,7 @@ fn generated_scenarios_are_reproducible_from_their_seed() -> Result<()> {
 struct Outcome {
     events: usize,
     event_kinds: BTreeSet<String>,
+    subregistry_detaches: usize,
     artifacts: BatchBoundaryArtifacts,
 }
 
@@ -295,6 +308,15 @@ fn check(
                 .map(|event| event.event_kind.clone()),
         );
     }
+    // Counted on the whole-sequence pass, where `before_state` is never a casualty of where a batch
+    // boundary fell, so what the sequence reaches does not depend on how it was split.
+    let subregistry_detaches = converged
+        .whole
+        .output
+        .normalized_events
+        .iter()
+        .filter(|event| is_subregistry_detach(event))
+        .count();
     // The whole-sequence pass is the shape a backfill runs, and it may attribute rows the split
     // replay leaves unattributed, so it needs its own foreign-key and canonicality check.
     IdentityReferences::new(world.chain_id, declared).absorb(
@@ -305,29 +327,68 @@ fn check(
     Ok(Outcome {
         events,
         event_kinds,
+        subregistry_detaches,
         artifacts: converged.artifacts,
     })
 }
 
+/// A subregistry that was attached and is now gone. The corpus reaches this through the terminal
+/// boundary an ENSv2 registry emits when a linked token is unregistered or regenerated, which is a
+/// different interpretation path from the attachment `SubregistryUpdated` takes.
+fn is_subregistry_detach(event: &bigname_adapters::schema_v2::NormalizedEvent) -> bool {
+    event.event_kind == "SubregistryChanged"
+        && event.after_state.get("subregistry") == Some(&Value::Null)
+        && event
+            .before_state
+            .get("subregistry")
+            .is_some_and(|prior| !prior.is_null())
+}
+
 /// Emitting a log proves nothing on its own — an unadmitted emitter or an undeclared event is
-/// dropped silently. These kinds are the interpretation the corpus is meant to reach; they are
-/// chosen to avoid fuse-derived state so the assertion survives adapter fuse changes.
+/// dropped silently. This is every kind the default corpus derives, so an interpretation path that
+/// goes dark fails the lane instead of quietly dropping out of the run. Deriving a *new* kind is
+/// not a regression and does not fail; add it here so the floor keeps tracking the corpus.
 const REQUIRED_EVENT_KINDS: &[&str] = &[
     "AuthorityEpochChanged",
     "AuthorityTransferred",
     "ExpiryChanged",
+    "ParentChanged",
     "PermissionChanged",
+    "PermissionScopeChanged",
     "PreimageObserved",
+    "RecordChanged",
+    "RegistrarNameRegistered",
     "RegistrationGranted",
     "RegistrationReleased",
     "RegistrationRenewed",
-    "RecordChanged",
+    "RegistryCreated",
     "ResolverChanged",
+    "ReverseChanged",
     "SubregistryChanged",
     "SurfaceBound",
     "SurfaceUnbound",
     "TokenControlTransferred",
+    "TokenRegenerated",
+    "TokenResourceLinked",
+    "Upgraded",
 ];
+
+/// The batch-boundary differences the default corpus reproduces exactly, keyed as
+/// `BatchBoundaryArtifacts::counts` reports them. The artifact classes themselves are shapes, so
+/// without an equality gate a regression that blanked `before_state` on every split-replay event,
+/// or dropped attribution wholesale, would stay inside an allowed shape and pass. Each count is an
+/// interpreter divergence tracked by issue #336: fixing those makes the counts fall, and emptying
+/// this table is that fix's acceptance test.
+const EXPECTED_ARTIFACTS: &[(&str, usize)] = &[
+    ("carried_before_states:only-the-whole-pass", 3),
+    ("rebased_anchors:resources", 8),
+    ("rebased_attributions", 4),
+];
+
+/// Terminal-boundary subregistry detaches the default corpus reaches. `SubregistryChanged` on its
+/// own is satisfiable by attachment alone, so without this the detach path could go dark while the
+/// coverage floor above stayed green.
+const EXPECTED_SUBREGISTRY_DETACHES: usize = 13;
 
 fn assert_interpretation_coverage(
     derived: &BTreeSet<String>,
@@ -341,6 +402,28 @@ fn assert_interpretation_coverage(
         bail!(
             "the corpus emitted {emitted_topic0s} distinct event signatures but the interpreter \
              never derived {missing:?}, so those paths are uncovered"
+        );
+    }
+    Ok(())
+}
+
+fn assert_pinned_artifacts(artifacts: &BatchBoundaryArtifacts, detaches: usize) -> Result<()> {
+    let expected = EXPECTED_ARTIFACTS
+        .iter()
+        .map(|(key, count)| ((*key).to_owned(), *count))
+        .collect::<BTreeMap<_, _>>();
+    let observed = artifacts.counts();
+    if observed != expected {
+        bail!(
+            "the default corpus produced batch-boundary artifacts {observed:?}, not the pinned \
+             {expected:?}; a count that fell is a divergence fixed (retire it here), one that rose \
+             or is newly named is a regression"
+        );
+    }
+    if detaches != EXPECTED_SUBREGISTRY_DETACHES {
+        bail!(
+            "the default corpus reached {detaches} terminal-boundary subregistry detaches, not the \
+             pinned {EXPECTED_SUBREGISTRY_DETACHES}"
         );
     }
     Ok(())
