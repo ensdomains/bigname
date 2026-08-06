@@ -903,20 +903,6 @@
             "0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c"
           ],
           "data": "0x000000000000000000000000000000000000000000000000000000000001007f"
-        },
-        {
-          "chain": "ethereum-mainnet",
-          "block_hash": "0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
-          "block_number": 140,
-          "transaction_hash": "0xb4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4",
-          "transaction_index": 0,
-          "log_index": 4,
-          "emitting_address": "0x00000000000000000000000000000000000026aa",
-          "topics": [
-            "0xee2ba1195c65bcf218a83d874335c6bf9d9067b4c672f3c3bf16cf40de7586c4",
-            "0x3c98d1a1ba0bf053d695dc718d447ff5afcbfaacfc9b35d81f7491d1a140793c"
-          ],
-          "data": "0x0000000000000000000000000000000000000000000000000000000000002611"
         }
       ]
     },

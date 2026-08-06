@@ -44,8 +44,7 @@ The seven A3 additions exercise:
   restores canonical state
   (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L116 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L133 @ ens_v1@91c966f);
-- a non-`.eth` ENSv1 `NameWrapped` → `FusesSet` → `NameUnwrapped`
-  lifecycle, with
+- a non-`.eth` ENSv1 `NameWrapped` → `FusesSet` lifecycle, with
   committed `wrapped`, `emancipated`, `locked`, and owner-controlled-fuse
   outputs. The fixture covers a zero bitmap, `PARENT_CANNOT_CONTROL`,
   `CANNOT_UNWRAP`, and `CANNOT_SET_RESOLVER`; it intentionally adds no
