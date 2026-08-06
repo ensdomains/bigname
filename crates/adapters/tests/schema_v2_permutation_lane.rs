@@ -41,7 +41,7 @@ use permutation::{
     scenario,
     world::{
         ENS_V1_MAINNET, ENS_V2_SEPOLIA, Wiring, World, assert_pins_are_current,
-        checked_in_manifests, declared_event_topics,
+        assert_worlds_cover_deployments, checked_in_manifests, declared_event_topics,
     },
 };
 
@@ -259,13 +259,18 @@ fn the_dimension_space_emits_every_declared_event() -> Result<()> {
 fn worlds_pin_the_manifest_version_their_families_have_rolled_out() -> Result<()> {
     let checked_in = checked_in_manifests()?;
     // Reported together: a stale pin in one world should not hide one in the other.
-    let stale = WORLDS
+    let mut drift = WORLDS
         .iter()
         .filter_map(|world| assert_pins_are_current(world, &checked_in).err())
         .map(|error| format!("{error:?}"))
         .collect::<Vec<_>>();
-    if !stale.is_empty() {
-        bail!("{}", stale.join("\n\n"));
+    drift.extend(
+        assert_worlds_cover_deployments(&WORLDS, &checked_in)
+            .err()
+            .map(|error| format!("{error:?}")),
+    );
+    if !drift.is_empty() {
+        bail!("{}", drift.join("\n\n"));
     }
     Ok(())
 }
@@ -363,7 +368,10 @@ fn check(
 /// terminal boundary the interpreter derives on `LabelUnregistered`; the interpreter derives the
 /// same boundary for a registration that replaces a live token, which these pools never produce
 /// because each label is registered once. A `SubregistryUpdated` naming the zero address would also
-/// clear a subregistry and would count here; the pools never emit one.
+/// clear a subregistry and would count here; the pools never emit one. The match is on payload
+/// shape, so it is ENSv2-only in practice: ENSv1 derives the same event kind from `NewOwner` but
+/// carries an owner rather than a subregistry, and would start counting if that payload ever gained
+/// one.
 fn is_subregistry_detach(event: &bigname_adapters::schema_v2::NormalizedEvent) -> bool {
     event.event_kind == "SubregistryChanged"
         && event.after_state.get("subregistry") == Some(&Value::Null)
@@ -460,7 +468,8 @@ fn assert_pinned_artifacts(artifacts: &BatchBoundaryArtifacts, detaches: usize) 
         bail!(
             "the default corpus reached {detaches} terminal-boundary subregistry detaches, not the \
              pinned {EXPECTED_SUBREGISTRY_DETACHES}. {DRAWN_CORPUS_CAVEAT} Otherwise a fall means \
-             the sequences stopped reaching the path"
+             the sequences stopped reaching the path, and a rise means something now clears a \
+             subregistry that did not — check what `is_subregistry_detach` is matching"
         );
     }
     Ok(())

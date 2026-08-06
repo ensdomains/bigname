@@ -5,7 +5,7 @@
 //! is what makes that fail the lane instead of silently generating from the retired ABI.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
@@ -340,8 +340,10 @@ fn admitted<'a>(
 }
 
 /// Fails the lane when a world no longer generates from what its namespace and chain have rolled
-/// out — either because a pin names a version other than the active one, or because a family became
-/// active that no scenario pool generates at all. Retired versions stay checked in, so the pin needs
+/// out — either because a pin names a version other than the active one, or because an event-bearing
+/// family became active *in this world's own deployment epoch* that no scenario pool generates. A
+/// whole epoch appearing with no world at all is the companion check,
+/// `assert_worlds_cover_deployments`. Retired versions stay checked in, so the pin needs
 /// something to be checked against; the anchor is `rollout_status = "active"` rather than the
 /// highest version number, because a family may also carry a `draft` or `shadow` version that
 /// production does not run. `docs/manifests.md` allows at most one active version per namespace,
@@ -390,9 +392,9 @@ pub fn assert_pins_are_current(world: &World, checked_in: &[LoadedManifest]) -> 
             }
         }
     }
-    // Only an event-bearing family in this world's own deployment epoch is a gap. A manifest that
-    // declares no events — an execution-owner entry, say — is not something logs can reach, and a
-    // family rolled out under another epoch belongs to a world that models that deployment.
+    // Only an event-bearing family in this world's own deployment epoch is a gap here. A manifest
+    // that declares no events — an execution-owner entry, say — is not something logs can reach, and
+    // a family rolled out under another epoch is `assert_worlds_cover_deployments`' business.
     for (family, versions) in &active {
         if versions.iter().any(|loaded| {
             loaded.manifest.deployment_epoch == world.deployment_epoch
@@ -400,7 +402,7 @@ pub fn assert_pins_are_current(world: &World, checked_in: &[LoadedManifest]) -> 
         }) {
             drift.push(format!(
                 "{family} is active and declares events, but no scenario pool generates it; give it \
-                 a source slot, or exclude it here deliberately"
+                 a source slot, or narrow this check deliberately"
             ));
         }
     }
@@ -409,6 +411,54 @@ pub fn assert_pins_are_current(world: &World, checked_in: &[LoadedManifest]) -> 
             "{} does not generate from the manifests its families have rolled out:\n  {}",
             world.label,
             drift.join("\n  ")
+        );
+    }
+    Ok(())
+}
+
+/// Namespaces the lane has no world for and does not claim to cover. Listing them here rather than
+/// filtering silently keeps the check below able to report a namespace that appears later.
+const UNMODELLED_NAMESPACES: &[&str] = &["basenames"];
+
+/// The per-world check only looks inside epochs a world already declares, so a deployment that
+/// arrives as a *new* epoch — ENSv2 reaching mainnet, say — would be pinned by nobody and generate
+/// nothing while every other assertion here stayed green. This is the check that notices.
+pub fn assert_worlds_cover_deployments(
+    worlds: &[&World],
+    checked_in: &[LoadedManifest],
+) -> Result<()> {
+    let modelled = worlds
+        .iter()
+        .map(|world| {
+            format!(
+                "{}/{}/{}",
+                world.namespace, world.chain_id, world.deployment_epoch
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let mut unmodelled = BTreeSet::new();
+    for loaded in checked_in {
+        let source = &loaded.manifest;
+        if source.rollout_status != RolloutStatus::Active
+            || source.abi.events.is_empty()
+            || UNMODELLED_NAMESPACES.contains(&source.namespace.as_str())
+        {
+            continue;
+        }
+        let deployment = format!(
+            "{}/{}/{}",
+            source.namespace, source.chain, source.deployment_epoch
+        );
+        if !modelled.contains(&deployment) {
+            unmodelled.insert(deployment);
+        }
+    }
+    if !unmodelled.is_empty() {
+        bail!(
+            "these deployments have active event-bearing manifests but no scenario world, so no \
+             sequence is ever generated against them; add a world or name the namespace in \
+             UNMODELLED_NAMESPACES:\n  {}",
+            unmodelled.into_iter().collect::<Vec<_>>().join("\n  ")
         );
     }
     Ok(())
