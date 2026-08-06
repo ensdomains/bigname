@@ -240,6 +240,7 @@ async fn stage_referenced_stable_identities(
                  AND lineage.block_hash = event.block_hash
                  AND lineage.block_number = event.block_number
                 WHERE identity.chain_id = $1
+                  AND identity.block_number BETWEEN $2 AND $3
                   AND event.block_number BETWEEN $2 AND $3
                   AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
                   AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')

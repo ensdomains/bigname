@@ -360,8 +360,11 @@ Normalized events are schema-v2 interpreter transitions. Interpretation loads
 canonical raw facts in chain order and carries the compact prior state needed
 across physical batches. A redo is an explicit bounded operation: it prepares
 the selected derived range, replays it through the same interpreter, and heals
-identities the replay did not reproduce — an identity the replay re-observes
-keeps its anchor at its first derivation block, and only an identity still
+identities the replay did not reproduce. Preparation restages only identities
+whose stored anchor lies inside the redone range, so a redo that starts after
+an identity's derivation block cannot move that anchor forward; an identity
+the replay re-observes keeps its anchor at its first derivation block, and
+only an identity still
 orphaned after the replay is re-anchored to the earliest surviving reference
 outside the redone range. The
 deleted old-schema storage layer no longer provides general field repair,
@@ -388,7 +391,8 @@ boundaries fall. Three rules keep the written rows batch-independent:
   rule) resets the before to `{}`, so the registration's stream starts from
   an empty snapshot. A surviving explicit before may quote in-memory state a
   later-dropped same-transaction event wrote; that snapshot is computed
-  identically in every run shape. The block-scoped predecessor-epoch
+  identically in every run shape. The block-scoped
+  predecessor-epoch
   permission closures keep their computed snapshot.
 - Identity attribution is fixed at emission, with one exception:
   same-transaction reconciliation may attribute registry, resolver, and

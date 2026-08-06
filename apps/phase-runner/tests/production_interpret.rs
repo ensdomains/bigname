@@ -3298,6 +3298,56 @@ async fn identity_anchors(
 }
 
 #[tokio::test]
+async fn suffix_redo_keeps_identities_anchored_before_its_range_at_their_first_derivation_block()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_suffix_redo_anchor").await?;
+    let chain = "interpret-suffix-redo-anchor";
+    seed_prior_owner_registration_fixture(
+        scratch.pool(),
+        chain,
+        PriorOwnerRegistrationFlow::LegacyTwoOwnerChanges,
+        REGISTRANT,
+    )
+    .await?;
+    run_engine(scratch.pool(), chain, 0, 2, InterpretRunMode::Normal).await?;
+    run_engine(scratch.pool(), chain, 3, 3, InterpretRunMode::Normal).await?;
+
+    let retained_resource: Uuid = sqlx::query_scalar(
+        "SELECT resource_id FROM normalized_events
+         WHERE chain_id = $1
+           AND source_family = 'ens_v1_registry_l1'
+           AND event_kind = 'PermissionChanged'
+           AND after_state ->> 'subject' = $2
+           AND block_number = 1",
+    )
+    .bind(chain)
+    .bind(PRIOR_REGISTRY_OWNER)
+    .fetch_one(scratch.pool())
+    .await?;
+    let before = identity_anchors(scratch.pool(), chain).await?;
+    let retained_anchor: (i64, String) = sqlx::query_as(
+        "SELECT block_number, block_hash FROM resources WHERE chain_id = $1 AND resource_id = $2",
+    )
+    .bind(chain)
+    .bind(retained_resource)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        retained_anchor.0, 1,
+        "the superseded registry resource stays anchored at its first derivation block"
+    );
+
+    run_engine(scratch.pool(), chain, 2, 3, InterpretRunMode::Redo).await?;
+
+    let after = identity_anchors(scratch.pool(), chain).await?;
+    assert_eq!(
+        before, after,
+        "a redo starting after an identity's first derivation block must not move that anchor"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn discovery_redo_reopens_an_edge_when_the_replacement_range_omits_its_close() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_discovery_reopen").await?;
     let chain = "interpret-discovery-reopen";

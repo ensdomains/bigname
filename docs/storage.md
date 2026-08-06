@@ -306,7 +306,11 @@ while retaining those event rows physically. Their row-local canonicality may
 lag during this window. Redo preparation then deletes normalized events in the
 selected range, orphans derived identities anchored there, replays the range
 through the schema-v2 interpreter, and heals identities the replay did not
-reproduce. An identity the replay re-observes is restored by the ordinary
+reproduce. Preparation restages only identities whose stored anchor lies
+inside the range: an identity anchored before the range keeps that anchor even
+when an in-range event references it, so a redo starting after an identity's
+derivation block cannot move the anchor forward. An identity the replay
+re-observes is restored by the ordinary
 identity upsert and keeps its anchor at its first derivation block; only an
 identity still `orphaned` after the replay is re-anchored to the earliest
 surviving reference outside the redone range. An interrupted multi-batch redo
