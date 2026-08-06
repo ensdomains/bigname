@@ -232,6 +232,72 @@ async fn planner_rejects_inverted_declared_bounds_with_manifest_name() -> AnyRes
 }
 
 #[tokio::test]
+async fn planner_omits_inverted_row_when_instance_has_valid_range() -> AnyResult<()> {
+    let database = range_database("ingest_inverted_manifest_range_with_sibling").await?;
+    let chain_id = "inverted-range-sibling-chain";
+    let file_path = "tests/inverted-range-sibling.toml";
+    let address = "0x00000000000000000000000000000000000000aa";
+    let contract_id = insert_contract_instance(database.pool(), chain_id).await?;
+    let manifest_id = insert_manifest(
+        database.pool(),
+        chain_id,
+        file_path,
+        json!([{
+            "role": "registry",
+            "address": address,
+            "proxy_kind": "none",
+            "implementation": null,
+            "start_block": 20
+        }]),
+    )
+    .await?;
+    sqlx::query(
+        "
+        INSERT INTO manifest_contract_instances (
+            manifest_id, chain_id, declaration_kind, declaration_name,
+            contract_instance_id, declared_address, role, proxy_kind,
+            start_block_number
+        )
+        VALUES ($1, $2, 'contract', 'registry', $3, $4,
+                'registry', 'none', 20)
+        ",
+    )
+    .bind(manifest_id)
+    .bind(chain_id)
+    .bind(contract_id)
+    .bind(address)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "
+        INSERT INTO contract_instance_addresses (
+            contract_instance_id, chain_id, address,
+            active_from_block_number, active_to_block_number,
+            source_manifest_id, deactivated_at, provenance
+        )
+        VALUES
+            ($1, $2, $3, 0, 10, $4, now(), '{}'::jsonb),
+            ($1, $2, $3, 11, NULL, $4, NULL, '{}'::jsonb)
+        ",
+    )
+    .bind(contract_id)
+    .bind(chain_id)
+    .bind(address)
+    .bind(manifest_id)
+    .execute(database.pool())
+    .await?;
+
+    let queries = load_watch_filter(database.pool(), chain_id, 0, 30)
+        .await?
+        .queries();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].from_block, 20);
+    assert_eq!(queries[0].to_block, 30);
+    assert_eq!(queries[0].addresses, [address]);
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn planner_rejects_non_overlapping_discovery_and_address_windows() -> AnyResult<()> {
     let database = range_database("ingest_disjoint_discovery_range").await?;
     let chain_id = "disjoint-range-chain";

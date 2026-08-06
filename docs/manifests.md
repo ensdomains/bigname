@@ -66,9 +66,11 @@ closes that baseline and makes the observed edge current. An observation naming
 the same implementation records event-derived evidence alongside the baseline.
 Later manifest synchronization preserves either current observed edge instead
 of resetting it to the declaration. The declared implementation remains
-deployment metadata used to seed the baseline; schema-v2 does not directly
-compare it with the current `Upgraded` edge or emit a drift candidate. This
-baseline materialization and handling of upgrade observations are the schema-v2
+deployment metadata used to seed the baseline. The live manifest-drift audit
+can emit a `proxy_implementation_drift` observation when the declaration and
+persisted manifest-declared proxy edge diverge; that comparison joins the
+`manifest_declared_proxy` edge, not the current `Upgraded` edge. Baseline
+materialization and handling of upgrade observations are the schema-v2
 consumers that keep `proxy_kind` in the manifest schema.
 
 `resolver_implementations` is a list of `{ role, address }` entries with unique

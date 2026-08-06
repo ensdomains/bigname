@@ -101,17 +101,27 @@ provider or range.
 The ingest [watch plan](glossary.md#watch-plan--watched-tuple) gives each
 contract address an inclusive block window. When a manifest version or
 discovery update retires an address, that is local indexing bookkeeping, not an
-onchain event. A retired address with a known end block remains in download
-planning for the part of its bounded history that intersects the requested
-range. A retired address without an end block is removed from fetching.
+onchain event. A retired manifest-declared address with a known end block
+remains in download planning for the part of its bounded history that
+intersects the requested range; without an end block, it is removed. For a
+discovered address, a non-orphaned discovery edge with a known end block can
+supply that bound: a retired address row without its own end remains in
+download planning for the overlap with the edge's bounded history. It is
+removed only when neither the address row nor the discovery edge supplies an
+end block. These retirement rules apply when an explicit historical download
+range overlaps the closed interval. Later live intake does not fetch that
+interval after its end block.
 
 The planner validates stored windows before clipping them to the requested
 range. Orphaned discovery edges do not participate in fetching or validation.
-A manifest declaration whose effective start is after its address end, or a
+A manifest declaration is a configuration error only when none of the stored
+address ranges considered by planning has an effective start at or before its
+end. When one contract instance has multiple non-overlapping address ranges,
+one valid range is enough for the declaration to pass validation; any range
+whose effective start remains after its end is omitted from fetching. A
 non-orphaned discovery edge whose window does not overlap the discovered
-address window, is a configuration error. Planning stops and names the
-governing manifest and inconsistent bounds instead of silently dropping or
-trimming the address.
+address window is also a configuration error. Planning stops and names the
+governing manifest and inconsistent bounds for either error.
 
 ## Reorgs and required downstream redo
 

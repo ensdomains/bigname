@@ -401,6 +401,9 @@ pub async fn load_watch_filter(
     let address_ranges = address_rows
         .into_iter()
         .filter_map(|(address, from_block, to_block, manifest_id)| {
+            if from_block > to_block {
+                return None;
+            }
             let mut topic0s = topics_by_manifest
                 .get(&manifest_id)
                 .cloned()
