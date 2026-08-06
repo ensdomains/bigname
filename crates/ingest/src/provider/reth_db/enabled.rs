@@ -165,9 +165,11 @@ impl RethDbReader {
 
     /// Reads the lowest block this datadir can still serve logs for.
     ///
-    /// A pruned node answers reads below that block with no rows and no error, so an
-    /// intake that only reads the database would record the range as covered. reth's
-    /// own `eth_getLogs` refuses such a range instead
+    /// A pruned node answers reads below that block with no rows and no error
+    /// (upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L1996 @ reth@88505c7f)
+    /// (upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L1998 @ reth@88505c7f),
+    /// so an intake that only reads the database would record the range as covered.
+    /// reth's own `eth_getLogs` refuses such a range instead
     /// (upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L584 @ reth@88505c7f)
     /// (upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L586 @ reth@88505c7f).
     fn earliest_available_block(&self) -> Result<i64> {

@@ -94,22 +94,25 @@ mod tests {
     use super::*;
     use crate::{ErrorKind, provider::ChainProvider};
 
-    const DATADIR: &str = "/var/lib/reth/pruned-datadir-fixture";
+    // Each test owns its endpoint: the injected floor is keyed by endpoint, and CI runs
+    // these as threads in one process.
+    const PRUNED_DATADIR: &str = "/var/lib/reth/pruned-datadir-fixture";
+    const UNREADABLE_DATADIR: &str = "/var/lib/reth/absent-datadir-fixture";
     const V1_REGISTRY_START: i64 = 3_327_417;
     const MERGE_RECEIPT_SEGMENT_START: i64 = 15_500_000;
 
     #[tokio::test]
     async fn a_range_below_the_node_floor_fails_the_phase_instead_of_completing() -> AnyResult<()> {
         let database = TestDatabase::create(TestDatabaseConfig::new("ingest_source_floor")).await?;
-        let _floor = test_floors::install(DATADIR, MERGE_RECEIPT_SEGMENT_START);
+        let _floor = test_floors::install(PRUNED_DATADIR, MERGE_RECEIPT_SEGMENT_START);
         let engine = Engine::new(database.pool().clone());
 
         let historical = engine
-            .run_batch(request(None))
+            .run_batch(request(PRUNED_DATADIR, None))
             .await
             .expect_err("planning a pruned range must fail rather than complete");
         let redo = engine
-            .run_batch(request(Some((3_000_000, 4_000_000))))
+            .run_batch(request(PRUNED_DATADIR, Some((3_000_000, 4_000_000))))
             .await
             .expect_err("redoing a pruned range must fail rather than complete");
 
@@ -177,7 +180,7 @@ mod tests {
         let engine = Engine::new(database.pool().clone());
 
         let error = engine
-            .enforce_source_floors(&request(None))
+            .enforce_source_floors(&request(UNREADABLE_DATADIR, None))
             .await
             .expect_err("an unreadable datadir must fail the floor read");
 
@@ -192,7 +195,7 @@ mod tests {
 
     #[test]
     fn a_redo_range_that_ends_below_the_source_window_plans_nothing() {
-        let source = source();
+        let source = source(PRUNED_DATADIR);
 
         assert_eq!(
             planned_range(&source, Some((0, V1_REGISTRY_START - 1))),
@@ -208,22 +211,22 @@ mod tests {
         );
     }
 
-    fn request(redo_range: Option<(i64, i64)>) -> BatchRequest {
+    fn request(endpoint: &str, redo_range: Option<(i64, i64)>) -> BatchRequest {
         BatchRequest {
             chain_id: "ethereum-mainnet".to_owned(),
-            sources: vec![source()],
+            sources: vec![source(endpoint)],
             cursors: Vec::new(),
             redo_range,
             resume_current: None,
         }
     }
 
-    fn source() -> SourceDescriptor {
+    fn source(endpoint: &str) -> SourceDescriptor {
         SourceDescriptor {
             key: "ethereum-reth".to_owned(),
             kind: "reth-db".to_owned(),
             start_block: V1_REGISTRY_START,
-            endpoint: DATADIR.to_owned(),
+            endpoint: endpoint.to_owned(),
         }
     }
 }

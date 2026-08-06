@@ -126,25 +126,46 @@ governing manifest and inconsistent bounds for either error.
 
 Planning also refuses a range the source cannot serve. Before any window is
 fetched, a local reth source reports its earliest available block — reth's
-expired-history floor, raised to the lowest block its receipt static files
-still cover — and planning fails as a configuration error naming that floor and
-the requested range instead of reading a pruned window as empty coverage.
-reth's own `eth_getLogs` refuses the same request with
-`PrunedHistoryUnavailable` (upstream:
-.refs/reth/crates/rpc/rpc/src/eth/filter.rs:L584 @ reth@88505c7f) (upstream:
-.refs/reth/crates/rpc/rpc/src/eth/filter.rs:L586 @ reth@88505c7f); reading the
-database directly has no such guard, and pruning receipts deletes whole
-static-file ranges while leaving their headers readable (upstream:
-.refs/reth/crates/prune/prune/src/segments/mod.rs:L41 @ reth@88505c7f).
+expired-history floor, raised to the lowest block its receipt static files still
+cover — and planning fails as a configuration error naming that floor and the
+requested range instead of reading a pruned window as empty coverage. Pruning
+receipts deletes whole static-file ranges while leaving their headers readable
+(upstream: .refs/reth/crates/prune/prune/src/segments/receipts.rs:L34 @ reth@88505c7f)
+(upstream: .refs/reth/crates/prune/prune/src/segments/mod.rs:L41 @ reth@88505c7f),
+and a deleted range reads back as no rows and no error
+(upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L1996 @ reth@88505c7f)
+(upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L1998 @ reth@88505c7f).
+
+The rule is deliberately stricter than the reference client's own guard. reth
+refuses an `eth_getLogs` range below its expired-history floor with
+`PrunedHistoryUnavailable`
+(upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L584 @ reth@88505c7f)
+(upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L586 @ reth@88505c7f),
+but a node whose receipts were pruned while its transactions were kept passes
+that guard and serves empty logs
+(upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L1141 @ reth@88505c7f)
+(upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L1144 @ reth@88505c7f);
+intake reads receipts directly, so it refuses there too. That widening is
+recorded in `docs/upstream.md` § Known divergences. A node that writes receipts
+to database tables rather than static files reports no receipt floor at all
+(upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L188 @ reth@88505c7f)
+(upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L190 @ reth@88505c7f);
+its row-wise prune checkpoints are not read, so on that configuration only the
+expired-history floor applies and a pruned receipt window can still be recorded
+as covered.
 
 The refusal is judged on the source's declared start block, not on how far its
-cursor has advanced, so a chain that already recorded the pruned window as
-complete keeps failing every batch — historical, redo, and the live follow that
-runs after them — until the node holds the declared range or the declared start
-block moves. A redo range that ends below a source's declared start plans
-nothing for that source and is unaffected. Sources that do not read a node's
-database report no floor: an RPC endpoint owns its own retention behind the
-wire, and the Coinbase SQL warehouse is not a block provider at all.
+cursor has advanced, so a resumed run whose cursor already stands above the
+floor is refused too. It fires wherever a batch is planned: historical ingest
+and redo. It does not re-examine work already recorded — a completed ingest
+phase is not planned again, so a chain that recorded the pruned window before
+this rule existed keeps its stored coverage until a resync or an explicit redo
+re-plans that range — and live follow, which extends the published head rather
+than planning a declared range, does not consult the floor. A redo range that
+ends below a source's declared start plans nothing for that source and is
+unaffected. Sources that do not read a node's database report no floor: an RPC
+endpoint owns its retention behind the wire, and the Coinbase SQL warehouse is
+not a block provider at all.
 
 ## Reorgs and required downstream redo
 

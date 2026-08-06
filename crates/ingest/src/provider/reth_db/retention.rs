@@ -10,13 +10,17 @@ pub(super) struct RetentionReadings {
     /// (upstream: .refs/reth/crates/storage/provider/src/providers/database/mod.rs:L705 @ reth@88505c7f).
     pub(super) earliest_history_block: u64,
     /// Lowest block covered by a receipt static file, when receipts are stored there.
-    /// Pruning receipts deletes whole static-file jars below the configured block
+    /// Pruning static-file receipts deletes whole jars below the configured block
+    /// (upstream: .refs/reth/crates/prune/prune/src/segments/receipts.rs:L34 @ reth@88505c7f)
     /// (upstream: .refs/reth/crates/prune/prune/src/segments/mod.rs:L41 @ reth@88505c7f),
     /// which leaves headers readable while every log below the boundary is gone.
     ///
-    /// A node old enough to keep receipts in database tables rather than static files
-    /// reports nothing here, and its row-wise prune checkpoints are not read: such a
-    /// node is covered only by `earliest_history_block`.
+    /// A node that writes receipts to database tables instead — receipt pruning without
+    /// `storage_v2`, or a receipt log filter with it
+    /// (upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L188 @ reth@88505c7f)
+    /// (upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L190 @ reth@88505c7f)
+    /// — reports nothing here and prunes rows against a checkpoint we do not read, so only
+    /// `earliest_history_block` bounds it.
     pub(super) lowest_receipt_block: Option<u64>,
 }
 
