@@ -35,6 +35,9 @@ pub struct IdentityReferences {
 }
 
 impl IdentityReferences {
+    /// Carries the manifest ids the batch declared: a normalized event or discovery edge stamped
+    /// with an id no manifest in the batch defines converges fine between the two passes and fails
+    /// only later, at the writer's foreign key.
     pub fn new(chain_id: &str, declared_instances: &[Uuid], manifests: &[i64]) -> Self {
         Self {
             chain_id: chain_id.to_owned(),

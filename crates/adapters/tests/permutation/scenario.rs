@@ -16,39 +16,33 @@ pub struct Emission {
     pub data: Vec<u8>,
 }
 
-/// Dependency stages. Within one name (and within the root chain) a later stage names something an
-/// earlier stage had to create, so the repair orders them; across names nothing is ordered, because
-/// names are independent on chain and that interleaving is where the permutation value is.
-///
-/// Only `ANNOUNCE` and the two `BOOTSTRAP` stages are hoisted globally — a registry announcement and
-/// the root's own `.eth` setup genuinely precede every name in the namespace.
+/// Dependency stages. Within one subject — a name, the root, a registry — a later stage names
+/// something an earlier stage had to create, so the repair orders them. Nothing is ordered *between*
+/// subjects: names are independent on chain, and that interleaving is the permutation value.
 pub mod stage {
-    /// A registry announcing itself. Emitted when the registry is created, so it precedes anything
-    /// registered in it, and `Catalog::select` ranks admissions differently once it exists.
+    /// A registry announcing itself, emitted from its constructor (upstream:
+    /// .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@ccaeb58).
     pub const ANNOUNCE: u8 = 0;
-    /// The root's own label registration.
-    pub const BOOTSTRAP: u8 = 1;
-    /// Pointers hung off the root token: its `.eth` subregistry and resolver. `setSubregistry`
-    /// needs the token to exist, so this cannot precede `BOOTSTRAP`.
-    pub const BOOTSTRAP_LINK: u8 = 2;
-    /// The registration itself.
-    pub const REGISTER: u8 = 3;
-    /// Identity the registration creates: token mint or resource, and the immediate child of a name.
-    pub const IDENTITY: u8 = 4;
-    /// Control handoffs over that identity — registrar and registry ownership transfers, and the
-    /// registrar's own `NameRegistered`, which upstream emits after the registry call returns.
-    pub const CONTROL: u8 = 5;
-    /// Pointers hung off the name: resolver assignment, subregistry edges, parent claims, wrapping,
-    /// a grandchild under an existing child.
-    pub const LINK: u8 = 6;
+    /// A label registration — the root's own `.eth`, or a name's.
+    pub const REGISTER: u8 = 1;
+    /// Identity the registration creates: token mint or resource, and a name's immediate child.
+    pub const IDENTITY: u8 = 2;
+    /// Control handoffs over that identity: registrar and registry ownership transfers.
+    pub const CONTROL: u8 = 3;
+    /// Pointers hung off the token: subregistry, resolver, parent claims, wrapping. `setSubregistry`
+    /// needs the token to exist (upstream:
+    /// .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L142-L147 @ ens_v2@ccaeb58).
+    pub const LINK: u8 = 4;
+    /// The registrar's own `NameRegistered`, which upstream emits after the registry call returns —
+    /// so after that call's `LabelRegistered`, `TokenResource`, `SubregistryUpdated` and
+    /// `ResolverUpdated` (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L151-L170
+    /// and .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464-L476 @ ens_v2@ccaeb58).
+    pub const REGISTRAR: u8 = 5;
     /// Writes that need the pointer: records, permissions, expiry and renewal, wrapper mutation.
-    pub const WRITE: u8 = 7;
+    pub const WRITE: u8 = 6;
     /// Perturbations that only mean something once the name is set up: unwrap, late writes, reverse
     /// claims, unregistration and replacement.
-    pub const LATE: u8 = 8;
-
-    /// Stages that precede every name in the namespace rather than one name's own chain.
-    pub const GLOBAL_PREFIX: u8 = BOOTSTRAP_LINK;
+    pub const LATE: u8 = 7;
 }
 
 #[derive(Default)]
@@ -310,43 +304,21 @@ pub fn generate(world: &'static World, wiring: &Wiring, seed: u64) -> Scenario {
     }
 }
 
-/// Two repairs, both stable so the shuffle keeps deciding everything they do not constrain.
-///
-/// The global prefix — a registry announcement and the root's `.eth` setup — moves to the front,
-/// because it precedes every name in the namespace. Everything else is ordered only against the
-/// other actions of its own name, in the positions the shuffle already gave that name, so names
-/// still interleave freely. Sorting the whole scenario by stage instead would make every batch
-/// boundary a dependency-closed prefix and quietly delete the orderings this lane exists to find.
+/// Orders each subject's actions among the positions the shuffle gave that subject, so its
+/// preconditions land first while its interleaving with every other subject stays as permuted.
+/// Sorting the whole scenario by stage instead would make every batch boundary a dependency-closed
+/// prefix and delete the orderings this lane exists to find; hoisting the root or a registry above
+/// every name would assert a precondition the pools do not have, since a registry can be running
+/// names before governance points the root at it.
 fn repair_preconditions(actions: &mut [Action]) {
-    let hoisted = actions
-        .iter()
-        .map(|item| item.stage <= stage::GLOBAL_PREFIX)
-        .collect::<Vec<_>>();
-    if hoisted.iter().any(|hoist| *hoist) {
-        let mut ordered = Vec::with_capacity(actions.len());
-        for keep in [true, false] {
-            for (index, item) in actions.iter_mut().enumerate() {
-                if hoisted[index] == keep {
-                    ordered.push(std::mem::take(item));
-                }
-            }
-        }
-        ordered[..hoisted.iter().filter(|hoist| **hoist).count()].sort_by_key(|item| item.stage);
-        for (slot, item) in actions.iter_mut().zip(ordered) {
-            *slot = item;
-        }
-    }
     let mut chains: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (index, item) in actions.iter().enumerate() {
-        if item.stage > stage::GLOBAL_PREFIX {
-            chains.entry(item.chain.as_str()).or_default().push(index);
-        }
+        chains.entry(item.chain.as_str()).or_default().push(index);
     }
-    let chains = chains
-        .into_iter()
-        .map(|(_, slots)| slots)
-        .collect::<Vec<_>>();
-    for slots in chains.into_iter().filter(|slots| slots.len() > 1) {
+    for slots in chains.into_values().collect::<Vec<_>>() {
+        if slots.len() < 2 {
+            continue;
+        }
         let mut chain = slots
             .iter()
             .map(|slot| std::mem::take(&mut actions[*slot]))
@@ -433,4 +405,55 @@ fn lay_out(
         }
     }
     logs
+}
+
+#[test]
+fn repairing_preconditions_only_reorders_within_a_subject() {
+    let scrambled = [
+        ("alpha:late", stage::LATE),
+        ("bravo:write", stage::WRITE),
+        ("alpha:register", stage::REGISTER),
+        ("root:link", stage::LINK),
+        ("bravo:register", stage::REGISTER),
+        ("alpha:link", stage::LINK),
+        ("root:register", stage::REGISTER),
+    ];
+    let mut actions = scrambled
+        .iter()
+        .map(|(name, stage)| action(*name, *stage, Vec::new()))
+        .collect::<Vec<_>>();
+    let occupied = |actions: &[Action]| {
+        let mut slots: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (index, item) in actions.iter().enumerate() {
+            slots.entry(item.chain.clone()).or_default().push(index);
+        }
+        slots
+    };
+    let before = occupied(&actions);
+    repair_preconditions(&mut actions);
+
+    assert_eq!(
+        before,
+        occupied(&actions),
+        "a subject moved into another subject's positions, so the interleaving the shuffle drew \
+         was not preserved"
+    );
+    let mut names = actions.iter().map(|item| &item.name).collect::<Vec<_>>();
+    names.sort();
+    let mut expected = scrambled.iter().map(|(name, _)| *name).collect::<Vec<_>>();
+    expected.sort_unstable();
+    assert_eq!(
+        names, expected,
+        "the repair dropped or duplicated an action"
+    );
+    for slots in occupied(&actions).into_values() {
+        let stages = slots
+            .iter()
+            .map(|slot| actions[*slot].stage)
+            .collect::<Vec<_>>();
+        assert!(
+            stages.windows(2).all(|pair| pair[0] <= pair[1]),
+            "a precondition still follows what it enables: {stages:?}"
+        );
+    }
 }

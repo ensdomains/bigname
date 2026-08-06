@@ -41,7 +41,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
     let mut actions = vec![
         action(
             "root:eth-label",
-            stage::BOOTSTRAP,
+            stage::REGISTER,
             vec![emission(
                 wires.root,
                 V2Registry::LabelRegistered {
@@ -57,7 +57,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
         ),
         action(
             "root:eth-subregistry",
-            stage::BOOTSTRAP_LINK,
+            stage::LINK,
             vec![emission(
                 wires.root,
                 V2Registry::SubregistryUpdated {
@@ -125,7 +125,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
         if dimensions.registration_path != RegistrationPath::Legacy {
             actions.push(action(
                 format!("{label}:registrar-registered"),
-                stage::CONTROL,
+                stage::REGISTRAR,
                 vec![emission(
                     wires.registrar,
                     V2Registrar::NameRegistered {

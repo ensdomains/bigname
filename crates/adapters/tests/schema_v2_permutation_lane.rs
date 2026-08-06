@@ -49,9 +49,8 @@ use permutation::{
 };
 
 /// 48 permutations per world. Deeper sweeps are clean to at least 600 per world, so this is a
-/// runtime budget rather than the edge of a known failure. It is also below the rate of the rarer
-/// batch-boundary artifacts: at 600 per world the same corpus reaches `carried_before_states` 7
-/// times and `rebased_attributions` once, so a class pinned empty below is rare here, not absent.
+/// runtime budget rather than the edge of a known failure, and below the rate of the rarer
+/// batch-boundary artifacts — see `EXPECTED_ARTIFACTS`.
 const DEFAULT_CASES: u64 = 48;
 const DEFAULT_SEED: u64 = 0x6e0d_5eed;
 /// Distance between case seeds. Deliberately *not* the SplitMix64 increment: because that increment
@@ -544,16 +543,18 @@ const REQUIRED_EVENT_KINDS: &[(&str, &[&str])] = &[
 /// The batch-boundary differences the default corpus reproduces exactly, keyed as
 /// `BatchBoundaryArtifacts::counts` reports them. The artifact classes themselves are shapes, so
 /// without an equality gate a regression that blanked `before_state` on every split-replay event,
-/// or dropped attribution wholesale, would stay inside an allowed shape and pass. Each count is an
-/// interpreter divergence tracked by issue #336: fixing those makes the counts fall, and emptying
-/// this table is that fix's acceptance test.
-/// Pinned per world, because the two are disjoint: every artifact the corpus reproduces is ENSv1,
-/// and ENSv2 reproduces none. A single cross-world total would read the same if ENSv2 started
-/// diverging while ENSv1 stopped.
-/// Whole-pass versus split-replay divergence that is a property of where the batch boundary fell
-/// rather than of the interpreter, counted so a new one cannot appear unnoticed. All of it is
-/// tracked on issue #336; none of it is an artifact of the generator, which was checked by holding
-/// the corpus fixed and varying only the ordering repair.
+/// or dropped attribution wholesale, would stay inside an allowed shape and pass. Each count is a
+/// real whole-pass versus split-replay divergence, tracked by issue #336: fixing those makes the
+/// counts fall, and emptying this table is that fix's acceptance test.
+///
+/// Pinned per world, because at this depth the two are disjoint: the only class the default corpus
+/// reaches is ENSv1's. A single cross-world total would read the same if ENSv2 started diverging
+/// while ENSv1 stopped.
+///
+/// A class missing from a row means the default corpus does not reach it, not that it cannot
+/// happen — `counts` omits zero-count classes. At 600 cases per world the same generator reaches
+/// ENSv1 `carried_before_states` 7 times and ENSv2 `rebased_attributions` 4 times, both absent
+/// here. So a row shrinking is only evidence of a fix once the deeper sweep agrees.
 const EXPECTED_ARTIFACTS: &[(&str, &[(&str, usize)])] = &[
     (ENS_V1_MAINNET.label, &[("rebased_anchors:resources", 63)]),
     (ENS_V2_SEPOLIA.label, &[]),
