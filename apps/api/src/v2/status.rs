@@ -43,7 +43,7 @@ pub(crate) async fn get_status(
     _no_query: NoQueryParams,
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<StatusData>>> {
-    let read = bigname_storage::load_indexing_status(&state.pool)
+    let read = bigname_storage::load_phase_indexing_status(&state.lookup_pool)
         .await
         .map_err(|load_error| {
             error!(
@@ -77,7 +77,10 @@ async fn build_status_data(
                 row.canonical_timestamp,
             )
             .await;
-        chains.insert(chain_key, build_chain_status(row, network_head));
+        chains.insert(
+            chain_key,
+            build_chain_status(row, network_head, state.heartbeat_max_age_secs),
+        );
     }
 
     Ok(StatusData {
@@ -102,6 +105,7 @@ fn status_chain_key(storage_chain_id: &str) -> V2Result<String> {
 fn build_chain_status(
     row: &bigname_storage::IndexingStatusChainRow,
     network_head: NetworkHeadComparison,
+    heartbeat_max_age_seconds: i64,
 ) -> ChainStatus {
     let lag_blocks = row
         .canonical_block
@@ -112,10 +116,12 @@ fn build_chain_status(
         .zip(row.latest_projected_timestamp)
         .map(|(canonical, projected)| (canonical - projected).whole_seconds().max(0));
     let status = chain_status(
+        row,
         row.canonical_block,
         row.latest_projected_block,
         lag_blocks,
         &network_head,
+        heartbeat_max_age_seconds,
     );
 
     ChainStatus {
@@ -136,15 +142,41 @@ fn build_chain_status(
 }
 
 fn chain_status(
+    row: &bigname_storage::IndexingStatusChainRow,
     latest_block: Option<i64>,
     indexed_block: Option<i64>,
     lag_blocks: Option<i64>,
     network_head: &NetworkHeadComparison,
+    heartbeat_max_age_seconds: i64,
 ) -> OpsStatus {
-    match status_readiness(latest_block, indexed_block, lag_blocks, network_head) {
-        StatusReadiness::Ready => OpsStatus::Ready,
-        StatusReadiness::Degraded => OpsStatus::Degraded,
-        StatusReadiness::Stale => OpsStatus::Stale,
+    let data_readiness = status_readiness(latest_block, indexed_block, lag_blocks, network_head);
+    let phase_readiness = phase_readiness(row, heartbeat_max_age_seconds);
+    match (data_readiness, phase_readiness) {
+        (StatusReadiness::Stale, _) | (_, StatusReadiness::Stale) => OpsStatus::Stale,
+        (StatusReadiness::Degraded, _) | (_, StatusReadiness::Degraded) => OpsStatus::Degraded,
+        (StatusReadiness::Ready, StatusReadiness::Ready) => OpsStatus::Ready,
+    }
+}
+
+fn phase_readiness(
+    row: &bigname_storage::IndexingStatusChainRow,
+    heartbeat_max_age_seconds: i64,
+) -> StatusReadiness {
+    if row.project_phase_status.as_deref() == Some("failed") {
+        return StatusReadiness::Stale;
+    }
+    match row.phase_runner_heartbeat_age_seconds {
+        Some(age) if age > heartbeat_max_age_seconds => return StatusReadiness::Stale,
+        None => return StatusReadiness::Degraded,
+        Some(_) => {}
+    }
+    if row.project_redo_in_progress {
+        return StatusReadiness::Degraded;
+    }
+    match row.project_phase_status.as_deref() {
+        Some("completed") => StatusReadiness::Ready,
+        Some("idle" | "running" | "paused") | None => StatusReadiness::Degraded,
+        Some(_) => StatusReadiness::Stale,
     }
 }
 
@@ -312,6 +344,7 @@ mod tests {
                 ingestion_lag_seconds: Some(0),
                 data_is_stale: false,
             },
+            20,
         );
 
         assert_eq!(status.lag_blocks, Some(0));
@@ -413,6 +446,9 @@ mod tests {
             canonical_timestamp: canonical_block.map(timestamp_for_block),
             latest_projected_block,
             latest_projected_timestamp: latest_projected_block.map(timestamp_for_block),
+            project_phase_status: Some("completed".to_owned()),
+            project_redo_in_progress: false,
+            phase_runner_heartbeat_age_seconds: Some(0),
         }
     }
 

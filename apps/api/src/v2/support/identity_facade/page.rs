@@ -73,8 +73,7 @@ pub(super) async fn load_reverse_identity_page_rows(
                 cursor_normalized_name, cursor_namespace, cursor_namehash
             )
         )
-        SELECT requested.input_index, candidate.logical_name_id,
-               candidate.relation_chain_positions
+        SELECT requested.input_index, candidate.logical_name_id
         FROM requested
         JOIN LATERAL (
             SELECT grouped.*
@@ -90,9 +89,7 @@ pub(super) async fn load_reverse_identity_page_rows(
                        END)::SMALLINT AS role_rank,
                        anc.raw_name AS normalized_name,
                        anc.namespace,
-                       anc.namehash,
-                       array_agg(anc.chain_positions ORDER BY anc.relation)
-                           AS relation_chain_positions
+                       anc.namehash
                 FROM address_names_current anc
                 JOIN name_current identity_nc
                   ON identity_nc.logical_name_id = anc.logical_name_id
@@ -157,7 +154,6 @@ pub(super) async fn load_reverse_identity_page_rows(
             Ok(ReverseIdentityPageRow {
                 input_index: row.try_get::<i32, _>("input_index")? as usize,
                 logical_name_id: row.try_get("logical_name_id")?,
-                relation_chain_positions: row.try_get("relation_chain_positions")?,
             })
         })
         .collect()

@@ -24,7 +24,7 @@ it does not preserve the deleted v1 DTOs.
 | Capability | Route owner | Notes |
 | --- | --- | --- |
 | Batched forward and reverse lookup | `POST /v2/lookup` | `profile=feed` is the field-budgeted path; `profile=detail` returns the documented full record shape. |
-| Indexing readiness | `GET /v2/status` | Per-chain stored and network-head readiness. |
+| Indexing readiness | `GET /v2/status` | Per-chain projection progress, stored head, indexing-process liveness, and network-head readiness. |
 | Exact name profile | `GET /v2/names/{name}` | Indexed or verified name and record fields, subject to the route's source rules. |
 | Resolver records | `GET /v2/names/{name}/records` | Key-selected record reads plus inventory metadata. |
 | Direct subnames | `GET /v2/names/{name}/subnames` | Latest-state direct-subname collection. |
@@ -38,6 +38,11 @@ it does not preserve the deleted v1 DTOs.
 | Resolver overview | `GET /v2/resolvers/{chain_id}/{address}` | Resolver metadata and bounded name expansion. |
 | Namespace metadata | `GET /v2/namespaces/{namespace}` | Product-facing namespace and capability metadata. |
 | Pipeline diagnostics | `/v2/diagnostics/*` | Explicit diagnostic tier, separate from product reads. |
+
+The GraphQL compatibility operations read the schema-v2 current projections
+and preserve the committed Manager response contract. They do not fall back to
+the retained public-schema projections. Unsupported name rows are omitted, and
+unsupported record inventories preserve the existing empty record shapes.
 
 All top-level v2 collections use the standard `page` object. Latest-state
 collections do not claim a frozen snapshot; point-in-time behavior is limited

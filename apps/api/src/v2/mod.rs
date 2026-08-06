@@ -9,7 +9,7 @@ mod envelope;
 mod error;
 mod events;
 mod history;
-mod lookup;
+pub(crate) mod lookup;
 mod name_record;
 mod name_records;
 #[cfg(test)]

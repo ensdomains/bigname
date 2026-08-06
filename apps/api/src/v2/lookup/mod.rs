@@ -18,7 +18,7 @@ mod admission;
 mod build;
 mod cursor;
 mod dto;
-pub(super) mod head;
+pub(crate) mod head;
 #[cfg(test)]
 pub(crate) use head::{
     served_head_initial_validation_test_hooks, served_head_revalidation_test_hooks,
@@ -27,6 +27,10 @@ mod page;
 mod parse;
 mod scope;
 
+pub(crate) use admission::{
+    require_flat_target_at_or_before_served_head, require_name_current_at_served_head,
+    require_name_projection_at_served_head,
+};
 use admission::{require_name_records_at_served_head, require_reverse_records_at_served_head};
 use build::{
     build_forward_detail_record, build_forward_feed_record, build_reverse_detail_record,

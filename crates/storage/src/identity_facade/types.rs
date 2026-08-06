@@ -132,7 +132,6 @@ pub struct ReverseIdentityFeedRecordRow {
 pub struct ReverseIdentityRecordRow {
     pub name_record: IdentityNameRecordRow,
     pub relation_facets: Vec<AddressNameRelation>,
-    pub relation_chain_positions: Vec<Value>,
     pub primary_chain_positions: Option<Value>,
     pub primary_name: Option<IdentityPrimaryNameSnapshot>,
     pub requested_coin_type: String,
@@ -166,4 +165,7 @@ pub struct IndexingStatusChainRow {
     pub canonical_timestamp: Option<sqlx::types::time::OffsetDateTime>,
     pub latest_projected_block: Option<i64>,
     pub latest_projected_timestamp: Option<sqlx::types::time::OffsetDateTime>,
+    pub project_phase_status: Option<String>,
+    pub project_redo_in_progress: bool,
+    pub phase_runner_heartbeat_age_seconds: Option<i64>,
 }

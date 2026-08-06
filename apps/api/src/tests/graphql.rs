@@ -5,16 +5,22 @@
 const GRAPHQL_OWNER: &str = "0x000000000000000000000000000000000000000a";
 const GRAPHQL_REGISTRANT: &str = "0x000000000000000000000000000000000000000b";
 const GRAPHQL_RESOLVER: &str = "0x000000000000000000000000000000000000def0";
-const GRAPHQL_ALICE_NAMEHASH: &str = "0xa11ce";
-const GRAPHQL_BOB_NAMEHASH: &str = "0xb0b";
+const GRAPHQL_ALICE_NAMEHASH: &str =
+    "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec";
+const GRAPHQL_BOB_NAMEHASH: &str =
+    "0xbe11069ec59144113f438b6ef59dd30497769fc2dce8e2b52e3ae71ac18e47c9";
 /// TokenHolder for the owner-fallback fixture names (carol, dave) — kept distinct from
 /// `GRAPHQL_OWNER` so the compatibility tests' `owner_in` windows stay two-name stable.
 const GRAPHQL_FALLBACK_HOLDER: &str = "0x000000000000000000000000000000000000000c";
 /// Declared registrant for carol — exercises the `owner → registrant` non-null fallback and the
 /// plural `registrant_in` filter.
 const GRAPHQL_REGISTRANT_C: &str = "0x000000000000000000000000000000000000000d";
-const GRAPHQL_CAROL_NAMEHASH: &str = "0xca401";
-const GRAPHQL_DAVE_NAMEHASH: &str = "0xda4e";
+const GRAPHQL_CAROL_NAMEHASH: &str =
+    "0xe3a6b53d6803112ab111b8dd6a02bc89a802451dec3eaec120740e5ed87bd5cb";
+const GRAPHQL_DAVE_NAMEHASH: &str =
+    "0x2ca4a3098bf61a1886dac6774bfe4dccdd1477d99a6fdbac5b409549f281cbe9";
+const GRAPHQL_ERIN_NAMEHASH: &str =
+    "0x93b576b9c8b56a6b4c3041e60f742e3678cfec194a3d9e4f5c069c8a2d0d194a";
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
 fn graphql_declared_summary(
@@ -157,6 +163,165 @@ async fn seed_graphql_compat_fixture(database: &TestDatabase) -> Result<()> {
         .await?;
 
     seed_graphql_fallback_fixture(database).await?;
+    seed_phase_graphql_compat_fixture(database, "ethereum-mainnet").await?;
+    Ok(())
+}
+
+async fn seed_phase_graphql_compat_fixture(
+    database: &TestDatabase,
+    chain_id: &str,
+) -> Result<()> {
+    let mut transaction = database.lookup_pool.begin().await?;
+    for statement in [
+        r#"
+        INSERT INTO token_lineages (
+            token_lineage_id, chain_id, block_hash, block_number,
+            provenance, canonicality_state
+        )
+        SELECT DISTINCT nc.token_lineage_id, head.chain_id,
+               head.latest_block_hash, head.latest_block_number,
+               '{"seed":"graphql_phase_fixture"}'::jsonb,
+               'finalized'::canonicality_state
+        FROM public.name_current nc
+        CROSS JOIN chain_heads head
+        WHERE head.chain_id = $1 AND nc.namespace = 'ens'
+          AND nc.token_lineage_id IS NOT NULL
+        ON CONFLICT (token_lineage_id) DO NOTHING
+        "#,
+        r#"
+        INSERT INTO resources (
+            resource_id, token_lineage_id, chain_id, block_hash, block_number,
+            provenance, canonicality_state
+        )
+        SELECT DISTINCT nc.resource_id, nc.token_lineage_id, head.chain_id,
+               head.latest_block_hash, head.latest_block_number,
+               '{"seed":"graphql_phase_fixture"}'::jsonb,
+               'finalized'::canonicality_state
+        FROM public.name_current nc
+        CROSS JOIN chain_heads head
+        WHERE head.chain_id = $1 AND nc.namespace = 'ens'
+          AND nc.resource_id IS NOT NULL
+        ON CONFLICT (resource_id) DO NOTHING
+        "#,
+        r#"
+        INSERT INTO name_surfaces (
+            logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+            namehash, labelhashes, normalizer_version, visibility_state,
+            normalization_errors, chain_id, block_hash, block_number,
+            provenance, canonicality_state
+        )
+        SELECT nc.namespace || ':' || nc.namehash, nc.namespace,
+               nc.canonical_display_name, ARRAY[]::text[], ''::bytea,
+               nc.namehash, ARRAY[]::text[], 'ensip15@ens-normalize-0.1.1',
+               'active', '[]'::jsonb, head.chain_id, head.latest_block_hash,
+               head.latest_block_number, '{"seed":"graphql_phase_fixture"}'::jsonb,
+               'finalized'::canonicality_state
+        FROM public.name_current nc
+        CROSS JOIN chain_heads head
+        WHERE head.chain_id = $1 AND nc.namespace = 'ens'
+        ON CONFLICT (logical_name_id) DO NOTHING
+        "#,
+        r#"
+        INSERT INTO surface_bindings (
+            surface_binding_id, logical_name_id, resource_id, binding_kind,
+            active_from, chain_id, block_hash, block_number, provenance,
+            canonicality_state
+        )
+        SELECT nc.surface_binding_id, nc.namespace || ':' || nc.namehash,
+               nc.resource_id, nc.binding_kind, lineage.block_timestamp,
+               head.chain_id, head.latest_block_hash, head.latest_block_number,
+               '{"seed":"graphql_phase_fixture"}'::jsonb,
+               'finalized'::canonicality_state
+        FROM public.name_current nc
+        CROSS JOIN chain_heads head
+        JOIN chain_lineage lineage
+          ON lineage.chain_id = head.chain_id
+         AND lineage.block_hash = head.latest_block_hash
+         AND lineage.block_number = head.latest_block_number
+        WHERE head.chain_id = $1 AND nc.namespace = 'ens'
+          AND nc.surface_binding_id IS NOT NULL
+        ON CONFLICT (surface_binding_id) DO NOTHING
+        "#,
+        r#"
+        INSERT INTO name_current (
+            logical_name_id, namespace, raw_name, namehash, surface_binding_id,
+            resource_id, token_lineage_id, binding_kind, declared_summary,
+            support_status, provenance, chain_positions, canonicality_summary,
+            manifest_version
+        )
+        SELECT nc.namespace || ':' || nc.namehash, nc.namespace,
+               nc.canonical_display_name, nc.namehash, nc.surface_binding_id,
+               nc.resource_id, nc.token_lineage_id, nc.binding_kind,
+               nc.declared_summary, 'supported', nc.provenance,
+               nc.chain_positions, nc.canonicality_summary,
+               GREATEST(nc.manifest_version, 1)
+        FROM public.name_current nc
+        WHERE nc.namespace = 'ens'
+        ON CONFLICT (logical_name_id) DO UPDATE SET
+            declared_summary = EXCLUDED.declared_summary,
+            chain_positions = EXCLUDED.chain_positions
+        "#,
+        r#"
+        INSERT INTO address_names_current (
+            address, logical_name_id, relation, namespace, raw_name, namehash,
+            surface_binding_id, resource_id, token_lineage_id, binding_kind,
+            support_status, provenance, chain_positions, canonicality_summary,
+            manifest_version
+        )
+        SELECT lower(anc.address), anc.namespace || ':' || anc.namehash,
+               anc.relation::text, anc.namespace, anc.canonical_display_name,
+               anc.namehash, anc.surface_binding_id, anc.resource_id,
+               anc.token_lineage_id, anc.binding_kind, 'supported', anc.provenance,
+               jsonb_build_object(
+                   'target_block_number', head.latest_block_number,
+                   'target_block_hash', head.latest_block_hash
+               ), anc.canonicality_summary, GREATEST(anc.manifest_version, 1)
+        FROM public.address_names_current anc
+        CROSS JOIN chain_heads head
+        WHERE head.chain_id = $1 AND anc.namespace = 'ens'
+        ON CONFLICT (address, logical_name_id, relation) DO UPDATE SET
+            chain_positions = EXCLUDED.chain_positions
+        "#,
+    ] {
+        sqlx::query(statement)
+            .bind(chain_id)
+            .execute(&mut *transaction)
+            .await?;
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
+async fn seed_phase_graphql_record_inventories(database: &TestDatabase) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO bigname_phase.record_inventory_current (
+            resource_id, record_version_boundary_key, record_version_boundary,
+            selectors, unsupported_families, entries, support_status,
+            provenance, chain_positions, canonicality_summary, manifest_version
+        )
+        SELECT inventory.resource_id, md5(inventory.record_version_boundary::text),
+               inventory.record_version_boundary, inventory.selectors,
+               inventory.unsupported_families, inventory.entries, 'supported',
+               inventory.provenance,
+               jsonb_build_object(
+                   'target_block_number', head.latest_block_number,
+                   'target_block_hash', head.latest_block_hash
+               ), inventory.canonicality_summary,
+               GREATEST(inventory.manifest_version, 1)
+        FROM public.record_inventory_current inventory
+        JOIN bigname_phase.resources resource
+          ON resource.resource_id = inventory.resource_id
+        JOIN bigname_phase.chain_heads head
+          ON head.chain_id = resource.chain_id
+        ON CONFLICT (resource_id, record_version_boundary_key) DO UPDATE SET
+            selectors = EXCLUDED.selectors,
+            entries = EXCLUDED.entries,
+            chain_positions = EXCLUDED.chain_positions
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
     Ok(())
 }
 
@@ -319,9 +484,11 @@ async fn seed_alice_record_inventory(database: &TestDatabase) -> Result<()> {
         411,
         graphql_declared_summary(GRAPHQL_OWNER, GRAPHQL_RESOLVER, "ens_v2_registry", 1_900_000_000, 1_700_000_000),
     );
-    let (resource_id, record_version_boundary) =
+    let (resource_id, mut record_version_boundary) =
         bigname_storage::resolution_record_inventory_lookup_key_any_chain(&alice_row)
             .expect("alice fixture row must yield a record-inventory lookup key");
+    record_version_boundary["logical_name_id"] =
+        json!(format!("ens:{GRAPHQL_ALICE_NAMEHASH}"));
 
     bigname_storage::upsert_record_inventory_current_rows(
         &database.pool,
@@ -399,6 +566,7 @@ async fn seed_alice_record_inventory(database: &TestDatabase) -> Result<()> {
         }],
     )
     .await?;
+    seed_phase_graphql_record_inventories(database).await?;
     Ok(())
 }
 
@@ -416,9 +584,10 @@ async fn seed_bob_record_inventory(database: &TestDatabase) -> Result<()> {
         412,
         graphql_declared_summary(GRAPHQL_OWNER, GRAPHQL_RESOLVER, "registrar", 1_800_000_000, 1_650_000_000),
     );
-    let (resource_id, record_version_boundary) =
+    let (resource_id, mut record_version_boundary) =
         bigname_storage::resolution_record_inventory_lookup_key_any_chain(&bob_row)
             .expect("bob fixture row must yield a record-inventory lookup key");
+    record_version_boundary["logical_name_id"] = json!(format!("ens:{GRAPHQL_BOB_NAMEHASH}"));
 
     bigname_storage::upsert_record_inventory_current_rows(
         &database.pool,
@@ -472,6 +641,7 @@ async fn seed_bob_record_inventory(database: &TestDatabase) -> Result<()> {
         }],
     )
     .await?;
+    seed_phase_graphql_record_inventories(database).await?;
     Ok(())
 }
 
@@ -598,7 +768,12 @@ async fn seed_erin_sepolia_record_fixture(database: &TestDatabase) -> Result<()>
     .await?;
     upsert_test_name_surfaces(
         &database.pool,
-        &[collection_name_surface("ens:erin.eth", "erin.eth", "0xe417", 415)],
+        &[collection_name_surface(
+            "ens:erin.eth",
+            "erin.eth",
+            GRAPHQL_ERIN_NAMEHASH,
+            415,
+        )],
     )
     .await?;
     upsert_test_surface_bindings(
@@ -611,7 +786,7 @@ async fn seed_erin_sepolia_record_fixture(database: &TestDatabase) -> Result<()>
         "ens:erin.eth",
         "Erin.eth",
         "erin.eth",
-        "0xe417",
+        GRAPHQL_ERIN_NAMEHASH,
         erin_sb,
         erin_res,
         Some(erin_tl),
@@ -627,6 +802,7 @@ async fn seed_erin_sepolia_record_fixture(database: &TestDatabase) -> Result<()>
         }
     });
     database.insert_name_current_row(erin_row.clone()).await?;
+    seed_phase_graphql_compat_fixture(database, "ethereum-sepolia").await?;
 
     let (resource_id, declared_boundary) =
         bigname_storage::resolution_record_inventory_lookup_key_any_chain(&erin_row)
@@ -634,6 +810,7 @@ async fn seed_erin_sepolia_record_fixture(database: &TestDatabase) -> Result<()>
     // The worker keys its row with the anchoring event pointer filled in — same anchor, different
     // exact key. The GraphQL read must land on it via the anchor fallback.
     let mut pointered_boundary = declared_boundary.clone();
+    pointered_boundary["logical_name_id"] = json!(format!("ens:{GRAPHQL_ERIN_NAMEHASH}"));
     pointered_boundary["normalized_event_id"] = json!(12_345);
     pointered_boundary["event_kind"] = json!("RecordChanged");
 
@@ -689,10 +866,24 @@ async fn seed_erin_sepolia_record_fixture(database: &TestDatabase) -> Result<()>
         }],
     )
     .await?;
+    seed_phase_graphql_record_inventories(database).await?;
     Ok(())
 }
 
 async fn post_graphql(state: AppState, query: &str, variables: Value) -> Result<Value> {
+    let payload = post_graphql_allow_errors(state, query, variables).await?;
+    assert!(
+        payload.get("errors").is_none(),
+        "unexpected graphql errors: {payload}"
+    );
+    Ok(payload)
+}
+
+async fn post_graphql_allow_errors(
+    state: AppState,
+    query: &str,
+    variables: Value,
+) -> Result<Value> {
     let body = json!({ "query": query, "variables": variables }).to_string();
     let response = app_router(state)
         .oneshot(
@@ -706,12 +897,7 @@ async fn post_graphql(state: AppState, query: &str, variables: Value) -> Result<
         .await
         .context("graphql request failed")?;
     assert_eq!(response.status(), StatusCode::OK, "graphql HTTP status");
-    let payload: Value = read_json(response).await?;
-    assert!(
-        payload.get("errors").is_none(),
-        "unexpected graphql errors: {payload}"
-    );
-    Ok(payload)
+    read_json(response).await
 }
 
 #[tokio::test]
@@ -772,6 +958,486 @@ fn graphql_sdl_matches_subgraph_compatibility_contract() {
 #[ignore = "bless helper: prints the SDL for updating the golden fixture"]
 fn print_subgraph_sdl_for_blessing() {
     println!("{}", crate::graphql::subgraph_sdl());
+}
+
+#[tokio::test]
+async fn graphql_compatibility_reads_survive_legacy_projection_removal() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    seed_alice_record_inventory(&database).await?;
+    sqlx::query("DELETE FROM public.record_inventory_current")
+        .execute(&database.pool)
+        .await?;
+    sqlx::query("DELETE FROM public.address_names_current")
+        .execute(&database.pool)
+        .await?;
+    sqlx::query("DELETE FROM public.name_current")
+        .execute(&database.pool)
+        .await?;
+
+    let payload = post_graphql(
+        database.app_state(),
+        r#"query PhaseOnly($id: String!, $where: DomainFilter!) {
+            domain(id: $id) {
+                name
+                resolver { contentHash addresses { coinType address } }
+            }
+            domains(where: $where) { name }
+            domainConnection(first: 0, where: $where) { totalCount }
+        }"#,
+        json!({"id": "alice.eth", "where": {"owner": GRAPHQL_OWNER}}),
+    )
+    .await?;
+    assert_eq!(payload["data"]["domain"]["name"], json!("Alice.eth"));
+    assert_eq!(
+        payload["data"]["domain"]["resolver"]["contentHash"],
+        json!("0xe30101701220aabbccdd")
+    );
+    assert_eq!(payload["data"]["domains"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        payload["data"]["domainConnection"]["totalCount"],
+        json!(2)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn graphql_phase_reads_accept_rfc3339_summary_timestamps() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.name_current
+        SET declared_summary = jsonb_set(
+            jsonb_set(
+                declared_summary,
+                '{registration,created_at}',
+                '"2023-11-14T22:13:20+00:00"'::jsonb
+            ),
+            '{registration,expiry}',
+            '"2030-03-17T17:46:40+00:00"'::jsonb
+        )
+        WHERE logical_name_id = 'ens:' || $1
+        "#,
+    )
+    .bind(GRAPHQL_ALICE_NAMEHASH)
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let payload = post_graphql(
+        database.app_state(),
+        r#"query Domain($id: String!) {
+            domain(id: $id) { createdAt expiryDate }
+        }"#,
+        json!({ "id": "alice.eth" }),
+    )
+    .await?;
+    assert_eq!(payload["data"]["domain"]["createdAt"], json!(1_700_000_000));
+    assert_eq!(payload["data"]["domain"]["expiryDate"], json!(1_900_000_000));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn graphql_exact_name_predicate_uses_phase_namehash_index() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    let mut transaction = database.lookup_pool.begin().await?;
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *transaction)
+        .await?;
+    let plan = sqlx::query_scalar::<_, String>(
+        r#"
+        EXPLAIN (COSTS OFF)
+        WITH filtered_names AS (
+            SELECT logical_name_id, namespace, raw_name, namehash
+            FROM name_current
+            WHERE support_status IN ('supported', 'unsupported')
+              AND namespace = $1
+              AND namehash = $2
+        )
+        SELECT * FROM filtered_names LIMIT 1
+        "#,
+    )
+    .bind("ens")
+    .bind(GRAPHQL_ALICE_NAMEHASH)
+    .fetch_all(&mut *transaction)
+    .await?
+    .join("\n");
+    assert!(
+        plan.contains("name_current_lookup_idx"),
+        "exact-name lookup must use the bounded phase namehash index:\n{plan}"
+    );
+    transaction.rollback().await?;
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn graphql_connection_counts_reject_targets_ahead_of_head() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.name_current
+        SET chain_positions = jsonb_set(chain_positions, '{ethereum,block_number}', '415')
+        WHERE logical_name_id = 'ens:' || $1
+        "#,
+    )
+    .bind(GRAPHQL_ALICE_NAMEHASH)
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let name_target = post_graphql_allow_errors(
+        database.app_state(),
+        r#"query Count($where: DomainFilter!) {
+            domainConnection(first: 0, where: $where) { totalCount }
+        }"#,
+        json!({ "where": { "owner": GRAPHQL_OWNER } }),
+    )
+    .await?;
+    assert_eq!(name_target["data"]["domainConnection"], Value::Null);
+    assert!(name_target["errors"].as_array().is_some_and(|errors| !errors.is_empty()));
+
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.name_current
+        SET chain_positions = jsonb_set(chain_positions, '{ethereum,block_number}', '411')
+        WHERE logical_name_id = 'ens:' || $1
+        "#,
+    )
+    .bind(GRAPHQL_ALICE_NAMEHASH)
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.address_names_current
+        SET chain_positions = jsonb_set(chain_positions, '{target_block_number}', '415')
+        WHERE address = $1 AND logical_name_id = 'ens:' || $2
+        "#,
+    )
+    .bind(GRAPHQL_OWNER)
+    .bind(GRAPHQL_ALICE_NAMEHASH)
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let membership_target = post_graphql_allow_errors(
+        database.app_state(),
+        r#"query Count($where: DomainFilter!) {
+            domainConnection(first: 0, where: $where) { totalCount }
+        }"#,
+        json!({ "where": { "owner": GRAPHQL_OWNER } }),
+    )
+    .await?;
+    assert_eq!(membership_target["data"]["domainConnection"], Value::Null);
+    assert!(
+        membership_target["errors"]
+            .as_array()
+            .is_some_and(|errors| !errors.is_empty())
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn graphql_connection_count_snapshot_metadata_is_bounded() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.name_current
+        SET chain_positions = jsonb_set(
+            jsonb_set(chain_positions, '{ethereum,block_number}',
+                to_jsonb(CASE raw_name
+                    WHEN 'Alice.eth' THEN 401
+                    WHEN 'Bob.eth' THEN 402
+                    WHEN 'Carol.eth' THEN 403
+                    ELSE 404
+                END)),
+            '{ethereum,block_hash}',
+            to_jsonb('0x' || lower(split_part(raw_name, '.', 1)))
+        )
+        WHERE namespace = 'ens'
+        "#,
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.address_names_current
+        SET chain_positions = jsonb_build_object(
+            'target_block_number', CASE raw_name
+                WHEN 'Alice.eth' THEN 401
+                WHEN 'Bob.eth' THEN 402
+                WHEN 'Carol.eth' THEN 403
+                ELSE 404
+            END,
+            'target_block_hash', '0x' || lower(split_part(raw_name, '.', 1))
+        )
+        WHERE namespace = 'ens'
+        "#,
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let count = bigname_storage::count_phase_graphql_name_list(
+        &database.lookup_pool,
+        &bigname_storage::NameCurrentListFilter {
+            namespace: Some("ens".to_owned()),
+            address: Some(bigname_storage::NameCurrentAddressFilter {
+                address: String::new(),
+                relation: bigname_storage::NameCurrentAddressRelationFilter::Any,
+                addresses: Some(vec![
+                    GRAPHQL_OWNER.to_owned(),
+                    GRAPHQL_FALLBACK_HOLDER.to_owned(),
+                ]),
+            }),
+            ..Default::default()
+        },
+    )
+    .await?;
+    assert_eq!(count.total_count, 4);
+    assert!(count.name_targets.len() <= 2, "{count:?}");
+    assert!(count.membership_targets.len() <= 2, "{count:?}");
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn graphql_point_list_and_inventory_reject_targets_ahead_of_head() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.name_current
+        SET chain_positions = jsonb_set(chain_positions, '{ethereum,block_number}', '415')
+        WHERE logical_name_id = 'ens:' || $1
+        "#,
+    )
+    .bind(GRAPHQL_ALICE_NAMEHASH)
+    .execute(&database.lookup_pool)
+    .await?;
+
+    for (query, variables, path) in [
+        (
+            r#"query Domain($id: String!) { domain(id: $id) { name } }"#,
+            json!({ "id": "alice.eth" }),
+            "domain",
+        ),
+        (
+            r#"query Domains($where: DomainFilter!) { domains(where: $where) { name } }"#,
+            json!({ "where": { "owner": GRAPHQL_OWNER } }),
+            "domains",
+        ),
+    ] {
+        let payload = post_graphql_allow_errors(database.app_state(), query, variables).await?;
+        assert_eq!(payload["data"][path], Value::Null);
+        assert!(payload["errors"].as_array().is_some_and(|errors| !errors.is_empty()));
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.name_current
+        SET chain_positions = jsonb_set(chain_positions, '{ethereum,block_number}', '411')
+        WHERE logical_name_id = 'ens:' || $1
+        "#,
+    )
+    .bind(GRAPHQL_ALICE_NAMEHASH)
+    .execute(&database.lookup_pool)
+    .await?;
+    seed_alice_record_inventory(&database).await?;
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.record_inventory_current
+        SET chain_positions = jsonb_set(chain_positions, '{target_block_number}', '415')
+        WHERE resource_id = $1
+        "#,
+    )
+    .bind(Uuid::from_u128(0x6_a002))
+    .execute(&database.lookup_pool)
+    .await?;
+    let inventory = post_graphql_allow_errors(
+        database.app_state(),
+        r#"query Domain($id: String!) {
+            domain(id: $id) { resolver { contentHash } }
+        }"#,
+        json!({ "id": "alice.eth" }),
+    )
+    .await?;
+    assert_eq!(inventory["data"]["domain"]["resolver"], Value::Null);
+    assert!(inventory["errors"].as_array().is_some_and(|errors| !errors.is_empty()));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn graphql_rejects_project_republication_during_read() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    let (_guard, control) =
+        crate::v2::lookup_served_head_revalidation_test_hooks::install(&database.lookup_pool)
+            .await?;
+    let state = database.app_state();
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/graphql")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "query": "query { domain(id: \"alice.eth\") { name } }"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("graphql request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.chain_phase_state
+        SET updated_at = clock_timestamp()
+        WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'
+        "#,
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("GraphQL republish request task panicked")?
+        .context("GraphQL republish request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["data"]["domain"], Value::Null);
+    assert_eq!(payload["errors"][0]["extensions"]["code"], json!("internal_error"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn graphql_nested_resolver_rejects_publication_after_parent_read() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    seed_alice_record_inventory(&database).await?;
+    let (_guard, control) =
+        crate::graphql::nested_inventory_test_hooks::install(&database.lookup_pool).await?;
+    let state = database.app_state();
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/graphql")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "query": "query { domain(id: \"alice.eth\") { name resolver { contentHash } } }"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("graphql request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.chain_phase_state
+        SET updated_at = clock_timestamp()
+        WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'
+        "#,
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("GraphQL nested resolver request task panicked")?
+        .context("GraphQL nested resolver request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["data"]["domain"]["resolver"], Value::Null);
+    assert_eq!(payload["errors"][0]["extensions"]["code"], json!("internal_error"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn graphql_does_not_publish_unsupported_phase_rows() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.name_current
+        SET support_status = 'unsupported',
+            unsupported_reason = 'unsupported GraphQL fixture'
+        WHERE logical_name_id = 'ens:' || $1
+        "#,
+    )
+    .bind(GRAPHQL_ALICE_NAMEHASH)
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let point = post_graphql(
+        database.app_state(),
+        "query { domain(id: \"alice.eth\") { name } }",
+        json!({}),
+    )
+    .await?;
+    assert_eq!(point["data"]["domain"], Value::Null);
+    let list = post_graphql(
+        database.app_state(),
+        r#"query Domains($where: DomainFilter!) { domains(where: $where) { name } }"#,
+        json!({ "where": { "owner": GRAPHQL_OWNER } }),
+    )
+    .await?;
+    assert_eq!(list["data"]["domains"], json!([{ "name": "Bob.eth" }]));
+
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.name_current
+        SET support_status = 'supported', unsupported_reason = NULL
+        WHERE logical_name_id = 'ens:' || $1
+        "#,
+    )
+    .bind(GRAPHQL_ALICE_NAMEHASH)
+    .execute(&database.lookup_pool)
+    .await?;
+    seed_alice_record_inventory(&database).await?;
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.record_inventory_current
+        SET support_status = 'unsupported',
+            unsupported_reason = 'unsupported GraphQL inventory fixture'
+        WHERE resource_id = $1
+        "#,
+    )
+    .bind(Uuid::from_u128(0x6_a002))
+    .execute(&database.lookup_pool)
+    .await?;
+    let inventory = post_graphql(
+        database.app_state(),
+        r#"query { domain(id: "alice.eth") {
+            resolver { texts contentHash addresses { coinType address } }
+        } }"#,
+        json!({}),
+    )
+    .await?;
+    let resolver = &inventory["data"]["domain"]["resolver"];
+    assert_eq!(resolver["texts"], json!([]));
+    assert_eq!(resolver["contentHash"], Value::Null);
+    assert_eq!(resolver["addresses"], json!([]));
+
+    database.cleanup().await
 }
 
 #[tokio::test]
@@ -1093,6 +1759,42 @@ async fn graphql_domain_resolver_serves_sepolia_records_via_anchor_fallback() ->
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn graphql_domain_resolver_rejects_a_sole_inventory_with_a_different_anchor() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    seed_alice_record_inventory(&database).await?;
+    sqlx::query(
+        r#"
+        UPDATE bigname_phase.record_inventory_current
+        SET record_version_boundary = jsonb_set(
+            record_version_boundary,
+            '{chain_position,block_hash}',
+            '"0xdifferent-anchor"'
+        )
+        WHERE resource_id = $1
+        "#,
+    )
+    .bind(Uuid::from_u128(0x6_a002))
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let payload = post_graphql(
+        database.app_state(),
+        r#"query { domain(id: "alice.eth") {
+            resolver { texts contentHash addresses { coinType address } }
+        } }"#,
+        json!({}),
+    )
+    .await?;
+    let resolver = &payload["data"]["domain"]["resolver"];
+    assert_eq!(resolver["texts"], json!([]));
+    assert_eq!(resolver["contentHash"], Value::Null);
+    assert_eq!(resolver["addresses"], json!([]));
+
+    database.cleanup().await
 }
 
 #[tokio::test]

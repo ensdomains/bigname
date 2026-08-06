@@ -111,7 +111,6 @@ fn reverse_identity_record(
     Some(ReverseIdentityRecordRow {
         name_record,
         relation_facets,
-        relation_chain_positions: Vec::new(),
         primary_chain_positions: None,
         primary_name,
         requested_coin_type: input.coin_type.clone(),

@@ -43,7 +43,7 @@ compatibility layer for this contract.
 
 ### Subgraph-compatible GraphQL surface
 
-Alongside the REST contract, bigname serves a narrow, deliberately scoped subgraph-compatible read surface at `POST /graphql`. It is **not** general subgraph parity: it implements only `domain`, `domains`, `registrationConnection`, and `domainConnection` over the existing `name_current` and `record_inventory_current` [projections](glossary.md). The GraphQL surface is a compatibility adapter, not a consumer-replacement declaration.
+Alongside the REST contract, bigname serves a narrow, deliberately scoped subgraph-compatible read surface at `POST /graphql`. It is **not** general subgraph parity: it implements only `domain`, `domains`, `registrationConnection`, and `domainConnection` over `bigname_phase.name_current`, `bigname_phase.address_names_current`, and `bigname_phase.record_inventory_current` [projections](glossary.md). A root read selects the current ENS chain position from `bigname_phase.chain_heads`, admits unchanged rows whose target is at or before that position, carries the same selection into nested record-inventory fields, and verifies before returning that the matching completed `project` phase row did not change. Rows whose projection support status is `unsupported` are not exposed; an unsupported record inventory maps to the compatibility surface's existing empty record shapes. GraphQL `createdAt` uses a declared registration or history timestamp; when neither exists, it preserves the non-null response field with Unix epoch `0` because the current phase projection has no legacy surface-creation timestamp. The GraphQL surface is a compatibility adapter, not a consumer-replacement declaration.
 
 ## Identity model
 

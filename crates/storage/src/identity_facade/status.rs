@@ -177,6 +177,9 @@ pub async fn load_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
                     &row,
                     "latest_projected_timestamp",
                 )?,
+                project_phase_status: None,
+                project_redo_in_progress: false,
+                phase_runner_heartbeat_age_seconds: None,
             })
         })
         .collect::<Result<Vec<_>>>()?;

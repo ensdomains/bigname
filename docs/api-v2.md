@@ -238,10 +238,19 @@ Lookup primitives serve the partner latency path and current indexing status:
 
 The lookup route uses the common record shape and in-band per-result statuses.
 `GET /v2/status` is the only route with the ops status vocabulary
-`ready`, `degraded`, `stale`. It exposes the live invalidation count exactly
-through 10,000, marks larger queues with
-`pending_invalidation_count_capped=true`, and reports the dead-letter count plus
-cached network-head comparison evidence. Provider refresh runs
+`ready`, `degraded`, `stale`. It reads the chain set from
+`bigname_phase.chain_heads` and `bigname_phase.chain_phase_state`. The stored
+head and finality fields come from `chain_heads`; indexed progress is the
+`project` phase's current position. Readiness also uses the Project lifecycle
+state, redo marker, and newest per-chain heartbeat in `service_heartbeats`.
+A failed Project phase or expired heartbeat maps to `stale`; a paused, running,
+redoing, or missing-heartbeat phase maps to `degraded`. Only a completed
+Project phase with a recent heartbeat remains eligible for `ready`, subject to
+the existing stored-head and network-head checks. The schema-v2 project phase has no
+invalidation queue or dead-letter table, so the retained response fields map
+to `pending_invalidation_count=0`,
+`pending_invalidation_count_capped=false`, and `dead_letter_count=0`.
+Cached network-head comparison evidence is unchanged. Provider refresh runs
 asynchronously under a timeout and cache TTL, so the route never waits for a
 provider. A failed latest refresh degrades readiness immediately while keeping
 the last successful head comparison visible as cached evidence.
@@ -430,9 +439,13 @@ During this source transition, a token or timestamp that selects a block older
 than the retained schema-v2 lineage walk returns `409 conflict`, even if a
 pre-transition public-schema lineage row once covered that block.
 
-This source move is limited to snapshot selection. API startup still reads
-`public.chain_checkpoints` to discover the status chain set, and `/v2/status`
-still reads those checkpoints for retained-worker progress and finality.
+API startup discovers the status chain set from the union of
+`bigname_phase.chain_heads` and `bigname_phase.chain_phase_state` instead of
+the legacy public-schema checkpoint and manifest tables. `/v2/status` uses
+those same relations for its chain set and reads stored head/finality positions
+from `chain_heads`, project progress from the `project` row in
+`chain_phase_state`, and both timestamps from the matching readable
+`chain_lineage` rows.
 
 Top-level collections page over mutable latest-state tables. They therefore
 omit `meta.as_of` and `meta.as_of_token`, and their cursors do not claim a

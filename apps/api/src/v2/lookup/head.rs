@@ -11,13 +11,14 @@ use crate::v2::{
     Meta, SnapshotReadResource, V2Error, V2Result, sanitized_snapshot_internal_error, snapshot_meta,
 };
 
-pub(super) struct ServedHead {
+#[derive(Clone)]
+pub(crate) struct ServedHead {
     selected: SelectedSnapshot,
     project_generations: BTreeMap<String, String>,
 }
 
 impl ServedHead {
-    pub(super) fn selected(&self) -> &SelectedSnapshot {
+    pub(crate) fn selected(&self) -> &SelectedSnapshot {
         &self.selected
     }
 
@@ -26,7 +27,7 @@ impl ServedHead {
     }
 }
 
-pub(super) async fn load_served_head(
+pub(crate) async fn load_served_head(
     pool: &PgPool,
     scope: &SnapshotSelectionScope,
 ) -> V2Result<Option<ServedHead>> {
@@ -66,7 +67,7 @@ pub(super) async fn load_served_head(
     }))
 }
 
-pub(super) async fn revalidate_served_head(pool: &PgPool, served: &ServedHead) -> V2Result<()> {
+pub(crate) async fn revalidate_served_head(pool: &PgPool, served: &ServedHead) -> V2Result<()> {
     #[cfg(test)]
     served_head_revalidation_test_hooks::run(pool).await?;
     let current = load_selected_project_generations(pool, &served.selected).await?;

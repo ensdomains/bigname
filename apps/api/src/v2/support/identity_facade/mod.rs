@@ -59,7 +59,6 @@ pub(crate) mod test_hooks {
 struct ReverseIdentityPageRow {
     input_index: usize,
     logical_name_id: String,
-    relation_chain_positions: Vec<serde_json::Value>,
 }
 
 pub(crate) async fn load_reverse_identity_records_live(
@@ -194,7 +193,6 @@ fn reverse_identity_record(
     Some(ReverseIdentityRecordRow {
         name_record,
         relation_facets,
-        relation_chain_positions: row.relation_chain_positions,
         primary_chain_positions: primary_name
             .as_ref()
             .and_then(|primary| primary.chain_positions.clone()),

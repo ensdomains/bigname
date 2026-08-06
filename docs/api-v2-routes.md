@@ -148,15 +148,29 @@ Field ownership:
 - Purpose: per-chain indexing readiness.
 - Request parameters: none.
 - Response shape: `data.status` plus `data.chains`, keyed by `chain_id`.
-  `data.pending_invalidation_count` reports live queued work exactly through
-  10,000. `data.pending_invalidation_count_capped=true` means the bounded query
-  observed at least 10,001 rows and reports 10,000 instead of scanning the
-  remaining queue. `data.dead_letter_count` reports terminal invalidation failures. Each chain
-  entry carries `latest_block`, `indexed_block`, `safe_block`,
+  The schema-v2 project phase does not use the legacy invalidation queue, so
+  `data.pending_invalidation_count` is `0`,
+  `data.pending_invalidation_count_capped` is `false`, and
+  `data.dead_letter_count` is `0`. Each chain entry carries `latest_block`,
+  `indexed_block`, `safe_block`,
   `finalized_block`, `lag_blocks`, `lag_seconds`, `network_block`,
   `network_head_observed_at`, `network_head_age_seconds`,
   `network_head_status`, `ingestion_lag_blocks`, `ingestion_lag_seconds`, and
   route-local ops `status`.
+- Storage mapping: the chain set is the union of
+  `bigname_phase.chain_heads` and `bigname_phase.chain_phase_state`.
+  `latest_block`, `safe_block`, and `finalized_block` map to the corresponding
+  `chain_heads` positions. `indexed_block` maps to the `project` phase's
+  `current_block_number`. `lag_seconds` compares the timestamps of the exact
+  latest-head and project-current hashes in `bigname_phase.chain_lineage`.
+  Missing head, project, or lineage rows preserve the existing nullable fields.
+- The existing per-chain `status` field also maps the Project lifecycle, redo
+  marker, and newest per-chain `bigname_phase.service_heartbeats` timestamp.
+  A failed Project phase or heartbeat older than
+  `BIGNAME_API_HEARTBEAT_MAX_AGE_SECS` is `stale`. A paused, running, redoing,
+  or missing-heartbeat phase is `degraded`. A completed Project phase with a
+  recent heartbeat remains eligible for `ready`; stored-position and cached
+  network-head checks can still lower it.
 - `lag_blocks` and `lag_seconds` are independently nonnegative. Each field
   clamps its own canonical-versus-projected difference at `0`.
 - Pagination behavior: none.

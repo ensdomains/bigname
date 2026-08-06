@@ -266,14 +266,16 @@ does not read those legacy tables or infer their dynamic cursor seeds.
 
 ## Surviving services
 
-The API keeps a `public`-schema pool for GraphQL, health and status checks, and
-retained public-schema reads, plus a `bigname_phase`-schema pool for v2 snapshot
-selection, verified lookup, primary-name projection reads, and the indexed
-lookup/resolver projections. In particular, startup and `/v2/status` still
-read `public.chain_checkpoints`. V2 projection routes that remain on the public
-pool join `public.chain_lineage`, so those status and lineage reads still need
-an explicit successor owner before the retained worker and tables can be
-removed. V2 record lookup
+The API keeps a `public`-schema pool for health checks and retained
+public-schema reads, plus a `bigname_phase`-schema pool for GraphQL, startup
+status-chain discovery, `/v2/status`, v2 snapshot selection, verified lookup,
+primary-name projection reads, and the indexed lookup/resolver projections.
+GraphQL reads `name_current`, `address_names_current`, and
+`record_inventory_current` through that phase pool. Startup and status read
+`chain_heads`, `chain_phase_state`, `chain_lineage`, and `service_heartbeats`;
+they do not read
+`public.chain_checkpoints`. V2 projection routes that remain on the public pool
+retain their existing successor work. V2 record lookup
 may perform only the schema-v2 guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) write;
 v2 primary-name lookup writes nothing. The API database role therefore needs
@@ -315,6 +317,7 @@ GRANT SELECT ON TABLE
     bigname_phase.chain_heads,
     bigname_phase.chain_lineage,
     bigname_phase.chain_phase_state,
+    bigname_phase.service_heartbeats,
     bigname_phase.name_current,
     bigname_phase.address_names_current,
     bigname_phase.resolver_current,

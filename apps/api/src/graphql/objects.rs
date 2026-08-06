@@ -5,6 +5,7 @@ use sqlx::types::Uuid;
 use super::convert::resolver_from_store;
 use super::error::internal_error;
 use super::loader::{RecordInventoryLoader, record_inventory_key};
+use super::snapshot::{require_inventory_at_head, revalidate_graphql_head};
 
 /// Subgraph `Account` — the lowercased address as `id`.
 #[derive(SimpleObject)]
@@ -69,10 +70,9 @@ pub(crate) struct Domain {
     pub(crate) expiry_date: Option<i32>,
     pub(crate) resolver_address: Option<String>,
     pub(crate) owner_id: String,
-    /// `(resource_id, record_version_boundary)` for the name's `record_inventory_current` row,
-    /// derived in `convert.rs`; `None` when the row carries no resolvable boundary, in which case
-    /// the resolver serves the empty record shapes without a read.
-    pub(crate) record_inventory_key: Option<(Uuid, serde_json::Value)>,
+    /// Resource and optional version boundary for the name's `record_inventory_current` row.
+    pub(crate) record_inventory_key: Option<(Uuid, Option<serde_json::Value>)>,
+    pub(crate) served_head: Option<crate::v2::lookup::head::ServedHead>,
 }
 
 #[Object]
@@ -115,9 +115,14 @@ impl Domain {
         };
         let inventory = match self.record_inventory_key.as_ref() {
             Some((resource_id, boundary)) => {
+                let state = ctx.data::<crate::AppState>()?;
+                #[cfg(test)]
+                super::snapshot::nested_inventory_test_hooks::run(&state.lookup_pool)
+                    .await
+                    .map_err(|error| internal_error("Domain.resolver", error))?;
                 let loader = ctx.data::<DataLoader<RecordInventoryLoader>>()?;
-                loader
-                    .load_one(record_inventory_key(*resource_id, boundary))
+                let inventory = loader
+                    .load_one(record_inventory_key(*resource_id, boundary.as_ref()))
                     .await
                     .map_err(|error| {
                         // `{error:#}` keeps the storage layer's full anyhow cause chain in the log
@@ -126,7 +131,17 @@ impl Domain {
                             "Domain.resolver",
                             anyhow::anyhow!("record inventory batch load failed: {error:#}"),
                         )
-                    })?
+                    })?;
+                if let Some(inventory) = inventory.as_ref() {
+                    require_inventory_at_head(
+                        &inventory.chain_positions,
+                        self.served_head.as_ref(),
+                        "Domain.resolver",
+                    )?;
+                }
+                revalidate_graphql_head(state, self.served_head.as_ref(), "Domain.resolver")
+                    .await?;
+                inventory
             }
             None => None,
         };

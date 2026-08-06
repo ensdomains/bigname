@@ -75,7 +75,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
         HEALTH_DATABASE_CHECK_TIMEOUT,
     )
     .await?;
-    let expected_status_chain_ids = bigname_storage::load_expected_status_chain_ids(&pool).await?;
+    let expected_status_chain_ids =
+        bigname_storage::load_phase_expected_status_chain_ids(&lookup_pool).await?;
     let missing_status_rpc_chains = v2::support::status_freshness::missing_status_rpc_chains(
         &expected_status_chain_ids,
         &chain_rpc_urls,
