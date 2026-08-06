@@ -359,8 +359,11 @@ Every normalized event carries: namespace, `logical_name_id` when applicable, `r
 Normalized events are schema-v2 interpreter transitions. Interpretation loads
 canonical raw facts in chain order and carries the compact prior state needed
 across physical batches. A redo is an explicit bounded operation: it prepares
-the selected derived range, replays it through the same interpreter, and
-re-anchors stable identities when the winning facts reproduce them. The
+the selected derived range, replays it through the same interpreter, and heals
+identities the replay did not reproduce — an identity the replay re-observes
+keeps its anchor at its first derivation block, and only an identity still
+orphaned after the replay is re-anchored to the earliest surviving reference
+outside the redone range. The
 deleted old-schema storage layer no longer provides general field repair,
 payload arbitration, supersession, full-closure proof, or adapter-checkpoint
 reuse.
@@ -397,7 +400,10 @@ boundaries fall. Three rules keep the written rows batch-independent:
 - Resource rows anchor at their first derivation block. A superseded
   registry-only resource emission is retained even when no surviving
   same-batch row references it, so the first-committed identity upsert anchors
-  the resource at the same block in every run shape.
+  the resource at the same block in every run shape. The single mover is the
+  bounded redo's orphan healing above: an identity still orphaned after a
+  replay re-anchors to the earliest surviving reference outside the redone
+  range.
 
 ## Resolution
 

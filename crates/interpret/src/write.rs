@@ -472,6 +472,7 @@ async fn reanchor_stable_identities(
                  AND lineage.block_number = event.block_number
                 WHERE identity.chain_id = $1
                   AND identity.block_number BETWEEN $2 AND $3
+                  AND identity.canonicality_state = 'orphaned'
                   AND event.block_number IS NOT NULL
                   AND event.block_number NOT BETWEEN $2 AND $3
                   AND event.canonicality_state IN ('canonical', 'safe', 'finalized')

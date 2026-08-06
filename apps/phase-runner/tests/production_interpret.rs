@@ -3246,6 +3246,58 @@ async fn redo_reanchors_a_stable_binding_after_same_timestamp_predecessor_remova
 }
 
 #[tokio::test]
+async fn redo_keeps_reproduced_identity_anchors_at_their_first_derivation_block() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_identity_anchor").await?;
+    let chain = "interpret-identity-anchor";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice"), (2, "alice")]).await?;
+    run_engine(scratch.pool(), chain, 0, 2, InterpretRunMode::Normal).await?;
+
+    let before = identity_anchors(scratch.pool(), chain).await?;
+    assert!(
+        before
+            .iter()
+            .any(|(table, _, block, state)| table == "name_surfaces"
+                && *block == 1
+                && state == "canonical"),
+        "the full walk anchors alice's name surface at block 1 with a later reference: {before:?}"
+    );
+
+    run_engine(scratch.pool(), chain, 1, 1, InterpretRunMode::Redo).await?;
+
+    let after = identity_anchors(scratch.pool(), chain).await?;
+    assert_eq!(
+        before, after,
+        "identities the redo replay reproduces must keep their first derivation anchor"
+    );
+    scratch.cleanup().await
+}
+
+async fn identity_anchors(
+    pool: &PgPool,
+    chain_id: &str,
+) -> Result<Vec<(String, String, i64, String)>> {
+    let mut rows = Vec::new();
+    for (table, id_column) in [
+        ("name_surfaces", "logical_name_id"),
+        ("resources", "resource_id"),
+        ("token_lineages", "token_lineage_id"),
+    ] {
+        let statement = format!(
+            "SELECT '{table}', {id_column}::text, block_number, canonicality_state::text
+             FROM {table} WHERE chain_id = $1 ORDER BY {id_column}"
+        );
+        rows.extend(
+            sqlx::query_as::<_, (String, String, i64, String)>(&statement)
+                .bind(chain_id)
+                .fetch_all(pool)
+                .await?,
+        );
+    }
+    rows.sort();
+    Ok(rows)
+}
+
+#[tokio::test]
 async fn discovery_redo_reopens_an_edge_when_the_replacement_range_omits_its_close() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_discovery_reopen").await?;
     let chain = "interpret-discovery-reopen";
@@ -3494,62 +3546,10 @@ async fn partial_redo_restores_resource_and_token_anchors_from_150_to_250() -> R
     .bind(block_hash(chain, 150))
     .execute(scratch.pool())
     .await?;
-    let transaction_hash = format!("{chain}-transaction-150");
-    sqlx::query(
-        "
-        INSERT INTO raw_transactions (
-            chain_id, block_hash, block_number, transaction_hash,
-            transaction_index, from_address, to_address
-        )
-        VALUES ($1, $2, 150, $3, 0, $4, $5)
-        ",
-    )
-    .bind(chain)
-    .bind(block_hash(chain, 150))
-    .bind(&transaction_hash)
-    .bind(SENDER)
-    .bind(CONTRACT)
-    .execute(scratch.pool())
-    .await?;
-    let token_id = versioned_token("alice", 1);
-    let owner: Address = "0x0000000000000000000000000000000000000061".parse()?;
-    let registration = v2_registry_events::LabelRegistered {
-        tokenId: token_id,
-        labelHash: keccak256(b"alice"),
-        label: "alice".to_owned(),
-        owner,
-        expiry: 1_000,
-        sender: SENDER.parse()?,
-    }
-    .encode_log_data();
-    insert_log_at(
-        scratch.pool(),
-        chain,
-        150,
-        &transaction_hash,
-        0,
-        CONTRACT,
-        registration.topics(),
-        registration.data.as_ref(),
-    )
-    .await?;
-    let resource = v2_registry_events::TokenResource {
-        tokenId: token_id,
-        resource: U256::from(5001),
-    }
-    .encode_log_data();
-    insert_log_at(
-        scratch.pool(),
-        chain,
-        150,
-        &transaction_hash,
-        1,
-        CONTRACT,
-        resource.topics(),
-        resource.data.as_ref(),
-    )
-    .await?;
-
+    // The redone range deliberately holds no raw facts re-deriving these identities, so the
+    // replay leaves them orphaned and the completion heal re-anchors all three to the surviving
+    // observation at 250. An identity the replay does reproduce keeps its first derivation
+    // anchor (covered by redo_keeps_reproduced_identity_anchors_at_their_first_derivation_block).
     for redo_attempt in 1..=2 {
         run_engine(scratch.pool(), chain, 100, 200, InterpretRunMode::Redo).await?;
 
@@ -3638,8 +3638,11 @@ async fn partial_redo_reanchors_shadow_deactivation_time_to_surviving_observatio
     .bind(block_hash(chain, 150))
     .execute(scratch.pool())
     .await?;
-    insert_name_registered(scratch.pool(), chain, 150, hostile_label).await?;
 
+    // The redone range deliberately holds no raw facts reproducing the shadow surface, so the
+    // replay leaves it orphaned and the completion heal re-anchors it to the surviving
+    // observation. An identity the replay does reproduce keeps its first derivation anchor
+    // (covered by redo_keeps_reproduced_identity_anchors_at_their_first_derivation_block).
     run_engine(scratch.pool(), chain, 100, 200, InterpretRunMode::Redo).await?;
 
     let anchor: (i64, i64) = sqlx::query_as(

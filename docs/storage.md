@@ -305,10 +305,13 @@ excluding its anchored normalized events through the mandatory lineage join
 while retaining those event rows physically. Their row-local canonicality may
 lag during this window. Redo preparation then deletes normalized events in the
 selected range, orphans derived identities anchored there, replays the range
-through the schema-v2 interpreter, and re-anchors stable identities when the
-winning facts reproduce them. An interrupted multi-batch redo remains explicit
-persisted redo state and must resume; its intermediate state is not a completed
-projection boundary.
+through the schema-v2 interpreter, and heals identities the replay did not
+reproduce. An identity the replay re-observes is restored by the ordinary
+identity upsert and keeps its anchor at its first derivation block; only an
+identity still `orphaned` after the replay is re-anchored to the earliest
+surviving reference outside the redone range. An interrupted multi-batch redo
+remains explicit persisted redo state and must resume; its intermediate state
+is not a completed projection boundary.
 
 This bounded delete-and-re-derive behavior is the intentional
 [plain-events redo](glossary.md#plain-events-redo) rule and a deliberate
