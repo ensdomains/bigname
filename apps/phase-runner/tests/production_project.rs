@@ -1657,9 +1657,293 @@ async fn parent_preimage_incrementally_publishes_an_existing_child_edge() -> Res
 }
 
 #[tokio::test]
-async fn wrapper_fuses_mask_resource_control_permissions() -> Result<()> {
-    let scratch = ScratchDatabase::create("production_project_fuse_mask").await?;
+async fn wrapper_states_and_expiry_gate_permissions_and_controller_relations() -> Result<()> {
+    let cases = [
+        (
+            "wrapped_expired",
+            0,
+            "wrapped",
+            2,
+            Some("wrapped"),
+            9,
+            true,
+            true,
+        ),
+        (
+            "emancipated",
+            65_536,
+            "emancipated",
+            3,
+            Some("emancipated"),
+            9,
+            true,
+            true,
+        ),
+        (
+            "dot_eth_grace_boundary",
+            196_608,
+            "emancipated",
+            7_776_003,
+            Some("emancipated"),
+            9,
+            true,
+            true,
+        ),
+        (
+            "dot_eth_grace",
+            196_608,
+            "emancipated",
+            7_776_002,
+            Some("emancipated"),
+            1,
+            false,
+            true,
+        ),
+        (
+            "locked",
+            65_537,
+            "locked",
+            3,
+            Some("locked"),
+            7,
+            false,
+            true,
+        ),
+        (
+            "locked_max_expiry",
+            65_537,
+            "locked",
+            u64::MAX,
+            Some("locked"),
+            7,
+            false,
+            true,
+        ),
+        (
+            "cannot_burn_fuses",
+            65_539,
+            "locked",
+            3,
+            Some("locked"),
+            6,
+            false,
+            true,
+        ),
+        (
+            "cannot_transfer",
+            65_541,
+            "locked",
+            3,
+            Some("locked"),
+            6,
+            false,
+            true,
+        ),
+        (
+            "cannot_set_resolver",
+            65_545,
+            "locked",
+            3,
+            Some("locked"),
+            5,
+            false,
+            true,
+        ),
+        (
+            "cannot_set_ttl",
+            65_553,
+            "locked",
+            3,
+            Some("locked"),
+            6,
+            false,
+            true,
+        ),
+        (
+            "cannot_create_subdomain",
+            65_569,
+            "locked",
+            3,
+            Some("locked"),
+            6,
+            false,
+            true,
+        ),
+        (
+            "cannot_approve",
+            65_601,
+            "locked",
+            3,
+            Some("locked"),
+            6,
+            false,
+            true,
+        ),
+        ("locked_expired", 65_537, "locked", 2, None, 0, false, false),
+    ];
+
+    for (
+        label,
+        fuses,
+        state,
+        expiry,
+        expected_state,
+        power_count,
+        has_controller,
+        has_token_holder,
+    ) in cases
+    {
+        let scratch = ScratchDatabase::create(&format!("production_project_fuse_{label}")).await?;
+        seed_project_fixture(scratch.pool()).await?;
+        insert_event(
+            scratch.pool(),
+            CHAIN,
+            2,
+            Some("ens:0xalice"),
+            Some(RESOURCE),
+            "PermissionChanged",
+            "ens_v1_wrapper_l1",
+            json!({
+                "subject":OWNER,
+                "scope":{"kind":"resource"},
+                "effective_powers":[
+                    "resource_control", "resolver_control", "set_resolver", "set_ttl",
+                    "create_subnames", "transfer", "unwrap", "burn_fuses", "approve"
+                ],
+                "grant_source":{"kind":"fixture"},
+                "revocation_source":null,
+                "inheritance_path":[],
+                "transfer_behavior":"replace_on_authority_change"
+            }),
+            json!({}),
+        )
+        .await?;
+        insert_event(
+            scratch.pool(),
+            CHAIN,
+            3,
+            Some("ens:0xalice"),
+            Some(RESOURCE),
+            "ExpiryChanged",
+            "ens_v1_wrapper_l1",
+            json!({"expiry":expiry}),
+            json!({}),
+        )
+        .await?;
+        insert_event(
+            scratch.pool(),
+            CHAIN,
+            3,
+            Some("ens:0xalice"),
+            Some(RESOURCE),
+            "PermissionScopeChanged",
+            "ens_v1_wrapper_l1",
+            json!({"fuses":fuses,"wrapper_state":state}),
+            json!({}),
+        )
+        .await?;
+
+        run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+        let projected_state: Option<String> = sqlx::query_scalar(
+            "SELECT declared_summary ->> 'wrapper_state' FROM name_current
+             WHERE logical_name_id = 'ens:0xalice'",
+        )
+        .fetch_one(scratch.pool())
+        .await?;
+        assert_eq!(projected_state.as_deref(), expected_state, "{label}");
+        let effective_powers: Option<Value> = sqlx::query_scalar(
+            "SELECT effective_powers FROM permissions_current WHERE resource_id = $1",
+        )
+        .bind(Uuid::parse_str(RESOURCE)?)
+        .fetch_optional(scratch.pool())
+        .await?;
+        assert_eq!(
+            effective_powers
+                .as_ref()
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len),
+            power_count,
+            "{label}"
+        );
+        if label == "dot_eth_grace" {
+            assert_eq!(effective_powers, Some(json!(["approve"])));
+        }
+        let controller_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM address_names_current
+                 WHERE logical_name_id = 'ens:0xalice'
+                   AND relation = 'effective_controller'
+             )",
+        )
+        .fetch_one(scratch.pool())
+        .await?;
+        assert_eq!(controller_exists, has_controller, "{label}");
+        let token_holder_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM address_names_current
+                 WHERE logical_name_id = 'ens:0xalice'
+                   AND relation = 'token_holder'
+             )",
+        )
+        .fetch_one(scratch.pool())
+        .await?;
+        assert_eq!(token_holder_exists, has_token_holder, "{label}");
+        scratch.cleanup().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn incremental_project_revisits_wrapper_timestamp_boundaries() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_wrapper_time_scope").await?;
     seed_project_fixture(scratch.pool()).await?;
+    insert_lineage_block(scratch.pool(), CHAIN, 4).await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state
+         ) VALUES ($1, $2, $3, 5, to_timestamp(7776004), 'canonical')",
+    )
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 5))
+    .bind(block_hash(CHAIN, 4))
+    .execute(scratch.pool())
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        2,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "PermissionChanged",
+        "ens_v1_wrapper_l1",
+        json!({
+            "subject":OWNER,
+            "scope":{"kind":"resource"},
+            "effective_powers":[
+                "resource_control", "resolver_control", "set_resolver", "set_ttl",
+                "create_subnames", "transfer", "unwrap", "burn_fuses", "approve"
+            ],
+            "grant_source":{"kind":"fixture"},
+            "revocation_source":null,
+            "inheritance_path":[],
+            "transfer_behavior":"replace_on_authority_change"
+        }),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "ExpiryChanged",
+        "ens_v1_registrar_l1",
+        json!({"source_event":"NameRenewed","authority_kind":"wrapper","expiry":7_776_003}),
+        json!({}),
+    )
+    .await?;
     insert_event(
         scratch.pool(),
         CHAIN,
@@ -1668,26 +1952,280 @@ async fn wrapper_fuses_mask_resource_control_permissions() -> Result<()> {
         Some(RESOURCE),
         "PermissionScopeChanged",
         "ens_v1_wrapper_l1",
-        json!({"fuses":8}),
+        json!({"fuses":196_608,"wrapper_state":"emancipated"}),
         json!({}),
     )
     .await?;
 
     run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
-    let permission_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM permissions_current WHERE resource_id = $1")
-            .bind(Uuid::parse_str(RESOURCE)?)
-            .fetch_one(scratch.pool())
-            .await?;
-    assert_eq!(permission_count, 0);
-    let support: String = sqlx::query_scalar(
-        "SELECT support_status FROM permissions_current_resource_summary
-         WHERE resource_id = $1",
+    run_project(
+        scratch.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Normal,
+        4,
+        4,
+    )
+    .await?;
+    let grace_powers: Value = sqlx::query_scalar(
+        "SELECT effective_powers FROM permissions_current WHERE resource_id = $1",
     )
     .bind(Uuid::parse_str(RESOURCE)?)
     .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(support, "supported");
+    assert_eq!(grace_powers, json!(["approve"]));
+    let grace_controller: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM address_names_current
+             WHERE logical_name_id = 'ens:0xalice'
+               AND relation = 'effective_controller'
+         )",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(!grace_controller);
+
+    run_project(
+        scratch.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 4,
+            hash: block_hash(CHAIN, 4),
+        }),
+        RunMode::Normal,
+        5,
+        5,
+    )
+    .await?;
+    let expired_state: Option<String> = sqlx::query_scalar(
+        "SELECT declared_summary ->> 'wrapper_state' FROM name_current
+         WHERE logical_name_id = 'ens:0xalice'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(expired_state, None);
+    let expired_relations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM address_names_current
+         WHERE logical_name_id = 'ens:0xalice'
+           AND relation IN ('effective_controller', 'token_holder')",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(expired_relations, 0);
+    let expired_permissions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM permissions_current WHERE resource_id = $1")
+            .bind(Uuid::parse_str(RESOURCE)?)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(expired_permissions, 0);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn unwrapped_registration_ignores_the_prior_wrapper_grace_expiry() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_unwrapped_registrar_expiry").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    let wrapper_resource = Uuid::new_v4();
+    let wrapper_resource_text = wrapper_resource.to_string();
+    sqlx::query(
+        "INSERT INTO resources (
+             resource_id, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1, $2, $3, 2, 'canonical')",
+    )
+    .bind(wrapper_resource)
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 2))
+    .execute(scratch.pool())
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "ExpiryChanged",
+        "ens_v1_registrar_l1",
+        json!({"expiry":1_000}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(&wrapper_resource_text),
+        "ExpiryChanged",
+        "ens_v1_registrar_l1",
+        json!({
+            "source_event":"NameRenewed",
+            "authority_kind":"wrapper",
+            "registrar_expiry":1_000,
+            "expiry":7_777_000
+        }),
+        json!({}),
+    )
+    .await?;
+
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let projected_expiry: i64 = sqlx::query_scalar(
+        "SELECT (declared_summary -> 'registration' ->> 'expiry')::BIGINT
+         FROM name_current WHERE logical_name_id = 'ens:0xalice'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(projected_expiry, 1_000);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn wrapped_registration_separates_registrar_and_wrapper_expiry() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_wrapped_expiry_split").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    let wrapper_resource = Uuid::new_v4();
+    let wrapper_resource_text = wrapper_resource.to_string();
+    sqlx::query(
+        "INSERT INTO resources (
+             resource_id, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1, $2, $3, 2, 'canonical')",
+    )
+    .bind(wrapper_resource)
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 2))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET resource_id = $1
+         WHERE logical_name_id = 'ens:0xalice'",
+    )
+    .bind(wrapper_resource)
+    .execute(scratch.pool())
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        2,
+        Some("ens:0xalice"),
+        Some(&wrapper_resource_text),
+        "ExpiryChanged",
+        "ens_v1_wrapper_l1",
+        json!({"authority_kind":"wrapper","expiry":500}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        2,
+        Some("ens:0xalice"),
+        Some(&wrapper_resource_text),
+        "PermissionScopeChanged",
+        "ens_v1_wrapper_l1",
+        json!({"fuses":196_609,"wrapper_state":"locked"}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "ExpiryChanged",
+        "ens_v1_registrar_l1",
+        json!({"source_event":"NameRenewed","authority_kind":"registrar","expiry":1_000}),
+        json!({}),
+    )
+    .await?;
+
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let summary: Value = sqlx::query_scalar(
+        "SELECT declared_summary FROM name_current
+         WHERE logical_name_id = 'ens:0xalice'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(summary["registration"]["expiry"], 1_000);
+    assert_eq!(summary["wrapper_state"], "locked");
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn project_redo_without_resume_revisits_wrapper_timestamp_boundaries() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_wrapper_redo_time_scope").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    insert_lineage_block(scratch.pool(), CHAIN, 4).await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        2,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "PermissionChanged",
+        "ens_v1_wrapper_l1",
+        json!({
+            "subject":OWNER,
+            "scope":{"kind":"resource"},
+            "effective_powers":[
+                "resource_control", "resolver_control", "set_resolver", "set_ttl",
+                "create_subnames", "transfer", "unwrap", "burn_fuses", "approve"
+            ],
+            "grant_source":{"kind":"fixture"},
+            "revocation_source":null,
+            "inheritance_path":[],
+            "transfer_behavior":"replace_on_authority_change"
+        }),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "ExpiryChanged",
+        "ens_v1_wrapper_l1",
+        json!({"expiry":7_776_003}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "PermissionScopeChanged",
+        "ens_v1_wrapper_l1",
+        json!({"fuses":196_608,"wrapper_state":"emancipated"}),
+        json!({}),
+    )
+    .await?;
+
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    run_project(scratch.pool(), CHAIN, None, RunMode::Redo, 4, 4).await?;
+
+    let powers: Value = sqlx::query_scalar(
+        "SELECT effective_powers FROM permissions_current WHERE resource_id = $1",
+    )
+    .bind(Uuid::parse_str(RESOURCE)?)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(powers, json!(["approve"]));
+    let controller: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM address_names_current
+             WHERE logical_name_id = 'ens:0xalice'
+               AND relation = 'effective_controller'
+         )",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(!controller);
     scratch.cleanup().await
 }
 

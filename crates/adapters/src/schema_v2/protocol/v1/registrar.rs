@@ -9,9 +9,7 @@ use super::super::{
 };
 use super::registry::append_authority_transition;
 use super::support::{events_linked, single_event};
-use crate::evm_abi::{
-    address_hex, decode_event_log, decode_event_log_data_as, hex_string, u256_word_hex,
-};
+use crate::evm_abi::{address_hex, decode_event_log, u256_word_hex};
 use crate::schema_v2::{
     catalog::Selected,
     common::{admitted_label, decoded_label, stable_uuid},
@@ -22,40 +20,8 @@ use crate::schema_v2::{
 mod identity;
 use identity::{new_registrar_identity, registrar_namehash};
 
-mod simple {
-    use super::*;
-    sol! {
-        event RawNameRegistered(bytes name, bytes32 indexed label, address indexed owner, uint256 expires);
-        event RawNameRenewed(bytes name, bytes32 indexed label, uint256 expires);
-    }
-}
-
-mod cost {
-    use super::*;
-    sol! {
-        event RawNameRegistered(bytes name, bytes32 indexed label, address indexed owner, uint256 cost, uint256 expires);
-        event RawNameRenewed(bytes name, bytes32 indexed label, uint256 cost, uint256 expires);
-    }
-}
-
-mod premium {
-    use super::*;
-    sol! {
-        event RawNameRegistered(bytes name, bytes32 indexed label, address indexed owner, uint256 baseCost, uint256 premium, uint256 expires);
-    }
-}
-
-mod premium_referrer {
-    use super::*;
-    sol! {
-        event RawNameRegistered(bytes name, bytes32 indexed label, address indexed owner, uint256 baseCost, uint256 premium, uint256 expires, bytes32 referrer);
-    }
-}
-
-mod renew_referrer {
-    use super::*;
-    sol! { event RawNameRenewed(bytes name, bytes32 indexed label, uint256 cost, uint256 expires, bytes32 referrer); }
-}
+mod decode;
+mod wrapper_renewal;
 
 mod transfer {
     use super::*;
@@ -63,7 +29,6 @@ mod transfer {
 }
 
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
-
 pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
@@ -247,7 +212,7 @@ fn name_event(
     state: &mut State,
     registration: bool,
 ) -> anyhow::Result<Interpreted> {
-    let (raw_label, explicit_labelhash, mut after) = decode_name(selected, raw)?;
+    let (raw_label, explicit_labelhash, mut after) = decode::name(selected, raw)?;
     if keccak256(&raw_label) != explicit_labelhash {
         bail!(
             "{} label does not hash to its indexed label",
@@ -330,6 +295,14 @@ fn name_event(
         retained_authority_key.clone(),
         make_current,
     );
+    let wrapper_renewal = wrapper_renewal::event(
+        selected,
+        state,
+        previous_active.as_ref(),
+        &raw_namehash,
+        expiry,
+        registration,
+    )?;
     let after_object = after.as_object_mut().expect("registrar state is an object");
     after_object.insert("namehash".to_owned(), Value::String(raw_namehash.clone()));
     after_object.insert("surface_known".to_owned(), Value::Bool(surface_known));
@@ -379,6 +352,7 @@ fn name_event(
         resource_id,
         after.clone(),
     );
+    output.events.extend(wrapper_renewal);
     if registration || synthetic_grant {
         if let Some(grant) = output
             .events
@@ -410,7 +384,9 @@ fn name_event(
                 "RegistrationRenewed" | "ExpiryChanged"
             )
         }) {
-            event.explicit_before = Some(json!({"expiry":before_expiry}));
+            if event.explicit_before.is_none() {
+                event.explicit_before = Some(json!({"expiry":before_expiry}));
+            }
         }
     }
     if registration
@@ -499,101 +475,4 @@ fn name_event(
         });
     }
     Ok(output)
-}
-
-fn decode_name(selected: &Selected, raw: &RawLogInput) -> anyhow::Result<(Vec<u8>, B256, Value)> {
-    match selected.event.signature.as_str() {
-        "NameRegistered(string,bytes32,address,uint256)" => {
-            let event = decode_event_log_data_as::<simple::RawNameRegistered>(
-                &raw.topics,
-                &raw.data,
-                &selected.event.topic0,
-                "NameRegistered log is malformed",
-            )?;
-            Ok((
-                event.name.to_vec(),
-                event.label,
-                json!({"source_event":"NameRegistered","registrant":address_hex(event.owner),"expiry":crate::evm_abi::u256_i64(event.expires, "NameRegistered expiry")?}),
-            ))
-        }
-        "NameRegistered(string,bytes32,address,uint256,uint256)" => {
-            let event = decode_event_log_data_as::<cost::RawNameRegistered>(
-                &raw.topics,
-                &raw.data,
-                &selected.event.topic0,
-                "NameRegistered log is malformed",
-            )?;
-            Ok((
-                event.name.to_vec(),
-                event.label,
-                json!({"source_event":"NameRegistered","registrant":address_hex(event.owner),"cost":event.cost.to_string(),"expiry":crate::evm_abi::u256_i64(event.expires, "NameRegistered expiry")?}),
-            ))
-        }
-        "NameRegistered(string,bytes32,address,uint256,uint256,uint256)" => {
-            let event = decode_event_log_data_as::<premium::RawNameRegistered>(
-                &raw.topics,
-                &raw.data,
-                &selected.event.topic0,
-                "NameRegistered log is malformed",
-            )?;
-            Ok((
-                event.name.to_vec(),
-                event.label,
-                json!({"source_event":"NameRegistered","registrant":address_hex(event.owner),"base_cost":event.baseCost.to_string(),"premium":event.premium.to_string(),"expiry":crate::evm_abi::u256_i64(event.expires, "NameRegistered expiry")?}),
-            ))
-        }
-        "NameRegistered(string,bytes32,address,uint256,uint256,uint256,bytes32)" => {
-            let event = decode_event_log_data_as::<premium_referrer::RawNameRegistered>(
-                &raw.topics,
-                &raw.data,
-                &selected.event.topic0,
-                "NameRegistered log is malformed",
-            )?;
-            Ok((
-                event.name.to_vec(),
-                event.label,
-                json!({"source_event":"NameRegistered","registrant":address_hex(event.owner),"base_cost":event.baseCost.to_string(),"premium":event.premium.to_string(),"expiry":crate::evm_abi::u256_i64(event.expires, "NameRegistered expiry")?,"referrer":hex_string(event.referrer)}),
-            ))
-        }
-        "NameRenewed(string,bytes32,uint256)" => {
-            let event = decode_event_log_data_as::<simple::RawNameRenewed>(
-                &raw.topics,
-                &raw.data,
-                &selected.event.topic0,
-                "NameRenewed log is malformed",
-            )?;
-            Ok((
-                event.name.to_vec(),
-                event.label,
-                json!({"source_event":"NameRenewed","expiry":crate::evm_abi::u256_i64(event.expires, "NameRenewed expiry")?}),
-            ))
-        }
-        "NameRenewed(string,bytes32,uint256,uint256)" => {
-            let event = decode_event_log_data_as::<cost::RawNameRenewed>(
-                &raw.topics,
-                &raw.data,
-                &selected.event.topic0,
-                "NameRenewed log is malformed",
-            )?;
-            Ok((
-                event.name.to_vec(),
-                event.label,
-                json!({"source_event":"NameRenewed","cost":event.cost.to_string(),"expiry":crate::evm_abi::u256_i64(event.expires, "NameRenewed expiry")?}),
-            ))
-        }
-        "NameRenewed(string,bytes32,uint256,uint256,bytes32)" => {
-            let event = decode_event_log_data_as::<renew_referrer::RawNameRenewed>(
-                &raw.topics,
-                &raw.data,
-                &selected.event.topic0,
-                "NameRenewed log is malformed",
-            )?;
-            Ok((
-                event.name.to_vec(),
-                event.label,
-                json!({"source_event":"NameRenewed","cost":event.cost.to_string(),"expiry":crate::evm_abi::u256_i64(event.expires, "NameRenewed expiry")?,"referrer":hex_string(event.referrer)}),
-            ))
-        }
-        signature => bail!("unsupported registrar ABI event {signature}"),
-    }
 }

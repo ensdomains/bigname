@@ -38,6 +38,14 @@ mod raw_v1_registrar {
     }
 }
 
+mod wrapped_controller {
+    use alloy_sol_types::sol;
+
+    sol! {
+        event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires);
+    }
+}
+
 mod v2_registry {
     use alloy_sol_types::sol;
 
@@ -1323,6 +1331,284 @@ fn wrapper_incremental_updates_keep_identity_and_prior_state_across_batches() ->
     assert_eq!(expiry.before_state["expiry"], 42);
     assert_eq!(fuses.resource_id, Some(wrapped_resource));
     assert_eq!(fuses.before_state["fuses"], 1);
+    Ok(())
+}
+
+#[test]
+fn unexpired_rewrap_restores_retained_parent_fuses_and_expiry() -> anyhow::Result<()> {
+    let labels = vec!["child".to_owned(), "parent".to_owned()];
+    let node = super::common::namehash(&labels).parse::<B256>()?;
+    let manifest = manifest_with_events(
+        65,
+        "ens",
+        "ens_v1_wrapper_l1",
+        &[
+            (
+                "NameWrapped",
+                "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)",
+                &["name_wrapper"],
+                &[
+                    "TokenControlTransferred",
+                    "ExpiryChanged",
+                    "PermissionScopeChanged",
+                    "SurfaceBound",
+                    "AuthorityEpochChanged",
+                ],
+            ),
+            (
+                "NameUnwrapped",
+                "event NameUnwrapped(bytes32 indexed node, address owner)",
+                &["name_wrapper"],
+                &["SurfaceUnbound", "AuthorityEpochChanged"],
+            ),
+        ],
+    );
+    let first = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest.clone()],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(65, "name_wrapper")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            raw_at(
+                NameWrapped {
+                    node,
+                    name: b"\x05child\x06parent\0".to_vec().into(),
+                    owner: CONTRACT.parse()?,
+                    fuses: 65_536,
+                    expiry: 100,
+                }
+                .encode_log_data(),
+                1,
+                0,
+                CONTRACT,
+            ),
+            raw_at(
+                NameUnwrapped {
+                    node,
+                    owner: CONTRACT.parse()?,
+                }
+                .encode_log_data(),
+                2,
+                0,
+                CONTRACT,
+            ),
+        ],
+    })?;
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(65, "name_wrapper")],
+        prior_events: first.normalized_events.iter().map(prior_event).collect(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw_at(
+            NameWrapped {
+                node,
+                name: b"\x05child\x06parent\0".to_vec().into(),
+                owner: CONTRACT.parse()?,
+                fuses: 0,
+                expiry: 0,
+            }
+            .encode_log_data(),
+            3,
+            0,
+            CONTRACT,
+        )],
+    })?;
+
+    let scope = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "PermissionScopeChanged")
+        .expect("rewrap permission scope");
+    assert_eq!(scope.after_state["fuses"], 65_536);
+    assert_eq!(scope.after_state["expiry"], 100);
+    assert_eq!(scope.after_state["wrapper_state"], "emancipated");
+    Ok(())
+}
+
+#[test]
+fn wrapped_controller_renewal_updates_the_wrapper_resource_expiry() -> anyhow::Result<()> {
+    const WRAPPER: &str = "0x0000000000000000000000000000000000000043";
+    const CONTROLLER: &str = "0x0000000000000000000000000000000000000044";
+
+    let labels = vec!["renewed".to_owned(), "eth".to_owned()];
+    let node = super::common::namehash(&labels).parse::<B256>()?;
+    let label = keccak256(b"renewed");
+    let wrapper_manifest = manifest_with_events(
+        66,
+        "ens",
+        "ens_v1_wrapper_l1",
+        &[
+            (
+                "NameWrapped",
+                "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)",
+                &["name_wrapper"],
+                &[
+                    "TokenControlTransferred",
+                    "ExpiryChanged",
+                    "PermissionScopeChanged",
+                    "SurfaceBound",
+                    "AuthorityEpochChanged",
+                ],
+            ),
+            (
+                "ExpiryExtended",
+                "event ExpiryExtended(bytes32 indexed node, uint64 expiry)",
+                &["name_wrapper"],
+                &["ExpiryChanged"],
+            ),
+            (
+                "FusesSet",
+                "event FusesSet(bytes32 indexed node, uint32 fuses)",
+                &["name_wrapper"],
+                &["PermissionScopeChanged"],
+            ),
+        ],
+    );
+    let registrar_manifest = manifest(
+        67,
+        "ens_v1_registrar_l1",
+        "NameRenewed",
+        "event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires)",
+        &["wrapped_registrar_controller"],
+        &[
+            "RegistrationGranted",
+            "RegistrationRenewed",
+            "ExpiryChanged",
+        ],
+    );
+    let mut wrapper_admission = admission(66, "name_wrapper");
+    wrapper_admission.address = WRAPPER.to_owned();
+    let mut controller_admission = admission(67, "wrapped_registrar_controller");
+    controller_admission.address = CONTROLLER.to_owned();
+    let block = |number| RawBlockInput {
+        chain_id: CHAIN.to_owned(),
+        block_hash: format!("block-{number}"),
+        block_number: number,
+        block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(number),
+        canonicality_state: "canonical".to_owned(),
+    };
+    let (first, session) = interpret_test_batch_incremental(
+        BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![wrapper_manifest.clone(), registrar_manifest.clone()],
+            discovery_rules: Vec::new(),
+            admissions: vec![wrapper_admission.clone(), controller_admission.clone()],
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: vec![raw_at(
+                NameWrapped {
+                    node,
+                    name: b"\x07renewed\x03eth\0".to_vec().into(),
+                    owner: CONTRACT.parse()?,
+                    fuses: 196_608,
+                    expiry: 7_776_100,
+                }
+                .encode_log_data(),
+                1,
+                0,
+                WRAPPER,
+            )],
+        },
+        None,
+    )?;
+    let wrapper_resource = first
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "PermissionScopeChanged")
+        .and_then(|event| event.resource_id)
+        .expect("wrapper resource");
+    let (output, session) = interpret_test_batch_incremental(
+        BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![wrapper_manifest.clone(), registrar_manifest.clone()],
+            discovery_rules: Vec::new(),
+            admissions: vec![wrapper_admission.clone(), controller_admission.clone()],
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: vec![raw_at(
+                wrapped_controller::NameRenewed {
+                    name: "renewed".to_owned(),
+                    label,
+                    cost: U256::from(1),
+                    expires: U256::from(200),
+                }
+                .encode_log_data(),
+                2,
+                0,
+                CONTROLLER,
+            )],
+        },
+        Some(session),
+    )?;
+
+    let expiry = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "ExpiryChanged" && event.resource_id == Some(wrapper_resource)
+        })
+        .expect("wrapper-linked renewal expiry");
+    assert_eq!(expiry.source_family, "ens_v1_registrar_l1");
+    assert_eq!(expiry.after_state["source_event"], "NameRenewed");
+    assert_eq!(expiry.after_state["authority_kind"], "wrapper");
+    assert_eq!(expiry.before_state["expiry"], 7_776_100);
+    assert_eq!(expiry.after_state["expiry"], 7_776_200);
+
+    let prior_events = seam::fold_prior_events(Vec::new(), &first.normalized_events, &[block(1)])?;
+    let prior_events =
+        seam::fold_prior_events(prior_events, &output.normalized_events, &[block(2)])?;
+    let later_input = BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![wrapper_manifest, registrar_manifest],
+        discovery_rules: Vec::new(),
+        admissions: vec![wrapper_admission, controller_admission],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            raw_at(
+                ExpiryExtended {
+                    node,
+                    expiry: 7_776_300,
+                }
+                .encode_log_data(),
+                3,
+                0,
+                WRAPPER,
+            ),
+            raw_at(
+                FusesSet {
+                    node,
+                    fuses: 196_609,
+                }
+                .encode_log_data(),
+                3,
+                1,
+                WRAPPER,
+            ),
+        ],
+    };
+    let mut compacted_input = later_input.clone();
+    compacted_input.prior_events = prior_events;
+    let compacted = interpret_test_batch(compacted_input)?;
+    let (later, _) = interpret_test_batch_incremental(later_input, Some(session))?;
+    assert_eq!(later, compacted);
+    let later_expiry = later
+        .normalized_events
+        .iter()
+        .find(|event| event.after_state["source_event"] == "ExpiryExtended")
+        .expect("later wrapper expiry");
+    let later_fuses = later
+        .normalized_events
+        .iter()
+        .find(|event| event.after_state["source_event"] == "FusesSet")
+        .expect("later wrapper fuses");
+    assert_eq!(later_expiry.before_state["expiry"], 7_776_200);
+    assert_eq!(later_fuses.before_state["fuses"], 196_608);
+    assert_eq!(later_fuses.before_state["expiry"], 7_776_300);
     Ok(())
 }
 

@@ -157,6 +157,7 @@ mod wrapped_controller_calls {
             bool reverseRecord,
             uint16 ownerControlledFuses
         ) external payable;
+        function renew(string name, uint256 duration) external payable;
         function rentPrice(string name, uint256 duration) external view returns (Price price);
     }
 }
@@ -200,6 +201,7 @@ mod wrapper_calls {
     sol! {
         function wrap(bytes name, address wrappedOwner, address resolver) external;
         function wrapETH2LD(string label, address wrappedOwner, uint16 ownerControlledFuses, address resolver) external returns (uint64 expiry);
+        function unwrap(bytes32 parentNode, bytes32 labelhash, address controller) external;
         function unwrapETH2LD(bytes32 labelhash, address registrant, address controller) external;
         function setFuses(bytes32 node, uint16 ownerControlledFuses) external returns (uint32 oldFuses);
         function setChildFuses(bytes32 parentNode, bytes32 labelhash, uint32 fuses, uint64 expiry) external;
@@ -1349,6 +1351,29 @@ pub async fn unwrap_eth_2ld(
     .await
 }
 
+pub async fn unwrap_registry_name(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    parent: &str,
+    label: &str,
+    controller: Address,
+) -> Result<String> {
+    let receipt = send_checked_receipt(
+        rpc,
+        from,
+        d.name_wrapper.address,
+        &wrapper_calls::unwrapCall {
+            parentNode: namehash(parent),
+            labelhash: labelhash(label),
+            controller,
+        }
+        .abi_encode(),
+    )
+    .await?;
+    Ok(receipt.tx_hash)
+}
+
 pub async fn set_wrapper_fuses(
     rpc: &RpcClient,
     d: &EnsV1Deployment,
@@ -1854,4 +1879,39 @@ pub async fn register_wrapped_eth_name(
         register_block: register_receipt.block_number,
         register_tx_hash: register_receipt.tx_hash,
     })
+}
+
+pub async fn renew_wrapped_eth_name(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    label: &str,
+    duration_secs: u64,
+) -> Result<String> {
+    let price_raw = rpc
+        .eth_call(
+            d.wrapped_controller.address,
+            &wrapped_controller_calls::rentPriceCall {
+                name: label.to_owned(),
+                duration: U256::from(duration_secs),
+            }
+            .abi_encode(),
+        )
+        .await?;
+    let price = wrapped_controller_calls::rentPriceCall::abi_decode_returns(&price_raw)
+        .context("wrapped renewal rentPrice decode")?;
+    let receipt = rpc
+        .send_checked(
+            from,
+            d.wrapped_controller.address,
+            &wrapped_controller_calls::renewCall {
+                name: label.to_owned(),
+                duration: U256::from(duration_secs),
+            }
+            .abi_encode(),
+            price.base,
+            &format!("wrapped renewal of {label}.eth"),
+        )
+        .await?;
+    Ok(receipt.tx_hash)
 }

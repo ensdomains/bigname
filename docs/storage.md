@@ -536,6 +536,78 @@ Current projection timestamp fields are representable Unix-second values or `nul
 
 Projection tables may be truncated and rebuilt from canonical facts plus normalized events.
 
+ENSv1 `PermissionScopeChanged` normalized events retain the effective
+NameWrapper fuse bitmap and the adapter-derived `wrapper_state`
+classification. Unwrapping clears the owner but retains the fuse and expiry
+data, and a later mint preserves the larger expiry plus every unexpired
+parent-controlled fuse; `NameWrapped` nevertheless emits the fuse and expiry
+arguments supplied to the wrapping call rather than the effective stored
+values.
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L235 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L239 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L242 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L246 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L276 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L901 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L902 @ ens_v1@91c966f)
+The adapter therefore restores retained wrapper data across batches and uses
+the effective values for a rewrap. The schema-v2 project phase, not the
+adapter, writes the effective value into
+`name_current.declared_summary` and applies the wrapper expiry at its target
+block timestamp. The same target-time calculation gates wrapper-holder rows in
+`permissions_current` and controller membership in `address_names_current`.
+This changes no raw fact or identity row and gives the API no raw-fact read
+path. Fuse bits are owner-controlled in the low 16 bits and parent-controlled
+in the high 16 bits; `PARENT_CANNOT_CONTROL` is bit 16.
+(upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L10 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L17 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L18 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L22 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/README.md:L131 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/README.md:L133 @ ens_v1@91c966f)
+The expiry used for fuse-effect comparisons retains the full valid `uint64`
+numeric domain independently of the narrower public timestamp representation.
+In particular, upstream `MAX_EXPIRY` remains a valid active boundary at
+representable target timestamps while `expires_at` can remain `null`.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L57 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L848 @ ens_v1@91c966f)
+`IS_DOT_ETH` is bit 17. For those names the project phase also treats the
+stored wrapper expiry minus the wrapper's 90-day grace period as the strict
+owner-modification and transfer boundary, without ending the wrapper lifecycle
+state or token-holder relation until wrapper expiry.
+(upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L19 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L48 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L218 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L221 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L820 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L825 @ ens_v1@91c966f)
+Because those transitions depend on time rather than a new log, incremental
+project scope compares the prior and target canonical timestamps and selects
+each wrapper resource whose grace-start or wrapper-expiry boundary falls in
+that interval. A quiet block can therefore update all three affected current
+projection families without fabricating a normalized event.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L820 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L825 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L848 @ ens_v1@91c966f)
+A fresh redo has no prior project marker, so its scope conservatively includes
+every canonical target-bounded wrapper resource with fuse state. The wider redo
+scope repairs the same time-derived rows after a replacement fork changes a
+quiet block timestamp across grace start or expiry.
+
+For a wrapped `.eth` name, a `NameRenewed` event from the admitted
+`wrapped_registrar_controller` also produces a wrapper-linked `ExpiryChanged`
+event. Its wrapper expiry is the event's registrar expiry plus the 90-day grace
+period, while its source family remains the registrar family that emitted the
+log. NameWrapper renewal computes that boundary and updates stored wrapper data
+without emitting `ExpiryExtended`.
+(upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L333 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L337 @ ens_v1@91c966f)
+
 `permissions_current_resource_summary` is the projection-owned per-resource companion to `permissions_current`. It persists permission-authority support classification, an optional ENSv2 registry-root anchor, and chain-position/canonicality evidence from the authority inputs even for resources with zero holder rows. Its JSONB coverage decoder accepts the documented legacy `full`/`authoritative`, `partial`/`best_effort`, and `unsupported`/`not_applicable` combinations and the schema-v2 derivation-only `projected`/`not_asserted` pair. The derivation-only pair does not assert permission support; until a reader consumes schema-v2's separate `support_status` and `unsupported_reason`, public permission consumers fail closed to partial/best-effort support. Unknown vocabulary and inconsistent status/exhaustiveness/reason combinations are storage read errors rather than implicit public upgrades or downgrades. Keyed rebuild replaces one resource's holder rows and summary in one transaction. Full rebuild target discovery additionally selects canonical zero-event resources with positive source-family/manifest-version identity evidence, then stages and publishes both families in one transaction. For a zero-event current resource, the worker may derive summary evidence from either the normal resource provenance keys (`source_family`, `manifest_version`) or the ENSv1 binding-authority keys (`binding_source_family`, `binding_manifest_version`); these are identity evidence for the projection rebuild, not an API fallback. A storage trigger records insertion, deletion, key changes, anchor/provenance changes, and canonicality changes in `projection_permissions_resource_input_revisions`, so durable full-rebuild staging does not depend on a normalized event existing for the resource. Deleting an identity resource cascades its summary. Public role and permission reads use this companion for support metadata and fail closed when it is absent; they do not recover that metadata from interpret-phase `resources` provenance.
 
 `permissions_current_publication` has one row keyed by `projection='permissions_current'`, with positive `publication_version`, positive monotonic `data_revision`, and `published_at`. Version 2 denotes the holder-row plus typed per-resource-summary publication contract. The full staged rebuild upserts the compatible version and advances the revision in the same transaction that replaces both projection families. A keyed resource rebuild advances the revision in its row-and-summary transaction only when the existing publication version is already exact-current; it neither creates the row nor upgrades an old version. Public permission-backed reads require the exact current version, capture its revision before reading, and verify the same revision before returning. Missing or incompatible versions and an interleaved revision change return `409 stale` before an assembled response is exposed. Readers do not use the revision or `published_at` as a freshness signal, and this artifact does not replace operational replay markers, apply cursors, invalidation draining, or deployment coordination. The retired Base normalized-event correction was the only direct permission-projection deletion path outside these publishers. Its command and storage helpers are deleted; current production writes use the keyed or full publishers. Exported row/summary upsert and delete helpers are low-level storage/test construction boundaries, not public-generation publishers; production worker publication uses the keyed or full transaction.

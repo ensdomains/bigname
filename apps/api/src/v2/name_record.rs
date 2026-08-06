@@ -18,7 +18,7 @@ use super::{
     Envelope, QueryParamAllowlist, RequestSource, SnapshotReadResource, StrictQueryParams, V2Error,
     V2Result, api_error_to_v2_for_resource, resolve_v2_snapshot_for, snapshot_meta,
     v2_exact_name_snapshot_scope_with_resolution_auxiliary,
-    vocab::{RegistrationStatus, Resolver, Source, Status},
+    vocab::{RegistrationStatus, Resolver, Source, Status, WrapperState},
 };
 
 #[path = "name_record/inventory.rs"]
@@ -65,6 +65,8 @@ pub(crate) struct NameRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at: Option<String>,
     pub(crate) registration_status: RegistrationStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) wrapper_state: Option<WrapperState>,
     pub(crate) name: String,
     pub(crate) display_name: String,
     pub(crate) namespace: String,
@@ -214,6 +216,7 @@ pub(crate) fn build_name_record(
         created_at: registration.created_at,
         expires_at: registration.expires_at,
         registration_status: registration.registration_status,
+        wrapper_state: wrapper_state(&row.declared_summary),
         name: row.normalized_name.clone(),
         display_name: row.canonical_display_name.clone(),
         namespace: row.namespace.clone(),
@@ -238,6 +241,13 @@ pub(crate) fn build_name_record(
         failure_reason: None,
         unsupported_fields,
     }
+}
+
+pub(crate) fn wrapper_state(declared_summary: &Value) -> Option<WrapperState> {
+    declared_summary
+        .get("wrapper_state")
+        .and_then(Value::as_str)
+        .and_then(WrapperState::from_wire)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

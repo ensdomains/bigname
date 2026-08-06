@@ -1,3 +1,5 @@
+//! The raw-fuse permission logic in `apps/worker/src/permissions/project.rs` is legacy and intentionally unchanged because #314 retires the worker tree.
+
 use alloy_primitives::{Address, U256};
 use alloy_sol_types::sol;
 use anyhow::bail;
@@ -7,7 +9,7 @@ use super::super::{
     EventDraft, Interpreted, NameDraft, ResourceDraft, ShadowNameDraft, ensure_declared,
     permissions::{v1_grant_states, v1_revoke_states},
 };
-use super::registry::append_authority_transition;
+use super::registry::{append_authority_transition, authority_kind};
 use super::support::{events_linked, single_event};
 use crate::evm_abi::{address_hex, decode_event_log, hex_string, u256_word_hex};
 use crate::schema_v2::{
@@ -26,6 +28,19 @@ sol! {
     event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values);
 }
 
+const CANNOT_UNWRAP: u32 = 1;
+const PARENT_CANNOT_CONTROL: u32 = 1 << 16;
+
+fn wrapper_state(fuses: u32) -> &'static str {
+    if fuses & CANNOT_UNWRAP != 0 {
+        "locked"
+    } else if fuses & PARENT_CANNOT_CONTROL != 0 {
+        "emancipated"
+    } else {
+        "wrapped"
+    }
+}
+
 pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
@@ -42,17 +57,25 @@ pub(super) fn interpret(
             )?;
             ensure_declared(selected, &["ExpiryChanged"])?;
             let node = hex_string(event.node);
-            let linked = state.update_v1_expiry(
-                &selected.source.namespace,
-                &node,
-                i64::try_from(event.expiry).unwrap_or(i64::MAX),
-            );
-            Ok(single_event(
+            let transition =
+                state.update_v1_wrapper_expiry(&selected.source.namespace, &node, event.expiry);
+            let explicit_before = transition.as_ref().map(|(expiry, linked)| {
+                json!({
+                    "authority_key":linked.authority_key,
+                    "authority_kind":authority_kind(linked),
+                    "node":node,
+                    "expiry":expiry,
+                })
+            });
+            let linked = transition.map(|(_, linked)| linked);
+            let mut output = single_event(
                 "ExpiryChanged",
                 linked.as_ref().map(|state| state.logical_name_id.clone()),
                 linked.as_ref().map(|state| state.resource_id),
                 json!({"source_event":"ExpiryExtended","node":node,"expiry":event.expiry}),
-            ))
+            );
+            output.events[0].explicit_before = explicit_before;
+            Ok(output)
         }
         "FusesSet" => {
             let event =
@@ -60,12 +83,33 @@ pub(super) fn interpret(
             ensure_declared(selected, &["PermissionScopeChanged"])?;
             let node = hex_string(event.node);
             let linked = state.v1_name(&selected.source.namespace, &node);
-            Ok(single_event(
+            let transition =
+                state.set_v1_wrapper_fuses(&selected.source.namespace, &node, event.fuses);
+            let previous = transition.map(|(previous, _)| previous);
+            let expiry = transition.map(|(_, data)| data.expiry);
+            let mut output = single_event(
                 "PermissionScopeChanged",
                 linked.as_ref().map(|state| state.logical_name_id.clone()),
                 linked.as_ref().map(|state| state.resource_id),
-                json!({"source_event":"FusesSet","node":node,"fuses":event.fuses}),
-            ))
+                json!({
+                    "source_event":"FusesSet",
+                    "node":node,
+                    "fuses":event.fuses,
+                    "wrapper_state":wrapper_state(event.fuses),
+                    "expiry":expiry,
+                }),
+            );
+            output.events[0].explicit_before = previous.map(|data| {
+                json!({
+                    "authority_key":linked.as_ref().and_then(|state| state.authority_key.clone()),
+                    "authority_kind":linked.as_ref().map(authority_kind),
+                    "node":node,
+                    "fuses":data.fuses,
+                    "wrapper_state":wrapper_state(data.fuses),
+                    "expiry":data.expiry,
+                })
+            });
+            Ok(output)
         }
         "TransferSingle" => transfer_single(selected, raw, state),
         "TransferBatch" => transfer_batch(selected, raw, state),
@@ -262,6 +306,13 @@ fn name_wrapped(
     let token_lineage_id = stable_uuid(&format!("token-lineage:{authority_key}"));
     let logical_name_id = format!("{}:{raw_namehash}", selected.source.namespace);
     let previous = state.v1_name(&selected.source.namespace, &raw_namehash);
+    let wrapper_data = state.wrap_v1_name(
+        &selected.source.namespace,
+        &raw_namehash,
+        event.fuses,
+        event.expiry,
+        raw.block_timestamp.unix_timestamp(),
+    );
     state.observe_v1_name(
         &selected.source.namespace,
         &raw_namehash,
@@ -270,7 +321,7 @@ fn name_wrapped(
         resource_id,
         Some(token_lineage_id),
         selected.source.source_family.clone(),
-        Some(i64::try_from(event.expiry).unwrap_or(i64::MAX)),
+        Some(i64::try_from(wrapper_data.expiry).unwrap_or(i64::MAX)),
         Some(address_hex(event.owner)),
         Some(authority_key.clone()),
     );
@@ -280,7 +331,7 @@ fn name_wrapped(
         "PermissionScopeChanged",
     ];
     ensure_declared(selected, &["TokenControlTransferred"])?;
-    let after = json!({"source_event":"NameWrapped","node":raw_namehash,"owner":address_hex(event.owner),"fuses":event.fuses,"expiry":event.expiry,"token_lineage_id":token_lineage_id.to_string(),"authority_kind":"wrapper","authority_key":authority_key.clone(),"surface_known":surface_known});
+    let after = json!({"source_event":"NameWrapped","node":raw_namehash,"owner":address_hex(event.owner),"fuses":wrapper_data.fuses,"wrapper_state":wrapper_state(wrapper_data.fuses),"expiry":wrapper_data.expiry,"token_lineage_id":token_lineage_id.to_string(),"authority_kind":"wrapper","authority_key":authority_key.clone(),"surface_known":surface_known});
     let mut output = events_linked(kinds, logical_name_id, resource_id, after.clone());
     if let Some(transfer) = output
         .events

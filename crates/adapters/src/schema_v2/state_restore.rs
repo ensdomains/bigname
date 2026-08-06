@@ -253,14 +253,38 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
             .map(str::to_owned);
         state.set_v1_resolver(&event.namespace, namehash, resolver);
     }
+    if event.source_family == "ens_v1_wrapper_l1"
+        && event.event_kind == "PermissionScopeChanged"
+        && let (Some(namehash), Some(fuses), Some(expiry)) = (
+            event.after_state.get("node").and_then(Value::as_str),
+            event.after_state.get("fuses").and_then(parse_u32),
+            event.after_state.get("expiry").and_then(parse_u64),
+        )
+    {
+        state.restore_v1_wrapper_data(&event.namespace, namehash, fuses, expiry);
+    }
     if source_event == Some("ExpiryExtended")
         && event.event_kind == "ExpiryChanged"
         && let (Some(namehash), Some(expiry)) = (
             event.after_state.get("node").and_then(Value::as_str),
-            event.after_state.get("expiry").and_then(parse_i64),
+            event.after_state.get("expiry").and_then(parse_u64),
         )
     {
-        state.update_v1_expiry(&event.namespace, namehash, expiry);
+        state.update_v1_wrapper_expiry(&event.namespace, namehash, expiry);
+    }
+    if event.source_family == "ens_v1_registrar_l1"
+        && event.event_kind == "ExpiryChanged"
+        && event
+            .after_state
+            .get("authority_kind")
+            .and_then(Value::as_str)
+            == Some("wrapper")
+        && let (Some(namehash), Some(expiry)) = (
+            event.after_state.get("node").and_then(Value::as_str),
+            event.after_state.get("expiry").and_then(parse_u64),
+        )
+    {
+        state.update_v1_wrapper_expiry(&event.namespace, namehash, expiry);
     }
     if event.event_kind == "AuthorityTransferred"
         && matches!(source_event, Some("NewOwner" | "Transfer"))
@@ -565,4 +589,8 @@ fn parse_u64(value: &Value) -> Option<u64> {
         .as_u64()
         .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
         .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
+fn parse_u32(value: &Value) -> Option<u32> {
+    parse_u64(value).and_then(|value| u32::try_from(value).ok())
 }

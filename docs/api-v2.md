@@ -47,6 +47,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `registered_at` | current registration start, RFC 3339 | `registration_date` |
 | `created_at` | first observation of the name, RFC 3339 | `created_at` (now defined and distinguished from `registered_at`) |
 | `registration_status` | registration/control lifecycle label: `active`, `wrapped`, `registered`, `released`, or `unregistered` | `ControlVector.status`, role-summary `status` |
+| `wrapper_state` | current ENSv1 NameWrapper lifecycle value: [`wrapped`](glossary.md#wrapped-namewrapper-state), [`emancipated`](glossary.md#emancipated-namewrapper-state), or [`locked`](glossary.md#locked-namewrapper-state); omitted when the current name is not in one of those states (upstream: .refs/ens_v1/contracts/wrapper/README.md:L32 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/README.md:L34 @ ens_v1@91c966f) | raw NameWrapper fuse bitmap |
 | `primary_name` | primary name selected or claimed for an address/coin tuple | `claimed_primary_name`, `verified_primary_name` when surfaced as the selected name |
 | `primary_address` | primary/default address value for a name | `primary_address` (unchanged) |
 | `is_primary` | whether an address-name row is the selected primary answer for that address/coin tuple | `is_primary` (unchanged) |

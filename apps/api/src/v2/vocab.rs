@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{V2Error, V2Result};
 
+#[path = "vocab/wrapper_state.rs"]
+mod wrapper_state;
+pub(crate) use wrapper_state::WrapperState;
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Status {
@@ -531,6 +535,13 @@ mod tests {
         assert_wire(RegistrationStatus::Registered, "registered");
         assert_wire(RegistrationStatus::Released, "released");
         assert_wire(RegistrationStatus::Unregistered, "unregistered");
+    }
+
+    #[test]
+    fn wrapper_state_variants_use_exact_wire_spelling() {
+        assert_wire(WrapperState::Wrapped, "wrapped");
+        assert_wire(WrapperState::Emancipated, "emancipated");
+        assert_wire(WrapperState::Locked, "locked");
     }
 
     #[test]

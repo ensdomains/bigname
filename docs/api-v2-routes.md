@@ -188,8 +188,37 @@ Field ownership:
   The registration summary is not nested; it is represented by
   `registration_id`, `token_id`, `owner`, `manager`, `registrant`,
   `registered_at`, `created_at`, `expires_at`, and `registration_status` on
-  the same object when backed. `manager` is omitted when no forward-read source
-  can derive it; it is not emitted as a permanent null placeholder. The
+  the same object when backed. An ENSv1 wrapper-backed row also carries
+  `wrapper_state` with the current [`wrapped`](glossary.md#wrapped-namewrapper-state),
+  [`emancipated`](glossary.md#emancipated-namewrapper-state), or
+  [`locked`](glossary.md#locked-namewrapper-state) lifecycle value. The field
+  follows the upstream NameWrapper lifecycle names.
+  (upstream: .refs/ens_v1/contracts/wrapper/README.md:L32 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/README.md:L34 @ ens_v1@91c966f)
+  The field
+  is omitted after an emancipated or locked wrapper position expires; a plain
+  wrapped position remains `wrapped` because expiry clears its fuses without
+  clearing its owner. (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L848 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L849 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L852 @ ens_v1@91c966f)
+  Fuse-effect gating accepts the full upstream `uint64` expiry domain. A valid
+  `MAX_EXPIRY` therefore keeps the lifecycle value active at representable
+  served block timestamps even when `expires_at` is omitted because that public
+  timestamp cannot be represented.
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L57 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L848 @ ens_v1@91c966f)
+  A `.eth` second-level name keeps its lifecycle value during the registrar
+  grace period, even though owner modification and transfer powers stop at the
+  earlier grace boundary; `wrapper_state` is not itself a complete permission
+  summary. (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L48 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L218 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L221 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L820 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L825 @ ens_v1@91c966f)
+  `manager` is omitted when no forward-read source can derive it; it is not
+  emitted as a permanent null placeholder. The
   name-profile portion uses `name`, `display_name`, `namespace`, `namehash`, `resolver`,
   `addresses`, `text_records`, `content_hash`,
   `primary_name`, `primary_address`, `chain_id`, `network`, `status`, and
@@ -200,7 +229,7 @@ Field ownership:
   verified path as `/v2/names/{name}/records`; indexed resolver-record values
   are not substituted into those fields. The registration and identity summary
   fields (`registration_id`, `token_id`, `owner`, `manager`, `registrant`, dates,
-  `registration_status`, `name`, `display_name`, `namespace`, `namehash`,
+  `registration_status`, `wrapper_state`, `name`, `display_name`, `namespace`, `namehash`,
   `resolver`, `primary_name`, `chain_id`, and `network`) remain indexed
   projection values because they are not resolver records. Verified responses
   include `meta.as_of`/`meta.as_of_token` for the positions used by the fresh
