@@ -347,7 +347,8 @@ fn admitted<'a>(
 /// production does not run. `docs/manifests.md` allows at most one active version per namespace,
 /// family, and chain *within one deployment-profile root*, and allows a family to have none; this
 /// lane loads two roots and is stricter — a family it pins with no active version, or with more than
-/// one, leaves the pin unjustifiable, so both fail here.
+/// one, leaves the pin unjustifiable, so both fail here. The pinned direction looks across epochs so
+/// that a rollout which retires this world's epoch reports where it went.
 pub fn assert_pins_are_current(world: &World, checked_in: &[LoadedManifest]) -> Result<()> {
     let mut active: BTreeMap<&str, Vec<&LoadedManifest>> = BTreeMap::new();
     for loaded in checked_in {
@@ -389,11 +390,19 @@ pub fn assert_pins_are_current(world: &World, checked_in: &[LoadedManifest]) -> 
             }
         }
     }
-    for family in active.keys() {
-        drift.push(format!(
-            "{family} is active but no scenario pool generates it; give it a source slot or record \
-             why this world leaves it out"
-        ));
+    // Only an event-bearing family in this world's own deployment epoch is a gap. A manifest that
+    // declares no events — an execution-owner entry, say — is not something logs can reach, and a
+    // family rolled out under another epoch belongs to a world that models that deployment.
+    for (family, versions) in &active {
+        if versions.iter().any(|loaded| {
+            loaded.manifest.deployment_epoch == world.deployment_epoch
+                && !loaded.manifest.abi.events.is_empty()
+        }) {
+            drift.push(format!(
+                "{family} is active and declares events, but no scenario pool generates it; give it \
+                 a source slot, or exclude it here deliberately"
+            ));
+        }
     }
     if !drift.is_empty() {
         bail!(

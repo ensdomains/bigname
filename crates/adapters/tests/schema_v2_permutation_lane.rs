@@ -7,18 +7,20 @@
 //! The catalog's D6 enumerates migration routes, which have no interpreter-level counterpart, and
 //! several of its D7 perturbations are unreachable on a migrated node; the axes here are the
 //! observable projection of that space, not a section-for-section copy. Wrapper fuse words are
-//! emitted so the event shape stays realistic, but no invariant here reads fuse-derived state.
+//! emitted so the event shape stays realistic, and no invariant here reads a fuse value — though
+//! the coverage floor does require the kind the wrapper derives from a fuse-bearing wrap.
 //!
 //! Knobs:
 //! - `BIGNAME_PERMUTATION_CASES` — permutations per protocol world. Default 24 (48 sequences per
 //!   run) keeps the lane inside the CI budget; raise it for deeper local sweeps.
 //! - `BIGNAME_PERMUTATION_SEED` — base seed, decimal. Default 1846370029.
 //!
-//! Changing either knob turns off the assertions about what the corpus reaches, because those are
+//! The knobs drop some of the assertions about what the corpus reaches, because those are
 //! properties of the default corpus rather than of any seed: a reduced or reseeded run drops the
 //! interpretation-coverage floor, and any run that is not exactly the default corpus also drops the
-//! exact artifact and detach counts, which a deeper sweep would legitimately exceed. The invariants
-//! themselves — the ones a failure would report — run on every sequence whatever the knobs say.
+//! exact artifact and detach counts, which a deeper sweep would legitimately exceed. A deeper sweep
+//! at the default seed keeps the coverage floor, which only grows. The invariants themselves — the
+//! ones a failure would report — run on every sequence whatever the knobs say.
 //!
 //! A failure reports `world=… seed=…`. Replay it with that seed and
 //! `BIGNAME_PERMUTATION_CASES=1`, against the same checked-in manifests — a scenario embeds the
@@ -414,9 +416,10 @@ const EXPECTED_ARTIFACTS: &[(&str, usize)] = &[
 
 /// The first thing to rule out when a pinned count moves: these are counts over the sequences one
 /// seed draws, so they are not evidence about the interpreter until the corpus is held fixed.
-const DRAWN_CORPUS_CAVEAT: &str = "If the scenario pools, the axes, the seeded draw order, or a \
-                                   checked-in manifest changed, the corpus changed and every \
-                                   pinned count here moves with it — re-pin rather than hunt.";
+const DRAWN_CORPUS_CAVEAT: &str = "If the scenario pools, the axes, the seeded draw order, the \
+                                   batch splitting, or a checked-in manifest changed, then what was \
+                                   measured changed and these counts move with it — re-pin rather \
+                                   than hunt.";
 
 /// Terminal-boundary subregistry detaches the default corpus reaches. `SubregistryChanged` on its
 /// own is satisfiable by attachment alone, so without this the detach path could go dark while the
