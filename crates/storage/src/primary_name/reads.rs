@@ -31,8 +31,6 @@ pub async fn load_primary_name_current_snapshot(
             coin_type,
             claim_status,
             raw_claim_name,
-            CASE WHEN claim_name_is_normalized THEN raw_claim_name ELSE NULL END
-                AS normalized_claim_name,
             claim_name_is_normalized,
             claim_provenance
         FROM bigname_phase.primary_names_current pnc

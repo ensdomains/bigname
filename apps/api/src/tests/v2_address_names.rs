@@ -143,6 +143,55 @@ async fn v2_get_address_names_filters_relation_sets_and_any() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_get_address_names_marks_primary_for_a_successful_non_normalized_claim() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    // The projection stores the raw claim spelling and a false is-normalized marker for a valid
+    // claim whose bytes were not already normalized. It is still a successful claim for alpha.eth.
+    upsert_primary_name_current_snapshots(
+        &database.pool,
+        &[PrimaryNameCurrentSnapshot {
+            row: PrimaryNameCurrentRow {
+                address: V2_ADDRESS.to_owned(),
+                namespace: "ens".to_owned(),
+                coin_type: "60".to_owned(),
+                claim_status: PrimaryNameClaimStatus::Success,
+                raw_claim_name: Some("Alpha.eth".to_owned()),
+                claim_provenance: json!({
+                    "source_family": "ens_v1_reverse_l1",
+                    "contract_role": "reverse_registrar",
+                }),
+            },
+            normalized_claim_name: None,
+            claim_name_is_normalized: false,
+        }],
+    )
+    .await?;
+
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v2/addresses/{V2_ADDRESS}/names"),
+    )
+    .await?;
+    let rows = payload["data"]
+        .as_array()
+        .expect("address names data must be an array");
+    let alpha = rows
+        .iter()
+        .find(|row| row["name"] == json!("alpha.eth"))
+        .expect("alpha.eth row must be present");
+    assert_eq!(alpha["is_primary"], json!(true));
+    assert!(
+        rows.iter()
+            .filter(|row| row["name"] != json!("alpha.eth"))
+            .all(|row| row["is_primary"] == json!(false))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_address_names_non_success_primary_claim_does_not_mark_primary() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
