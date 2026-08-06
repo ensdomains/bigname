@@ -21,6 +21,7 @@ tracing.workspace = true
 uuid.workspace = true
 
 bigname-domain.workspace = true
+bigname-content-hash.workspace = true
 
 [dev-dependencies]
 bigname-test-support.workspace = true

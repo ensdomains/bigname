@@ -314,10 +314,10 @@ async fn v2_get_permissions_name_filter_uses_current_registration_without_snapsh
 }
 
 #[tokio::test]
-async fn v2_get_permissions_name_filter_uses_current_sepolia_anchor_on_mixed_checkpoints()
+async fn v2_get_permissions_name_filter_uses_current_sepolia_anchor_on_mixed_phase_heads()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_mixed_checkpoint_names(&database).await?;
+    seed_v2_mixed_phase_head_names(&database).await?;
     let resource_id = Uuid::from_u128(0x7e20);
     bigname_storage::upsert_permissions_current_rows(
         &database.pool,

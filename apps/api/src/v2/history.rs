@@ -291,7 +291,7 @@ pub(crate) async fn v2_exact_name_snapshot_scope_with_resolution_auxiliary(
         .unwrap_or_default();
 
     exact_name_snapshot_scope(
-        &state.pool,
+        &state.lookup_pool,
         namespace,
         selector,
         include_resolution_auxiliary,

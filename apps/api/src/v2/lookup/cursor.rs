@@ -4,6 +4,8 @@ use bigname_storage::{ReverseIdentityCursor, ReverseIdentityRecordRow};
 
 use crate::v2::{CursorPayload, RelationSet, V2Error, V2Result};
 
+use super::parse::ParsedAddressLookup;
+
 const SORT: &str = "primary_relation_name_namespace_namehash_asc";
 const NONE_FILTER_VALUE: &str = "any";
 
@@ -22,6 +24,60 @@ pub(super) struct LookupReverseCursorBinding<'a> {
     pub(super) address: &'a str,
     pub(super) coin_type: u64,
     pub(super) relation: Option<&'a RelationSet>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) struct ReverseStorageKey {
+    pub(super) address: String,
+    pub(super) coin_type: u64,
+    pub(super) roles: bigname_storage::ReverseIdentityRoles,
+    pub(super) page_size: u64,
+    pub(super) cursor: Option<ReverseCursorKey>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) struct ReverseCursorKey {
+    pub(super) is_primary: bool,
+    pub(super) role_rank: i16,
+    pub(super) normalized_name: String,
+    pub(super) namespace: String,
+    pub(super) namehash: String,
+}
+
+impl From<&ParsedAddressLookup> for ReverseStorageKey {
+    fn from(value: &ParsedAddressLookup) -> Self {
+        Self {
+            address: value.address.clone(),
+            coin_type: value.coin_type,
+            roles: value.roles,
+            page_size: value.page_size,
+            cursor: value.page_cursor.clone().map(ReverseCursorKey::from),
+        }
+    }
+}
+
+impl From<ReverseIdentityCursor> for ReverseCursorKey {
+    fn from(value: ReverseIdentityCursor) -> Self {
+        Self {
+            is_primary: value.is_primary,
+            role_rank: value.role_rank,
+            normalized_name: value.normalized_name,
+            namespace: value.namespace,
+            namehash: value.namehash,
+        }
+    }
+}
+
+impl From<ReverseCursorKey> for ReverseIdentityCursor {
+    fn from(value: ReverseCursorKey) -> Self {
+        Self {
+            is_primary: value.is_primary,
+            role_rank: value.role_rank,
+            normalized_name: value.normalized_name,
+            namespace: value.namespace,
+            namehash: value.namehash,
+        }
+    }
 }
 
 pub(super) fn lookup_reverse_cursor_payload(
@@ -238,6 +294,8 @@ mod tests {
                 relations: Vec::new(),
             },
             relation_facets: vec![bigname_storage::AddressNameRelation::TokenHolder],
+            relation_chain_positions: Vec::new(),
+            primary_chain_positions: None,
             primary_name: None,
             requested_coin_type: "60".to_owned(),
         }

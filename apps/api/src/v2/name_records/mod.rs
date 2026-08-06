@@ -304,7 +304,7 @@ async fn load_name_records_snapshot_state(
     )
     .await?;
     let selected_snapshot = resolve_v2_snapshot_for(
-        &state.pool,
+        &state.lookup_pool,
         &scope,
         at,
         finality,

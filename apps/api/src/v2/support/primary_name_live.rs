@@ -1,5 +1,70 @@
 use super::*;
 
+#[cfg(test)]
+pub(crate) mod indexed_read_test_hooks {
+    use std::sync::Arc;
+
+    use bigname_test_support::{
+        ScopedTestHookGuard, ScopedTestHookRegistry, current_test_database,
+    };
+    use tokio::sync::Barrier;
+
+    use super::*;
+
+    #[derive(Clone)]
+    pub(crate) struct IndexedReadHook {
+        reached: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    }
+
+    pub(crate) struct IndexedReadControl {
+        reached: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    }
+
+    impl IndexedReadControl {
+        pub(crate) async fn wait_until_reached(&self) {
+            self.reached.wait().await;
+        }
+
+        pub(crate) async fn resume(&self) {
+            self.resume.wait().await;
+        }
+    }
+
+    static HOOKS: ScopedTestHookRegistry<String, IndexedReadHook> = ScopedTestHookRegistry::new();
+
+    pub(crate) async fn install(
+        pool: &PgPool,
+    ) -> anyhow::Result<(
+        ScopedTestHookGuard<String, IndexedReadHook>,
+        IndexedReadControl,
+    )> {
+        let database = current_test_database(pool).await?;
+        let reached = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let guard = HOOKS.install(
+            database,
+            IndexedReadHook {
+                reached: Arc::clone(&reached),
+                resume: Arc::clone(&resume),
+            },
+        );
+        Ok((guard, IndexedReadControl { reached, resume }))
+    }
+
+    pub(super) async fn run(pool: &PgPool) -> ApiResult<()> {
+        let database = current_test_database(pool)
+            .await
+            .map_err(|_| ApiError::internal_error("failed to run primary-name read test hook"))?;
+        if let Some(hook) = HOOKS.take(&database) {
+            hook.reached.wait().await;
+            hook.resume.wait().await;
+        }
+        Ok(())
+    }
+}
+
 pub(crate) async fn load_v2_primary_name_route_read(
     state: &AppState,
     address: &str,
@@ -11,14 +76,27 @@ pub(crate) async fn load_v2_primary_name_route_read(
         || namespace != bigname_storage::ENS_NAMESPACE
         || canonical_primary_name_coin_type(coin_type)? != "60"
     {
+        let publication = current_primary_name_publication(&state.lookup_pool, namespace).await?;
         let lookup_state =
-            load_primary_name_lookup_state(&state.pool, address, namespace, coin_type).await?;
+            load_primary_name_lookup_state(&state.lookup_pool, address, namespace, coin_type)
+                .await?;
+        #[cfg(test)]
+        indexed_read_test_hooks::run(&state.lookup_pool).await?;
+        require_primary_name_publication_unchanged(
+            &publication,
+            current_primary_name_publication(&state.lookup_pool, namespace).await?,
+        )?;
         return Ok(PrimaryNameRouteRead {
             lookup_state,
-            selected_snapshot: None,
+            selected_snapshot: publication.selected_snapshot,
         });
     }
 
+    let mixed_publication = if mode == ResolutionMode::Both {
+        Some(current_primary_name_publication(&state.lookup_pool, namespace).await?)
+    } else {
+        None
+    };
     let timer = crate::metrics::verified_execution_timer();
     let lookup = bigname_lookup::LookupEngine::new(
         state.lookup_pool.clone(),
@@ -28,9 +106,14 @@ pub(crate) async fn load_v2_primary_name_route_read(
     .await
     .map_err(|error| primary_name_lookup_error(address, error))?;
     let selected_snapshot = primary_name_lookup_snapshot(&lookup.position)?;
+    if mixed_publication.as_ref().is_some_and(|publication| {
+        publication.selected_snapshot.as_ref() != Some(&selected_snapshot)
+    }) {
+        return Err(primary_name_publication_changed());
+    }
     let mut lookup_state = if mode == ResolutionMode::Both {
         load_mixed_primary_name_lookup_state_at_position(
-            &state.pool,
+            &state.lookup_pool,
             address,
             namespace,
             coin_type,
@@ -38,8 +121,16 @@ pub(crate) async fn load_v2_primary_name_route_read(
         )
         .await?
     } else {
-        load_primary_name_lookup_state(&state.pool, address, namespace, coin_type).await?
+        load_primary_name_lookup_state(&state.lookup_pool, address, namespace, coin_type).await?
     };
+    if let Some(publication) = &mixed_publication {
+        #[cfg(test)]
+        indexed_read_test_hooks::run(&state.lookup_pool).await?;
+        require_primary_name_publication_unchanged(
+            publication,
+            current_primary_name_publication(&state.lookup_pool, namespace).await?,
+        )?;
+    }
     apply_primary_name_lookup(&mut lookup_state, namespace, lookup)?;
     let outcome = primary_name_verified_result(namespace, &lookup_state);
     timer.finish(crate::metrics::json_outcome(&outcome));
@@ -50,16 +141,129 @@ pub(crate) async fn load_v2_primary_name_route_read(
     })
 }
 
+#[derive(Eq, PartialEq)]
+struct PrimaryNamePublication {
+    selected_snapshot: Option<SelectedSnapshot>,
+    project_generation: Option<String>,
+}
+
+fn require_primary_name_publication_unchanged(
+    before: &PrimaryNamePublication,
+    after: PrimaryNamePublication,
+) -> ApiResult<()> {
+    if before == &after {
+        Ok(())
+    } else {
+        Err(primary_name_publication_changed())
+    }
+}
+
+fn primary_name_publication_changed() -> ApiError {
+    ApiError {
+        status: StatusCode::CONFLICT,
+        code: "stale",
+        message: "indexed primary-name data changed during the request".to_owned(),
+    }
+}
+
+async fn current_primary_name_publication(
+    phase_pool: &PgPool,
+    namespace: &str,
+) -> ApiResult<PrimaryNamePublication> {
+    let scope = exact_name_snapshot_scope(
+        phase_pool,
+        namespace,
+        ExactNameSnapshotSelector::default(),
+        false,
+    )
+    .await?;
+    let input = SnapshotSelectorInput::new(None, None, SnapshotConsistency::Head)
+        .map_err(snapshot_selection_api_error)?;
+    match resolve_exact_name_snapshot_selection(phase_pool, &scope, &input).await {
+        Ok(selected_snapshot) => {
+            let position = selected_snapshot
+                .chain_positions
+                .as_map()
+                .values()
+                .next()
+                .filter(|_| selected_snapshot.chain_positions.as_map().len() == 1)
+                .ok_or_else(|| {
+                    ApiError::internal_error(
+                        "primary-name snapshot scope did not select exactly one position",
+                    )
+                })?;
+            let project_generation: Option<String> = sqlx::query_scalar(
+                r#"
+                SELECT project.xmin::text
+                FROM chain_heads head
+                JOIN chain_phase_state project
+                  ON project.chain_id = head.chain_id
+                 AND project.phase_name = 'project'
+                 AND project.phase_status = 'completed'
+                 AND project.current_block_number = head.latest_block_number
+                 AND project.current_block_hash = head.latest_block_hash
+                 AND project.input_content_hash = $4
+                WHERE head.chain_id = $1
+                  AND head.latest_block_number = $2
+                  AND head.latest_block_hash = $3
+                "#,
+            )
+            .bind(&position.chain_id)
+            .bind(position.block_number)
+            .bind(&position.block_hash)
+            .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+            .fetch_optional(phase_pool)
+            .await
+            .map_err(|error| {
+                error!(
+                    service = "api",
+                    chain_id = %position.chain_id,
+                    error = ?error,
+                    "failed to load primary-name project generation"
+                );
+                ApiError::internal_error("failed to load primary-name data")
+            })?;
+            let project_generation = project_generation.ok_or_else(|| ApiError {
+                status: StatusCode::CONFLICT,
+                code: "stale",
+                message: "primary-name project publication changed during the request".to_owned(),
+            })?;
+            Ok(PrimaryNamePublication {
+                selected_snapshot: Some(selected_snapshot),
+                project_generation: Some(project_generation),
+            })
+        }
+        Err(error)
+            if error.kind() == SnapshotSelectionErrorKind::Conflict
+                && scope.required_positions().len() == 1 =>
+        {
+            let chain_id = &scope.required_positions()[0].chain_id;
+            if !snapshot_chain_has_head(phase_pool, chain_id)
+                .await
+                .map_err(snapshot_selection_api_error)?
+            {
+                return Ok(PrimaryNamePublication {
+                    selected_snapshot: None,
+                    project_generation: None,
+                });
+            }
+            Err(snapshot_selection_api_error(error))
+        }
+        Err(error) => Err(snapshot_selection_api_error(error)),
+    }
+}
+
 async fn load_mixed_primary_name_lookup_state_at_position(
-    pool: &PgPool,
+    phase_pool: &PgPool,
     address: &str,
     namespace: &str,
     coin_type: &str,
     position: &bigname_lookup::LookupPosition,
 ) -> ApiResult<PrimaryNameLookupState> {
-    require_primary_name_projection_position(pool, position).await?;
-    let lookup_state = load_primary_name_lookup_state(pool, address, namespace, coin_type).await?;
-    require_primary_name_projection_position(pool, position).await?;
+    require_primary_name_projection_position(phase_pool, position).await?;
+    let lookup_state =
+        load_primary_name_lookup_state(phase_pool, address, namespace, coin_type).await?;
+    require_primary_name_projection_position(phase_pool, position).await?;
     Ok(lookup_state)
 }
 
@@ -67,21 +271,39 @@ async fn require_primary_name_projection_position(
     pool: &PgPool,
     position: &bigname_lookup::LookupPosition,
 ) -> ApiResult<()> {
-    let checkpoint = load_chain_checkpoint(pool, bigname_lookup::ETHEREUM_MAINNET_CHAIN_ID)
-        .await
-        .map_err(|error| {
-            error!(
-                service = "api",
-                chain_id = bigname_lookup::ETHEREUM_MAINNET_CHAIN_ID,
-                error = ?error,
-                "failed to fence indexed primary-name claim to lookup position"
-            );
-            ApiError::internal_error("failed to load primary-name data")
-        })?;
-    let matches_lookup = checkpoint.as_ref().is_some_and(|checkpoint| {
-        checkpoint.canonical_block_number == Some(position.block_number)
-            && checkpoint.canonical_block_hash.as_deref() == Some(position.block_hash.as_str())
-    });
+    let matches_lookup: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM chain_heads head
+            JOIN chain_phase_state project
+              ON project.chain_id = head.chain_id
+             AND project.phase_name = 'project'
+             AND project.phase_status = 'completed'
+             AND project.current_block_number = head.latest_block_number
+             AND project.current_block_hash = head.latest_block_hash
+             AND project.input_content_hash = $4
+            WHERE head.chain_id = $1
+              AND head.latest_block_number = $2
+              AND head.latest_block_hash = $3
+        )
+        "#,
+    )
+    .bind(bigname_lookup::ETHEREUM_MAINNET_CHAIN_ID)
+    .bind(position.block_number)
+    .bind(&position.block_hash)
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| {
+        error!(
+            service = "api",
+            chain_id = bigname_lookup::ETHEREUM_MAINNET_CHAIN_ID,
+            error = ?error,
+            "failed to fence indexed primary-name claim to lookup position"
+        );
+        ApiError::internal_error("failed to load primary-name data")
+    })?;
     if matches_lookup {
         return Ok(());
     }

@@ -9,7 +9,7 @@ use super::chain_position::{
 };
 use super::consistency::SnapshotConsistency;
 use super::error::{SnapshotSelectionError, SnapshotSelectionResult};
-use crate::checkpoints::{ChainCheckpoint, CheckpointBlockRef, load_chain_checkpoint};
+use super::project::validate_current_project_publications;
 use crate::lineage::{CanonicalityState, load_chain_lineage_block};
 use crate::time::format_timestamp;
 
@@ -92,6 +92,7 @@ pub async fn resolve_exact_name_snapshot_selection(
     };
 
     validate_cross_chain_positions(scope, &chain_positions)?;
+    validate_current_project_publications(pool, &chain_positions).await?;
     Ok(SelectedSnapshot {
         chain_positions,
         consistency: input.consistency,
@@ -184,7 +185,7 @@ async fn resolve_latest_positions(
             },
         )?;
         let authoritative_position =
-            load_checkpoint_position(pool, authoritative_requirement, consistency).await?;
+            load_phase_head_position(pool, authoritative_requirement, consistency).await?;
         let upper_bound = authoritative_position.timestamp;
         positions.insert(authoritative_position.slot.clone(), authoritative_position);
 
@@ -202,7 +203,7 @@ async fn resolve_latest_positions(
     }
 
     for requirement in scope.required_positions() {
-        let position = load_checkpoint_position(pool, requirement, consistency).await?;
+        let position = load_phase_head_position(pool, requirement, consistency).await?;
         positions.insert(position.slot.clone(), position);
     }
 
@@ -257,62 +258,158 @@ async fn resolve_positions_at_timestamp(
     Ok(ChainPositions::new(positions))
 }
 
-async fn load_checkpoint_position(
+async fn load_phase_head_position(
     pool: &PgPool,
     requirement: &SnapshotPositionRequirement,
     consistency: SnapshotConsistency,
 ) -> SnapshotSelectionResult<ChainPosition> {
-    let checkpoint = load_chain_checkpoint(pool, &requirement.chain_id)
-        .await
-        .map_err(|error| {
-            SnapshotSelectionError::internal(format!(
-                "failed to load checkpoint for chain {}: {error}",
-                requirement.chain_id
-            ))
-        })?
-        .ok_or_else(|| {
-            SnapshotSelectionError::conflict(format!(
-                "chain {} has no stored checkpoint row",
-                requirement.chain_id
-            ))
-        })?;
-    let checkpoint_ref = checkpoint_block_ref(&checkpoint, consistency).ok_or_else(|| {
-        SnapshotSelectionError::conflict(format!(
-            "chain {} has no {} checkpoint",
+    let row = sqlx::query(
+        r#"
+        SELECT
+            latest_block_hash,
+            latest_block_number,
+            CASE $2
+                WHEN 'head' THEN latest_block_hash
+                WHEN 'safe' THEN safe_block_hash
+                WHEN 'finalized' THEN finalized_block_hash
+            END AS block_hash,
+            CASE $2
+                WHEN 'head' THEN latest_block_number
+                WHEN 'safe' THEN safe_block_number
+                WHEN 'finalized' THEN finalized_block_number
+            END AS block_number
+        FROM chain_heads
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(&requirement.chain_id)
+    .bind(consistency.as_str())
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        SnapshotSelectionError::internal(format!(
+            "failed to load schema-v2 head for chain {} at consistency {}: {error}",
             requirement.chain_id,
             consistency.as_str()
         ))
+    })?
+    .ok_or_else(|| {
+        SnapshotSelectionError::conflict(format!(
+            "chain {} has no stored schema-v2 head",
+            requirement.chain_id
+        ))
     })?;
 
-    let block = load_chain_lineage_block(pool, &requirement.chain_id, &checkpoint_ref.block_hash)
+    let latest_block_hash = row
+        .try_get::<String, _>("latest_block_hash")
+        .map_err(|error| {
+            SnapshotSelectionError::internal(format!(
+                "failed to decode latest schema-v2 head hash for chain {}: {error}",
+                requirement.chain_id
+            ))
+        })?;
+    let latest_block_number = row
+        .try_get::<i64, _>("latest_block_number")
+        .map_err(|error| {
+            SnapshotSelectionError::internal(format!(
+                "failed to decode latest schema-v2 head number for chain {}: {error}",
+                requirement.chain_id
+            ))
+        })?;
+    let block_hash = row
+        .try_get::<Option<String>, _>("block_hash")
+        .map_err(|error| {
+            SnapshotSelectionError::internal(format!(
+                "failed to decode {} schema-v2 head hash for chain {}: {error}",
+                consistency.as_str(),
+                requirement.chain_id
+            ))
+        })?;
+    let block_number = row
+        .try_get::<Option<i64>, _>("block_number")
+        .map_err(|error| {
+            SnapshotSelectionError::internal(format!(
+                "failed to decode {} schema-v2 head number for chain {}: {error}",
+                consistency.as_str(),
+                requirement.chain_id
+            ))
+        })?;
+    let (block_hash, block_number) = match (block_hash, block_number) {
+        (Some(block_hash), Some(block_number)) => (block_hash, block_number),
+        (None, None) => {
+            return Err(SnapshotSelectionError::conflict(format!(
+                "chain {} has no current {} schema-v2 position",
+                requirement.chain_id,
+                consistency.as_str()
+            )));
+        }
+        _ => {
+            return Err(SnapshotSelectionError::conflict(format!(
+                "chain {} has a mismatched hash and number for its {} schema-v2 position",
+                requirement.chain_id,
+                consistency.as_str()
+            )));
+        }
+    };
+
+    let project_is_current: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM chain_phase_state
+            WHERE chain_id = $1
+              AND phase_name = 'project'
+              AND phase_status = 'completed'
+              AND current_block_number = $2
+              AND current_block_hash = $3
+              AND input_content_hash = $4
+        )
+        "#,
+    )
+    .bind(&requirement.chain_id)
+    .bind(latest_block_number)
+    .bind(&latest_block_hash)
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| {
+        SnapshotSelectionError::internal(format!(
+            "failed to check the current project phase for chain {}: {error}",
+            requirement.chain_id
+        ))
+    })?;
+    if !project_is_current {
+        return Err(SnapshotSelectionError::stale(format!(
+            "chain {} project phase is not published at its current schema-v2 head",
+            requirement.chain_id
+        )));
+    }
+
+    let block = load_chain_lineage_block(pool, &requirement.chain_id, &block_hash)
         .await
         .map_err(|error| {
             SnapshotSelectionError::internal(format!(
-                "failed to load lineage for checkpoint {} {}: {error}",
-                requirement.chain_id, checkpoint_ref.block_hash
+                "failed to load schema-v2 lineage for chain {} block {}: {error}",
+                requirement.chain_id, block_hash
             ))
         })?
         .ok_or_else(|| {
             SnapshotSelectionError::conflict(format!(
-                "checkpoint for chain {} references missing lineage block {}",
-                requirement.chain_id, checkpoint_ref.block_hash
+                "schema-v2 position for chain {} references missing lineage block {}",
+                requirement.chain_id, block_hash
             ))
         })?;
-
-    if block.block_number != checkpoint_ref.block_number {
+    if block.block_number != block_number {
         return Err(SnapshotSelectionError::conflict(format!(
-            "checkpoint for chain {} block {} stores number {}, lineage stores {}",
-            requirement.chain_id,
-            checkpoint_ref.block_hash,
-            checkpoint_ref.block_number,
-            block.block_number
+            "schema-v2 position for chain {} block {} stores number {}, lineage stores {}",
+            requirement.chain_id, block_hash, block_number, block.block_number
         )));
     }
     if !consistency.allows(block.canonicality_state) {
         return Err(SnapshotSelectionError::conflict(format!(
-            "checkpoint for chain {} block {} does not satisfy consistency {}",
+            "schema-v2 position for chain {} block {} does not satisfy consistency {}",
             requirement.chain_id,
-            checkpoint_ref.block_hash,
+            block_hash,
             consistency.as_str()
         )));
     }
@@ -324,6 +421,21 @@ async fn load_checkpoint_position(
         block_hash: block.block_hash,
         timestamp: block.block_timestamp,
     })
+}
+
+pub async fn snapshot_chain_has_head(
+    pool: &PgPool,
+    chain_id: &str,
+) -> SnapshotSelectionResult<bool> {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM chain_heads WHERE chain_id = $1)")
+        .bind(chain_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| {
+            SnapshotSelectionError::internal(format!(
+                "failed to check current schema-v2 head for chain {chain_id}: {error}"
+            ))
+        })
 }
 
 async fn load_lineage_position_at_or_before(
@@ -466,24 +578,4 @@ fn validate_cross_chain_positions(
     }
 
     Ok(())
-}
-
-fn checkpoint_block_ref(
-    checkpoint: &ChainCheckpoint,
-    consistency: SnapshotConsistency,
-) -> Option<CheckpointBlockRef> {
-    match consistency {
-        SnapshotConsistency::Head => Some(CheckpointBlockRef {
-            block_hash: checkpoint.canonical_block_hash.clone()?,
-            block_number: checkpoint.canonical_block_number?,
-        }),
-        SnapshotConsistency::Safe => Some(CheckpointBlockRef {
-            block_hash: checkpoint.safe_block_hash.clone()?,
-            block_number: checkpoint.safe_block_number?,
-        }),
-        SnapshotConsistency::Finalized => Some(CheckpointBlockRef {
-            block_hash: checkpoint.finalized_block_hash.clone()?,
-            block_number: checkpoint.finalized_block_number?,
-        }),
-    }
 }

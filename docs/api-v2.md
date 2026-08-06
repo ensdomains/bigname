@@ -188,11 +188,11 @@ Rules:
   indexed peers. The authoritative position identifies the projection snapshot
   admitted for the lookup. For a cross-chain path, the auxiliary position is
   the canonical execution position retained by that projected row, even when it
-  is older than the newest generic checkpoint for that chain. The lookup engine
-  returns both positions, and `meta.as_of`/`meta.as_of_token` expose those actual
-  lookup positions rather than implying execution at the newer checkpoint. The
-  engine independently requires its project phase to be at the current readable
-  authoritative head before executing. After the live calls it revalidates the
+  is older than the newest `chain_heads` marker for that chain. The lookup
+  engine returns both positions, and `meta.as_of`/`meta.as_of_token` expose
+  those actual lookup positions rather than implying execution at the newer
+  marker. The engine independently requires its project phase to be at the
+  current readable authoritative head before executing. After the live calls it revalidates the
   exact project generation, projected name topology, selected manifest
   declarations, and canonical positions. A concurrent replacement returns the
   existing `409 stale` response and performs no ledger mutation. `meta.as_of` is
@@ -295,12 +295,19 @@ the request with `keys`, while the verified flat name-profile has no selector
 parameter and returns the same error.
 
 `GET /v2/addresses/{address}/primary-name` keeps its documented `answers` and
-typed `verification` shapes. The verified producer is a fresh ENS/60 lookup at
-the current readable Ethereum position. It applies the raw-claim normalization
-gate before forward resolution and persists neither a legacy execution outcome
-nor a divergence row. When `source` is omitted, the route returns the indexed
-and verified answers together only if the indexed Ethereum checkpoint matches
-that lookup position before and after the indexed read; otherwise the whole
+typed `verification` shapes. Every indexed answer reads
+`bigname_phase.primary_names_current`; `source` selection only narrows the
+answer list and does not select a different indexed projection. A successful
+stored raw claim is normalized for the indexed product name even when its raw
+spelling was not already normalized. The verified producer is a fresh ENS/60
+lookup at the current readable Ethereum position. It applies the raw-claim
+normalization gate before forward resolution and persists neither a legacy
+execution outcome nor a divergence row. When `source` is omitted, the route
+returns the indexed and verified answers together only if the current Ethereum
+`chain_heads` position and exact completed `project` publication generation
+match that lookup before verified execution and remain unchanged after reading
+the indexed tuple from
+`bigname_phase.primary_names_current`; otherwise the whole
 request returns `409 stale` instead of assigning answers from different
 positions to one `meta.as_of`. The indexed answer depends only on the projected
 tuple: a live reverse claim or live lookup failure changes only the verified
@@ -312,13 +319,37 @@ The post-call guard also revalidates the Ethereum project generation and both
 selected ENS manifest declarations; a concurrent replacement returns `409
 stale` and no verified answer.
 
-The exact-head and post-call generation fences fail safe under pipeline lag. If
-head following or project publication remains behind the readable chain head,
-verified reads degrade to `409 stale` instead of executing against mixed
-generations. Fast-moving chains such as Base are especially sensitive when a
-CCIP round trip overlaps a new head. The rejection rate under realistic lag is
-not yet measured; measuring it and setting an acceptable pre-edge-flip bound is
-an operational release task.
+The exact-head and post-call generation fences on verified reads fail safe
+under schema-v2 projection lag. If head following or project publication
+remains behind the readable chain head, verified reads degrade to `409 stale`
+instead of executing against mixed generations. Snapshot selection and
+verified lookup now read the same `chain_heads` and `chain_phase_state` project
+row, so this exact-head fence detects only a concurrent head, rewind, or
+project-publication change between their reads; it no longer waits for an
+independently updated legacy checkpoint. This removes the persistent `409
+stale` case on the verified path caused only by the old worker lagging or not
+running. A fast-moving chain can still advance during a provider or CCIP round
+trip, so the post-call generation checks remain necessary.
+
+Indexed lookup names, record inventories, address-name relations, resolver
+overviews, and resolver bound names now come from `bigname_phase` projections.
+Projection publication is incremental, so an unchanged row retains the target of
+the last projection-phase run that rebuilt it. A row target may therefore be earlier
+than the selected position; it may not be later, and a target at the same
+height must carry the selected hash. The API captures and revalidates the
+completed projection-phase generation around each indexed read. Current lookup and
+latest resolver reads also bind that generation to the selected
+`chain_heads` position; historical resolver reads bind to the current
+generation while admitting only rows at or before the requested position.
+
+This is now a single-source projection consistency check rather than a comparison
+between independently advanced phase and public-schema pipelines. It rejects
+future or same-height wrong-fork rows while serving unchanged rows after an
+unrelated head advance. Moving these indexed routes removes both the
+old-worker-lag `409` class and the counterproductive exact-per-row-head `409`
+class from lookup and resolver serving. A real phase lag,
+interpreter-hash mismatch, concurrent publication change, or row ahead of the
+selected position still fails closed.
 
 ### Tier 3: Diagnostics
 
@@ -384,6 +415,25 @@ response carries `meta.as_of`, keyed by stringified `chain_id`, and
 per-chain positions. Tokens must cover every required slot in the target
 route's snapshot scope and must not carry extra slots outside that scope.
 
+The API selects current `latest`, `safe`, and `finalized` positions from
+`bigname_phase.chain_heads` and obtains their timestamps from readable
+`bigname_phase.chain_lineage`; it does not read the legacy public-schema
+checkpoint table. Every selection is available only when the current
+`project` phase is completed at the exact latest head with the API's compiled
+interpreter content hash. Timestamp `at` selection and opaque-token replay
+still choose historical positions: every supplied or resolved position must
+exist in `bigname_phase.chain_lineage` and satisfy the requested finality
+floor, and an authoritative cross-chain selection bounds auxiliary positions
+by its timestamp. The current project-publication check also applies to those
+historical selectors.
+During this source transition, a token or timestamp that selects a block older
+than the retained schema-v2 lineage walk returns `409 conflict`, even if a
+pre-transition public-schema lineage row once covered that block.
+
+This source move is limited to snapshot selection. API startup still reads
+`public.chain_checkpoints` to discover the status chain set, and `/v2/status`
+still reads those checkpoints for retained-worker progress and finality.
+
 Top-level collections page over mutable latest-state tables. They therefore
 omit `meta.as_of` and `meta.as_of_token`, and their cursors do not claim a
 snapshot bound. Newly issued collection cursors carry no snapshot token; a
@@ -404,7 +454,12 @@ restrictions lift and collection snapshot metadata can be restored.
 `finality`; when a served head is available, its `meta.as_of` and
 `meta.as_of_token` record the served positions for staleness attribution and
 shadow-diff correlation. Lookup rejects partial scoped heads instead of
-emitting a token that cannot replay on a compatible snapshot-read route.
+emitting a token that cannot replay on a compatible snapshot-read route. Each
+returned forward or reverse phase row must have a projection target at or before
+the selected position; a target at the same height must have the same hash. The
+selected `chain_heads` rows and completed schema-v2 projection generations must
+remain unchanged across the read. An ahead, same-height wrong-hash, or
+publication-generation mismatch returns `409 stale`.
 
 `GET /v2/addresses/{address}/primary-name` is also a current-state read. It
 does not accept `at` or `finality`; when a served head is available, its
@@ -412,7 +467,8 @@ does not accept `at` or `finality`; when a served head is available, its
 attribution and shadow-diff correlation. For an ENS/60 verified answer, both
 metadata fields identify the current readable Ethereum position that pins the
 fresh lookup. An omitted-source ENS/60 response fences the indexed claim to
-that same position and returns `409 stale` if the two current positions differ.
+that same schema-v2 position and project publication generation across the
+verified and indexed reads and returns `409 stale` if either changes.
 There is no persisted trace or verified-outcome cache. Indexed-only Basenames
 responses remain Base-scoped; Basenames verified primary-name lookup is
 currently unsupported.

@@ -84,12 +84,14 @@ fn compact_resolver_binding_item(item: &Value) -> V2Result<Value> {
     {
         insert_optional_string(&mut compact, "namespace", Some(namespace.to_owned()));
     }
-    insert_optional_string(&mut compact, "name", item_string(item, "normalized_name"));
-    insert_optional_string(
-        &mut compact,
-        "display_name",
-        item_string(item, "canonical_display_name"),
-    );
+    if let Some(name) = item_string(item, "normalized_name") {
+        let normalized = normalize_resolver_name(&name)?;
+        compact.insert("name".to_owned(), Value::String(normalized.normalized_name));
+        compact.insert(
+            "display_name".to_owned(),
+            Value::String(normalized.canonical_display_name),
+        );
+    }
     insert_optional_string(&mut compact, "namehash", item_string(item, "namehash"));
     Ok(Value::Object(compact))
 }
@@ -275,6 +277,13 @@ fn resolver_alias_unknown_key_has_banned_vocabulary(key: &str) -> bool {
 
 fn resolver_alias_mapping_error() -> V2Error {
     V2Error::internal_error("failed to map resolver alias item")
+}
+
+fn normalize_resolver_name(
+    value: &str,
+) -> V2Result<bigname_domain::normalization::NormalizedEnsName> {
+    bigname_domain::normalization::normalize_name(value)
+        .map_err(|_| V2Error::internal_error("failed to normalize resolver name item"))
 }
 
 fn compact_resolver_role_item(item: &Value) -> V2Result<Value> {

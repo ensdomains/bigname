@@ -31,6 +31,8 @@ pub struct IdentityNameCurrentRow {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IdentityRecordInventoryRow {
     pub resource_id: Uuid,
+    pub support_status: String,
+    pub unsupported_reason: Option<String>,
     pub entries: Value,
     pub unsupported_families: Value,
     pub chain_positions: Value,
@@ -42,6 +44,7 @@ pub struct IdentityAddressRelationRow {
     pub address: String,
     pub logical_name_id: String,
     pub relation: AddressNameRelation,
+    pub chain_positions: Value,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -129,6 +132,8 @@ pub struct ReverseIdentityFeedRecordRow {
 pub struct ReverseIdentityRecordRow {
     pub name_record: IdentityNameRecordRow,
     pub relation_facets: Vec<AddressNameRelation>,
+    pub relation_chain_positions: Vec<Value>,
+    pub primary_chain_positions: Option<Value>,
     pub primary_name: Option<IdentityPrimaryNameSnapshot>,
     pub requested_coin_type: String,
 }
@@ -140,6 +145,7 @@ pub struct IdentityPrimaryNameSnapshot {
     pub coin_type: String,
     pub claim_status: PrimaryNameClaimStatus,
     pub normalized_claim_name: Option<String>,
+    pub chain_positions: Option<Value>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

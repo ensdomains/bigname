@@ -776,9 +776,9 @@ async fn v2_get_name_reads_basenames_record_with_base_network() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_get_name_uses_sepolia_positioned_at_token_on_mixed_checkpoints() -> Result<()> {
+async fn v2_get_name_uses_sepolia_positioned_at_token_on_mixed_phase_heads() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_mixed_checkpoint_names(&database).await?;
+    seed_v2_mixed_phase_head_names(&database).await?;
 
     let at = v2_sepolia_snapshot_token();
     let payload = v2_name_record_payload_for_database(
@@ -806,7 +806,7 @@ async fn v2_get_name_uses_sepolia_positioned_at_token_on_mixed_checkpoints() -> 
 #[tokio::test]
 async fn v2_get_name_at_tokens_round_trip_mainnet_and_sepolia_profiles() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_mixed_checkpoint_names(&database).await?;
+    seed_v2_mixed_phase_head_names(&database).await?;
 
     let mainnet = v2_name_record_payload_for_database(
         &database,
@@ -848,9 +848,9 @@ async fn v2_get_name_at_tokens_round_trip_mainnet_and_sepolia_profiles() -> Resu
 }
 
 #[tokio::test]
-async fn v2_get_name_without_at_keeps_mainnet_preference_on_mixed_checkpoints() -> Result<()> {
+async fn v2_get_name_without_at_keeps_mainnet_preference_on_mixed_phase_heads() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_mixed_checkpoint_names(&database).await?;
+    seed_v2_mixed_phase_head_names(&database).await?;
 
     let payload = v2_name_record_payload_for_database(
         &database,
@@ -875,9 +875,30 @@ async fn v2_get_name_without_at_keeps_mainnet_preference_on_mixed_checkpoints() 
 }
 
 #[tokio::test]
-async fn v2_get_name_timestamp_at_uses_sepolia_when_only_sepolia_checkpoint_exists() -> Result<()> {
+async fn v2_get_name_uses_phase_snapshot_with_zero_legacy_checkpoint_rows() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_sepolia_only_checkpoint_name(&database).await?;
+    seed_v2_mixed_phase_head_names(&database).await?;
+
+    let legacy_checkpoint_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM chain_checkpoints")
+            .fetch_one(&database.pool)
+            .await?;
+    assert_eq!(legacy_checkpoint_count, 0);
+
+    let payload = v2_name_record_payload_for_database(
+        &database,
+        &format!("/v2/names/{V2_MAINNET_SNAPSHOT_NAME}"),
+    )
+    .await?;
+    assert_eq!(payload["meta"]["as_of"]["1"]["block_hash"], V2_MAINNET_SNAPSHOT_HASH);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_name_timestamp_at_uses_sepolia_when_only_sepolia_phase_head_exists() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_sepolia_only_phase_head_name(&database).await?;
 
     let payload = v2_name_record_payload_for_database(
         &database,
@@ -1950,9 +1971,9 @@ async fn v2_get_subnames_paginates_with_opaque_cursor_without_overlap() -> Resul
 }
 
 #[tokio::test]
-async fn v2_get_subnames_uses_current_sepolia_anchor_on_mixed_checkpoints() -> Result<()> {
+async fn v2_get_subnames_uses_current_sepolia_anchor_on_mixed_phase_heads() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_mixed_checkpoint_names(&database).await?;
+    seed_v2_mixed_phase_head_names(&database).await?;
     let child_logical_name_id = format!("ens:child.{V2_SEPOLIA_SNAPSHOT_NAME}");
     seed_v2_subnames_bound_child(
         &database,
@@ -2237,7 +2258,7 @@ const V2_SEPOLIA_ONLY_SNAPSHOT_HASH: &str = "0xv2-sepolia-only";
 const V2_SEPOLIA_ONLY_SNAPSHOT_BLOCK: i64 = 111_551_120;
 const V2_SEPOLIA_ONLY_SNAPSHOT_TIMESTAMP: &str = "2026-04-17T00:10:20Z";
 
-async fn seed_v2_mixed_checkpoint_names(database: &TestDatabase) -> Result<()> {
+async fn seed_v2_mixed_phase_head_names(database: &TestDatabase) -> Result<()> {
     seed_v2_snapshot_profile_name(
         database,
         V2_SEPOLIA_SNAPSHOT_NAME,
@@ -2270,7 +2291,7 @@ async fn seed_v2_mixed_checkpoint_names(database: &TestDatabase) -> Result<()> {
     .await
 }
 
-async fn seed_v2_sepolia_only_checkpoint_name(database: &TestDatabase) -> Result<()> {
+async fn seed_v2_sepolia_only_phase_head_name(database: &TestDatabase) -> Result<()> {
     seed_v2_snapshot_profile_name(
         database,
         V2_SEPOLIA_ONLY_SNAPSHOT_NAME,
@@ -2286,10 +2307,14 @@ async fn seed_v2_sepolia_only_checkpoint_name(database: &TestDatabase) -> Result
         V2_SEPOLIA_ONLY_SNAPSHOT_TIMESTAMP,
     )
     .await?;
-    sqlx::query("DELETE FROM chain_checkpoints WHERE chain_id = 'ethereum-mainnet'")
-        .execute(&database.pool)
+    sqlx::query("DELETE FROM chain_phase_state WHERE chain_id = 'ethereum-mainnet'")
+        .execute(&database.lookup_pool)
         .await
-        .context("failed to remove mainnet checkpoint for sepolia-only v2 snapshot test")?;
+        .context("failed to remove mainnet project state for sepolia-only v2 snapshot test")?;
+    sqlx::query("DELETE FROM chain_heads WHERE chain_id = 'ethereum-mainnet'")
+        .execute(&database.lookup_pool)
+        .await
+        .context("failed to remove mainnet phase head for sepolia-only v2 snapshot test")?;
     Ok(())
 }
 

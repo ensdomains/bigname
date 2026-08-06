@@ -55,143 +55,11 @@ pub(crate) mod test_hooks {
     }
 }
 
-const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = r#"
-  AND surface.canonicality_state IN (
-      'canonical'::canonicality_state,
-      'safe'::canonicality_state,
-      'finalized'::canonicality_state
-  )
-  AND surface_lineage.canonicality_state IN (
-      'canonical'::canonicality_state,
-      'safe'::canonicality_state,
-      'finalized'::canonicality_state
-  )
-  AND resource.canonicality_state IN (
-      'canonical'::canonicality_state,
-      'safe'::canonicality_state,
-      'finalized'::canonicality_state
-  )
-  AND resource_lineage.canonicality_state IN (
-      'canonical'::canonicality_state,
-      'safe'::canonicality_state,
-      'finalized'::canonicality_state
-  )
-  AND binding.canonicality_state IN (
-      'canonical'::canonicality_state,
-      'safe'::canonicality_state,
-      'finalized'::canonicality_state
-  )
-  AND binding_lineage.canonicality_state IN (
-      'canonical'::canonicality_state,
-      'safe'::canonicality_state,
-      'finalized'::canonicality_state
-  )
-  AND binding.active_to IS NULL
-  AND (
-      anc.token_lineage_id IS NULL
-      OR (
-          token_lineage.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-          AND token_lineage_lineage.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-      )
-  )
-"#;
-
-const DEFAULT_ADDRESS_NAMES_CURRENT_LINEAGE_JOINS: &str = r#"
-  JOIN chain_lineage surface_lineage
-    ON surface_lineage.chain_id = surface.chain_id
-   AND surface_lineage.block_hash = surface.block_hash
-  JOIN chain_lineage resource_lineage
-    ON resource_lineage.chain_id = resource.chain_id
-   AND resource_lineage.block_hash = resource.block_hash
-  JOIN chain_lineage binding_lineage
-    ON binding_lineage.chain_id = binding.chain_id
-   AND binding_lineage.block_hash = binding.block_hash
-  LEFT JOIN chain_lineage token_lineage_lineage
-    ON token_lineage_lineage.chain_id = token_lineage.chain_id
-   AND token_lineage_lineage.block_hash = token_lineage.block_hash
-"#;
-
-const DEFAULT_IDENTITY_NAME_CURRENT_READ_FILTER: &str = r#"
-  AND identity_nc_surface.canonicality_state IN (
-      'canonical'::canonicality_state,
-      'safe'::canonicality_state,
-      'finalized'::canonicality_state
-  )
-  AND identity_nc_surface_lineage.canonicality_state IN (
-      'canonical'::canonicality_state,
-      'safe'::canonicality_state,
-      'finalized'::canonicality_state
-  )
-  AND (
-      identity_nc.surface_binding_id IS NULL
-      OR (
-          identity_nc_resource.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-          AND identity_nc_resource_lineage.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-          AND identity_nc_binding.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-          AND identity_nc_binding_lineage.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-          AND identity_nc_binding.active_to IS NULL
-          AND (
-              identity_nc.token_lineage_id IS NULL
-              OR (
-                  identity_nc_token_lineage.canonicality_state IN (
-                      'canonical'::canonicality_state,
-                      'safe'::canonicality_state,
-                      'finalized'::canonicality_state
-                  )
-                  AND identity_nc_token_lineage_lineage.canonicality_state IN (
-                      'canonical'::canonicality_state,
-                      'safe'::canonicality_state,
-                      'finalized'::canonicality_state
-                  )
-              )
-          )
-      )
-  )
-"#;
-
-const DEFAULT_IDENTITY_NAME_CURRENT_LINEAGE_JOINS: &str = r#"
-  JOIN chain_lineage identity_nc_surface_lineage
-    ON identity_nc_surface_lineage.chain_id = identity_nc_surface.chain_id
-   AND identity_nc_surface_lineage.block_hash = identity_nc_surface.block_hash
-  LEFT JOIN chain_lineage identity_nc_resource_lineage
-    ON identity_nc_resource_lineage.chain_id = identity_nc_resource.chain_id
-   AND identity_nc_resource_lineage.block_hash = identity_nc_resource.block_hash
-  LEFT JOIN chain_lineage identity_nc_binding_lineage
-    ON identity_nc_binding_lineage.chain_id = identity_nc_binding.chain_id
-   AND identity_nc_binding_lineage.block_hash = identity_nc_binding.block_hash
-  LEFT JOIN chain_lineage identity_nc_token_lineage_lineage
-    ON identity_nc_token_lineage_lineage.chain_id = identity_nc_token_lineage.chain_id
-   AND identity_nc_token_lineage_lineage.block_hash = identity_nc_token_lineage.block_hash
-"#;
-
 #[derive(Clone)]
 struct ReverseIdentityPageRow {
     input_index: usize,
     logical_name_id: String,
+    relation_chain_positions: Vec<serde_json::Value>,
 }
 
 pub(crate) async fn load_reverse_identity_records_live(
@@ -231,11 +99,12 @@ async fn load_reverse_identity_records_live_with_count_mode(
         let page_rows = page::load_reverse_identity_page_rows(pool, inputs).await?;
         let logical_name_ids =
             dedupe_in_order(page_rows.iter().map(|row| row.logical_name_id.clone()));
-        let name_records = bigname_storage::load_identity_records_by_names(pool, &logical_name_ids)
-            .await?
-            .into_iter()
-            .map(|record| (record.row.logical_name_id.clone(), record))
-            .collect::<BTreeMap<_, _>>();
+        let name_records =
+            bigname_storage::load_phase_identity_records_by_ids(pool, &logical_name_ids)
+                .await?
+                .into_iter()
+                .map(|record| (record.row.logical_name_id.clone(), record))
+                .collect::<BTreeMap<_, _>>();
         Result::<_>::Ok((page_rows, name_records))
     };
 
@@ -325,6 +194,10 @@ fn reverse_identity_record(
     Some(ReverseIdentityRecordRow {
         name_record,
         relation_facets,
+        relation_chain_positions: row.relation_chain_positions,
+        primary_chain_positions: primary_name
+            .as_ref()
+            .and_then(|primary| primary.chain_positions.clone()),
         primary_name,
         requested_coin_type: input.coin_type.clone(),
     })
@@ -342,7 +215,8 @@ async fn load_identity_primary_name_snapshots(
 
     let rows = sqlx::query(
         r#"
-        SELECT address, namespace, coin_type, claim_status, normalized_claim_name
+        SELECT address, namespace, coin_type, claim_status, raw_claim_name,
+               claim_provenance
         FROM primary_names_current
         WHERE address = ANY($1::TEXT[])
           AND coin_type = ANY($2::TEXT[])
@@ -368,12 +242,27 @@ async fn load_identity_primary_name_snapshots(
             let coin_type = row.try_get::<String, _>("coin_type")?;
             let claim_status =
                 parse_primary_name_claim_status(&row.try_get::<String, _>("claim_status")?)?;
+            let raw_claim_name: Option<String> = row.try_get("raw_claim_name")?;
+            let normalized_claim_name = if claim_status == PrimaryNameClaimStatus::Success {
+                raw_claim_name
+                    .map(|raw_name| bigname_domain::normalization::normalize_name(&raw_name))
+                    .transpose()
+                    .with_context(|| {
+                        format!(
+                            "phase primary-name row {address}:{namespace}:{coin_type} has invalid successful raw_claim_name"
+                        )
+                    })?
+                    .map(|name| name.normalized_name)
+            } else {
+                None
+            };
             let snapshot = IdentityPrimaryNameSnapshot {
                 address: address.clone(),
                 namespace: namespace.clone(),
                 coin_type: coin_type.clone(),
                 claim_status,
-                normalized_claim_name: row.try_get("normalized_claim_name")?,
+                normalized_claim_name,
+                chain_positions: Some(row.try_get("claim_provenance")?),
             };
             Ok(((address, namespace, coin_type), snapshot))
         })
@@ -400,7 +289,7 @@ async fn load_reverse_identity_total_counts_live(
         .map(|(_, roles)| roles_storage_value(*roles).to_owned())
         .collect::<Vec<_>>();
 
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(
         r#"
         WITH requested AS (
             SELECT *
@@ -418,54 +307,17 @@ async fn load_reverse_identity_total_counts_live(
              OR (requested.roles = 'owned' AND anc.relation IN ('registrant', 'token_holder'))
              OR (requested.roles = 'managed' AND anc.relation = 'effective_controller')
          )
-        LEFT JOIN name_surfaces surface
-          ON surface.logical_name_id = anc.logical_name_id
-        LEFT JOIN resources resource
-          ON resource.resource_id = anc.resource_id
-        LEFT JOIN surface_bindings binding
-          ON binding.surface_binding_id = anc.surface_binding_id
-        LEFT JOIN token_lineages token_lineage
-          ON token_lineage.token_lineage_id = anc.token_lineage_id
-        LEFT JOIN chain_lineage surface_lineage
-          ON surface_lineage.chain_id = surface.chain_id
-         AND surface_lineage.block_hash = surface.block_hash
-        LEFT JOIN chain_lineage resource_lineage
-          ON resource_lineage.chain_id = resource.chain_id
-         AND resource_lineage.block_hash = resource.block_hash
-        LEFT JOIN chain_lineage binding_lineage
-          ON binding_lineage.chain_id = binding.chain_id
-         AND binding_lineage.block_hash = binding.block_hash
-        LEFT JOIN chain_lineage token_lineage_lineage
-          ON token_lineage_lineage.chain_id = token_lineage.chain_id
-         AND token_lineage_lineage.block_hash = token_lineage.block_hash
         LEFT JOIN name_current identity_nc
           ON identity_nc.logical_name_id = anc.logical_name_id
-        LEFT JOIN name_surfaces identity_nc_surface
-          ON identity_nc_surface.logical_name_id = identity_nc.logical_name_id
-        LEFT JOIN resources identity_nc_resource
-          ON identity_nc_resource.resource_id = identity_nc.resource_id
-        LEFT JOIN surface_bindings identity_nc_binding
-          ON identity_nc_binding.surface_binding_id = identity_nc.surface_binding_id
-        LEFT JOIN token_lineages identity_nc_token_lineage
-          ON identity_nc_token_lineage.token_lineage_id = identity_nc.token_lineage_id
-        LEFT JOIN chain_lineage identity_nc_surface_lineage
-          ON identity_nc_surface_lineage.chain_id = identity_nc_surface.chain_id
-         AND identity_nc_surface_lineage.block_hash = identity_nc_surface.block_hash
-        LEFT JOIN chain_lineage identity_nc_resource_lineage
-          ON identity_nc_resource_lineage.chain_id = identity_nc_resource.chain_id
-         AND identity_nc_resource_lineage.block_hash = identity_nc_resource.block_hash
-        LEFT JOIN chain_lineage identity_nc_binding_lineage
-          ON identity_nc_binding_lineage.chain_id = identity_nc_binding.chain_id
-         AND identity_nc_binding_lineage.block_hash = identity_nc_binding.block_hash
-        LEFT JOIN chain_lineage identity_nc_token_lineage_lineage
-          ON identity_nc_token_lineage_lineage.chain_id = identity_nc_token_lineage.chain_id
-         AND identity_nc_token_lineage_lineage.block_hash = identity_nc_token_lineage.block_hash
         WHERE anc.logical_name_id IS NULL
-           OR (TRUE {DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER} {DEFAULT_IDENTITY_NAME_CURRENT_READ_FILTER})
+           OR (
+               anc.support_status = 'supported'
+               AND identity_nc.support_status IN ('supported', 'unsupported')
+           )
         GROUP BY requested.address, requested.roles
         ORDER BY requested.address, requested.roles
         "#,
-    ))
+    )
     .bind(&addresses)
     .bind(&roles)
     .fetch_all(pool)

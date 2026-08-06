@@ -131,6 +131,14 @@ Field ownership:
   vocabulary before serialization; current values include `read_failed`,
   `exact_name_profile_not_supported`, `mixed_exact_name_corpus`, and
   `unsupported_reason_missing`.
+- Snapshot behavior: lookup selects the current schema-v2 phase head and reads
+  `bigname_phase` name, inventory, and address-name projections published for
+  one completed projection-phase generation. Because projection publication is
+  incremental, an unchanged row target may precede the selected head; it may
+  not be ahead, and a same-height target must match the selected hash. Lookup
+  revalidates both `chain_heads` and that generation after the read. An
+  invalid target, phase lag, or mid-request head/projection change returns `409
+  stale`.
 - Replaces (v1): `POST /v1/identity:lookup`.
 
 ### `GET /v2/status`
@@ -199,9 +207,9 @@ Field ownership:
   lookup. For cross-chain resolution, the authoritative position is admitted
   from the selected product snapshot and the auxiliary position is the
   canonical execution position retained by the projected row; it may be older
-  than the newest generic checkpoint selected for that chain, but never newer;
-  an anchor at the same height must have the same block hash. They create no
-  legacy trace or reusable execution outcome. Provider connect, DNS, TLS,
+  than the newest `chain_heads` position selected for that chain, but never
+  newer; an anchor at the same height must have the same block hash. They create
+  no legacy trace or reusable execution outcome. Provider connect, DNS, TLS,
   connection-reset, and other transport failures abort the whole request with
   `500 internal_error`; they are not flat-record `status=stale` results. On a
   `200` name-profile response,
@@ -241,7 +249,7 @@ Field ownership:
   `meta.as_of` and `meta.as_of_token` report the authoritative and actual
   hash-pinned execution positions returned by the lookup engine. On a
   cross-chain path, the execution position may be an older canonical projected
-  position than the generic auxiliary checkpoint initially selected by the
+  position than the auxiliary `chain_heads` position initially selected by the
   route. It may not be newer, and a position at the same height must have the
   same block hash; violations are stale before provider execution. Provider
   connect, DNS, TLS, connection-reset, and other transport
@@ -473,7 +481,10 @@ Field ownership:
   unsupported sources are represented by an entry with `status=unsupported`,
   not omitted.
   Supplying `source=indexed` or `source=verified` narrows the `answers` array
-  to that source for single-source callers. `verification` is
+  to that source for single-source callers; every indexed entry comes from
+  `bigname_phase.primary_names_current`, regardless of source selection. A
+  successful stored raw claim is normalized for the indexed product name even
+  when its raw spelling was not already normalized. `verification` is
   `{status, name?, unsupported_reason?, failure_reason?}` and appears when the
   fresh lookup produces a verification outcome. As an explicit exception,
   it also appears when the request includes the `verified` source and the
@@ -489,10 +500,12 @@ Field ownership:
   uses the schema-v2 lookup engine's current readable Ethereum position and
   pins its reverse and optional forward calls to that block hash. It persists
   neither a legacy trace/outcome nor a divergence row. When `source` is omitted,
-  the indexed claim is returned beside the verified answer only when its
-  checkpoint matches the lookup position before and after the indexed read;
-  otherwise the request returns `409 stale`. Live results never change the
-  indexed answer. Basenames verified primary-name lookup is unsupported;
+  the indexed claim is read from `bigname_phase.primary_names_current` and
+  returned beside the verified answer only when the current `chain_heads`
+  position and exact completed `project` publication generation match the
+  lookup before verified execution and remain unchanged after the indexed
+  read; otherwise the request returns `409 stale`. Live results never change
+  the indexed answer. Basenames verified primary-name lookup is unsupported;
   indexed Basenames responses remain Base-scoped.
 - Pagination behavior: none.
 - Snapshot behavior: current-state read over chain-derived primary-name state.
@@ -612,10 +625,22 @@ Field ownership:
   remain included in `count` but are excluded from `by_type`.
 - Pagination behavior: standard collection pagination applies to the
   nested `bound_names.page` object. The top-level response has no `page`.
-- Status semantics: an otherwise valid resolver with no overview row returns
-  `404 not_found`. A resolver overview with no bound names returns `200` with
-  an empty bound-names section. Malformed `chain_id` or `address` returns
-  `400 invalid_input`.
+- Snapshot behavior: the resolver overview and bound names read
+  `bigname_phase` projections from one completed projection-phase generation. A row
+  target may precede the selected position when the row was unchanged by later
+  incremental publications; it may not be ahead, and a same-height target must
+  match the selected hash. The projection-phase generation is revalidated after the
+  read, and an invalid target or changed generation returns `409 stale`.
+- Status semantics: an otherwise valid current/latest resolver with no overview
+  row returns `404 not_found`. For `at`, `safe`, or `finalized`, a missing
+  current projection cannot prove historical absence and returns `409 stale`.
+  Bound-name listings under `at`, `safe`, or `finalized` are drawn from
+  current-state projections: a name bound at the requested position but
+  unbound since is absent from the listing rather than flagged, consistent
+  with the coverage `exhaustiveness: not_asserted` disclosure.
+  A resolver overview with no bound names returns `200` with an empty
+  bound-names section. Malformed `chain_id` or `address` returns `400
+  invalid_input`.
 - Replaces (v1): `GET /v1/resolvers/{chain_id}/{resolver_address}/overview`
   and the `GET /v1/names?resolver=...` filter.
 

@@ -111,7 +111,7 @@ async fn v2_get_primary_name_executes_lookup_each_time_without_legacy_persistenc
 }
 
 #[tokio::test]
-async fn v2_get_primary_name_rejects_mixed_answers_from_different_positions() -> Result<()> {
+async fn v2_get_primary_name_uses_one_phase_position_without_legacy_checkpoint() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database.initialize_lookup_schema().await?;
     database
@@ -131,7 +131,7 @@ async fn v2_get_primary_name_rejects_mixed_answers_from_different_positions() ->
             V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
             "ens",
             "60",
-            Some("taytems.eth"),
+            Some("legacy-worker.eth"),
             true,
         )
         .await?;
@@ -141,6 +141,15 @@ async fn v2_get_primary_name_rejects_mixed_answers_from_different_positions() ->
         21_000_004,
         "0xnewer-phase-head",
         "2026-04-17T00:00:04Z",
+    )
+    .await?;
+    seed_schema_v2_primary_name_claim(
+        &lookup_pool,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        "ens",
+        "60",
+        "taytems.eth",
+        true,
     )
     .await?;
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
@@ -155,7 +164,7 @@ async fn v2_get_primary_name_rejects_mixed_answers_from_different_positions() ->
         .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
         .await?;
 
-    let response = app_router(state)
+    let response = app_router(state.clone())
         .oneshot(
             Request::builder()
                 .uri(format!(
@@ -168,8 +177,50 @@ async fn v2_get_primary_name_rejects_mixed_answers_from_different_positions() ->
         .context("v2 mixed primary-name request failed")?;
     let status = response.status();
     let payload: Value = read_json(response).await?;
-    assert_eq!(status, StatusCode::CONFLICT, "unexpected response: {payload}");
-    assert_eq!(payload["error"]["code"], json!("stale"));
+    assert_eq!(status, StatusCode::OK, "unexpected response: {payload}");
+    assert_eq!(payload["meta"]["as_of"]["1"]["block_number"], 21_000_004);
+    assert_eq!(
+        payload["data"]["answers"],
+        json!([
+            {
+                "source": "indexed",
+                "status": "ok",
+                "name": "taytems.eth"
+            },
+            {
+                "source": "verified",
+                "status": "ok",
+                "name": "taytems.eth"
+            }
+        ])
+    );
+
+    let legacy_checkpoint_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM chain_checkpoints")
+            .fetch_one(&database.pool)
+            .await?;
+    assert_eq!(legacy_checkpoint_count, 0);
+
+    let indexed_response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await?;
+    assert_eq!(indexed_response.status(), StatusCode::OK);
+    let indexed_payload: Value = read_json(indexed_response).await?;
+    assert_eq!(
+        indexed_payload["data"]["answers"],
+        json!([{
+            "source": "indexed",
+            "status": "ok",
+            "name": "taytems.eth"
+        }])
+    );
 
     assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 3);
     lookup_pool.close().await;
@@ -208,6 +259,15 @@ async fn v2_get_primary_name_returns_mixed_answers_at_one_position() -> Result<(
         21_000_003,
         "0xbinding",
         "2026-04-17T00:00:03Z",
+    )
+    .await?;
+    seed_schema_v2_primary_name_claim(
+        &lookup_pool,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        "ens",
+        "60",
+        "taytems.eth",
+        true,
     )
     .await?;
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
@@ -257,6 +317,189 @@ async fn v2_get_primary_name_returns_mixed_answers_at_one_position() -> Result<(
     lookup_pool.close().await;
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_primary_name_normalizes_schema_v2_successful_claim() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_005,
+                "block_hash": "0xprimary-nonnormalized",
+                "timestamp": "2026-04-17T00:00:05Z"
+            }
+        }))
+        .await?;
+    seed_schema_v2_primary_name_claim(
+        &database.lookup_pool,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        "ens",
+        "60",
+        "Taytems.eth",
+        false,
+    )
+    .await?;
+
+    let payload = v2_primary_name_payload_for_database(
+        &database,
+        &format!(
+            "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
+        ),
+    )
+    .await?;
+    assert_eq!(
+        payload["data"]["answers"],
+        json!([{
+            "source": "indexed",
+            "status": "ok",
+            "name": "taytems.eth"
+        }])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_primary_name_rejects_project_change_after_indexed_read() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_006,
+                "block_hash": "0xprimary-before-publication",
+                "timestamp": "2026-04-17T00:00:06Z"
+            }
+        }))
+        .await?;
+    seed_schema_v2_primary_name_claim(
+        &database.lookup_pool,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        "ens",
+        "60",
+        "before.eth",
+        true,
+    )
+    .await?;
+    let (_guard, control) =
+        crate::v2::support::indexed_read_test_hooks::install(&database.lookup_pool).await?;
+    let state = database.app_state();
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
+                    ))
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    seed_schema_v2_primary_name_claim(
+        &database.lookup_pool,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        "ens",
+        "60",
+        "after.eth",
+        true,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET updated_at = clock_timestamp()
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("indexed primary-name request task panicked")?
+        .context("indexed primary-name request failed")?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("stale"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_primary_name_rejects_same_head_republication_during_mixed_read() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let lookup_pool = database.lookup_pool().await?;
+    seed_schema_v2_ens_primary_name_authority(
+        &lookup_pool,
+        21_000_007,
+        "0xprimary-mixed-publication",
+        "2026-04-17T00:00:07Z",
+    )
+    .await?;
+    seed_schema_v2_primary_name_claim(
+        &lookup_pool,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        "ens",
+        "60",
+        "taytems.eth",
+        true,
+    )
+    .await?;
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("taytems.eth"),
+        primary_name_universal_resolver_addr60_response(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+    let (_guard, control) =
+        crate::v2::support::indexed_read_test_hooks::install(&database.lookup_pool).await?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name"
+                    ))
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET updated_at = clock_timestamp()
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("mixed primary-name request task panicked")?
+        .context("mixed primary-name request failed")?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("stale"));
+    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 3);
+
+    lookup_pool.close().await;
+    database.cleanup().await
 }
 
 #[tokio::test]
@@ -452,7 +695,6 @@ async fn v2_get_basenames_primary_name_normalization_gate_keeps_meta_base_scoped
             false,
         )
         .await?;
-
     let verified = v2_primary_name_payload_for_database(
         &database,
         &format!(
@@ -505,6 +747,15 @@ async fn v2_get_basenames_primary_name_without_persisted_verified_stays_base_sco
             true,
         )
         .await?;
+    seed_schema_v2_primary_name_claim(
+        &database.lookup_pool,
+        address,
+        "basenames",
+        V2_BASENAMES_PRIMARY_COIN_TYPE,
+        "alice.base.eth",
+        true,
+    )
+    .await?;
 
     let verified = v2_primary_name_payload_for_database(
         &database,
@@ -754,6 +1005,51 @@ async fn seed_v2_basenames_primary_name_base_snapshot_position(
             }
         }))
         .await
+}
+
+async fn seed_schema_v2_primary_name_claim(
+    pool: &PgPool,
+    address: &str,
+    namespace: &str,
+    coin_type: &str,
+    name: &str,
+    claim_name_is_normalized: bool,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO primary_names_current (
+            address,
+            coin_type,
+            namespace,
+            claim_status,
+            raw_claim_name,
+            claim_name_is_normalized,
+            claim_provenance
+        )
+        VALUES ($1, $3, $2, 'success', $4, $5, $6)
+        ON CONFLICT (address, coin_type, namespace) DO UPDATE SET
+            claim_status = EXCLUDED.claim_status,
+            raw_claim_name = EXCLUDED.raw_claim_name,
+            claim_name_is_normalized = EXCLUDED.claim_name_is_normalized,
+            unsupported_reason = NULL,
+            claim_provenance = EXCLUDED.claim_provenance
+        "#,
+    )
+    .bind(address)
+    .bind(namespace)
+    .bind(coin_type)
+    .bind(name)
+    .bind(claim_name_is_normalized)
+    .bind(json!({
+        "chain_id": if namespace == "basenames" {
+            "base-mainnet"
+        } else {
+            "ethereum-mainnet"
+        }
+    }))
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn seed_v2_basenames_primary_name_persisted_verified(

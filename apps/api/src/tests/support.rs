@@ -40,6 +40,7 @@ static WORKER_CARGO_LOCK: Mutex<()> = Mutex::new(());
 struct TestDatabase {
     database: bigname_test_support::TestDatabase,
     pool: PgPool,
+    lookup_pool: PgPool,
     database_name: String,
 }
 
@@ -452,15 +453,21 @@ impl TestDatabase {
             .context("failed to create execution_cache_outcomes for API tests")?;
         }
 
-        Ok(Self {
+        let mut database = Self {
             database,
+            lookup_pool: pool.clone(),
             pool,
             database_name,
-        })
+        };
+        if initialize_name_current_schema {
+            database.initialize_lookup_schema().await?;
+            database.lookup_pool = database.open_lookup_pool().await?;
+        }
+        Ok(database)
     }
 
     async fn new_migrated() -> Result<Self> {
-        let database = Self::new(false).await?;
+        let mut database = Self::new(false).await?;
         database
             .database
             .apply_migrations(
@@ -468,12 +475,14 @@ impl TestDatabase {
                 "failed to apply checked-in migrations for API tests",
             )
             .await?;
+        database.initialize_lookup_schema().await?;
+        database.lookup_pool = database.open_lookup_pool().await?;
         Ok(database)
     }
 
     async fn initialize_lookup_schema(&self) -> Result<()> {
         let mut transaction = self.pool.begin().await?;
-        sqlx::query("CREATE SCHEMA bigname_phase")
+        sqlx::query("CREATE SCHEMA IF NOT EXISTS bigname_phase")
             .execute(&mut *transaction)
             .await?;
         sqlx::query("SET LOCAL search_path TO bigname_phase, public")
@@ -498,6 +507,10 @@ impl TestDatabase {
     }
 
     async fn lookup_pool(&self) -> Result<PgPool> {
+        Ok(self.lookup_pool.clone())
+    }
+
+    async fn open_lookup_pool(&self) -> Result<PgPool> {
         let config = self.database_config(6)?;
         let options = bigname_storage::stamp_projection_replay_version(
             PgConnectOptions::from_str(
@@ -521,14 +534,15 @@ impl TestDatabase {
     ) -> Result<AppState> {
         Ok(AppState::new_with_rpc_urls(
             self.pool.clone(),
-            self.lookup_pool().await?,
+            self.lookup_pool.clone(),
             chain_rpc_urls,
         ))
     }
 
     fn app_state(&self) -> AppState {
-        AppState::new(
+        AppState::new_with_rpc_urls(
             self.pool.clone(),
+            self.lookup_pool.clone(),
             bigname_lookup::ChainRpcUrls::default(),
         )
     }
@@ -845,10 +859,52 @@ impl TestDatabase {
 
             sqlx::query(
                 r#"
-                INSERT INTO chain_checkpoints (
+                INSERT INTO chain_lineage (
                     chain_id,
-                    canonical_block_hash,
-                    canonical_block_number,
+                    block_hash,
+                    block_number,
+                    block_timestamp,
+                    canonicality_state
+                )
+                VALUES ($1, $2, $3, $4, 'canonical'::canonicality_state)
+                ON CONFLICT (chain_id, block_hash) DO NOTHING
+                "#,
+            )
+            .bind(chain_id)
+            .bind(block_hash)
+            .bind(block_number)
+            .bind(timestamp)
+            .execute(&self.lookup_pool)
+            .await
+            .with_context(|| format!("failed to seed phase lineage for {chain_id}"))?;
+
+            sqlx::query(
+                "UPDATE chain_lineage
+                 SET canonicality_state = 'safe'
+                 WHERE chain_id = $1 AND block_hash = $2
+                   AND canonicality_state = 'canonical'",
+            )
+            .bind(chain_id)
+            .bind(block_hash)
+            .execute(&self.lookup_pool)
+            .await?;
+            sqlx::query(
+                "UPDATE chain_lineage
+                 SET canonicality_state = 'finalized'
+                 WHERE chain_id = $1 AND block_hash = $2
+                   AND canonicality_state = 'safe'",
+            )
+            .bind(chain_id)
+            .bind(block_hash)
+            .execute(&self.lookup_pool)
+            .await?;
+
+            sqlx::query(
+                r#"
+                INSERT INTO chain_heads (
+                    chain_id,
+                    latest_block_hash,
+                    latest_block_number,
                     safe_block_hash,
                     safe_block_number,
                     finalized_block_hash,
@@ -856,8 +912,8 @@ impl TestDatabase {
                 )
                 VALUES ($1, $2, $3, $2, $3, $2, $3)
                 ON CONFLICT (chain_id) DO UPDATE SET
-                    canonical_block_hash = EXCLUDED.canonical_block_hash,
-                    canonical_block_number = EXCLUDED.canonical_block_number,
+                    latest_block_hash = EXCLUDED.latest_block_hash,
+                    latest_block_number = EXCLUDED.latest_block_number,
                     safe_block_hash = EXCLUDED.safe_block_hash,
                     safe_block_number = EXCLUDED.safe_block_number,
                     finalized_block_hash = EXCLUDED.finalized_block_hash,
@@ -868,9 +924,45 @@ impl TestDatabase {
             .bind(chain_id)
             .bind(block_hash)
             .bind(block_number)
-            .execute(&self.pool)
+            .execute(&self.lookup_pool)
             .await
-            .with_context(|| format!("failed to seed chain checkpoint for {chain_id}"))?;
+            .with_context(|| format!("failed to seed phase head for {chain_id}"))?;
+
+            sqlx::query(
+                r#"
+                INSERT INTO chain_phase_state (
+                    chain_id,
+                    phase_name,
+                    phase_status,
+                    current_block_number,
+                    current_block_hash,
+                    target_block_number,
+                    target_block_hash,
+                    input_content_hash,
+                    started_at,
+                    finished_at
+                )
+                VALUES ($1, 'project', 'completed', $2, $3, $2, $3, $4, now(), now())
+                ON CONFLICT (chain_id, phase_name) DO UPDATE SET
+                    phase_status = EXCLUDED.phase_status,
+                    current_block_number = EXCLUDED.current_block_number,
+                    current_block_hash = EXCLUDED.current_block_hash,
+                    target_block_number = EXCLUDED.target_block_number,
+                    target_block_hash = EXCLUDED.target_block_hash,
+                    input_content_hash = EXCLUDED.input_content_hash,
+                    started_at = EXCLUDED.started_at,
+                    finished_at = EXCLUDED.finished_at,
+                    updated_at = now()
+                "#,
+            )
+            .bind(chain_id)
+            .bind(block_number)
+            .bind(block_hash)
+            .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+            .execute(&self.lookup_pool)
+            .await
+            .with_context(|| format!("failed to seed project phase state for {chain_id}"))?;
+
         }
 
         Ok(())
@@ -1218,9 +1310,11 @@ impl TestDatabase {
         let Self {
             database,
             pool,
+            lookup_pool,
             database_name: _,
         } = self;
         drop(pool);
+        drop(lookup_pool);
         database.cleanup().await
     }
 }
@@ -1251,7 +1345,8 @@ async fn seed_schema_v2_lookup_head(
     sqlx::query(
         "INSERT INTO chain_lineage
             (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
-         VALUES ($1, $2, $3, $4::timestamptz, 'canonical')",
+         VALUES ($1, $2, $3, $4::timestamptz, 'canonical')
+         ON CONFLICT (chain_id, block_hash) DO NOTHING",
     )
     .bind(chain_id)
     .bind(block_hash)
@@ -1261,7 +1356,11 @@ async fn seed_schema_v2_lookup_head(
     .await?;
     sqlx::query(
         "INSERT INTO chain_heads (chain_id, latest_block_hash, latest_block_number)
-         VALUES ($1, $2, $3)",
+         VALUES ($1, $2, $3)
+         ON CONFLICT (chain_id) DO UPDATE SET
+             latest_block_hash = EXCLUDED.latest_block_hash,
+             latest_block_number = EXCLUDED.latest_block_number,
+             updated_at = now()",
     )
     .bind(chain_id)
     .bind(block_hash)
@@ -1272,7 +1371,17 @@ async fn seed_schema_v2_lookup_head(
         "INSERT INTO chain_phase_state
             (chain_id, phase_name, phase_status, current_block_number, current_block_hash,
              target_block_number, target_block_hash, input_content_hash, started_at, finished_at)
-         VALUES ($1, 'project', 'completed', $2, $3, $2, $3, $4, now(), now())",
+         VALUES ($1, 'project', 'completed', $2, $3, $2, $3, $4, now(), now())
+         ON CONFLICT (chain_id, phase_name) DO UPDATE SET
+             phase_status = EXCLUDED.phase_status,
+             current_block_number = EXCLUDED.current_block_number,
+             current_block_hash = EXCLUDED.current_block_hash,
+             target_block_number = EXCLUDED.target_block_number,
+             target_block_hash = EXCLUDED.target_block_hash,
+             input_content_hash = EXCLUDED.input_content_hash,
+             started_at = EXCLUDED.started_at,
+             finished_at = EXCLUDED.finished_at,
+             updated_at = now()",
     )
     .bind(chain_id)
     .bind(block_number)
@@ -3389,6 +3498,40 @@ async fn seed_identity_name(
     relation: bigname_storage::AddressNameRelation,
     block_number: i64,
 ) -> Result<()> {
+    let name_row = address_name_name_current_row(
+        logical_name_id,
+        display_name,
+        normalized_name,
+        namehash,
+        surface_binding_id,
+        resource_id,
+        Some(token_lineage_id),
+        block_number,
+        compact_name_declared_summary(
+            address,
+            address,
+            address,
+            1_900_000_000,
+            "2026-04-17T00:00:21Z",
+            "2026-04-17T00:00:11Z",
+        ),
+    );
+    let publication_positions = name_row.chain_positions.clone();
+    let mut inventory = compact_records_inventory_current_row(logical_name_id, resource_id);
+    inventory.chain_positions = publication_positions.clone();
+    let address_row = address_name_current_row(
+        address,
+        logical_name_id,
+        relation,
+        display_name,
+        normalized_name,
+        namehash,
+        surface_binding_id,
+        resource_id,
+        Some(token_lineage_id),
+        block_number,
+    );
+
     database
         .seed_name_current_binding_migrated(
             logical_name_id,
@@ -3397,47 +3540,334 @@ async fn seed_identity_name(
             surface_binding_id,
         )
         .await?;
+    database.insert_name_current_row(name_row.clone()).await?;
     database
-        .insert_name_current_row(address_name_name_current_row(
-            logical_name_id,
-            display_name,
-            normalized_name,
-            namehash,
-            surface_binding_id,
-            resource_id,
-            Some(token_lineage_id),
-            block_number,
-            compact_name_declared_summary(
-                address,
-                address,
-                address,
-                1_900_000_000,
-                "2026-04-17T00:00:21Z",
-                "2026-04-17T00:00:11Z",
-            ),
-        ))
-        .await?;
-    database
-        .insert_record_inventory_current_row(compact_records_inventory_current_row(
-            logical_name_id,
-            resource_id,
-        ))
+        .insert_record_inventory_current_row(inventory.clone())
         .await?;
     bigname_storage::upsert_address_names_current_rows(
         &database.pool,
-        &[address_name_current_row(
-            address,
-            logical_name_id,
-            relation,
-            display_name,
-            normalized_name,
-            namehash,
-            surface_binding_id,
-            resource_id,
-            Some(token_lineage_id),
-            block_number,
-        )],
+        std::slice::from_ref(&address_row),
     )
+    .await?;
+    seed_phase_identity_name(
+        database,
+        display_name,
+        normalized_name,
+        resource_id,
+        token_lineage_id,
+        surface_binding_id,
+        address,
+        relation,
+        &name_row.declared_summary,
+        &inventory,
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_phase_identity_name(
+    database: &TestDatabase,
+    display_name: &str,
+    normalized_name: &str,
+    resource_id: Uuid,
+    token_lineage_id: Uuid,
+    surface_binding_id: Uuid,
+    address: &str,
+    relation: bigname_storage::AddressNameRelation,
+    declared_summary: &Value,
+    inventory: &bigname_storage::RecordInventoryCurrentRow,
+) -> Result<()> {
+    let namespace = if normalized_name.ends_with(".base.eth") && normalized_name != "base.eth" {
+        "basenames"
+    } else {
+        "ens"
+    };
+    let namehash = bigname_lookup::ens_namehash_hex(normalized_name)?;
+    let logical_name_id = format!("{namespace}:{namehash}");
+    let normalized = bigname_domain::normalization::normalize_name(display_name)
+        .map_err(|error| anyhow::anyhow!(error.message().to_owned()))?;
+    let labelhashes = normalized
+        .normalized_labels
+        .iter()
+        .map(|label| {
+            bigname_storage::label_preimage_from_label(label, "api_test", 1, json!({}))
+                .map(|preimage| preimage.labelhash)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let chain_id = if namespace == "basenames" {
+        "base-mainnet"
+    } else {
+        "ethereum-mainnet"
+    };
+    let (block_hash, block_number, timestamp, timestamp_text): (
+        String,
+        i64,
+        OffsetDateTime,
+        String,
+    ) = sqlx::query_as(
+        r#"
+        SELECT head.latest_block_hash, head.latest_block_number, lineage.block_timestamp,
+               to_char(
+                   lineage.block_timestamp AT TIME ZONE 'UTC',
+                   'YYYY-MM-DD"T"HH24:MI:SS"Z"'
+               )
+        FROM chain_heads head
+        JOIN chain_lineage lineage
+          ON lineage.chain_id = head.chain_id
+         AND lineage.block_hash = head.latest_block_hash
+         AND lineage.block_number = head.latest_block_number
+        WHERE head.chain_id = $1
+        "#,
+    )
+    .bind(chain_id)
+    .fetch_one(&database.lookup_pool)
+    .await?;
+    let slot = if chain_id == "base-mainnet" { "base" } else { "ethereum" };
+    let publication_positions = json!({
+        slot: {
+            "chain_id": chain_id,
+            "block_number": block_number,
+            "block_hash": block_hash,
+            "timestamp": timestamp_text,
+        }
+    });
+    let target_positions = json!({
+        "target_block_number": block_number,
+        "target_block_hash": block_hash,
+    });
+    let boundary_key = format!(
+        "{logical_name_id}:{resource_id}:0:{block_number}:{block_hash}"
+    );
+
+    let mut transaction = database.lookup_pool.begin().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO token_lineages (
+            token_lineage_id, chain_id, block_hash, block_number,
+            provenance, canonicality_state
+        ) VALUES ($1, $2, $3, $4, '{}'::jsonb, 'finalized')
+        ON CONFLICT (token_lineage_id) DO NOTHING
+        "#,
+    )
+    .bind(token_lineage_id)
+    .bind(chain_id)
+    .bind(&block_hash)
+    .bind(block_number)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO resources (
+            resource_id, token_lineage_id, chain_id, block_hash, block_number,
+            provenance, canonicality_state
+        ) VALUES ($1, $2, $3, $4, $5, '{}'::jsonb, 'finalized')
+        ON CONFLICT (resource_id) DO NOTHING
+        "#,
+    )
+    .bind(resource_id)
+    .bind(token_lineage_id)
+    .bind(chain_id)
+    .bind(&block_hash)
+    .bind(block_number)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO name_surfaces (
+            logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+            namehash, labelhashes, normalizer_version, visibility_state,
+            normalization_errors, chain_id, block_hash, block_number,
+            provenance, canonicality_state
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, 'active', '[]'::jsonb,
+            $9, $10, $11, '{}'::jsonb, 'finalized'
+        ) ON CONFLICT (logical_name_id) DO NOTHING
+        "#,
+    )
+    .bind(&logical_name_id)
+    .bind(namespace)
+    .bind(&normalized.normalized_name)
+    .bind(&normalized.normalized_labels)
+    .bind(&normalized.dns_encoded_name)
+    .bind(&namehash)
+    .bind(labelhashes)
+    .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION)
+    .bind(chain_id)
+    .bind(&block_hash)
+    .bind(block_number)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO surface_bindings (
+            surface_binding_id, logical_name_id, resource_id, binding_kind,
+            active_from, chain_id, block_hash, block_number, provenance,
+            canonicality_state
+        ) VALUES (
+            $1, $2, $3, 'declared_registry_path', $4, $5, $6, $7,
+            '{}'::jsonb, 'finalized'
+        ) ON CONFLICT (surface_binding_id) DO NOTHING
+        "#,
+    )
+    .bind(surface_binding_id)
+    .bind(&logical_name_id)
+    .bind(resource_id)
+    .bind(timestamp)
+    .bind(chain_id)
+    .bind(&block_hash)
+    .bind(block_number)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO name_current (
+            logical_name_id, namespace, raw_name, namehash, surface_binding_id,
+            resource_id, token_lineage_id, binding_kind, declared_summary,
+            support_status, provenance, chain_positions, canonicality_summary,
+            manifest_version
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, 'declared_registry_path', $8,
+            'supported', '{}'::jsonb, $9, $10, 1
+        ) ON CONFLICT (logical_name_id) DO UPDATE SET
+            declared_summary = EXCLUDED.declared_summary,
+            chain_positions = EXCLUDED.chain_positions
+        "#,
+    )
+    .bind(&logical_name_id)
+    .bind(namespace)
+    .bind(&normalized.normalized_name)
+    .bind(&namehash)
+    .bind(surface_binding_id)
+    .bind(resource_id)
+    .bind(token_lineage_id)
+    .bind(declared_summary)
+    .bind(&publication_positions)
+    .bind(json!({
+        "state": "canonical_lineage",
+        "target_block_number": block_number,
+        "target_block_hash": block_hash,
+    }))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO record_inventory_current (
+            resource_id, record_version_boundary_key, record_version_boundary,
+            selectors, unsupported_families, entries, support_status,
+            provenance, chain_positions, canonicality_summary, manifest_version
+        ) VALUES ($1, $2, $3, $4, $5, $6, 'supported', '{}'::jsonb, $7, $8, 1)
+        ON CONFLICT (resource_id, record_version_boundary_key) DO UPDATE SET
+            entries = EXCLUDED.entries,
+            chain_positions = EXCLUDED.chain_positions
+        "#,
+    )
+    .bind(resource_id)
+    .bind(boundary_key)
+    .bind(&inventory.record_version_boundary)
+    .bind(&inventory.selectors)
+    .bind(&inventory.unsupported_families)
+    .bind(&inventory.entries)
+    .bind(&target_positions)
+    .bind(json!({
+        "state": "canonical_lineage",
+        "target_block_number": block_number,
+        "target_block_hash": block_hash,
+    }))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO address_names_current (
+            address, logical_name_id, relation, namespace, raw_name, namehash,
+            surface_binding_id, resource_id, token_lineage_id, binding_kind,
+            support_status, provenance, chain_positions, canonicality_summary,
+            manifest_version
+        ) VALUES (
+            lower($1), $2, $3, $4, $5, $6, $7, $8, $9,
+            'declared_registry_path', 'supported', '{}'::jsonb, $10, $11, 1
+        ) ON CONFLICT (address, logical_name_id, relation) DO UPDATE SET
+            chain_positions = EXCLUDED.chain_positions
+        "#,
+    )
+    .bind(address)
+    .bind(&logical_name_id)
+    .bind(relation.as_str())
+    .bind(namespace)
+    .bind(&normalized.normalized_name)
+    .bind(&namehash)
+    .bind(surface_binding_id)
+    .bind(resource_id)
+    .bind(token_lineage_id)
+    .bind(target_positions)
+    .bind(json!({
+        "state": "canonical_lineage",
+        "target_block_number": block_number,
+        "target_block_hash": block_hash,
+    }))
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+async fn seed_phase_primary_name_snapshot(
+    database: &TestDatabase,
+    address: &str,
+    namespace: &str,
+    coin_type: &str,
+    claim_status: bigname_storage::PrimaryNameClaimStatus,
+    raw_claim_name: Option<&str>,
+) -> Result<()> {
+    let chain_id = if namespace == "basenames" {
+        "base-mainnet"
+    } else {
+        "ethereum-mainnet"
+    };
+    let (block_number, block_hash): (i64, String) = sqlx::query_as(
+        "SELECT latest_block_number, latest_block_hash
+         FROM chain_heads
+         WHERE chain_id = $1",
+    )
+    .bind(chain_id)
+    .fetch_one(&database.lookup_pool)
+    .await?;
+    let claim_provenance = json!({
+        "chain_id": chain_id,
+        "target_block_number": block_number,
+        "target_block_hash": block_hash,
+    });
+    let status = match claim_status {
+        bigname_storage::PrimaryNameClaimStatus::Success => "success",
+        bigname_storage::PrimaryNameClaimStatus::NotFound => "not_found",
+        bigname_storage::PrimaryNameClaimStatus::Unsupported => "unsupported",
+        bigname_storage::PrimaryNameClaimStatus::InvalidName => "invalid_name",
+    };
+    let unsupported_reason = (status == "unsupported").then_some("unsupported_test_claim");
+    sqlx::query(
+        r#"
+        INSERT INTO primary_names_current (
+            address, coin_type, namespace, claim_status, raw_claim_name,
+            claim_name_is_normalized, unsupported_reason, claim_provenance
+        ) VALUES (lower($1), $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT (address, coin_type, namespace) DO UPDATE SET
+            claim_status = EXCLUDED.claim_status,
+            raw_claim_name = EXCLUDED.raw_claim_name,
+            claim_name_is_normalized = EXCLUDED.claim_name_is_normalized,
+            unsupported_reason = EXCLUDED.unsupported_reason,
+            claim_provenance = EXCLUDED.claim_provenance
+        "#,
+    )
+    .bind(address)
+    .bind(coin_type)
+    .bind(namespace)
+    .bind(status)
+    .bind(raw_claim_name)
+    .bind(status == "success")
+    .bind(unsupported_reason)
+    .bind(claim_provenance)
+    .execute(&database.lookup_pool)
     .await?;
     Ok(())
 }

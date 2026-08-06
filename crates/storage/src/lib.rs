@@ -17,6 +17,7 @@ mod migration_indexes;
 mod name_current;
 mod normalized_events;
 mod permissions;
+mod phase_projection_reads;
 mod primary_name;
 mod projection_helpers;
 pub mod projection_staging;
@@ -176,6 +177,11 @@ pub use permissions::{
     replace_permissions_current_resource_projection, upsert_permissions_current_resource_summary,
     upsert_permissions_current_rows,
 };
+pub use phase_projection_reads::{
+    load_phase_identity_name_feed_records_by_ids, load_phase_identity_records_by_ids,
+    load_phase_name_current_rows_by_ids, load_phase_resolver_bound_name_rows,
+    load_phase_resolver_current,
+};
 pub use primary_name::{
     PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot,
     VERIFIED_PRIMARY_NAME_INVALIDATION_KEY, VERIFIED_PRIMARY_NAME_LOOKUP_KEY,
@@ -260,7 +266,7 @@ pub use snapshot_selection::{
     SnapshotPositionRequirement, SnapshotProjectionRead, SnapshotSelectionError,
     SnapshotSelectionErrorKind, SnapshotSelectionResult, SnapshotSelectionScope,
     SnapshotSelectorInput, ensure_projection_chain_positions_match, parse_rfc3339_utc_timestamp,
-    resolve_exact_name_snapshot_selection,
+    resolve_exact_name_snapshot_selection, snapshot_chain_has_head,
 };
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
