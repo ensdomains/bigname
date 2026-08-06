@@ -155,7 +155,14 @@ The API serves `GET /healthz` on its normal bind address, defaulting locally to
 public versioned API route.
 
 `api_status` reflects the API's own database reachability. Aggregate status
-also evaluates the phase runner's latest heartbeat. A standalone API therefore
-reports `status="degraded"` with `api_status="ready"`; a current phase-runner
-heartbeat makes the aggregate ready. The server compose healthcheck tests
-`api_status` so API liveness does not depend on an indexing loop restart.
+also evaluates the phase runner's heartbeats, judged on the worst expected
+chain rather than the single freshest row: an expected chain with no
+phase-runner heartbeat, or whose newest heartbeat is older than
+`BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS`, reports `stale` even while another
+chain keeps writing heartbeats. Expected chains are the ones the phase schema
+knows: stored heads, chain phase state, and any chain already writing
+phase-runner heartbeats. A phase runner that has written no heartbeat at all
+reports `not_started`. A standalone API therefore reports `status="degraded"`
+with `api_status="ready"`; current heartbeats on every expected chain make the
+aggregate ready. The server compose healthcheck tests `api_status` so API
+liveness does not depend on an indexing loop restart.

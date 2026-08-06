@@ -147,38 +147,80 @@ pub(crate) async fn health(
     )
 }
 
+/// Judge the phase runner by its worst expected chain, not by the single freshest heartbeat row.
+/// One stalled chain must not be masked by another chain still writing heartbeats, so an expected
+/// chain with no heartbeat at all, or a freshest-per-chain heartbeat older than the configured
+/// age, reports `stale`. Expected chains are the ones the phase schema knows: stored heads, phase
+/// state, and any chain already writing phase-runner heartbeats.
 async fn load_phase_runner_health(
     pool: &PgPool,
     max_age_seconds: i64,
 ) -> anyhow::Result<HealthLoopResponse> {
     let row = sqlx::query(
         r#"
+        WITH expected_chains AS (
+            SELECT chain_id FROM bigname_phase.chain_heads
+            UNION
+            SELECT chain_id FROM bigname_phase.chain_phase_state
+            UNION
+            SELECT chain_id FROM bigname_phase.service_heartbeats
+            WHERE service_name = 'phase-runner'
+        ),
+        chain_heartbeats AS (
+            SELECT expected.chain_id, freshest.phase_name, freshest.started_at,
+                   freshest.heartbeat_at
+            FROM expected_chains expected
+            LEFT JOIN LATERAL (
+                SELECT phase_name, started_at, heartbeat_at
+                FROM bigname_phase.service_heartbeats
+                WHERE service_name = 'phase-runner'
+                  AND chain_id = expected.chain_id
+                ORDER BY heartbeat_at DESC, instance_id, phase_name
+                LIMIT 1
+            ) freshest ON TRUE
+        ),
+        oldest AS (
+            SELECT phase_name, started_at, heartbeat_at
+            FROM chain_heartbeats
+            WHERE heartbeat_at IS NOT NULL
+            ORDER BY heartbeat_at ASC, chain_id, phase_name
+            LIMIT 1
+        )
         SELECT
-            phase_name,
-            started_at,
-            heartbeat_at,
-            FLOOR(EXTRACT(EPOCH FROM (clock_timestamp() - heartbeat_at)))::BIGINT AS age_seconds
-        FROM bigname_phase.service_heartbeats
-        WHERE service_name = 'phase-runner'
-        ORDER BY heartbeat_at DESC, instance_id, chain_id, phase_name
-        LIMIT 1
+            (
+                SELECT COUNT(*) FROM chain_heartbeats WHERE heartbeat_at IS NULL
+            )::BIGINT AS missing_chain_count,
+            oldest.phase_name,
+            oldest.started_at,
+            oldest.heartbeat_at,
+            FLOOR(
+                EXTRACT(EPOCH FROM (clock_timestamp() - oldest.heartbeat_at))
+            )::BIGINT AS age_seconds
+        FROM (SELECT 1) probe
+        LEFT JOIN oldest ON TRUE
         "#,
     )
-    .fetch_optional(pool)
+    .fetch_one(pool)
     .await?;
-    let Some(row) = row else {
-        return Ok(HealthLoopResponse {
-            status: "not_started",
-            phase: None,
-            started_at: None,
-            heartbeat_at: None,
-            heartbeat_age_seconds: None,
-            max_age_seconds,
-        });
+    let not_started = HealthLoopResponse {
+        status: "not_started",
+        phase: None,
+        started_at: None,
+        heartbeat_at: None,
+        heartbeat_age_seconds: None,
+        max_age_seconds,
     };
+    let Some(heartbeat_at) = row.try_get::<Option<OffsetDateTime>, _>("heartbeat_at")? else {
+        return Ok(not_started);
+    };
+    if row.try_get::<i64, _>("missing_chain_count")? > 0 {
+        return Ok(HealthLoopResponse {
+            status: "stale",
+            ..not_started
+        });
+    }
     let age_seconds: i64 = row.try_get("age_seconds")?;
     let started_at: OffsetDateTime = row.try_get("started_at")?;
-    let heartbeat_at: OffsetDateTime = row.try_get("heartbeat_at")?;
     Ok(HealthLoopResponse {
         status: if age_seconds <= max_age_seconds {
             "running"
