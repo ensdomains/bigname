@@ -281,18 +281,19 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                 actions.push(subnode(&wires, label, "sub", node, owner));
             }
             SubnameShape::WrappedChild => {
-                let child = child_node(node, "kid");
+                let child_node = child_node(node, "kid");
+                let child = child_wrap(dimensions.wrap_state, expires);
                 actions.push(subnode(&wires, label, "kid", node, wrapper_address));
                 actions.push(action(
                     format!("{label}:wrapped-child"),
                     vec![emission(
                         wires.wrapper,
                         V1Wrapper::NameWrapped {
-                            node: child,
+                            node: child_node,
                             name: dns_encode(&["kid", label, "eth"]).into(),
                             owner: successor,
-                            fuses: child_fuses(dimensions.wrap_state),
-                            expiry: u64::try_from(expires).expect("expiry fits u64"),
+                            fuses: child.0,
+                            expiry: child.1,
                         }
                         .encode_log_data(),
                     )],
@@ -513,14 +514,19 @@ fn subnode(wires: &Wires<'_>, label: &str, child: &str, parent: B256, owner: Add
     )
 }
 
-/// A subname can only carry a parent-controlled fuse if its parent has burned CANNOT_UNWRAP
-/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L968-L975 @ ens_v1@91c966f), and the
-/// plain wrap path always burns none
+/// The fuses and wrapper expiry a wrapped subname can carry, given its parent's state. A subname
+/// only holds a parent-controlled fuse or a wrapper expiry once its parent has burned
+/// CANNOT_UNWRAP (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L968-L975 @
+/// ens_v1@91c966f); wrapping under any other parent goes through the plain wrap path, which burns
+/// no fuses and sets no expiry
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L374 @ ens_v1@91c966f).
-fn child_fuses(wrap_state: WrapState) -> u32 {
+fn child_wrap(wrap_state: WrapState, expires: i64) -> (u32, u64) {
     match wrap_state {
-        WrapState::WrappedLocked => PARENT_CANNOT_CONTROL,
-        _ => 0,
+        WrapState::WrappedLocked => (
+            PARENT_CANNOT_CONTROL,
+            u64::try_from(expires).expect("expiry fits u64"),
+        ),
+        _ => (0, 0),
     }
 }
 
