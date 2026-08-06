@@ -339,44 +339,67 @@ fn admitted<'a>(
     })
 }
 
-/// Fails the lane when a pinned version file is not the one its family currently has rolled out.
-/// Superseded versions stay checked in, so the pin has to be checked against something; the check
-/// is `rollout_status = "active"` rather than the highest version number because a family may also
-/// carry a `draft` or `shadow` version that production does not run, and because at most one
-/// version per family and chain is active (`docs/manifests.md`), across deployment epochs. A bump
-/// that retires the world's epoch therefore reports the epoch it moved to rather than passing.
+/// Fails the lane when a world no longer generates from what its namespace and chain have rolled
+/// out — either because a pin names a version other than the active one, or because a family became
+/// active that no scenario pool generates at all. Retired versions stay checked in, so the pin needs
+/// something to be checked against; the anchor is `rollout_status = "active"` rather than the
+/// highest version number, because a family may also carry a `draft` or `shadow` version that
+/// production does not run. `docs/manifests.md` allows at most one active version per namespace,
+/// family, and chain *within one deployment-profile root*, and allows a family to have none; this
+/// lane loads two roots and is stricter — a family it pins with no active version, or with more than
+/// one, leaves the pin unjustifiable, so both fail here.
 pub fn assert_pins_are_current(world: &World, checked_in: &[LoadedManifest]) -> Result<()> {
-    let mut stale = Vec::new();
-    for slot in world.sources {
-        let active = checked_in.iter().find(|loaded| {
-            loaded.manifest.namespace == world.namespace
-                && loaded.manifest.source_family == slot.family
-                && loaded.manifest.chain == world.chain_id
-                && loaded.manifest.rollout_status == RolloutStatus::Active
-        });
-        let Some(active) = active else {
-            stale.push(format!(
-                "{} pins {} but no version of that family is active",
-                slot.family, slot.version_file
-            ));
-            continue;
-        };
-        let file = version_file(active).unwrap_or_default();
-        if file != slot.version_file || active.manifest.deployment_epoch != world.deployment_epoch {
-            stale.push(format!(
-                "{} pins {} ({}) but the active version is {file} ({})",
-                slot.family,
-                slot.version_file,
-                world.deployment_epoch,
-                active.manifest.deployment_epoch
-            ));
+    let mut active: BTreeMap<&str, Vec<&LoadedManifest>> = BTreeMap::new();
+    for loaded in checked_in {
+        if loaded.manifest.namespace == world.namespace
+            && loaded.manifest.chain == world.chain_id
+            && loaded.manifest.rollout_status == RolloutStatus::Active
+        {
+            active
+                .entry(loaded.manifest.source_family.as_str())
+                .or_default()
+                .push(loaded);
         }
     }
-    if !stale.is_empty() {
+    let mut drift = Vec::new();
+    for slot in world.sources {
+        match active.remove(slot.family).as_deref() {
+            None | Some([]) => drift.push(format!(
+                "{} pins {} but no version of that family is active",
+                slot.family, slot.version_file
+            )),
+            Some([_, _, ..]) => drift.push(format!(
+                "{} has more than one active version, so a pin cannot be checked against it",
+                slot.family
+            )),
+            Some([current]) => {
+                let file = version_file(current).unwrap_or_default();
+                if file != slot.version_file
+                    || current.manifest.deployment_epoch != world.deployment_epoch
+                {
+                    drift.push(format!(
+                        "{} pins {} but the active version is {file}, deployed as {} where this \
+                         world is {}",
+                        slot.family,
+                        slot.version_file,
+                        current.manifest.deployment_epoch,
+                        world.deployment_epoch
+                    ));
+                }
+            }
+        }
+    }
+    for family in active.keys() {
+        drift.push(format!(
+            "{family} is active but no scenario pool generates it; give it a source slot or record \
+             why this world leaves it out"
+        ));
+    }
+    if !drift.is_empty() {
         bail!(
             "{} does not generate from the manifests its families have rolled out:\n  {}",
             world.label,
-            stale.join("\n  ")
+            drift.join("\n  ")
         );
     }
     Ok(())

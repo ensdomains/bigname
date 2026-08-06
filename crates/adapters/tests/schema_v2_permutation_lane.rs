@@ -356,11 +356,12 @@ fn check(
     })
 }
 
-/// An event that clears a subregistry the name was carrying. The corpus reaches this only through
-/// the terminal boundary the interpreter derives when an ENSv2 registration ends — `LabelUnregistered`,
-/// or a `LabelRegistered` that replaces a live token — which is a different interpretation path from
-/// the one an attaching `SubregistryUpdated` takes. A `SubregistryUpdated` naming the zero address
-/// would also clear a subregistry and would count here; the pools never emit one.
+/// An event that clears a subregistry the name was carrying — a different interpretation path from
+/// the one an attaching `SubregistryUpdated` takes. Every one the corpus reaches comes from the
+/// terminal boundary the interpreter derives on `LabelUnregistered`; the interpreter derives the
+/// same boundary for a registration that replaces a live token, which these pools never produce
+/// because each label is registered once. A `SubregistryUpdated` naming the zero address would also
+/// clear a subregistry and would count here; the pools never emit one.
 fn is_subregistry_detach(event: &bigname_adapters::schema_v2::NormalizedEvent) -> bool {
     event.event_kind == "SubregistryChanged"
         && event.after_state.get("subregistry") == Some(&Value::Null)
@@ -411,6 +412,12 @@ const EXPECTED_ARTIFACTS: &[(&str, usize)] = &[
     ("rebased_attributions", 4),
 ];
 
+/// The first thing to rule out when a pinned count moves: these are counts over the sequences one
+/// seed draws, so they are not evidence about the interpreter until the corpus is held fixed.
+const DRAWN_CORPUS_CAVEAT: &str = "If the scenario pools, the axes, the seeded draw order, or a \
+                                   checked-in manifest changed, the corpus changed and every \
+                                   pinned count here moves with it — re-pin rather than hunt.";
+
 /// Terminal-boundary subregistry detaches the default corpus reaches. `SubregistryChanged` on its
 /// own is satisfiable by attachment alone, so without this the detach path could go dark while the
 /// coverage floor above stayed green.
@@ -442,14 +449,15 @@ fn assert_pinned_artifacts(artifacts: &BatchBoundaryArtifacts, detaches: usize) 
     if observed != expected {
         bail!(
             "the default corpus produced batch-boundary artifacts {observed:?}, not the pinned \
-             {expected:?}; a count that fell is a divergence fixed (retire it here), one that rose \
-             or is newly named is a regression"
+             {expected:?}. {DRAWN_CORPUS_CAVEAT} Otherwise: a count that fell is a divergence fixed \
+             (retire it here), and one that rose or is newly named is a regression"
         );
     }
     if detaches != EXPECTED_SUBREGISTRY_DETACHES {
         bail!(
             "the default corpus reached {detaches} terminal-boundary subregistry detaches, not the \
-             pinned {EXPECTED_SUBREGISTRY_DETACHES}"
+             pinned {EXPECTED_SUBREGISTRY_DETACHES}. {DRAWN_CORPUS_CAVEAT} Otherwise a fall means \
+             the sequences stopped reaching the path"
         );
     }
     Ok(())

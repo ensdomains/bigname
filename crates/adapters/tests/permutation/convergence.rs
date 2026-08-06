@@ -35,8 +35,8 @@ pub struct BatchBoundaryArtifacts {
 impl BatchBoundaryArtifacts {
     /// One flat count per artifact class the run actually produced, for pinning. A class that never
     /// fired is absent rather than zero, so a lane whose interpreter no longer diverges compares
-    /// equal to an empty pin table. Destructured so that a new artifact class cannot be added to the
-    /// struct without being added to the pin.
+    /// equal to an empty pin table. Destructured so that adding an artifact class to the struct
+    /// stops compiling here until someone decides how it is counted.
     pub fn counts(&self) -> BTreeMap<String, usize> {
         let Self {
             carried_before_states,
