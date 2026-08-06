@@ -94,42 +94,71 @@ const fn injected_floor(_endpoint: &str) -> Option<i64> {
 /// Stands in for a pruned datadir, which no unit test can build.
 #[cfg(test)]
 mod test_floors {
-    use std::{
-        collections::VecDeque,
-        sync::{Arc, Mutex},
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
     };
 
     use bigname_test_support::{ScopedTestHookGuard, ScopedTestHookRegistry};
 
-    type Floors = Arc<Mutex<VecDeque<i64>>>;
+    /// A node that prunes at a chosen moment: the floor rises only once the source has
+    /// served the window, so a read taken before the fetch cannot observe the new floor.
+    pub(super) struct PruningNode {
+        before_fetch: i64,
+        after_fetch: i64,
+        fetched: AtomicBool,
+    }
 
-    static FLOORS: ScopedTestHookRegistry<String, Floors> = ScopedTestHookRegistry::new();
+    impl PruningNode {
+        pub(super) fn observe_fetch(&self) {
+            self.fetched.store(true, Ordering::SeqCst);
+        }
 
-    /// Each read takes the next floor and the last one repeats, so a node that prunes
-    /// mid-batch is expressed as `[low, raised]`.
+        fn floor(&self) -> i64 {
+            if self.fetched.load(Ordering::SeqCst) {
+                self.after_fetch
+            } else {
+                self.before_fetch
+            }
+        }
+    }
+
+    static FLOORS: ScopedTestHookRegistry<String, Arc<PruningNode>> = ScopedTestHookRegistry::new();
+
     pub(super) fn install(
         endpoint: &str,
-        floors: impl IntoIterator<Item = i64>,
-    ) -> ScopedTestHookGuard<String, Floors> {
-        FLOORS.install(
-            endpoint.to_owned(),
-            Arc::new(Mutex::new(floors.into_iter().collect())),
-        )
+        floor: i64,
+    ) -> ScopedTestHookGuard<String, Arc<PruningNode>> {
+        install_node(endpoint, pruning_node(floor, floor))
+    }
+
+    pub(super) fn pruning_node(before_fetch: i64, after_fetch: i64) -> Arc<PruningNode> {
+        Arc::new(PruningNode {
+            before_fetch,
+            after_fetch,
+            fetched: AtomicBool::new(false),
+        })
+    }
+
+    /// Installed after the source is listening, so the node and its endpoint agree.
+    pub(super) fn install_node(
+        endpoint: &str,
+        node: Arc<PruningNode>,
+    ) -> ScopedTestHookGuard<String, Arc<PruningNode>> {
+        FLOORS.install(endpoint.to_owned(), node)
     }
 
     pub(super) fn floor(endpoint: &str) -> Option<i64> {
-        let floors = FLOORS.get_cloned(&endpoint.to_owned())?;
-        let mut floors = floors.lock().expect("floor queue mutex poisoned");
-        if floors.len() > 1 {
-            floors.pop_front()
-        } else {
-            floors.front().copied()
-        }
+        FLOORS
+            .get_cloned(&endpoint.to_owned())
+            .map(|node| node.floor())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use anyhow::Result as AnyResult;
     use bigname_test_support::{TestDatabase, TestDatabaseConfig};
     use serde_json::{Value, json};
@@ -153,7 +182,7 @@ mod tests {
     #[tokio::test]
     async fn a_range_below_the_node_floor_fails_the_phase_instead_of_completing() -> AnyResult<()> {
         let database = TestDatabase::create(TestDatabaseConfig::new("ingest_source_floor")).await?;
-        let _floor = test_floors::install(PRUNED_DATADIR, [MERGE_RECEIPT_SEGMENT_START]);
+        let _floor = test_floors::install(PRUNED_DATADIR, MERGE_RECEIPT_SEGMENT_START);
         let engine = Engine::new(database.pool().clone());
 
         let historical = engine
@@ -183,9 +212,11 @@ mod tests {
     #[tokio::test]
     async fn a_floor_rising_while_a_window_is_in_flight_stops_the_write() -> AnyResult<()> {
         let database = single_block_database("ingest_source_floor_race").await?;
-        let endpoint = single_block_chain_endpoint().await?;
-        // The node prunes mid-batch: planning finds block 0 servable, the re-read does not.
-        let _floor = test_floors::install(&endpoint, [0, 1]);
+        // The node prunes the moment it has served the window: planning finds block 0
+        // servable, and only a floor read taken after the fetch sees otherwise.
+        let node = test_floors::pruning_node(0, 1);
+        let endpoint = single_block_chain_endpoint(Arc::clone(&node)).await?;
+        let _floor = test_floors::install_node(&endpoint, node);
         let engine = Engine::new(database.pool().clone());
 
         let error = engine
@@ -279,7 +310,7 @@ mod tests {
     async fn a_redo_range_above_the_floor_is_planned_on_a_pruned_node() -> AnyResult<()> {
         let database =
             TestDatabase::create(TestDatabaseConfig::new("ingest_source_floor_redo")).await?;
-        let _floor = test_floors::install(REDO_DATADIR, [MERGE_RECEIPT_SEGMENT_START]);
+        let _floor = test_floors::install(REDO_DATADIR, MERGE_RECEIPT_SEGMENT_START);
         let engine = Engine::new(database.pool().clone());
 
         // The declared window starts below the floor, but this redo range does not.
@@ -420,11 +451,15 @@ mod tests {
     }
 
     /// Serves one canonical block, enough for a batch to plan, fetch, and try to store.
-    async fn single_block_chain_endpoint() -> AnyResult<String> {
+    ///
+    /// Serving the block payloads is the last read of a window, so the node prunes there:
+    /// a floor read taken before the fetch still sees the pre-prune floor.
+    async fn single_block_chain_endpoint(node: Arc<test_floors::PruningNode>) -> AnyResult<String> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let endpoint = format!("http://{}/", listener.local_addr()?);
         tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
+                let node = Arc::clone(&node);
                 tokio::spawn(async move {
                     while let Some(body) = read_request_body(&mut socket).await {
                         let response =
@@ -436,6 +471,9 @@ mod tests {
                                     single => respond(&single),
                                 }
                             });
+                        if body.contains("eth_getBlockByHash") {
+                            node.observe_fetch();
+                        }
                         let payload = response.to_string();
                         let http = format!(
                             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{payload}",

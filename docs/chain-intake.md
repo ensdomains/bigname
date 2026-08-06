@@ -131,13 +131,17 @@ cover — and planning fails as a configuration error naming that floor and the
 requested range instead of reading a pruned window as empty coverage. The floor
 is read a second time after a window is fetched and before it is stored, because
 a node can prune while a batch is in flight; a window whose floor rose under it
-fails the same way rather than being recorded. Neither read is instantaneous —
-the node deletes files before committing the transaction that makes a read-only
-reader refresh its view
-(upstream: .refs/reth/crates/storage/provider/src/providers/database/mod.rs:L279 @ reth@88505c7f)
-(upstream: .refs/reth/crates/prune/prune/src/pruner.rs:L363 @ reth@88505c7f) —
-so the log read also fails any fetched block whose receipt count does not match
-the transaction count its retained body indices declare. Pruning
+fails the same way rather than being recorded. For receipts kept in static files
+that second read is sufficient on its own: until the node commits a deletion, a
+reader still holding the old index fails outright rather than reading empty
+(upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L972 @ reth@88505c7f),
+and the index refresh that makes such a read empty is the same one that raises
+the floor. Independently of the floor, the
+log read fails any fetched block whose receipt count does not match the
+transaction count its retained body indices declare — the check that covers what
+a floor cannot express: receipts pruned out of database tables, where there is no
+retained static-file range to read a floor from, and a partial receipt list,
+which would otherwise attribute logs to the wrong transaction. Pruning
 receipts deletes whole static-file ranges while leaving their headers readable
 (upstream: .refs/reth/crates/prune/prune/src/segments/receipts.rs:L34 @ reth@88505c7f)
 (upstream: .refs/reth/crates/prune/prune/src/segments/mod.rs:L41 @ reth@88505c7f),
@@ -164,9 +168,12 @@ from the static files on disk, so it bounds nothing on a node that keeps
 receipts in database tables
 (upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L188 @ reth@88505c7f)
 (upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L190 @ reth@88505c7f),
-whose row-wise prune checkpoints are not read. On that configuration only the
-expired-history floor applies and a pruned receipt window can still be recorded
-as covered.
+whose row-wise prune checkpoints are not read. On that configuration the floor
+falls back to expired history alone, and the receipt-count check is what stops a
+pruned window from being recorded: any block whose bloom admits a watched event
+fails the read rather than contributing nothing. A node pruning receipts by log
+filter is upstream-healthy but cannot serve historical intake at all, because the
+receipts it dropped are exactly the ones our reader would have to account for.
 
 Historical ingest is judged on the source's declared start block, not on how far
 its cursor has advanced, so a resumed run whose cursor already stands above the

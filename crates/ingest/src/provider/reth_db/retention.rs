@@ -25,6 +25,8 @@ pub(super) struct RetentionReadings {
     pub(super) lowest_receipt_block: Option<u64>,
 }
 
+/// Reads `earliest_block_number` first: that call catches a read-only provider up with the
+/// node and re-initializes the static-file index that `get_lowest_range_start` then reads.
 pub(super) fn read_retention(factory: &EthereumRethProviderFactory) -> Result<RetentionReadings> {
     Ok(RetentionReadings {
         earliest_history_block: factory.earliest_block_number()?,
