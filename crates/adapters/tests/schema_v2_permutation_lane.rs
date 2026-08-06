@@ -12,9 +12,9 @@
 //! Knobs:
 //! - `BIGNAME_PERMUTATION_CASES` — permutations per protocol world. Default 24 (48 sequences per
 //!   run) keeps the lane inside the CI budget; raise it for deeper local sweeps.
-//! - `BIGNAME_PERMUTATION_SEED` — base seed, decimal. Default 1846370029. Overriding either knob
-//!   turns off the interpretation-coverage assertion, which is a property of the default corpus
-//!   rather than of any seed; the invariants themselves still run.
+//! - `BIGNAME_PERMUTATION_SEED` — base seed, decimal. Default 1846370029. Reducing the case count
+//!   or changing the seed turns off the interpretation-coverage assertion, which is a property of
+//!   the default corpus rather than of any seed; the invariants themselves still run.
 //!
 //! A failure reports `world=… seed=…`. Replay it with that seed and
 //! `BIGNAME_PERMUTATION_CASES=1`, against the same checked-in manifests — a scenario embeds the

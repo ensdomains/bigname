@@ -22,8 +22,7 @@ const PARENT_CANNOT_CONTROL: u32 = 1 << 16;
 /// (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L19 @ ens_v1@91c966f)
 const IS_DOT_ETH: u32 = 1 << 17;
 /// Wrapping a .eth 2LD always burns both, so no other word is reachable for one
-/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1013 @ ens_v1@91c966f). An
-/// emancipated 3LD child carries PARENT_CANNOT_CONTROL alone.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1013 @ ens_v1@91c966f).
 const WRAPPED_2LD_FUSES: u32 = PARENT_CANNOT_CONTROL | IS_DOT_ETH;
 const REGISTRY: &str = "ens_v1_registry_l1";
 const REGISTRAR: &str = "ens_v1_registrar_l1";
@@ -292,7 +291,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                             node: child,
                             name: dns_encode(&["kid", label, "eth"]).into(),
                             owner: successor,
-                            fuses: PARENT_CANNOT_CONTROL,
+                            fuses: child_fuses(dimensions.wrap_state),
                             expiry: u64::try_from(expires).expect("expiry fits u64"),
                         }
                         .encode_log_data(),
@@ -512,6 +511,17 @@ fn subnode(wires: &Wires<'_>, label: &str, child: &str, parent: B256, owner: Add
             .encode_log_data(),
         )],
     )
+}
+
+/// A subname can only carry a parent-controlled fuse if its parent has burned CANNOT_UNWRAP
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L968-L975 @ ens_v1@91c966f), and the
+/// plain wrap path always burns none
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L374 @ ens_v1@91c966f).
+fn child_fuses(wrap_state: WrapState) -> u32 {
+    match wrap_state {
+        WrapState::WrappedLocked => PARENT_CANNOT_CONTROL,
+        _ => 0,
+    }
 }
 
 fn expiry(window: ExpiryWindow, settle_timestamp: i64) -> i64 {
