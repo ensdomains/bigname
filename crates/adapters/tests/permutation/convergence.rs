@@ -18,7 +18,10 @@ pub struct BatchBoundaryArtifacts {
     /// `before_state` of that scope's first event *in the batch*, and a split gives each batch its
     /// own first event — so the split replay blanks values the whole pass carries. Neither leaves a
     /// trace on the row itself, so this cannot be pinned tighter than "one side is empty"; the
-    /// counter is split by direction to keep both visible.
+    /// counter is split by direction to keep both visible. Only the whole-pass direction is
+    /// witnessed by the default corpus and pinned in `EXPECTED_ARTIFACTS` — the resolver-scope
+    /// direction is a mechanism read out of the interpreter, not something the lane has reproduced,
+    /// so it would arrive as a new key and fail the pin rather than pass unnoticed.
     pub carried_before_states: BTreeMap<&'static str, usize>,
     /// Reconciliation keeps a superseded identity row only while a retained row in the same batch
     /// output still references it. Where the referencing row lands in a later batch the earlier

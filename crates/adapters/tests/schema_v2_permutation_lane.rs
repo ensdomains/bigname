@@ -23,8 +23,10 @@
 //! ones a failure would report — run on every sequence whatever the knobs say.
 //!
 //! A failure reports `world=… seed=…`. Replay it with that seed and
-//! `BIGNAME_PERMUTATION_CASES=1`, against the same checked-in manifests — a scenario embeds the
-//! manifest payloads, so a manifest edit changes what a seed generates.
+//! `BIGNAME_PERMUTATION_CASES=1`. What a seed generates depends only on the seed and the scenario
+//! pools — addresses come from the world's own base, not from a manifest — but a scenario carries
+//! the manifest payloads into the interpreter, so a manifest edit changes what that unchanged log
+//! sequence derives.
 
 mod permutation;
 
@@ -37,11 +39,12 @@ use permutation::{
     convergence::BatchBoundaryArtifacts,
     directed::Directed,
     events::declared_events,
-    invariants::{IdentityReferences, converge, split},
+    invariants::{IdentityReferences, assert_upsert_guards_agree, converge, split},
     scenario,
     world::{
         ENS_V1_MAINNET, ENS_V2_SEPOLIA, Wiring, World, assert_pins_are_current,
-        assert_worlds_cover_deployments, checked_in_manifests, declared_event_topics,
+        assert_worlds_cover_deployments, checked_in_manifests, declared_event_kinds,
+        declared_event_topics,
     },
 };
 
@@ -65,7 +68,7 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
     let mut artifacts = BatchBoundaryArtifacts::default();
     let mut subregistry_detaches = 0;
     let mut emitted_topic0s = BTreeSet::new();
-    let mut event_kinds = BTreeSet::new();
+    let mut event_kinds: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     let mut derived = Vec::new();
     for world in WORLDS {
         let wiring = Wiring::build(world, &checked_in)?;
@@ -89,7 +92,10 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
             match check(&context, world, &declared, input, batches) {
                 Ok(outcome) => {
                     events += outcome.events;
-                    event_kinds.extend(outcome.event_kinds);
+                    event_kinds
+                        .entry(world.label)
+                        .or_default()
+                        .extend(outcome.event_kinds);
                     subregistry_detaches += outcome.subregistry_detaches;
                     artifacts.absorb(outcome.artifacts);
                 }
@@ -105,10 +111,12 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
     eprintln!(
         "permutation_lane batch_boundary_artifacts: {artifacts} subregistry_detaches={subregistry_detaches}"
     );
-    eprintln!(
-        "permutation_lane derived_event_kinds={:?}",
-        event_kinds.iter().collect::<Vec<_>>()
-    );
+    for (world, kinds) in &event_kinds {
+        eprintln!(
+            "permutation_lane world={world} derived_event_kinds={:?}",
+            kinds.iter().collect::<Vec<_>>()
+        );
+    }
     if !failures.is_empty() {
         bail!(
             "{} of {} generated sequences failed:\n\n{}",
@@ -128,6 +136,13 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
     // default corpus asserts it. A reduced or reseeded run is a reproduction tool, not a gate.
     if cases < DEFAULT_CASES || base != DEFAULT_SEED {
         return Ok(());
+    }
+    for world in WORLDS {
+        assert_declared_kinds_are_reached(
+            world.label,
+            &declared_event_kinds(world, &checked_in)?,
+            event_kinds.get(world.label),
+        )?;
     }
     assert_interpretation_coverage(&event_kinds, emitted_topic0s.len())?;
     // Coverage only grows with a deeper sweep, but the pinned counts below are exact, so a sweep
@@ -205,6 +220,10 @@ fn generated_event_fragments_match_the_checked_in_manifest_abi() -> Result<()> {
 #[test]
 fn the_dimension_space_emits_every_declared_event() -> Result<()> {
     let checked_in = checked_in_manifests()?;
+    // Keyed by world, not by topic0 alone: three fragments this lane declares for ENSv1
+    // (`V1Wrapper::TransferSingle`, `V1Resolver::TextChanged`, `V1Resolver::NameChanged`) hash
+    // identically to their ENSv2 namesakes, so a flat set lets one world's emission stand in for
+    // the other's and silently drops the shadowed fragment from both directions of this check.
     let mut emitted = BTreeSet::new();
     for world in WORLDS {
         let wiring = Wiring::build(world, &checked_in)?;
@@ -215,19 +234,19 @@ fn the_dimension_space_emits_every_declared_event() -> Result<()> {
                         .emissions
                         .iter()
                         .filter_map(|emission| emission.topics.first())
-                        .map(|topic| topic.to_ascii_lowercase()),
+                        .map(|topic| (world.label, topic.to_ascii_lowercase())),
                 );
             }
         }
     }
     let declared = declared_events()
         .into_iter()
-        .map(|event| (event.topic0.to_ascii_lowercase(), event))
+        .map(|event| ((event.world, event.topic0.to_ascii_lowercase()), event))
         .collect::<BTreeMap<_, _>>();
     let missing = declared
-        .values()
-        .filter(|event| !emitted.contains(&event.topic0.to_ascii_lowercase()))
-        .map(|event| format!("{} ({})", event.name, event.signature))
+        .iter()
+        .filter(|(key, _)| !emitted.contains(*key))
+        .map(|((world, _), event)| format!("{world} {} ({})", event.name, event.signature))
         .collect::<Vec<_>>();
     if !missing.is_empty() {
         bail!(
@@ -240,7 +259,7 @@ fn the_dimension_space_emits_every_declared_event() -> Result<()> {
     // does not list is checked against neither the manifest ABI nor coverage.
     let undeclared = emitted
         .iter()
-        .filter(|topic0| !declared.contains_key(*topic0))
+        .filter(|key| !declared.contains_key(*key))
         .collect::<Vec<_>>();
     if !undeclared.is_empty() {
         bail!(
@@ -253,8 +272,8 @@ fn the_dimension_space_emits_every_declared_event() -> Result<()> {
 
 /// A retired manifest version stays checked in, so a world that keeps pinning it goes on generating
 /// from the old ABI against an interpreter that has moved to the rolled-out one. The lane is where
-/// that has to be loud. It does not check the other direction: an event a newer ABI adds is covered
-/// only once the pools emit it.
+/// that has to be loud. The other direction — a manifest declaring a normalized event nothing here
+/// reaches — is `assert_declared_kinds_are_reached`, on the corpus run.
 #[test]
 fn worlds_pin_the_manifest_version_their_families_have_rolled_out() -> Result<()> {
     let checked_in = checked_in_manifests()?;
@@ -278,11 +297,22 @@ fn worlds_pin_the_manifest_version_their_families_have_rolled_out() -> Result<()
 #[test]
 fn generated_scenarios_are_reproducible_from_their_seed() -> Result<()> {
     let checked_in = checked_in_manifests()?;
-    assert_eq!(
-        split(6, DEFAULT_SEED ^ SPLIT_SALT),
-        split(6, DEFAULT_SEED ^ SPLIT_SALT),
-        "batch splitting is not seed-deterministic"
-    );
+    // `split` is a pure function of its arguments, so comparing two calls proves nothing. What has
+    // to hold is that the batches partition the blocks: a split that dropped or double-counted one
+    // would leave the replay comparing a different sequence from the whole pass, and every
+    // convergence failure after that would be an artifact of the harness.
+    for len in 1..=12 {
+        let batches = split(len, DEFAULT_SEED ^ SPLIT_SALT);
+        let covered = batches
+            .iter()
+            .flat_map(|range| range.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            covered,
+            (0..len).collect::<Vec<_>>(),
+            "a {len}-block split does not partition the blocks in order: {batches:?}"
+        );
+    }
     for world in WORLDS {
         let wiring = Wiring::build(world, &checked_in)?;
         let left = scenario::generate(world, &wiring, DEFAULT_SEED);
@@ -330,6 +360,7 @@ fn check(
     let mut event_kinds = BTreeSet::new();
     for batch in &converged.batches {
         references.absorb(context, &batch.blocks, &batch.output)?;
+        assert_upsert_guards_agree(context, &batch.output)?;
         events += batch.output.normalized_events.len();
         event_kinds.extend(
             batch
@@ -350,11 +381,13 @@ fn check(
         .count();
     // The whole-sequence pass is the shape a backfill runs, and it may attribute rows the split
     // replay leaves unattributed, so it needs its own foreign-key and canonicality check.
+    let whole = format!("{context} whole-sequence pass");
     IdentityReferences::new(world.chain_id, declared).absorb(
-        &format!("{context} whole-sequence pass"),
+        &whole,
         &converged.whole.blocks,
         &converged.whole.output,
     )?;
+    assert_upsert_guards_agree(&whole, &converged.whole.output)?;
     Ok(Outcome {
         events,
         event_kinds,
@@ -385,29 +418,56 @@ fn is_subregistry_detach(event: &bigname_adapters::schema_v2::NormalizedEvent) -
 /// dropped silently. This is every kind the default corpus derives, so an interpretation path that
 /// goes dark fails the lane instead of quietly dropping out of the run. Deriving a *new* kind is
 /// not a regression and does not fail; add it here so the floor keeps tracking the corpus.
-const REQUIRED_EVENT_KINDS: &[&str] = &[
-    "AuthorityEpochChanged",
-    "AuthorityTransferred",
-    "ExpiryChanged",
-    "ParentChanged",
-    "PermissionChanged",
-    "PermissionScopeChanged",
-    "PreimageObserved",
-    "RecordChanged",
-    "RegistrarNameRegistered",
-    "RegistrationGranted",
-    "RegistrationReleased",
-    "RegistrationRenewed",
-    "RegistryCreated",
-    "ResolverChanged",
-    "ReverseChanged",
-    "SubregistryChanged",
-    "SurfaceBound",
-    "SurfaceUnbound",
-    "TokenControlTransferred",
-    "TokenRegenerated",
-    "TokenResourceLinked",
-    "Upgraded",
+///
+/// Held per world rather than as one union: 13 of these kinds are derived by both protocols, so a
+/// union floor is satisfied by either world alone and an ENSv1-only or ENSv2-only path could go
+/// dark without failing anything.
+const REQUIRED_EVENT_KINDS: &[(&str, &[&str])] = &[
+    (
+        ENS_V1_MAINNET.label,
+        &[
+            "AuthorityEpochChanged",
+            "AuthorityTransferred",
+            "ExpiryChanged",
+            "PermissionChanged",
+            "PermissionScopeChanged",
+            "PreimageObserved",
+            "RecordChanged",
+            "RegistrationGranted",
+            "RegistrationReleased",
+            "RegistrationRenewed",
+            "ResolverChanged",
+            "ReverseChanged",
+            "SubregistryChanged",
+            "SurfaceBound",
+            "SurfaceUnbound",
+            "TokenControlTransferred",
+        ],
+    ),
+    (
+        ENS_V2_SEPOLIA.label,
+        &[
+            "AuthorityTransferred",
+            "ExpiryChanged",
+            "ParentChanged",
+            "PermissionChanged",
+            "PreimageObserved",
+            "RecordChanged",
+            "RegistrarNameRegistered",
+            "RegistrationGranted",
+            "RegistrationReleased",
+            "RegistrationRenewed",
+            "RegistryCreated",
+            "ResolverChanged",
+            "SubregistryChanged",
+            "SurfaceBound",
+            "SurfaceUnbound",
+            "TokenControlTransferred",
+            "TokenRegenerated",
+            "TokenResourceLinked",
+            "Upgraded",
+        ],
+    ),
 ];
 
 /// The batch-boundary differences the default corpus reproduces exactly, keyed as
@@ -434,18 +494,77 @@ const DRAWN_CORPUS_CAVEAT: &str = "If the scenario pools, the axes, the seeded d
 /// coverage floor above stayed green.
 const EXPECTED_SUBREGISTRY_DETACHES: usize = 13;
 
+/// Normalized events the pinned manifests declare that the pools deliberately never reach, with the
+/// reason each one is out. Anything a manifest declares that is neither derived nor listed here
+/// fails the lane, so adding an event to a manifest forces a decision instead of silently widening
+/// the gap between what the manifests promise and what this lane covers.
+const UNREACHED_EVENT_KINDS: &[(&str, &str)] = &[
+    (
+        "AliasChanged",
+        "the resolver pool emits no AliasChanged; alias resolution has no interpreter state the \
+         convergence checks here would exercise",
+    ),
+    (
+        "RecordVersionChanged",
+        "the resolver pools emit no VersionChanged, so no record-version bump is generated",
+    ),
+    (
+        "RegistrationReserved",
+        "the v2 pools emit no LabelReserved; reservation is a registrar-side path with no \
+         registration to permute",
+    ),
+    (
+        "RootPermissionChanged",
+        "EACRolesChanged derives this only when it names resource zero on a registry or root, and \
+         the v2 pool always names a non-zero resource",
+    ),
+];
+
+/// The manifests declare which normalized events each ABI event derives, so they — not this lane's
+/// own list of what it happens to reach — are the honest denominator for coverage.
+fn assert_declared_kinds_are_reached(
+    world: &str,
+    declared: &BTreeSet<String>,
+    derived: Option<&BTreeSet<String>>,
+) -> Result<()> {
+    let unreached = declared
+        .iter()
+        .filter(|kind| !derived.is_some_and(|kinds| kinds.contains(*kind)))
+        .filter(|kind| {
+            !UNREACHED_EVENT_KINDS
+                .iter()
+                .any(|(excluded, _)| excluded == *kind)
+        })
+        .collect::<Vec<_>>();
+    if !unreached.is_empty() {
+        bail!(
+            "{world}'s manifests declare {unreached:?}, which no scenario reaches; emit the event \
+             that derives it, or add it to UNREACHED_EVENT_KINDS with the reason it is out"
+        );
+    }
+    Ok(())
+}
+
 fn assert_interpretation_coverage(
-    derived: &BTreeSet<String>,
+    derived: &BTreeMap<&str, BTreeSet<String>>,
     emitted_topic0s: usize,
 ) -> Result<()> {
     let missing = REQUIRED_EVENT_KINDS
         .iter()
-        .filter(|kind| !derived.contains(**kind))
+        .filter_map(|(world, required)| {
+            let derived = derived.get(world);
+            let missing = required
+                .iter()
+                .filter(|kind| !derived.is_some_and(|kinds| kinds.contains(**kind)))
+                .collect::<Vec<_>>();
+            (!missing.is_empty()).then(|| format!("{world} never derived {missing:?}"))
+        })
         .collect::<Vec<_>>();
     if !missing.is_empty() {
         bail!(
-            "the corpus emitted {emitted_topic0s} distinct event signatures but the interpreter \
-             never derived {missing:?}, so those paths are uncovered"
+            "the corpus emitted {emitted_topic0s} distinct event signatures but those paths are \
+             uncovered: {}",
+            missing.join("; ")
         );
     }
     Ok(())

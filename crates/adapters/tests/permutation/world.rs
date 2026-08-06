@@ -498,16 +498,46 @@ pub fn declared_event_topics(
     Ok(declared)
 }
 
+/// Every normalized-event kind the world's pinned manifests say their events derive. This is the
+/// interpretation surface the manifests promise, which is what the lane's coverage floor is
+/// measured against — the floor's own list only records what the pools happen to reach today, so on
+/// its own it cannot notice a manifest declaring something nothing covers.
+pub fn declared_event_kinds(
+    world: &World,
+    checked_in: &[LoadedManifest],
+) -> Result<BTreeSet<String>> {
+    let mut kinds = BTreeSet::new();
+    for slot in world.sources {
+        for event in &find_checked_in(world, slot, checked_in)?
+            .manifest
+            .abi
+            .events
+        {
+            kinds.extend(event.normalized_events.iter().cloned());
+        }
+    }
+    Ok(kinds)
+}
+
+/// Every deployment-profile root under `manifests/`, discovered rather than listed: naming the
+/// roots would put the same blind spot one level up from `assert_worlds_cover_deployments`, which
+/// exists precisely so that a deployment nothing models is loud.
 pub fn checked_in_manifests() -> Result<Vec<LoadedManifest>> {
     let root = workspace_root()?.join("manifests");
+    let mut profiles = std::fs::read_dir(&root)
+        .with_context(|| format!("read manifest roots under {}", root.display()))?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            entry.file_type().ok()?.is_dir().then(|| entry.path())
+        })
+        .collect::<Vec<_>>();
+    profiles.sort();
+    if profiles.is_empty() {
+        bail!("no deployment-profile roots under {}", root.display());
+    }
     let mut manifests = Vec::new();
-    for profile in ["mainnet", "sepolia"] {
-        manifests.extend(
-            load_repository(root.join(profile))?
-                .manifests()
-                .iter()
-                .cloned(),
-        );
+    for profile in profiles {
+        manifests.extend(load_repository(profile)?.manifests().iter().cloned());
     }
     Ok(manifests)
 }

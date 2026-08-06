@@ -270,6 +270,98 @@ impl IdentityReferences {
     }
 }
 
+/// The convergence check keeps one row per key per family, modelling the upsert as "one emission
+/// wins and the rest are harmless replays". That is only half the writer: each upsert carries a
+/// `WHERE` guard, and a re-emission that disagrees with the stored row on a guarded column matches
+/// no row, returns nothing, and fails the batch (`crates/interpret/src/write/identity.rs`,
+/// `identity_names.rs`). Repeats are the norm rather than an edge case — the adapter emits a name
+/// surface per interpreted name per log — so without this the most common shape in the output is
+/// unchecked, and a sequence that agrees on the surviving row while disagreeing on a dropped one
+/// looks convergent here and aborts in production.
+///
+/// Scoped to one batch because that is one write transaction. `deactivated_at` is deliberately not
+/// compared: it is absent from the writer's guard, which is the divergence tracked by issue #336.
+pub fn assert_upsert_guards_agree(context: &str, output: &BatchOutput) -> Result<()> {
+    // One report per key: a key emitted N times conflicting is one rejected batch, not N.
+    let mut conflicts = BTreeMap::new();
+    let mut guarded = BTreeMap::new();
+    let mut check = |family: &'static str, key: String, columns: String| match guarded
+        .entry((family, key.clone()))
+    {
+        std::collections::btree_map::Entry::Vacant(slot) => {
+            slot.insert(columns);
+        }
+        std::collections::btree_map::Entry::Occupied(slot) => {
+            if slot.get() != &columns {
+                conflicts.entry((family, key)).or_insert_with(|| {
+                    format!(
+                        "{family} is emitted twice with different guarded columns\n      \
+                             stored={}\n    incoming={columns}",
+                        slot.get()
+                    )
+                });
+            }
+        }
+    };
+    for row in &output.name_surfaces {
+        check(
+            "name_surfaces",
+            format!("{}:{}", row.chain_id, row.logical_name_id),
+            format!(
+                "{}:{}:{:?}:{:?}:{:?}:{}:{}:{}:{}:{:?}",
+                row.namespace,
+                row.raw_name,
+                row.raw_labels,
+                row.labelhashes,
+                row.dns_encoded_name,
+                row.namehash,
+                row.normalizer_version,
+                row.visibility_state,
+                row.normalization_errors,
+                row.deactivation_reason
+            ),
+        );
+    }
+    for row in &output.label_preimages {
+        check(
+            "label_preimages",
+            row.labelhash.clone(),
+            format!(
+                "{:?}:{:?}:{}:{}:{:?}",
+                row.raw_label,
+                row.decoded_label,
+                row.normalizer_version,
+                row.normalized_under_version,
+                row.normalization_error
+            ),
+        );
+    }
+    // The lineage guard also passes when the stored row is orphaned, so only a repeat that lands on
+    // a different anchor while both rows are live is a batch the writer would reject.
+    for row in &output.token_lineages {
+        if row.canonicality_state == "orphaned" {
+            continue;
+        }
+        check(
+            "token_lineages",
+            format!("{}:{}", row.chain_id, row.token_lineage_id),
+            format!("{}:{}:{}", row.block_hash, row.block_number, row.provenance),
+        );
+    }
+    if !conflicts.is_empty() {
+        bail!(
+            "{context}: the writer would reject this batch — a repeated identity row disagrees \
+             with the emission the upsert keeps:\n  {}",
+            conflicts
+                .into_iter()
+                .map(|((_, key), report)| format!("{key} {report}"))
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        );
+    }
+    Ok(())
+}
+
 /// The writer fails a batch whose binding carries only half a position, a negative index, or no
 /// position without raw-block provenance (`crates/interpret/src/write/identity.rs`), so a lane that
 /// silently defaulted those to -1 would model a batch the database rejects.
