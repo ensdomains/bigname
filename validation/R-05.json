@@ -1,0 +1,397 @@
+{
+  "id": "R-05",
+  "title": "syncWrapper refreshes wrapper expiry after renewer renewal",
+  "status": "VALIDATED",
+  "txs": [
+    {
+      "step": 1,
+      "contract": "v1.BaseRegistrar",
+      "fn": "register",
+      "args": [
+        "r05",
+        "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "31536000"
+      ],
+      "sender": "deployer(controller)"
+    },
+    {
+      "step": 2,
+      "contract": "v2.ETHRegistry",
+      "fn": "register (reserve)",
+      "args": [
+        "r05",
+        "owner=0",
+        "registry=0",
+        "ENSV1Resolver",
+        "roles=0",
+        "1822787385"
+      ],
+      "sender": "deployer"
+    },
+    {
+      "step": 3,
+      "contract": "v1.BaseRegistrar",
+      "fn": "safeTransferFrom→NameWrapper (wrap)",
+      "args": [
+        "r05",
+        "fuses=0"
+      ],
+      "sender": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+    },
+    {
+      "step": 4,
+      "contract": "erc20.MockUSDC",
+      "fn": "mint+approve",
+      "args": [
+        "r05",
+        "640000005"
+      ],
+      "sender": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+    },
+    {
+      "step": 5,
+      "contract": "v2.ETHRenewerV1",
+      "fn": "renew",
+      "args": [
+        "r05",
+        "31536000",
+        "MockUSDC",
+        "referrer"
+      ],
+      "sender": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+    },
+    {
+      "step": 6,
+      "contract": "v2.ETHRenewerV1",
+      "fn": "syncWrapper([r05])",
+      "args": [
+        "r05"
+      ],
+      "sender": "anyone(user)"
+    }
+  ],
+  "reverts": [],
+  "checks": [
+    {
+      "name": "wrapper expiry synced up",
+      "ok": true,
+      "detail": {
+        "before": "1825206584",
+        "after": "1856742584"
+      }
+    }
+  ],
+  "logs": [
+    {
+      "blockNumber": "225",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "Transfer",
+      "args": {
+        "from": "0x0000000000000000000000000000000000000000",
+        "to": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "tokenId": "6294053826781552269338400057048773394076514818746342249330991325421195015610"
+      }
+    },
+    {
+      "blockNumber": "225",
+      "logIndex": 1,
+      "address": "0x0165878a594ca255338adfa4d48449f69242eb8f",
+      "contract": "ENSRegistry",
+      "event": "NewOwner",
+      "args": {
+        "node": "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae",
+        "label": "0x0dea4ee7aba9b6608a666c1f1f71143d39b4a7f08379a489829ab388d9acb5ba",
+        "owner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+      }
+    },
+    {
+      "blockNumber": "225",
+      "logIndex": 2,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "NameRegistered",
+      "args": {
+        "id": "6294053826781552269338400057048773394076514818746342249330991325421195015610",
+        "owner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "expires": "1817430584"
+      }
+    },
+    {
+      "blockNumber": "226",
+      "logIndex": 0,
+      "address": "0x2279b7a0a67db372996a5fab50d91eaa73d2ebe6",
+      "contract": "LabelStore",
+      "event": "Label",
+      "args": {
+        "labelHash": "0x0dea4ee7aba9b6608a666c1f1f71143d39b4a7f08379a489829ab388d9acb5ba",
+        "label": "r05"
+      }
+    },
+    {
+      "blockNumber": "226",
+      "logIndex": 1,
+      "address": "0x36c02da8a0983159322a80ffe9f24b1acff8b570",
+      "contract": "ETHRegistry",
+      "event": "LabelReserved",
+      "args": {
+        "tokenId": "6294053826781552269338400057048773394076514818746342249330991325417543041024",
+        "labelHash": "0x0dea4ee7aba9b6608a666c1f1f71143d39b4a7f08379a489829ab388d9acb5ba",
+        "sender": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "label": "r05",
+        "expiry": "1822787385"
+      }
+    },
+    {
+      "blockNumber": "226",
+      "logIndex": 2,
+      "address": "0x36c02da8a0983159322a80ffe9f24b1acff8b570",
+      "contract": "ETHRegistry",
+      "event": "ResolverUpdated",
+      "args": {
+        "tokenId": "6294053826781552269338400057048773394076514818746342249330991325417543041024",
+        "resolver": "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853",
+        "sender": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+      }
+    },
+    {
+      "blockNumber": "227",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "Transfer",
+      "args": {
+        "from": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "to": "0x82e01223d51Eb87e16A03E24687EDF0F294da6f1",
+        "tokenId": "6294053826781552269338400057048773394076514818746342249330991325421195015610"
+      }
+    },
+    {
+      "blockNumber": "227",
+      "logIndex": 1,
+      "address": "0x0165878a594ca255338adfa4d48449f69242eb8f",
+      "contract": "ENSRegistry",
+      "event": "NewOwner",
+      "args": {
+        "node": "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae",
+        "label": "0x0dea4ee7aba9b6608a666c1f1f71143d39b4a7f08379a489829ab388d9acb5ba",
+        "owner": "0x82e01223d51Eb87e16A03E24687EDF0F294da6f1"
+      }
+    },
+    {
+      "blockNumber": "227",
+      "logIndex": 2,
+      "address": "0x82e01223d51eb87e16a03e24687edf0f294da6f1",
+      "contract": "NameWrapper",
+      "event": "TransferSingle",
+      "args": {
+        "operator": "0xB7f8BC63BbcaD18155201308C8f3540b07f84F5e",
+        "from": "0x0000000000000000000000000000000000000000",
+        "to": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "id": "79616882361346104942941274692560023802549961079830512014920631143618239324172",
+        "value": "1"
+      }
+    },
+    {
+      "blockNumber": "227",
+      "logIndex": 3,
+      "address": "0x82e01223d51eb87e16a03e24687edf0f294da6f1",
+      "contract": "NameWrapper",
+      "event": "NameWrapped",
+      "args": {
+        "node": "0xb0058ef98859ae55773c6b8c54b4b3f2f354ae6a96ee4541a91abf188b88e00c",
+        "name": "0x037230350365746800",
+        "owner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "fuses": 196608,
+        "expiry": "1825206584"
+      }
+    },
+    {
+      "blockNumber": "228",
+      "logIndex": 0,
+      "address": "0x82e01223d51eb87e16a03e24687edf0f294da6f1",
+      "contract": "NameWrapper",
+      "event": "OwnershipTransferred",
+      "args": {
+        "previousOwner": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+        "newOwner": "0x0000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "blockNumber": "229",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerRemoved",
+      "args": {
+        "controller": "0xB0D4afd8879eD9F52b28595d31B441D079B2Ca07"
+      }
+    },
+    {
+      "blockNumber": "230",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerRemoved",
+      "args": {
+        "controller": "0x86A2EE8FAf9A840F7a2c64CA3d51209F9A02081D"
+      }
+    },
+    {
+      "blockNumber": "231",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerRemoved",
+      "args": {
+        "controller": "0x82e01223d51Eb87e16A03E24687EDF0F294da6f1"
+      }
+    },
+    {
+      "blockNumber": "232",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerAdded",
+      "args": {
+        "controller": "0x7969c5eD335650692Bc04293B07F5BF2e7A673C0"
+      }
+    },
+    {
+      "blockNumber": "233",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerAdded",
+      "args": {
+        "controller": "0x202CCe504e04bEd6fC0521238dDf04Bc9E8E15aB"
+      }
+    },
+    {
+      "blockNumber": "234",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "OwnershipTransferred",
+      "args": {
+        "previousOwner": "0x9A9f2CCfdE556A7E9Ff0848998Aa4a0CFD8863AE",
+        "newOwner": "0x202CCe504e04bEd6fC0521238dDf04Bc9E8E15aB"
+      }
+    },
+    {
+      "blockNumber": "235",
+      "logIndex": 0,
+      "address": "0x322813fd9a801c5507c9de605d63cea4f2ce6c44",
+      "contract": "MockUSDC",
+      "event": "topic0=0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+      "args": {
+        "data": "0x000000000000000000000000000000000000000000000000000000002625a005"
+      }
+    },
+    {
+      "blockNumber": "236",
+      "logIndex": 0,
+      "address": "0x322813fd9a801c5507c9de605d63cea4f2ce6c44",
+      "contract": "MockUSDC",
+      "event": "topic0=0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
+      "args": {
+        "data": "0x000000000000000000000000000000000000000000000000000000002625a005"
+      }
+    },
+    {
+      "blockNumber": "237",
+      "logIndex": 0,
+      "address": "0x322813fd9a801c5507c9de605d63cea4f2ce6c44",
+      "contract": "MockUSDC",
+      "event": "topic0=0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+      "args": {
+        "data": "0x000000000000000000000000000000000000000000000000000000002625a005"
+      }
+    },
+    {
+      "blockNumber": "237",
+      "logIndex": 1,
+      "address": "0x36c02da8a0983159322a80ffe9f24b1acff8b570",
+      "contract": "ETHRegistry",
+      "event": "ExpiryUpdated",
+      "args": {
+        "tokenId": "6294053826781552269338400057048773394076514818746342249330991325417543041024",
+        "newExpiry": "1854323385",
+        "sender": "0x202CCe504e04bEd6fC0521238dDf04Bc9E8E15aB"
+      }
+    },
+    {
+      "blockNumber": "237",
+      "logIndex": 2,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "NameRenewed",
+      "args": {
+        "id": "6294053826781552269338400057048773394076514818746342249330991325421195015610",
+        "expires": "1848966584"
+      }
+    },
+    {
+      "blockNumber": "237",
+      "logIndex": 3,
+      "address": "0x202cce504e04bed6fc0521238ddf04bc9e8e15ab",
+      "contract": "ETHRenewerV1",
+      "event": "NameRenewed",
+      "args": {
+        "tokenId": "6294053826781552269338400057048773394076514818746342249330991325417543041024",
+        "referrer": "0xf3b0270f3a8ec9526f8446c07f12eb9227533843b83be50d674ab539e58e7914",
+        "label": "r05",
+        "duration": "31536000",
+        "newExpiry": "1854323385",
+        "paymentToken": "0x322813Fd9A801c5507c9de605d63CEA4f2CE6c44",
+        "amount": "640000005"
+      }
+    },
+    {
+      "blockNumber": "238",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerAdded",
+      "args": {
+        "controller": "0x82e01223d51Eb87e16A03E24687EDF0F294da6f1"
+      }
+    },
+    {
+      "blockNumber": "238",
+      "logIndex": 1,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "NameRenewed",
+      "args": {
+        "id": "6294053826781552269338400057048773394076514818746342249330991325421195015610",
+        "expires": "1848966584"
+      }
+    },
+    {
+      "blockNumber": "238",
+      "logIndex": 2,
+      "address": "0x8198f5d8f8cffe8f9c413d98a0a55aeb8ab9fbb7",
+      "contract": "WrappedETHRegistrarController",
+      "event": "NameRenewed",
+      "args": {
+        "label": "0x0dea4ee7aba9b6608a666c1f1f71143d39b4a7f08379a489829ab388d9acb5ba",
+        "name": "r05",
+        "cost": "0",
+        "expires": "1848966584"
+      }
+    },
+    {
+      "blockNumber": "238",
+      "logIndex": 3,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerRemoved",
+      "args": {
+        "controller": "0x82e01223d51Eb87e16A03E24687EDF0F294da6f1"
+      }
+    }
+  ],
+  "notes": []
+}

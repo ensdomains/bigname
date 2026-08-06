@@ -1,0 +1,443 @@
+[
+  {
+    "id": "U-01",
+    "title": "unwrapped 2LD happy path with records",
+    "status": "VALIDATED",
+    "checks": 6,
+    "logs": 27
+  },
+  {
+    "id": "U-02",
+    "title": "E1 via approved operator",
+    "status": "VALIDATED",
+    "checks": 4,
+    "logs": 22
+  },
+  {
+    "id": "U-03",
+    "title": "E1 with owner override in payload",
+    "status": "VALIDATED",
+    "checks": 4,
+    "logs": 21
+  },
+  {
+    "id": "U-04",
+    "title": "E1 with resolver override in payload",
+    "status": "VALIDATED",
+    "checks": 5,
+    "logs": 27
+  },
+  {
+    "id": "U-05",
+    "title": "E1 with custom subregistry in payload",
+    "status": "VALIDATED",
+    "checks": 5,
+    "logs": 22
+  },
+  {
+    "id": "U-06",
+    "title": "E1 with v1 registry subnode; residue persists and stays v1-mutable",
+    "status": "VALIDATED",
+    "checks": 6,
+    "logs": 23
+  },
+  {
+    "id": "U-07",
+    "title": "E1 with v1 primary name set pre-migration",
+    "status": "VALIDATED",
+    "checks": 4,
+    "logs": 31
+  },
+  {
+    "id": "U-08",
+    "title": "E1 near expiry (active); v2 expiry inherits reservation",
+    "status": "VALIDATED",
+    "checks": 5,
+    "logs": 21
+  },
+  {
+    "id": "U-09",
+    "title": "E1 with contract (ERC1155Holder) as v2 owner",
+    "status": "VALIDATED",
+    "checks": 4,
+    "logs": 21
+  },
+  {
+    "id": "X-U-01",
+    "title": "E1 without premigration reverts",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 10
+  },
+  {
+    "id": "X-U-02",
+    "title": "E1 with owner=0 reverts InvalidOwner",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 13
+  },
+  {
+    "id": "X-U-03",
+    "title": "E1 with label mismatch reverts NameDataMismatch",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 13
+  },
+  {
+    "id": "X-U-04",
+    "title": "E1 with junk payload reverts InvalidData",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 13
+  },
+  {
+    "id": "X-U-05",
+    "title": "unwrapped token to LockedMigrationController reverts",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 13
+  },
+  {
+    "id": "X-U-06",
+    "title": "E1 during v1 grace reverts (ownerOf gone)",
+    "status": "VALIDATED",
+    "checks": 2,
+    "logs": 13
+  },
+  {
+    "id": "X-U-07",
+    "title": "E1 with non-receiver contract owner reverts",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 13
+  },
+  {
+    "id": "W-01",
+    "title": "wrapped-unlocked 2LD happy path with records",
+    "status": "VALIDATED",
+    "checks": 6,
+    "logs": 32
+  },
+  {
+    "id": "W-02",
+    "title": "E2 with custom subregistry + owner override",
+    "status": "VALIDATED",
+    "checks": 5,
+    "logs": 28
+  },
+  {
+    "id": "W-03",
+    "title": "E2 batch via safeBatchTransferFrom",
+    "status": "VALIDATED",
+    "checks": 8,
+    "logs": 46
+  },
+  {
+    "id": "X-W-01",
+    "title": "wrapped-unlocked to LockedMigrationController reverts NameNotLocked",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 17
+  },
+  {
+    "id": "X-W-02",
+    "title": "wrapped-locked to UnlockedMigrationController reverts NameIsLocked",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 17
+  },
+  {
+    "id": "X-W-03",
+    "title": "wrapped 2LD in grace cannot transfer",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 17
+  },
+  {
+    "id": "L-01",
+    "title": "locked 2LD happy path: WrapperRegistry + fuse-role translation",
+    "status": "VALIDATED",
+    "checks": 9,
+    "logs": 36
+  },
+  {
+    "id": "L-02",
+    "title": "locked + CANNOT_SET_RESOLVER with recognized PublicResolver → swapped to v2 PublicResolver",
+    "status": "VALIDATED",
+    "checks": 7,
+    "logs": 36
+  },
+  {
+    "id": "L-03",
+    "title": "locked + CANNOT_SET_RESOLVER with custom resolver → carried over",
+    "status": "VALIDATED",
+    "checks": 6,
+    "logs": 33
+  },
+  {
+    "id": "L-04",
+    "title": "locked + CANNOT_BURN_FUSES (frozen): no admin roles in v2",
+    "status": "VALIDATED",
+    "checks": 7,
+    "logs": 31
+  },
+  {
+    "id": "L-05",
+    "title": "locked + CANNOT_CREATE_SUBDOMAIN: subregistry loses REGISTRAR",
+    "status": "VALIDATED",
+    "checks": 6,
+    "logs": 31
+  },
+  {
+    "id": "L-06",
+    "title": "locked + CANNOT_APPROVE without live approval migrates",
+    "status": "VALIDATED",
+    "checks": 5,
+    "logs": 31
+  },
+  {
+    "id": "L-07",
+    "title": "locked with records: resolution continuity through v2",
+    "status": "VALIDATED",
+    "checks": 6,
+    "logs": 36
+  },
+  {
+    "id": "L-08",
+    "title": "E3 batch of two locked names (common owner)",
+    "status": "VALIDATED",
+    "checks": 10,
+    "logs": 54
+  },
+  {
+    "id": "X-L-01",
+    "title": "locked + CANNOT_TRANSFER cannot migrate (wall)",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 17
+  },
+  {
+    "id": "X-L-02",
+    "title": "locked + CANNOT_APPROVE with live approval reverts FrozenTokenApproval",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 19
+  },
+  {
+    "id": "X-L-03",
+    "title": "locked 2LD into another name's WrapperRegistry reverts NameDataMismatch",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 41
+  },
+  {
+    "id": "X-L-04",
+    "title": "locked 3LD into LockedMigrationController reverts NameDataMismatch",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 20
+  },
+  {
+    "id": "C-01",
+    "title": "locked child into parent WrapperRegistry (nested registries)",
+    "status": "VALIDATED",
+    "checks": 4,
+    "logs": 49
+  },
+  {
+    "id": "C-02",
+    "title": "detached (emancipated, unlocked) child migrates via unwrap branch",
+    "status": "VALIDATED",
+    "checks": 3,
+    "logs": 44
+  },
+  {
+    "id": "C-03",
+    "title": "child with CAN_EXTEND_EXPIRY gets v2 renew rights",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 50
+  },
+  {
+    "id": "C-04",
+    "title": "deep chain: locked 2LD→3LD→4LD migrate sequentially",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 67
+  },
+  {
+    "id": "C-05",
+    "title": "unmigrated emancipated child: fallback resolver + register blocked",
+    "status": "VALIDATED",
+    "checks": 2,
+    "logs": 34
+  },
+  {
+    "id": "C-06",
+    "title": "parent-controlled child: cannot migrate, clobberable by parent",
+    "status": "VALIDATED",
+    "checks": 3,
+    "logs": 38
+  },
+  {
+    "id": "C-08",
+    "title": "abandoned child (unwrapped then registry owner=0): label reclaimable",
+    "status": "VALIDATED",
+    "checks": 2,
+    "logs": 42
+  },
+  {
+    "id": "H-01",
+    "title": "helper mixed batch: unwrapped + unlocked group + locked group + locked child",
+    "status": "VALIDATED",
+    "checks": 14,
+    "logs": 85
+  },
+  {
+    "id": "H-02",
+    "title": "helper without approval reverts NotApprovedOperator",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 13
+  },
+  {
+    "id": "H-03",
+    "title": "helper wrapped group with mixed owners reverts WrappedOwnerMismatch",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 30
+  },
+  {
+    "id": "H-04",
+    "title": "helper locked child with unmigrated parent reverts ParentNotMigrated",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 21
+  },
+  {
+    "id": "G-01",
+    "title": "clear v1 registry subnode residue under migrated 2LD",
+    "status": "VALIDATED",
+    "checks": 2,
+    "logs": 25
+  },
+  {
+    "id": "G-02",
+    "title": "clear fully-expired unmigrated 2LD: graveyard self-claims",
+    "status": "VALIDATED",
+    "checks": 4,
+    "logs": 22
+  },
+  {
+    "id": "G-03",
+    "title": "clear reverts on live unmigrated name",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 13
+  },
+  {
+    "id": "G-04",
+    "title": "clear wrapped parent-controlled child residue under migrated locked 2LD",
+    "status": "VALIDATED",
+    "checks": 2,
+    "logs": 42
+  },
+  {
+    "id": "R-01",
+    "title": "renewer extends unmigrated premigrated name on both sides",
+    "status": "VALIDATED",
+    "checks": 3,
+    "logs": 19
+  },
+  {
+    "id": "R-02",
+    "title": "renew during v1 grace restores, then migration succeeds",
+    "status": "VALIDATED",
+    "checks": 5,
+    "logs": 27
+  },
+  {
+    "id": "R-03",
+    "title": "renew after combined grace reverts NameNotRenewable",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 13
+  },
+  {
+    "id": "R-04",
+    "title": "renewer refuses migrated names",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 21
+  },
+  {
+    "id": "R-05",
+    "title": "syncWrapper refreshes wrapper expiry after renewer renewal",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 27
+  },
+  {
+    "id": "P-02",
+    "title": "old owner cannot write migrated node on v1 (suppression by construction)",
+    "status": "VALIDATED",
+    "checks": 2,
+    "logs": 21
+  },
+  {
+    "id": "P-03",
+    "title": "pre-migration v1 registry operator loses power after migration",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 22
+  },
+  {
+    "id": "P-04",
+    "title": "old owner cannot write E3-migrated node via NameWrapper",
+    "status": "VALIDATED",
+    "checks": 2,
+    "logs": 31
+  },
+  {
+    "id": "P-05",
+    "title": "emancipated sibling stays v1-live under migrated locked parent",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 37
+  },
+  {
+    "id": "P-06",
+    "title": "v2 renew of migrated name diverges from v1 husk expiry",
+    "status": "VALIDATED",
+    "checks": 2,
+    "logs": 26
+  },
+  {
+    "id": "P-07",
+    "title": "role grant on migrated name regenerates token id",
+    "status": "VALIDATED",
+    "checks": 2,
+    "logs": 25
+  },
+  {
+    "id": "P-08",
+    "title": "v2 transfer of migrated name moves roles",
+    "status": "VALIDATED",
+    "checks": 1,
+    "logs": 24
+  },
+  {
+    "id": "P-09",
+    "title": "reservation lapse → fresh v2 registration = new identity",
+    "status": "VALIDATED",
+    "checks": 2,
+    "logs": 22
+  },
+  {
+    "id": "P-11",
+    "title": "root unregister of migrated name (governance action)",
+    "status": "VALIDATED",
+    "checks": 0,
+    "logs": 21
+  }
+]

@@ -1,0 +1,193 @@
+{
+  "id": "G-03",
+  "title": "clear reverts on live unmigrated name",
+  "status": "VALIDATED",
+  "txs": [
+    {
+      "step": 1,
+      "contract": "v1.BaseRegistrar",
+      "fn": "register",
+      "args": [
+        "g03",
+        "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "31536000"
+      ],
+      "sender": "deployer(controller)"
+    },
+    {
+      "step": 2,
+      "contract": "v2.ETHRegistry",
+      "fn": "register (reserve)",
+      "args": [
+        "g03",
+        "owner=0",
+        "registry=0",
+        "ENSV1Resolver",
+        "roles=0",
+        "1822787381"
+      ],
+      "sender": "deployer"
+    }
+  ],
+  "reverts": [
+    {
+      "step": "clear live name",
+      "error": "The contract function \"clear\" reverted.\n\nContract Call:\n  address:   0x7969c5ed335650692bc04293b07f5bf2e7a673c0\n  function:  clear(bytes[] names)\n  args:           ([\"0x036730330365746800\"])\n  sender:    0x90F79bf6EB2c4f870365E785982E1f101E93b906\n\nDocs: https://viem.sh/docs/contract/writeContract\nDetails: execution reverted\nVersion: viem@2.51.0"
+    }
+  ],
+  "checks": [
+    {
+      "name": "clear live name reverts with /NameNotClearable|revert/",
+      "ok": true,
+      "detail": "The contract function \"clear\" reverted.\n\nContract Call:\n  address:   0x7969c5ed335650692bc04293b07f5bf2e7a673c0\n  function:  clear(bytes[] names)\n  args:           ([\"0x036730330365746800\"])\n  sender:"
+    }
+  ],
+  "logs": [
+    {
+      "blockNumber": "225",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "Transfer",
+      "args": {
+        "from": "0x0000000000000000000000000000000000000000",
+        "to": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "tokenId": "103322361287509788303944029428836477332993601448714244765323554641487053043955"
+      }
+    },
+    {
+      "blockNumber": "225",
+      "logIndex": 1,
+      "address": "0x0165878a594ca255338adfa4d48449f69242eb8f",
+      "contract": "ENSRegistry",
+      "event": "NewOwner",
+      "args": {
+        "node": "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae",
+        "label": "0xe46e6253e96b37a61631aff83e09a362db9afb4c5d4580f3c4d9d84b68c9b8f3",
+        "owner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+      }
+    },
+    {
+      "blockNumber": "225",
+      "logIndex": 2,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "NameRegistered",
+      "args": {
+        "id": "103322361287509788303944029428836477332993601448714244765323554641487053043955",
+        "owner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "expires": "1817430580"
+      }
+    },
+    {
+      "blockNumber": "226",
+      "logIndex": 0,
+      "address": "0x2279b7a0a67db372996a5fab50d91eaa73d2ebe6",
+      "contract": "LabelStore",
+      "event": "Label",
+      "args": {
+        "labelHash": "0xe46e6253e96b37a61631aff83e09a362db9afb4c5d4580f3c4d9d84b68c9b8f3",
+        "label": "g03"
+      }
+    },
+    {
+      "blockNumber": "226",
+      "logIndex": 1,
+      "address": "0x36c02da8a0983159322a80ffe9f24b1acff8b570",
+      "contract": "ETHRegistry",
+      "event": "LabelReserved",
+      "args": {
+        "tokenId": "103322361287509788303944029428836477332993601448714244765323554641485294993408",
+        "labelHash": "0xe46e6253e96b37a61631aff83e09a362db9afb4c5d4580f3c4d9d84b68c9b8f3",
+        "sender": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "label": "g03",
+        "expiry": "1822787381"
+      }
+    },
+    {
+      "blockNumber": "226",
+      "logIndex": 2,
+      "address": "0x36c02da8a0983159322a80ffe9f24b1acff8b570",
+      "contract": "ETHRegistry",
+      "event": "ResolverUpdated",
+      "args": {
+        "tokenId": "103322361287509788303944029428836477332993601448714244765323554641485294993408",
+        "resolver": "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853",
+        "sender": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+      }
+    },
+    {
+      "blockNumber": "227",
+      "logIndex": 0,
+      "address": "0x82e01223d51eb87e16a03e24687edf0f294da6f1",
+      "contract": "NameWrapper",
+      "event": "OwnershipTransferred",
+      "args": {
+        "previousOwner": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+        "newOwner": "0x0000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "blockNumber": "228",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerRemoved",
+      "args": {
+        "controller": "0xB0D4afd8879eD9F52b28595d31B441D079B2Ca07"
+      }
+    },
+    {
+      "blockNumber": "229",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerRemoved",
+      "args": {
+        "controller": "0x86A2EE8FAf9A840F7a2c64CA3d51209F9A02081D"
+      }
+    },
+    {
+      "blockNumber": "230",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerRemoved",
+      "args": {
+        "controller": "0x82e01223d51Eb87e16A03E24687EDF0F294da6f1"
+      }
+    },
+    {
+      "blockNumber": "231",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerAdded",
+      "args": {
+        "controller": "0x7969c5eD335650692Bc04293B07F5BF2e7A673C0"
+      }
+    },
+    {
+      "blockNumber": "232",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerAdded",
+      "args": {
+        "controller": "0x202CCe504e04bEd6fC0521238dDf04Bc9E8E15aB"
+      }
+    },
+    {
+      "blockNumber": "233",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "OwnershipTransferred",
+      "args": {
+        "previousOwner": "0x9A9f2CCfdE556A7E9Ff0848998Aa4a0CFD8863AE",
+        "newOwner": "0x202CCe504e04bEd6fC0521238dDf04Bc9E8E15aB"
+      }
+    }
+  ],
+  "notes": []
+}

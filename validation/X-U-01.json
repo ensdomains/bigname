@@ -1,0 +1,157 @@
+{
+  "id": "X-U-01",
+  "title": "E1 without premigration reverts",
+  "status": "VALIDATED",
+  "txs": [
+    {
+      "step": 1,
+      "contract": "v1.BaseRegistrar",
+      "fn": "register",
+      "args": [
+        "xu01",
+        "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "31536000"
+      ],
+      "sender": "deployer(controller)"
+    },
+    {
+      "step": 2,
+      "contract": "v1.BaseRegistrar",
+      "fn": "safeTransferFrom→controller (migrate)",
+      "args": [
+        "xu01.eth",
+        {
+          "label": "xu01",
+          "owner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+          "subregistry": "0x0000000000000000000000000000000000000000",
+          "resolver": "0x0000000000000000000000000000000000000000"
+        }
+      ],
+      "sender": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+    }
+  ],
+  "reverts": [
+    {
+      "step": "migrate un-premigrated",
+      "error": "The contract function \"safeTransferFrom\" reverted.\n\nError: EACUnauthorizedAccountRoles(uint256 resource, uint256 roleBitmap, address account)\n                                  (0, 1, 0xD8a5a9b31c3C0232E196d518E89Fd8bF83AcAd43)\n \nContract Call:\n  address:   0xb7f8bc63bbcad18155201308c8f3540b07f84f5e\n  function:  safeTransferFrom(address from, address to, uint256 tokenId, bytes data)\n  args:        "
+    }
+  ],
+  "checks": [
+    {
+      "name": "migrate un-premigrated reverts with /EACUnauthorizedAccountRoles|0x4b27a133/",
+      "ok": true,
+      "detail": "The contract function \"safeTransferFrom\" reverted.\n\nError: EACUnauthorizedAccountRoles(uint256 resource, uint256 roleBitmap, address account)\n                                  (0, 1, 0xD8a5a9b31c3C023"
+    }
+  ],
+  "logs": [
+    {
+      "blockNumber": "225",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "Transfer",
+      "args": {
+        "from": "0x0000000000000000000000000000000000000000",
+        "to": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "tokenId": "80047769711126008711595360537915612567942580547093025037339811594910858637024"
+      }
+    },
+    {
+      "blockNumber": "225",
+      "logIndex": 1,
+      "address": "0x0165878a594ca255338adfa4d48449f69242eb8f",
+      "contract": "ENSRegistry",
+      "event": "NewOwner",
+      "args": {
+        "node": "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae",
+        "label": "0xb0f96e9d9cf9ee36f2b155f6ef7ae05dcbf2e8db2e8e34b8538c74a912ca6ee0",
+        "owner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+      }
+    },
+    {
+      "blockNumber": "225",
+      "logIndex": 2,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "NameRegistered",
+      "args": {
+        "id": "80047769711126008711595360537915612567942580547093025037339811594910858637024",
+        "owner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "expires": "1817430555"
+      }
+    },
+    {
+      "blockNumber": "226",
+      "logIndex": 0,
+      "address": "0x82e01223d51eb87e16a03e24687edf0f294da6f1",
+      "contract": "NameWrapper",
+      "event": "OwnershipTransferred",
+      "args": {
+        "previousOwner": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+        "newOwner": "0x0000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "blockNumber": "227",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerRemoved",
+      "args": {
+        "controller": "0xB0D4afd8879eD9F52b28595d31B441D079B2Ca07"
+      }
+    },
+    {
+      "blockNumber": "228",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerRemoved",
+      "args": {
+        "controller": "0x86A2EE8FAf9A840F7a2c64CA3d51209F9A02081D"
+      }
+    },
+    {
+      "blockNumber": "229",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerRemoved",
+      "args": {
+        "controller": "0x82e01223d51Eb87e16A03E24687EDF0F294da6f1"
+      }
+    },
+    {
+      "blockNumber": "230",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerAdded",
+      "args": {
+        "controller": "0x7969c5eD335650692Bc04293B07F5BF2e7A673C0"
+      }
+    },
+    {
+      "blockNumber": "231",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerAdded",
+      "args": {
+        "controller": "0x202CCe504e04bEd6fC0521238dDf04Bc9E8E15aB"
+      }
+    },
+    {
+      "blockNumber": "232",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "OwnershipTransferred",
+      "args": {
+        "previousOwner": "0x9A9f2CCfdE556A7E9Ff0848998Aa4a0CFD8863AE",
+        "newOwner": "0x202CCe504e04bEd6fC0521238dDf04Bc9E8E15aB"
+      }
+    }
+  ],
+  "notes": []
+}

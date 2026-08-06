@@ -1,0 +1,313 @@
+{
+  "id": "P-11",
+  "title": "root unregister of migrated name (governance action)",
+  "status": "VALIDATED",
+  "txs": [
+    {
+      "step": 1,
+      "contract": "v1.BaseRegistrar",
+      "fn": "register",
+      "args": [
+        "p11",
+        "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "31536000"
+      ],
+      "sender": "deployer(controller)"
+    },
+    {
+      "step": 2,
+      "contract": "v2.ETHRegistry",
+      "fn": "register (reserve)",
+      "args": [
+        "p11",
+        "owner=0",
+        "registry=0",
+        "ENSV1Resolver",
+        "roles=0",
+        "1822787391"
+      ],
+      "sender": "deployer"
+    },
+    {
+      "step": 3,
+      "contract": "v1.BaseRegistrar",
+      "fn": "safeTransferFrom→controller (migrate)",
+      "args": [
+        "p11.eth",
+        {
+          "label": "p11",
+          "owner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+          "subregistry": "0x0000000000000000000000000000000000000000",
+          "resolver": "0x0000000000000000000000000000000000000000"
+        }
+      ],
+      "sender": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+    },
+    {
+      "step": 4,
+      "contract": "v2.ETHRegistry",
+      "fn": "unregister (as root/deployer)",
+      "args": [
+        "p11"
+      ],
+      "sender": "deployer"
+    }
+  ],
+  "reverts": [
+    {
+      "step": "root unregister",
+      "error": "ContractFunctionExecutionError: The contract function \"unregister\" reverted.\n\nError: EACUnauthorizedAccountRoles(uint256 resource, uint256 roleBitmap, address account)\n                                  (78365075210814451790117212581767703632520358346217661713457036841543442366464, 4096, 0xf39Fd6e51a"
+    }
+  ],
+  "checks": [],
+  "logs": [
+    {
+      "blockNumber": "225",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "Transfer",
+      "args": {
+        "from": "0x0000000000000000000000000000000000000000",
+        "to": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "tokenId": "78365075210814451790117212581767703632520358346217661713457036841546272902588"
+      }
+    },
+    {
+      "blockNumber": "225",
+      "logIndex": 1,
+      "address": "0x0165878a594ca255338adfa4d48449f69242eb8f",
+      "contract": "ENSRegistry",
+      "event": "NewOwner",
+      "args": {
+        "node": "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae",
+        "label": "0xad410f8db5d9b85ffea4f3f071682d4801bd7b0b18abee9bcc44da47a8b68dbc",
+        "owner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+      }
+    },
+    {
+      "blockNumber": "225",
+      "logIndex": 2,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "NameRegistered",
+      "args": {
+        "id": "78365075210814451790117212581767703632520358346217661713457036841546272902588",
+        "owner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "expires": "1817430590"
+      }
+    },
+    {
+      "blockNumber": "226",
+      "logIndex": 0,
+      "address": "0x2279b7a0a67db372996a5fab50d91eaa73d2ebe6",
+      "contract": "LabelStore",
+      "event": "Label",
+      "args": {
+        "labelHash": "0xad410f8db5d9b85ffea4f3f071682d4801bd7b0b18abee9bcc44da47a8b68dbc",
+        "label": "p11"
+      }
+    },
+    {
+      "blockNumber": "226",
+      "logIndex": 1,
+      "address": "0x36c02da8a0983159322a80ffe9f24b1acff8b570",
+      "contract": "ETHRegistry",
+      "event": "LabelReserved",
+      "args": {
+        "tokenId": "78365075210814451790117212581767703632520358346217661713457036841543442366464",
+        "labelHash": "0xad410f8db5d9b85ffea4f3f071682d4801bd7b0b18abee9bcc44da47a8b68dbc",
+        "sender": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "label": "p11",
+        "expiry": "1822787391"
+      }
+    },
+    {
+      "blockNumber": "226",
+      "logIndex": 2,
+      "address": "0x36c02da8a0983159322a80ffe9f24b1acff8b570",
+      "contract": "ETHRegistry",
+      "event": "ResolverUpdated",
+      "args": {
+        "tokenId": "78365075210814451790117212581767703632520358346217661713457036841543442366464",
+        "resolver": "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853",
+        "sender": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+      }
+    },
+    {
+      "blockNumber": "227",
+      "logIndex": 0,
+      "address": "0x82e01223d51eb87e16a03e24687edf0f294da6f1",
+      "contract": "NameWrapper",
+      "event": "OwnershipTransferred",
+      "args": {
+        "previousOwner": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+        "newOwner": "0x0000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "blockNumber": "228",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerRemoved",
+      "args": {
+        "controller": "0xB0D4afd8879eD9F52b28595d31B441D079B2Ca07"
+      }
+    },
+    {
+      "blockNumber": "229",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerRemoved",
+      "args": {
+        "controller": "0x86A2EE8FAf9A840F7a2c64CA3d51209F9A02081D"
+      }
+    },
+    {
+      "blockNumber": "230",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerRemoved",
+      "args": {
+        "controller": "0x82e01223d51Eb87e16A03E24687EDF0F294da6f1"
+      }
+    },
+    {
+      "blockNumber": "231",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerAdded",
+      "args": {
+        "controller": "0x7969c5eD335650692Bc04293B07F5BF2e7A673C0"
+      }
+    },
+    {
+      "blockNumber": "232",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerAdded",
+      "args": {
+        "controller": "0x202CCe504e04bEd6fC0521238dDf04Bc9E8E15aB"
+      }
+    },
+    {
+      "blockNumber": "233",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "OwnershipTransferred",
+      "args": {
+        "previousOwner": "0x9A9f2CCfdE556A7E9Ff0848998Aa4a0CFD8863AE",
+        "newOwner": "0x202CCe504e04bEd6fC0521238dDf04Bc9E8E15aB"
+      }
+    },
+    {
+      "blockNumber": "234",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "Transfer",
+      "args": {
+        "from": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "to": "0xD8a5a9b31c3C0232E196d518E89Fd8bF83AcAd43",
+        "tokenId": "78365075210814451790117212581767703632520358346217661713457036841546272902588"
+      }
+    },
+    {
+      "blockNumber": "234",
+      "logIndex": 1,
+      "address": "0x0165878a594ca255338adfa4d48449f69242eb8f",
+      "contract": "ENSRegistry",
+      "event": "NewOwner",
+      "args": {
+        "node": "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae",
+        "label": "0xad410f8db5d9b85ffea4f3f071682d4801bd7b0b18abee9bcc44da47a8b68dbc",
+        "owner": "0xD8a5a9b31c3C0232E196d518E89Fd8bF83AcAd43"
+      }
+    },
+    {
+      "blockNumber": "234",
+      "logIndex": 2,
+      "address": "0x0165878a594ca255338adfa4d48449f69242eb8f",
+      "contract": "ENSRegistry",
+      "event": "Transfer",
+      "args": {
+        "node": "0x355e75815e18bb57f5b0f2b00b3b7fa20c72b57f78ddfa233a1f458e1c6e4e50",
+        "owner": "0x7969c5eD335650692Bc04293B07F5BF2e7A673C0"
+      }
+    },
+    {
+      "blockNumber": "234",
+      "logIndex": 3,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "Transfer",
+      "args": {
+        "from": "0xD8a5a9b31c3C0232E196d518E89Fd8bF83AcAd43",
+        "to": "0x7969c5eD335650692Bc04293B07F5BF2e7A673C0",
+        "tokenId": "78365075210814451790117212581767703632520358346217661713457036841546272902588"
+      }
+    },
+    {
+      "blockNumber": "234",
+      "logIndex": 4,
+      "address": "0x36c02da8a0983159322a80ffe9f24b1acff8b570",
+      "contract": "ETHRegistry",
+      "event": "LabelRegistered",
+      "args": {
+        "tokenId": "78365075210814451790117212581767703632520358346217661713457036841543442366464",
+        "labelHash": "0xad410f8db5d9b85ffea4f3f071682d4801bd7b0b18abee9bcc44da47a8b68dbc",
+        "sender": "0xD8a5a9b31c3C0232E196d518E89Fd8bF83AcAd43",
+        "label": "p11",
+        "owner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "expiry": "1822787391"
+      }
+    },
+    {
+      "blockNumber": "234",
+      "logIndex": 5,
+      "address": "0x36c02da8a0983159322a80ffe9f24b1acff8b570",
+      "contract": "ETHRegistry",
+      "event": "TransferSingle",
+      "args": {
+        "operator": "0xD8a5a9b31c3C0232E196d518E89Fd8bF83AcAd43",
+        "from": "0x0000000000000000000000000000000000000000",
+        "to": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "id": "78365075210814451790117212581767703632520358346217661713457036841543442366464",
+        "value": "1"
+      }
+    },
+    {
+      "blockNumber": "234",
+      "logIndex": 6,
+      "address": "0x36c02da8a0983159322a80ffe9f24b1acff8b570",
+      "contract": "ETHRegistry",
+      "event": "TokenResource",
+      "args": {
+        "tokenId": "78365075210814451790117212581767703632520358346217661713457036841543442366464",
+        "resource": "78365075210814451790117212581767703632520358346217661713457036841543442366464"
+      }
+    },
+    {
+      "blockNumber": "234",
+      "logIndex": 7,
+      "address": "0x36c02da8a0983159322a80ffe9f24b1acff8b570",
+      "contract": "ETHRegistry",
+      "event": "EACRolesChanged",
+      "args": {
+        "resource": "78365075210814451790117212581767703632520358346217661713457036841543442366464",
+        "account": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "oldRoleBitmap": "0",
+        "newRoleBitmap": "97409655027181761882228017414928043062435250176"
+      }
+    }
+  ],
+  "notes": [
+    "deployer lacks root ROLE_UNREGISTER on this devnet: governance-only path, recorded as revert evidence"
+  ]
+}

@@ -1,0 +1,625 @@
+{
+  "id": "C-08",
+  "title": "abandoned child (unwrapped then registry owner=0): label reclaimable",
+  "status": "VALIDATED",
+  "txs": [
+    {
+      "step": 1,
+      "contract": "v1.BaseRegistrar",
+      "fn": "register",
+      "args": [
+        "c08",
+        "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "31536000"
+      ],
+      "sender": "deployer(controller)"
+    },
+    {
+      "step": 2,
+      "contract": "v2.ETHRegistry",
+      "fn": "register (reserve)",
+      "args": [
+        "c08",
+        "owner=0",
+        "registry=0",
+        "ENSV1Resolver",
+        "roles=0",
+        "1822787376"
+      ],
+      "sender": "deployer"
+    },
+    {
+      "step": 3,
+      "contract": "v1.BaseRegistrar",
+      "fn": "safeTransferFrom→NameWrapper (wrap)",
+      "args": [
+        "c08",
+        "fuses=1"
+      ],
+      "sender": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+    },
+    {
+      "step": 4,
+      "contract": "v1.NameWrapper",
+      "fn": "setSubnodeOwner",
+      "args": [
+        "c08.eth",
+        "sub",
+        "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+        "fuses=65536",
+        "18446744073709551615"
+      ],
+      "sender": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+    },
+    {
+      "step": 5,
+      "contract": "v1.NameWrapper",
+      "fn": "safeTransferFrom→receiver (migrate)",
+      "args": [
+        "c08.eth",
+        {
+          "label": "c08",
+          "owner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+          "subregistry": "0x0000000000000000000000000000000000000000",
+          "resolver": "0x0000000000000000000000000000000000000000"
+        }
+      ],
+      "sender": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+    },
+    {
+      "step": 6,
+      "contract": "v1.NameWrapper",
+      "fn": "unwrap child to self",
+      "args": [
+        "sub.c08.eth"
+      ],
+      "sender": "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+    },
+    {
+      "step": 7,
+      "contract": "v1.ENSRegistry",
+      "fn": "setOwner(0) — abandon",
+      "args": [
+        "sub.c08.eth"
+      ],
+      "sender": "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+    },
+    {
+      "step": 8,
+      "contract": "WrapperRegistry(c08.eth)",
+      "fn": "register abandoned label",
+      "args": [
+        "sub"
+      ],
+      "sender": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+    }
+  ],
+  "reverts": [
+    {
+      "step": "still protected while v1 owner set",
+      "error": "The contract function \"register\" reverted.\n\nError: NameRequiresMigration()\n \nContract Call:\n  address:   0x517c054CfA734B11144F39331C4d591c3f58729C\n  function:  register(string label, address owner, address registry, address resolver, uint256 roleBitmap, uint64 expiry)\n  args:              (sub, 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC, 0x0000000000000000000000000000000000000000, 0x0000000000000"
+    }
+  ],
+  "checks": [
+    {
+      "name": "still protected while v1 owner set reverts with NameRequiresMigration",
+      "ok": true,
+      "detail": "The contract function \"register\" reverted.\n\nError: NameRequiresMigration()\n \nContract Call:\n  address:   0x517c054CfA734B11144F39331C4d591c3f58729C\n  function:  register(string label, address owner, a"
+    },
+    {
+      "name": "abandoned label re-registered in v2",
+      "ok": true,
+      "detail": 2
+    }
+  ],
+  "logs": [
+    {
+      "blockNumber": "225",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "Transfer",
+      "args": {
+        "from": "0x0000000000000000000000000000000000000000",
+        "to": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "tokenId": "29613444427751461192664813442120579747692544548934297572986533761845284767552"
+      }
+    },
+    {
+      "blockNumber": "225",
+      "logIndex": 1,
+      "address": "0x0165878a594ca255338adfa4d48449f69242eb8f",
+      "contract": "ENSRegistry",
+      "event": "NewOwner",
+      "args": {
+        "node": "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae",
+        "label": "0x41789d962501cbc8f577f76106050b2eda85b9b3ed045ba3ad7faaf95c830740",
+        "owner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+      }
+    },
+    {
+      "blockNumber": "225",
+      "logIndex": 2,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "NameRegistered",
+      "args": {
+        "id": "29613444427751461192664813442120579747692544548934297572986533761845284767552",
+        "owner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "expires": "1817430575"
+      }
+    },
+    {
+      "blockNumber": "226",
+      "logIndex": 0,
+      "address": "0x2279b7a0a67db372996a5fab50d91eaa73d2ebe6",
+      "contract": "LabelStore",
+      "event": "Label",
+      "args": {
+        "labelHash": "0x41789d962501cbc8f577f76106050b2eda85b9b3ed045ba3ad7faaf95c830740",
+        "label": "c08"
+      }
+    },
+    {
+      "blockNumber": "226",
+      "logIndex": 1,
+      "address": "0x36c02da8a0983159322a80ffe9f24b1acff8b570",
+      "contract": "ETHRegistry",
+      "event": "LabelReserved",
+      "args": {
+        "tokenId": "29613444427751461192664813442120579747692544548934297572986533761843732676608",
+        "labelHash": "0x41789d962501cbc8f577f76106050b2eda85b9b3ed045ba3ad7faaf95c830740",
+        "sender": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "label": "c08",
+        "expiry": "1822787376"
+      }
+    },
+    {
+      "blockNumber": "226",
+      "logIndex": 2,
+      "address": "0x36c02da8a0983159322a80ffe9f24b1acff8b570",
+      "contract": "ETHRegistry",
+      "event": "ResolverUpdated",
+      "args": {
+        "tokenId": "29613444427751461192664813442120579747692544548934297572986533761843732676608",
+        "resolver": "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853",
+        "sender": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+      }
+    },
+    {
+      "blockNumber": "227",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "Transfer",
+      "args": {
+        "from": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "to": "0x82e01223d51Eb87e16A03E24687EDF0F294da6f1",
+        "tokenId": "29613444427751461192664813442120579747692544548934297572986533761845284767552"
+      }
+    },
+    {
+      "blockNumber": "227",
+      "logIndex": 1,
+      "address": "0x0165878a594ca255338adfa4d48449f69242eb8f",
+      "contract": "ENSRegistry",
+      "event": "NewOwner",
+      "args": {
+        "node": "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae",
+        "label": "0x41789d962501cbc8f577f76106050b2eda85b9b3ed045ba3ad7faaf95c830740",
+        "owner": "0x82e01223d51Eb87e16A03E24687EDF0F294da6f1"
+      }
+    },
+    {
+      "blockNumber": "227",
+      "logIndex": 2,
+      "address": "0x82e01223d51eb87e16a03e24687edf0f294da6f1",
+      "contract": "NameWrapper",
+      "event": "TransferSingle",
+      "args": {
+        "operator": "0xB7f8BC63BbcaD18155201308C8f3540b07f84F5e",
+        "from": "0x0000000000000000000000000000000000000000",
+        "to": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "id": "43746096728947597976283779860990638921329025901804892485897880046974355343461",
+        "value": "1"
+      }
+    },
+    {
+      "blockNumber": "227",
+      "logIndex": 3,
+      "address": "0x82e01223d51eb87e16a03e24687edf0f294da6f1",
+      "contract": "NameWrapper",
+      "event": "NameWrapped",
+      "args": {
+        "node": "0x60b769ce8e4875e02d5fc456e23bdb6501872cddd58761c3b441902ea29f8865",
+        "name": "0x036330380365746800",
+        "owner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "fuses": 196609,
+        "expiry": "1825206575"
+      }
+    },
+    {
+      "blockNumber": "228",
+      "logIndex": 0,
+      "address": "0x0165878a594ca255338adfa4d48449f69242eb8f",
+      "contract": "ENSRegistry",
+      "event": "NewOwner",
+      "args": {
+        "node": "0x60b769ce8e4875e02d5fc456e23bdb6501872cddd58761c3b441902ea29f8865",
+        "label": "0xfa1ea47215815692a5f1391cff19abbaf694c82fb2151a4c351b6c0eeaaf317b",
+        "owner": "0x82e01223d51Eb87e16A03E24687EDF0F294da6f1"
+      }
+    },
+    {
+      "blockNumber": "228",
+      "logIndex": 1,
+      "address": "0x82e01223d51eb87e16a03e24687edf0f294da6f1",
+      "contract": "NameWrapper",
+      "event": "TransferSingle",
+      "args": {
+        "operator": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "from": "0x0000000000000000000000000000000000000000",
+        "to": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+        "id": "44116762633046960225697496812146179942253662922805746718301505874803387830022",
+        "value": "1"
+      }
+    },
+    {
+      "blockNumber": "228",
+      "logIndex": 2,
+      "address": "0x82e01223d51eb87e16a03e24687edf0f294da6f1",
+      "contract": "NameWrapper",
+      "event": "NameWrapped",
+      "args": {
+        "node": "0x618933e911b3ac48756e180617719865ebb0c532e67a2eb7bdee4bf97c148f06",
+        "name": "0x03737562036330380365746800",
+        "owner": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+        "fuses": 65536,
+        "expiry": "1825206575"
+      }
+    },
+    {
+      "blockNumber": "229",
+      "logIndex": 0,
+      "address": "0x82e01223d51eb87e16a03e24687edf0f294da6f1",
+      "contract": "NameWrapper",
+      "event": "OwnershipTransferred",
+      "args": {
+        "previousOwner": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+        "newOwner": "0x0000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "blockNumber": "230",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerRemoved",
+      "args": {
+        "controller": "0xB0D4afd8879eD9F52b28595d31B441D079B2Ca07"
+      }
+    },
+    {
+      "blockNumber": "231",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerRemoved",
+      "args": {
+        "controller": "0x86A2EE8FAf9A840F7a2c64CA3d51209F9A02081D"
+      }
+    },
+    {
+      "blockNumber": "232",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerRemoved",
+      "args": {
+        "controller": "0x82e01223d51Eb87e16A03E24687EDF0F294da6f1"
+      }
+    },
+    {
+      "blockNumber": "233",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerAdded",
+      "args": {
+        "controller": "0x7969c5eD335650692Bc04293B07F5BF2e7A673C0"
+      }
+    },
+    {
+      "blockNumber": "234",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "ControllerAdded",
+      "args": {
+        "controller": "0x202CCe504e04bEd6fC0521238dDf04Bc9E8E15aB"
+      }
+    },
+    {
+      "blockNumber": "235",
+      "logIndex": 0,
+      "address": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+      "contract": "BaseRegistrarImplementation",
+      "event": "OwnershipTransferred",
+      "args": {
+        "previousOwner": "0x9A9f2CCfdE556A7E9Ff0848998Aa4a0CFD8863AE",
+        "newOwner": "0x202CCe504e04bEd6fC0521238dDf04Bc9E8E15aB"
+      }
+    },
+    {
+      "blockNumber": "236",
+      "logIndex": 0,
+      "address": "0x82e01223d51eb87e16a03e24687edf0f294da6f1",
+      "contract": "NameWrapper",
+      "event": "TransferSingle",
+      "args": {
+        "operator": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "from": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "to": "0x2B0d36FACD61B71CC05ab8F3D2355ec3631C0dd5",
+        "id": "43746096728947597976283779860990638921329025901804892485897880046974355343461",
+        "value": "1"
+      }
+    },
+    {
+      "blockNumber": "236",
+      "logIndex": 1,
+      "address": "0x0165878a594ca255338adfa4d48449f69242eb8f",
+      "contract": "ENSRegistry",
+      "event": "NewResolver",
+      "args": {
+        "node": "0x60b769ce8e4875e02d5fc456e23bdb6501872cddd58761c3b441902ea29f8865",
+        "resolver": "0x0000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "blockNumber": "236",
+      "logIndex": 2,
+      "address": "0x82e01223d51eb87e16a03e24687edf0f294da6f1",
+      "contract": "NameWrapper",
+      "event": "TransferSingle",
+      "args": {
+        "operator": "0x2B0d36FACD61B71CC05ab8F3D2355ec3631C0dd5",
+        "from": "0x2B0d36FACD61B71CC05ab8F3D2355ec3631C0dd5",
+        "to": "0x7969c5eD335650692Bc04293B07F5BF2e7A673C0",
+        "id": "43746096728947597976283779860990638921329025901804892485897880046974355343461",
+        "value": "1"
+      }
+    },
+    {
+      "blockNumber": "236",
+      "logIndex": 3,
+      "address": "0x517c054cfa734b11144f39331c4d591c3f58729c",
+      "contract": "WrapperRegistry(c08.eth)",
+      "event": "Upgraded",
+      "args": {
+        "implementation": "0x4EE6eCAD1c2Dae9f525404De8555724e3c35d07B"
+      }
+    },
+    {
+      "blockNumber": "236",
+      "logIndex": 4,
+      "address": "0x517c054cfa734b11144f39331c4d591c3f58729c",
+      "contract": "WrapperRegistry(c08.eth)",
+      "event": "RegistryCreated",
+      "args": null
+    },
+    {
+      "blockNumber": "236",
+      "logIndex": 5,
+      "address": "0x517c054cfa734b11144f39331c4d591c3f58729c",
+      "contract": "WrapperRegistry(c08.eth)",
+      "event": "ParentUpdated",
+      "args": {
+        "parent": "0x36C02dA8a0983159322a80FFE9F24b1acfF8B570",
+        "sender": "0x36C02dA8a0983159322a80FFE9F24b1acfF8B570",
+        "label": "c08"
+      }
+    },
+    {
+      "blockNumber": "236",
+      "logIndex": 6,
+      "address": "0x517c054cfa734b11144f39331c4d591c3f58729c",
+      "contract": "WrapperRegistry(c08.eth)",
+      "event": "EACRolesChanged",
+      "args": {
+        "resource": "0",
+        "account": "0x36C02dA8a0983159322a80FFE9F24b1acfF8B570",
+        "oldRoleBitmap": "0",
+        "newRoleBitmap": "7689318425915528602346510723233203681989287692675117274766242163843521380353"
+      }
+    },
+    {
+      "blockNumber": "236",
+      "logIndex": 7,
+      "address": "0x517c054cfa734b11144f39331c4d591c3f58729c",
+      "contract": "WrapperRegistry(c08.eth)",
+      "event": "Initialized",
+      "args": {
+        "version": "1"
+      }
+    },
+    {
+      "blockNumber": "236",
+      "logIndex": 8,
+      "address": "0x4a679253410272dd5232b3ff7cf5dbb88f295319",
+      "contract": "VerifiableFactory",
+      "event": "ProxyDeployed",
+      "args": {
+        "sender": "0x2B0d36FACD61B71CC05ab8F3D2355ec3631C0dd5",
+        "proxyAddress": "0x517c054CfA734B11144F39331C4d591c3f58729C",
+        "salt": "43746096728947597976283779860990638921329025901804892485897880046974355343461",
+        "implementation": "0x4EE6eCAD1c2Dae9f525404De8555724e3c35d07B"
+      }
+    },
+    {
+      "blockNumber": "236",
+      "logIndex": 9,
+      "address": "0x36c02da8a0983159322a80ffe9f24b1acff8b570",
+      "contract": "ETHRegistry",
+      "event": "LabelRegistered",
+      "args": {
+        "tokenId": "29613444427751461192664813442120579747692544548934297572986533761843732676608",
+        "labelHash": "0x41789d962501cbc8f577f76106050b2eda85b9b3ed045ba3ad7faaf95c830740",
+        "sender": "0x2B0d36FACD61B71CC05ab8F3D2355ec3631C0dd5",
+        "label": "c08",
+        "owner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "expiry": "1822787376"
+      }
+    },
+    {
+      "blockNumber": "236",
+      "logIndex": 10,
+      "address": "0x36c02da8a0983159322a80ffe9f24b1acff8b570",
+      "contract": "ETHRegistry",
+      "event": "TransferSingle",
+      "args": {
+        "operator": "0x2B0d36FACD61B71CC05ab8F3D2355ec3631C0dd5",
+        "from": "0x0000000000000000000000000000000000000000",
+        "to": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "id": "29613444427751461192664813442120579747692544548934297572986533761843732676608",
+        "value": "1"
+      }
+    },
+    {
+      "blockNumber": "236",
+      "logIndex": 11,
+      "address": "0x36c02da8a0983159322a80ffe9f24b1acff8b570",
+      "contract": "ETHRegistry",
+      "event": "TokenResource",
+      "args": {
+        "tokenId": "29613444427751461192664813442120579747692544548934297572986533761843732676608",
+        "resource": "29613444427751461192664813442120579747692544548934297572986533761843732676608"
+      }
+    },
+    {
+      "blockNumber": "236",
+      "logIndex": 12,
+      "address": "0x36c02da8a0983159322a80ffe9f24b1acff8b570",
+      "contract": "ETHRegistry",
+      "event": "EACRolesChanged",
+      "args": {
+        "resource": "29613444427751461192664813442120579747692544548934297572986533761843732676608",
+        "account": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "oldRoleBitmap": "0",
+        "newRoleBitmap": "97052843104005271911963445922565669278338514944"
+      }
+    },
+    {
+      "blockNumber": "236",
+      "logIndex": 13,
+      "address": "0x36c02da8a0983159322a80ffe9f24b1acff8b570",
+      "contract": "ETHRegistry",
+      "event": "SubregistryUpdated",
+      "args": {
+        "tokenId": "29613444427751461192664813442120579747692544548934297572986533761843732676608",
+        "subregistry": "0x517c054CfA734B11144F39331C4d591c3f58729C",
+        "sender": "0x2B0d36FACD61B71CC05ab8F3D2355ec3631C0dd5"
+      }
+    },
+    {
+      "blockNumber": "237",
+      "logIndex": 0,
+      "address": "0x82e01223d51eb87e16a03e24687edf0f294da6f1",
+      "contract": "NameWrapper",
+      "event": "TransferSingle",
+      "args": {
+        "operator": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+        "from": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+        "to": "0x0000000000000000000000000000000000000000",
+        "id": "44116762633046960225697496812146179942253662922805746718301505874803387830022",
+        "value": "1"
+      }
+    },
+    {
+      "blockNumber": "237",
+      "logIndex": 1,
+      "address": "0x0165878a594ca255338adfa4d48449f69242eb8f",
+      "contract": "ENSRegistry",
+      "event": "Transfer",
+      "args": {
+        "node": "0x618933e911b3ac48756e180617719865ebb0c532e67a2eb7bdee4bf97c148f06",
+        "owner": "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+      }
+    },
+    {
+      "blockNumber": "237",
+      "logIndex": 2,
+      "address": "0x82e01223d51eb87e16a03e24687edf0f294da6f1",
+      "contract": "NameWrapper",
+      "event": "NameUnwrapped",
+      "args": {
+        "node": "0x618933e911b3ac48756e180617719865ebb0c532e67a2eb7bdee4bf97c148f06",
+        "owner": "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+      }
+    },
+    {
+      "blockNumber": "238",
+      "logIndex": 0,
+      "address": "0x0165878a594ca255338adfa4d48449f69242eb8f",
+      "contract": "ENSRegistry",
+      "event": "Transfer",
+      "args": {
+        "node": "0x618933e911b3ac48756e180617719865ebb0c532e67a2eb7bdee4bf97c148f06",
+        "owner": "0x0000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "blockNumber": "239",
+      "logIndex": 0,
+      "address": "0x2279b7a0a67db372996a5fab50d91eaa73d2ebe6",
+      "contract": "LabelStore",
+      "event": "Label",
+      "args": {
+        "labelHash": "0xfa1ea47215815692a5f1391cff19abbaf694c82fb2151a4c351b6c0eeaaf317b",
+        "label": "sub"
+      }
+    },
+    {
+      "blockNumber": "239",
+      "logIndex": 1,
+      "address": "0x517c054cfa734b11144f39331c4d591c3f58729c",
+      "contract": "WrapperRegistry(c08.eth)",
+      "event": "LabelRegistered",
+      "args": {
+        "tokenId": "113132352519859507095063477130285612326912585875596539515691185052692315635712",
+        "labelHash": "0xfa1ea47215815692a5f1391cff19abbaf694c82fb2151a4c351b6c0eeaaf317b",
+        "sender": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "label": "sub",
+        "owner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "expiry": "18446744073709551615"
+      }
+    },
+    {
+      "blockNumber": "239",
+      "logIndex": 2,
+      "address": "0x517c054cfa734b11144f39331c4d591c3f58729c",
+      "contract": "WrapperRegistry(c08.eth)",
+      "event": "TransferSingle",
+      "args": {
+        "operator": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "from": "0x0000000000000000000000000000000000000000",
+        "to": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "id": "113132352519859507095063477130285612326912585875596539515691185052692315635712",
+        "value": "1"
+      }
+    },
+    {
+      "blockNumber": "239",
+      "logIndex": 3,
+      "address": "0x517c054cfa734b11144f39331c4d591c3f58729c",
+      "contract": "WrapperRegistry(c08.eth)",
+      "event": "TokenResource",
+      "args": {
+        "tokenId": "113132352519859507095063477130285612326912585875596539515691185052692315635712",
+        "resource": "113132352519859507095063477130285612326912585875596539515691185052692315635712"
+      }
+    }
+  ],
+  "notes": [
+    "unwrap-after-parent-migration without abandonment leaves the label protected but unmigratable (see C-05 revert): v1-resident via fallback until owner clears or expiry"
+  ]
+}
