@@ -1478,7 +1478,7 @@ async fn rebuild_excludes_non_current_ensv2_public_resolver_records() -> Result<
 
     // PublicResolverV2 authorizes writes from registry ownership and approvals rather than
     // requiring itself to be the registry-selected resolver.
-    // (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L170 @ ens_v2@48b3e2d)
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L170 @ ens_v2@ccaeb58)
     let mut stale_record = record_changed_event_with_value(
         "ensv2-stale-public-resolver-record",
         "ens:alice.eth",
