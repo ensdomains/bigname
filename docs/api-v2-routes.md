@@ -634,6 +634,10 @@ Field ownership:
 - Status semantics: an otherwise valid current/latest resolver with no overview
   row returns `404 not_found`. For `at`, `safe`, or `finalized`, a missing
   current projection cannot prove historical absence and returns `409 stale`.
+  Bound-name listings under `at`, `safe`, or `finalized` are drawn from
+  current-state projections: a name bound at the requested position but
+  unbound since is absent from the listing rather than flagged, consistent
+  with the coverage `exhaustiveness: not_asserted` disclosure.
   A resolver overview with no bound names returns `200` with an empty
   bound-names section. Malformed `chain_id` or `address` returns `400
   invalid_input`.
