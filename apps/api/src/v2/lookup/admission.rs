@@ -1,5 +1,6 @@
 use bigname_storage::{
-    ChainPositions, IdentityNameRecordRow, ReverseIdentityRecordRow, SelectedSnapshot,
+    ChainPositions, IdentityNameRecordRow, NameCurrentRow, ReverseIdentityRecordRow,
+    SelectedSnapshot,
 };
 
 use crate::v2::{V2Error, V2Result};
@@ -35,9 +36,43 @@ fn require_record_at_served_head(
     record: &IdentityNameRecordRow,
     selected_snapshot: &SelectedSnapshot,
 ) -> V2Result<()> {
-    let projected = ChainPositions::from_value(&record.row.chain_positions)
+    require_name_projection_at_served_head(
+        &record.row.chain_positions,
+        &record.row.namespace,
+        selected_snapshot,
+    )?;
+    if let Some(inventory) = record.record_inventory_current.as_ref() {
+        require_flat_target_at_or_before_served_head(
+            &inventory.chain_positions,
+            &record.row.namespace,
+            selected_snapshot,
+        )?;
+    }
+    for relation in &record.relations {
+        require_flat_target_at_or_before_served_head(
+            &relation.chain_positions,
+            &record.row.namespace,
+            selected_snapshot,
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn require_name_current_at_served_head(
+    row: &NameCurrentRow,
+    selected_snapshot: &SelectedSnapshot,
+) -> V2Result<()> {
+    require_name_projection_at_served_head(&row.chain_positions, &row.namespace, selected_snapshot)
+}
+
+pub(crate) fn require_name_projection_at_served_head(
+    chain_positions: &serde_json::Value,
+    namespace: &str,
+    selected_snapshot: &SelectedSnapshot,
+) -> V2Result<()> {
+    let projected = ChainPositions::from_value(chain_positions)
         .map_err(|_| V2Error::stale("lookup data is unavailable at the selected snapshot"))?;
-    let slot = match record.row.namespace.as_str() {
+    let slot = match namespace {
         "ens" if projected.get("ethereum-sepolia").is_some() => "ethereum-sepolia",
         "ens" => "ethereum",
         "basenames" => "base",
@@ -63,24 +98,10 @@ fn require_record_at_served_head(
             "lookup data is unavailable at the selected snapshot",
         ));
     }
-    if let Some(inventory) = record.record_inventory_current.as_ref() {
-        require_flat_target_at_or_before_served_head(
-            &inventory.chain_positions,
-            &record.row.namespace,
-            selected_snapshot,
-        )?;
-    }
-    for relation in &record.relations {
-        require_flat_target_at_or_before_served_head(
-            &relation.chain_positions,
-            &record.row.namespace,
-            selected_snapshot,
-        )?;
-    }
     Ok(())
 }
 
-pub(super) fn require_flat_target_at_or_before_served_head(
+pub(crate) fn require_flat_target_at_or_before_served_head(
     chain_positions: &serde_json::Value,
     namespace: &str,
     selected_snapshot: &SelectedSnapshot,

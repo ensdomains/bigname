@@ -294,7 +294,6 @@ mod tests {
                 relations: Vec::new(),
             },
             relation_facets: vec![bigname_storage::AddressNameRelation::TokenHolder],
-            relation_chain_positions: Vec::new(),
             primary_chain_positions: None,
             primary_name: None,
             requested_coin_type: "60".to_owned(),

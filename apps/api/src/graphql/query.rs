@@ -1,9 +1,9 @@
 use async_graphql::{Context, Object, Result};
 use bigname_storage::{
     AddressNameRelation, NameCurrentAddressFilter, NameCurrentAddressRelationFilter,
-    NameCurrentListFilter, NameCurrentListOrder, NameCurrentListSort, count_name_current_list,
-    load_name_current_list_page_offset, load_name_current_list_row_by_name,
-    load_name_current_list_row_by_namehash,
+    NameCurrentListFilter, NameCurrentListOrder, NameCurrentListSort,
+    count_phase_graphql_name_list, load_phase_graphql_name_list_page_offset,
+    load_phase_graphql_name_row_by_name, load_phase_graphql_name_row_by_namehash,
 };
 
 use crate::state::AppState;
@@ -12,6 +12,10 @@ use super::enums::{DomainOrderBy, OrderDirection};
 use super::error::internal_error;
 use super::inputs::{DomainFilter, RegistrationFilter};
 use super::objects::{Domain, DomainConnection, RegistrationConnection};
+use super::snapshot::{
+    graphql_snapshot_chain_ids, load_graphql_head, require_count_at_head, require_rows_at_head,
+    revalidate_graphql_head,
+};
 
 /// The compatibility surface is scoped to ENS names.
 const NAMESPACE: &str = "ens";
@@ -34,16 +38,25 @@ impl QueryRoot {
     /// signal which id form they are sending.
     async fn domain(&self, ctx: &Context<'_>, id: String) -> Result<Option<Domain>> {
         let state = ctx.data::<AppState>()?;
-        let row = match load_name_current_list_row_by_name(&state.pool, NAMESPACE, &id)
+        let head = load_graphql_head(state, "domain").await?;
+        let row = match load_phase_graphql_name_row_by_name(&state.lookup_pool, NAMESPACE, &id)
             .await
             .map_err(|error| internal_error("domain", error))?
         {
             Some(row) => Some(row),
-            None => load_name_current_list_row_by_namehash(&state.pool, &id)
+            None => load_phase_graphql_name_row_by_namehash(&state.lookup_pool, NAMESPACE, &id)
                 .await
                 .map_err(|error| internal_error("domain", error))?,
         };
-        Ok(row.map(Domain::from))
+        if let Some(row) = row.as_ref() {
+            require_rows_at_head(std::slice::from_ref(row), head.as_ref(), "domain")?;
+        }
+        revalidate_graphql_head(state, head.as_ref(), "domain").await?;
+        Ok(row.map(|row| {
+            let mut domain = Domain::from(row.row);
+            domain.served_head = head;
+            domain
+        }))
     }
 
     /// `domains(where, first, skip, orderBy, orderDirection)` — offset-paged list.
@@ -64,9 +77,12 @@ impl QueryRoot {
         let offset = (skip.unwrap_or(0).max(0) as u64).min(MAX_DOMAINS_SKIP);
         let (sort, order) = storage_sort(order_by, order_direction);
         let state = ctx.data::<AppState>()?;
-        let rows = load_name_current_list_page_offset(
-            &state.pool,
+        let head = load_graphql_head(state, "domains").await?;
+        let snapshot_chain_ids = graphql_snapshot_chain_ids(head.as_ref());
+        let rows = load_phase_graphql_name_list_page_offset(
+            &state.lookup_pool,
             &domain_filter_to_storage(filter),
+            &snapshot_chain_ids,
             sort,
             order,
             limit,
@@ -74,7 +90,16 @@ impl QueryRoot {
         )
         .await
         .map_err(|error| internal_error("domains", error))?;
-        Ok(rows.into_iter().map(Domain::from).collect())
+        require_rows_at_head(&rows, head.as_ref(), "domains")?;
+        revalidate_graphql_head(state, head.as_ref(), "domains").await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let mut domain = Domain::from(row.row);
+                domain.served_head = head.clone();
+                domain
+            })
+            .collect())
     }
 
     /// `registrationConnection(first: 0, where) { totalCount }` — backs `OwnedNamesCount`.
@@ -96,11 +121,16 @@ impl QueryRoot {
             ..Default::default()
         };
         let state = ctx.data::<AppState>()?;
-        let count = count_name_current_list(&state.pool, &storage_filter)
-            .await
-            .map_err(|error| internal_error("registrationConnection", error))?;
+        let head = load_graphql_head(state, "registrationConnection").await?;
+        let snapshot_chain_ids = graphql_snapshot_chain_ids(head.as_ref());
+        let count =
+            count_phase_graphql_name_list(&state.lookup_pool, &storage_filter, &snapshot_chain_ids)
+                .await
+                .map_err(|error| internal_error("registrationConnection", error))?;
+        require_count_at_head(&count, head.as_ref(), "registrationConnection")?;
+        revalidate_graphql_head(state, head.as_ref(), "registrationConnection").await?;
         Ok(RegistrationConnection {
-            total_count: Some(count_to_i32(count)),
+            total_count: Some(count_to_i32(count.total_count)),
         })
     }
 
@@ -113,11 +143,19 @@ impl QueryRoot {
         #[graphql(name = "where")] filter: Option<DomainFilter>,
     ) -> Result<DomainConnection> {
         let state = ctx.data::<AppState>()?;
-        let count = count_name_current_list(&state.pool, &domain_filter_to_storage(filter))
-            .await
-            .map_err(|error| internal_error("domainConnection", error))?;
+        let head = load_graphql_head(state, "domainConnection").await?;
+        let snapshot_chain_ids = graphql_snapshot_chain_ids(head.as_ref());
+        let count = count_phase_graphql_name_list(
+            &state.lookup_pool,
+            &domain_filter_to_storage(filter),
+            &snapshot_chain_ids,
+        )
+        .await
+        .map_err(|error| internal_error("domainConnection", error))?;
+        require_count_at_head(&count, head.as_ref(), "domainConnection")?;
+        revalidate_graphql_head(state, head.as_ref(), "domainConnection").await?;
         Ok(DomainConnection {
-            total_count: Some(count_to_i32(count)),
+            total_count: Some(count_to_i32(count.total_count)),
         })
     }
 }

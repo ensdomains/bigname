@@ -1,0 +1,458 @@
+use anyhow::{Context, Result};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
+use uuid::Uuid;
+
+use crate::{
+    NameCurrentAddressRelationFilter, NameCurrentListFilter, NameCurrentListOrder,
+    NameCurrentListRow, NameCurrentListSort, NameCurrentRow, SurfaceBindingKind,
+};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhaseGraphqlNameListRow {
+    pub row: NameCurrentListRow,
+    pub membership_targets: Vec<Value>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhaseGraphqlNameCount {
+    pub total_count: u64,
+    pub name_targets: Vec<PhaseGraphqlNameCountTarget>,
+    pub membership_targets: Vec<Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct PhaseGraphqlNameCountTarget {
+    pub namespace: String,
+    pub chain_positions: Value,
+}
+
+const SELECT_NAMES: &str = r#"
+    SELECT logical_name_id, namespace, canonical_display_name, normalized_name,
+           namehash, surface_binding_id, resource_id, token_lineage_id,
+           binding_kind, declared_summary, provenance, chain_positions,
+           canonicality_summary, manifest_version, last_recomputed_at,
+           support_status, unsupported_reason, labelhash, token_id, owner,
+           registrant, created_at, registration_date, expiry_date,
+           resolver_address, membership_targets
+    FROM filtered_names
+"#;
+
+pub async fn load_phase_graphql_name_row_by_name(
+    pool: &PgPool,
+    namespace: &str,
+    name: &str,
+) -> Result<Option<PhaseGraphqlNameListRow>> {
+    let filter = NameCurrentListFilter {
+        namespace: Some(namespace.to_owned()),
+        name: Some(name.to_owned()),
+        ..Default::default()
+    };
+    load_one(pool, &filter, None).await
+}
+
+pub async fn load_phase_graphql_name_row_by_namehash(
+    pool: &PgPool,
+    namespace: &str,
+    namehash: &str,
+) -> Result<Option<PhaseGraphqlNameListRow>> {
+    let filter = NameCurrentListFilter {
+        namespace: Some(namespace.to_owned()),
+        ..Default::default()
+    };
+    load_one(pool, &filter, Some(namehash)).await
+}
+
+async fn load_one(
+    pool: &PgPool,
+    filter: &NameCurrentListFilter,
+    namehash: Option<&str>,
+) -> Result<Option<PhaseGraphqlNameListRow>> {
+    let mut builder = QueryBuilder::<Postgres>::new("");
+    push_filtered_names(&mut builder, filter, namehash, None);
+    builder.push(SELECT_NAMES);
+    builder.push(" LIMIT 1");
+    let row = builder
+        .build()
+        .fetch_optional(pool)
+        .await
+        .context("failed to load schema-v2 GraphQL name row")?;
+    row.map(decode_row).transpose()
+}
+
+pub async fn load_phase_graphql_name_list_page_offset(
+    pool: &PgPool,
+    filter: &NameCurrentListFilter,
+    snapshot_chain_ids: &[String],
+    sort: NameCurrentListSort,
+    order: NameCurrentListOrder,
+    limit: u64,
+    offset: u64,
+) -> Result<Vec<PhaseGraphqlNameListRow>> {
+    let limit = i64::try_from(limit).context("GraphQL name limit exceeds SQL limit")?;
+    let offset = i64::try_from(offset).context("GraphQL name offset exceeds SQL limit")?;
+    let mut builder = QueryBuilder::<Postgres>::new("");
+    push_filtered_names(&mut builder, filter, None, Some(snapshot_chain_ids));
+    builder.push(SELECT_NAMES);
+    push_order(&mut builder, sort, order);
+    builder.push(" LIMIT ");
+    builder.push_bind(limit);
+    builder.push(" OFFSET ");
+    builder.push_bind(offset);
+    let rows = builder
+        .build()
+        .fetch_all(pool)
+        .await
+        .with_context(|| format!("failed to load schema-v2 GraphQL names for {filter:?}"))?;
+    rows.into_iter().map(decode_row).collect()
+}
+
+pub async fn count_phase_graphql_name_list(
+    pool: &PgPool,
+    filter: &NameCurrentListFilter,
+    snapshot_chain_ids: &[String],
+) -> Result<PhaseGraphqlNameCount> {
+    let mut builder = QueryBuilder::<Postgres>::new("");
+    push_filtered_names(&mut builder, filter, None, Some(snapshot_chain_ids));
+    builder.push(
+        r#"
+        , distinct_name_targets AS (
+            SELECT DISTINCT namespace, position.key AS slot,
+                   position.value AS target
+            FROM filtered_names
+            CROSS JOIN LATERAL JSONB_EACH(chain_positions) AS position
+        ), ranked_name_targets AS (
+            SELECT namespace, slot, target,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY namespace, slot, target ->> 'chain_id'
+                       ORDER BY (target ->> 'block_number')::BIGINT DESC,
+                                target ->> 'block_hash' DESC
+                   ) AS target_rank
+            FROM distinct_name_targets
+        ), distinct_membership_targets AS (
+            SELECT DISTINCT namespace, target
+            FROM filtered_names membership_name
+            CROSS JOIN LATERAL JSONB_ARRAY_ELEMENTS(
+                membership_name.membership_targets
+            ) AS target
+        ), ranked_membership_targets AS (
+            SELECT namespace, target,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY namespace
+                       ORDER BY (target ->> 'target_block_number')::BIGINT DESC,
+                                target ->> 'target_block_hash' DESC
+                   ) AS target_rank
+            FROM distinct_membership_targets
+        )
+        SELECT (SELECT COUNT(*)::BIGINT FROM filtered_names) AS total_count,
+               COALESCE((
+                   SELECT JSONB_AGG(
+                       JSONB_BUILD_OBJECT(
+                           'namespace', namespace,
+                           'chain_positions', JSONB_BUILD_OBJECT(slot, target)
+                       ) ORDER BY namespace, slot, target_rank
+                   )
+                   FROM ranked_name_targets
+                   WHERE target_rank <= 2
+               ), '[]'::JSONB) AS name_targets,
+               COALESCE((
+                   SELECT JSONB_AGG(target ORDER BY namespace, target_rank)
+                   FROM ranked_membership_targets
+                   WHERE target_rank <= 2
+               ), '[]'::JSONB) AS membership_targets
+        "#,
+    );
+    let row = builder
+        .build()
+        .fetch_one(pool)
+        .await
+        .with_context(|| format!("failed to count schema-v2 GraphQL names for {filter:?}"))?;
+    let count: i64 = row.try_get("total_count")?;
+    let name_targets = serde_json::from_value(row.try_get("name_targets")?)
+        .context("invalid schema-v2 GraphQL name count targets")?;
+    let membership_targets = serde_json::from_value(row.try_get("membership_targets")?)
+        .context("invalid schema-v2 GraphQL membership count targets")?;
+    Ok(PhaseGraphqlNameCount {
+        total_count: u64::try_from(count).context("negative schema-v2 GraphQL name count")?,
+        name_targets,
+        membership_targets,
+    })
+}
+
+fn push_filtered_names<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    filter: &'a NameCurrentListFilter,
+    namehash: Option<&str>,
+    snapshot_chain_ids: Option<&'a [String]>,
+) {
+    builder.push("WITH ");
+    if let Some(address) = filter.address.as_ref() {
+        builder.push(
+            "address_membership AS (SELECT names.logical_name_id, \
+             JSONB_AGG(chain_positions ORDER BY address, relation) AS membership_targets \
+             FROM address_names_current names \
+             WHERE names.support_status = 'supported' AND ",
+        );
+        match address.addresses.as_ref() {
+            Some(addresses) => {
+                builder.push("LOWER(address) = ANY(");
+                builder.push_bind(addresses.as_slice());
+                builder.push(")");
+            }
+            None => {
+                builder.push("LOWER(address) = ");
+                builder.push_bind(&address.address);
+            }
+        }
+        if let NameCurrentAddressRelationFilter::Relation(relation) = address.relation {
+            builder.push(" AND relation = ");
+            builder.push_bind(relation.as_str());
+        }
+        if let Some(chain_ids) = snapshot_chain_ids {
+            builder.push(" AND names.provenance ->> 'chain_id' = ANY(");
+            builder.push_bind(chain_ids);
+            builder.push(")");
+        }
+        builder.push(" GROUP BY names.logical_name_id), ");
+    }
+    builder.push(
+        r#"filtered_names AS (
+        SELECT nc.logical_name_id, nc.namespace, nc.raw_name AS canonical_display_name,
+               LOWER(nc.raw_name) AS normalized_name, nc.namehash,
+               nc.surface_binding_id, nc.resource_id, nc.token_lineage_id,
+               nc.binding_kind, nc.declared_summary, nc.provenance,
+               nc.chain_positions, nc.canonicality_summary, nc.manifest_version,
+               nc.last_recomputed_at, nc.support_status, nc.unsupported_reason,
+               NULL::TEXT AS labelhash,
+               NULLIF(COALESCE(
+                   nc.declared_summary #>> '{authority,token_id}',
+                   nc.declared_summary #>> '{registration,token_id}',
+                   nc.declared_summary #>> '{registration,upstream_resource}',
+                   nc.declared_summary #>> '{control,token_id}'
+               ), '') AS token_id,
+               NULLIF(LOWER(COALESCE(
+                   nc.declared_summary #>> '{control,registry_owner}',
+                   nc.declared_summary #>> '{control,owner}'
+               )), '') AS owner,
+               NULLIF(LOWER(COALESCE(
+                   nc.declared_summary #>> '{control,registrant}',
+                   nc.declared_summary #>> '{registration,registrant}'
+               )), '') AS registrant,
+               COALESCE("#,
+    );
+    push_json_timestamp(builder, &["registration", "created_at"]);
+    builder.push(", ");
+    push_json_timestamp(builder, &["history", "created_at"]);
+    builder.push(") AS created_at, COALESCE(");
+    push_json_timestamp(builder, &["registration", "registration_date"]);
+    builder.push(", ");
+    push_json_timestamp(builder, &["registration", "registered_at"]);
+    builder.push(") AS registration_date, COALESCE(");
+    push_json_timestamp(builder, &["registration", "expiry_date"]);
+    builder.push(", ");
+    push_json_timestamp(builder, &["registration", "expiry"]);
+    builder.push(", ");
+    push_json_timestamp(builder, &["control", "expiry_date"]);
+    builder.push(", ");
+    push_json_timestamp(builder, &["control", "expiry"]);
+    builder.push(
+        r#") AS expiry_date,
+           NULLIF(LOWER(nc.declared_summary #>> '{resolver,address}'), '') AS resolver_address,"#,
+    );
+    if filter.address.is_some() {
+        builder.push(" address_membership.membership_targets");
+    } else {
+        builder.push(" '[]'::JSONB AS membership_targets");
+    }
+    builder.push(" FROM name_current nc");
+    if filter.address.is_some() {
+        builder.push(" JOIN address_membership USING (logical_name_id)");
+    }
+    builder.push(" WHERE nc.support_status = 'supported'");
+    if let Some(chain_ids) = snapshot_chain_ids {
+        builder.push(
+            " AND nc.chain_positions <> '{}'::JSONB \
+             AND NOT EXISTS (SELECT 1 FROM JSONB_EACH(nc.chain_positions) position \
+             WHERE position.value ->> 'chain_id' IS NULL \
+                OR position.value ->> 'chain_id' <> ALL(",
+        );
+        builder.push_bind(chain_ids);
+        builder.push("))");
+    }
+    push_filters(builder, filter);
+    if let Some(namehash) = namehash {
+        builder.push(" AND nc.namehash = ");
+        builder.push_bind(crate::normalize_evm_b256(namehash));
+    }
+    builder.push(")");
+}
+
+fn push_filters<'a>(builder: &mut QueryBuilder<'a, Postgres>, filter: &'a NameCurrentListFilter) {
+    if let Some(namespaces) = filter
+        .namespaces
+        .as_ref()
+        .filter(|values| !values.is_empty())
+    {
+        builder.push(" AND nc.namespace = ANY(");
+        builder.push_bind(namespaces.as_slice());
+        builder.push(")");
+    } else if let Some(namespace) = filter.namespace.as_deref() {
+        builder.push(" AND nc.namespace = ");
+        builder.push_bind(namespace);
+    }
+    if let Some(name) = filter.name.as_deref() {
+        match graphql_namehash(name) {
+            Some(namehash) => {
+                builder.push(" AND nc.namehash = ");
+                builder.push_bind(namehash);
+            }
+            None => {
+                builder.push(" AND FALSE");
+            }
+        }
+    }
+    if let Some(contains) = filter.contains.as_deref() {
+        builder.push(" AND LOWER(nc.raw_name) LIKE ");
+        builder.push_bind(format!("%{}%", escape_like(contains)));
+        builder.push(" ESCAPE '\\'");
+    }
+    if filter.is_migrated == Some(true) {
+        builder.push(
+            " AND nc.declared_summary #>> '{registration,authority_kind}' = 'ens_v2_registry'",
+        );
+    }
+}
+
+fn graphql_namehash(name: &str) -> Option<String> {
+    let normalized = bigname_domain::normalization::normalize_name(name).ok()?;
+    let labels = normalized
+        .normalized_labels
+        .iter()
+        .map(|label| label.as_bytes())
+        .collect::<Vec<_>>();
+    Some(format!("{:#x}", crate::ens_namehash_label_bytes(&labels)))
+}
+
+fn push_json_timestamp(builder: &mut QueryBuilder<'_, Postgres>, path: &[&str]) {
+    let path = format!("'{{{}}}'", path.join(","));
+    builder.push("CASE WHEN JSONB_TYPEOF(nc.declared_summary #> ");
+    builder.push(path.as_str());
+    builder.push(") = 'number' THEN TO_TIMESTAMP((nc.declared_summary #>> ");
+    builder.push(path.as_str());
+    builder.push(")::DOUBLE PRECISION) WHEN JSONB_TYPEOF(nc.declared_summary #> ");
+    builder.push(path.as_str());
+    builder.push(") = 'string' AND nc.declared_summary #>> ");
+    builder.push(path.as_str());
+    builder.push(" ~ '^[0-9]+(\\.[0-9]+)?$' THEN TO_TIMESTAMP((nc.declared_summary #>> ");
+    builder.push(path.as_str());
+    builder.push(")::DOUBLE PRECISION) WHEN JSONB_TYPEOF(nc.declared_summary #> ");
+    builder.push(path.as_str());
+    builder.push(") = 'string' AND nc.declared_summary #>> ");
+    builder.push(path.as_str());
+    builder.push(" ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$' THEN (nc.declared_summary #>> ");
+    builder.push(path.as_str());
+    builder.push(")::TIMESTAMPTZ ELSE NULL END");
+}
+
+fn push_order(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    sort: NameCurrentListSort,
+    order: NameCurrentListOrder,
+) {
+    let direction = match order {
+        NameCurrentListOrder::Asc => "ASC",
+        NameCurrentListOrder::Desc => "DESC",
+    };
+    let column = match sort {
+        NameCurrentListSort::Name => "canonical_display_name COLLATE \"C\"",
+        NameCurrentListSort::ExpiryDate => "expiry_date",
+        NameCurrentListSort::RegistrationDate => "registration_date",
+        NameCurrentListSort::CreatedAt => "created_at",
+    };
+    builder.push(" ORDER BY ");
+    if sort != NameCurrentListSort::Name {
+        builder.push(match order {
+            NameCurrentListOrder::Asc => {
+                format!("CASE WHEN {column} IS NULL THEN 1 ELSE 0 END ASC, ")
+            }
+            NameCurrentListOrder::Desc => {
+                format!("CASE WHEN {column} IS NULL THEN 0 ELSE 1 END ASC, ")
+            }
+        });
+    }
+    builder.push(column);
+    builder.push(" ");
+    builder.push(direction);
+    builder.push(", namespace ASC, normalized_name ASC, namehash ASC");
+}
+
+fn decode_row(row: PgRow) -> Result<PhaseGraphqlNameListRow> {
+    let raw_name: String = row.try_get("canonical_display_name")?;
+    let normalized = bigname_domain::normalization::normalize_name(&raw_name).ok();
+    let labelhash = normalized
+        .as_ref()
+        .and_then(|name| name.normalized_labels.first())
+        .map(|label| {
+            format!(
+                "0x{}",
+                alloy_primitives::hex::encode(alloy_primitives::keccak256(label.as_bytes()))
+            )
+        });
+    let normalized_name = normalized
+        .map(|name| name.normalized_name)
+        .unwrap_or(row.try_get("normalized_name")?);
+    let support_status: String = row.try_get("support_status")?;
+    let unsupported_reason: Option<String> = row.try_get("unsupported_reason")?;
+    let binding_kind = row
+        .try_get::<Option<String>, _>("binding_kind")?
+        .map(|value| SurfaceBindingKind::parse(&value))
+        .transpose()?;
+    let current = NameCurrentRow {
+        logical_name_id: row.try_get("logical_name_id")?,
+        namespace: row.try_get("namespace")?,
+        canonical_display_name: raw_name,
+        normalized_name,
+        namehash: row.try_get("namehash")?,
+        surface_binding_id: row.try_get("surface_binding_id")?,
+        resource_id: row.try_get::<Option<Uuid>, _>("resource_id")?,
+        token_lineage_id: row.try_get("token_lineage_id")?,
+        binding_kind,
+        declared_summary: row.try_get("declared_summary")?,
+        provenance: row.try_get("provenance")?,
+        coverage: if support_status == "supported" {
+            json!({"status": "projected", "exhaustiveness": "not_asserted"})
+        } else {
+            json!({"status": "unsupported", "exhaustiveness": "not_asserted", "unsupported_reason": unsupported_reason})
+        },
+        chain_positions: row.try_get("chain_positions")?,
+        canonicality_summary: row.try_get("canonicality_summary")?,
+        manifest_version: row.try_get("manifest_version")?,
+        last_recomputed_at: row.try_get("last_recomputed_at")?,
+    };
+    let membership_targets: Value = row.try_get("membership_targets")?;
+    Ok(PhaseGraphqlNameListRow {
+        row: NameCurrentListRow {
+            row: current,
+            labelhash,
+            token_id: row.try_get("token_id")?,
+            owner: row.try_get("owner")?,
+            registrant: row.try_get("registrant")?,
+            created_at: row.try_get("created_at")?,
+            registration_date: row.try_get("registration_date")?,
+            expiry_date: row.try_get("expiry_date")?,
+            resolver_address: row.try_get("resolver_address")?,
+        },
+        membership_targets: membership_targets
+            .as_array()
+            .cloned()
+            .context("schema-v2 GraphQL membership targets must be an array")?,
+    })
+}
+
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', r"\\")
+        .replace('%', r"\%")
+        .replace('_', r"\_")
+}

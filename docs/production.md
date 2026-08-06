@@ -123,15 +123,16 @@ When the rate limiter is enabled behind Caddy, `BIGNAME_API_TRUST_X_FORWARDED_FO
 MUST be `true`; otherwise all clients share Caddy's single container-IP bucket
 and the intended per-client limit becomes an accidental global throttle.
 
-The undrain statement timeout remains `25000` because the current status query
-performs aggregate counts that can exceed five seconds under backlog. Lower it
-only after status no longer depends on that expensive query.
+The undrain statement timeout remains `25000` as a conservative request-pool
+ceiling. `/v2/status` no longer scans the legacy invalidation backlog: its
+schema-v2 status read is bounded by the configured request timeout and uses
+the phase lookup pool.
 
 The RPC deadlines are shorter than the whole-request deadline. A hung provider
 therefore becomes the route's existing in-band execution-failure result rather
 than consuming an API request indefinitely. The request deadline remains a
 backstop on `/healthz` and `/v2/status`; the status route remains
-bounded by the primary API pool's statement timeout. `/healthz` alone bypasses
+bounded by the phase lookup pool's statement timeout. `/healthz` alone bypasses
 the process-wide concurrency limiter and load shedding, and its `SELECT 1` uses
 a persistent one-connection readiness pool with a two-second check limit. The
 retained `public`-schema request pool and the schema-v2 lookup request pool each
@@ -144,8 +145,8 @@ healthy but busy process returns `200` with `status="ready"`. A readiness
 connection failure or timeout instead returns `503` with `status="degraded"`,
 preserving the database reachability check for a genuinely unavailable
 PostgreSQL server. The health-specific ceiling prevents unbounded probe work.
-The status routes retain global admission because their aggregate database
-query can be expensive under backlog.
+The status routes retain global request admission with the other API routes;
+their schema-v2 reads no longer aggregate the legacy backlog.
 
 For a temporary HTTP-only deployment before DNS is ready, set:
 

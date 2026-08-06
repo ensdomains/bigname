@@ -15,7 +15,10 @@ mod loader;
 mod objects;
 mod query;
 mod schema;
+mod snapshot;
 
 pub(crate) use schema::graphql_routes;
 #[cfg(test)]
 pub(crate) use schema::subgraph_sdl;
+#[cfg(test)]
+pub(crate) use snapshot::nested_inventory_test_hooks;

@@ -21,9 +21,11 @@ const MAX_QUERY_COMPLEXITY: usize = 4_000;
 fn build_schema(state: AppState) -> SubgraphSchema {
     // Batches the per-domain `record_inventory_current` reads behind `Domain.resolver` (the list
     // N+1). `DataLoader::new` uses `NoCache`, so the loader only coalesces a request's reads into
-    // one query and never memoizes rows across requests (the projection changes under the worker).
-    let record_inventory_loader =
-        DataLoader::new(RecordInventoryLoader::new(state.pool.clone()), tokio::spawn);
+    // one query and never memoizes rows across requests (the phase projection can change).
+    let record_inventory_loader = DataLoader::new(
+        RecordInventoryLoader::new(state.lookup_pool.clone()),
+        tokio::spawn,
+    );
     Schema::build(QueryRoot, EmptyMutation, EmptySubscription)
         .limit_depth(MAX_QUERY_DEPTH)
         .limit_complexity(MAX_QUERY_COMPLEXITY)

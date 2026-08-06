@@ -8,6 +8,41 @@ fn default_block_lag_tolerates_fast_chain_poll_and_provider_skew() {
 }
 
 #[test]
+fn project_publication_lag_uses_the_configured_block_and_time_thresholds() {
+    let freshness = StatusFreshness::new(StatusFreshnessConfig::default());
+    let network = NetworkHeadComparison {
+        status: NetworkHeadStatus::Fresh,
+        block: Some(130),
+        observed_at: None,
+        age_seconds: Some(0),
+        ingestion_lag_blocks: Some(0),
+        ingestion_lag_seconds: Some(0),
+        data_is_stale: false,
+    };
+
+    assert_eq!(
+        freshness.readiness(Some(130), Some(100), Some(30), Some(60), &network),
+        StatusReadiness::Ready
+    );
+    assert_eq!(
+        freshness.readiness(Some(130), Some(100), Some(30), None, &network),
+        StatusReadiness::Degraded
+    );
+    assert_eq!(
+        freshness.readiness(Some(131), Some(100), Some(31), None, &network),
+        StatusReadiness::Stale
+    );
+    assert_eq!(
+        freshness.readiness(Some(131), Some(100), Some(31), Some(60), &network),
+        StatusReadiness::Stale
+    );
+    assert_eq!(
+        freshness.readiness(Some(130), Some(100), Some(30), Some(61), &network),
+        StatusReadiness::Stale
+    );
+}
+
+#[test]
 fn missing_status_rpc_chains_names_every_expected_unconfigured_chain() -> Result<()> {
     let urls = ChainRpcUrls::from_entries(&[
         "ethereum-mainnet=http://rpc.test".to_owned(),
@@ -61,7 +96,7 @@ async fn comparison_distinguishes_probe_states_and_applies_both_lag_thresholds()
     assert_eq!(block_lag.ingestion_lag_seconds, Some(0));
     assert!(block_lag.data_is_stale);
     assert_eq!(
-        status_readiness(Some(100), Some(100), Some(0), &block_lag),
+        freshness.readiness(Some(100), Some(100), Some(0), Some(0), &block_lag),
         StatusReadiness::Stale
     );
 
@@ -85,7 +120,7 @@ async fn comparison_distinguishes_probe_states_and_applies_both_lag_thresholds()
         .compare(&urls, "ethereum-mainnet", Some(100), Some(observed_at))
         .await;
     assert_eq!(
-        status_readiness(Some(100), Some(100), Some(0), &unavailable),
+        freshness.readiness(Some(100), Some(100), Some(0), Some(0), &unavailable),
         StatusReadiness::Degraded
     );
 
@@ -99,13 +134,13 @@ async fn comparison_distinguishes_probe_states_and_applies_both_lag_thresholds()
         .await;
     assert_eq!(unconfigured.status, NetworkHeadStatus::Unconfigured);
     assert_eq!(
-        status_readiness(Some(100), Some(100), Some(0), &unconfigured),
+        freshness.readiness(Some(100), Some(100), Some(0), Some(0), &unconfigured),
         StatusReadiness::Degraded
     );
     assert_eq!(
-        status_readiness(Some(100), Some(99), Some(1), &unconfigured),
+        freshness.readiness(Some(100), Some(94), Some(6), Some(0), &unconfigured),
         StatusReadiness::Stale,
-        "known projection lag must not be masked by an unconfigured provider"
+        "excessive projection lag must not be masked by an unconfigured provider"
     );
     Ok(())
 }
@@ -199,7 +234,7 @@ async fn successful_refresh_caches_eth_block_number_and_cache_age_is_explicit() 
         .await;
     assert_eq!(stale_cache.status, NetworkHeadStatus::Stale);
     assert_eq!(
-        status_readiness(Some(42), Some(42), Some(0), &stale_cache),
+        freshness.readiness(Some(42), Some(42), Some(0), Some(0), &stale_cache),
         StatusReadiness::Degraded
     );
     Ok(())
@@ -229,7 +264,7 @@ async fn failed_refresh_degrades_but_retains_the_last_successful_head_as_evidenc
     assert_eq!(comparison.block, Some(42));
     assert!(comparison.observed_at.is_some());
     assert_eq!(
-        status_readiness(Some(42), Some(42), Some(0), &comparison),
+        freshness.readiness(Some(42), Some(42), Some(0), Some(0), &comparison),
         StatusReadiness::Degraded
     );
     Ok(())

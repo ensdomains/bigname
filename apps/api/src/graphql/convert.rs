@@ -1,6 +1,4 @@
-use bigname_storage::{
-    NameCurrentListRow, RecordInventoryCurrentRow, resolution_record_inventory_lookup_key_any_chain,
-};
+use bigname_storage::{NameCurrentListRow, PhaseGraphqlRecordInventoryRow};
 use serde_json::Value;
 use sqlx::types::time::OffsetDateTime;
 
@@ -14,10 +12,14 @@ const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 /// `Account!` fallback chain here so the resolver stays trivial.
 impl From<NameCurrentListRow> for Domain {
     fn from(row: NameCurrentListRow) -> Self {
-        // The any-chain key: the verified-resolution REST surface scopes record reads to the
-        // mainnet profiles, but the subgraph endpoint serves declared record inventory on whatever
-        // chain the deployment indexes (Sepolia v2 here).
-        let record_inventory_key = resolution_record_inventory_lookup_key_any_chain(&row.row);
+        let record_inventory_key = row.row.resource_id.map(|resource_id| {
+            let boundary = row
+                .row
+                .declared_summary
+                .pointer("/topology/version_boundaries/record_version_boundary")
+                .cloned();
+            (resource_id, boundary)
+        });
         let owner_id = non_empty(row.owner)
             .or_else(|| non_empty(row.registrant))
             .unwrap_or_else(|| ZERO_ADDRESS.to_owned());
@@ -26,14 +28,15 @@ impl From<NameCurrentListRow> for Domain {
             name: Some(row.row.canonical_display_name),
             normalized_name: Some(row.row.normalized_name),
             token_id: non_empty(row.token_id),
-            // The GraphQL SDL pins `createdAt` non-null (`Int!`); the storage value coalesces
-            // registration/history timestamps with the surface block timestamp, so a missing value
-            // is a degenerate row. Surface it as epoch rather than break the contract with null.
+            // The GraphQL SDL pins `createdAt` non-null (`Int!`), while the phase projection has
+            // no legacy surface-creation timestamp. Preserve the response shape with epoch zero
+            // when neither declared registration nor history supplies a timestamp.
             created_at: row.created_at.map(unix_seconds_i32).unwrap_or(0),
             expiry_date: row.expiry_date.map(unix_seconds_i32),
             resolver_address: non_empty(row.resolver_address),
             owner_id,
             record_inventory_key,
+            served_head: None,
         }
     }
 }
@@ -47,7 +50,7 @@ impl From<NameCurrentListRow> for Domain {
 /// no inventory row serves the empty shapes.
 pub(super) fn resolver_from_store(
     address: String,
-    inventory: Option<&RecordInventoryCurrentRow>,
+    inventory: Option<&PhaseGraphqlRecordInventoryRow>,
 ) -> Resolver {
     let texts = inventory
         .map(|row| {

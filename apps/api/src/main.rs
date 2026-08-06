@@ -75,7 +75,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         HEALTH_DATABASE_CHECK_TIMEOUT,
     )
     .await?;
-    let expected_status_chain_ids = bigname_storage::load_expected_status_chain_ids(&pool).await?;
+    let expected_status_chain_ids = load_expected_status_chain_ids_at_startup(&lookup_pool).await?;
     let missing_status_rpc_chains = v2::support::status_freshness::missing_status_rpc_chains(
         &expected_status_chain_ids,
         &chain_rpc_urls,
@@ -94,6 +94,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
         "BIGNAME_API_HEARTBEAT_MAX_AGE_SECS must be greater than zero"
     );
     ensure!(
+        args.phase_heartbeat_max_age_secs > 0,
+        "BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS must be greater than zero"
+    );
+    ensure!(
         args.indexer_chain_heartbeat_max_age_secs > 0,
         "BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS must be greater than zero"
     );
@@ -110,6 +114,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
     )?;
     let state = AppState::new_with_rpc_urls(pool, lookup_pool, chain_rpc_urls)
         .with_heartbeat_max_age_secs(args.heartbeat_max_age_secs)
+        .with_phase_heartbeat_max_age_secs(args.phase_heartbeat_max_age_secs)
         .with_indexer_chain_heartbeat_max_age_secs(args.indexer_chain_heartbeat_max_age_secs)
         .with_worker_rebuild_phase_max_age_secs(args.worker_rebuild_phase_max_age_secs)
         .with_status_freshness_config(status_freshness_config);
@@ -140,6 +145,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         verified_execution_max_in_flight = args.bounds.verified_execution_max_in_flight,
         rpc_connect_timeout_ms = args.rpc_connect_timeout_ms,
         rpc_timeout_ms = args.rpc_timeout_ms,
+        phase_heartbeat_max_age_secs = args.phase_heartbeat_max_age_secs,
         verified_rate_limit_per_second = args.bounds.verified_rate_limit_per_second,
         verified_rate_limit_burst = args.bounds.verified_rate_limit_burst,
         verified_rate_limit_max_clients = args.bounds.verified_rate_limit_max_clients,
@@ -163,6 +169,24 @@ async fn serve(args: ServeArgs) -> Result<()> {
     .with_graceful_shutdown(shutdown_signal("api"))
     .await
     .context("API server exited unexpectedly")
+}
+
+async fn load_expected_status_chain_ids_at_startup(pool: &PgPool) -> Result<Vec<String>> {
+    match bigname_storage::load_phase_expected_status_chain_ids(pool).await {
+        Ok(chain_ids) => Ok(chain_ids),
+        Err(error) => {
+            if state::is_absent_phase_schema(pool, &error).await {
+                warn!(
+                    service = "api",
+                    error = ?error,
+                    "phase schema is not available at API startup; status starts without expected chains"
+                );
+                Ok(Vec::new())
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 #[cfg(test)]

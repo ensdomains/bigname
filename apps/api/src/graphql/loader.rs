@@ -2,20 +2,21 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_graphql::dataloader::Loader;
-use bigname_storage::{RecordInventoryCurrentRow, load_record_inventory_current_batch};
+use bigname_storage::{PhaseGraphqlRecordInventoryRow, load_phase_graphql_record_inventory_batch};
 use serde_json::Value;
 use sqlx::PgPool;
 use sqlx::types::Uuid;
 
-/// DataLoader key for a name's `record_inventory_current` row. The version boundary is a
-/// `serde_json::Value` (not `Hash`/`Eq`), so it is carried as its canonical JSON serialization and
-/// parsed back in [`RecordInventoryLoader::load`]; `serde_json` serializes a given `Value`
-/// deterministically, so equal boundaries map to the same key (and the loader dedups them).
-pub(super) type RecordInventoryKey = (Uuid, String);
+/// DataLoader key for a resource's `record_inventory_current` row. A declared JSON version
+/// boundary is serialized when available to disambiguate multiple projected inventories.
+pub(super) type RecordInventoryKey = (Uuid, Option<String>);
 
-/// Serialize a version boundary into the string half of a [`RecordInventoryKey`].
-pub(super) fn record_inventory_key(resource_id: Uuid, boundary: &Value) -> RecordInventoryKey {
-    (resource_id, boundary.to_string())
+/// Serialize an optional version boundary into the string half of a [`RecordInventoryKey`].
+pub(super) fn record_inventory_key(
+    resource_id: Uuid,
+    boundary: Option<&Value>,
+) -> RecordInventoryKey {
+    (resource_id, boundary.map(Value::to_string))
 }
 
 /// Batches the per-domain `record_inventory_current` reads behind `Domain.resolver` into one
@@ -32,7 +33,7 @@ impl RecordInventoryLoader {
 }
 
 impl Loader<RecordInventoryKey> for RecordInventoryLoader {
-    type Value = RecordInventoryCurrentRow;
+    type Value = PhaseGraphqlRecordInventoryRow;
     // anyhow::Error is not Clone; async-graphql requires a Clone error, so share it behind an Arc.
     type Error = Arc<anyhow::Error>;
 
@@ -43,16 +44,20 @@ impl Loader<RecordInventoryKey> for RecordInventoryLoader {
         let pairs = keys
             .iter()
             .map(|(resource_id, boundary)| {
-                let boundary: Value = serde_json::from_str(boundary).map_err(|error| {
-                    Arc::new(anyhow::Error::new(error).context(
-                        "failed to parse record inventory DataLoader boundary key as JSON",
-                    ))
-                })?;
+                let boundary = boundary
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .map_err(|error| {
+                        Arc::new(anyhow::Error::new(error).context(
+                            "failed to parse record inventory DataLoader boundary key as JSON",
+                        ))
+                    })?;
                 Ok((*resource_id, boundary))
             })
             .collect::<Result<Vec<_>, Self::Error>>()?;
 
-        let rows = load_record_inventory_current_batch(&self.pool, &pairs)
+        let rows = load_phase_graphql_record_inventory_batch(&self.pool, &pairs)
             .await
             .map_err(Arc::new)?;
 

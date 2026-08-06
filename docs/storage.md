@@ -668,14 +668,21 @@ pending invalidations as well as the permission cutover.
 
 Historical projection materializations are projection-owned caches, not truth. When a worker materializes an `at` or `chain_positions` snapshot, the rows are keyed by the normal projection key plus exact chain-position context or an equivalent snapshot key. They may be bounded and evicted by policy; absence returns `stale`. A historical materialization must never overwrite a newer current row in place, and the API must never fill a missing historical projection from raw facts or provider data.
 
-Exact-name snapshot selection is a storage read boundary, not a new family. The API resolves `at`, explicit `chain_positions`, and `consistency` to one concrete `ChainPositions` object from the `bigname_phase` pool. Current `head`, `safe`, and `finalized` positions come from `chain_heads`, while timestamps and timestamp-based historical selections come from readable `chain_lineage`. Every selection, including historical timestamp and token replay, also requires the current `project` row in `chain_phase_state` to be completed at the exact latest head with the compiled interpreter content hash. The selector does not read `public.chain_checkpoints`. It then reads only projection rows and execution outputs eligible for that object. Lookup names, record inventories, address-name relations, resolver overviews, and resolver bound names read the `bigname_phase` projection tables. Projection publication replaces only affected scope, so an unchanged row can retain an earlier publication target. Indexed admission accepts a row target at or before the selected position, requires the selected hash at equal height, and captures and revalidates the completed projection-phase generation around the read. This is a single-source projection consistency check; it does not compare a legacy per-entity event position with a phase head, and these indexed projection readers do not read interpretation-owned identity rows.
+Exact-name snapshot selection is a storage read boundary, not a new family. The API resolves `at`, explicit `chain_positions`, and `consistency` to one concrete `ChainPositions` object from the `bigname_phase` pool. Current `head`, `safe`, and `finalized` positions come from `chain_heads`, while timestamps and timestamp-based historical selections come from readable `chain_lineage`. Every selection, including historical timestamp and token replay, also requires the current `project` row in `chain_phase_state` to be completed at the exact latest head with the compiled interpreter content hash. The selector does not read `public.chain_checkpoints`. It then reads only projection rows and execution outputs eligible for that object. Lookup names, record inventories, address-name relations, resolver overviews, resolver bound names, and GraphQL compatibility operations read the `bigname_phase` projection tables. GraphQL carries one selected head from a domain row into its nested inventory fields, scopes list and count SQL to the selected chains, excludes unsupported names, and treats an unsupported inventory as the existing empty compatibility shape. A sole record inventory is selected by resource even when its event boundary differs from the name's later Project publication target; multiple rows require one exact declared-boundary match or fail as ambiguous. Projection publication replaces only affected scope, so an unchanged row can retain an earlier publication target. Indexed admission accepts a row target at or before the selected position, requires the selected hash at equal height, and captures and revalidates the completed projection-phase generation around the read. This is a single-source projection consistency check; it does not compare a legacy per-entity event position with a phase head, and these indexed projection readers do not read interpretation-owned identity rows. If Project has not completed at the newest stored head, GraphQL row-returning operations fail instead of serving the prior publication.
 
-The API still uses the public pool outside snapshot selection: startup and
-`/v2/status` read `public.chain_checkpoints`, and the v2 routes that have not
-yet moved their projection reads use `public.chain_lineage` to filter readable
-rows. Removing the retained worker and its tables therefore still requires an
-explicit successor owner for those status and remaining lineage reads; lookup
-and resolver serving no longer require that owner.
+API startup and `/v2/status` read the schema-v2 chain set from `chain_heads`
+and `chain_phase_state`. Status maps the head and finality positions from
+`chain_heads`, indexed progress from the project phase's current position, and
+timestamps from `chain_lineage`. It maps `project` failure, pause, normal or redo
+activity, and the newest per-chain `service_heartbeats` timestamp into the
+existing readiness vocabulary without adding response fields. Readiness also
+requires the current interpreter content hash and, when project and head are at
+the same height, the exact head hash; a generation mismatch is degraded.
+Because the schema-v2 project phase stages and
+publishes atomically without the legacy invalidation journals, the preserved
+status queue and dead-letter fields report neutral values. V2 routes that have
+not moved their projection reads still use the public pool; removing their
+retained tables requires their separately owned source moves.
 
 If the selected positions are valid but no eligible projection or persisted execution output exists, the serving path returns the documented `stale`, `unsupported`, or `not_found` API state. It does not read raw facts, interpret-phase identity/event rows, or provider data directly to fill the public response.
 
