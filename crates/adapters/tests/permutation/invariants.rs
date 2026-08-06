@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::Range,
+};
 
 use anyhow::{Context, Result, bail};
 use bigname_adapters::schema_v2::{
@@ -8,29 +11,36 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::{
-    convergence::{KnownDivergence, assert_converged},
+    convergence::{BatchBoundaryArtifacts, assert_converged, assert_lineage_integrity},
     rng::Rng,
 };
 
-/// Cumulative identity rows already visible to the persistence transport, so a later batch may
-/// reference what an earlier one materialized without re-emitting it.
-pub struct Ledger {
+/// Models the identity rows a batch may reference: everything the persistence transport has
+/// already committed, accumulated in commit order. `crates/interpret/src/write.rs` writes identity
+/// rows, then discovery rows, then normalized events, one transaction per batch — so a row may
+/// reference anything its own batch emits or anything an earlier batch emitted, and nothing else.
+pub struct IdentityReferences {
+    chain_id: String,
     resources: BTreeSet<(String, Uuid)>,
     lineages: BTreeSet<(String, Uuid)>,
-    surfaces: BTreeSet<String>,
-    bindings: BTreeSet<Uuid>,
-    instances: BTreeSet<Uuid>,
+    surfaces: BTreeSet<(String, String)>,
+    bindings: BTreeMap<Uuid, (i64, i64, i64)>,
+    instances: BTreeSet<(String, Uuid)>,
     positions: BTreeMap<String, (i64, i64, i64)>,
 }
 
-impl Ledger {
-    pub fn new(declared_instances: &[Uuid]) -> Self {
+impl IdentityReferences {
+    pub fn new(chain_id: &str, declared_instances: &[Uuid]) -> Self {
         Self {
+            chain_id: chain_id.to_owned(),
             resources: BTreeSet::new(),
             lineages: BTreeSet::new(),
             surfaces: BTreeSet::new(),
-            bindings: BTreeSet::new(),
-            instances: declared_instances.iter().copied().collect(),
+            bindings: BTreeMap::new(),
+            instances: declared_instances
+                .iter()
+                .map(|instance| (chain_id.to_owned(), *instance))
+                .collect(),
             positions: BTreeMap::new(),
         }
     }
@@ -42,10 +52,12 @@ impl Ledger {
                 .insert((lineage.chain_id.clone(), lineage.token_lineage_id));
         }
         for surface in &output.name_surfaces {
-            self.surfaces.insert(surface.logical_name_id.clone());
+            self.surfaces
+                .insert((surface.chain_id.clone(), surface.logical_name_id.clone()));
         }
         for instance in &output.contract_instances {
-            self.instances.insert(instance.contract_instance_id);
+            self.instances
+                .insert((instance.chain_id.clone(), instance.contract_instance_id));
         }
         for resource in &output.resources {
             if let Some(lineage) = resource.token_lineage_id
@@ -74,7 +86,9 @@ impl Ledger {
                 );
             }
             if let Some(logical) = event.logical_name_id.as_ref()
-                && !self.surfaces.contains(logical)
+                && !self
+                    .surfaces
+                    .contains(&(event.chain_id.clone(), logical.clone()))
             {
                 bail!(
                     "{context}: event {} references unknown name surface {logical}",
@@ -93,25 +107,32 @@ impl Ledger {
                     binding.resource_id
                 );
             }
-            if !self.surfaces.contains(&binding.logical_name_id) {
+            if !self
+                .surfaces
+                .contains(&(binding.chain_id.clone(), binding.logical_name_id.clone()))
+            {
                 bail!(
                     "{context}: binding {} references unknown name surface {}",
                     binding.surface_binding_id,
                     binding.logical_name_id
                 );
             }
-            self.bindings.insert(binding.surface_binding_id);
+            self.bindings
+                .insert(binding.surface_binding_id, binding_position(binding));
         }
         for closure in &output.binding_closures {
             if let Some(binding) = closure.except_surface_binding_id
-                && !self.bindings.contains(&binding)
+                && !self.bindings.contains_key(&binding)
             {
                 bail!(
                     "{context}: binding closure for {} exempts unknown binding {binding}",
                     closure.logical_name_id
                 );
             }
-            if !self.surfaces.contains(&closure.logical_name_id) {
+            if !self
+                .surfaces
+                .contains(&(self.chain_id.clone(), closure.logical_name_id.clone()))
+            {
                 bail!(
                     "{context}: binding closure references unknown name surface {}",
                     closure.logical_name_id
@@ -119,7 +140,10 @@ impl Ledger {
             }
         }
         for address in &output.contract_addresses {
-            if !self.instances.contains(&address.contract_instance_id) {
+            if !self
+                .instances
+                .contains(&(address.chain_id.clone(), address.contract_instance_id))
+            {
                 bail!(
                     "{context}: contract address {} references unknown contract instance {}",
                     address.address,
@@ -132,7 +156,7 @@ impl Ledger {
                 ("from", edge.from_contract_instance_id),
                 ("to", edge.to_contract_instance_id),
             ] {
-                if !self.instances.contains(&instance) {
+                if !self.instances.contains(&(edge.chain_id.clone(), instance)) {
                     bail!(
                         "{context}: discovery edge {} references unknown {side} contract instance {instance}",
                         edge.edge_kind
@@ -141,7 +165,10 @@ impl Ledger {
             }
         }
         for closure in &output.discovery_edge_closures {
-            if !self.instances.contains(&closure.from_contract_instance_id) {
+            if !self
+                .instances
+                .contains(&(closure.chain_id.clone(), closure.from_contract_instance_id))
+            {
                 bail!(
                     "{context}: discovery closure {} references unknown from contract instance {}",
                     closure.edge_kind,
@@ -149,7 +176,56 @@ impl Ledger {
                 );
             }
         }
-        self.check_canonicality(context, &live, output)
+        self.check_canonicality(context, &live, output)?;
+        self.check_binding_exclusivity(context, output)
+    }
+
+    /// `surface_bindings_no_overlap` forbids two live bindings for one name. Replaying the batch's
+    /// bindings and closures in chain order must never leave a name with more than one open.
+    fn check_binding_exclusivity(&self, context: &str, output: &BatchOutput) -> Result<()> {
+        let mut open: BTreeMap<&str, BTreeMap<Uuid, (i64, i64, i64)>> = BTreeMap::new();
+        let mut steps = output
+            .surface_bindings
+            .iter()
+            .map(|binding| {
+                (
+                    binding_position(binding),
+                    Some(binding),
+                    Option::<&bigname_adapters::schema_v2::BindingClosure>::None,
+                )
+            })
+            .chain(
+                output
+                    .binding_closures
+                    .iter()
+                    .map(|closure| (closure_position(closure), None, Some(closure))),
+            )
+            .collect::<Vec<_>>();
+        // Closures settle before a binding opened at the same position, which is how a replacement
+        // binding survives its own closure.
+        steps.sort_by_key(|(position, binding, _)| (*position, binding.is_some()));
+        for (position, binding, closure) in steps {
+            if let Some(closure) = closure {
+                if let Some(live) = open.get_mut(closure.logical_name_id.as_str()) {
+                    live.retain(|binding, opened| {
+                        *opened > position || closure.except_surface_binding_id == Some(*binding)
+                    });
+                }
+                continue;
+            }
+            let binding = binding.expect("step is a binding or a closure");
+            let live = open.entry(binding.logical_name_id.as_str()).or_default();
+            live.insert(binding.surface_binding_id, position);
+            if live.len() > 1 {
+                bail!(
+                    "{context}: name {} has {} live surface bindings at {position:?}: {:?}",
+                    binding.logical_name_id,
+                    live.len(),
+                    live.keys().collect::<Vec<_>>()
+                );
+            }
+        }
+        Ok(())
     }
 
     fn check_canonicality(
@@ -196,18 +272,16 @@ impl Ledger {
             let Some(exempt) = closure.except_surface_binding_id else {
                 continue;
             };
-            let Some(binding) = output
-                .surface_bindings
-                .iter()
-                .find(|binding| binding.surface_binding_id == exempt)
-            else {
-                continue;
-            };
-            if binding_position(binding) > closure_position(closure) {
+            let Some(opened) = self.bindings.get(&exempt) else {
                 bail!(
-                    "{context}: binding closure at {:?} exempts binding {exempt} opened later at {:?}",
-                    closure_position(closure),
-                    binding_position(binding)
+                    "{context}: binding closure at {:?} exempts binding {exempt}, which no batch opened",
+                    closure_position(closure)
+                );
+            };
+            if *opened > closure_position(closure) {
+                bail!(
+                    "{context}: binding closure at {:?} exempts binding {exempt} opened later at {opened:?}",
+                    closure_position(closure)
                 );
             }
         }
@@ -292,13 +366,16 @@ pub struct Replayed {
 }
 
 pub struct Converged {
+    /// The split replay, batch by batch, in commit order.
     pub batches: Vec<Replayed>,
-    pub known: KnownDivergence,
+    /// The same sequence interpreted as one batch — the shape a backfill runs.
+    pub whole: Replayed,
+    pub artifacts: BatchBoundaryArtifacts,
 }
 
 /// Runs the same sequence three ways — one fresh pass, one incremental pass, and one pass split
 /// into resumed batches — and requires all three to derive identical state.
-pub fn converge(context: &str, input: BatchInput, split_seed: u64) -> Result<Converged> {
+pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> Result<Converged> {
     let fresh = interpret_schema_v2_batch(input.clone())
         .with_context(|| format!("{context}: fresh interpretation failed"))?;
     let (incremental, live) = interpret_schema_v2_batch_incremental(input.clone(), None)
@@ -324,10 +401,7 @@ pub fn converge(context: &str, input: BatchInput, split_seed: u64) -> Result<Con
     let mut prior = Vec::new();
     let mut replayed = BatchOutput::default();
     let mut outputs = Vec::new();
-    for (index, range) in split(input.blocks.len(), split_seed)
-        .into_iter()
-        .enumerate()
-    {
+    for (index, range) in split.into_iter().enumerate() {
         let blocks = input.blocks[range.clone()].to_vec();
         let hashes = blocks
             .iter()
@@ -349,11 +423,7 @@ pub fn converge(context: &str, input: BatchInput, split_seed: u64) -> Result<Con
             .with_context(|| format!("{context}: split batch {index} failed a restored pass"))?;
         let (resumed_output, next) = interpret_schema_v2_batch_incremental(
             BatchInput {
-                prior_events: if session.is_none() {
-                    prior.clone()
-                } else {
-                    Vec::new()
-                },
+                prior_events: Vec::new(),
                 ..restored_input.clone()
             },
             session,
@@ -382,10 +452,20 @@ pub fn converge(context: &str, input: BatchInput, split_seed: u64) -> Result<Con
             output: resumed_output,
         });
     }
-    let known = assert_converged(context, &fresh, &replayed)?;
+    let artifacts = assert_converged(context, &fresh, &replayed)?;
+    assert_lineage_integrity(context, "the whole-sequence pass", &fresh)?;
+    assert_lineage_integrity(context, "the split replay", &replayed)?;
     Ok(Converged {
         batches: outputs,
-        known,
+        whole: Replayed {
+            blocks: input
+                .blocks
+                .iter()
+                .map(|block| block.block_number)
+                .collect(),
+            output: fresh,
+        },
+        artifacts,
     })
 }
 
@@ -404,7 +484,7 @@ fn absorb_rows(into: &mut BatchOutput, from: BatchOutput) {
         .extend(from.discovery_edge_closures);
 }
 
-pub fn split(len: usize, seed: u64) -> Vec<std::ops::Range<usize>> {
+pub fn split(len: usize, seed: u64) -> Vec<Range<usize>> {
     if len == 0 {
         return Vec::new();
     }

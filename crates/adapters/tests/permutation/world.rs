@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
@@ -322,6 +322,21 @@ fn find_checked_in<'a>(
         bail!("more than one checked-in manifest for {}", slot.family);
     }
     Ok(found)
+}
+
+/// Topic0 of every event the world's checked-in manifests declare. The lane asserts the event
+/// fragments it emits against this, so a mistyped fragment cannot silently drop coverage.
+pub fn declared_topic0s(world: &World, checked_in: &[LoadedManifest]) -> Result<BTreeSet<String>> {
+    let mut topics = BTreeSet::new();
+    for slot in world.sources {
+        let loaded = find_checked_in(world, slot, checked_in)?;
+        for event in &loaded.manifest.abi.events {
+            if let Some(topic) = event.topic0()? {
+                topics.insert(topic.to_ascii_lowercase());
+            }
+        }
+    }
+    Ok(topics)
 }
 
 pub fn checked_in_manifests() -> Result<Vec<LoadedManifest>> {

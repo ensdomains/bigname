@@ -1,5 +1,5 @@
 use alloy_primitives::LogData;
-use alloy_sol_types::sol;
+use alloy_sol_types::{SolEvent, sol};
 
 sol! {
     interface V1Registry {
@@ -169,6 +169,58 @@ sol! {
         event NameChanged(bytes32 indexed node, string name);
         event VersionChanged(bytes32 indexed node, uint64 newVersion);
     }
+}
+
+/// Every event this lane emits, as (name, solidity signature, topic0). The lane asserts each entry
+/// against the checked-in manifest ABI, so a mistyped fragment fails loudly instead of silently
+/// dropping an axis of coverage. The manifests carry the upstream citations for these fragments.
+pub fn declared_events() -> Vec<(&'static str, &'static str, String)> {
+    macro_rules! declared {
+        ($($event:ty),* $(,)?) => {
+            vec![$((
+                stringify!($event),
+                <$event as SolEvent>::SIGNATURE,
+                format!("{:#x}", <$event as SolEvent>::SIGNATURE_HASH),
+            )),*]
+        };
+    }
+    declared![
+        V1Registry::NewOwner,
+        V1Registry::Transfer,
+        V1Registry::NewResolver,
+        V1RegistrarToken::Transfer,
+        V1LegacyController::NameRegistered,
+        V1LegacyController::NameRenewed,
+        V1WrappedController::NameRegistered,
+        V1UnwrappedController::NameRegistered,
+        V1UnwrappedController::NameRenewed,
+        V1Wrapper::NameWrapped,
+        V1Wrapper::NameUnwrapped,
+        V1Wrapper::ExpiryExtended,
+        V1Wrapper::TransferSingle,
+        V1Resolver::AddrChanged,
+        V1Resolver::TextChanged,
+        V1Resolver::ContenthashChanged,
+        V1Resolver::NameChanged,
+        V1Reverse::ReverseClaimed,
+        V2Registry::RegistryCreated,
+        V2Registry::LabelRegistered,
+        V2Registry::LabelUnregistered,
+        V2Registry::ExpiryUpdated,
+        V2Registry::SubregistryUpdated,
+        V2Registry::ResolverUpdated,
+        V2Registry::TokenResource,
+        V2Registry::TransferSingle,
+        V2Registry::EACRolesChanged,
+        V2Registry::TokenRegenerated,
+        V2Registry::ParentUpdated,
+        V2Registry::Upgraded,
+        V2Registrar::NameRegistered,
+        V2Registrar::NameRenewed,
+        V2Resolver::AddressChanged,
+        V2Resolver::TextChanged,
+        V2Resolver::NameChanged,
+    ]
 }
 
 pub fn encoded_topics(encoded: &LogData) -> Vec<String> {

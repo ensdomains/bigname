@@ -298,7 +298,6 @@ fn lay_out(
             log_index = 0;
         } else if !dimensions.dense_transactions || !rng.chance(1, 2) {
             transaction_index += 1;
-            log_index = 0;
         }
         let transaction_hash = format!(
             "0x{:064x}",

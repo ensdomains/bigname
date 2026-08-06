@@ -16,7 +16,14 @@ const BINDING_FK_RELEASE: &str = include_str!("../fixtures/interpreters/binding-
 #[derive(Deserialize)]
 struct Fixture {
     case: Case,
+    batches: Vec<BlockRange>,
     expected: Expected,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+struct BlockRange {
+    from_block: i64,
+    to_block: i64,
 }
 
 #[derive(Deserialize)]
@@ -71,12 +78,18 @@ pub struct Directed {
     pub id: String,
     pub input: BatchInput,
     pub declared_instances: Vec<Uuid>,
+    /// The physical batch boundaries the corpus was captured with, one block each.
+    pub batches: Vec<std::ops::Range<usize>>,
     expected: Expected,
 }
 
 impl Directed {
     pub fn lease_release(checked_in: &[LoadedManifest]) -> Result<Self> {
-        let Fixture { case, expected } = serde_json::from_str(BINDING_FK_RELEASE)?;
+        let Fixture {
+            case,
+            batches,
+            expected,
+        } = serde_json::from_str(BINDING_FK_RELEASE)?;
         let chain_id = case
             .manifests
             .first()
@@ -161,8 +174,24 @@ impl Directed {
             });
         }
         raw_logs.sort_by_key(|log| (log.block_number, log.transaction_index, log.log_index));
+        let mut ranges = Vec::with_capacity(batches.len());
+        for batch in &batches {
+            let start = blocks
+                .iter()
+                .position(|block| block.block_number >= batch.from_block)
+                .with_context(|| format!("fixture batch {} has no blocks", batch.from_block))?;
+            let end = blocks
+                .iter()
+                .rposition(|block| block.block_number <= batch.to_block)
+                .with_context(|| format!("fixture batch {} has no blocks", batch.to_block))?;
+            ranges.push(start..end + 1);
+        }
+        if ranges.iter().map(|range| range.len()).sum::<usize>() != blocks.len() {
+            bail!("fixture batches do not cover every block exactly once");
+        }
         Ok(Self {
             id: case.id,
+            batches: ranges,
             input: BatchInput {
                 chain_id,
                 manifests,
