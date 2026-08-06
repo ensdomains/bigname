@@ -431,10 +431,26 @@ fn anchor(block_hash: &str, block_number: i64, provenance: &Value) -> String {
     format!("{block_hash}:{block_number}:{provenance}")
 }
 
+/// The families whose rows the two passes must agree on. The destructure below names every field of
+/// `BatchOutput` so that adding one stops compiling here rather than silently going uncompared;
+/// `normalized_events` is handled separately by `assert_event_stream`.
 fn families(
     fresh: &BatchOutput,
     replayed: &BatchOutput,
 ) -> Vec<(&'static str, Keeps, Vec<Row>, Vec<Row>)> {
+    let BatchOutput {
+        normalized_events: _,
+        label_preimages: _,
+        name_surfaces: _,
+        token_lineages: _,
+        resources: _,
+        surface_bindings: _,
+        binding_closures: _,
+        contract_instances: _,
+        contract_addresses: _,
+        discovery_edges: _,
+        discovery_edge_closures: _,
+    } = fresh;
     vec![
         (
             "label_preimages",

@@ -11,7 +11,7 @@
 //! the coverage floor does require the kind the wrapper derives from a fuse-bearing wrap.
 //!
 //! Knobs:
-//! - `BIGNAME_PERMUTATION_CASES` — permutations per protocol world. Default 24 (48 sequences per
+//! - `BIGNAME_PERMUTATION_CASES` — permutations per protocol world. Default 48 (96 sequences per
 //!   run) keeps the lane inside the CI budget; raise it for deeper local sweeps.
 //! - `BIGNAME_PERMUTATION_SEED` — base seed, decimal. Default 1846370029.
 //!
@@ -48,9 +48,16 @@ use permutation::{
     },
 };
 
-const DEFAULT_CASES: u64 = 24;
+/// 48 rather than 24 because that is where the corpus starts reproducing every batch-boundary
+/// artifact class, including the split-replay direction of `carried_before_states` that no depth
+/// reached before `CASE_STRIDE` was decoupled from the generator's increment. Costs about 6s.
+const DEFAULT_CASES: u64 = 48;
 const DEFAULT_SEED: u64 = 0x6e0d_5eed;
-const CASE_STRIDE: u64 = 0x9e37_79b9_7f4a_7c15;
+/// Distance between case seeds. Deliberately *not* the SplitMix64 increment: because that
+/// increment is odd it is invertible, so every stride makes consecutive cases the same value stream
+/// offset by some fixed number of draws, and a stride equal to the increment makes that offset one.
+/// This one puts them about 8e18 draws apart, which no scenario approaches.
+const CASE_STRIDE: u64 = 0xd134_2543_de82_ef95;
 const SPLIT_SALT: u64 = 0xa076_1d64_78bd_642f;
 const WORLDS: [&World; 2] = [&ENS_V1_MAINNET, &ENS_V2_SEPOLIA];
 /// Any timestamp works for coverage; the axes decide which events a pool contains, not the clock.
@@ -177,12 +184,15 @@ fn production_lease_release_sequence_holds_the_same_invariants() -> Result<()> {
     let mut references = IdentityReferences::new(&chain_id, &directed.declared_instances);
     for batch in &converged.batches {
         references.absorb(&context, &batch.blocks, &batch.output)?;
+        assert_upsert_guards_agree(&context, &batch.output)?;
     }
+    let whole = format!("{context} whole-sequence pass");
     IdentityReferences::new(&chain_id, &directed.declared_instances).absorb(
-        &format!("{context} whole-sequence pass"),
+        &whole,
         &converged.whole.blocks,
         &converged.whole.output,
     )?;
+    assert_upsert_guards_agree(&whole, &converged.whole.output)?;
     let outputs = converged
         .batches
         .into_iter()
@@ -348,6 +358,23 @@ fn generated_scenarios_are_reproducible_from_their_seed() -> Result<()> {
             world.label
         );
     }
+    // Differing seeds is not enough: the generator's increment is odd and therefore invertible, so
+    // two seeds always produce the same value stream at *some* offset, and a stride equal to that
+    // increment makes the offset one — every case would then replay its predecessor shifted by a
+    // single draw, and the axes would be mechanically coupled between adjacent cases.
+    // A stride of k increments puts the next case's first draw at this case's k-th, so finding it
+    // in the first few hundred says k is small enough for the axes to couple across cases.
+    let mut first = permutation::rng::Rng::new(DEFAULT_SEED);
+    let mut second = permutation::rng::Rng::new(DEFAULT_SEED.wrapping_add(CASE_STRIDE));
+    let opening = second.next_u64();
+    for draw in 0..512 {
+        assert_ne!(
+            first.next_u64(),
+            opening,
+            "the next case's stream is this one advanced by {draw} draws; CASE_STRIDE must not be a \
+             small multiple of the generator's increment"
+        );
+    }
     Ok(())
 }
 
@@ -497,9 +524,10 @@ const EXPECTED_ARTIFACTS: &[(&str, &[(&str, usize)])] = &[
     (
         ENS_V1_MAINNET.label,
         &[
+            ("carried_before_states:only-the-split-replay", 2),
             ("carried_before_states:only-the-whole-pass", 3),
-            ("rebased_anchors:resources", 8),
-            ("rebased_attributions", 4),
+            ("rebased_anchors:resources", 16),
+            ("rebased_attributions", 3),
         ],
     ),
     (ENS_V2_SEPOLIA.label, &[]),
@@ -518,7 +546,7 @@ const DRAWN_CORPUS_CAVEAT: &str = "If the scenario pools, the axes, the seeded d
 /// `SubregistryChanged` carries an owner rather than a subregistry and detaches nothing, so a
 /// cross-world total would let an ENSv1 detach appearing offset the ENSv2 path going dark.
 const EXPECTED_SUBREGISTRY_DETACHES: &[(&str, usize)] =
-    &[(ENS_V1_MAINNET.label, 0), (ENS_V2_SEPOLIA.label, 13)];
+    &[(ENS_V1_MAINNET.label, 0), (ENS_V2_SEPOLIA.label, 33)];
 
 /// Normalized events the pinned manifests declare that the pools deliberately never reach, with the
 /// reason each one is out. Anything a manifest declares that is neither derived nor listed here
@@ -601,6 +629,13 @@ fn assert_interpretation_coverage(
     derived: &BTreeMap<&str, BTreeSet<String>>,
     emitted_topic0s: usize,
 ) -> Result<()> {
+    assert_tables_name_every_world(
+        "REQUIRED_EVENT_KINDS",
+        &REQUIRED_EVENT_KINDS
+            .iter()
+            .map(|(world, _)| *world)
+            .collect::<Vec<_>>(),
+    )?;
     let missing = REQUIRED_EVENT_KINDS
         .iter()
         .filter_map(|(world, required)| {
@@ -622,10 +657,40 @@ fn assert_interpretation_coverage(
     Ok(())
 }
 
+/// Every table here is keyed by world, so each is checked for a row per world as well as for the
+/// row's contents. `assert_worlds_cover_deployments` forces a new world to be added when a
+/// deployment appears; without this, whoever adds it satisfies that check and silently inherits no
+/// pins and no floor at all.
+fn assert_tables_name_every_world(table: &str, named: &[&str]) -> Result<()> {
+    let missing = WORLDS
+        .iter()
+        .map(|world| world.label)
+        .filter(|label| !named.contains(label))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        bail!("{table} has no row for {missing:?}, so nothing that world produces is checked");
+    }
+    Ok(())
+}
+
 fn assert_pinned_artifacts(
     artifacts: &BTreeMap<&str, BatchBoundaryArtifacts>,
     detaches: &BTreeMap<&str, usize>,
 ) -> Result<()> {
+    assert_tables_name_every_world(
+        "EXPECTED_ARTIFACTS",
+        &EXPECTED_ARTIFACTS
+            .iter()
+            .map(|(world, _)| *world)
+            .collect::<Vec<_>>(),
+    )?;
+    assert_tables_name_every_world(
+        "EXPECTED_SUBREGISTRY_DETACHES",
+        &EXPECTED_SUBREGISTRY_DETACHES
+            .iter()
+            .map(|(world, _)| *world)
+            .collect::<Vec<_>>(),
+    )?;
     for (world, pinned) in EXPECTED_ARTIFACTS {
         let expected = pinned
             .iter()

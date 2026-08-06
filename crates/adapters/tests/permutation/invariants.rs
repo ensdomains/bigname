@@ -281,8 +281,10 @@ impl IdentityReferences {
 ///
 /// The guard compares against the row already in the table, not against the batch, so this holds
 /// over any set of rows the writer would apply in sequence — one batch, or a whole split replay
-/// concatenated. Comparing against the first emission is right in both cases because none of the
-/// three `SET` clauses ever rewrites a guarded column, so the stored values are frozen at insert.
+/// concatenated. Comparing against the first emission is right because the guarded columns are
+/// frozen at insert: `name_surfaces`, `label_preimages`, and `normalized_events` never rewrite one,
+/// and the two that can — `token_lineages` rewriting its anchor, `surface_bindings` rewriting
+/// `active_from` — only do so when the stored row is orphaned, which cannot occur here (below).
 /// `deactivated_at` is deliberately not compared: it is absent from the writer's guard, which is
 /// the divergence tracked by issue #336.
 ///
@@ -346,8 +348,10 @@ pub fn assert_upsert_guards_agree(context: &str, output: &BatchOutput) -> Result
         );
     }
     // The lineage guard also passes when the *stored* row is orphaned. That escape is not modelled
-    // here because `check_canonicality` already fails any output carrying a non-canonical row, so
-    // an orphaned lineage never reaches this function; modelling it would be an untested branch.
+    // here because nothing in the corpus emits a non-canonical row — `check_canonicality` rejects
+    // one outright at the lane's own call sites — so modelling it would be an untested branch. On
+    // the concatenated call below, which runs before that check, an orphaned row would be reported
+    // here as a conflict the writer would in fact accept.
     for row in &output.token_lineages {
         check(
             "token_lineages",
@@ -604,19 +608,35 @@ pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> R
     })
 }
 
+/// Destructured so that a row family added to `BatchOutput` stops compiling here. Missing one is
+/// silent and total: the split replay would carry none of that family while the whole pass carried
+/// all of it, and nothing downstream — convergence, foreign keys, upsert guards — would compare
+/// them, because each of those enumerates the families too.
 fn absorb_rows(into: &mut BatchOutput, from: BatchOutput) {
-    into.normalized_events.extend(from.normalized_events);
-    into.label_preimages.extend(from.label_preimages);
-    into.name_surfaces.extend(from.name_surfaces);
-    into.token_lineages.extend(from.token_lineages);
-    into.resources.extend(from.resources);
-    into.surface_bindings.extend(from.surface_bindings);
-    into.binding_closures.extend(from.binding_closures);
-    into.contract_instances.extend(from.contract_instances);
-    into.contract_addresses.extend(from.contract_addresses);
-    into.discovery_edges.extend(from.discovery_edges);
-    into.discovery_edge_closures
-        .extend(from.discovery_edge_closures);
+    let BatchOutput {
+        normalized_events,
+        label_preimages,
+        name_surfaces,
+        token_lineages,
+        resources,
+        surface_bindings,
+        binding_closures,
+        contract_instances,
+        contract_addresses,
+        discovery_edges,
+        discovery_edge_closures,
+    } = from;
+    into.normalized_events.extend(normalized_events);
+    into.label_preimages.extend(label_preimages);
+    into.name_surfaces.extend(name_surfaces);
+    into.token_lineages.extend(token_lineages);
+    into.resources.extend(resources);
+    into.surface_bindings.extend(surface_bindings);
+    into.binding_closures.extend(binding_closures);
+    into.contract_instances.extend(contract_instances);
+    into.contract_addresses.extend(contract_addresses);
+    into.discovery_edges.extend(discovery_edges);
+    into.discovery_edge_closures.extend(discovery_edge_closures);
 }
 
 pub fn split(len: usize, seed: u64) -> Vec<Range<usize>> {

@@ -514,12 +514,14 @@ fn subnode(wires: &Wires<'_>, label: &str, child: &str, parent: B256, owner: Add
     )
 }
 
-/// The fuses and wrapper expiry a wrapped subname can carry, given its parent's state. A subname
-/// only holds a parent-controlled fuse or a wrapper expiry once its parent has burned
-/// CANNOT_UNWRAP (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L968-L975 @
-/// ens_v1@91c966f); wrapping under any other parent goes through the plain wrap path, which burns
-/// no fuses and sets no expiry
-/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L374 @ ens_v1@91c966f).
+/// The fuses and wrapper expiry a wrapped subname can carry, given its parent's state. Burning a
+/// parent-controlled fuse on a subname reverts unless the parent has burned CANNOT_UNWRAP
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L968-L975 @ ens_v1@91c966f). Expiry is
+/// not gated the same way — it is only clamped to the parent's maximum (upstream:
+/// .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L978-L994 @ ens_v1@91c966f) — so pairing the two
+/// here is this lane's choice of a realistic locked-parent shape, not an upstream requirement.
+/// Wrapping under any other parent goes through the plain wrap path, which burns no fuses and sets
+/// no expiry (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L374 @ ens_v1@91c966f).
 fn child_wrap(wrap_state: WrapState, expires: i64) -> (u32, u64) {
     match wrap_state {
         WrapState::WrappedLocked => (
