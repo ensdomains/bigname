@@ -8,8 +8,9 @@ use crate::{
 impl Engine {
     /// Refuses, before any ingest work, a plan whose range starts below what a source holds.
     ///
-    /// Only a source that reads a node's database directly can answer this: an RPC endpoint
-    /// already refuses a range below its own retention.
+    /// The refusal is judged on the source's declared start block rather than on cursor
+    /// progress: a cursor standing above the floor recorded coverage the node never had.
+    /// Only a source reading a node's database directly reports a floor at all.
     pub(super) async fn enforce_source_floors(&self, request: &BatchRequest) -> Result<()> {
         for source in &request.sources {
             if normalized_kind(&source.kind) == ProviderKind::Coinbase {
@@ -91,7 +92,7 @@ mod tests {
     use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 
     use super::*;
-    use crate::ErrorKind;
+    use crate::{ErrorKind, provider::ChainProvider};
 
     const DATADIR: &str = "/var/lib/reth/pruned-datadir-fixture";
     const V1_REGISTRY_START: i64 = 3_327_417;
@@ -123,6 +124,68 @@ mod tests {
         assert!(
             redo.to_string().contains("15500000") && redo.to_string().contains("3327417..=4000000"),
             "{redo}"
+        );
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn an_rpc_source_reports_no_floor() -> AnyResult<()> {
+        let provider = ChainProvider::new("base-mainnet", "rpc", "https://rpc.example.com/")?;
+
+        assert_eq!(provider.earliest_available_block().await?, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_warehouse_source_is_planned_without_asking_it_for_a_floor() -> AnyResult<()> {
+        let database =
+            TestDatabase::create(TestDatabaseConfig::new("ingest_source_floor_base")).await?;
+        let engine = Engine::new(database.pool().clone());
+
+        // Coinbase SQL is not a block provider at all, so asking it for a floor would
+        // fail every base-mainnet batch.
+        engine
+            .enforce_source_floors(&BatchRequest {
+                chain_id: "base-mainnet".to_owned(),
+                sources: vec![
+                    SourceDescriptor {
+                        key: "base-coinbase".to_owned(),
+                        kind: "coinbase-sql".to_owned(),
+                        start_block: 0,
+                        endpoint: "coinbase-sql://warehouse".to_owned(),
+                    },
+                    SourceDescriptor {
+                        key: "base-rpc".to_owned(),
+                        kind: "rpc".to_owned(),
+                        start_block: crate::BASE_COINBASE_SEAM_BLOCK,
+                        endpoint: "https://rpc.example.com/".to_owned(),
+                    },
+                ],
+                cursors: Vec::new(),
+                redo_range: None,
+                resume_current: None,
+            })
+            .await?;
+        database.cleanup().await
+    }
+
+    #[cfg(feature = "reth-db")]
+    #[tokio::test]
+    async fn planning_reads_the_floor_from_the_configured_datadir() -> AnyResult<()> {
+        let database =
+            TestDatabase::create(TestDatabaseConfig::new("ingest_source_floor_datadir")).await?;
+        let engine = Engine::new(database.pool().clone());
+
+        let error = engine
+            .enforce_source_floors(&request(None))
+            .await
+            .expect_err("an unreadable datadir must fail the floor read");
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to read the earliest available block for source ethereum-reth"),
+            "{error}"
         );
         database.cleanup().await
     }
