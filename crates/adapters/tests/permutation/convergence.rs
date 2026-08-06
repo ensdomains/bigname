@@ -501,7 +501,7 @@ fn name_surfaces(output: &BatchOutput) -> Vec<Row> {
         .map(|row| Row {
             key: format!("{}:{}", row.chain_id, row.logical_name_id),
             body: format!(
-                "{}:{}:{:?}:{:?}:{:?}:{}:{}:{}:{}:{:?}:{}",
+                "{}:{}:{:?}:{:?}:{:?}:{}:{}:{}:{}:{:?}:{:?}:{}",
                 row.namespace,
                 row.raw_name,
                 row.raw_labels,
@@ -512,6 +512,7 @@ fn name_surfaces(output: &BatchOutput) -> Vec<Row> {
                 row.visibility_state,
                 row.normalization_errors,
                 row.deactivation_reason,
+                row.deactivated_at,
                 row.canonicality_state
             ),
             anchor: anchor(&row.block_hash, row.block_number, &row.provenance),
@@ -567,11 +568,18 @@ fn binding_closures(output: &BatchOutput) -> Vec<Row> {
         .binding_closures
         .iter()
         .map(|row| Row {
+            // The exempted binding is part of the key, not just the body: two closures for one name
+            // at one position differ only by which binding they spare, and keying without it would
+            // compare one of them against the other and drop the rest.
             key: format!(
-                "{}:{}:{}:{}",
-                row.logical_name_id, row.block_number, row.transaction_index, row.log_index
+                "{}:{}:{}:{}:{:?}",
+                row.logical_name_id,
+                row.block_number,
+                row.transaction_index,
+                row.log_index,
+                row.except_surface_binding_id
             ),
-            body: format!("{:?}:{}", row.except_surface_binding_id, row.active_to),
+            body: row.active_to.to_string(),
             anchor: String::new(),
         })
         .collect()
