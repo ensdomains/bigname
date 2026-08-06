@@ -758,3 +758,71 @@ fn knob(name: &str, fallback: u64) -> Result<u64> {
         Err(_) => Ok(fallback),
     }
 }
+
+/// Pins issue #339: a binding closure whose `except_surface_binding_id` names a binding the same
+/// batch no longer opens.
+///
+/// The mechanism, directed rather than drawn, so it is deterministic and independent of the
+/// generator. A lapsed lease settles at a bare block boundary, which derives a registry-only
+/// resource, a surface binding for it, and a closure clamping the name's binding window with that
+/// binding exempted. In the same block a registry `Transfer` and a registrar `NameRegistered` land
+/// in one transaction, so same-transaction reconciliation folds the pending registry setup into the
+/// registration.
+///
+/// The two indexes then disagree about where the boundary rows sit. A binding's position comes from
+/// its provenance, and boundary provenance carries no transaction or log index, so `BindingIndex`
+/// defaults it to `(block, 0, 0)` — which is exactly where the pending log sits, and the binding is
+/// dropped. The closure carries its own `(-1, -1)` sentinel, which is in no pending position, so it
+/// survives. The exemption is left naming a binding that is gone.
+///
+/// Nothing downstream rejects it: there is no foreign key on that column, so the writer's
+/// `surface_binding_id <> $3` clause matches no row and the closure clamps its whole window with
+/// nothing exempted. Whether that loses a binding the interpreter meant to keep depends on where
+/// the intended binding sits, which this test does not establish — it pins the dangling reference.
+///
+/// This asserts the current, wrong behaviour. When the interpreter stops emitting it, this test
+/// fails and becomes the fix's acceptance test.
+#[test]
+fn a_boundary_closure_exempts_a_binding_the_same_batch_no_longer_opens() -> Result<()> {
+    let checked_in = checked_in_manifests()?;
+    let directed = Directed::same_transaction_setup(&checked_in)?;
+    let context = format!("directed={}", directed.id);
+    let converged = converge(&context, directed.input.clone(), directed.batches.clone())?;
+    let output = &converged.whole.output;
+    let opened = output
+        .surface_bindings
+        .iter()
+        .map(|binding| binding.surface_binding_id)
+        .collect::<BTreeSet<_>>();
+    let dangling = output
+        .binding_closures
+        .iter()
+        .filter(|closure| {
+            closure
+                .except_surface_binding_id
+                .is_some_and(|id| !opened.contains(&id))
+        })
+        .map(|closure| {
+            (
+                closure.block_number,
+                closure.transaction_index,
+                closure.log_index,
+                closure.except_surface_binding_id,
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected = (
+        directed.release_block_number(),
+        -1,
+        -1,
+        Some(directed.surface_binding_id()),
+    );
+    if dangling != vec![expected] {
+        bail!(
+            "{context}: expected exactly the boundary closure {expected:?} to exempt a binding the \
+             batch no longer opens, found {dangling:?}. A closure that stopped dangling is issue \
+             #339 fixed — retire this test. A different one is a new defect"
+        );
+    }
+    Ok(())
+}

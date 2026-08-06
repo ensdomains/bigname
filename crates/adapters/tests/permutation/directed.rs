@@ -87,11 +87,34 @@ pub struct Directed {
 
 impl Directed {
     pub fn lease_release(checked_in: &[LoadedManifest]) -> Result<Self> {
+        Self::from_fixture(BINDING_FK_RELEASE, checked_in)
+    }
+
+    /// Accessors for the rows the #339 pin names, so the fixture stays the single source of both.
+    pub fn release_block_number(&self) -> i64 {
+        self.expected.release_block_number
+    }
+
+    pub fn surface_binding_id(&self) -> Uuid {
+        self.expected.surface_binding_id
+    }
+
+    /// The same lapsed lease with a registration setup landing in the release block's first
+    /// transaction, where the binding index's `(block, 0, 0)` default for boundary provenance
+    /// collides with the pending log.
+    pub fn same_transaction_setup(checked_in: &[LoadedManifest]) -> Result<Self> {
+        Self::from_fixture(
+            include_str!("../fixtures/interpreters/binding-closure-dangling.json"),
+            checked_in,
+        )
+    }
+
+    fn from_fixture(raw: &str, checked_in: &[LoadedManifest]) -> Result<Self> {
         let Fixture {
             case,
             batches,
             expected,
-        } = serde_json::from_str(BINDING_FK_RELEASE)?;
+        } = serde_json::from_str(raw)?;
         let chain_id = case
             .manifests
             .first()
