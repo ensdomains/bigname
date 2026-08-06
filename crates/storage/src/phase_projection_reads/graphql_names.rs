@@ -70,7 +70,7 @@ async fn load_one(
     namehash: Option<&str>,
 ) -> Result<Option<PhaseGraphqlNameListRow>> {
     let mut builder = QueryBuilder::<Postgres>::new("");
-    push_filtered_names(&mut builder, filter, namehash);
+    push_filtered_names(&mut builder, filter, namehash, None);
     builder.push(SELECT_NAMES);
     builder.push(" LIMIT 1");
     let row = builder
@@ -84,6 +84,7 @@ async fn load_one(
 pub async fn load_phase_graphql_name_list_page_offset(
     pool: &PgPool,
     filter: &NameCurrentListFilter,
+    snapshot_chain_ids: &[String],
     sort: NameCurrentListSort,
     order: NameCurrentListOrder,
     limit: u64,
@@ -92,7 +93,7 @@ pub async fn load_phase_graphql_name_list_page_offset(
     let limit = i64::try_from(limit).context("GraphQL name limit exceeds SQL limit")?;
     let offset = i64::try_from(offset).context("GraphQL name offset exceeds SQL limit")?;
     let mut builder = QueryBuilder::<Postgres>::new("");
-    push_filtered_names(&mut builder, filter, None);
+    push_filtered_names(&mut builder, filter, None, Some(snapshot_chain_ids));
     builder.push(SELECT_NAMES);
     push_order(&mut builder, sort, order);
     builder.push(" LIMIT ");
@@ -110,9 +111,10 @@ pub async fn load_phase_graphql_name_list_page_offset(
 pub async fn count_phase_graphql_name_list(
     pool: &PgPool,
     filter: &NameCurrentListFilter,
+    snapshot_chain_ids: &[String],
 ) -> Result<PhaseGraphqlNameCount> {
     let mut builder = QueryBuilder::<Postgres>::new("");
-    push_filtered_names(&mut builder, filter, None);
+    push_filtered_names(&mut builder, filter, None, Some(snapshot_chain_ids));
     builder.push(
         r#"
         , distinct_name_targets AS (
@@ -182,13 +184,15 @@ fn push_filtered_names<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &'a NameCurrentListFilter,
     namehash: Option<&str>,
+    snapshot_chain_ids: Option<&'a [String]>,
 ) {
     builder.push("WITH ");
     if let Some(address) = filter.address.as_ref() {
         builder.push(
-            "address_membership AS (SELECT logical_name_id, \
+            "address_membership AS (SELECT names.logical_name_id, \
              JSONB_AGG(chain_positions ORDER BY address, relation) AS membership_targets \
-             FROM address_names_current WHERE support_status = 'supported' AND ",
+             FROM address_names_current names \
+             WHERE names.support_status = 'supported' AND ",
         );
         match address.addresses.as_ref() {
             Some(addresses) => {
@@ -205,7 +209,12 @@ fn push_filtered_names<'a>(
             builder.push(" AND relation = ");
             builder.push_bind(relation.as_str());
         }
-        builder.push(" GROUP BY logical_name_id), ");
+        if let Some(chain_ids) = snapshot_chain_ids {
+            builder.push(" AND names.provenance ->> 'chain_id' = ANY(");
+            builder.push_bind(chain_ids);
+            builder.push(")");
+        }
+        builder.push(" GROUP BY names.logical_name_id), ");
     }
     builder.push(
         r#"filtered_names AS (
@@ -261,6 +270,16 @@ fn push_filtered_names<'a>(
         builder.push(" JOIN address_membership USING (logical_name_id)");
     }
     builder.push(" WHERE nc.support_status = 'supported'");
+    if let Some(chain_ids) = snapshot_chain_ids {
+        builder.push(
+            " AND nc.chain_positions <> '{}'::JSONB \
+             AND NOT EXISTS (SELECT 1 FROM JSONB_EACH(nc.chain_positions) position \
+             WHERE position.value ->> 'chain_id' IS NULL \
+                OR position.value ->> 'chain_id' <> ALL(",
+        );
+        builder.push_bind(chain_ids);
+        builder.push("))");
+    }
     push_filters(builder, filter);
     if let Some(namehash) = namehash {
         builder.push(" AND nc.namehash = ");
@@ -295,7 +314,7 @@ fn push_filters<'a>(builder: &mut QueryBuilder<'a, Postgres>, filter: &'a NameCu
     }
     if let Some(contains) = filter.contains.as_deref() {
         builder.push(" AND LOWER(nc.raw_name) LIKE ");
-        builder.push_bind(format!("%{}%", escape_like(&contains.to_ascii_lowercase())));
+        builder.push_bind(format!("%{}%", escape_like(contains)));
         builder.push(" ESCAPE '\\'");
     }
     if filter.is_migrated == Some(true) {
@@ -346,7 +365,7 @@ fn push_order(
         NameCurrentListOrder::Desc => "DESC",
     };
     let column = match sort {
-        NameCurrentListSort::Name => "normalized_name",
+        NameCurrentListSort::Name => "canonical_display_name COLLATE \"C\"",
         NameCurrentListSort::ExpiryDate => "expiry_date",
         NameCurrentListSort::RegistrationDate => "registration_date",
         NameCurrentListSort::CreatedAt => "created_at",
@@ -370,14 +389,19 @@ fn push_order(
 
 fn decode_row(row: PgRow) -> Result<PhaseGraphqlNameListRow> {
     let raw_name: String = row.try_get("canonical_display_name")?;
-    let normalized = bigname_domain::normalization::normalize_name(&raw_name)
-        .with_context(|| format!("schema-v2 GraphQL name {raw_name} is not readable"))?;
-    let labelhash = normalized.normalized_labels.first().map(|label| {
-        format!(
-            "0x{}",
-            alloy_primitives::hex::encode(alloy_primitives::keccak256(label.as_bytes()))
-        )
-    });
+    let normalized = bigname_domain::normalization::normalize_name(&raw_name).ok();
+    let labelhash = normalized
+        .as_ref()
+        .and_then(|name| name.normalized_labels.first())
+        .map(|label| {
+            format!(
+                "0x{}",
+                alloy_primitives::hex::encode(alloy_primitives::keccak256(label.as_bytes()))
+            )
+        });
+    let normalized_name = normalized
+        .map(|name| name.normalized_name)
+        .unwrap_or(row.try_get("normalized_name")?);
     let support_status: String = row.try_get("support_status")?;
     let unsupported_reason: Option<String> = row.try_get("unsupported_reason")?;
     let binding_kind = row
@@ -388,7 +412,7 @@ fn decode_row(row: PgRow) -> Result<PhaseGraphqlNameListRow> {
         logical_name_id: row.try_get("logical_name_id")?,
         namespace: row.try_get("namespace")?,
         canonical_display_name: raw_name,
-        normalized_name: normalized.normalized_name,
+        normalized_name,
         namehash: row.try_get("namehash")?,
         surface_binding_id: row.try_get("surface_binding_id")?,
         resource_id: row.try_get::<Option<Uuid>, _>("resource_id")?,

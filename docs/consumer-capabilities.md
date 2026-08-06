@@ -41,7 +41,11 @@ it does not preserve the deleted v1 DTOs.
 
 The GraphQL compatibility operations read the schema-v2 current projections
 and preserve the committed Manager response contract. They do not fall back to
-the retained public-schema projections. Unsupported name rows are omitted, and
+the retained public-schema projections. Name inputs are ENS-normalized and
+matched by namehash within the `ens`
+namespace. While the `project` phase has not completed at the newest stored chain head,
+operations that would return projection rows fail rather than serve the prior
+publication. Unsupported name rows are omitted, and
 unsupported record inventories preserve the existing empty record shapes.
 
 All top-level v2 collections use the standard `page` object. Latest-state

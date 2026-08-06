@@ -37,6 +37,15 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
             project.current_block_number AS latest_projected_block,
             projected_lineage.block_timestamp AS latest_projected_timestamp,
             project.phase_status AS project_phase_status,
+            COALESCE(
+                project.input_content_hash = $1
+                AND project.current_block_number <= head.latest_block_number
+                AND (
+                    project.current_block_number < head.latest_block_number
+                    OR project.current_block_hash = head.latest_block_hash
+                ),
+                false
+            ) AS project_generation_current,
             COALESCE(project.redo_in_progress, false) AS project_redo_in_progress,
             heartbeat.age_seconds AS phase_runner_heartbeat_age_seconds
         FROM known_chains
@@ -70,6 +79,7 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
         ORDER BY known_chains.chain_id
         "#,
     )
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
     .fetch_all(pool)
     .await
     .context("failed to load schema-v2 indexing status")?;
@@ -89,6 +99,10 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
                     "latest_projected_timestamp",
                 )?,
                 project_phase_status: crate::sql_row::get(&row, "project_phase_status")?,
+                project_generation_current: crate::sql_row::get(
+                    &row,
+                    "project_generation_current",
+                )?,
                 project_redo_in_progress: crate::sql_row::get(&row, "project_redo_in_progress")?,
                 phase_runner_heartbeat_age_seconds: crate::sql_row::get(
                     &row,

@@ -274,7 +274,10 @@ GraphQL reads `name_current`, `address_names_current`, and
 `record_inventory_current` through that phase pool. Startup and status read
 `chain_heads`, `chain_phase_state`, `chain_lineage`, and `service_heartbeats`;
 they do not read
-`public.chain_checkpoints`. V2 projection routes that remain on the public pool
+`public.chain_checkpoints`. The `/v2/status` phase-runner heartbeat threshold
+uses `BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS` (60 seconds by default),
+independently of the retained legacy worker-health threshold. V2 projection
+routes that remain on the public pool
 retain their existing successor work. V2 record lookup
 may perform only the schema-v2 guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) write;

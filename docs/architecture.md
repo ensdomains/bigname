@@ -45,6 +45,26 @@ compatibility layer for this contract.
 
 Alongside the REST contract, bigname serves a narrow, deliberately scoped subgraph-compatible read surface at `POST /graphql`. It is **not** general subgraph parity: it implements only `domain`, `domains`, `registrationConnection`, and `domainConnection` over `bigname_phase.name_current`, `bigname_phase.address_names_current`, and `bigname_phase.record_inventory_current` [projections](glossary.md). A root read selects the current ENS chain position from `bigname_phase.chain_heads`, admits unchanged rows whose target is at or before that position, carries the same selection into nested record-inventory fields, and verifies before returning that the matching completed `project` phase row did not change. Rows whose projection support status is `unsupported` are not exposed; an unsupported record inventory maps to the compatibility surface's existing empty record shapes. GraphQL `createdAt` uses a declared registration or history timestamp; when neither exists, it preserves the non-null response field with Unix epoch `0` because the current phase projection has no legacy surface-creation timestamp. The GraphQL surface is a compatibility adapter, not a consumer-replacement declaration.
 
+Manager name inputs have ENS name semantics rather than display-string equality.
+`domain(id: ...)` and `DomainFilter.name` normalize a name, compute its
+namehash, and match that hash, so `ALICE.eth` resolves the same ENS name as
+`alice.eth`. An `id` already shaped as a namehash is matched only within the
+`ens` namespace. `name_contains` compares its pattern case-sensitively with
+the normalized ENS name, and `orderBy: name` uses byte-wise stored
+display-name order. Resolver record fields select the
+sole projected inventory for the name's resource without coupling its event
+boundary to the later name-publication target. If a resource has multiple
+inventory rows and no declared boundary selects exactly one, the operation
+errors instead of serving empty records or choosing arbitrarily.
+
+GraphQL availability follows the exact current-head admission rule shared
+with v2 lookup. While the `project` phase catches up to a newly stored chain head, an
+operation that would return projection rows errors instead of serving the
+previous completed publication as a stale view. Connection counts are also
+more expensive than a plain `COUNT(*)`: they compute distinct matched rows and
+rank their publication targets so the API can validate count admission before
+returning the result.
+
 ## Identity model
 
 Four identity layers, each with its own continuity rules:

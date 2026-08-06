@@ -13,7 +13,8 @@ use super::error::internal_error;
 use super::inputs::{DomainFilter, RegistrationFilter};
 use super::objects::{Domain, DomainConnection, RegistrationConnection};
 use super::snapshot::{
-    load_graphql_head, require_count_at_head, require_rows_at_head, revalidate_graphql_head,
+    graphql_snapshot_chain_ids, load_graphql_head, require_count_at_head, require_rows_at_head,
+    revalidate_graphql_head,
 };
 
 /// The compatibility surface is scoped to ENS names.
@@ -77,9 +78,11 @@ impl QueryRoot {
         let (sort, order) = storage_sort(order_by, order_direction);
         let state = ctx.data::<AppState>()?;
         let head = load_graphql_head(state, "domains").await?;
+        let snapshot_chain_ids = graphql_snapshot_chain_ids(head.as_ref());
         let rows = load_phase_graphql_name_list_page_offset(
             &state.lookup_pool,
             &domain_filter_to_storage(filter),
+            &snapshot_chain_ids,
             sort,
             order,
             limit,
@@ -119,9 +122,11 @@ impl QueryRoot {
         };
         let state = ctx.data::<AppState>()?;
         let head = load_graphql_head(state, "registrationConnection").await?;
-        let count = count_phase_graphql_name_list(&state.lookup_pool, &storage_filter)
-            .await
-            .map_err(|error| internal_error("registrationConnection", error))?;
+        let snapshot_chain_ids = graphql_snapshot_chain_ids(head.as_ref());
+        let count =
+            count_phase_graphql_name_list(&state.lookup_pool, &storage_filter, &snapshot_chain_ids)
+                .await
+                .map_err(|error| internal_error("registrationConnection", error))?;
         require_count_at_head(&count, head.as_ref(), "registrationConnection")?;
         revalidate_graphql_head(state, head.as_ref(), "registrationConnection").await?;
         Ok(RegistrationConnection {
@@ -139,10 +144,14 @@ impl QueryRoot {
     ) -> Result<DomainConnection> {
         let state = ctx.data::<AppState>()?;
         let head = load_graphql_head(state, "domainConnection").await?;
-        let count =
-            count_phase_graphql_name_list(&state.lookup_pool, &domain_filter_to_storage(filter))
-                .await
-                .map_err(|error| internal_error("domainConnection", error))?;
+        let snapshot_chain_ids = graphql_snapshot_chain_ids(head.as_ref());
+        let count = count_phase_graphql_name_list(
+            &state.lookup_pool,
+            &domain_filter_to_storage(filter),
+            &snapshot_chain_ids,
+        )
+        .await
+        .map_err(|error| internal_error("domainConnection", error))?;
         require_count_at_head(&count, head.as_ref(), "domainConnection")?;
         revalidate_graphql_head(state, head.as_ref(), "domainConnection").await?;
         Ok(DomainConnection {

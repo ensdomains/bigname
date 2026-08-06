@@ -7,9 +7,8 @@ use serde_json::Value;
 use sqlx::PgPool;
 use sqlx::types::Uuid;
 
-/// DataLoader key for a name's `record_inventory_current` row. An available JSON version boundary
-/// is serialized so it can participate in batching; an absent boundary permits the phase reader's
-/// single-candidate fallback.
+/// DataLoader key for a resource's `record_inventory_current` row. A declared JSON version
+/// boundary is serialized when available to disambiguate multiple projected inventories.
 pub(super) type RecordInventoryKey = (Uuid, Option<String>);
 
 /// Serialize an optional version boundary into the string half of a [`RecordInventoryKey`].

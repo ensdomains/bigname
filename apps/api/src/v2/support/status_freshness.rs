@@ -123,17 +123,27 @@ pub(crate) enum StatusReadiness {
     Stale,
 }
 
-pub(crate) fn status_readiness(
+fn status_readiness(
     canonical_block: Option<i64>,
     latest_projected_block: Option<i64>,
     projection_lag_blocks: Option<i64>,
+    projection_lag_seconds: Option<i64>,
     network_head: &NetworkHeadComparison,
+    max_block_lag: i64,
+    max_lag_seconds: i64,
 ) -> StatusReadiness {
-    if canonical_block.is_none() || latest_projected_block.is_none() {
-        return StatusReadiness::Degraded;
-    }
-    if projection_lag_blocks.is_some_and(|lag| lag > 0) || network_head.data_is_stale {
+    if projection_lag_blocks.is_some_and(|lag| lag > max_block_lag)
+        || projection_lag_seconds.is_some_and(|lag| lag > max_lag_seconds)
+        || network_head.data_is_stale
+    {
         return StatusReadiness::Stale;
+    }
+    if canonical_block.is_none()
+        || latest_projected_block.is_none()
+        || projection_lag_blocks.is_none()
+        || projection_lag_seconds.is_none()
+    {
+        return StatusReadiness::Degraded;
     }
     if network_head.status != NetworkHeadStatus::Fresh {
         return StatusReadiness::Degraded;
@@ -178,6 +188,25 @@ impl StatusFreshness {
                 freshness.refresh_once(&chain_rpc_urls).await;
             }
         });
+    }
+
+    pub(crate) fn readiness(
+        &self,
+        canonical_block: Option<i64>,
+        latest_projected_block: Option<i64>,
+        projection_lag_blocks: Option<i64>,
+        projection_lag_seconds: Option<i64>,
+        network_head: &NetworkHeadComparison,
+    ) -> StatusReadiness {
+        status_readiness(
+            canonical_block,
+            latest_projected_block,
+            projection_lag_blocks,
+            projection_lag_seconds,
+            network_head,
+            self.config.max_block_lag,
+            self.config.max_lag_seconds,
+        )
     }
 
     async fn refresh_once(&self, chain_rpc_urls: &ChainRpcUrls) {

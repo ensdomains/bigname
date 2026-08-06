@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -12,6 +12,12 @@ pub struct PhaseGraphqlRecordInventoryRow {
     pub selectors: Value,
     pub entries: Value,
     pub chain_positions: Value,
+}
+
+struct InventoryCandidate {
+    boundary: Value,
+    supported: bool,
+    row: PhaseGraphqlRecordInventoryRow,
 }
 
 pub async fn load_phase_graphql_record_inventory_batch(
@@ -29,10 +35,9 @@ pub async fn load_phase_graphql_record_inventory_batch(
     let rows = sqlx::query(
         r#"
         SELECT resource_id, record_version_boundary, selectors, entries,
-               chain_positions
+               chain_positions, support_status
         FROM record_inventory_current
         WHERE resource_id = ANY($1::UUID[])
-          AND support_status = 'supported'
         ORDER BY resource_id, record_version_boundary_key
         "#,
     )
@@ -41,63 +46,42 @@ pub async fn load_phase_graphql_record_inventory_batch(
     .await
     .context("failed to load schema-v2 GraphQL record inventories")?;
 
-    let mut inventories = BTreeMap::<Uuid, Vec<(Value, PhaseGraphqlRecordInventoryRow)>>::new();
+    let mut inventories = BTreeMap::<Uuid, Vec<InventoryCandidate>>::new();
     for row in rows {
         let resource_id: Uuid = row.try_get("resource_id")?;
-        inventories.entry(resource_id).or_default().push((
-            row.try_get("record_version_boundary")?,
-            PhaseGraphqlRecordInventoryRow {
-                selectors: row.try_get("selectors")?,
-                entries: row.try_get("entries")?,
-                chain_positions: row.try_get("chain_positions")?,
-            },
-        ));
+        inventories
+            .entry(resource_id)
+            .or_default()
+            .push(InventoryCandidate {
+                boundary: row.try_get("record_version_boundary")?,
+                supported: row.try_get::<String, _>("support_status")? == "supported",
+                row: PhaseGraphqlRecordInventoryRow {
+                    selectors: row.try_get("selectors")?,
+                    entries: row.try_get("entries")?,
+                    chain_positions: row.try_get("chain_positions")?,
+                },
+            });
     }
 
-    Ok(keys
-        .iter()
+    keys.iter()
         .map(|(resource_id, boundary)| {
-            let candidates = inventories.get(resource_id)?;
-            let boundary = boundary.as_ref()?;
-            if let Some((_, row)) = candidates
-                .iter()
-                .find(|(candidate, _)| candidate == boundary)
-            {
-                return Some(row.clone());
+            let Some(candidates) = inventories.get(resource_id) else {
+                return Ok(None);
+            };
+            if candidates.len() == 1 {
+                return Ok(candidates[0].supported.then(|| candidates[0].row.clone()));
             }
-            if !boundary_is_pointerless(boundary) {
-                return None;
+            if let Some(boundary) = boundary {
+                let mut exact = candidates
+                    .iter()
+                    .filter(|candidate| candidate.boundary == *boundary);
+                if let Some(candidate) = exact.next()
+                    && exact.next().is_none()
+                {
+                    return Ok(candidate.supported.then(|| candidate.row.clone()));
+                }
             }
-            let mut anchored = candidates
-                .iter()
-                .filter(|(candidate, _)| boundaries_share_anchor(boundary, candidate));
-            let (_, row) = anchored.next()?;
-            if anchored.next().is_some() {
-                return None;
-            }
-            Some(row.clone())
+            bail!("schema-v2 GraphQL record inventory is ambiguous for resource {resource_id}")
         })
-        .collect())
-}
-
-fn boundary_is_pointerless(boundary: &Value) -> bool {
-    ["normalized_event_id", "event_kind"]
-        .into_iter()
-        .all(|field| boundary.get(field).is_none_or(Value::is_null))
-}
-
-fn boundaries_share_anchor(requested: &Value, candidate: &Value) -> bool {
-    [
-        "/logical_name_id",
-        "/chain_position/chain_id",
-        "/chain_position/block_number",
-        "/chain_position/block_hash",
-        "/chain_position/timestamp",
-    ]
-    .into_iter()
-    .all(|path| {
-        requested
-            .pointer(path)
-            .is_some_and(|value| candidate.pointer(path) == Some(value))
-    })
+        .collect()
 }

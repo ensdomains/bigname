@@ -53,13 +53,14 @@ async fn v2_status_and_startup_chain_discovery_read_phase_state() -> Result<()> 
         INSERT INTO chain_phase_state (
             chain_id, phase_name, phase_status, current_block_number,
             current_block_hash, target_block_number, target_block_hash,
-            started_at
+            input_content_hash, started_at
         ) VALUES (
             'ethereum-mainnet', 'project', 'running', 115,
-            '0xphase-projected', 120, '0xphase-latest', now()
+            '0xphase-projected', 120, '0xphase-latest', $1, now()
         )
         "#,
     )
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
     .execute(&database.lookup_pool)
     .await?;
 
@@ -102,9 +103,14 @@ async fn v2_status_maps_phase_lifecycle_and_heartbeat_to_readiness() -> Result<(
         INSERT INTO chain_lineage (
             chain_id, block_hash, block_number, block_timestamp,
             canonicality_state
-        ) VALUES (
+        ) VALUES
+        (
+            'ethereum-mainnet', '0xphase-projected', 115,
+            '2026-08-06T00:00:15Z', 'finalized'
+        ),
+        (
             'ethereum-mainnet', '0xphase-head', 120,
-            '2026-08-06T00:00:20Z', 'finalized'
+            '2026-08-06T00:00:20Z', 'canonical'
         );
         INSERT INTO chain_heads (
             chain_id, latest_block_hash, latest_block_number,
@@ -112,7 +118,7 @@ async fn v2_status_maps_phase_lifecycle_and_heartbeat_to_readiness() -> Result<(
             finalized_block_hash, finalized_block_number
         ) VALUES (
             'ethereum-mainnet', '0xphase-head', 120,
-            '0xphase-head', 120, '0xphase-head', 120
+            NULL, NULL, NULL, NULL
         );
         INSERT INTO chain_phase_state (
             chain_id, phase_name, phase_status, current_block_number,
@@ -134,13 +140,21 @@ async fn v2_status_maps_phase_lifecycle_and_heartbeat_to_readiness() -> Result<(
     )
     .execute(&database.lookup_pool)
     .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET input_content_hash = $1 \
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    )
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .execute(&database.lookup_pool)
+    .await?;
 
     let chain_rpc_urls = bigname_lookup::ChainRpcUrls::from_entries(&[
         "ethereum-mainnet=http://rpc.test".to_owned(),
     ])?;
     let state = database
         .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
-        .await?;
+        .await?
+        .with_heartbeat_max_age_secs(1);
     state
         .status_freshness
         .seed_success(
@@ -176,6 +190,77 @@ async fn v2_status_maps_phase_lifecycle_and_heartbeat_to_readiness() -> Result<(
     assert_eq!(status_value(state.clone()).await?, json!("ready"));
 
     sqlx::query(
+        "UPDATE chain_phase_state SET input_content_hash = 'old-interpreter' \
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    assert_eq!(status_value(state.clone()).await?, json!("degraded"));
+    sqlx::query(
+        "UPDATE chain_phase_state SET input_content_hash = $1 \
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    )
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .execute(&database.lookup_pool)
+    .await?;
+    assert_eq!(status_value(state.clone()).await?, json!("ready"));
+
+    sqlx::query(
+        "UPDATE chain_phase_state SET current_block_hash = '0xold-same-height-head' \
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let read = bigname_storage::load_phase_indexing_status(&database.lookup_pool).await?;
+    assert!(!read.chains[0].project_generation_current);
+    assert_eq!(status_value(state.clone()).await?, json!("degraded"));
+    sqlx::query(
+        "UPDATE chain_phase_state SET current_block_hash = '0xphase-head' \
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    assert_eq!(status_value(state.clone()).await?, json!("ready"));
+
+    sqlx::query(
+        r#"
+        UPDATE chain_phase_state
+        SET phase_status = 'running', current_block_number = 115,
+            current_block_hash = '0xphase-projected', finished_at = NULL
+        WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'
+        "#,
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    assert_eq!(status_value(state.clone()).await?, json!("ready"));
+
+    sqlx::query(
+        r#"
+        UPDATE chain_phase_state
+        SET current_block_number = NULL, current_block_hash = NULL
+        WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'
+        "#,
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    assert_eq!(status_value(state.clone()).await?, json!("degraded"));
+
+    sqlx::raw_sql(
+        r#"
+        UPDATE chain_phase_state
+        SET current_block_number = 120, current_block_hash = '0xphase-head'
+        WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project';
+        UPDATE service_heartbeats
+        SET started_at = now() - interval '1 minute',
+            heartbeat_at = now() - interval '30 seconds'
+        WHERE service_name = 'phase-runner' AND chain_id = 'ethereum-mainnet'
+        "#,
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    assert_eq!(status_value(state.clone()).await?, json!("ready"));
+
+    sqlx::query(
         "DELETE FROM service_heartbeats
          WHERE service_name = 'phase-runner' AND chain_id = 'ethereum-mainnet'",
     )
@@ -190,7 +275,7 @@ async fn v2_status_maps_phase_lifecycle_and_heartbeat_to_readiness() -> Result<(
             started_at, heartbeat_at
         ) VALUES (
             'phase-runner', 'status-test', 'ethereum-mainnet', 'live',
-            now() - interval '2 minutes', now() - interval '1 minute'
+            now() - interval '3 minutes', now() - interval '2 minutes'
         )
         "#,
     )
@@ -220,6 +305,49 @@ async fn v2_status_maps_phase_lifecycle_and_heartbeat_to_readiness() -> Result<(
     .execute(&database.lookup_pool)
     .await?;
     assert_eq!(status_value(state).await?, json!("degraded"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn startup_and_v2_status_tolerate_an_absent_phase_schema() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    sqlx::query("DROP SCHEMA bigname_phase CASCADE")
+        .execute(&database.pool)
+        .await?;
+
+    assert!(
+        load_expected_status_chain_ids_at_startup(&database.lookup_pool)
+            .await?
+            .is_empty()
+    );
+    let response = app_router(database.app_state())
+        .oneshot(Request::builder().uri("/v2/status").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["data"]["status"], json!("degraded"));
+    assert_eq!(payload["data"]["chains"], json!({}));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn startup_and_v2_status_reject_a_partially_missing_phase_schema() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    sqlx::query("DROP TABLE bigname_phase.chain_phase_state CASCADE")
+        .execute(&database.pool)
+        .await?;
+
+    assert!(
+        load_expected_status_chain_ids_at_startup(&database.lookup_pool)
+            .await
+            .is_err()
+    );
+    let response = app_router(database.app_state())
+        .oneshot(Request::builder().uri("/v2/status").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
     database.cleanup().await
 }

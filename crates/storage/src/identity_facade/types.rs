@@ -147,7 +147,7 @@ pub struct IdentityPrimaryNameSnapshot {
     pub chain_positions: Option<Value>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct IndexingStatusRead {
     pub chains: Vec<IndexingStatusChainRow>,
     pub has_unscoped_pending_invalidations: bool,
@@ -166,6 +166,7 @@ pub struct IndexingStatusChainRow {
     pub latest_projected_block: Option<i64>,
     pub latest_projected_timestamp: Option<sqlx::types::time::OffsetDateTime>,
     pub project_phase_status: Option<String>,
+    pub project_generation_current: bool,
     pub project_redo_in_progress: bool,
     pub phase_runner_heartbeat_age_seconds: Option<i64>,
 }

@@ -241,12 +241,15 @@ The lookup route uses the common record shape and in-band per-result statuses.
 `ready`, `degraded`, `stale`. It reads the chain set from
 `bigname_phase.chain_heads` and `bigname_phase.chain_phase_state`. The stored
 head and finality fields come from `chain_heads`; indexed progress is the
-`project` phase's current position. Readiness also uses the Project lifecycle
-state, redo marker, and newest per-chain heartbeat in `service_heartbeats`.
-A failed Project phase or expired heartbeat maps to `stale`; a paused, running,
-redoing, or missing-heartbeat phase maps to `degraded`. Only a completed
-Project phase with a recent heartbeat remains eligible for `ready`, subject to
-the existing stored-head and network-head checks. The schema-v2 project phase has no
+`project` phase's most recent completed publication. Readiness also uses that
+phase's lifecycle state, redo marker, and newest per-chain heartbeat in
+`service_heartbeats`. A failed phase or expired heartbeat maps to `stale`; a
+paused, redoing, or missing-heartbeat phase maps to `degraded`. A running phase
+with a completed publication remains eligible for `ready` when its block and
+time lag are within the configured thresholds, its interpreter content hash
+matches this API build, and a same-height publication has the stored head's
+exact block hash. A generation mismatch or running without a completed
+publication is `degraded`. The schema-v2 project phase has no
 invalidation queue or dead-letter table, so the retained response fields map
 to `pending_invalidation_count=0`,
 `pending_invalidation_count_capped=false`, and `dead_letter_count=0`.

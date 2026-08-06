@@ -164,24 +164,40 @@ Field ownership:
   `current_block_number`. `lag_seconds` compares the timestamps of the exact
   latest-head and project-current hashes in `bigname_phase.chain_lineage`.
   Missing head, project, or lineage rows preserve the existing nullable fields.
-- The existing per-chain `status` field also maps the Project lifecycle, redo
-  marker, and newest per-chain `bigname_phase.service_heartbeats` timestamp.
-  A failed Project phase or heartbeat older than
-  `BIGNAME_API_HEARTBEAT_MAX_AGE_SECS` is `stale`. A paused, running, redoing,
-  or missing-heartbeat phase is `degraded`. A completed Project phase with a
-  recent heartbeat remains eligible for `ready`; stored-position and cached
-  network-head checks can still lower it.
+  If the phase schema has not been created yet, API startup uses an empty
+  expected-chain set and this route returns the same empty, `degraded` status
+  shape instead of preventing the API process from starting.
+- The existing per-chain `status` field also maps the `project` phase
+  lifecycle, redo marker, and newest per-chain
+  `bigname_phase.service_heartbeats` timestamp.
+  The most recent completed `project` publication remains the indexed position
+  while the next live-follow pass is running. A running phase is therefore
+  eligible for `ready` when that completed publication is present and its
+  block and time lag are within `BIGNAME_API_STATUS_MAX_BLOCK_LAG` and
+  `BIGNAME_API_STATUS_MAX_LAG_SECS`. Readiness also requires the publication's
+  interpreter content hash to match this API build and, at the same height as
+  the stored head, its block hash to match exactly. A generation mismatch is
+  `degraded`. A running phase without a completed publication is `degraded`;
+  lag beyond either threshold is `stale`. A failed
+  `project` phase is `stale`, while a paused or redoing phase is `degraded`.
+  Missing phase-runner heartbeat evidence is `degraded`; a heartbeat older
+  than `BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS` is `stale`. This phase-only
+  threshold defaults to 60 seconds so a long database statement between
+  five-second runner heartbeat opportunities does not reuse the stricter
+  legacy worker-health threshold.
 - `lag_blocks` and `lag_seconds` are independently nonnegative. Each field
   clamps its own canonical-versus-projected difference at `0`.
 - Pagination behavior: none.
 - Status semantics: route-local ops `status` is `ready`, `degraded`, or
-  `stale`. This is the only non-result `status` enum in `v2`. Projection lag
-  or a fresh provider comparison beyond either configured ingestion-lag
-  threshold is `stale`. Missing stored readiness or a provider observation
+  `stale`. This is the only non-result `status` enum in `v2`. `project`
+  publication lag beyond either configured threshold, or a fresh provider
+  comparison beyond either configured ingestion-lag threshold, is `stale`.
+  Missing stored readiness or a provider observation
   whose `network_head_status` is `stale`, `unavailable`, `pending`, or
-  `unconfigured` is `degraded` when its projection is current. Positive
-  projection lag takes precedence and is `stale`; `network_head_status` still
-  reports the provider state. The provider head is refreshed asynchronously
+  `unconfigured` is `degraded` when its projection is within the configured
+  thresholds. Excessive projection lag takes precedence and is `stale`;
+  `network_head_status` still reports the provider state. The provider head is
+  refreshed asynchronously
   under a timeout and cache TTL; this route reads only the cache and never
   waits for provider I/O. If the latest refresh fails after a successful one,
   `network_head_status` becomes `unavailable` immediately while the last head,

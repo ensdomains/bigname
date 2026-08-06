@@ -29,6 +29,13 @@ pub(super) async fn load_graphql_head(
         .map_err(|error| internal_error(operation, anyhow::anyhow!("{error:?}")))
 }
 
+pub(super) fn graphql_snapshot_chain_ids(head: Option<&ServedHead>) -> Vec<String> {
+    head.into_iter()
+        .flat_map(|head| head.selected().chain_positions.as_map().values())
+        .map(|position| position.chain_id.clone())
+        .collect()
+}
+
 pub(super) fn require_rows_at_head(
     rows: &[PhaseGraphqlNameListRow],
     head: Option<&ServedHead>,

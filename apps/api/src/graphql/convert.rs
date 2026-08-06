@@ -1,7 +1,4 @@
-use bigname_storage::{
-    NameCurrentListRow, PhaseGraphqlRecordInventoryRow,
-    resolution_record_inventory_lookup_key_any_chain,
-};
+use bigname_storage::{NameCurrentListRow, PhaseGraphqlRecordInventoryRow};
 use serde_json::Value;
 use sqlx::types::time::OffsetDateTime;
 
@@ -15,19 +12,13 @@ const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 /// `Account!` fallback chain here so the resolver stays trivial.
 impl From<NameCurrentListRow> for Domain {
     fn from(row: NameCurrentListRow) -> Self {
-        // The any-chain key: the verified-resolution REST surface scopes record reads to the
-        // mainnet profiles, but the subgraph endpoint serves declared record inventory on whatever
-        // chain the deployment indexes (Sepolia v2 here).
-        let record_inventory_key = row.row.resource_id.and_then(|resource_id| {
-            let boundary = resolution_record_inventory_lookup_key_any_chain(&row.row)
-                .map(|(_, boundary)| boundary)
-                .or_else(|| {
-                    row.row
-                        .declared_summary
-                        .pointer("/topology/version_boundaries/record_version_boundary")
-                        .cloned()
-                });
-            boundary.map(|boundary| (resource_id, Some(boundary)))
+        let record_inventory_key = row.row.resource_id.map(|resource_id| {
+            let boundary = row
+                .row
+                .declared_summary
+                .pointer("/topology/version_boundaries/record_version_boundary")
+                .cloned();
+            (resource_id, boundary)
         });
         let owner_id = non_empty(row.owner)
             .or_else(|| non_empty(row.registrant))

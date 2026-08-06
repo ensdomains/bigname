@@ -59,6 +59,12 @@ pub(crate) struct ServeArgs {
     pub(crate) heartbeat_max_age_secs: i64,
     #[arg(
         long,
+        env = "BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS",
+        default_value_t = crate::state::DEFAULT_PHASE_HEARTBEAT_MAX_AGE_SECS
+    )]
+    pub(crate) phase_heartbeat_max_age_secs: i64,
+    #[arg(
+        long,
         env = "BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS",
         default_value_t = bigname_storage::DEFAULT_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS
     )]

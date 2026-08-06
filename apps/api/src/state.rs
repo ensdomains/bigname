@@ -5,6 +5,28 @@ use sqlx::{PgPool, postgres::PgConnectOptions};
 
 use crate::v2::support::status_freshness::{StatusFreshness, StatusFreshnessConfig};
 
+pub(crate) const DEFAULT_PHASE_HEARTBEAT_MAX_AGE_SECS: i64 = 60;
+
+pub(crate) async fn is_absent_phase_schema(pool: &PgPool, error: &anyhow::Error) -> bool {
+    let relation_is_undefined = error.chain().any(|source| {
+        source
+            .downcast_ref::<sqlx::Error>()
+            .and_then(sqlx::Error::as_database_error)
+            .and_then(|database_error| database_error.code())
+            .is_some_and(|code| matches!(code.as_ref(), "42P01" | "3F000"))
+    });
+    if !relation_is_undefined {
+        return false;
+    }
+
+    sqlx::query_scalar::<_, bool>(
+        "SELECT NOT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = 'bigname_phase')",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false)
+}
+
 pub(crate) async fn connect_lookup_pool(
     config: &bigname_storage::DatabaseConfig,
     application_name: &str,
@@ -40,6 +62,7 @@ pub(crate) struct AppState {
     pub(crate) lookup_pool: PgPool,
     pub(crate) lookup_chain_rpc_urls: bigname_lookup::ChainRpcUrls,
     pub(crate) heartbeat_max_age_secs: i64,
+    pub(crate) phase_heartbeat_max_age_secs: i64,
     pub(crate) indexer_chain_heartbeat_max_age_secs: i64,
     pub(crate) worker_rebuild_phase_max_age_secs: i64,
     pub(crate) status_freshness: StatusFreshness,
@@ -61,6 +84,7 @@ impl AppState {
             lookup_pool,
             lookup_chain_rpc_urls,
             heartbeat_max_age_secs: 20,
+            phase_heartbeat_max_age_secs: DEFAULT_PHASE_HEARTBEAT_MAX_AGE_SECS,
             indexer_chain_heartbeat_max_age_secs:
                 bigname_storage::DEFAULT_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS,
             worker_rebuild_phase_max_age_secs:
@@ -79,6 +103,14 @@ impl AppState {
 
     pub(crate) fn with_heartbeat_max_age_secs(mut self, heartbeat_max_age_secs: i64) -> Self {
         self.heartbeat_max_age_secs = heartbeat_max_age_secs;
+        self
+    }
+
+    pub(crate) fn with_phase_heartbeat_max_age_secs(
+        mut self,
+        phase_heartbeat_max_age_secs: i64,
+    ) -> Self {
+        self.phase_heartbeat_max_age_secs = phase_heartbeat_max_age_secs;
         self
     }
 
