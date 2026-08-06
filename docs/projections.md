@@ -118,7 +118,27 @@ contains the adapter-derived [`wrapped`](glossary.md#wrapped-namewrapper-state),
 [`emancipated`](glossary.md#emancipated-namewrapper-state), or
 [`locked`](glossary.md#locked-namewrapper-state) value. The builder combines
 the latest wrapper fuse classification and wrapper expiry for that resource at
-the target block timestamp. If the target timestamp is later than expiry, all
+the target block timestamp. The classification uses effective retained wrapper
+data rather than assuming that a `NameWrapped` payload is the complete stored
+state: an unwrap keeps fuse and expiry data, while an unexpired rewrap restores
+parent-controlled fuses and the larger prior expiry.
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L235 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L239 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L242 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L246 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L276 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L901 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L902 @ ens_v1@91c966f)
+The expiry stream includes wrapper events and a wrapper-linked `ExpiryChanged`
+derived from `NameRenewed` by the admitted `wrapped_registrar_controller`,
+because that path updates NameWrapper storage to registrar expiry plus the
+90-day grace period without an `ExpiryExtended` log.
+(upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L333 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L337 @ ens_v1@91c966f)
+If the target timestamp is later than expiry, all
 fuses are ineffective; emancipated and locked positions project no
 `wrapper_state`, while a plain wrapped position remains `wrapped`.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
@@ -235,7 +255,7 @@ For ENSv1 registry-backed resources, registry-only authority uses the current EN
 
 `PermissionScopeChanged` is a modifier input for the same `resource_id`, not a subject grant and not a separate ledger. `AuthorityEpochChanged` also invalidates this projection because authority changes can alter the resource summary even when no subject grant row exists. Where a projection owns a compatible current permission grant row (`PermissionChanged` or `RootPermissionChanged`), scope application must retain the modifier in provenance and chain positions when it changes the published row.
 
-For ENSv1 wrapper-backed resources, `PermissionScopeChanged` carries the active NameWrapper fuse value observed from wrapper events. Upstream defines `CANNOT_UNWRAP`, `CANNOT_BURN_FUSES`, `CANNOT_TRANSFER`, `CANNOT_SET_RESOLVER`, `CANNOT_SET_TTL`, `CANNOT_CREATE_SUBDOMAIN`, `CANNOT_APPROVE`, `PARENT_CANNOT_CONTROL`, and emits `NameWrapped` and `FusesSet` carrying fuse values.[^v1-iname-l10][^v1-iname-l11][^v1-iname-l12][^v1-iname-l13][^v1-iname-l14][^v1-iname-l15][^v1-iname-l16][^v1-iname-l18][^v1-iname-l31][^v1-iname-l37]
+For ENSv1 wrapper-backed resources, `PermissionScopeChanged` carries the effective active NameWrapper fuse value derived from wrapper events and retained wrapper data. Upstream defines `CANNOT_UNWRAP`, `CANNOT_BURN_FUSES`, `CANNOT_TRANSFER`, `CANNOT_SET_RESOLVER`, `CANNOT_SET_TTL`, `CANNOT_CREATE_SUBDOMAIN`, `CANNOT_APPROVE`, `PARENT_CANNOT_CONTROL`, and emits `NameWrapped` and `FusesSet` carrying fuse values.[^v1-iname-l10][^v1-iname-l11][^v1-iname-l12][^v1-iname-l13][^v1-iname-l14][^v1-iname-l15][^v1-iname-l16][^v1-iname-l18][^v1-iname-l31][^v1-iname-l37]
 
 The current projection retains those scope events but does not synthesize a wrapper-holder subject grant. When a compatible current holder grant exists, it publishes an expiry-gated, fuse-masked `effective_powers` row. `CANNOT_SET_RESOLVER` removes resolver mutation, `CANNOT_SET_TTL` removes TTL mutation, `CANNOT_CREATE_SUBDOMAIN` removes subname creation, `CANNOT_TRANSFER` removes transfer, `CANNOT_UNWRAP` removes unwrap, `CANNOT_BURN_FUSES` removes further fuse burning, and `CANNOT_APPROVE` removes wrapper-token approval. (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L669 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L679 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L723 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L831 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1023 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L427 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L132 @ ens_v1@91c966f) `PARENT_CANNOT_CONTROL` restricts the parent and does not by itself remove the holder's subname-creation power. (upstream: .refs/ens_v1/contracts/wrapper/README.md:L133 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/README.md:L143 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/README.md:L155 @ ens_v1@91c966f) Until holder-grant materialization exists, an empty wrapper-resource permission result is unsupported evidence for holder powers, not proof of complete holder enumeration.
 

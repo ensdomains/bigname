@@ -536,8 +536,23 @@ Current projection timestamp fields are representable Unix-second values or `nul
 
 Projection tables may be truncated and rebuilt from canonical facts plus normalized events.
 
-ENSv1 `PermissionScopeChanged` normalized events retain the raw NameWrapper
-fuse bitmap and the adapter-derived `wrapper_state` classification. The
+ENSv1 `PermissionScopeChanged` normalized events retain the effective
+NameWrapper fuse bitmap and the adapter-derived `wrapper_state`
+classification. Unwrapping clears the owner but retains the fuse and expiry
+data, and a later mint preserves the larger expiry plus every unexpired
+parent-controlled fuse; `NameWrapped` nevertheless emits the fuse and expiry
+arguments supplied to the wrapping call rather than the effective stored
+values.
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L235 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L239 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L242 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L246 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L276 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L901 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L902 @ ens_v1@91c966f)
+The adapter therefore restores retained wrapper data across batches and uses
+the effective values for a rewrap. The
 schema-v2 project phase, not the adapter, writes the effective value into
 `name_current.declared_summary` and applies the wrapper expiry at its target
 block timestamp. The same target-time calculation gates wrapper-holder rows in
@@ -581,6 +596,17 @@ A fresh redo has no prior project marker, so its scope conservatively includes
 every canonical target-bounded wrapper resource with fuse state. The wider redo
 scope repairs the same time-derived rows after a replacement fork changes a
 quiet block timestamp across grace start or expiry.
+
+For a wrapped `.eth` name, a `NameRenewed` event from the admitted
+`wrapped_registrar_controller` also produces a wrapper-linked `ExpiryChanged`
+event. Its wrapper expiry is the event's registrar expiry plus the 90-day grace
+period, while its source family remains the registrar family that emitted the
+log. NameWrapper renewal computes that boundary and updates stored wrapper data
+without emitting `ExpiryExtended`.
+(upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L333 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L337 @ ens_v1@91c966f)
 
 `permissions_current_resource_summary` is the projection-owned per-resource companion to `permissions_current`. It persists permission-authority support classification, an optional ENSv2 registry-root anchor, and chain-position/canonicality evidence from the authority inputs even for resources with zero holder rows. Its JSONB coverage decoder accepts the documented legacy `full`/`authoritative`, `partial`/`best_effort`, and `unsupported`/`not_applicable` combinations and the schema-v2 derivation-only `projected`/`not_asserted` pair. The derivation-only pair does not assert permission support; until a reader consumes schema-v2's separate `support_status` and `unsupported_reason`, public permission consumers fail closed to partial/best-effort support. Unknown vocabulary and inconsistent status/exhaustiveness/reason combinations are storage read errors rather than implicit public upgrades or downgrades. Keyed rebuild replaces one resource's holder rows and summary in one transaction. Full rebuild target discovery additionally selects canonical zero-event resources with positive source-family/manifest-version identity evidence, then stages and publishes both families in one transaction. For a zero-event current resource, the worker may derive summary evidence from either the normal resource provenance keys (`source_family`, `manifest_version`) or the ENSv1 binding-authority keys (`binding_source_family`, `binding_manifest_version`); these are identity evidence for the projection rebuild, not an API fallback. A storage trigger records insertion, deletion, key changes, anchor/provenance changes, and canonicality changes in `projection_permissions_resource_input_revisions`, so durable full-rebuild staging does not depend on a normalized event existing for the resource. Deleting an identity resource cascades its summary. Public role and permission reads use this companion for support metadata and fail closed when it is absent; they do not recover that metadata from interpret-phase `resources` provenance.
 
