@@ -5415,8 +5415,8 @@
         {
           "after_state": {
             "authority_kind": "wrapper",
-            "fuses": 1,
-            "wrapper_state": "locked"
+            "fuses": 196608,
+            "wrapper_state": "emancipated"
           },
           "before_state": {},
           "block_number": 181,
