@@ -49,7 +49,9 @@ use permutation::{
 };
 
 /// 48 permutations per world. Deeper sweeps are clean to at least 600 per world, so this is a
-/// runtime budget rather than the edge of a known failure.
+/// runtime budget rather than the edge of a known failure. It is also below the rate of the rarer
+/// batch-boundary artifacts: at 600 per world the same corpus reaches `carried_before_states` 7
+/// times and `rebased_attributions` once, so a class pinned empty below is rare here, not absent.
 const DEFAULT_CASES: u64 = 48;
 const DEFAULT_SEED: u64 = 0x6e0d_5eed;
 /// Distance between case seeds. Deliberately *not* the SplitMix64 increment: because that increment
@@ -182,16 +184,21 @@ fn production_lease_release_sequence_holds_the_same_invariants() -> Result<()> {
     let context = format!("directed={}", directed.id);
     let chain_id = directed.input.chain_id.clone();
     let converged = converge(&context, directed.input.clone(), directed.batches.clone())?;
-    let mut references = IdentityReferences::new(&chain_id, &directed.declared_instances);
+    let mut references = IdentityReferences::new(
+        &chain_id,
+        &directed.declared_instances,
+        &directed.manifest_ids,
+    );
     for batch in &converged.batches {
         references.absorb(&context, &batch.blocks, &batch.output)?;
     }
     let whole = format!("{context} whole-sequence pass");
-    IdentityReferences::new(&chain_id, &directed.declared_instances).absorb(
-        &whole,
-        &converged.whole.blocks,
-        &converged.whole.output,
-    )?;
+    IdentityReferences::new(
+        &chain_id,
+        &directed.declared_instances,
+        &directed.manifest_ids,
+    )
+    .absorb(&whole, &converged.whole.blocks, &converged.whole.output)?;
     assert_upsert_guards_agree(&whole, &converged.whole.output)?;
     let outputs = converged
         .batches
@@ -420,7 +427,7 @@ fn check(
         bail!("{context}: a split replay of fewer than two batches proves nothing");
     }
     let converged = converge(context, input, batches)?;
-    let mut references = IdentityReferences::with_manifests(world.chain_id, declared, manifests);
+    let mut references = IdentityReferences::new(world.chain_id, declared, manifests);
     let mut events = 0;
     let mut event_kinds = BTreeSet::new();
     for batch in &converged.batches {
@@ -446,7 +453,7 @@ fn check(
     // The whole-sequence pass is the shape a backfill runs, and it may attribute rows the split
     // replay leaves unattributed, so it needs its own foreign-key and canonicality check.
     let whole = format!("{context} whole-sequence pass");
-    IdentityReferences::with_manifests(world.chain_id, declared, manifests).absorb(
+    IdentityReferences::new(world.chain_id, declared, manifests).absorb(
         &whole,
         &converged.whole.blocks,
         &converged.whole.output,
@@ -543,8 +550,12 @@ const REQUIRED_EVENT_KINDS: &[(&str, &[&str])] = &[
 /// Pinned per world, because the two are disjoint: every artifact the corpus reproduces is ENSv1,
 /// and ENSv2 reproduces none. A single cross-world total would read the same if ENSv2 started
 /// diverging while ENSv1 stopped.
+/// Whole-pass versus split-replay divergence that is a property of where the batch boundary fell
+/// rather than of the interpreter, counted so a new one cannot appear unnoticed. All of it is
+/// tracked on issue #336; none of it is an artifact of the generator, which was checked by holding
+/// the corpus fixed and varying only the ordering repair.
 const EXPECTED_ARTIFACTS: &[(&str, &[(&str, usize)])] = &[
-    (ENS_V1_MAINNET.label, &[("rebased_anchors:resources", 64)]),
+    (ENS_V1_MAINNET.label, &[("rebased_anchors:resources", 63)]),
     (ENS_V2_SEPOLIA.label, &[]),
 ];
 
@@ -561,7 +572,7 @@ const DRAWN_CORPUS_CAVEAT: &str = "If the scenario pools, the axes, the seeded d
 /// `SubregistryChanged` carries an owner rather than a subregistry and detaches nothing, so a
 /// cross-world total would let an ENSv1 detach appearing offset the ENSv2 path going dark.
 const EXPECTED_SUBREGISTRY_DETACHES: &[(&str, usize)] =
-    &[(ENS_V1_MAINNET.label, 0), (ENS_V2_SEPOLIA.label, 56)];
+    &[(ENS_V1_MAINNET.label, 0), (ENS_V2_SEPOLIA.label, 33)];
 
 /// Normalized events the pinned manifests declare that the pools deliberately never reach, with the
 /// reason each one is out. Anything a manifest declares that is neither derived nor listed here

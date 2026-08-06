@@ -79,6 +79,7 @@ pub struct Directed {
     pub id: String,
     pub input: BatchInput,
     pub declared_instances: Vec<Uuid>,
+    pub manifest_ids: Vec<i64>,
     /// The physical batch boundaries the corpus was captured with, one block each.
     pub batches: Vec<std::ops::Range<usize>>,
     expected: Expected,
@@ -217,6 +218,7 @@ impl Directed {
                 raw_logs,
             },
             declared_instances,
+            manifest_ids: manifest_ids.into_values().collect(),
             expected,
         })
     }

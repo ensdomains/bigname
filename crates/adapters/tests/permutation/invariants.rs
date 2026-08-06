@@ -35,14 +35,7 @@ pub struct IdentityReferences {
 }
 
 impl IdentityReferences {
-    pub fn new(chain_id: &str, declared_instances: &[Uuid]) -> Self {
-        Self::with_manifests(chain_id, declared_instances, &[])
-    }
-
-    /// `source_manifest_id` is a foreign key on normalized events, contract addresses and discovery
-    /// edges. A stale or unknown id converges fine between the two passes and fails only at the
-    /// writer, so the batch's own manifest ids are carried here and every reference checked.
-    pub fn with_manifests(chain_id: &str, declared_instances: &[Uuid], manifests: &[i64]) -> Self {
+    pub fn new(chain_id: &str, declared_instances: &[Uuid], manifests: &[i64]) -> Self {
         Self {
             chain_id: chain_id.to_owned(),
             manifests: manifests.iter().copied().collect(),

@@ -57,7 +57,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
         ),
         action(
             "root:eth-subregistry",
-            stage::BOOTSTRAP,
+            stage::BOOTSTRAP_LINK,
             vec![emission(
                 wires.root,
                 V2Registry::SubregistryUpdated {
@@ -125,7 +125,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
         if dimensions.registration_path != RegistrationPath::Legacy {
             actions.push(action(
                 format!("{label}:registrar-registered"),
-                stage::REGISTER,
+                stage::CONTROL,
                 vec![emission(
                     wires.registrar,
                     V2Registrar::NameRegistered {
@@ -262,7 +262,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
             AuthorityShape::OperatorTransfer => {
                 actions.push(action(
                     format!("{label}:transfer"),
-                    stage::IDENTITY,
+                    stage::CONTROL,
                     vec![emission(
                         wires.registry,
                         V2Registry::TransferSingle {
@@ -342,7 +342,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
     if dimensions.has(Perturbation::RegistryAnnouncement) {
         actions.push(action(
             "registry:announcement",
-            stage::LINK,
+            stage::ANNOUNCE,
             vec![emission(
                 &format!("{:?}", actor(0x400)).to_ascii_lowercase(),
                 V2Registry::RegistryCreated {}.encode_log_data(),

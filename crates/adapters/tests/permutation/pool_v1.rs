@@ -251,7 +251,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
             AuthorityShape::OperatorTransfer => {
                 actions.push(action(
                     format!("{label}:registrar-transfer"),
-                    stage::IDENTITY,
+                    stage::CONTROL,
                     vec![emission(
                         wires.registrar,
                         V1RegistrarToken::Transfer {
@@ -266,7 +266,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
             AuthorityShape::GiveAway => {
                 actions.push(action(
                     format!("{label}:registry-transfer"),
-                    stage::IDENTITY,
+                    stage::CONTROL,
                     vec![emission(
                         wires.registry,
                         V1Registry::Transfer {

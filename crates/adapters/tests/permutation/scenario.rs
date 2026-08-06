@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use alloy_primitives::LogData;
 
 use super::{
@@ -14,33 +16,48 @@ pub struct Emission {
     pub data: Vec<u8>,
 }
 
-/// Dependency stages. A permutation may reorder actions freely *within* a stage, but never across
-/// one, because a later stage names something an earlier stage had to create first. Grouping by
-/// label instead would leave the cross-label and root-to-label preconditions unordered, and an
-/// ungrouped action free to land anywhere at all — which is how the lane came to spend cases on
-/// sequences the chain cannot produce, like renewing a name before registering it.
+/// Dependency stages. Within one name (and within the root chain) a later stage names something an
+/// earlier stage had to create, so the repair orders them; across names nothing is ordered, because
+/// names are independent on chain and that interleaving is where the permutation value is.
+///
+/// Only `ANNOUNCE` and the two `BOOTSTRAP` stages are hoisted globally — a registry announcement and
+/// the root's own `.eth` setup genuinely precede every name in the namespace.
 pub mod stage {
-    /// Registry bootstrap a namespace needs before any name exists: ENSv2's root label and its
-    /// `.eth` subregistry pointer.
-    pub const BOOTSTRAP: u8 = 0;
+    /// A registry announcing itself. Emitted when the registry is created, so it precedes anything
+    /// registered in it, and `Catalog::select` ranks admissions differently once it exists.
+    pub const ANNOUNCE: u8 = 0;
+    /// The root's own label registration.
+    pub const BOOTSTRAP: u8 = 1;
+    /// Pointers hung off the root token: its `.eth` subregistry and resolver. `setSubregistry`
+    /// needs the token to exist, so this cannot precede `BOOTSTRAP`.
+    pub const BOOTSTRAP_LINK: u8 = 2;
     /// The registration itself.
-    pub const REGISTER: u8 = 1;
-    /// Identity a registration must exist for: token mints, registrar/registry ownership handoffs,
-    /// the immediate child of a name.
-    pub const IDENTITY: u8 = 2;
-    /// Pointers hung off that identity: resolver assignment, subregistry edges, parent claims,
-    /// wrapping, a grandchild under an existing child.
-    pub const LINK: u8 = 3;
+    pub const REGISTER: u8 = 3;
+    /// Identity the registration creates: token mint or resource, and the immediate child of a name.
+    pub const IDENTITY: u8 = 4;
+    /// Control handoffs over that identity — registrar and registry ownership transfers, and the
+    /// registrar's own `NameRegistered`, which upstream emits after the registry call returns.
+    pub const CONTROL: u8 = 5;
+    /// Pointers hung off the name: resolver assignment, subregistry edges, parent claims, wrapping,
+    /// a grandchild under an existing child.
+    pub const LINK: u8 = 6;
     /// Writes that need the pointer: records, permissions, expiry and renewal, wrapper mutation.
-    pub const WRITE: u8 = 4;
-    /// Perturbations that only mean something after the name is fully set up: unwrap, late writes,
-    /// reverse claims, unregistration and replacement.
-    pub const LATE: u8 = 5;
+    pub const WRITE: u8 = 7;
+    /// Perturbations that only mean something once the name is set up: unwrap, late writes, reverse
+    /// claims, unregistration and replacement.
+    pub const LATE: u8 = 8;
+
+    /// Stages that precede every name in the namespace rather than one name's own chain.
+    pub const GLOBAL_PREFIX: u8 = BOOTSTRAP_LINK;
 }
 
+#[derive(Default)]
 pub struct Action {
     pub name: String,
     pub emissions: Vec<Emission>,
+    /// The chain this action belongs to — one name, or the root. Ordering is enforced inside a
+    /// chain and never between two of them.
+    pub chain: String,
     /// The dependency stage this action belongs to; see [`stage`].
     pub stage: u8,
 }
@@ -54,9 +71,14 @@ pub fn emission(emitter: &str, encoded: LogData) -> Emission {
 }
 
 pub fn action(name: impl Into<String>, stage: u8, emissions: Vec<Emission>) -> Action {
+    let name = name.into();
+    let chain = name
+        .split_once(':')
+        .map_or_else(|| name.clone(), |(chain, _)| chain.to_owned());
     Action {
-        name: name.into(),
+        name,
         emissions,
+        chain,
         stage,
     }
 }
@@ -288,12 +310,52 @@ pub fn generate(world: &'static World, wiring: &Wiring, seed: u64) -> Scenario {
     }
 }
 
-/// Reorders each group's actions among the positions the shuffle gave them, so preconditions land
-/// first while the interleaving with every other group stays as permuted.
-/// Stable, so the shuffle still decides the order inside a stage — which is where the permutation
-/// value is. All this removes is orderings the chain could not have produced.
+/// Two repairs, both stable so the shuffle keeps deciding everything they do not constrain.
+///
+/// The global prefix — a registry announcement and the root's `.eth` setup — moves to the front,
+/// because it precedes every name in the namespace. Everything else is ordered only against the
+/// other actions of its own name, in the positions the shuffle already gave that name, so names
+/// still interleave freely. Sorting the whole scenario by stage instead would make every batch
+/// boundary a dependency-closed prefix and quietly delete the orderings this lane exists to find.
 fn repair_preconditions(actions: &mut [Action]) {
-    actions.sort_by_key(|item| item.stage);
+    let hoisted = actions
+        .iter()
+        .map(|item| item.stage <= stage::GLOBAL_PREFIX)
+        .collect::<Vec<_>>();
+    if hoisted.iter().any(|hoist| *hoist) {
+        let mut ordered = Vec::with_capacity(actions.len());
+        for keep in [true, false] {
+            for (index, item) in actions.iter_mut().enumerate() {
+                if hoisted[index] == keep {
+                    ordered.push(std::mem::take(item));
+                }
+            }
+        }
+        ordered[..hoisted.iter().filter(|hoist| **hoist).count()].sort_by_key(|item| item.stage);
+        for (slot, item) in actions.iter_mut().zip(ordered) {
+            *slot = item;
+        }
+    }
+    let mut chains: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (index, item) in actions.iter().enumerate() {
+        if item.stage > stage::GLOBAL_PREFIX {
+            chains.entry(item.chain.as_str()).or_default().push(index);
+        }
+    }
+    let chains = chains
+        .into_iter()
+        .map(|(_, slots)| slots)
+        .collect::<Vec<_>>();
+    for slots in chains.into_iter().filter(|slots| slots.len() > 1) {
+        let mut chain = slots
+            .iter()
+            .map(|slot| std::mem::take(&mut actions[*slot]))
+            .collect::<Vec<_>>();
+        chain.sort_by_key(|item| item.stage);
+        for (slot, item) in slots.into_iter().zip(chain) {
+            actions[slot] = item;
+        }
+    }
 }
 
 pub fn pool(
