@@ -1484,6 +1484,13 @@ fn wrapped_controller_renewal_updates_the_wrapper_resource_expiry() -> anyhow::R
     wrapper_admission.address = WRAPPER.to_owned();
     let mut controller_admission = admission(67, "wrapped_registrar_controller");
     controller_admission.address = CONTROLLER.to_owned();
+    let block = |number| RawBlockInput {
+        chain_id: CHAIN.to_owned(),
+        block_hash: format!("block-{number}"),
+        block_number: number,
+        block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(number),
+        canonicality_state: "canonical".to_owned(),
+    };
     let (first, session) = interpret_test_batch_incremental(
         BatchInput {
             chain_id: CHAIN.to_owned(),
@@ -1551,12 +1558,9 @@ fn wrapped_controller_renewal_updates_the_wrapper_resource_expiry() -> anyhow::R
     assert_eq!(expiry.before_state["expiry"], 7_776_100);
     assert_eq!(expiry.after_state["expiry"], 7_776_200);
 
-    let mut prior_events = first
-        .normalized_events
-        .iter()
-        .map(prior_event)
-        .collect::<Vec<_>>();
-    prior_events.extend(output.normalized_events.iter().map(prior_event));
+    let prior_events = seam::fold_prior_events(Vec::new(), &first.normalized_events, &[block(1)])?;
+    let prior_events =
+        seam::fold_prior_events(prior_events, &output.normalized_events, &[block(2)])?;
     let later_input = BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![wrapper_manifest, registrar_manifest],
