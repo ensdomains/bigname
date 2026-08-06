@@ -250,7 +250,13 @@ fn dense_same_transaction_output_matches_the_slow_path_snapshot() -> Result<()> 
         .iter()
         .filter(|event| event.event_kind == "RegistrationGranted")
         .count();
-    let snapshot = format!("{output:#?}");
+    // `before_state_explicit` is an in-memory re-thread marker, not persisted output; mask it so
+    // a flag-only reclassification cannot rotate this snapshot hash.
+    let mut hashed_output = output.clone();
+    for event in &mut hashed_output.normalized_events {
+        event.before_state_explicit = false;
+    }
+    let snapshot = format!("{hashed_output:#?}");
     let output_keccak = format!("{:#x}", keccak256(snapshot.as_bytes()));
     eprintln!(
         "dense_corpus raw_logs={} normalized_events={} registrations={} output_keccak={} elapsed_ms={:.3}",
