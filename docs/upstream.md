@@ -156,6 +156,12 @@ Intentional differences between our docs/manifests and upstream. Every divergenc
 > **Why**: keep automatic historical bootstrap from silently widening unknown source history, address-only target identity, or chain checkpoint state.
 > **Since**: `2026-04-22`
 
+> **Intake retention floor widening over the reference client's own guard** — bigname refuses an ingest range whose start falls below the lowest block a local reth datadir can serve, using reth's expired-history floor raised to the lowest block still covered by its receipt static files. reth's own RPC refuses only below the expired-history floor, so a node whose receipts were pruned while its transactions were kept answers such a range with empty logs upstream while bigname refuses the plan.
+> **Upstream**: reth's `eth_getLogs` reads `earliest_block_number()` and returns `PrunedHistoryUnavailable` when the requested range starts lower `(upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L584 @ reth@88505c7f)` `(upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L586 @ reth@88505c7f)`; that floor is the expired-history height `(upstream: .refs/reth/crates/storage/provider/src/providers/database/mod.rs:L705 @ reth@88505c7f)`, which tracks the lowest transaction static file `(upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L1221 @ reth@88505c7f)` `(upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L1224 @ reth@88505c7f)`. Pruning receipts separately deletes whole receipt static-file ranges `(upstream: .refs/reth/crates/prune/prune/src/segments/mod.rs:L41 @ reth@88505c7f)`.
+> **Our rule**: `docs/chain-intake.md` § Download range planning.
+> **Why**: intake reads the datadir directly for logs rather than going through the RPC layer, so the receipt segment — not the transaction segment — bounds what it can actually serve. Coverage must be explicit, and a silently empty pruned window is indistinguishable from real absence downstream.
+> **Since**: `2026-08-06`
+
 Per-entry format:
 
 > **Surface** — one-line description of what differs.
