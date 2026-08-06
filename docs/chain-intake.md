@@ -124,6 +124,21 @@ non-orphaned discovery edge whose window does not overlap the discovered
 address window is also a configuration error. Planning stops and names the
 governing manifest and inconsistent bounds for either error.
 
+Planning also refuses a range the source cannot serve. Before any window is
+fetched, a local reth source reports its earliest available block — reth's
+expired-history floor, raised to the lowest block its receipt static files
+still cover — and planning fails as a configuration error naming that floor and
+the requested range instead of reading a pruned window as empty coverage.
+reth's own `eth_getLogs` refuses the same request with
+`PrunedHistoryUnavailable` (upstream:
+.refs/reth/crates/rpc/rpc/src/eth/filter.rs:L584 @ reth@88505c7f) (upstream:
+.refs/reth/crates/rpc/rpc/src/eth/filter.rs:L586 @ reth@88505c7f); reading the
+database directly has no such guard, and pruning receipts deletes whole
+static-file ranges while leaving their headers readable (upstream:
+.refs/reth/crates/prune/prune/src/segments/mod.rs:L41 @ reth@88505c7f). An RPC
+source reports no floor here because the endpoint refuses out-of-retention
+ranges itself.
+
 ## Reorgs and required downstream redo
 
 Head publication marks a displaced readable suffix orphaned and invalidates
