@@ -2025,6 +2025,63 @@ async fn incremental_project_revisits_wrapper_timestamp_boundaries() -> Result<(
 }
 
 #[tokio::test]
+async fn unwrapped_registration_ignores_the_prior_wrapper_grace_expiry() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_unwrapped_registrar_expiry").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    let wrapper_resource = Uuid::new_v4();
+    let wrapper_resource_text = wrapper_resource.to_string();
+    sqlx::query(
+        "INSERT INTO resources (
+             resource_id, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1, $2, $3, 2, 'canonical')",
+    )
+    .bind(wrapper_resource)
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 2))
+    .execute(scratch.pool())
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "ExpiryChanged",
+        "ens_v1_registrar_l1",
+        json!({"expiry":1_000}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(&wrapper_resource_text),
+        "ExpiryChanged",
+        "ens_v1_registrar_l1",
+        json!({
+            "source_event":"NameRenewed",
+            "authority_kind":"wrapper",
+            "registrar_expiry":1_000,
+            "expiry":7_777_000
+        }),
+        json!({}),
+    )
+    .await?;
+
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let projected_expiry: i64 = sqlx::query_scalar(
+        "SELECT (declared_summary -> 'registration' ->> 'expiry')::BIGINT
+         FROM name_current WHERE logical_name_id = 'ens:0xalice'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(projected_expiry, 1_000);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn project_redo_without_resume_revisits_wrapper_timestamp_boundaries() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_wrapper_redo_time_scope").await?;
     seed_project_fixture(scratch.pool()).await?;

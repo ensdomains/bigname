@@ -262,6 +262,7 @@ pub(super) async fn build(
                    END AS expiry_seconds
             FROM project_events event
             WHERE event.logical_name_id = surface.logical_name_id
+              AND event.resource_id = binding.resource_id
               AND event.event_kind IN (
                   'RegistrationGranted', 'RegistrationRenewed', 'ExpiryChanged'
               )

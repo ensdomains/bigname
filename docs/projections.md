@@ -138,6 +138,13 @@ because that path updates NameWrapper storage to registrar expiry plus the
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L333 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L337 @ ens_v1@91c966f)
+Registration expiry is selected from the current binding resource. The
+wrapper-linked grace expiry therefore applies while the wrapper resource is
+current; after `.eth` unwrap reactivates the registrar resource, its registrar
+expiry applies instead.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L390 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L391 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L395 @ ens_v1@91c966f)
 If the target timestamp is later than expiry, all
 fuses are ineffective; emancipated and locked positions project no
 `wrapper_state`, while a plain wrapped position remains `wrapped`.
