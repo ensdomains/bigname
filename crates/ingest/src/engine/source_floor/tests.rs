@@ -153,6 +153,45 @@ async fn a_live_suffix_below_the_floor_is_refused_before_it_is_loaded() -> AnyRe
 }
 
 #[tokio::test]
+async fn a_resume_marker_outside_the_redo_range_fails_the_batch_before_any_work() -> AnyResult<()> {
+    let database = single_block_database("ingest_redo_resume_refused").await?;
+    let engine = Engine::new(database.pool().clone());
+
+    // The endpoint is unroutable on purpose: validation must refuse the batch before
+    // any provider is built or window is fetched.
+    let error = engine
+        .run_batch(BatchRequest {
+            chain_id: RACE_CHAIN.to_owned(),
+            sources: vec![SourceDescriptor {
+                key: "redo-rpc".to_owned(),
+                kind: "rpc".to_owned(),
+                start_block: 0,
+                endpoint: "http://127.0.0.1:9/".to_owned(),
+            }],
+            cursors: Vec::new(),
+            redo_range: Some((10, 20)),
+            resume_current: Some(Marker {
+                number: 5,
+                hash: "stale".to_owned(),
+            }),
+        })
+        .await
+        .expect_err("a resume marker below the redo range must be refused");
+
+    // Only ErrorKind::Transient is retried; a refused marker has to stop the phase.
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    let message = error.to_string();
+    for expected in ["5", "10..=20"] {
+        assert!(message.contains(expected), "{message} must name {expected}");
+    }
+    let recorded: i64 = sqlx::query_scalar("SELECT count(*) FROM chain_lineage")
+        .fetch_one(database.pool())
+        .await?;
+    assert_eq!(recorded, 0, "the refused batch must leave no coverage");
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn an_rpc_source_reports_no_floor() -> AnyResult<()> {
     let provider = ChainProvider::new("base-mainnet", "rpc", "https://rpc.example.com/")?;
 
@@ -277,6 +316,19 @@ fn a_resumed_redo_is_judged_on_what_it_has_left_to_read() {
         ),
         None,
         "a redo with nothing left to read plans nothing"
+    );
+    let stale = Marker {
+        number: V1_REGISTRY_START - 50,
+        hash: "stale".to_owned(),
+    };
+    assert_eq!(
+        planned_range(
+            &source,
+            Some((V1_REGISTRY_START, V1_REGISTRY_START + 200)),
+            Some(&stale)
+        ),
+        Some((V1_REGISTRY_START, Some(V1_REGISTRY_START + 200))),
+        "a marker below the range still starts at the range start"
     );
 }
 

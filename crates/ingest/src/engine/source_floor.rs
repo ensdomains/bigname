@@ -1,7 +1,7 @@
 use crate::{
     Result,
     engine::{BatchRequest, Engine, Marker, SourceDescriptor},
-    plan::enforce_source_floor,
+    plan::{effective_redo_start, enforce_source_floor},
     provider::{ProviderKind, normalized_kind, provider_error},
 };
 
@@ -81,8 +81,7 @@ fn planned_range(
     let Some((from, to)) = redo_range else {
         return Some((source.start_block, None));
     };
-    let resumed = resume_current.map_or(from, |marker| marker.number.saturating_add(1));
-    let from = from.max(resumed).max(source.start_block);
+    let from = effective_redo_start(from, resume_current, source.start_block);
     (from <= to).then_some((from, Some(to)))
 }
 

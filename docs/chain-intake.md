@@ -190,7 +190,9 @@ redo is judged on what it has left to read instead: its range start, the source'
 declared start, and the block after its own durable progress, whichever is
 highest. A redo that has not reached the floor yet is refused, one already past
 it keeps running, and one with nothing left to read plans nothing for that
-source. Work already recorded is not re-examined: a completed ingest phase is not
+source. Progress outside the range is not judged at all: a resume marker below
+the range start or past its end is refused as a misconfigured request. Work
+already recorded is not re-examined: a completed ingest phase is not
 planned again, so a chain that recorded a pruned window before this rule existed
 keeps that stored coverage. Re-indexing it needs the node to hold the range
 again — a fresh resync or redo across the pruned window is refused rather than

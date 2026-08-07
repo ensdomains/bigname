@@ -57,6 +57,15 @@ pub fn validate_request(request: &BatchRequest) -> Result<()> {
     {
         return Err(IngestError::configuration("ingest redo range is invalid"));
     }
+    if let Some((from, to)) = request.redo_range
+        && let Some(resume) = &request.resume_current
+        && (resume.number < from || resume.number > to)
+    {
+        return Err(IngestError::configuration(format!(
+            "ingest redo resume marker {} is outside the redo range {from}..={to}",
+            resume.number
+        )));
+    }
     Ok(())
 }
 
@@ -104,6 +113,12 @@ pub fn target_number(source: &SourceDescriptor, heads: &HeadSnapshot) -> i64 {
     } else {
         heads.latest.number
     }
+}
+
+/// The block a resumed redo starts at: the floor is checked against exactly what executes.
+pub fn effective_redo_start(redo_from: i64, resume: Option<&Marker>, start_block: i64) -> i64 {
+    let resumed = resume.map_or(redo_from, |marker| marker.number.saturating_add(1));
+    redo_from.max(resumed).max(start_block)
 }
 
 pub fn redo_source_target(source: &SourceDescriptor, range_to: i64) -> i64 {
@@ -198,6 +213,38 @@ mod tests {
             ))
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_resume_marker_outside_the_redo_range_is_refused() {
+        let mut batch = request("ethereum-mainnet", vec![source("reth-db", 0)]);
+        batch.redo_range = Some((100, 200));
+        for outside in [99, 201] {
+            batch.resume_current = Some(Marker {
+                number: outside,
+                hash: "stale".to_owned(),
+            });
+            let error = validate_request(&batch)
+                .expect_err("a marker outside the redo range must be refused");
+            assert_eq!(error.kind(), crate::ErrorKind::Configuration);
+            let message = error.to_string();
+            for expected in [outside.to_string(), "100..=200".to_owned()] {
+                assert!(
+                    message.contains(&expected),
+                    "{message} must name {expected}"
+                );
+            }
+        }
+        for edge in [100, 200] {
+            batch.resume_current = Some(Marker {
+                number: edge,
+                hash: "durable".to_owned(),
+            });
+            assert!(
+                validate_request(&batch).is_ok(),
+                "a marker at {edge} lies inside 100..=200"
+            );
+        }
     }
 
     #[test]
