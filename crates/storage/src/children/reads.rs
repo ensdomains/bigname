@@ -17,11 +17,12 @@ use super::{
 /// Registry events prove a child node and its labelhash but not the label itself, so Project
 /// writes the name columns null until a preimage arrives, and stores raw bytes with no decoded
 /// form for a preimage that does not decode. The three arms answer in that order: the decoded
-/// name, the escape-encoded raw bytes, and the documented
-/// `[<labelhash-without-0x>].<parent-name>` placeholder — never a null into a mandatory field.
-/// The parent portion is the parent's stored spelling verbatim. It is empty only for the
-/// zero-label root surface: a parent whose own labels do not decode is written shadow, and both
-/// children projection arms admit active parents only. No route can address the empty name, so the
+/// name, the escape-encoded raw bytes — parent portion included, since the encoding runs over the
+/// whole stored string — and the documented `[<labelhash-without-0x>].<parent-name>` placeholder,
+/// never a null into a mandatory field. Only the placeholder concatenates the parent's stored
+/// spelling verbatim, and that spelling is empty only for the zero-label root surface: a parent
+/// whose own labels do not decode is written `visibility_state = 'shadow'`, and both children
+/// projection arms admit active parents only. No route can address the empty name, so the
 /// trailing-dot string that root would produce never reaches a served page.
 const CHILD_DISPLAY_NAME_EXPR: &str = r#"COALESCE(
     cc.decoded_name,

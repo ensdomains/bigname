@@ -2203,8 +2203,8 @@ async fn v2_get_subnames_paginates_across_a_child_with_no_observed_label() -> Re
         .expect("subnames data")
         .iter()
         .find(|row| row["labelhash"] == "0xfeed0002")
-        .expect("the undecodable label must be served, not dropped");
-    assert_eq!(escaped_row["name"], "\\377\tbad.parent.eth", "{names:?}");
+        .unwrap_or_else(|| panic!("an undecodable label must be served, not dropped: {names:?}"));
+    assert_eq!(escaped_row["name"], "\\377\tbad.parent.eth");
     assert_eq!(escaped_row["display_name"], "\\377\tBad.parent.eth");
 
     // The audit read has no keyset to drop the row, so it decodes the name directly.
