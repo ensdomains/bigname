@@ -359,35 +359,53 @@ single implementation *family* rather than one implementation — instead of bei
 fixed by manifest declaration. Code that identifies these registries by a single
 expected implementation address will miss upgraded ones.
 
-**Migratable child** — a child of an already-migrated name that has not
-migrated yet, has `PARENT_CANNOT_CONTROL` burned — a *helper-positive* child,
-in the three-way split below — and still has a nonzero ENSv1 registry owner
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58).
-All three hold at once or none of it applies: its parent's
-[migration registry](#migration-registry-wrapperregistry) refuses to let anyone
-register that label
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L170 @ ens_v2@ccaeb58)
-only while they do, so the child cannot be taken on the ENSv2 side and keeps
-resolving through ENSv1 for as long as it stays unmigrated. Drop any one
-conjunct and the label becomes registrable: an abandoned child whose ENSv1
-owner has gone to zero is not protected, and neither is a child that never had
-`PARENT_CANNOT_CONTROL` burned — which is the worse case of the two, because it
-also cannot migrate
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L188 @ ens_v2@ccaeb58).
+**Migratable child** — a child of an already-migrated name whose label its
+parent's [migration registry](#migration-registry-wrapperregistry) will not let
+anyone register
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L170 @ ens_v2@ccaeb58),
+so the child cannot be taken on the ENSv2 side and keeps resolving through
+ENSv1 for as long as it stays unmigrated. Three conditions must hold at once,
+and failing each one means something different:
 
-The `PARENT_CANNOT_CONTROL` conjunct is nonetheless broader than the
+1. *Not migrated yet* — the label has no live entry in the parent's ENSv2
+   registry
+   (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293 @ ens_v2@ccaeb58).
+   Failing this does not release the label; it is the opposite. ENSv2 is
+   already authoritative and registration reverts, `LabelAlreadyRegistered`
+   for a live entry
+   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L437 @ ens_v2@ccaeb58)
+   or `LabelAlreadyReserved` for a reserved one
+   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L439 @ ens_v2@ccaeb58).
+   Only an expired ENSv2 entry can be registered again
+   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L428 @ ens_v2@ccaeb58).
+2. *`PARENT_CANNOT_CONTROL` burned* — the child is *helper-positive* under
+   `LibMigration.isEmancipatedChild`, the superset the three-way split below is
+   built on
+   (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L88 @ ens_v2@ccaeb58).
+   Failing this means the child was never emancipated: the register test is
+   false, so the label can be taken out from under a name that is still live on
+   ENSv1
+   (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58),
+   and migration reverts as well
+   (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L188 @ ens_v2@ccaeb58).
+3. *Nonzero ENSv1 registry owner* — the second half of that same test
+   (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58).
+   Failing this means the name was abandoned, and releasing the label is the
+   designed end state rather than a loss. Such a child cannot migrate either: a
+   zero registry owner means the name is not wrapped, because wrapping puts the
+   NameWrapper itself in that slot
+   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L580 @ ens_v1@91c966f),
+   so no ERC-1155 is left to transfer.
+
+The `PARENT_CANNOT_CONTROL` condition is nonetheless broader than the
 [emancipated NameWrapper state](#emancipated-namewrapper-state) defined above,
 and this is the one place in the migration cluster where "emancipated" must not
-be read as that state. The gate is `LibMigration.isEmancipatedChild`, which
-tests only that
-`PARENT_CANNOT_CONTROL` is burned and the name is not a `.eth` 2LD
+be read as that state. Beyond that fuse, `isEmancipatedChild` requires only that
+the name is not a `.eth` 2LD
 (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L88 @ ens_v2@ccaeb58);
 it never consults `CANNOT_UNWRAP`, so it is *also* true of a
-[locked](#locked-namewrapper-state) child, and that is the predicate the
-migratable-child test uses
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58).
-Three states therefore have to be kept apart, because two of them migrate by
-different paths:
+[locked](#locked-namewrapper-state) child. Three states therefore have to be
+kept apart, because two of them migrate by different paths:
 
 - *Helper-positive child* — any child satisfying `isEmancipatedChild`. This is
   the superset that "migratable child" is defined over, and it is not a
@@ -428,7 +446,7 @@ fuses and expiry when it burns a token
 so a child that unwraps after its parent migrated still counts
 as migratable — and is stuck, because migration needs a NameWrapper token to
 transfer and it no longer has one. It stays blocked until its ENSv1 registry
-owner is zeroed — the third conjunct above failing — which is what releases the
+owner is zeroed — condition 3 above failing — which is what releases the
 label
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58).
 
