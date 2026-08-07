@@ -1,6 +1,6 @@
 use std::str;
 
-use bigname_adapters::schema_v2::seam::LOG_INDEX_KEY;
+use bigname_adapters::schema_v2::seam::{LOG_INDEX_KEY, PREIMAGE_OBSERVATION_EVENT_KIND};
 use bigname_domain::normalization::{ENS_NORMALIZER_VERSION, normalize_label_under_suffix};
 use serde_json::{Value, json};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
@@ -167,7 +167,7 @@ async fn load_labels(
     from_block: i64,
     to_block: i64,
 ) -> Result<Vec<LabelRow>> {
-    sqlx::query_as(
+    sqlx::query_as(&format!(
         "SELECT preimage.labelhash, preimage.raw_label
          FROM label_preimages preimage
          WHERE EXISTS (
@@ -188,12 +188,12 @@ async fn load_labels(
                 FROM normalized_events event
                 WHERE event.chain_id = $1
                   AND event.block_number BETWEEN $2 AND $3
-                  AND event.event_kind = 'PreimageObserved'
+                  AND event.event_kind = '{PREIMAGE_OBSERVATION_EVENT_KIND}'
                   AND event.after_state ->> 'labelhash' = preimage.labelhash
             )
          ORDER BY preimage.labelhash
-         FOR UPDATE",
-    )
+         FOR UPDATE"
+    ))
     .bind(chain_id)
     .bind(from_block)
     .bind(to_block)

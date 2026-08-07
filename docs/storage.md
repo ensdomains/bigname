@@ -313,7 +313,11 @@ derivation block cannot move the anchor forward. An identity the replay
 re-observes is restored by the ordinary
 identity upsert and keeps its anchor at its first derivation block; only an
 identity still `orphaned` after the replay is re-anchored to the earliest
-surviving reference outside the redone range. An interrupted multi-batch redo
+surviving reference outside the redone range — for a `name_surfaces` row, the
+earliest surviving body-carrying `PreimageObserved` observation of that name,
+so a surface with no surviving body-carrying observation stays orphaned rather
+than adopting an anchor — or, for a shadow surface, a `deactivated_at` — from
+a reference that never re-stated its body. An interrupted multi-batch redo
 remains explicit persisted redo state and must resume; its intermediate state
 is not a completed projection boundary.
 

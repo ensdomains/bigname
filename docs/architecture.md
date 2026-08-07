@@ -391,7 +391,7 @@ boundaries fall. Three rules keep the written rows batch-independent:
   rule) resets the before to `{}`, so the registration's stream starts from
   an empty snapshot. A surviving explicit before may quote in-memory state a
   later-dropped same-transaction event wrote; that snapshot is computed
-  identically in every run shape. The block-scoped
+  identically in every [run shape](glossary.md#run-shape). The block-scoped
   predecessor-epoch
   permission closures keep their computed snapshot.
 - Identity attribution is fixed at emission, with one exception:
@@ -404,7 +404,7 @@ boundaries fall. Three rules keep the written rows batch-independent:
   predecessor-epoch observations that only
   a later block's registration could identify keep their event-time
   attribution (null `logical_name_id`/`resource_id` where no authority was
-  known) in every [run shape](glossary.md#run-shape) (fresh, incremental, or
+  known) in every run shape (fresh, incremental, or
   resumed).
 - Resource rows anchor at their first derivation block. A superseded
   registry-only resource emission is retained even when no surviving

@@ -3567,8 +3567,32 @@ async fn partial_redo_restores_resource_and_token_anchors_from_150_to_250() -> R
     .bind(token_lineage_id)
     .execute(scratch.pool())
     .await?;
+    // The surface heal only accepts an observation that re-states the surface body, so plant a
+    // body-carrying preimage observation alongside the resource/token observation.
     sqlx::query(
-        "DELETE FROM normalized_events WHERE chain_id = $1 AND event_identity <> 'anchor-observation-250'",
+        "
+        INSERT INTO normalized_events (
+            event_identity, namespace, logical_name_id, resource_id, event_kind,
+            source_family, manifest_version, source_manifest_id, chain_id,
+            block_number, block_hash, raw_fact_ref, derivation_kind,
+            canonicality_state, before_state, after_state
+        )
+        SELECT 'surface-observation-250', namespace, logical_name_id, resource_id,
+               event_kind, source_family, manifest_version, source_manifest_id,
+               chain_id, 250, $2, jsonb_build_object('kind', 'raw_block'),
+               derivation_kind, 'canonical', before_state, after_state
+        FROM normalized_events
+        WHERE chain_id = $1 AND event_kind = 'PreimageObserved'
+        ORDER BY normalized_event_id
+        LIMIT 1
+        ",
+    )
+    .bind(chain)
+    .bind(block_hash(chain, 250))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "DELETE FROM normalized_events WHERE chain_id = $1 AND event_identity NOT IN ('anchor-observation-250', 'surface-observation-250')",
     )
     .bind(chain)
     .execute(scratch.pool())
@@ -3659,7 +3683,7 @@ async fn partial_redo_reanchors_shadow_deactivation_time_to_surviving_observatio
                250, $2, jsonb_build_object('kind', 'raw_block'),
                derivation_kind, 'canonical', '{}'::jsonb, after_state
         FROM normalized_events
-        WHERE chain_id = $1 AND logical_name_id IS NOT NULL
+        WHERE chain_id = $1 AND logical_name_id IS NOT NULL AND event_kind = 'PreimageObserved'
         ORDER BY normalized_event_id
         LIMIT 1
         ",
@@ -3706,6 +3730,99 @@ async fn partial_redo_reanchors_shadow_deactivation_time_to_surviving_observatio
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(anchor, (250, 250));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn redo_heal_leaves_a_surface_orphaned_without_a_body_carrying_observation() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_surface_heal_body").await?;
+    let chain = "interpret-surface-heal-body";
+    let hostile_label = "bad\u{1}";
+    seed_fixture(scratch.pool(), chain, &[(1, hostile_label)]).await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+
+    sqlx::query(
+        "
+        INSERT INTO chain_lineage (
+            chain_id, block_hash, parent_hash, block_number, block_timestamp,
+            canonicality_state
+        )
+        SELECT $1,
+               $1 || '-block-' || height::text,
+               $1 || '-block-' || (height - 1)::text,
+               height,
+               to_timestamp(height),
+               'canonical'::canonicality_state
+        FROM generate_series(2, 250) AS height
+        ",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    // A reference that carries no surface body: production only persists one alongside a
+    // surface re-emission, and none was derived here.
+    sqlx::query(
+        "
+        INSERT INTO normalized_events (
+            event_identity, namespace, logical_name_id, resource_id, event_kind,
+            source_family, manifest_version, source_manifest_id, chain_id,
+            block_number, block_hash, raw_fact_ref, derivation_kind,
+            canonicality_state, before_state, after_state
+        )
+        SELECT 'permission-observation-250', namespace, logical_name_id, NULL,
+               'PermissionChanged', source_family, manifest_version, source_manifest_id,
+               chain_id, 250, $2, jsonb_build_object('kind', 'raw_block'),
+               derivation_kind, 'canonical', '{}'::jsonb, '{}'::jsonb
+        FROM normalized_events
+        WHERE chain_id = $1 AND logical_name_id IS NOT NULL
+        ORDER BY normalized_event_id
+        LIMIT 1
+        ",
+    )
+    .bind(chain)
+    .bind(block_hash(chain, 250))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "DELETE FROM normalized_events WHERE chain_id = $1 AND event_identity <> 'permission-observation-250'",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "
+        UPDATE name_surfaces
+        SET block_number = 150,
+            block_hash = $2,
+            deactivated_at = to_timestamp(150),
+            canonicality_state = 'canonical'
+        WHERE chain_id = $1
+        ",
+    )
+    .bind(chain)
+    .bind(block_hash(chain, 150))
+    .execute(scratch.pool())
+    .await?;
+
+    run_engine(scratch.pool(), chain, 100, 200, InterpretRunMode::Redo).await?;
+
+    let row: (i64, String, i64) = sqlx::query_as(
+        "
+        SELECT block_number,
+               canonicality_state::text,
+               extract(epoch FROM deactivated_at)::bigint
+        FROM name_surfaces
+        WHERE chain_id = $1
+        ",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        row,
+        (150, "orphaned".to_owned(), 150),
+        "a reference carrying no surface body must not anchor or deactivate the surface"
+    );
     scratch.cleanup().await
 }
 
