@@ -141,18 +141,24 @@ activates all decide which identity, discovery, and label-preimage rows the
 projections then read, so they are interpretation rather than plumbing.
 Interpret's batch sizing stays outside, because folding the same events into
 differently sized physical batches produces the same rows. Request-scoped
-serving, RPC transport, and phase orchestration are outside because they
-decide no persisted row, so a serving-only change does not force a
-re-derivation.
+serving and RPC transport are outside because they write nothing, so a
+serving-only change does not force a re-derivation.
 
 Several semantic surfaces are outside the hash today and are guarded by review
 rather than by a rotation:
 
 - interpret's input loader — which earlier interpreted state an adapter sees,
-  which manifest versions and admitted address ranges it reads, and the order
-  raw logs arrive in;
+  which manifest versions, discovery rules, admitted address ranges, and
+  canonical blocks it reads, and the order raw logs arrive in;
 - the interpret engine's redo and completion gates, which decide whether a run
-  clears a redo range or reanchors stable identities;
+  clears a redo range or reanchors stable identities, and its prior-session
+  reuse rule, which decides whether a batch folds onto retained adapter state
+  or reloads it;
+- the phase runner, which owns the redo marker, decides the replay range each
+  run receives, and publishes the head epoch interpret's prior cache
+  revalidates against. It is outside the hash on purpose — no semantic
+  interpretation may live there — but that is a rule it must be held to, not a
+  property the hash enforces;
 - checked-in SQL, meaning migration trigger bodies and the schema-v2 baseline
   constraints.
 

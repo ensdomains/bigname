@@ -205,8 +205,23 @@ fn phase_orchestration_does_not_change_hash() {
     let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
     assert_eq!(
         first, changed,
-        "phase orchestration and interpret engine batching must remain outside the hash"
+        "phase orchestration and the interpret engine must remain outside the hash"
     );
+}
+
+#[test]
+fn every_cfg_test_scan_root_is_watched_for_rebuilds() {
+    // A scan root is not hashed, but a cfg(test) declaration inside one changes which files under
+    // a hashed root are excluded. Without a rerun trigger the compiled hash would go stale.
+    let workspace_root = workspace_root();
+    let watched = crate::compute::watched_paths(&workspace_root);
+    for scan_root in crate::compute::cfg_test_scan_roots() {
+        let path = workspace_root.join(scan_root);
+        assert!(
+            watched.contains(&path),
+            "{scan_root} is scanned but not watched"
+        );
+    }
 }
 
 #[test]

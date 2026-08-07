@@ -432,6 +432,11 @@ pub(crate) fn hashed_source_paths(workspace_root: &Path) -> io::Result<Vec<Strin
 }
 
 #[cfg(test)]
+pub(crate) fn cfg_test_scan_roots() -> &'static [&'static str] {
+    CFG_TEST_SCAN_ROOTS
+}
+
+#[cfg(test)]
 pub(crate) fn excluded_source_reason(
     workspace_root: &Path,
     path: &Path,
