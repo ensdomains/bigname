@@ -368,7 +368,7 @@ impl Engine {
         });
         let facts = fetch_selected_facts(&provider, &resolved, selected.clone()).await?;
         let estimated_write_bytes = estimated_write_bytes(&facts);
-        self.enforce_fetched_window_floor(chain_id, source, from, to)
+        self.enforce_window_floor(chain_id, source, from, to)
             .await?;
         crate::write::store(
             &self.pool,

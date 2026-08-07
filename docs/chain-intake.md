@@ -131,17 +131,23 @@ cover — and planning fails as a configuration error naming that floor and the
 requested range instead of reading a pruned window as empty coverage. The floor
 is read a second time after a window is fetched and before it is stored, because
 a node can prune while a batch is in flight; a window whose floor rose under it
-fails the same way rather than being recorded. For receipts kept in static files
-that second read is sufficient on its own: until the node commits a deletion, a
-reader still holding the old index fails outright rather than reading empty
-(upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L972 @ reth@88505c7f),
-and the index refresh that makes such a read empty is the same one that raises
-the floor. Independently of the floor, the
-log read fails any fetched block whose receipt count does not match the
-transaction count its retained body indices declare — the check that covers what
-a floor cannot express: receipts pruned out of database tables, where there is no
-retained static-file range to read a floor from, and a partial receipt list,
-which would otherwise attribute logs to the wrong transaction. Pruning
+fails the same way rather than being recorded. The live suffix is checked the same
+way once its common ancestor is known, because extending the published head does
+not imply starting above a floor that moved during downtime or a deep reorg.
+
+Those refusals are an early, cheap answer, not the guarantee. The reported floor
+is optimistic even on an idle node: reth advances a receipt static file's block
+position before deciding whether to write that block's receipts
+(upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2504 @ reth@88505c7f)
+(upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2512 @ reth@88505c7f),
+so the lowest retained range can begin with receipt-less blocks, and a receipt log
+filter can drop individual receipts inside a block that was written
+(upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2528 @ reth@88505c7f).
+The guarantee is at the read: every fetched block whose receipt count does not
+match the transaction count in its retained body indices fails the log read. That
+covers what no floor can express — receipt-less blocks inside a retained range,
+receipts pruned out of database tables, and a partial receipt list, which would
+otherwise attribute logs to the wrong transaction. Pruning
 receipts deletes whole static-file ranges while leaving their headers readable
 (upstream: .refs/reth/crates/prune/prune/src/segments/receipts.rs:L34 @ reth@88505c7f)
 (upstream: .refs/reth/crates/prune/prune/src/segments/mod.rs:L41 @ reth@88505c7f),
@@ -187,8 +193,8 @@ unaffected. Work already recorded is not re-examined: a completed ingest phase
 is not planned again, so a chain that recorded a pruned window before this rule
 existed keeps that stored coverage; a resync or a redo over the same range is
 refused rather than silently repeating the empty read, so the node has to hold
-the range before it can be re-indexed. Live follow extends the published head rather than planning a
-declared range and does not consult the floor. Sources that do not read a node's
+the range before it can be re-indexed. Live follow plans no declared range, so it is judged on the suffix it is about to
+load. Sources that do not read a node's
 database report no floor: an RPC endpoint owns its retention behind the wire,
 and the Coinbase SQL warehouse is not a block provider at all.
 

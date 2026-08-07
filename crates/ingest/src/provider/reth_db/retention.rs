@@ -4,6 +4,16 @@ use reth_ethereum::provider::{BlockNumReader, StaticFileProviderFactory, StaticF
 use super::EthereumRethProviderFactory;
 
 /// What a reth datadir reports about the history it still holds.
+///
+/// These readings are an optimistic bound, not a completeness guarantee: reth advances a
+/// receipt static file's block position before deciding whether to write that block's
+/// receipts, so the lowest retained range can begin with receipt-less blocks
+/// (upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2504 @ reth@88505c7f)
+/// (upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2512 @ reth@88505c7f),
+/// and a log filter can drop individual receipts inside a written block
+/// (upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2528 @ reth@88505c7f).
+/// The floor is therefore the cheap early refusal; comparing each fetched block's receipts
+/// against its body indices is what actually guarantees a window was readable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct RetentionReadings {
     /// Lowest block whose history has not expired, as reth's own RPC layer reads it

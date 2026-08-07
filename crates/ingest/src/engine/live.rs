@@ -80,6 +80,10 @@ impl Engine {
             .number
             .min(common.number.saturating_add(BLOCKS_PER_BATCH));
         let (current, estimated_write_bytes) = if load_to > common.number {
+            // Extending the published head does not imply staying above the node's retention:
+            // downtime or a deep reorg can put the ancestor below a floor that moved on.
+            self.enforce_window_floor(&request.chain_id, primary, common.number + 1, load_to)
+                .await?;
             let loaded = self
                 .load_window(
                     &request.chain_id,
