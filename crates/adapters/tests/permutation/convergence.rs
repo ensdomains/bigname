@@ -312,7 +312,7 @@ fn assert_emission_multiset(
 
 /// Per key, the order-normalized list of every emission's body and anchor. Sorting rather than
 /// set-collecting so a repeated identical emission counts twice, as it must.
-fn group_by_key<'a>(rows: &'a [Row]) -> BTreeMap<&'a str, Vec<(&'a str, &'a str)>> {
+fn group_by_key(rows: &[Row]) -> BTreeMap<&str, Vec<(&str, &str)>> {
     let mut grouped: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
     for row in rows {
         grouped
