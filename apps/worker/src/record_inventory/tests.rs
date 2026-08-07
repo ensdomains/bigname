@@ -1477,8 +1477,13 @@ async fn rebuild_excludes_non_current_ensv2_public_resolver_records() -> Result<
     });
 
     // PublicResolverV2 authorizes writes from registry ownership and approvals rather than
-    // requiring itself to be the registry-selected resolver.
-    // (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L170 @ ens_v2@ccaeb58)
+    // requiring itself to be the registry-selected resolver: `canModifyName` resolves the
+    // owner through the registry and accepts owner, operator, or per-node delegate.
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L174 @ ens_v2@ccaeb58)
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L179 @ ens_v2@ccaeb58)
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L181 @ ens_v2@ccaeb58)
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L182 @ ens_v2@ccaeb58)
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L183 @ ens_v2@ccaeb58)
     let mut stale_record = record_changed_event_with_value(
         "ensv2-stale-public-resolver-record",
         "ens:alice.eth",

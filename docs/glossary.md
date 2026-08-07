@@ -225,10 +225,17 @@ remains separately governed by `CANNOT_APPROVE` until wrapper expiry.
 ENSv1 contracts to the ENSv2 registries. It happens entirely on one chain, it
 is per-name rather than a global state copy, and it is driven by a token
 transfer: the holder sends the name's ENSv1 token (the registrar ERC-721, or
-the NameWrapper ERC-1155) to a [migration controller](#migration-controller),
-which retires the name's ENSv1 presence into the [Graveyard](#graveyard) and
-claims its [premigrated](#premigration-reservation) ENSv2 entry in the same
-transaction.
+the NameWrapper ERC-1155) to a receiver contract, which retires the name's ENSv1
+presence into the [Graveyard](#graveyard) and creates its ENSv2 entry in the same
+transaction. Which receiver depends on the name's depth. A `.eth` second-level
+name goes to a [migration controller](#migration-controller), and its ENSv2 entry
+is the [premigrated](#premigration-reservation) reservation being claimed. A
+subname goes to its already-migrated parent's
+[migration registry](#migration-registry-wrapperregistry), which registers the
+label outright — premigration reserved only second-level names, so there is
+nothing to claim
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L212 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L224 @ ens_v2@ccaeb58).
 Nothing about it is cross-chain; see [`upstream.md`](upstream.md#known-divergences)
 for the stale upstream comment that says otherwise. **No bigname source family
 is admitted for any of this yet** — the terms below describe the upstream
@@ -248,7 +255,10 @@ rather than `LabelRegistered`
 The reserved expiry is the ENSv1 registrar expiry plus a bonus period of 62 days
 and 1 second — the difference between ENSv1's 90-day grace and ENSv2's 28-day
 grace, plus a second
-(upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L218 @ ens_v2@ccaeb58);
+(upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L216 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L217 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L218 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L219 @ ens_v2@ccaeb58);
 `ETHRenewerV1` recovers the ENSv1 expiry by subtracting that bonus back off the
 reservation
 (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L119 @ ens_v2@ccaeb58),
@@ -258,22 +268,46 @@ and no owner, while ENSv1 is still the authority for it. Reserved entries are
 not registrations.
 
 **Migration controller** — an ENSv2 contract that accepts a transferred ENSv1
-token and performs that name's migration. There are two, and the split is by
-name shape and lock state rather than by whether the name can still be
-unwrapped. `UnlockedMigrationController` takes unwrapped registrar ERC-721s
+token and performs that name's migration. There are two, split by whether the
+name can still be unwrapped: "locked" means the `CANNOT_UNWRAP` fuse is burned
+(upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L76 @ ens_v2@ccaeb58),
+which is exactly what makes an unwrap revert
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1023 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1024 @ ens_v1@91c966f).
+`UnlockedMigrationController` takes unwrapped registrar ERC-721s
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92 @ ens_v2@ccaeb58)
 and unlocked wrapped `.eth` 2LDs — it rejects a locked name, and it also
 rejects anything whose token id is not the namehash of a `.eth` second-level
 label, so subnames never reach it
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L143 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L144 @ ens_v2@ccaeb58).
-`LockedMigrationController` takes locked 2LDs *and* emancipated children, which
-is why a still-unwrappable emancipated subname migrates through the locked side
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L176 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L85 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L88 @ ens_v2@ccaeb58).
-Both inherit their ERC-1155 receiver from a shared base
+`LockedMigrationController` takes locked wrapped `.eth` 2LDs. Both inherit their
+ERC-1155 receiver from a shared base
 (upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L101 @ ens_v2@ccaeb58).
+
+Neither controller receives subnames. Both are bound to `.eth`: the locked
+controller's wrapped node is fixed to `ETH_NODE`
+(upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L81 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L82 @ ens_v2@ccaeb58),
+and the shared receiver requires each incoming name to be an immediate child of
+that node
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L117 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L118 @ ens_v2@ccaeb58).
+A child migrates into its already-migrated parent's
+[migration registry](#migration-registry-wrapperregistry) instead, which is the
+same receiver bound to the parent's node
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L197 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L287 @ ens_v2@ccaeb58).
+The batch helper routes accordingly: locked 2LD groups go to the locked
+controller
+(upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L121 @ ens_v2@ccaeb58),
+while child groups are looked up by parent name and sent to that parent's
+registry, reverting if the parent has not migrated
+(upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L124 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L126 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L131 @ ens_v2@ccaeb58).
+Attributing a child migration to the locked controller would name the wrong
+receiver and the wrong registry.
 A separate `MigrationHelper` batches many names through operator approval
 (upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L94 @ ens_v2@ccaeb58).
 Name collision worth guarding against: ENSv1 also ships a `MigrationHelper`, a
@@ -322,31 +356,54 @@ owner is zeroed, which is the condition that releases the label
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58).
 
 **Graveyard** — the ENSv2 contract that ends up holding the dead ENSv1 side of
-every migrated name: migration rewrites the ENSv1 registry record to make the
-Graveyard the owner and to clear the resolver
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L114 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L115 @ ens_v2@ccaeb58),
-then sends it the ENSv1 registrar token
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58).
-The deployment script's activation sequence also adds it as an ENSv1 registrar
-controller alongside `ETHRenewerV1`
+every migrated name. **What it receives, and what is left behind, differs by
+migration path**, and an ENSv1 adapter that assumes one shape will expect the
+wrong events and the wrong terminal state:
+
+- *Unwrapped `.eth` 2LD.* The controller reclaims the name, rewrites the ENSv1
+  registry record so the Graveyard owns it and the resolver is cleared, then
+  transfers the registrar ERC-721 to the Graveyard
+  (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L112 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L114 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L115 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58).
+- *Unlocked wrapped `.eth` 2LD.* Resolver cleared, then unwrapped straight out
+  of NameWrapper into the Graveyard
+  (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L147 @ ens_v2@ccaeb58).
+- *Locked wrapped name.* ENSv1 ownership does not move: the NameWrapper stays the
+  registry owner and the name stays wrapped. Only the ERC-1155 moves to the
+  Graveyard, fuses intact, with no unwrap and no burn
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58),
+  so a wrapper adapter watching only transfers would keep calling the name
+  `wrapped` after it has migrated. The resolver is conditional, and the two
+  branches differ in whether ENSv1 is written at all. With `CANNOT_SET_RESOLVER`
+  unburned, migration clears the name's **ENSv1** resolver through the wrapper
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L135 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L136 @ ens_v2@ccaeb58),
+  which reaches the ENSv1 registry and emits `NewResolver(node, 0)`
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L670 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L93 @ ens_v1@91c966f)
+  — the one ENSv1 registry write a locked migration makes, and one an adapter
+  could easily mistake for an unrelated user action. With the fuse burned, ENSv1
+  is left untouched and the name's existing ENSv1 resolver is carried over as its
+  **ENSv2** resolver, swapped for the new `PublicResolver` when the carried-over
+  one is a recognized old `PublicResolver`
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L138 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L140 @ ens_v2@ccaeb58).
+- *Emancipated child.* Resolver cleared, then unwrapped into the Graveyard
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L177 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58).
+
+The deployment script's activation sequence also adds the Graveyard as an ENSv1
+registrar controller alongside `ETHRenewerV1`
 (upstream: .refs/ens_v2/contracts/script/setup.ts:L873 @ ens_v2@ccaeb58),
 which is what lets its permissionless `clear` entrypoint
 (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L99 @ ens_v2@ccaeb58)
-tidy leftover ENSv1 registry state.
-
-Two traps for an ENSv1 adapter. First, what happens to the NameWrapper position
-depends on the path: an unlocked wrapped 2LD is unwrapped into the Graveyard
-(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L147 @ ens_v2@ccaeb58),
-as is an emancipated child
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58),
-but a **locked** name stays wrapped — its ERC-1155 is transferred to the
-Graveyard with fuses intact and no unwrap or burn
-(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58),
-so a wrapper adapter watching only transfers would keep calling that name
-`wrapped` after it has migrated. Second, for a fully expired name `clear`
-self-claims it from the registrar with a duration chosen to pin expiry at
-`uint64` max minus the ENSv1 grace period
+tidy leftover ENSv1 registry state. One more trap there: for a fully expired
+name `clear` self-claims it from the registrar with a duration chosen to pin
+expiry at `uint64` max minus the ENSv1 grace period
 (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L164 @ ens_v2@ccaeb58),
 which surfaces as an ENSv1 `NameRegistered` naming the Graveyard as registrant
 with an absurdly distant expiry.
