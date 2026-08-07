@@ -242,9 +242,12 @@ impl Engine {
         sort_sources(&mut request.sources);
         self.enforce_source_floors(&request).await?;
         let (range_from, range_to) = request.redo_range.expect("redo range is present");
-        // Source start blocks clamp each window below; the batch window clamps to the range.
+        // Source start blocks clamp each window below; the batch window clamps to the
+        // range. A marker at i64::MAX has no successor: nothing remains, no window loads.
         let from = effective_redo_start(range_from, request.resume_current.as_ref(), 0);
-        let to = from.saturating_add(BLOCKS_PER_BATCH - 1).min(range_to);
+        let to = from.map_or(range_to, |from| {
+            from.saturating_add(BLOCKS_PER_BATCH - 1).min(range_to)
+        });
         let mut written_bytes = 0u64;
         let mut progress = Vec::with_capacity(request.sources.len());
 
@@ -254,9 +257,11 @@ impl Engine {
                 .resolver(&request.chain_id, source, &request.sources)
                 .await?;
             let source_target = resolve_marker(&resolver, source_target_number).await?;
-            let window_from = from.max(source.start_block);
-            let window_to = to.min(source_target_number);
-            let current = if window_from <= window_to {
+            let window =
+                from.map(|from| (from.max(source.start_block), to.min(source_target_number)));
+            let current = if let Some((window_from, window_to)) = window
+                && window_from <= window_to
+            {
                 let loaded = self
                     .load_window(
                         &request.chain_id,

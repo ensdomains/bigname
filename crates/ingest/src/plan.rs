@@ -115,10 +115,18 @@ pub fn target_number(source: &SourceDescriptor, heads: &HeadSnapshot) -> i64 {
     }
 }
 
-/// The block a resumed redo starts at: the floor is checked against exactly what executes.
-pub fn effective_redo_start(redo_from: i64, resume: Option<&Marker>, start_block: i64) -> i64 {
-    let resumed = resume.map_or(redo_from, |marker| marker.number.saturating_add(1));
-    redo_from.max(resumed).max(start_block)
+/// The block a resumed redo starts at, or `None` when the marker's successor
+/// overflows and nothing remains: the floor is checked against exactly what executes.
+pub fn effective_redo_start(
+    redo_from: i64,
+    resume: Option<&Marker>,
+    start_block: i64,
+) -> Option<i64> {
+    let resumed = match resume {
+        Some(marker) => marker.number.checked_add(1)?,
+        None => redo_from,
+    };
+    Some(redo_from.max(resumed).max(start_block))
 }
 
 pub fn redo_source_target(source: &SourceDescriptor, range_to: i64) -> i64 {

@@ -81,7 +81,7 @@ fn planned_range(
     let Some((from, to)) = redo_range else {
         return Some((source.start_block, None));
     };
-    let from = effective_redo_start(from, resume_current, source.start_block);
+    let from = effective_redo_start(from, resume_current, source.start_block)?;
     (from <= to).then_some((from, Some(to)))
 }
 

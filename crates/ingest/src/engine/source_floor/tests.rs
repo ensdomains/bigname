@@ -19,6 +19,8 @@ const RACE_CHAIN: &str = "ingest-floor-race";
 const RACE_BLOCK_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
 const RACE_ADDRESS: &str = "0x0000000000000000000000000000000000000002";
 const HEAD_BLOCK_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000003";
+const TOP_BLOCK_SELECTOR: &str = "0x7fffffffffffffff";
+const TOP_BLOCK_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000004";
 
 #[tokio::test]
 async fn a_range_below_the_node_floor_fails_the_phase_instead_of_completing() -> AnyResult<()> {
@@ -193,6 +195,59 @@ async fn an_out_of_range_resume_marker_fails_the_batch_before_any_network_use() 
 }
 
 #[tokio::test]
+async fn a_marker_at_the_top_of_the_block_space_completes_without_loading() -> AnyResult<()> {
+    let database = single_block_database("ingest_redo_resume_top").await?;
+    // The chain serves marker resolution only: a finished redo must not fetch a window.
+    let node = test_floors::pruning_node(0, 0);
+    let endpoint = single_block_chain_endpoint(node).await?;
+    let engine = Engine::new(database.pool().clone());
+
+    let outcome = engine
+        .run_batch(BatchRequest {
+            chain_id: RACE_CHAIN.to_owned(),
+            sources: vec![SourceDescriptor {
+                key: "redo-rpc".to_owned(),
+                kind: "rpc".to_owned(),
+                start_block: 0,
+                endpoint,
+            }],
+            cursors: Vec::new(),
+            redo_range: Some((i64::MAX, i64::MAX)),
+            resume_current: Some(Marker {
+                number: i64::MAX,
+                hash: TOP_BLOCK_HASH.to_owned(),
+            }),
+        })
+        .await?;
+
+    assert!(
+        outcome.complete,
+        "a marker at the inclusive range end completes the redo"
+    );
+    assert_eq!(
+        outcome.current.number,
+        i64::MAX,
+        "completion resolves the range-end marker"
+    );
+    assert_eq!(
+        outcome.estimated_write_bytes, 0,
+        "nothing was left to fetch"
+    );
+    assert!(
+        outcome
+            .sources
+            .iter()
+            .all(|source| source.current.as_ref() == Some(&source.target)),
+        "a complete redo marks every source at its target"
+    );
+    let recorded: i64 = sqlx::query_scalar("SELECT count(*) FROM chain_lineage")
+        .fetch_one(database.pool())
+        .await?;
+    assert_eq!(recorded, 0, "no window may load: nothing was left to read");
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn an_rpc_source_reports_no_floor() -> AnyResult<()> {
     let provider = ChainProvider::new("base-mainnet", "rpc", "https://rpc.example.com/")?;
 
@@ -330,6 +385,24 @@ fn a_resumed_redo_is_judged_on_what_it_has_left_to_read() {
         ),
         Some((V1_REGISTRY_START, Some(V1_REGISTRY_START + 200))),
         "a marker below the range still starts at the range start"
+    );
+}
+
+#[test]
+fn a_marker_at_the_top_of_the_block_space_plans_nothing() {
+    let top = Marker {
+        number: i64::MAX,
+        hash: TOP_BLOCK_HASH.to_owned(),
+    };
+
+    assert_eq!(
+        planned_range(
+            &source(PRUNED_DATADIR),
+            Some((i64::MAX, i64::MAX)),
+            Some(&top)
+        ),
+        None,
+        "a marker at i64::MAX has no successor, so nothing remains to plan"
     );
 }
 
@@ -523,8 +596,17 @@ fn respond(call: &Value) -> Value {
     })
 }
 
-/// Block 0, plus block 1 for callers that need a head above a stored ancestor.
+/// Block 0, plus block 1 for callers that need a head above a stored ancestor, and
+/// the top of the block space for a redo whose range ends there.
 fn block_json(selector: &str) -> Value {
+    if selector == TOP_BLOCK_SELECTOR {
+        return json!({
+            "hash": TOP_BLOCK_HASH,
+            "parentHash": HEAD_BLOCK_HASH,
+            "number": TOP_BLOCK_SELECTOR,
+            "timestamp": "0x66"
+        });
+    }
     let one =
         matches!(selector, "0x1" | "latest" | "safe" | "finalized") || selector == HEAD_BLOCK_HASH;
     if one {
