@@ -179,7 +179,8 @@ this endpoint:
   rows are deleted, which is the same removal `/v2/status` needs.
 - The runner records a chain's phase state when it initializes the chain, which
   is before that chain's first heartbeat. A staged startup therefore reports
-  `degraded` until every expected chain has started a phase.
+  `degraded` until every expected chain has written a heartbeat within the
+  configured max age, which is the same condition as the bullet above.
 
 When a chain is missing a heartbeat entirely, the reported `phase`,
 `started_at`, `heartbeat_at`, and `heartbeat_age_seconds` are null: there is no

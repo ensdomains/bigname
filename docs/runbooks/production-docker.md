@@ -58,8 +58,10 @@ the ledger is reconciled by hand. A migration that drops legacy
 maintenance window.
 
 Adding, editing, or deleting a covered interpreter input rotates the compiled
-interpreter content hash; `docs/storage.md` names what is covered. Do not mix
-new interpretation output with rows published under the old hash. For such a
+interpreter content hash; `docs/storage.md` names what is covered. Covered
+files are hashed whole, so editing a unit test that lives inside one rotates
+the hash as surely as changing its production code. Do not mix new
+interpretation output with rows published under the old hash. For such a
 release:
 
 1. stop the API and phase runner;

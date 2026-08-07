@@ -460,6 +460,7 @@ async fn v2_lookup_ignores_invalid_phase_primary_claim() -> Result<()> {
         "60",
         bigname_storage::PrimaryNameClaimStatus::InvalidName,
         Some("bad name.eth"),
+        false,
     )
     .await?;
 
@@ -914,6 +915,99 @@ async fn v2_lookup_serves_reverse_pagination_after_unrelated_head_advance() -> R
 }
 
 #[tokio::test]
+async fn v2_lookup_reverse_serves_the_batch_when_a_primary_claim_no_longer_normalizes()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    // A successful claim whose stored spelling does not normalize is one row's defect. The batched
+    // reverse read must still answer, marking nothing primary, rather than failing every input.
+    seed_phase_primary_name_snapshot(
+        &database,
+        address,
+        "ens",
+        "60",
+        bigname_storage::PrimaryNameClaimStatus::Success,
+        Some("alice..eth"),
+        false,
+    )
+    .await?;
+
+    let payload = v2_lookup_json(&database, json!({"inputs": [{"address": address}]})).await?;
+
+    assert_eq!(payload["data"][0]["status"], json!("ok"));
+    let records = payload["data"][0]["records"]
+        .as_array()
+        .expect("reverse lookup records must be an array");
+    assert!(!records.is_empty());
+    assert!(records.iter().all(|record| record["is_primary"] == json!(false)));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_lookup_reverse_orders_pages_by_the_is_primary_it_returns() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    // The marker says these stored bytes are the published normalized form, so they are served
+    // unchanged and no longer equal the current name row. Paging orders by `is_primary`, so the
+    // ordering predicate and the emitted flag have to be derived the same way. The claim names the
+    // second row in name order, so a re-normalizing ordering would sort it first and the keyset
+    // predicate — built from the emitted flag — would then skip the first row entirely.
+    seed_phase_primary_name_snapshot(
+        &database,
+        address,
+        "ens",
+        "60",
+        bigname_storage::PrimaryNameClaimStatus::Success,
+        Some("Bob.eth"),
+        true,
+    )
+    .await?;
+
+    let mut seen = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..3 {
+        let mut input = json!({"id": "addr", "address": address, "page_size": 1});
+        if let Some(cursor) = cursor.as_deref() {
+            input["cursor"] = json!(cursor);
+        }
+        let payload = v2_lookup_json(
+            &database,
+            json!({"profile": "detail", "inputs": [input]}),
+        )
+        .await?;
+        let records = payload["data"][0]["records"]
+            .as_array()
+            .expect("reverse lookup records must be an array");
+        for record in records {
+            assert_eq!(
+                record["is_primary"],
+                json!(false),
+                "a claim served in its stored spelling must not mark the normalized name primary"
+            );
+            seen.push(
+                record["name"]
+                    .as_str()
+                    .expect("record name must be a string")
+                    .to_owned(),
+            );
+        }
+        match payload["data"][0]["page"]["next_cursor"].as_str() {
+            Some(next) => cursor = Some(next.to_owned()),
+            None => break,
+        }
+    }
+
+    assert_eq!(seen, vec!["alice.eth".to_owned(), "bob.eth".to_owned()]);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_lookup_reverse_page_and_count_include_primary_when_matching_relation_is_unreadable()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -996,6 +1090,7 @@ async fn v2_lookup_reverse_page_and_count_include_primary_when_matching_relation
         "60",
         bigname_storage::PrimaryNameClaimStatus::Success,
         Some(normalized_name),
+        true,
     )
     .await?;
     seed_v2_lookup_base_head(&database).await?;
@@ -1669,6 +1764,7 @@ async fn seed_v2_lookup_reverse_fixture(database: &TestDatabase, address: &str) 
         "60",
         bigname_storage::PrimaryNameClaimStatus::Success,
         Some("alice.eth"),
+        true,
     )
     .await?;
     seed_v2_lookup_base_head(database).await?;

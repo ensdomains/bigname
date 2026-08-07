@@ -80,14 +80,14 @@ pub(super) async fn load_reverse_identity_page_rows(
             FROM (
                 SELECT anc.logical_name_id,
                        bool_or(COALESCE(
-                           lower(requested.primary_names ->> anc.namespace) = lower(anc.raw_name),
+                           requested.primary_names ->> anc.namespace = lower(anc.raw_name),
                            false
                        )) AS is_primary,
                        min(CASE
                            WHEN anc.relation IN ('registrant', 'token_holder') THEN 0
                            ELSE 1
                        END)::SMALLINT AS role_rank,
-                       anc.raw_name AS normalized_name,
+                       lower(anc.raw_name) AS normalized_name,
                        anc.namespace,
                        anc.namehash
                 FROM readable_relations anc
@@ -101,7 +101,8 @@ pub(super) async fn load_reverse_identity_page_rows(
                       OR (requested.roles = 'managed'
                           AND anc.relation = 'effective_controller')
                   )
-                GROUP BY anc.logical_name_id, anc.raw_name, anc.namespace, anc.namehash
+                GROUP BY anc.logical_name_id, lower(anc.raw_name), anc.namespace,
+                         anc.namehash
             ) grouped
             WHERE NOT requested.cursor_present
                OR (
@@ -177,7 +178,7 @@ async fn load_normalized_primary_names(
                 AS requested(input_index, address, coin_type)
         )
         SELECT requested.input_index, primary_name.namespace,
-               primary_name.raw_claim_name
+               primary_name.raw_claim_name, primary_name.claim_name_is_normalized
         FROM requested
         JOIN bigname_phase.primary_names_current primary_name
           ON lower(primary_name.address) = lower(requested.address)
@@ -209,9 +210,17 @@ async fn load_normalized_primary_names(
         let input_index = row.try_get::<i32, _>("input_index")? as usize;
         let namespace: String = row.try_get("namespace")?;
         let raw_name: String = row.try_get("raw_claim_name")?;
-        let normalized = bigname_domain::normalization::normalize_name(&raw_name)
-            .with_context(|| format!("successful phase primary name {raw_name} is invalid"))?;
-        by_input[input_index].insert(namespace, Value::String(normalized.normalized_name));
+        // Same derivation the emitted `is_primary` uses, so the ordering and keyset predicate this
+        // map feeds cannot disagree with the flag the response carries. A claim that yields no
+        // normalized name marks nothing primary instead of failing the batch.
+        let Some(normalized) = bigname_storage::normalized_claim_name(
+            bigname_storage::PrimaryNameClaimStatus::Success,
+            row.try_get("claim_name_is_normalized")?,
+            Some(&raw_name),
+        ) else {
+            continue;
+        };
+        by_input[input_index].insert(namespace, Value::String(normalized));
     }
     Ok(by_input.into_iter().map(Value::Object).collect())
 }

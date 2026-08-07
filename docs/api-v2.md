@@ -516,7 +516,8 @@ deliberately narrows earlier behavior, which listed unsupported names and left
 the caller to read the reason; per-name unsupported detail now lives on the
 name-shaped routes and diagnostics, which read the row directly.
 `GET /v2/addresses/{address}/names` is the exception and is unchanged: it lists
-unsupported rows and carries the reason in each row's `coverage`.
+unsupported rows. It does not carry a per-row reason; read the reason from the
+name-shaped routes or diagnostics for the name in question.
 
 ## Error Model
 

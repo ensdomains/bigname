@@ -564,7 +564,9 @@ Field ownership:
   to that source for single-source callers; every indexed entry comes from
   `bigname_phase.primary_names_current`, regardless of source selection. A
   successful stored raw claim is normalized for the indexed product name even
-  when its raw spelling was not already normalized. `verification` is
+  when its raw spelling was not already normalized, unless the projection
+  already recorded that spelling as its normalized form, in which case the
+  stored spelling is published unchanged. `verification` is
   `{status, name?, unsupported_reason?, failure_reason?}` and appears when the
   fresh lookup produces a verification outcome. As an explicit exception,
   it also appears when the request includes the `verified` source and the
@@ -596,7 +598,11 @@ Field ownership:
   failures abort the request with `500 internal_error`; they are not verified
   answer entries with `status=stale`.
 - Status semantics: answer entries use in-band `status`. Valid tuples with no
-  indexed claim return an `indexed` entry with `status=not_found`. Unsupported,
+  indexed claim return an `indexed` entry with `status=not_found`. A stored
+  successful claim whose spelling does not normalize returns an `indexed` entry
+  with `status=invalid_name` and `raw_claim_name`, the same answer the
+  projection's own `invalid_name` classification produces; that row marks no
+  name primary on the address-name and reverse-lookup collections. Unsupported,
   not-found, failed, and mismatched verified outcomes return `200` with the
   corresponding `verified` entry status. When the requested output includes the
   verified source, a successful live claim whose raw spelling

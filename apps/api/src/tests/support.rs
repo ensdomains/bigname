@@ -3915,6 +3915,7 @@ async fn seed_phase_primary_name_snapshot(
     coin_type: &str,
     claim_status: bigname_storage::PrimaryNameClaimStatus,
     raw_claim_name: Option<&str>,
+    claim_name_is_normalized: bool,
 ) -> Result<()> {
     let chain_id = if namespace == "basenames" {
         "base-mainnet"
@@ -3960,7 +3961,7 @@ async fn seed_phase_primary_name_snapshot(
     .bind(namespace)
     .bind(status)
     .bind(raw_claim_name)
-    .bind(status == "success")
+    .bind(claim_name_is_normalized)
     .bind(unsupported_reason)
     .bind(claim_provenance)
     .execute(&database.lookup_pool)
