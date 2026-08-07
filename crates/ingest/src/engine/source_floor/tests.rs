@@ -153,12 +153,13 @@ async fn a_live_suffix_below_the_floor_is_refused_before_it_is_loaded() -> AnyRe
 }
 
 #[tokio::test]
-async fn a_resume_marker_outside_the_redo_range_fails_the_batch_before_any_work() -> AnyResult<()> {
+async fn an_out_of_range_resume_marker_fails_the_batch_before_any_network_use() -> AnyResult<()> {
     let database = single_block_database("ingest_redo_resume_refused").await?;
     let engine = Engine::new(database.pool().clone());
 
-    // The endpoint is unroutable on purpose: validation must refuse the batch before
-    // any provider is built or window is fetched.
+    // The endpoint is unroutable on purpose: the refusal must reach the caller before
+    // any provider network use. Planning is side-effect-free — an RPC floor read
+    // answers None without network — so the first resolve is the earliest touch.
     let error = engine
         .run_batch(BatchRequest {
             chain_id: RACE_CHAIN.to_owned(),
