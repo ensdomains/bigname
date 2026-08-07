@@ -16,12 +16,13 @@ use super::{
 
 /// Registry events prove a child node and its labelhash but not the label itself, so Project
 /// writes the name columns null until a preimage arrives, and stores raw bytes with no decoded
-/// form for a preimage that does not decode. The three arms answer in that order — the decoded
-/// name, the escape-encoded raw bytes, and the documented
-/// `[<labelhash-without-0x>].<parent-name>` placeholder — so no arm puts a null into a mandatory
-/// field. The escape arm re-encodes the whole stored string, parent portion included; the
-/// placeholder arm concatenates the parent's stored spelling here, and that spelling is empty
-/// only for the zero-label root surface, since a parent whose own labels do not decode is written
+/// form for a preimage that does not decode. The arms answer in that order: the decoded name,
+/// the escape-encoded raw bytes, and the documented `[<labelhash-without-0x>].<parent-name>`
+/// placeholder. The first two are null exactly when Project had nothing to write; the placeholder
+/// is total, which is what keeps a null out of a mandatory field. The escape arm re-encodes the
+/// whole stored string, so a non-ASCII parent portion is octal-escaped too; only the placeholder
+/// carries the parent's stored spelling verbatim. That spelling is empty only for the zero-label
+/// root surface, since a parent whose own labels do not decode is written
 /// `visibility_state = 'shadow'` and both children projection arms admit active parents only. No
 /// route can address the empty name, so the trailing-dot string that root would produce never
 /// reaches a served page.

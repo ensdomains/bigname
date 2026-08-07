@@ -556,7 +556,7 @@ Additive expansion, not a separate route. Adds `role_summary` (one `subjects[*]`
 
 ### Name → children
 
-Default returns declared direct child nodes. ENSv1 and Basenames registry edges whose parent surface is active remain children even when bigname cannot state the child's name; those rows carry a [non-name form](glossary.md#non-name-form) — the bracketed labelhash placeholder when the label was never observed, or the escape encoding of the whole stored name when the label was observed as bytes that do not decode — rather than minting exact-name surfaces. The ENSv2 arm joins the child's own surface instead, so a child whose label is not admitted is absent rather than named by a stand-in. Optional buckets: linked-subregistry, alias-derived, observed wildcard. `subname_count` in the main name summary means declared direct children only.
+Default returns declared direct child nodes. ENSv1 and Basenames registry edges whose parent surface is active remain children even when bigname cannot state the child's name; those rows carry a [non-name form](glossary.md#non-name-form) — the bracketed labelhash placeholder when the label was never observed, or the escape encoding of the whole stored name when the label was observed as bytes that do not decode — rather than minting exact-name surfaces. The ENSv2 arm additionally joins the child's own name surface, so a child without an active surface — label never observed, or rejected by the normalization gate — is absent there rather than named by a stand-in. Optional buckets: linked-subregistry, alias-derived, observed wildcard. `subname_count` in the main name summary means declared direct children only.
 
 ### Resource → permissions
 

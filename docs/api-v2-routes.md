@@ -380,7 +380,9 @@ Field ownership:
   — a label really spelled `[<64 hex digits>].<parent>`, or really spelled like
   escape output such as `\377bad`, produces the same string — so distinguish
   rows by `namehash` and `labelhash` rather than by parsing the served text.
-  Neither form is addressable, and neither may be fed
+  Both forms come from ENSv1 and Basenames registry edges; an ENSv2 child
+  bigname cannot name is absent from the page instead. Neither form is
+  addressable, and neither may be fed
   back into a name-shaped route. Resolver records are not included here;
   use `GET /v2/names/{name}/records` for `resolver`, `addresses`,
   `text_records`, and `content_hash`.
