@@ -22,8 +22,9 @@ bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The 
   events. Adapters provide interpretation behavior and do not write projection
   rows.
 - API code reads phase projections, normalized events, and request-scoped lookup
-  output only, except explicit audit endpoints and the schema-v2 lookup engine's guarded [resolution
-  divergence ledger](docs/glossary.md#resolution-divergence-ledger) write.
+  output only, except explicit audit endpoints and the schema-v2 lookup engine's
+  guarded [resolution divergence
+  ledger](docs/glossary.md#resolution-divergence-ledger) write.
   Provider responses are request-scoped: serving paths never persist them as
   reusable outcomes or as a durable step-by-step record of the calls made.
 - Lookup code uses declared topology and manifests, not adapter internals.

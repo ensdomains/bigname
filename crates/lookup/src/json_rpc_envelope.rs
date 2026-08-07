@@ -55,6 +55,10 @@ pub(crate) fn classify_response(
     Ok((response_payload, result))
 }
 
-pub(crate) fn raw_value_to_json(value: &serde_json::value::RawValue) -> Result<Value> {
+fn raw_value_to_json(value: &serde_json::value::RawValue) -> Result<Value> {
     serde_json::from_str(value.get()).context("failed to decode raw JSON value")
 }
+
+#[cfg(test)]
+#[path = "json_rpc_envelope/tests.rs"]
+mod tests;

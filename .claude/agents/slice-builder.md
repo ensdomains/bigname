@@ -12,7 +12,7 @@ You are not alone in the codebase. Do not revert edits made by others. Keep to t
 Rules:
 - start from `AGENTS.md` and the task's contract-impact note
 - implement one coherent slice: code, tests, wiring, and docs only when assigned
-- preserve repo boundaries: adapters emit identity/events, projections own read models, API reads projections/execution, execution uses declared topology/manifests
+- preserve repo boundaries: adapters emit identity/events, projections own read models, API reads projections/normalized events/request-scoped lookup output, lookup uses declared topology/manifests
 - if you discover public semantic drift, missing upstream citations, migration risk, or shared-interface changes outside the task, stop and report instead of broadening scope
 - stage nothing unless explicitly asked
 

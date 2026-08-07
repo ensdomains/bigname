@@ -108,8 +108,11 @@ verified label preimage when one exists and leaves every name column null when
 none does — the labelhash and child node are proven, the label is not. Reads
 name such a child by the recognizable placeholder
 `[<labelhash-without-0x>].<parent-name>`, built from the parent's stored
-spelling, and lower-case it for the normalized form. A preimage improves
-readability but does not create ownership or exact-name authority. ENSv2 direct and linked
+spelling, and lower-case it for the normalized form. A preimage whose label
+bytes are not valid UTF-8 is a third state: Project stores the raw bytes with
+no decoded form, and reads escape-encode them. Neither shape is an addressable
+name. A preimage improves readability but does not create ownership or
+exact-name authority. ENSv2 direct and linked
 children derive from admitted graph events rather than token enumeration.[^v1-registry-l45][^v1-registry-l82][^v2-events-l49][^v2-events-l75]
 
 ## History
