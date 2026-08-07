@@ -9,6 +9,10 @@ license.workspace = true
 name = "schema_v2_interpreter_fixtures"
 required-features = ["schema-v2"]
 
+[[test]]
+name = "schema_v2_permutation_lane"
+required-features = ["schema-v2"]
+
 [features]
 default = ["schema-v2"]
 schema-v2 = [

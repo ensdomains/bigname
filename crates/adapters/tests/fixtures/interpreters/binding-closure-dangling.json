@@ -1,0 +1,185 @@
+{
+  "case": {
+    "id": "ens_v1_production_lease_release_binding_fk-same-transaction-setup",
+    "runner": "unwrapped_authority",
+    "upstream_citations": [
+      "(upstream: .refs/ens_subgraph/subgraph.yaml:L141 @ ens_subgraph@723f1b6)",
+      "(upstream: .refs/ens_subgraph/subgraph.yaml:L166 @ ens_subgraph@723f1b6)",
+      "(upstream: .refs/ens_v1/contracts/registry/ENS.sol:L6 @ ens_v1@91c966f)",
+      "(upstream: .refs/ens_v1/contracts/registry/ENS.sol:L9 @ ens_v1@91c966f)",
+      "(upstream: .refs/ens_subgraph/subgraph.yaml:L162 @ ens_subgraph@723f1b6)"
+    ],
+    "manifests": [
+      {
+        "namespace": "ens",
+        "source_family": "ens_v1_registrar_l1",
+        "chain": "ethereum-mainnet",
+        "deployment_epoch": "ens_v1",
+        "file_path": "manifests/mainnet/ethereum/ens/ens_v1_registrar_l1/v1.toml",
+        "role": "legacy_registrar_controller",
+        "address": "0x283af0b28c62c092c9727f1ee09c02ca627eb7f5",
+        "contract_instance_id": "00000000-0000-0000-0000-000000000071"
+      },
+      {
+        "namespace": "ens",
+        "source_family": "ens_v1_registrar_l1",
+        "chain": "ethereum-mainnet",
+        "deployment_epoch": "ens_v1",
+        "file_path": "manifests/mainnet/ethereum/ens/ens_v1_registrar_l1/v1.toml",
+        "role": "registrar",
+        "address": "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85",
+        "contract_instance_id": "00000000-0000-0000-0000-000000000072"
+      },
+      {
+        "namespace": "ens",
+        "source_family": "ens_v1_registry_l1",
+        "chain": "ethereum-mainnet",
+        "deployment_epoch": "ens_v1",
+        "file_path": "manifests/mainnet/ethereum/ens/ens_v1_registry_l1/v3.toml",
+        "role": "registry",
+        "address": "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e",
+        "contract_instance_id": "00000000-0000-0000-0000-000000000073"
+      }
+    ],
+    "blocks": [
+      {
+        "hash": "0x11e70bab4f9b74d3165e082545cf07423774bfee75e9ccb101318b061148b3d9",
+        "number": 15504055,
+        "timestamp": 1662745602
+      },
+      {
+        "hash": "0x6c918736b272d9c72ee1246e8b26956b580b58257077e2a3835500485cc2403f",
+        "number": 15504660,
+        "timestamp": 1662754051
+      },
+      {
+        "hash": "0xd4437baeb1001a11ac3df60871c209725463b0bc6edf0aaf1cc30145637d7ba1",
+        "number": 15504679,
+        "timestamp": 1662754282
+      },
+      {
+        "hash": "0x0bbb11cf23443b094e4587e50d3c973d4beffa005869980f5a0e69b5c4b3a889",
+        "number": 16176355,
+        "timestamp": 1670941511
+      }
+    ],
+    "logs": [
+      {
+        "chain": "ethereum-mainnet",
+        "block_hash": "0x11e70bab4f9b74d3165e082545cf07423774bfee75e9ccb101318b061148b3d9",
+        "block_number": 15504055,
+        "transaction_hash": "0xce18f592ef68bc7e83323a21fae663572cca3011f59907f514e5e96bd80cc9e7",
+        "transaction_index": 40,
+        "log_index": 101,
+        "emitting_address": "0x283af0b28c62c092c9727f1ee09c02ca627eb7f5",
+        "topics": [
+          "0x3da24c024582931cfaf8267d8ed24d13a82a8068d5bd337d30ec45cea4e506ae",
+          "0x52882124921cf68fc2f44eced602af312cb8a2ef8c4f8df59d5a8fbc7861d369"
+        ],
+        "data": "0x000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000ef0396e8215f0d000000000000000000000000000000000000000000000000000000006321e43c00000000000000000000000000000000000000000000000000000000000000037075790000000000000000000000000000000000000000000000000000000000"
+      },
+      {
+        "chain": "ethereum-mainnet",
+        "block_hash": "0x6c918736b272d9c72ee1246e8b26956b580b58257077e2a3835500485cc2403f",
+        "block_number": 15504660,
+        "transaction_hash": "0x449bb492d7682a1f4f4d05d420975846e8abcc1af32110206c8a6cd5fbbfb637",
+        "transaction_index": 215,
+        "log_index": 453,
+        "emitting_address": "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85",
+        "topics": [
+          "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+          "0x000000000000000000000000668f386b1780a757fde264eaefd7877c263cae2c",
+          "0x0000000000000000000000009ebfb53fa8526906738856848a27cb11b0285c3f",
+          "0x52882124921cf68fc2f44eced602af312cb8a2ef8c4f8df59d5a8fbc7861d369"
+        ],
+        "data": "0x"
+      },
+      {
+        "chain": "ethereum-mainnet",
+        "block_hash": "0x6c918736b272d9c72ee1246e8b26956b580b58257077e2a3835500485cc2403f",
+        "block_number": 15504660,
+        "transaction_hash": "0x449bb492d7682a1f4f4d05d420975846e8abcc1af32110206c8a6cd5fbbfb637",
+        "transaction_index": 215,
+        "log_index": 456,
+        "emitting_address": "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85",
+        "topics": [
+          "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+          "0x0000000000000000000000009ebfb53fa8526906738856848a27cb11b0285c3f",
+          "0x000000000000000000000000ad25744f626d59079e7788617daa87e68486debe",
+          "0x52882124921cf68fc2f44eced602af312cb8a2ef8c4f8df59d5a8fbc7861d369"
+        ],
+        "data": "0x"
+      },
+      {
+        "chain": "ethereum-mainnet",
+        "block_hash": "0xd4437baeb1001a11ac3df60871c209725463b0bc6edf0aaf1cc30145637d7ba1",
+        "block_number": 15504679,
+        "transaction_hash": "0xfe1a7340deaa97f04a39f6d57c70a568186475684508c3331cd334f0a5180406",
+        "transaction_index": 53,
+        "log_index": 71,
+        "emitting_address": "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e",
+        "topics": [
+          "0xce0457fe73731f824cc272376169235128c118b49d344817417c6d108d155e82",
+          "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae",
+          "0x52882124921cf68fc2f44eced602af312cb8a2ef8c4f8df59d5a8fbc7861d369"
+        ],
+        "data": "0x000000000000000000000000ad25744f626d59079e7788617daa87e68486debe"
+      },
+      {
+        "chain": "ethereum-mainnet",
+        "block_hash": "0x0bbb11cf23443b094e4587e50d3c973d4beffa005869980f5a0e69b5c4b3a889",
+        "block_number": 16176355,
+        "transaction_hash": "0xd3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3",
+        "transaction_index": 0,
+        "log_index": 0,
+        "emitting_address": "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e",
+        "topics": [
+          "0xd4735d920b0f87494915f556dd9b54c8f309026070caea5c737245152564d266",
+          "0x4e170399560e4ac2aa15f173565ddd572f7dc55acc67304d8dfcd81f97c45e02"
+        ],
+        "data": "0x0000000000000000000000001111111111111111111111111111111111111111"
+      },
+      {
+        "chain": "ethereum-mainnet",
+        "block_hash": "0x0bbb11cf23443b094e4587e50d3c973d4beffa005869980f5a0e69b5c4b3a889",
+        "block_number": 16176355,
+        "transaction_hash": "0xd3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3",
+        "transaction_index": 0,
+        "log_index": 1,
+        "emitting_address": "0x283af0b28c62c092c9727f1ee09c02ca627eb7f5",
+        "topics": [
+          "0xca6abbe9d7f11422cb6ca7629fbf6fe9efb1c621f71ce8f02b9f2a230097404f",
+          "0x52882124921cf68fc2f44eced602af312cb8a2ef8c4f8df59d5a8fbc7861d369",
+          "0x0000000000000000000000002222222222222222222222222222222222222222"
+        ],
+        "data": "0x000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000ef0396e8215f0d00000000000000000000000000000000000000000000000000000000713fb30000000000000000000000000000000000000000000000000000000000000000037075790000000000000000000000000000000000000000000000000000000000"
+      }
+    ],
+    "synthetic_logs": "The two logs in transaction 0xd3d3... are hand-built, not production: a registry Transfer and a legacy-controller NameRegistered placed in the release block. A real registration also emits the registrar's ERC721 Transfer and a registry NewOwner in that transaction (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f); they are omitted because the defect needs only a registry-family event at (block, 0, 0) with a log index below the registration's. Every other log, block hash and timestamp is production."
+  },
+  "batches": [
+    {
+      "from_block": 15504055,
+      "to_block": 15504055
+    },
+    {
+      "from_block": 15504660,
+      "to_block": 15504660
+    },
+    {
+      "from_block": 15504679,
+      "to_block": 15504679
+    },
+    {
+      "from_block": 16176355,
+      "to_block": 16176355
+    }
+  ],
+  "expected": {
+    "logical_name_id": "ens:0x4e170399560e4ac2aa15f173565ddd572f7dc55acc67304d8dfcd81f97c45e02",
+    "resource_id": "ed884e02-7154-575e-a285-dc5e1dbc0335",
+    "surface_binding_id": "3bca4aa0-41f1-5769-913e-f220d6203e3a",
+    "release_block_number": 16176355,
+    "surface_binding_id_note": "The binding the release boundary derives. In the base fixture the release opens it; here same-transaction reconciliation drops it and the boundary closure is left exempting it. Its id is stable across both because it hashes the registry-only authority key and the block hash."
+  }
+}
