@@ -375,8 +375,7 @@ async fn load_identity_primary_name_snapshots(
                 claim_status,
                 row.try_get("claim_name_is_normalized")?,
                 raw_claim_name.as_deref(),
-            )
-            .with_context(|| format!("phase primary-name row {address}:{namespace}:{coin_type}"))?;
+            );
             let snapshot = IdentityPrimaryNameSnapshot {
                 address: address.clone(),
                 namespace: namespace.clone(),

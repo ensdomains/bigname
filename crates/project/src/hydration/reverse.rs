@@ -14,9 +14,12 @@ use crate::{Marker, ProjectError, Result};
 const BATCH_SIZE: usize = 250;
 
 /// ENSv1 reverse resolvers that answer `name()` without emitting a record event, so the claim can
-/// only be learned by calling them. This list selects which reverse claims get hydrated and
-/// therefore which `primary_names_current` rows exist, so it lives inside the interpreter
-/// content hash's watched roots rather than in a serving crate.
+/// only be learned by calling them. The reference indexer records the same for this deployment
+/// (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L311 @ ensnode@2017ae6)
+/// (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L316 @ ensnode@2017ae6).
+/// This list selects which reverse claims get hydrated and therefore which
+/// `primary_names_current` rows exist, so it lives inside the interpreter content hash's watched
+/// roots rather than in a serving crate.
 const EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES: &[&str] =
     &["0xa2c122be93b0074270ebee7f6b7292c7deb45047"];
 

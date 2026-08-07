@@ -221,17 +221,26 @@ fn build_indexed_answer(lookup_state: &PrimaryNameLookupState) -> PrimaryNameAns
             PrimaryNameAnswer::new(Source::Indexed, Status::NotFound)
         }
         PrimaryNameTupleState::TuplePresent(row) => {
+            // A stored successful claim whose spelling no longer normalizes is reported with the
+            // `invalid_name` vocabulary the projection would assign, not as a name-less `ok`.
+            let claim_status = if row.claim_status == PrimaryNameClaimStatus::Success
+                && lookup_state.normalized_claim_name.is_none()
+            {
+                PrimaryNameClaimStatus::InvalidName
+            } else {
+                row.claim_status
+            };
             let mut answer =
-                PrimaryNameAnswer::new(Source::Indexed, claim_status_to_v2(row.claim_status));
-            if row.claim_status == PrimaryNameClaimStatus::Success
+                PrimaryNameAnswer::new(Source::Indexed, claim_status_to_v2(claim_status));
+            if claim_status == PrimaryNameClaimStatus::Success
                 && let Some(name) = lookup_state.normalized_claim_name.as_deref()
             {
                 answer.name = Some(name.to_owned());
             }
-            if row.claim_status == PrimaryNameClaimStatus::InvalidName {
+            if claim_status == PrimaryNameClaimStatus::InvalidName {
                 answer.raw_claim_name = row.raw_claim_name.clone();
             }
-            if row.claim_status == PrimaryNameClaimStatus::Unsupported {
+            if claim_status == PrimaryNameClaimStatus::Unsupported {
                 answer.unsupported_reason = Some(
                     "indexed primary-name claim is not supported for the requested tuple"
                         .to_owned(),

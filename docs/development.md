@@ -177,3 +177,10 @@ this endpoint:
 - Nothing removes a chain from the expected set on its own. A decommissioned
   chain keeps `stale` latched until its `chain_heads` and `chain_phase_state`
   rows are deleted, which is the same removal `/v2/status` needs.
+- The runner records a chain's phase state when it initializes the chain, which
+  is before that chain's first heartbeat. A staged startup therefore reports
+  `degraded` until every expected chain has started a phase.
+
+When a chain is missing a heartbeat entirely, the reported `phase`,
+`started_at`, `heartbeat_at`, and `heartbeat_age_seconds` are null: there is no
+row to describe, and the freshest other chain's row would misreport the fault.

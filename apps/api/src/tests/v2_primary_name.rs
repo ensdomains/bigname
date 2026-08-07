@@ -348,6 +348,51 @@ async fn v2_get_primary_name_normalizes_schema_v2_successful_claim() -> Result<(
 }
 
 #[tokio::test]
+async fn v2_get_primary_name_reports_an_unnormalizable_stored_claim_as_invalid_name() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_005,
+                "block_hash": "0xprimary-unnormalizable",
+                "timestamp": "2026-04-17T00:00:05Z"
+            }
+        }))
+        .await?;
+    // The projection classifies an unnormalizable claim `invalid_name`, so a stored `success` row
+    // that no longer normalizes is only reachable mid-normalizer-revision. Report it with the same
+    // vocabulary rather than a name-less `ok` or a failed read.
+    seed_schema_v2_primary_name_claim(
+        &database.lookup_pool,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        "ens",
+        "60",
+        "taytems..eth",
+        false,
+    )
+    .await?;
+
+    let payload = v2_primary_name_payload_for_database(
+        &database,
+        &format!(
+            "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
+        ),
+    )
+    .await?;
+    assert_eq!(
+        payload["data"]["answers"],
+        json!([{
+            "source": "indexed",
+            "status": "invalid_name",
+            "raw_claim_name": "taytems..eth"
+        }])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_primary_name_publishes_an_already_normalized_claim_as_stored() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database

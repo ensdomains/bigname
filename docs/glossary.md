@@ -694,8 +694,9 @@ facts.
 kept as audit input; internal invalidation and reorg-repair machinery still
 consumes them. Readability is a statement about block canonicality only, not
 about support: a readable row may still carry an unsupported support status,
-and routes that additionally require supported rows say so. Reverse address
-results are one such route ([api-v2.md](api-v2.md#cursors-and-pagination)).
+and routes that additionally require supported rows say so. `POST /v2/lookup`
+reverse address results are one such route
+([api-v2.md](api-v2.md#cursors-and-pagination)).
 
 **Reserved surface** — a schema value, enum variant, or documented field that
 the system accepts and can render but that no code path ever produces. It

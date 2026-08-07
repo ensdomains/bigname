@@ -139,6 +139,25 @@ async fn v2_search_escapes_like_metacharacters() -> Result<()> {
         v2_search_payload_for_database(&database, "/v2/search?q=al%25&namespace=ens").await?;
     assert_eq!(percent["data"], json!([]));
 
+    // `contains` builds its own pattern, so it needs the same escaping. `_und` unescaped would
+    // also match `bunder.eth`.
+    let contains = v2_search_payload_for_database(
+        &database,
+        "/v2/search?q=_und&namespace=ens&match=contains",
+    )
+    .await?;
+    assert_eq!(
+        v2_search_names(contains["data"].as_array().expect("contains data")),
+        vec!["_under.eth"]
+    );
+
+    let contains_percent = v2_search_payload_for_database(
+        &database,
+        "/v2/search?q=al%25&namespace=ens&match=contains",
+    )
+    .await?;
+    assert_eq!(contains_percent["data"], json!([]));
+
     database.cleanup().await
 }
 

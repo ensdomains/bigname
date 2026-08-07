@@ -57,9 +57,10 @@ the ledger is reconciled by hand. A migration that drops legacy
 `public`-schema tables is destructive and additionally requires an explicit
 maintenance window.
 
-Deleting interpreter inputs rotates the compiled interpreter content hash. Do
-not mix new interpretation output with rows published under the old hash. For
-such a release:
+Adding, editing, or deleting a covered interpreter input rotates the compiled
+interpreter content hash; `docs/storage.md` names what is covered. Do not mix
+new interpretation output with rows published under the old hash. For such a
+release:
 
 1. stop the API and phase runner;
 2. take and verify a database backup;

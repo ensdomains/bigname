@@ -192,6 +192,49 @@ async fn v2_get_address_names_marks_primary_for_a_successful_non_normalized_clai
 }
 
 #[tokio::test]
+async fn v2_get_address_names_serves_the_page_when_a_primary_claim_no_longer_normalizes()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    // A successful claim whose stored spelling does not normalize is only reachable while a
+    // normalizer revision is mid-re-derivation. It is one row's defect: the page still serves and
+    // no row claims to be primary.
+    upsert_primary_name_current_snapshots(
+        &database.pool,
+        &[PrimaryNameCurrentSnapshot {
+            row: PrimaryNameCurrentRow {
+                address: V2_ADDRESS.to_owned(),
+                namespace: "ens".to_owned(),
+                coin_type: "60".to_owned(),
+                claim_status: PrimaryNameClaimStatus::Success,
+                raw_claim_name: Some("alpha..eth".to_owned()),
+                claim_provenance: json!({
+                    "source_family": "ens_v1_reverse_l1",
+                    "contract_role": "reverse_registrar",
+                }),
+            },
+            normalized_claim_name: None,
+            claim_name_is_normalized: false,
+        }],
+    )
+    .await?;
+
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v2/addresses/{V2_ADDRESS}/names"),
+    )
+    .await?;
+    let rows = payload["data"]
+        .as_array()
+        .expect("address names data must be an array");
+    assert!(!rows.is_empty());
+    assert!(rows.iter().all(|row| row["is_primary"] == json!(false)));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_address_names_non_success_primary_claim_does_not_mark_primary() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
