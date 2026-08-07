@@ -19,17 +19,23 @@ use super::{
 /// form for a preimage that does not decode. The three arms answer in that order: the decoded
 /// name, the escape-encoded raw bytes, and the documented
 /// `[<labelhash-without-0x>].<parent-name>` placeholder — never a null into a mandatory field.
-/// The parent name comes from a subquery so the expression holds on the audit path too, which
-/// omits the identity joins.
+/// The parent portion is the parent's stored spelling verbatim, which is itself empty when no
+/// label of the parent decoded; that parent cannot be addressed by name, so the shape is
+/// unreachable from the subnames route and only the audit read can observe it.
 const CHILD_DISPLAY_NAME_EXPR: &str = r#"COALESCE(
     cc.decoded_name,
     encode(cc.raw_name, 'escape'),
-    '[' || substring(lower(cc.labelhash) FROM 3) || '].' || (
-        SELECT parent_surface.raw_name
-        FROM bigname_phase.name_surfaces parent_surface
-        WHERE parent_surface.logical_name_id = cc.parent_logical_name_id
-    )
+    '[' || substring(lower(cc.labelhash) FROM 3) || '].' || display_parent.raw_name
 )"#;
+
+/// Joined here rather than inside the expression so the parent row is read once per child instead
+/// of once per evaluation, and so the audit path — which omits the canonicality identity joins —
+/// still resolves the parent portion. `logical_name_id` is the primary key, so this cannot
+/// multiply rows.
+const CHILD_DISPLAY_PARENT_JOIN: &str = r#"
+  LEFT JOIN bigname_phase.name_surfaces display_parent
+    ON display_parent.logical_name_id = cc.parent_logical_name_id
+"#;
 
 fn child_select() -> String {
     format!(
@@ -42,6 +48,7 @@ fn child_select() -> String {
            cc.chain_positions, cc.canonicality_summary, cc.manifest_version,
            cc.last_recomputed_at
     FROM bigname_phase.children_current cc
+    {CHILD_DISPLAY_PARENT_JOIN}
 "#
     )
 }

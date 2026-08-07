@@ -106,7 +106,7 @@ default unit; resource deduplication is explicit.
 events that expose only a labelhash, Project composes the child name from a
 verified label preimage when one exists and leaves every name column null when
 none does — the labelhash and child node are proven, the label is not. Reads
-name such a child by the recognizable placeholder
+name such a child by the [non-name form](glossary.md#non-name-form)
 `[<labelhash-without-0x>].<parent-name>`, built from the parent's stored
 spelling, and lower-case it for the normalized form. A preimage whose label
 bytes are not valid UTF-8, or contain a NUL, is a third state: Project stores
