@@ -18,8 +18,7 @@ const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8"
 #[derive(Clone, Copy, Debug)]
 pub struct BuildInfo<'a> {
     pub build_sha: &'a str,
-    pub replay_version: i32,
-    pub schema_version: i64,
+    pub interpreter_content_hash: &'a str,
 }
 
 #[derive(Clone)]
@@ -35,17 +34,13 @@ impl MetricsRegistry {
         let build_info = GaugeVec::new(
             prometheus::Opts::new(
                 "build_info",
-                "Build and storage compatibility information for this process.",
+                "Build and interpretation identity for this process.",
             ),
-            &["build_sha", "replay_version", "schema_version"],
+            &["build_sha", "interpreter_content_hash"],
         )
         .context("failed to define build_info")?;
         build_info
-            .with_label_values(&[
-                build.build_sha,
-                &build.replay_version.to_string(),
-                &build.schema_version.to_string(),
-            ])
+            .with_label_values(&[build.build_sha, build.interpreter_content_hash])
             .set(1.0);
         registry.register(build_info)?;
         Ok(registry)

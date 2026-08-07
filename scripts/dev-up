@@ -14,11 +14,10 @@ export BIGNAME_DATABASE_URL="${BIGNAME_DATABASE_URL:-${DATABASE_URL:-postgres://
 export BIGNAME_PHASE_RUNNER_MANIFESTS_ROOT="${BIGNAME_PHASE_RUNNER_MANIFESTS_ROOT:-manifests/mainnet}"
 
 if [ -z "${BIGNAME_PHASE_RUNNER_CHAINS:-}" ]; then
-  printf '%s\n' "warning: BIGNAME_PHASE_RUNNER_CHAINS is unset; dev-up will start only the surviving API and worker runtimes." >&2
+  printf '%s\n' "warning: BIGNAME_PHASE_RUNNER_CHAINS is unset; dev-up will start only the API." >&2
 fi
 
 docker compose up -d
-cargo run -p bigname-worker -- migrate
 
 cleanup() {
   local pids
@@ -32,7 +31,6 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 cargo run -p bigname-api -- serve &
-cargo run -p bigname-worker -- run &
 if [ -n "${BIGNAME_PHASE_RUNNER_CHAINS:-}" ]; then
   cargo run -p phase-runner -- run &
 fi

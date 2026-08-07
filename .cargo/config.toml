@@ -1,4 +1,3 @@
 [alias]
 api = "run -p bigname-api --"
 phase = "run -p phase-runner --"
-worker = "run -p bigname-worker --"

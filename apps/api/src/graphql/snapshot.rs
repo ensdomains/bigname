@@ -6,8 +6,7 @@ use crate::{
     v2::{
         lookup::{
             head::{ServedHead, load_served_head, revalidate_served_head},
-            require_flat_target_at_or_before_served_head, require_name_current_at_served_head,
-            require_name_projection_at_served_head,
+            require_name_current_at_served_head, require_name_projection_at_served_head,
         },
         v2_exact_name_snapshot_scope,
     },
@@ -24,7 +23,7 @@ pub(super) async fn load_graphql_head(
     let scope = v2_exact_name_snapshot_scope(state, NAMESPACE, None)
         .await
         .map_err(|error| internal_error(operation, anyhow::anyhow!("{error:?}")))?;
-    load_served_head(&state.lookup_pool, &scope)
+    load_served_head(&state.pool, &scope)
         .await
         .map_err(|error| internal_error(operation, anyhow::anyhow!("{error:?}")))
 }
@@ -54,7 +53,7 @@ pub(super) fn require_rows_at_head(
         require_name_current_at_served_head(&row.row.row, head.selected())
             .map_err(|error| internal_error(operation, anyhow::anyhow!("{error:?}")))?;
         for target in &row.membership_targets {
-            require_flat_target_at_or_before_served_head(target, NAMESPACE, head.selected())
+            require_name_projection_at_served_head(target, NAMESPACE, head.selected())
                 .map_err(|error| internal_error(operation, anyhow::anyhow!("{error:?}")))?;
         }
     }
@@ -63,6 +62,7 @@ pub(super) fn require_rows_at_head(
 
 pub(super) fn require_inventory_at_head(
     chain_positions: &serde_json::Value,
+    chain_id: Option<&str>,
     head: Option<&ServedHead>,
     operation: &str,
 ) -> Result<()> {
@@ -72,7 +72,49 @@ pub(super) fn require_inventory_at_head(
             anyhow::anyhow!("schema-v2 GraphQL inventory has no served head"),
         )
     })?;
-    require_flat_target_at_or_before_served_head(chain_positions, NAMESPACE, head.selected())
+    if let Some(target_block_number) = chain_positions
+        .get("target_block_number")
+        .and_then(serde_json::Value::as_i64)
+    {
+        let target_block_hash = chain_positions
+            .get("target_block_hash")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                internal_error(
+                    operation,
+                    anyhow::anyhow!("record inventory target has no block hash"),
+                )
+            })?;
+        let chain_id = chain_id.ok_or_else(|| {
+            internal_error(
+                operation,
+                anyhow::anyhow!("record inventory target has no chain id"),
+            )
+        })?;
+        let selected = head
+            .selected()
+            .chain_positions
+            .as_map()
+            .values()
+            .find(|position| position.chain_id == chain_id)
+            .ok_or_else(|| {
+                internal_error(
+                    operation,
+                    anyhow::anyhow!("record inventory target is outside the served chain scope"),
+                )
+            })?;
+        if target_block_number > selected.block_number
+            || (target_block_number == selected.block_number
+                && target_block_hash != selected.block_hash)
+        {
+            return Err(internal_error(
+                operation,
+                anyhow::anyhow!("record inventory target is ahead of the served head"),
+            ));
+        }
+        return Ok(());
+    }
+    require_name_projection_at_served_head(chain_positions, NAMESPACE, head.selected())
         .map_err(|error| internal_error(operation, anyhow::anyhow!("{error:?}")))
 }
 
@@ -99,7 +141,7 @@ pub(super) fn require_count_at_head(
         .map_err(|error| internal_error(operation, anyhow::anyhow!("{error:?}")))?;
     }
     for target in &count.membership_targets {
-        require_flat_target_at_or_before_served_head(target, NAMESPACE, head.selected())
+        require_name_projection_at_served_head(target, NAMESPACE, head.selected())
             .map_err(|error| internal_error(operation, anyhow::anyhow!("{error:?}")))?;
     }
     Ok(())
@@ -111,7 +153,7 @@ pub(super) async fn revalidate_graphql_head(
     operation: &str,
 ) -> Result<()> {
     if let Some(head) = head {
-        revalidate_served_head(&state.lookup_pool, head)
+        revalidate_served_head(&state.pool, head)
             .await
             .map_err(|error| internal_error(operation, anyhow::anyhow!("{error:?}")))?;
     }

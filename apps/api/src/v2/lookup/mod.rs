@@ -28,8 +28,7 @@ mod parse;
 mod scope;
 
 pub(crate) use admission::{
-    require_flat_target_at_or_before_served_head, require_name_current_at_served_head,
-    require_name_projection_at_served_head,
+    require_name_current_at_served_head, require_name_projection_at_served_head,
 };
 use admission::{require_name_records_at_served_head, require_reverse_records_at_served_head};
 use build::{
@@ -82,7 +81,7 @@ pub(crate) async fn get_lookup(
     let snapshot_scope =
         lookup_snapshot_scope(&state, namespace, &name_inputs, !address_inputs.is_empty()).await?;
     let served_head = match snapshot_scope.as_ref() {
-        Some(scope) => load_served_head(&state.lookup_pool, scope).await?,
+        Some(scope) => load_served_head(&state.pool, scope).await?,
         None => None,
     };
 
@@ -105,7 +104,7 @@ pub(crate) async fn get_lookup(
     )
     .await?;
     if let Some(served_head) = served_head.as_ref() {
-        revalidate_served_head(&state.lookup_pool, served_head).await?;
+        revalidate_served_head(&state.pool, served_head).await?;
     }
     let data = results
         .into_iter()
@@ -179,17 +178,13 @@ async fn load_name_records(
     let records = match profile {
         LookupProfile::Feed => {
             bigname_storage::load_phase_identity_name_feed_records_by_ids(
-                &state.lookup_pool,
+                &state.pool,
                 logical_name_ids,
             )
             .await
         }
         LookupProfile::Detail => {
-            bigname_storage::load_phase_identity_records_by_ids(
-                &state.lookup_pool,
-                logical_name_ids,
-            )
-            .await
+            bigname_storage::load_phase_identity_records_by_ids(&state.pool, logical_name_ids).await
         }
     }
     .map_err(|load_error| {
@@ -242,7 +237,7 @@ async fn render_storage_exact_reverse_lookup_results(
         .filter(|input| !requires_relation_post_filter(input.relation.as_ref()))
         .collect::<Vec<_>>();
     let storage_inputs = deduped_reverse_storage_inputs(storage_exact_inputs.iter().copied());
-    let groups = load_reverse_identity_records_live(&state.lookup_pool, &storage_inputs)
+    let groups = load_reverse_identity_records_live(&state.pool, &storage_inputs)
         .await
         .map_err(|load_error| {
             error!(
@@ -320,7 +315,7 @@ async fn load_exact_relation_reverse_page(
             cursor: cursor.clone(),
         };
         let mut groups = load_reverse_identity_records_page_live(
-            &state.lookup_pool,
+            &state.pool,
             std::slice::from_ref(&storage_input),
         )
         .await

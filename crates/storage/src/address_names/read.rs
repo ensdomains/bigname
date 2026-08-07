@@ -2,9 +2,7 @@ use anyhow::{Context, Result};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use super::{
-    canonicality::{
-        DEFAULT_ADDRESS_NAMES_CURRENT_LINEAGE_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
-    },
+    DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
     decode::decode_address_name_current_row,
     types::{AddressNameCurrentRow, AddressNameRelation},
 };
@@ -70,32 +68,29 @@ async fn load_address_names_current_internal(
             anc.logical_name_id,
             anc.relation,
             anc.namespace,
-            anc.canonical_display_name,
-            anc.normalized_name,
+            anc.raw_name AS canonical_display_name,
+            lower(anc.raw_name) AS normalized_name,
             anc.namehash,
             anc.surface_binding_id,
             anc.resource_id,
             anc.token_lineage_id,
             anc.binding_kind,
             anc.provenance,
-            anc.coverage,
+            CASE WHEN anc.support_status = 'supported'
+                 THEN jsonb_build_object('status', 'projected', 'exhaustiveness', 'not_asserted')
+                 ELSE jsonb_build_object(
+                     'status', 'unsupported', 'exhaustiveness', 'not_asserted',
+                     'unsupported_reason', anc.unsupported_reason
+                 ) END AS coverage,
             anc.chain_positions,
             anc.canonicality_summary,
             anc.manifest_version,
             anc.last_recomputed_at
-        FROM address_names_current anc
-        JOIN name_surfaces surface
-          ON surface.logical_name_id = anc.logical_name_id
-        JOIN resources resource
-          ON resource.resource_id = anc.resource_id
-        JOIN surface_bindings binding
-          ON binding.surface_binding_id = anc.surface_binding_id
-        LEFT JOIN token_lineages token_lineage
-          ON token_lineage.token_lineage_id = anc.token_lineage_id
+        FROM bigname_phase.address_names_current anc
         "#,
     );
     if !include_noncanonical {
-        builder.push(DEFAULT_ADDRESS_NAMES_CURRENT_LINEAGE_JOINS);
+        builder.push(DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS);
     }
     builder.push(" WHERE anc.address = ");
     builder.push_bind(address);
@@ -120,7 +115,7 @@ async fn load_address_names_current_internal(
     builder.push(
         r#"
         ORDER BY
-            anc.canonical_display_name ASC,
+            anc.raw_name ASC,
             anc.logical_name_id ASC,
             CASE anc.relation
                 WHEN 'registrant' THEN 0

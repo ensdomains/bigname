@@ -186,8 +186,8 @@ Not enough:
 
 Done means:
 
-- raw facts, raw normalized events, execution traces, and provenance live only behind
-  explicit audit, explain, or worker inspection surfaces
+- raw facts, raw normalized events, and provenance live only behind explicit
+  audit or explain surfaces; the current runtime has no durable execution traces
 - compact builders cannot accidentally render those internals because the data is not
   present on the compact path
 - public explain DTOs are route-owned and do not expose internal storage rows as the

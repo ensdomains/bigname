@@ -13,7 +13,13 @@ const ADAPTER_SOURCE_ROOT: &str = "crates/adapters/src";
 const MANIFEST_AUTHORITY_SOURCE_ROOT: &str = "crates/manifests/src";
 const MANIFEST_ROOT: &str = "manifests";
 const PROJECT_SOURCE_ROOT: &str = "crates/project/src";
-const WORKER_SOURCE_ROOT: &str = "apps/worker/src";
+/// Interpret's persistence stage: which interpreted row wins a conflict, how a redo range reopens
+/// and reanchors bindings, and which surfaces a normalizer-version recompute activates. All of it
+/// decides which identity, discovery, and label-preimage rows the projections then read.
+const INTERPRET_WRITE_SOURCE_ROOT: &str = "crates/interpret/src/write";
+/// Scanned for `#[cfg(test)] mod x;` declarations only. The hashed root's parent module lives here,
+/// so without it a test module declared in `write.rs` would land inside the hashed root undetected.
+const INTERPRET_SOURCE_SCAN_ROOT: &str = "crates/interpret/src";
 const MINIMUM_MANIFEST_EVENT_COUNT: usize = 111;
 const MINIMUM_EVENT_MANIFEST_COUNT: usize = 16;
 const HASH_FORMAT: &[u8] = b"bigname-interpreter-content-v3\0";
@@ -22,59 +28,38 @@ const MANIFEST_PROFILE_HASH_FORMAT: &[u8] = b"bigname-manifest-profile-v1\0";
 // `apps/phase-runner` is deliberately outside these roots: it may orchestrate phase work, but
 // semantic interpretation or projection code must never live there.
 
-struct SourceExclusion {
-    relative_path: &'static str,
-    includes_descendants: bool,
-    reason: &'static str,
-}
-
-const WORKER_SOURCE_EXCLUSIONS: &[SourceExclusion] = &[
-    // The binary entrypoint only parses the CLI and starts runtime wiring.
-    SourceExclusion {
-        relative_path: "main.rs",
-        includes_descendants: false,
-        reason: "worker binary entrypoint wiring",
-    },
-    // clap declarations select commands but do not interpret or project indexed facts.
-    SourceExclusion {
-        relative_path: "cli.rs",
-        includes_descendants: false,
-        reason: "worker CLI declarations",
-    },
-    // Command dispatch and its submodules only connect command-line requests to owned behavior.
-    SourceExclusion {
-        relative_path: "commands.rs",
-        includes_descendants: false,
-        reason: "worker CLI command dispatch",
-    },
-    SourceExclusion {
-        relative_path: "commands",
-        includes_descendants: true,
-        reason: "worker CLI command handlers",
-    },
-    // Tracing, metrics, and listener setup do not change interpreter output.
-    SourceExclusion {
-        relative_path: "runtime.rs",
-        includes_descendants: false,
-        reason: "worker runtime and observability wiring",
-    },
-    // The healthcheck reads service state but does not derive or apply indexed state.
-    SourceExclusion {
-        relative_path: "healthcheck.rs",
-        includes_descendants: false,
-        reason: "worker healthcheck wiring",
-    },
-    // Inspect commands are read-only operational views over already persisted state.
-    SourceExclusion {
-        relative_path: "inspect.rs",
-        includes_descendants: false,
-        reason: "worker inspection command wiring",
-    },
-    SourceExclusion {
-        relative_path: "inspect",
-        includes_descendants: true,
-        reason: "worker read-only inspection implementations",
-    },
+/// Sources outside the watched roots that those roots call to decide persisted interpretation and
+/// projection output. Without them a change to, say, ENS normalization would alter projected
+/// primary-name rows while leaving the fingerprint — and therefore the redo the phase guard
+/// demands — unchanged.
+///
+/// This is a file list rather than a crate root on purpose. `bigname-lookup` also holds the
+/// request-scoped serving engine, CCIP-Read, storage, and RPC transport, none of which decide a
+/// persisted row; watching the whole crate would rotate the fingerprint (and force a full
+/// re-derivation) for serving-only edits. A missing entry is a hard error so moving one of these
+/// modules fails the build instead of silently narrowing the fingerprint.
+const SEMANTIC_SOURCE_FILES: &[&str] = &[
+    // ENS normalization decides primary-name claim status, the stored spelling, label sets, and
+    // DNS encoding for identity, discovery, and primary-name projection.
+    "crates/domain/src/normalization.rs",
+    // Namehash, DNS encoding, resolver-call encoding, and result decoding shared by the hydration
+    // multicalls below.
+    "crates/lookup/src/abi.rs",
+    // Record-selector vocabulary those calls encode. Deliberately not `crates/lookup/src/types.rs`,
+    // which is otherwise the request-scoped verified-lookup response shape.
+    "crates/lookup/src/record_selector.rs",
+    // Reverse-name and text-record multicall encode/decode used by project hydration before rows
+    // are persisted.
+    "crates/lookup/src/reverse_names.rs",
+    "crates/lookup/src/text_records.rs",
+    // Which provider response those calls accept as an answer, and what value is taken from it.
+    // Deliberately not the rest of `crates/lookup/src/rpc.rs`: client construction, timeouts, and
+    // endpoint configuration abort a request rather than reshape an answer, and its head-block
+    // read has no hydration caller.
+    "crates/lookup/src/json_rpc_envelope.rs",
+    // Redo-range preparation and the normalizer-version recompute that drive the stage above.
+    "crates/interpret/src/write.rs",
+    "crates/interpret/src/recompute.rs",
 ];
 
 #[allow(dead_code)]
@@ -85,36 +70,7 @@ struct CfgTestSourceExclusion {
     reason: &'static str,
 }
 
-const CFG_TEST_SOURCE_EXCLUSIONS: &[CfgTestSourceExclusion] = &[
-    // Projection rebuild hooks are compiled only for worker tests.
-    CfgTestSourceExclusion {
-        relative_path: "apps/worker/src/primary_name/projection/test_hooks.rs",
-        parent_module: "apps/worker/src/primary_name/projection.rs",
-        module_declaration: "pub(crate) mod test_hooks;",
-        reason: "cfg(test)-gated primary-name projection hooks",
-    },
-    // Hydration hooks are compiled only for worker tests.
-    CfgTestSourceExclusion {
-        relative_path: "apps/worker/src/primary_name/hydration/test_hooks.rs",
-        parent_module: "apps/worker/src/primary_name/hydration.rs",
-        module_declaration: "pub(crate) mod test_hooks;",
-        reason: "cfg(test)-gated primary-name hydration hooks",
-    },
-    // Record hydration seed helpers are compiled only for worker tests.
-    CfgTestSourceExclusion {
-        relative_path: "apps/worker/src/record_inventory/hydration_tests_support.rs",
-        parent_module: "apps/worker/src/record_inventory/hydration.rs",
-        module_declaration: "pub(super) mod tests_support;",
-        reason: "cfg(test)-gated record-inventory hydration support",
-    },
-    // The staging fingerprint exists only to regression-test the durable staging contract.
-    CfgTestSourceExclusion {
-        relative_path: "apps/worker/src/replay/staging/fingerprint.rs",
-        parent_module: "apps/worker/src/replay/staging.rs",
-        module_declaration: "pub(crate) mod fingerprint;",
-        reason: "cfg(test)-gated projection staging fingerprint",
-    },
-];
+const CFG_TEST_SOURCE_EXCLUSIONS: &[CfgTestSourceExclusion] = &[];
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct Input {
@@ -124,13 +80,22 @@ struct Input {
 
 #[allow(dead_code)]
 pub(crate) fn watched_paths(workspace_root: &Path) -> Vec<PathBuf> {
-    vec![
+    let mut paths = vec![
         workspace_root.join(ADAPTER_SOURCE_ROOT),
         workspace_root.join(MANIFEST_AUTHORITY_SOURCE_ROOT),
         workspace_root.join(MANIFEST_ROOT),
         workspace_root.join(PROJECT_SOURCE_ROOT),
-        workspace_root.join(WORKER_SOURCE_ROOT),
-    ]
+        workspace_root.join(INTERPRET_WRITE_SOURCE_ROOT),
+        // Not hashed, but scanned: a cfg(test) declaration here changes which files under the
+        // hashed root are excluded, so it has to trigger a rebuild.
+        workspace_root.join(INTERPRET_SOURCE_SCAN_ROOT),
+    ];
+    paths.extend(
+        SEMANTIC_SOURCE_FILES
+            .iter()
+            .map(|relative_path| workspace_root.join(relative_path)),
+    );
+    paths
 }
 
 pub(crate) fn compute(workspace_root: &Path) -> io::Result<String> {
@@ -191,17 +156,16 @@ fn hash_inputs(format: &[u8], inputs: &mut [Input]) -> String {
     format!("keccak256:{}", hex::encode(keccak256(encoded)))
 }
 
+const CFG_TEST_SCAN_ROOTS: &[&str] = &[
+    ADAPTER_SOURCE_ROOT,
+    MANIFEST_AUTHORITY_SOURCE_ROOT,
+    PROJECT_SOURCE_ROOT,
+    INTERPRET_SOURCE_SCAN_ROOT,
+];
+
 fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
     let mut inputs = Vec::new();
-    let cfg_test_sources = source_paths::cfg_test_sources(
-        workspace_root,
-        &[
-            ADAPTER_SOURCE_ROOT,
-            MANIFEST_AUTHORITY_SOURCE_ROOT,
-            PROJECT_SOURCE_ROOT,
-            WORKER_SOURCE_ROOT,
-        ],
-    )?;
+    let cfg_test_sources = source_paths::cfg_test_sources(workspace_root, CFG_TEST_SCAN_ROOTS)?;
     collect_rust_sources(
         workspace_root,
         &workspace_root.join(ADAPTER_SOURCE_ROOT),
@@ -219,18 +183,36 @@ fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
     )?;
     collect_rust_sources(
         workspace_root,
-        &workspace_root.join(WORKER_SOURCE_ROOT),
+        &workspace_root.join(PROJECT_SOURCE_ROOT),
         &cfg_test_sources,
         &mut inputs,
     )?;
     collect_rust_sources(
         workspace_root,
-        &workspace_root.join(PROJECT_SOURCE_ROOT),
+        &workspace_root.join(INTERPRET_WRITE_SOURCE_ROOT),
         &cfg_test_sources,
         &mut inputs,
     )?;
     collect_manifest_event_blocks(workspace_root, &mut inputs)?;
+    collect_semantic_sources(workspace_root, &mut inputs)?;
     Ok(inputs)
+}
+
+fn collect_semantic_sources(workspace_root: &Path, inputs: &mut Vec<Input>) -> io::Result<()> {
+    for relative_path in SEMANTIC_SOURCE_FILES {
+        let path = workspace_root.join(relative_path);
+        if !path.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "interpreter content hash requires semantic source {relative_path}; if those \
+                     semantics moved, update SEMANTIC_SOURCE_FILES in the same change"
+                ),
+            ));
+        }
+        collect_file(workspace_root, &path, inputs)?;
+    }
+    Ok(())
 }
 
 fn collect_rust_sources(
@@ -274,23 +256,6 @@ fn source_exclusion(
         return Ok(Some("cfg(test)-gated external module"));
     }
 
-    let source_relative_path = if let Some(path) = relative_path.strip_prefix(ADAPTER_SOURCE_ROOT) {
-        path.trim_start_matches('/')
-    } else if let Some(path) = relative_path.strip_prefix(MANIFEST_AUTHORITY_SOURCE_ROOT) {
-        path.trim_start_matches('/')
-    } else if let Some(path) = relative_path.strip_prefix(WORKER_SOURCE_ROOT) {
-        path.trim_start_matches('/')
-    } else if let Some(path) = relative_path.strip_prefix(PROJECT_SOURCE_ROOT) {
-        path.trim_start_matches('/')
-    } else {
-        return Ok(None);
-    };
-    if relative_path.starts_with(WORKER_SOURCE_ROOT) {
-        return Ok(WORKER_SOURCE_EXCLUSIONS
-            .iter()
-            .find(|exclusion| exclusion.matches(source_relative_path))
-            .map(|exclusion| exclusion.reason));
-    }
     Ok(None)
 }
 
@@ -456,14 +421,9 @@ fn append_usize(output: &mut Vec<u8>, value: usize) {
     output.extend_from_slice(&(value as u64).to_be_bytes());
 }
 
-impl SourceExclusion {
-    fn matches(&self, relative_path: &str) -> bool {
-        relative_path == self.relative_path
-            || (self.includes_descendants
-                && relative_path
-                    .strip_prefix(self.relative_path)
-                    .is_some_and(|suffix| suffix.starts_with('/')))
-    }
+#[cfg(test)]
+pub(crate) fn semantic_source_files() -> &'static [&'static str] {
+    SEMANTIC_SOURCE_FILES
 }
 
 #[cfg(test)]
@@ -477,19 +437,16 @@ pub(crate) fn hashed_source_paths(workspace_root: &Path) -> io::Result<Vec<Strin
 }
 
 #[cfg(test)]
+pub(crate) fn cfg_test_scan_roots() -> &'static [&'static str] {
+    CFG_TEST_SCAN_ROOTS
+}
+
+#[cfg(test)]
 pub(crate) fn excluded_source_reason(
     workspace_root: &Path,
     path: &Path,
 ) -> io::Result<Option<&'static str>> {
-    let cfg_test_sources = source_paths::cfg_test_sources(
-        workspace_root,
-        &[
-            ADAPTER_SOURCE_ROOT,
-            MANIFEST_AUTHORITY_SOURCE_ROOT,
-            PROJECT_SOURCE_ROOT,
-            WORKER_SOURCE_ROOT,
-        ],
-    )?;
+    let cfg_test_sources = source_paths::cfg_test_sources(workspace_root, CFG_TEST_SCAN_ROOTS)?;
     source_exclusion(workspace_root, path, &cfg_test_sources)
 }
 

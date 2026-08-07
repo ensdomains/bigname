@@ -9,6 +9,11 @@ use crate::{
     AddressNameRelation, IdentityAddressRelationRow, IdentityNameCurrentRow, IdentityNameRecordRow,
     IdentityRecordInventoryRow, NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentRow,
     SurfaceBindingKind,
+    address_names::{
+        DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
+    },
+    name_current::{DEFAULT_NAME_CURRENT_LINEAGE_JOINS, DEFAULT_NAME_CURRENT_READ_FILTER},
+    record_inventory::{DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER, RESOURCE_CANONICALITY_JOINS},
 };
 
 pub async fn load_phase_identity_records_by_ids(
@@ -89,39 +94,52 @@ pub async fn load_phase_resolver_bound_name_rows(
             _ => anyhow::bail!("phase resolver bound-name cursor must use name ordering"),
         })
         .transpose()?;
-    let rows = sqlx::query(
+    let query = format!(
         r#"
-        SELECT name.logical_name_id, name.namespace, name.raw_name, name.namehash,
-               name.surface_binding_id, name.resource_id, name.token_lineage_id,
-               name.binding_kind, name.declared_summary, name.support_status,
-               name.unsupported_reason, name.provenance, name.chain_positions,
-               name.canonicality_summary, name.manifest_version,
-               name.last_recomputed_at
-        FROM name_current name
-        WHERE name.support_status IN ('supported', 'unsupported')
-          AND name.declared_summary #>> '{{resolver,chain_id}}' = $1
-          AND lower(name.declared_summary #>> '{{resolver,address}}') = lower($2)
-          AND ($3::TEXT IS NULL OR name.namespace = $3)
+        SELECT nc.logical_name_id, nc.namespace, nc.raw_name, nc.namehash,
+               nc.surface_binding_id, nc.resource_id, nc.token_lineage_id,
+               nc.binding_kind, nc.declared_summary, nc.support_status,
+               nc.unsupported_reason, nc.provenance, nc.chain_positions,
+               nc.canonicality_summary, nc.manifest_version,
+               nc.last_recomputed_at
+        FROM bigname_phase.name_current nc
+        JOIN bigname_phase.name_surfaces surface
+          ON surface.logical_name_id = nc.logical_name_id
+        LEFT JOIN bigname_phase.resources resource
+          ON resource.resource_id = nc.resource_id
+        LEFT JOIN bigname_phase.surface_bindings binding
+          ON binding.surface_binding_id = nc.surface_binding_id
+        LEFT JOIN bigname_phase.token_lineages token_lineage
+          ON token_lineage.token_lineage_id = nc.token_lineage_id
+        {DEFAULT_NAME_CURRENT_LINEAGE_JOINS}
+        WHERE nc.support_status IN ('supported', 'unsupported')
+          {DEFAULT_NAME_CURRENT_READ_FILTER}
+          AND nc.declared_summary #>> '{{resolver,chain_id}}' = $1
+          AND lower(nc.declared_summary #>> '{{resolver,address}}') = lower($2)
+          AND ($3::TEXT IS NULL OR nc.namespace = $3)
           AND (
               $4::TEXT IS NULL
-              OR (name.raw_name, name.namespace, name.namehash) > ($4, $5, $6)
+              OR (nc.raw_name, nc.namespace, nc.namehash) > ($4, $5, $6)
           )
-        ORDER BY name.raw_name, name.namespace, name.namehash
+        ORDER BY nc.raw_name, nc.namespace, nc.namehash
         LIMIT $7
-        "#,
-    )
-    .bind(chain_id)
-    .bind(resolver_address)
-    .bind(namespace)
-    .bind(cursor_values.map(|values| values.0))
-    .bind(cursor_values.map(|values| values.1))
-    .bind(cursor_values.map(|values| values.2))
-    .bind(limit)
-    .fetch_all(pool)
-    .await
-    .with_context(|| {
-        format!("failed to load phase bound-name ids for resolver {chain_id}:{resolver_address}")
-    })?;
+        "#
+    );
+    let rows = sqlx::query(&query)
+        .bind(chain_id)
+        .bind(resolver_address)
+        .bind(namespace)
+        .bind(cursor_values.map(|values| values.0))
+        .bind(cursor_values.map(|values| values.1))
+        .bind(cursor_values.map(|values| values.2))
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load phase bound-name ids for resolver {chain_id}:{resolver_address}"
+            )
+        })?;
     rows.into_iter().map(decode_name_current).collect()
 }
 
@@ -142,24 +160,35 @@ async fn load_phase_name_rows(pool: &PgPool, logical_name_ids: &[String]) -> Res
     if logical_name_ids.is_empty() {
         return Ok(Vec::new());
     }
-    sqlx::query(
+    let query = format!(
         r#"
-        SELECT name.logical_name_id, name.namespace, name.raw_name, name.namehash,
-               name.surface_binding_id, name.resource_id, name.token_lineage_id,
-               name.binding_kind, name.declared_summary, name.support_status,
-               name.unsupported_reason, name.provenance, name.chain_positions,
-               name.canonicality_summary, name.manifest_version,
-               name.last_recomputed_at
-        FROM name_current name
-        WHERE name.logical_name_id = ANY($1::TEXT[])
-          AND name.support_status IN ('supported', 'unsupported')
-        ORDER BY name.logical_name_id
-        "#,
-    )
-    .bind(logical_name_ids)
-    .fetch_all(pool)
-    .await
-    .with_context(|| format!("failed to load {} phase name rows", logical_name_ids.len()))
+        SELECT nc.logical_name_id, nc.namespace, nc.raw_name, nc.namehash,
+               nc.surface_binding_id, nc.resource_id, nc.token_lineage_id,
+               nc.binding_kind, nc.declared_summary, nc.support_status,
+               nc.unsupported_reason, nc.provenance, nc.chain_positions,
+               nc.canonicality_summary, nc.manifest_version,
+               nc.last_recomputed_at
+        FROM bigname_phase.name_current nc
+        JOIN bigname_phase.name_surfaces surface
+          ON surface.logical_name_id = nc.logical_name_id
+        LEFT JOIN bigname_phase.resources resource
+          ON resource.resource_id = nc.resource_id
+        LEFT JOIN bigname_phase.surface_bindings binding
+          ON binding.surface_binding_id = nc.surface_binding_id
+        LEFT JOIN bigname_phase.token_lineages token_lineage
+          ON token_lineage.token_lineage_id = nc.token_lineage_id
+        {DEFAULT_NAME_CURRENT_LINEAGE_JOINS}
+        WHERE nc.logical_name_id = ANY($1::TEXT[])
+          AND nc.support_status IN ('supported', 'unsupported')
+          {DEFAULT_NAME_CURRENT_READ_FILTER}
+        ORDER BY nc.logical_name_id
+        "#
+    );
+    sqlx::query(&query)
+        .bind(logical_name_ids)
+        .fetch_all(pool)
+        .await
+        .with_context(|| format!("failed to load {} phase name rows", logical_name_ids.len()))
 }
 
 fn decode_identity_name(row: PgRow) -> Result<IdentityNameCurrentRow> {
@@ -259,21 +288,24 @@ async fn load_phase_inventories<'a>(
     if resource_ids.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let rows = sqlx::query(
+    let query = format!(
         r#"
-        SELECT inventory.resource_id, inventory.record_version_boundary,
-               inventory.entries, inventory.unsupported_families,
-               inventory.support_status, inventory.unsupported_reason,
-               inventory.chain_positions, inventory.last_recomputed_at
-        FROM record_inventory_current inventory
-        WHERE inventory.resource_id = ANY($1::UUID[])
-        ORDER BY inventory.resource_id, inventory.record_version_boundary_key
-        "#,
-    )
-    .bind(resource_ids.into_iter().collect::<Vec<_>>())
-    .fetch_all(pool)
-    .await
-    .context("failed to load phase record inventories")?;
+        SELECT ric.resource_id, ric.record_version_boundary,
+               ric.entries, ric.unsupported_families,
+               ric.support_status, ric.unsupported_reason,
+               ric.chain_positions, ric.last_recomputed_at
+        FROM bigname_phase.record_inventory_current ric
+        {RESOURCE_CANONICALITY_JOINS}
+        WHERE ric.resource_id = ANY($1::UUID[])
+          {DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER}
+        ORDER BY ric.resource_id, ric.record_version_boundary_key
+        "#
+    );
+    let rows = sqlx::query(&query)
+        .bind(resource_ids.into_iter().collect::<Vec<_>>())
+        .fetch_all(pool)
+        .await
+        .context("failed to load phase record inventories")?;
 
     let mut by_resource = BTreeMap::<Uuid, Vec<(Value, IdentityRecordInventoryRow)>>::new();
     for row in rows {
@@ -316,20 +348,23 @@ async fn load_phase_relations(
     pool: &PgPool,
     logical_name_ids: &[String],
 ) -> Result<BTreeMap<String, Vec<IdentityAddressRelationRow>>> {
-    let rows = sqlx::query(
+    let query = format!(
         r#"
-        SELECT relation.address, relation.logical_name_id, relation.relation,
-               relation.chain_positions
-        FROM address_names_current relation
-        WHERE relation.logical_name_id = ANY($1::TEXT[])
-          AND relation.support_status = 'supported'
-        ORDER BY relation.logical_name_id, relation.address, relation.relation
-        "#,
-    )
-    .bind(logical_name_ids)
-    .fetch_all(pool)
-    .await
-    .context("failed to load phase address-name relations")?;
+        SELECT anc.address, anc.logical_name_id, anc.relation,
+               anc.chain_positions
+        FROM bigname_phase.address_names_current anc
+        {DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS}
+        WHERE anc.logical_name_id = ANY($1::TEXT[])
+          AND anc.support_status = 'supported'
+          {DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER}
+        ORDER BY anc.logical_name_id, anc.address, anc.relation
+        "#
+    );
+    let rows = sqlx::query(&query)
+        .bind(logical_name_ids)
+        .fetch_all(pool)
+        .await
+        .context("failed to load phase address-name relations")?;
     let mut grouped = BTreeMap::<String, Vec<IdentityAddressRelationRow>>::new();
     for row in rows {
         let logical_name_id: String = row.try_get("logical_name_id")?;

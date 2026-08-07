@@ -183,8 +183,7 @@ Field ownership:
   Missing phase-runner heartbeat evidence is `degraded`; a heartbeat older
   than `BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS` is `stale`. This phase-only
   threshold defaults to 60 seconds so a long database statement between
-  five-second runner heartbeat opportunities does not reuse the stricter
-  legacy worker-health threshold.
+  five-second runner heartbeat opportunities.
 - `lag_blocks` and `lag_seconds` are independently nonnegative. Each field
   clamps its own canonical-versus-projected difference at `0`.
 - Pagination behavior: none.
@@ -319,7 +318,22 @@ Field ownership:
   `record_family_not_supported`.
   `source=auto` blends per key: indexed answers are used where they satisfy the
   requested key, and only the remaining supported keys fall back to verified
-  lookup. A Basenames auto read remains Base-scoped when no fallback key
+  lookup. An indexed answer — including an indexed `not_found` — is admitted
+  only from a record inventory whose coverage carries no unsupported reason and
+  whose coverage `status` is `full` or `projected`. `projected` is admitted
+  because a supported schema-v2 inventory is complete by construction: the
+  project phase derives its entries from every interpreted record event the
+  name still has under a classified resolver — everything since that resolver
+  last bumped the name's record version and thereby cleared its earlier records
+  (the `record_version_boundary` reported below). A key's absence from that
+  inventory is therefore absence in the retained history rather than an
+  unfinished build. The row's
+  `exhaustiveness: not_asserted` disclaims a claim about complete *history*,
+  which is a weaker statement than `full` and does not weaken this admission.
+  An inventory in any other coverage state is not authoritative, and the
+  request falls through to verified lookup or an explicit unsupported answer
+  rather than reporting absence from the index as absence on chain.
+  A Basenames auto read remains Base-scoped when no fallback key
   remains; it selects the Ethereum resolution-auxiliary position only when it
   will attempt that verified fallback. If projection movement removes the last
   fallback key while the expanded snapshot is being selected, the request
@@ -352,7 +366,24 @@ Field ownership:
 - Response shape: `data` is an array of dedicated subname rows in dictionary
   vocabulary: `name`, `display_name`, `namespace`, `namehash`, `labelhash`,
   `owner`, `registrant`, `registration_status`, `registered_at`,
-  `created_at`, and `expires_at`. Resolver records are not included here;
+  `created_at`, and `expires_at`. Registry events prove the child node and its
+  labelhash but not the label, so two [non-name
+  forms](glossary.md#non-name-form) are reachable here. A child whose label has
+  never been observed carries `[<labelhash-without-0x>].<parent-name>` in
+  `display_name` and its lower-cased form in `name`. When a label is observed as
+  bytes that are not valid UTF-8, or that contain a NUL, the row instead carries
+  the whole stored child name — those label bytes, a dot, and the parent's —
+  encoded by PostgreSQL's `escape` rule: a NUL as `\000`, each byte above `0x7f`
+  as a backslash and three octal digits, a backslash doubled, and every other
+  byte verbatim. The rule runs over the whole string, so a non-ASCII parent
+  portion is octal-escaped along with the label. Neither form is reserved syntax
+  — a label really spelled `[<64 hex digits>].<parent>`, or really spelled like
+  escape output such as `\377bad`, produces the same string — so distinguish
+  rows by `namehash` and `labelhash` rather than by parsing the served text.
+  Both forms come from ENSv1 and Basenames registry edges; an ENSv2 child
+  bigname cannot name is absent from the page instead. Neither form is
+  addressable, and neither may be fed
+  back into a name-shaped route. Resolver records are not included here;
   use `GET /v2/names/{name}/records` for `resolver`, `addresses`,
   `text_records`, and `content_hash`.
   `include=counts` adds `subname_count`, the row's direct subname count.
@@ -447,12 +478,10 @@ Field ownership:
 - Status semantics: no matching permission rows returns `200` with empty
   `data`, including when a `name` filter has no registration anchor in the
   current state. Unsupported filter combinations return `422 unsupported`.
-  An absent or older projection-owned permission
-  publication version returns `409 stale` before permission rows are decoded.
-  A publication revision change while rows and summaries are read also returns
-  `409 stale`. The version and revision are schema/publication compatibility and
-  request-coherence guards, not freshness watermarks. When `name` or
-  `registration_id` binds the read to a registration, the projection-owned
+  The route reads current permission rows and summaries without claiming a
+  request-wide immutable projection generation; current-state generation changes
+  do not produce `409 stale`. When `name` or `registration_id` binds the read to a
+  registration, the projection-owned
   per-registration permission summary classifies the result: full support adds
   no completeness metadata, missing or partial support returns
   `meta.completeness=partial` with
@@ -493,8 +522,16 @@ Field ownership:
   Address-name rows add `is_primary` and `relations`, where `relations` is the
   subset of `owner`, `manager`, and `registrant` that matched. `is_primary` is
   evaluated against that row namespace's coin-type-60 primary-name claim, not a
-  route-wide namespace shortcut. Resolver records are not included; use
-  `GET /v2/names/{name}/records` for resolver data.
+  route-wide namespace shortcut. The claim is compared in the same normalized
+  form the indexed answer from `GET /v2/addresses/{address}/primary-name`
+  publishes, so a successful claim recorded in a non-normalized spelling still
+  marks its name primary. A spelling the projection already recorded as its
+  normalized form is instead compared verbatim, so such a claim marks a row
+  primary only where the published spelling is exactly that row's name. A
+  successful claim whose stored spelling does not normalize likewise marks no
+  row primary, and the primary-name route reports it as `invalid_name`.
+  Resolver records are not included; use `GET /v2/names/{name}/records` for
+  resolver data.
   `include=role_summary` adds
   `role_summary: [{address, grants: [{grant_scope, powers}]}]` grouped by the
   permission subject address and `record_count` when record inventory exists
@@ -512,11 +549,9 @@ Field ownership:
   revision-bound storage follow-up.
 - Status semantics: no related names returns `200` with empty `data`.
   Malformed addresses return `400 invalid_input`. `include=role_summary`
-  conditionally returns `409 stale` when the compatible projection-owned
-  permission publication version is absent or old; the same address-name read
-  without that expansion remains available. The expansion also returns `409
-  stale` when the permission publication revision changes while it is assembled.
-  The expansion batch-loads projection-owned permission summaries for every
+  does not claim a request-wide immutable projection generation, and current-state
+  generation changes do not produce `409 stale`. The expansion batch-loads
+  projection-owned permission summaries for every
   registration on the served page. If all are full, no completeness metadata is
   added. A missing or partial summary returns `meta.completeness=partial`,
   `meta.unsupported_fields=["role_summary"]`, and
@@ -549,7 +584,9 @@ Field ownership:
   to that source for single-source callers; every indexed entry comes from
   `bigname_phase.primary_names_current`, regardless of source selection. A
   successful stored raw claim is normalized for the indexed product name even
-  when its raw spelling was not already normalized. `verification` is
+  when its raw spelling was not already normalized, unless the projection
+  already recorded that spelling as its normalized form, in which case the
+  stored spelling is published unchanged. `verification` is
   `{status, name?, unsupported_reason?, failure_reason?}` and appears when the
   fresh lookup produces a verification outcome. As an explicit exception,
   it also appears when the request includes the `verified` source and the
@@ -581,7 +618,11 @@ Field ownership:
   failures abort the request with `500 internal_error`; they are not verified
   answer entries with `status=stale`.
 - Status semantics: answer entries use in-band `status`. Valid tuples with no
-  indexed claim return an `indexed` entry with `status=not_found`. Unsupported,
+  indexed claim return an `indexed` entry with `status=not_found`. A stored
+  successful claim whose spelling does not normalize returns an `indexed` entry
+  with `status=invalid_name` and `raw_claim_name`, the same answer the
+  projection's own `invalid_name` classification produces; that row marks no
+  name primary on the address-name and reverse-lookup collections. Unsupported,
   not-found, failed, and mismatched verified outcomes return `200` with the
   corresponding `verified` entry status. When the requested output includes the
   verified source, a successful live claim whose raw spelling
@@ -737,20 +778,20 @@ Diagnostic snapshot rules:
 - `/v2/diagnostics/names/{name}/coverage`,
   `/v2/diagnostics/names/{name}/binding`,
   `/v2/diagnostics/names/{name}/authority`,
-  `/v2/diagnostics/names/{name}/records`,
-  and `/v2/diagnostics/names/{name}/execution` accept `at` and `finality` and
+  and `/v2/diagnostics/names/{name}/records` accept `at` and `finality` and
   carry `meta.as_of`/`meta.as_of_token` because they explain one selected
   snapshot.
 - `/v2/diagnostics/events` follows the shared latest-state collection rule: it
   omits snapshot metadata and rejects `at` and historical `finality`.
-- Diagnostics execution selection uses the exact name, `keys`, and selected
-  snapshot. Omitting `at` selects the latest persisted execution artifact.
-  RFC 3339 `at` selects the newest persisted artifact whose requested chain
-  positions are at or before the selected positions. If multiple artifacts
-  match, the deterministic tie-break is newest `finished_at`, then greatest
-  `execution_trace_id`.
 - `/v2/diagnostics/namespaces/{namespace}/manifests` omits `meta.as_of` and
   `meta.as_of_token`; it is control-plane metadata.
+
+`GET /v2/diagnostics/names/{name}/execution` is removed. The persisted-explain
+capability it served is retired with the C2 cutover, not deferred to a later
+slice: the execution traces, steps, and cache outcomes it read no longer exist
+and no replacement route is planned. Verified resolution now runs per request,
+so there is no persisted artifact to explain. See
+[`execution.md`](execution.md#removed-legacy-artifacts).
 
 ### `GET /v2/diagnostics/names/{name}/coverage`
 
@@ -828,26 +869,6 @@ Diagnostic snapshot rules:
   `GET /v1/profiles/names/{name}` and
   `GET /v1/names/{namespace}/{name}/records`, including the former
   `mode=both` comparison.
-
-### `GET /v2/diagnostics/names/{name}/execution`
-
-- Method/path: `GET /v2/diagnostics/names/{name}/execution`
-- Tier: diagnostics.
-- Purpose: persisted verified-execution explain.
-- Request parameters: path `name`; query `namespace`, `at`, `finality`, and
-  required `keys`.
-  `keys` uses the same record-key grammar as `/v2/names/{name}/records`. The
-  route is verified-only; callers select the persisted artifact by exact name,
-  requested keys, and selected snapshot. The route rejects duplicate or
-  malformed keys with `400 invalid_input`.
-- Response shape: `data` includes trace id, steps, digests, and CCIP
-  participation. Identity objects in the payload use dictionary spellings
-  (`namespace`, `name`, `display_name`, `registration_id`), while pipeline-only
-  identifiers keep their pipeline names per the tier-3 rule.
-- Pagination behavior: none.
-- Status semantics: missing persisted execution artifacts return
-  `404 not_found`.
-- Replaces (v1): `GET /v1/explain/resolutions/{namespace}/{name}/execution`.
 
 ### `GET /v2/diagnostics/namespaces/{namespace}/manifests`
 

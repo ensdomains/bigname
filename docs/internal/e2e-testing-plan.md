@@ -22,22 +22,22 @@ Finished-chain fixture scenarios materialize immutable facts and the completed
 ingest boundary directly; intake-parity, provider-fault, and reorg scenarios
 execute the production ingest redo. Scenarios then execute interpret and
 project through the production binary where their assertion needs those
-layers. No runnable scenario invokes the verify phase: the only verification
-scenario needs the public lookup/explain boundary and is deferred to C2/C3.
+layers. No runnable scenario invokes the verify phase; public lookup and
+explain behavior is owned by API crate tests rather than this projection-level
+suite.
 Assertions read [normalized events](../glossary.md#normalized-event), phase
 state, and [projections](../glossary.md#projection) directly. The route-shaped
 `ProjectionReader` is a test-only schema-v2 reader; it is not an HTTP server and
-is not evidence for the retained v1 API.
+is not evidence for public API behavior.
 
-The semantic inventory is fixed at 61 scenarios:
+The semantic inventory is fixed at 58 scenarios:
 
 - 55 retargeted and runnable;
-- 5 explicitly retired because their runtime semantics were deleted; and
-- 1 deferred to C2/C3 because only the public API can make its assertion.
+- 3 explicitly retired because their runtime semantics were deleted.
 
-The exhaustive three-way list is in the e2e README. The crate also contains 24
-harness and support checks, for 85 tests total. The passed-count gate therefore
-requires 79 passed, 0 failed, and 6 ignored.
+The exhaustive list is in the e2e README. The crate also contains 24
+harness and support checks, for 82 tests total. The passed-count gate therefore
+requires 79 passed, 0 failed, and 3 ignored.
 
 ## Coverage vocabulary
 
@@ -52,8 +52,6 @@ requires 79 passed, 0 failed, and 6 ignored.
 - `retired(test; reason)` means the scenario remains in the inventory as an
   ignored test with a one-line reason because the asserted behavior was
   intentionally deleted.
-- `deferred(test; owner)` means the scenario remains ignored until the named
-  later stage supplies the only honest observation boundary.
 - `not_covered(reason)` records a capability risk for which this suite has no
   contract-backed current scenario.
 
@@ -82,24 +80,20 @@ The README carries every exact test path and is the count authority.
 | Retriable provider and receipt faults | Truncated JSON, transient JSON-RPC errors, delayed responses, and a partial receipt batch pass through the production provider/ingest implementation. Failed or incomplete attempts are followed by an explicit clean redo, after which raw facts, normalized rows, and projections match a clean control. | `covered_ingest(transient_provider_faults_and_partial_receipts_recover_to_control)` |
 | Cross-protocol composition | One dual-Anvil corpus retains separate ENS and Basenames resources, positions, address collections, and manifest state. The ENS generic reverse observation remains `not_found` as a declared primary name, while the admitted Base claim serves only under Basenames; neither namespace leaks into the other. | `covered_pipeline(composed_mainnet_profile_serves_both_protocols_without_leakage)` |
 
-## Explicit retirements and deferral
+## Explicit retirements
 
 The ignored tests remain executable inventory entries, so their count and
 reason are visible in the gate output.
 
-- `retired(register_eth_name::live_worker_applies_registration_and_renewal_while_api_serves; deleting apps/indexer removed the live intake-to-worker-to-v1-API coordination this scenario required)`
 - `retired(provider_faults::transient_get_code_retries_primary_without_using_configured_fallback; runtime bytecode-hash admission and its primary retry path were deleted)`
 - `retired(provider_faults::pruned_get_code_fails_closed_then_uses_configured_fallback; the archive fallback was deleted with runtime bytecode-hash admission)`
-- `retired(resolver_records::byte_identical_public_resolver_copy_converges_to_admitted_profile; observed-code-hash admission was replaced by declared-list classification)`
 - `retired(registry_preimages::registry_only_non_eth_tree_derives_declared_state; the schema-v2 identity gate does not materialize an unknown registry-only surface from a generic resolver event)`
-- `deferred(verified_resolution::direct_path_verified_query_via_local_universal_resolver_persists_trace; C2/C3 public lookup and explain API cutover)`
-
 ## Capabilities not covered here
 
 These gaps are not hidden behind a green phase-runner scenario:
 
 - Public route status codes, envelopes, query validation, pagination, and
-  lookup/explain execution output remain conformance or C2/C3 work.
+  lookup/explain output are covered outside this suite by API crate tests.
 - Wildcard, alias, CCIP-read, and Basenames L1 transport execution do not have
   a deployable pinned end-to-end corpus in this suite.
 - ENSv2 reverse/primary intake, registry TTL changes, root/DNS registrar
@@ -108,8 +102,8 @@ These gaps are not hidden behind a green phase-runner scenario:
 - A continuous service loop, worker restart, old backfill scheduler,
   completeness/frontier proofs, startup adapter checkpoints, and runtime
   bytecode-hash discovery are deleted semantics rather than current gaps.
-- No scenario wires the retained v1 API to schema-v2. That cutover belongs to
-  C2 and must not be inferred from route-shaped projection reads.
+- No scenario starts the API, so public behavior must not be inferred from
+  route-shaped projection reads.
 
 ## Runtime topology
 
@@ -131,18 +125,18 @@ signal.
 
 The `e2e` CI job provisions PostgreSQL, installs pinned Foundry, verifies
 `.refs`, prebuilds `phase-runner`, and runs `tests/e2e/run-gate` with eight test
-threads. The gate requires the exact 79/0/6 library-test summary in addition to
+threads. The gate requires the exact 79/0/3 library-test summary in addition to
 Cargo's exit status. The aggregate `test` job requires this e2e job, so a
 filtered, compile-only, or partially executed suite cannot satisfy CI.
 
 ## Ledger discipline
 
 - Change this ledger in the same PR that changes a scenario's evidence layer,
-  retirement, or deferral.
+  retirement, or deletion.
 - A green projection assertion never graduates a public API claim.
 - New upstream behavior claims in tests or docs cite pinned `.refs` evidence.
 - A production contradiction is a stop condition for this lane; the scenario
   reports it, and production code changes land separately.
-- Scenario removal requires an explicit retirement or deferral. Renaming a
+- Scenario removal requires an explicit reason. Renaming a
   scenario must preserve its semantic row or document why that semantic no
   longer exists.

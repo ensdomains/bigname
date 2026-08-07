@@ -14,16 +14,6 @@ pub enum SupportedVerifiedResolutionRecordKey {
     Text,
 }
 
-pub(super) fn canonical_resolution_record_key(record_key: &str) -> String {
-    let Some(coin_type) = record_key.strip_prefix("addr:") else {
-        return record_key.to_owned();
-    };
-
-    canonical_addr_coin_type(coin_type)
-        .map(|coin_type| format!("addr:{coin_type}"))
-        .unwrap_or_else(|| record_key.to_owned())
-}
-
 pub fn parse_supported_verified_resolution_record_key(
     record_key: &str,
 ) -> Result<SupportedVerifiedResolutionRecordKey> {
@@ -97,27 +87,6 @@ pub fn is_resolution_avatar_record(record: &impl VerifiedResolutionRecord) -> bo
     record.record_key() == "avatar"
         && record.record_family() == "avatar"
         && record.selector_key().is_none()
-}
-
-pub fn resolution_execution_cache_lookup_records<R>(row: &NameCurrentRow, records: &[R]) -> Vec<R>
-where
-    R: VerifiedResolutionRecord + Clone,
-{
-    if !resolution_supports_avatar_readback(row, None) {
-        return records.to_vec();
-    }
-
-    let lookup_records = records
-        .iter()
-        .filter(|record| !is_resolution_avatar_record(*record))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    if lookup_records.is_empty() || lookup_records.len() == records.len() {
-        records.to_vec()
-    } else {
-        lookup_records
-    }
 }
 
 pub fn canonical_addr_coin_type(coin_type: &str) -> Option<String> {

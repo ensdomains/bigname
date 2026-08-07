@@ -1,6 +1,6 @@
 ---
 name: replay-safety
-description: Review bigname raw facts, normalized events, canonicality, projection rebuilds, reorg repair, invalidation, execution artifacts, migrations, and storage-family write ownership.
+description: Review bigname raw facts, normalized events, canonicality, projection rebuilds, reorg repair, invalidation, migrations, and storage-family write ownership.
 metadata:
   kind: playbook
 ---
@@ -17,7 +17,7 @@ For replayable-state work, state:
 2. identity anchors and primary keys
 3. canonicality and reorg behavior
 4. rebuild or replay path
-5. invalidation and execution-cache effects
+5. invalidation effects
 6. migration and fixture blast radius
 
 ## Non-negotiables
@@ -26,6 +26,9 @@ For replayable-state work, state:
 - Schema-v2 interpret writes identity rows, discovery edges, and normalized
   events. Adapters provide interpretation behavior and do not write projections.
 - Projection workers own projection tables.
-- API reads projections and execution output except explicit audit endpoints.
-- Execution uses declared topology and manifests, not adapter internals.
+- API reads projections, normalized events, and request-scoped lookup output
+  except explicit audit endpoints and the guarded [resolution divergence
+  ledger](../../../docs/glossary.md#resolution-divergence-ledger).
+  Provider responses are never persisted as reusable outcomes.
+- Lookup uses declared topology and manifests, not adapter internals.
 - Replay or migration semantic changes require `$contract-impact`.

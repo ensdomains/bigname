@@ -1,9 +1,6 @@
-mod canonicality;
 mod decode;
 mod reads;
 mod types;
-mod upserts;
-mod validation;
 
 pub use reads::{
     chain_lineage_contains_ancestor, chain_lineage_contains_ancestor_at_block,
@@ -11,10 +8,3 @@ pub use reads::{
     load_chain_lineage_canonical_child_path, load_highest_canonical_chain_lineage_block,
 };
 pub use types::{CanonicalityState, ChainLineageBlock};
-pub use upserts::{upsert_chain_lineage_blocks, upsert_chain_lineage_blocks_without_snapshots};
-
-pub(crate) use canonicality::promote_chain_lineage_path;
-pub(crate) use reads::{chain_lineage_contains_ancestor_internal, ensure_chain_lineage_block};
-
-#[cfg(test)]
-mod tests;

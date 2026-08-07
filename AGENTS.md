@@ -21,13 +21,15 @@ bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The 
 - Schema-v2 interpret writes identity rows, discovery edges, and normalized
   events. Adapters provide interpretation behavior and do not write projection
   rows.
-- API code reads projections and execution output only, except explicit audit
-  endpoints and the schema-v2 lookup engine's guarded [resolution divergence
-  ledger](docs/glossary.md#resolution-divergence-ledger) write. Serving paths
-  do not write legacy execution traces or cache outcomes.
-- Execution code uses declared topology and manifests, not adapter internals.
+- API code reads phase projections, normalized events, and request-scoped lookup
+  output only, except explicit audit endpoints and the schema-v2 lookup engine's
+  guarded [resolution divergence
+  ledger](docs/glossary.md#resolution-divergence-ledger) write.
+  Provider responses are request-scoped: serving paths never persist them as
+  reusable outcomes or as a durable step-by-step record of the calls made.
+- Lookup code uses declared topology and manifests, not adapter internals.
 - Manifest and discovery code decides what is authoritative.
-- Raw facts are immutable. Projections are rebuildable. Canonicality is explicit. Execution artifacts are durable. Unsupported behavior must be explicit.
+- Raw facts are immutable. Projections are rebuildable. Canonicality is explicit. Unsupported behavior must be explicit.
 
 ## Upstream anchors
 
@@ -76,7 +78,7 @@ Citation rules:
 - `$upstream-evidence`: gather pinned `.refs/` citations and divergence notes for upstream behavior claims.
 - `$consumer-slice`: scope one end-to-end consumer capability with docs, behavior, tests, and explicit deferrals.
 - `$manifest-authority`: plan or review manifests, discovery, admission, capability flags, and watch-plan authority.
-- `$replay-safety`: review raw facts, normalized events, canonicality, projection rebuilds, invalidation, execution artifacts, and migrations.
+- `$replay-safety`: review raw facts, normalized events, canonicality, projection rebuilds, invalidation, and migrations.
 - `$verify-loop`: user-invoked reviewer/fix loop that spawns a fresh `verification_reviewer`, confirms real findings with failing tests or checks, fixes them, and repeats until clean.
 
 ## Core Agents

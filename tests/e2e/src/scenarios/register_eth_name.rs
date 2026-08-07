@@ -132,11 +132,3 @@ async fn register_eth_name_end_to_end() -> Result<()> {
     run.db.cleanup().await?;
     Ok(())
 }
-
-/// Retired old-runtime coordination smoke; its replacement belongs to the
-/// post-cutover API/continuous-runner integration suite.
-#[tokio::test]
-#[ignore = "retired: deleting apps/indexer removed the live intake-to-worker-to-v1-API coordination this scenario required"]
-async fn live_worker_applies_registration_and_renewal_while_api_serves() -> Result<()> {
-    Ok(())
-}

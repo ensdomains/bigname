@@ -189,6 +189,8 @@ async fn build_name_records_diagnostic(
         &[],
         RECORD_CACHE_UNSUPPORTED_REASON,
     );
+    expose_record_boundary_name(&mut record_inventory_section, row);
+    expose_record_boundary_name(&mut record_cache_section, row);
     apply_diagnostics_dictionary_names(&mut record_inventory_section)?;
     apply_diagnostics_dictionary_names(&mut record_cache_section)?;
 
@@ -199,6 +201,19 @@ async fn build_name_records_diagnostic(
         comparison,
         comparison_explicit_gaps,
     })
+}
+
+fn expose_record_boundary_name(section: &mut JsonValue, row: &NameCurrentRow) {
+    let Some(boundary) = section
+        .get_mut("record_version_boundary")
+        .and_then(JsonValue::as_object_mut)
+    else {
+        return;
+    };
+    boundary.insert(
+        "logical_name_id".to_owned(),
+        JsonValue::String(format!("{}:{}", row.namespace, row.normalized_name)),
+    );
 }
 
 async fn build_bounded_ephemeral_verified_record_answers(

@@ -148,8 +148,6 @@ jobs:
         include:
           - name: api
             packages: "-p bigname-api"
-          - name: worker
-            packages: "-p bigname-worker"
           - name: phase-runner
             packages: >-
               -p phase-runner
@@ -165,7 +163,6 @@ jobs:
               -p bigname-storage
               -p bigname-manifests
               -p bigname-adapters
-              -p bigname-execution
               -p bigname-test-support
     services:
       postgres:
@@ -342,9 +339,6 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: verify migrations
-        run: cargo run -p bigname-worker -- migrate
-
       - name: Fetch smoke dependencies
         run: |
           cargo fetch --locked
@@ -352,6 +346,9 @@ jobs:
 
       - name: Sync upstream refs
         run: scripts/sync-refs
+
+      - name: Initialize phase schema
+        run: cargo run --locked -p phase-runner --bin phase-runner -- init-schema
 
       - name: release smoke gate (no network)
         run: ./scripts/release-smoke --no-network

@@ -1,355 +1,122 @@
-# Verified execution
-
-Verified execution covers two served read paths: explicit record resolution by
-name, and primary-name verification by `(address, coin_type)`. Both use the
-schema-v2 lookup engine: record lookups may write only the guarded
-[resolution divergence ledger](glossary.md#resolution-divergence-ledger), and
-primary-name lookups write nothing. The legacy execution crate, durable traces,
-and reusable outcomes remain for worker-owned processing and persisted
-diagnostics; no served API path invokes that engine. Both engines consume
-declared topology and manifest state rather than adapter-specific internals.
-Mixed routes return
-per-result `ResultStatus` from one shared vocabulary: `success`, `not_found`,
-`mismatch`, `unsupported`, `invalid_name`, `execution_failed`. `mismatch` is
-verified-only; `execution_failed` may also describe a route-local
-claimed-primary-name reverse lookup whose provider failed before a claim could
-be established. Companion docs: [`architecture.md`](architecture.md),
-[`api-v2.md`](api-v2.md), [`api-v2-routes.md`](api-v2-routes.md), and
-[`storage.md`](storage.md).
-
-## Resolution flow
-
-The retained legacy execution engine runs the following flow for worker-owned
-processing and historical artifacts; it is not an API serving path:
-
-1. load the declared topology for the requested surface and chain positions
-2. select the namespace's execution entrypoint
-3. resolve resolver selection, alias rewrites, and wildcard traversal
-4. execute onchain calls
-5. follow CCIP-Read where the manifest and resolver family allow it
-6. hand any admitted exact block-anchored call snapshots to intake-owned raw facts; persist the trace and final answer
-
-Every step is attributable in provenance. One request may cover multiple explicit selectors under one request-scoped trace, returning one `verified_queries` entry per selector. Wildcard traversal and alias rewriting appear explicitly in the trace. Entrypoint selection is attributable to a manifest-declared `source_family` and `role` — registry-family presence alone does not imply it. Admitted exact block-anchored `raw_call_snapshots` stay intake-owned; execution may hand them off as a narrow persistence step but they are not trace rows.
-
-A v2 verified resolution request instead loads the schema-v2 project phase at
-its current readable authoritative head, loads projected resolver topology and
-the exact indexed record comparison row, executes a fresh lookup, and returns
-the existing v2 record shape. It creates no execution trace or reusable
-outcome. A direct live/indexed disagreement may create or replace one guarded
-ledger row; agreement may clear the matching active row, while wildcard and
-CCIP-Read answers do not mutate the ledger. The detailed write guard is in
-[`storage.md` § Execution storage](storage.md#execution-storage).
-
-Before persisting a selector-local result as a supported, cache-eligible outcome, execution reloads from storage the manifest versions, the same declared topology snapshot the mixed route would serve, and any [resolver-profile](glossary.md) [admission](glossary.md) state required by the participating resolver-local fact families. The namespace support class is derived from those stored inputs, not from transient trace shape. If revalidation cannot re-establish a frozen supported class, audit material may persist but supported-outcome persistence fails closed.
-
-Unsupported record families surface explicit `status=unsupported`; they never silently degrade to declared cache values. Supported requests that cannot produce a trustworthy answer return `status=execution_failed` with a typed `failure_reason`; plain resolver reverts are `resolver_call_reverted`, malformed return data is `resolver_return_data_malformed`, and unclassified provider-side JSON-RPC response errors remain `resolver_call_failed`. Cache-eligible in-band failures are limited to completed JSON-RPC responses, malformed successful response payloads, expiration of the API's configured provider response deadline, and expiration of the CCIP-Read gateway client's configured response deadline. A JSON-RPC response recognized as unable to serve the selected block, a provider or gateway connect-phase timeout, or any other provider or gateway transport failure aborts before trace or outcome persistence.
-
-### Namespaces and entrypoints
-
-For ENS on Ethereum Mainnet, the entrypoint is `ens_execution` with contract role `universal_resolver` at the official ENS Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`.[^ens-docs-univ] The pinned ENSv1 deployment artifact is the implementation/ABI anchor behind that source family rather than the route-facing proxy.[^v1-ur-deploy][^v1-ursol-l8]
-
-For Basenames on the shipped mainnet [deployment profile](glossary.md), the entrypoint is active `basenames_execution` v2 with contract role `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` for the exact-surface transport-assisted direct-path class only.[^bn-readme-l22][^bn-l1resolver-l13] The same L1 Resolver address is also referenced by `basenames_l1_compat`, but ownership stays split: `basenames_l1_compat` owns transport attribution; `basenames_execution` owns verified-resolution entrypoint selection. Declared exact-name, address-name, and children reads remain on the Base registry/registrar/resolver families. `basenames_base_primary` is claim intake only, sourced from ENSv1's Base `L2ReverseRegistrar` `NameForAddrChanged(address,string)` values.[^bn-readme-l70][^v1-l2rev-base-deploy][^v1-l2rev-event]
-
-### API lookup execution
-
-`GET /v2/names/{name}?source=verified` and
-`GET /v2/names/{name}/records` with a verified source execute the schema-v2
-lookup on every request. The name response populates only
-resolver-record-backed flat fields; registration and identity summary fields
-remain indexed projection values. The compact records route remains the
-selector-specific app path. Both retain their documented response shapes and
-identify the authoritative position admitted for the lookup in `meta`. For a
-cross-chain path, `meta` also identifies the actual canonical projected
-execution position returned by the lookup engine, which may be older than the
-newest generic checkpoint for that auxiliary chain. They do not expose a
-legacy trace identity or imply cache reuse.
-
-Live-execution rules:
-
-- the API Ethereum RPC provider must be configured
-  (`BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<url>`) and able to serve the
-  selected Ethereum block; missing configuration or a selected-block rejection
-  fails closed as `409 stale`. Provider response timeouts remain in-band
-  selector failures. Connect timeouts and other transport failures abort the
-  request as `500 internal_error` without persisting an outcome.
-- v2 lookup requires the schema-v2 project phase to identify the newest
-  processed authoritative head and requires that exact position in the
-  product snapshot admitted by the API. A cross-chain execution chain must be
-  present in that snapshot, but the exact execution position comes from the
-  canonical projected row and can be older than the generic auxiliary
-  checkpoint. It cannot be newer, and a same-height position must match the
-  admitted block hash. The provider call is hash-pinned to that returned execution
-  position, and a position-bearing response exposes it in metadata. The verified
-  section reports in-band `status=stale` when the engine cannot admit or
-  canonically validate those positions.
-- unsupported selector families and unsupported verified [path classes](glossary.md) stay
-  selector-local `status=unsupported`; on-demand execution does not widen the
-  support boundary
-- `GET /v2/diagnostics/names/{name}/execution` is persisted-trace readback only
-
-The compact v2 records routes keep the same supported-selector boundary as
-their name-profile routes. They execute afresh only after the lookup engine
-admits the current schema-v2 readable position. The lookup engine canonicalizes and
-deduplicates selectors, returns them in deterministic canonical order, and
-executes at most 16 record calls concurrently within one lookup. A
-selected-block rejection is an in-band `status=stale`; v2 persists no execution
-outcome. A connect-phase timeout or other transport failure aborts before any
-write. V2 aborts the whole request with `500 internal_error` rather than relabeling the failure as a
-selector-local stale answer or returning a partial `source=auto` result.
-
-### Namespace inference
-
-For `GET /v2/names/{name}` and its nested routes, inference happens before
-lookup and produces the canonical `{namespace, name}` tuple:
-
-- exact `base.eth` resolves as `namespace=ens`
-- `*.base.eth` resolves as `namespace=basenames`
-- other supported ENS names resolve as `namespace=ens`
-
-The inferred namespace selects projected topology, lookup entrypoint, and
-provenance. Namespace inference and verified support are separate gates: an
-inferred `namespace=basenames` request never retries as `namespace=ens`.
-
-## Primary-name verification
-
-A verification request runs:
-
-1. load the untrimmed claimed name from the currently admitted declared claim surface
-2. normalize the claimed name using the recorded normalizer version
-3. require the untrimmed claim to byte-equal its normalized form
-4. resolve the claimed name for the requested `coin_type`
-5. compare the resolved target to the requested address
-6. return the claim and verification result; v1 may persist the execution
-   result, while v2 does not
-
-The route keeps claim state separate from the execution-derived verification result. Both `claimed_primary_name` and `verified_primary_name` use `ResultStatus`. `claimed_primary_name` is limited to `success`, `not_found`, `unsupported`, `invalid_name`, and `execution_failed`; the last status distinguishes a route-local reverse provider failure from an absent claim. `verified_primary_name` additionally uses `mismatch`. A normalizable claim that fails step 3 produces verified `invalid_name` with `failure_reason=claim_not_normalized`; no forward lookup runs.
-
-For retained v1 execution, completed JSON-RPC failures, malformed successful
-responses, and expiration of the configured provider response deadline remain
-cache-eligible in-band `execution_failed` results. A provider connect-phase
-timeout, DNS failure, TLS failure, connection reset, or other transport failure
-aborts with `409 stale` before trace or outcome persistence. The CCIP-Read
-gateway leg follows the same split. V2 uses the same in-band result vocabulary,
-but neither successful nor failed primary-name lookup is persisted.
-
-`mismatch` means the claim normalized, resolved for the requested `coin_type`, and produced a concrete target address that did not equal the requested one. A nonblank raw claim that cannot be normalized surfaces `invalid_name`; blank or whitespace-only is `not_found`. `raw_claim_name` is claim-local — it may be preserved to explain `claimed_primary_name.status=invalid_name` but does not migrate into `verified_primary_name`. When verification establishes a concrete normalized target, `verified_primary_name` may carry that name identity for `success` or `mismatch`; it is omitted otherwise.
-
-### Claim sources
-
-For ENS on Ethereum Mainnet, declared claim intake is reverse-only through `ens_v1_reverse_l1` at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`.[^v1-revreg-deploy][^v1-revreg-l15][^v1-revreg-l100][^v1-revreg-l123] Verification reuses `ens_execution` and the Universal Resolver proxy; declared claim ownership and verified execution ownership stay separate.[^v1-aur-l217][^v1-aur-l263][^v1-aur-l269]
-
-For Basenames, declared claim intake is `basenames_base_primary` at the ENSv1 Base `L2ReverseRegistrar` address `0x0000000000D8e504002cC26E3Ec46D81971C1664`, keyed by `NameForAddrChanged(address,string)` and Base coin type `2147492101`.[^v1-l2rev-base-deploy][^v1-l2rev-base-args][^v1-l2rev-event][^v1-l2rev-nameforaddr] It stays claim intake only — exact-name, address-name, and children declared truth remain on the Base registry/registrar/resolver families, and the Basenames `ReverseRegistrar` is not the primary-name value authority. Verification runs through `basenames_execution` against the Mainnet `L1Resolver`; declared and verified ownership do not collapse.[^bn-readme-l22][^bn-l1resolver-l13]
-
-For v2, fresh verified primary-name execution is intentionally narrower:
-`namespace=ens&coin_type=60` uses the schema-v2 lookup engine at the current
-readable Ethereum position. It performs reverse claim lookup, applies the raw
-claim normalization gate, resolves the admitted claim forward, and compares the
-result with the requested address. It retains the documented `answers` and
-typed `verification` response fields but returns no execution trace identity.
-Other verified tuples, including Basenames, are explicit `unsupported`.
-
-For retained v1, `claimed_primary_name.name`, when present from persisted state,
-comes from the exact requested
-`primary_names_current(address, coin_type, namespace)` row's declared
-normalized claim-identity source for that same tuple, including
-projection-owned legacy reverse-resolver [hydration](glossary.md) for configured
-[event-silent](glossary.md) ENSv1 reverse resolvers. Resolver-edge-only legacy
-hydration may create that exact row only when the untrimmed hydrated name
-byte-equals its normalized form and then resolves forward for `addr:60` through
-the ENS Universal Resolver at the same [hash-pinned](glossary.md) checkpoint to
-an ETH address whose computed `addr.reverse` node matches the candidate node;
-that forward check is claim-side address recovery, not persisted
-verified-primary execution.[^v1-revreg-l137][^v1-registry-l137][^v1-nameresolver-l7][^v1-iaddrres-l11][^v1-iur-l44][^v1-iur-l52]
-An admitted reverse tuple is retained when its raw spelling differs from the
-normalized name, but its `claim_name_is_normalized=false` flag prevents forward
-execution. The v1 app default tuple (`namespace=ens`, `coin_type=60`) may use an
-on-demand Ethereum Mainnet reverse RPC fallback when that persisted tuple is
-missing. It persists the reverse result, normalization decision, optional
-forward call, final result, selected position, and manifest version as
-`request_type=verified_primary_name`, while leaving `primary_names_current`
-untouched.[^v1-registry-deploy][^v1-revreg-l137][^v1-registry-l137][^v1-nameresolver-l7][^v1-nameresolverimpl-l25][^v1-ur-deploy][^v1-iur-l44][^v1-iur-l52]
-Other tuple claim sources are not synthesized from manifest presence,
-resolver-backed forward identity outside that resolver-edge recovery guard,
-verified execution identity, tuple presence alone, or a different
-tuple.[^v1-revreg-l74][^v1-revreg-l83][^v1-revreg-l84]
-
-### Coverage and provenance
-
-For v1, the exact-tuple verified-primary support class remains persisted
-readback for materialized tuples. Both the ENS slice and the first Basenames
-support class use it. Persisted `request_type=verified_primary_name` rows are
-normally backfill-fed through the execution persistence API. The v1 ENS/60 app
-fallback is the bounded route-local producer and creates the same trace and
-outcome before responding. Stable persisted execution identity is the
-normalized tuple `{namespace}:{normalized_address}:{coin_type}`.
-
-Supported tuples may publish `coverage.status=partial` with `exhaustiveness=non_enumerable`. Tuples outside the frozen class remain explicit `unsupported`; they do not inherit coverage from manifest rollout, tuple presence, or verified-resolution support.
-
-`primary_names_current(address, coin_type, namespace)` is the claim-side lookup and invalidation anchor for that tuple. Its `claim_name_is_normalized` flag records whether a successful untrimmed claim byte-equals the stored normalized claim. [Projection](glossary.md)-owned claim state may explain tuple admission or claim invalidation but must not persist `execution_trace_id` or `verified_primary_name`.
-
-Section-local provenance:
-
-- `claimed_primary_name.provenance` is exact-tuple declared-only provenance from the requested row, including projection-owned legacy reverse-resolver hydration metadata when present, or route-local `ens_reverse_rpc` resolver provenance for the ENS/60 on-demand fallback. Persisted declared provenance strips `verified_primary_name_lookup` / `verified_primary_name_invalidation` hook material and omits `execution_trace_id`.
-- On v1, `verified_primary_name.provenance`, when present, is
-  `{execution_trace_id, manifest_versions}` for persisted readback, including
-  ENS/60 fallback execution. Its `execution_trace_id` must equal the top-level
-  trace identity. V2 publishes no trace identity; `meta.as_of` and
-  `meta.as_of_token` identify the current readable position used by its fresh
-  ENS/60 lookup.
-- Top-level route provenance joins claim-side and verification-side context. `verified_primary_name.provenance` does not publish lookup/invalidation hook material, restate claimed-row provenance, or introduce a second lookup/invalidation identity.
-
-The shipped primary-name paths do not require dedicated manifest capability
-flags. Reverse claim admission stays under `ens_v1_reverse_l1` /
-`basenames_base_primary`. V1 persisted readback stays execution-derived under
-`ens_execution` / `basenames_execution`; v2 fresh verification admits only the
-ENS/60 lookup-engine path.
-
-## Trace schema
-
-Each retained v1 verified answer persists into `execution_traces`:
-
-- `execution_trace_id`
-- request type, request key
-- namespace, chain positions, manifest versions
-- step list
-- contracts called, gateway digests
-- final value, failure reason, finished timestamp
-
-For resolution, one persisted answer may carry multiple selector-scoped outputs under the same `execution_trace_id`. For exact-tuple verified primary, one persisted answer covers exactly one `{address, namespace, coin_type}` tuple under `request_type=verified_primary_name`.
-
-Each step row in `execution_steps` records:
-
-- step index, step kind
-- input digest, output digest
-- latency. Producer-generated trace rows must write a numeric `latency_ms`; deterministic local bookkeeping steps may use `0`.
-- [canonicality](glossary.md) dependency
-
-Admitted exact block-anchored `raw_call_snapshots` are not part of this schema. They remain intake-owned raw facts keyed by exact block identity even when verified-resolution persistence hands them off alongside the trace.
-
-Execution traces and steps are durable audit artifacts. Reorg-driven cache invalidation does not delete `execution_traces`, `execution_steps`, or the trace-local step list — it only changes whether a persisted outcome is reusable as a cache hit.
-
-### Worker inspection
-
-`bigname-worker inspect execution-trace --execution-trace-id <id> --json` is the worker-owned operational read for one persisted trace. The JSON output is limited to already persisted state: `command`, `execution_trace_id`, request metadata, request type and key, namespace, chain positions, manifest versions, trace status, final value digest, failure reason, finished timestamp, and ordered `steps` entries with index, kind, input digest, output digest, latency, canonicality dependency, and attachment digest metadata.
-
-The command reads `execution_traces`, `execution_steps`, and trace attachment metadata only. It does not execute or re-execute resolution, primary-name verification, CCIP calls, or topology discovery; it does not expose a raw execution API, raw gateway transcript, or batch trace dump; it does not synthesize topology or resolver/wildcard/alias/transport paths from non-trace storage; it does not mutate cache, projections, manifests, discovery, [watch plans](glossary.md), or [normalized events](glossary.md). The API's persisted explain boundary stays intact at `GET /v2/diagnostics/names/{name}/execution`; this command is operational read-only inspection.
-
-## Cache identity and invalidation
-
-Retained, unserved legacy outcomes live in `execution_cache_outcomes`, keyed by:
-
-- request key
-- requested chain positions
-- manifest versions
-- topology version boundary
-- record version boundary
-
-Those two boundary fields normally contain the projected `VersionBoundary`
-that identifies the logical name, backing resource, last normalized event, and
-chain position. The ENS/60 route-local producer runs only when the exact
-`primary_names_current` tuple is absent, so it owns neither a projected name
-surface nor a backing resource. In that bounded case both fields instead carry
-`{boundary_kind: "selected_checkpoint", chain_position}`. This explicit
-checkpoint dependency contains the stored block number, hash, and timestamp;
-it does not fabricate `logical_name_id`, `resource_id`, or normalized-event
-identity. The outer request key continues to identify the exact
-`{namespace}:{normalized_address}:{coin_type}` tuple.
-
-For resolution, the legacy request key includes the normalized explicit selector set so the cache boundary matches `verified_queries`. `addr:<coin_type>` selectors canonicalize digit text to unsigned 64-bit decimal form before selector dedupe and cache-key construction; `addr:060` and `addr:60` are the same execution identity, and digit text outside `u64` fails input validation. This is a bigname cache-identity narrowing relative to upstream resolver `uint256 coinType` APIs `(upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L14 @ ens_v1@91c966f)` `(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L93 @ basenames@1809bbc)`; the divergence is recorded in `docs/upstream.md`. The resolution request key is built from the inferred namespace, normalized name, and normalized selector set. Namespace inference does not create a separate cache namespace.
-
-For verified primary, the request key is the normalized tuple `{namespace}:{normalized_address}:{coin_type}`. Materialized verified-primary results use the matching `primary_names_current(address, coin_type, namespace)` row as their claim-side lookup/invalidation anchor; targeted projection updates, full projection rebuilds, and legacy reverse-resolver hydration writes/deletes invalidate request-matching answers for tuples whose claim row appeared, disappeared, or changed, but claim projection and hydration do not persist verified payloads or trace IDs. The route-local ENS/60 producer is admitted only while that exact row is absent, uses the selected-checkpoint dependency described above instead of a projected version boundary, and is fenced out of route-local readback when a row later appears.
-
-Verified-primary producers persist the full cache identity in `trace.request_metadata.cache_identity` and reject missing or mismatched identity fields rather than normalizing them. Materialized producers fence writes against the current `primary_names_current` claim anchor: the terminal claim status must still match, success or mismatch rows must match the current normalized claim name whenever that claim identity is present on the anchor, and a successful anchor's `claim_name_is_normalized` flag must agree with whether the verified result is `invalid_name/claim_not_normalized`. The retained ENS/60 missing-tuple producer instead fences persistence and readback on absence of that exact tuple; its readback additionally requires the selected checkpoint to equal the persisted requested position, and its traces cannot satisfy materialized readback or vice versa. In both cases, the normalization gate runs before any forward call: a projected non-normalized success bypasses readback, while a non-normalized missing-tuple claim persists a trace with no `call_universal_resolver` step. Persisted-primary readback treats cache identity drift as a cache miss. An outcome is reusable by retained worker code only when its request tuple, requested chain positions, manifest versions, topology version boundary, and record version boundary match the loaded trace's cache-identity metadata and outcome cache key. Active manifest changes must evict affected outcomes through execution invalidation. Durable traces and steps are retained even when an outcome is no longer reusable, except for the bounded ENS/60 missing-tuple retention described in [`storage.md`](storage.md#execution-storage).
-
-Legacy persisted-primary readback applies the current successful-row
-`claim_name_is_normalized=false` gate. V2 applies the same raw-claim
-normalization rule inside each fresh lookup, without consulting or writing the
-legacy cache.
-
-Invalidate on:
-
-- reorg
-- manifest change
-- resolver change
-- alias or wildcard topology change
-- relevant record change
-- primary claim change
-
-Reorg invalidation rules: reorg repair invalidates any `execution_cache_outcomes` row whose dependency set contains an orphaned block identity. Cache dependencies must tie to explicit block-hash-bearing chain positions or boundaries; block numbers, `latest`/`head` tags, manifest versions, topology versions, and record versions are not sufficient unless they resolve to one or more block hashes or to source rows that carry block hashes. Verified resolution and verified primary-name rows without explicit block-hash-bearing dependencies fail closed and are ineligible for cache reuse after a reorg check. Request types documented as not depending on chain state remain explicitly out of scope rather than implicitly safe. Invalidation affects cache eligibility only; traces, steps, and attachments stay durable.
-
-## Explain
-
-Every persisted verified answer must be explainable through the selected entrypoint, resolver discovery path, wildcard traversal, alias rewriting, CCIP steps, and the final comparison or returned record value. The shipped persisted-execution explain surface is `GET /v2/diagnostics/names/{name}/execution`.
-
-It is keyed by the same current exact surface and explicit selector set as the diagnostic request, reads the persisted trace and selector-scoped results, and does not re-execute or synthesize from declared topology alone. Top-level provenance and any selector-local provenance anchor to the same persisted `execution_trace_id`. The route surfaces the selected entrypoint, resolver discovery path, wildcard traversal, alias rewriting, and the ordered persisted step summary; CCIP-Read participation appears through persisted step kinds, not a raw gateway transcript. The handler exposes the name path parameter plus required `keys` and snapshot selectors.
-
-Diagnostic explain support stays coupled to the retained verified-resolution artifact boundary; deferred unsupported path classes do not gain a synthetic trace-shaped contract. The separate binding and authority diagnostics remain on the declared read plane.[^bn-readme-l70]
-
-## Retained legacy support boundary
-
-ENS legacy verified resolution on Ethereum Mainnet uses `ens_execution` at the Universal Resolver proxy.[^ens-docs-univ][^v1-aur-l90][^v1-aur-l106] Its persisted artifacts cover three exact-surface path classes against the same declared topology snapshot:
-
-- **Direct path** — `resolver_path[0].logical_name_id` equals top-level `data.logical_name_id`; `wildcard.source` is `null` with `matched_labels=[]`; `alias.final_target` is `null` with `hops=[]`; all `transport` fields are `null`.
-- **Alias-only non-direct** — same shape, except `alias.final_target` is non-`null` with non-empty `hops`.
-- **Wildcard-derived** — `wildcard.source` is non-`null` with non-empty `matched_labels`; `resolver_path[0].logical_name_id` equals `wildcard.source.logical_name_id`; `alias.final_target` is `null` with `hops=[]`; `subregistry_path=[]`; all `transport` fields are `null`.
-
-All three flow through the same persisted execution trace and explain contract: explain surfaces the selected entrypoint, resolver discovery path, ordered persisted steps, and any participating alias or wildcard detail without a second trace family.
-
-ENS requests outside these classes — including non-alias ancestor-selected paths, linked-subregistry ancestor-selected paths, any transport-assisted path, and any request whose persisted execution used CCIP-Read — remain `unsupported`. The diagnostic explain route does not synthesize traces for them.
-
-Basenames verified resolution on the shipped mainnet deployment profile uses active `basenames_execution` v2 at the L1 Resolver for the exact-surface transport-assisted direct-path class:[^bn-readme-l22][^bn-readme-l69][^bn-readme-l70][^bn-l1resolver-l13]
-
-- `resolver_path[0].logical_name_id` equals top-level `data.logical_name_id`
-- `wildcard.source=null`, `matched_labels=[]`
-- `alias.final_target=null`, `hops=[]`
-- `subregistry_path=[]`
-- `transport.source_chain_id="base-mainnet"`, `transport.target_chain_id="ethereum-mainnet"`, `transport.contract_address="0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31"`
-
-CCIP-participating traces are eligible for that class rather than `unsupported`, because upstream `L1Resolver` initiates `OffchainLookup` for non-`base.eth` requests and completes them through `resolveWithProof`.[^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191] Diagnostics surface the resulting persisted CCIP steps without inventing a second trace family. Other Basenames paths remain `unsupported`. These retained artifact classes do not widen the v2 lookup engine's route-level support or add manifest flags.
-
-V2 admits fresh ENS/60 primary-name lookup and no other verified primary tuple.
-It does not read the retained persisted-primary outcomes.
+# Verified Lookup
+
+Verified lookup is request-scoped schema-v2 behavior. The API reads declared
+topology and phase projections, may call an admitted chain provider, compares
+the answer with indexed state where the route requires it, and returns the
+result without writing a reusable cache outcome or durable execution trace.
+
+The only serving-path write is the guarded
+[resolution divergence ledger](glossary.md#resolution-divergence-ledger). It is
+an operational observation of a direct live/indexed disagreement, not a result
+cache, projection, or source of truth.
+
+## Read planes
+
+The API keeps these meanings separate:
+
+- `indexed` reads the phase projection and record inventory only;
+- `verified` attempts the admitted schema-v2 lookup path for the requested
+  selector or primary-name tuple; and
+- `auto` uses a satisfying indexed answer and attempts verified lookup only for
+  requested selectors that indexed state cannot satisfy.
+
+Verified lookup never backfills `record_inventory_current` or
+`primary_names_current`. Project owns those rows. A provider answer affects only
+the current response and, for guarded direct comparisons, divergence-ledger
+state.
+
+## Snapshot and canonicality
+
+Before lookup, the API selects a readable project publication and exact chain
+positions from `bigname_phase`. Every admitted projection row must be at or
+before that selection and must resolve through `bigname_phase.chain_lineage`.
+The API revalidates the selected project generation before returning. A moved
+head, mismatched hash, future publication, missing canonical lineage, or
+interpreter-content-hash mismatch returns `409 stale`; it does not fall back to
+an answer at another position.
+
+Provider calls use the selected block identity rather than `latest`. Missing
+provider configuration, unsupported topology, and unsupported selectors are
+reported through the route's explicit unsupported or failed result shapes.
+
+## Resolver-record lookup
+
+ENS verified resolution uses the manifest-admitted Universal Resolver
+entrypoint.[^ens-docs-univ][^v1-ur-deploy] The supported topology classes are:
+
+- exact-surface direct resolution;
+- exact-surface alias resolution with a declared non-empty alias path; and
+- exact-surface wildcard-derived resolution with a declared wildcard source
+  and matched labels.
+
+Ancestor-selected non-alias paths, linked-subregistry ancestor selection,
+transport-assisted ENS paths, and CCIP-participating ENS paths remain explicit
+`unsupported` unless a retained route contract says otherwise.
+
+Basenames verified resolution admits the exact-surface transport-assisted
+direct path through the manifest-selected L1 Resolver. That contract may use
+`OffchainLookup` and `resolveWithProof` for non-`base.eth` requests.[^bn-readme-l22][^bn-readme-l69][^bn-readme-l70][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
+Other Basenames path classes remain explicit `unsupported`.
+
+Requests identify records with normalized selector keys such as
+`addr:<coin_type>`, `text:<key>`, and `contenthash`. Decimal coin types are
+canonicalized to their unsigned 64-bit decimal spelling before deduplication;
+out-of-range values are invalid input. This is an intentional narrowing of the
+upstream resolver `uint256 coinType` surface and is recorded in
+[`upstream.md`](upstream.md).[^v1-iaddressres-l14][^bn-addrresolver-l93]
+
+Selector-local results use `success`, `not_found`, `unsupported`, or `failed`.
+One unsupported selector does not discard successful answers for other
+selectors in the same request.
+
+## Primary-name lookup
+
+The verified primary-name product path supports ENS on coin type `60`. It reads
+the phase `primary_names_current` claim, requires a byte-normalized successful
+claim, resolves the claimed name at the selected Ethereum position, and accepts
+it only when the forward address matches the requested address. A reverse claim
+alone is not proof of a primary name.[^v1-aur-l217][^v1-aur-l263][^v1-aur-l269]
+
+Invalid or non-normalized claims remain non-primary. A successful claim whose
+publication has no matching canonical phase-lineage row makes snapshot-selected
+lookup stale. Other namespace and coin-type tuples are explicit unsupported
+unless the API contract admits them.
+
+Primary-name lookup writes neither projections nor divergence observations.
+
+## Divergence ledger
+
+The lookup engine may call fixed-`search_path`, security-definer functions that
+revalidate the selected lookup state and then create, refresh, or clear an
+active resolution-divergence observation. The API role has `EXECUTE` on those
+functions but no direct write privilege on the ledger table.
+
+An observation records the logical name, resolver identity, request kind,
+selected positions, and indexed/live comparison. Reorg handling clears active
+observations whose recorded positions include an orphaned block. The ledger is
+diagnostic evidence only; indexed projection reads and verified provider reads
+do not consume it as an answer.
+
+## Removed legacy artifacts
+
+The old execution crate, `execution_traces`, `execution_steps`, and
+`execution_cache_outcomes` have been deleted. There is no worker trace inspector,
+persisted-execution explain route, legacy cache invalidator, or serving fallback
+to those tables. Unsupported behavior must remain explicit rather than being
+hidden behind a stale cached result.
 
 ---
 
 [^ens-docs-univ]: <https://docs.ens.domains/resolvers/universal/> (official Universal Resolver proxy)
-
 [^v1-ur-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/UniversalResolver.json:L2 @ ens_v1@91c966f)
-[^v1-ursol-l8]: (upstream: .refs/ens_v1/contracts/universalResolver/UniversalResolver.sol:L8 @ ens_v1@91c966f)
-[^v1-iur-l44]: (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L44 @ ens_v1@91c966f)
-[^v1-iur-l52]: (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L52 @ ens_v1@91c966f)
-[^v1-iaddrres-l11]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddrResolver.sol:L11 @ ens_v1@91c966f)
-[^v1-aur-l90]: (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L90 @ ens_v1@91c966f)
-[^v1-aur-l106]: (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L106 @ ens_v1@91c966f)
+[^v1-iaddressres-l14]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L14 @ ens_v1@91c966f)
 [^v1-aur-l217]: (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L217 @ ens_v1@91c966f)
 [^v1-aur-l263]: (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L263 @ ens_v1@91c966f)
 [^v1-aur-l269]: (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L269 @ ens_v1@91c966f)
-
-[^v1-revreg-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/ReverseRegistrar.json:L2 @ ens_v1@91c966f)
-[^v1-l2rev-base-deploy]: (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L2 @ ens_v1@91c966f)
-[^v1-l2rev-base-args]: (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L391 @ ens_v1@91c966f)
-[^v1-l2rev-event]: (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L98 @ ens_v1@91c966f)
-[^v1-l2rev-nameforaddr]: (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L154 @ ens_v1@91c966f)
-[^v1-revreg-l15]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L15 @ ens_v1@91c966f)
-[^v1-revreg-l74]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L74 @ ens_v1@91c966f)
-[^v1-revreg-l83]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L83 @ ens_v1@91c966f)
-[^v1-revreg-l84]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L84 @ ens_v1@91c966f)
-[^v1-revreg-l100]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L100 @ ens_v1@91c966f)
-[^v1-revreg-l123]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123 @ ens_v1@91c966f)
-[^v1-registry-deploy]: (upstream: .refs/ens_v1/deployments/mainnet/ENSRegistry.json:L2 @ ens_v1@91c966f)
-[^v1-revreg-l137]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L137 @ ens_v1@91c966f)
-[^v1-registry-l137]: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)
-[^v1-nameresolver-l7]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L7 @ ens_v1@91c966f)
-[^v1-nameresolverimpl-l25]: (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L25 @ ens_v1@91c966f)
-
 [^bn-readme-l22]: (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc)
-[^bn-readme-l33]: (upstream: .refs/basenames/README.md:L33 @ basenames@1809bbc)
 [^bn-readme-l69]: (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc)
 [^bn-readme-l70]: (upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)
-[^bn-l1resolver-l13]: (upstream: .refs/basenames/src/L1/L1Resolver.sol:L13 @ basenames@1809bbc)
 [^bn-l1resolver-l154]: (upstream: .refs/basenames/src/L1/L1Resolver.sol:L154 @ basenames@1809bbc)
 [^bn-l1resolver-l173]: (upstream: .refs/basenames/src/L1/L1Resolver.sol:L173 @ basenames@1809bbc)
 [^bn-l1resolver-l191]: (upstream: .refs/basenames/src/L1/L1Resolver.sol:L191 @ basenames@1809bbc)
-[^bn-revreg-l12]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc)
-[^bn-revreg-l150]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L150 @ basenames@1809bbc)
-[^bn-revreg-l193]: (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L193 @ basenames@1809bbc)
+[^bn-addrresolver-l93]: (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L93 @ basenames@1809bbc)

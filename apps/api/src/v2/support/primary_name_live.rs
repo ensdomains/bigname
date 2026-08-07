@@ -76,15 +76,14 @@ pub(crate) async fn load_v2_primary_name_route_read(
         || namespace != bigname_storage::ENS_NAMESPACE
         || canonical_primary_name_coin_type(coin_type)? != "60"
     {
-        let publication = current_primary_name_publication(&state.lookup_pool, namespace).await?;
+        let publication = current_primary_name_publication(&state.pool, namespace).await?;
         let lookup_state =
-            load_primary_name_lookup_state(&state.lookup_pool, address, namespace, coin_type)
-                .await?;
+            load_primary_name_lookup_state(&state.pool, address, namespace, coin_type).await?;
         #[cfg(test)]
-        indexed_read_test_hooks::run(&state.lookup_pool).await?;
+        indexed_read_test_hooks::run(&state.pool).await?;
         require_primary_name_publication_unchanged(
             &publication,
-            current_primary_name_publication(&state.lookup_pool, namespace).await?,
+            current_primary_name_publication(&state.pool, namespace).await?,
         )?;
         return Ok(PrimaryNameRouteRead {
             lookup_state,
@@ -93,18 +92,16 @@ pub(crate) async fn load_v2_primary_name_route_read(
     }
 
     let mixed_publication = if mode == ResolutionMode::Both {
-        Some(current_primary_name_publication(&state.lookup_pool, namespace).await?)
+        Some(current_primary_name_publication(&state.pool, namespace).await?)
     } else {
         None
     };
     let timer = crate::metrics::verified_execution_timer();
-    let lookup = bigname_lookup::LookupEngine::new(
-        state.lookup_pool.clone(),
-        state.lookup_chain_rpc_urls.clone(),
-    )
-    .lookup_ens_primary_name(address)
-    .await
-    .map_err(|error| primary_name_lookup_error(address, error))?;
+    let lookup =
+        bigname_lookup::LookupEngine::new(state.pool.clone(), state.lookup_chain_rpc_urls.clone())
+            .lookup_ens_primary_name(address)
+            .await
+            .map_err(|error| primary_name_lookup_error(address, error))?;
     let selected_snapshot = primary_name_lookup_snapshot(&lookup.position)?;
     if mixed_publication.as_ref().is_some_and(|publication| {
         publication.selected_snapshot.as_ref() != Some(&selected_snapshot)
@@ -113,7 +110,7 @@ pub(crate) async fn load_v2_primary_name_route_read(
     }
     let mut lookup_state = if mode == ResolutionMode::Both {
         load_mixed_primary_name_lookup_state_at_position(
-            &state.lookup_pool,
+            &state.pool,
             address,
             namespace,
             coin_type,
@@ -121,14 +118,14 @@ pub(crate) async fn load_v2_primary_name_route_read(
         )
         .await?
     } else {
-        load_primary_name_lookup_state(&state.lookup_pool, address, namespace, coin_type).await?
+        load_primary_name_lookup_state(&state.pool, address, namespace, coin_type).await?
     };
     if let Some(publication) = &mixed_publication {
         #[cfg(test)]
-        indexed_read_test_hooks::run(&state.lookup_pool).await?;
+        indexed_read_test_hooks::run(&state.pool).await?;
         require_primary_name_publication_unchanged(
             publication,
-            current_primary_name_publication(&state.lookup_pool, namespace).await?,
+            current_primary_name_publication(&state.pool, namespace).await?,
         )?;
     }
     apply_primary_name_lookup(&mut lookup_state, namespace, lookup)?;
@@ -456,7 +453,7 @@ fn live_primary_name_ref(namespace: &str, normalized_name: &str) -> ApiResult<Js
         ))
     })?;
     Ok(json!({
-        "logical_name_id": format!("{namespace}:{normalized_name}"),
+        "logical_name_id": bigname_storage::logical_name_id_for_name(namespace, normalized_name),
         "namespace": namespace,
         "normalized_name": normalized_name,
         "canonical_display_name": normalized_name,

@@ -3,7 +3,7 @@ use bigname_storage::ReverseIdentityStorageInput;
 use serde_json::{Map, Value};
 use sqlx::{PgPool, Row};
 
-use super::{ReverseIdentityPageRow, roles_storage_value};
+use super::{READABLE_REVERSE_IDENTITY_CTES, ReverseIdentityPageRow, roles_storage_value};
 
 pub(super) async fn load_reverse_identity_page_rows(
     pool: &PgPool,
@@ -60,9 +60,9 @@ pub(super) async fn load_reverse_identity_page_rows(
         .map(|input| input.cursor.as_ref().map(|cursor| cursor.namehash.clone()))
         .collect::<Vec<_>>();
 
-    let rows = sqlx::query(
+    let query = format!(
         r#"
-        WITH requested AS (
+        WITH {READABLE_REVERSE_IDENTITY_CTES}, requested AS (
             SELECT * FROM UNNEST(
                 $1::INT[], $2::TEXT[], $3::TEXT[], $4::TEXT[], $5::JSONB[],
                 $6::BIGINT[], $7::BOOLEAN[], $8::BOOLEAN[], $9::SMALLINT[],
@@ -90,12 +90,10 @@ pub(super) async fn load_reverse_identity_page_rows(
                        anc.raw_name AS normalized_name,
                        anc.namespace,
                        anc.namehash
-                FROM address_names_current anc
-                JOIN name_current identity_nc
+                FROM readable_relations anc
+                JOIN readable_names identity_nc
                   ON identity_nc.logical_name_id = anc.logical_name_id
                 WHERE lower(anc.address) = lower(requested.address)
-                  AND anc.support_status = 'supported'
-                  AND identity_nc.support_status IN ('supported', 'unsupported')
                   AND (
                       requested.roles = 'both'
                       OR (requested.roles = 'owned'
@@ -126,28 +124,29 @@ pub(super) async fn load_reverse_identity_page_rows(
         ORDER BY requested.input_index, NOT candidate.is_primary,
                  candidate.role_rank, candidate.normalized_name,
                  candidate.namespace, candidate.namehash
-        "#,
-    )
-    .bind(&input_indexes)
-    .bind(&addresses)
-    .bind(&coin_types)
-    .bind(&roles)
-    .bind(&primary_names)
-    .bind(&page_sizes)
-    .bind(&cursor_present)
-    .bind(&cursor_is_primary)
-    .bind(&cursor_role_ranks)
-    .bind(&cursor_normalized_names)
-    .bind(&cursor_namespaces)
-    .bind(&cursor_namehashes)
-    .fetch_all(pool)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to load phase reverse candidates for {} inputs",
-            inputs.len()
-        )
-    })?;
+        "#
+    );
+    let rows = sqlx::query(&query)
+        .bind(&input_indexes)
+        .bind(&addresses)
+        .bind(&coin_types)
+        .bind(&roles)
+        .bind(&primary_names)
+        .bind(&page_sizes)
+        .bind(&cursor_present)
+        .bind(&cursor_is_primary)
+        .bind(&cursor_role_ranks)
+        .bind(&cursor_normalized_names)
+        .bind(&cursor_namespaces)
+        .bind(&cursor_namehashes)
+        .fetch_all(pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load phase reverse candidates for {} inputs",
+                inputs.len()
+            )
+        })?;
 
     rows.into_iter()
         .map(|row| {
@@ -159,6 +158,9 @@ pub(super) async fn load_reverse_identity_page_rows(
         .collect()
 }
 
+/// Pairs with `identity_facade::load_identity_primary_name_snapshots`, which decides the same claim
+/// for the emitted flag. Both admit on chain id plus target block hash, and they only stay in step
+/// if they are changed together.
 async fn load_normalized_primary_names(
     pool: &PgPool,
     inputs: &[ReverseIdentityStorageInput],
@@ -178,12 +180,23 @@ async fn load_normalized_primary_names(
                 AS requested(input_index, address, coin_type)
         )
         SELECT requested.input_index, primary_name.namespace,
-               primary_name.raw_claim_name
+               primary_name.raw_claim_name, primary_name.claim_name_is_normalized
         FROM requested
-        JOIN primary_names_current primary_name
+        JOIN bigname_phase.primary_names_current primary_name
           ON lower(primary_name.address) = lower(requested.address)
          AND primary_name.coin_type = requested.coin_type
          AND primary_name.claim_status = 'success'
+         AND EXISTS (
+             SELECT 1
+             FROM bigname_phase.chain_lineage projection_lineage
+             WHERE projection_lineage.chain_id =
+                   primary_name.claim_provenance ->> 'chain_id'
+               AND projection_lineage.block_hash =
+                   primary_name.claim_provenance ->> 'target_block_hash'
+               AND projection_lineage.canonicality_state IN (
+                   'canonical', 'safe', 'finalized'
+               )
+         )
         ORDER BY requested.input_index, primary_name.namespace
         "#,
     )
@@ -198,10 +211,22 @@ async fn load_normalized_primary_names(
     for row in rows {
         let input_index = row.try_get::<i32, _>("input_index")? as usize;
         let namespace: String = row.try_get("namespace")?;
-        let raw_name: String = row.try_get("raw_claim_name")?;
-        let normalized = bigname_domain::normalization::normalize_name(&raw_name)
-            .with_context(|| format!("successful phase primary name {raw_name} is invalid"))?;
-        by_input[input_index].insert(namespace, Value::String(normalized.normalized_name));
+        let raw_name: Option<String> = row.try_get("raw_claim_name")?;
+        // Same derivation the emitted `is_primary` uses, so this map and the flag the response
+        // carries evaluate the same predicate over the same two strings. The page rows and the
+        // primary-name snapshots are separate statements, so a projection write landing between
+        // them can still skew one against the other for one request; that is the ordinary
+        // latest-state race, not a predicate disagreement. The status is `Success` because the
+        // query above selects only successful claims. A claim that yields no normalized name
+        // marks nothing primary instead of failing the batch.
+        let Some(normalized) = bigname_storage::normalized_claim_name(
+            bigname_storage::PrimaryNameClaimStatus::Success,
+            row.try_get("claim_name_is_normalized")?,
+            raw_name.as_deref(),
+        ) else {
+            continue;
+        };
+        by_input[input_index].insert(namespace, Value::String(normalized));
     }
     Ok(by_input.into_iter().map(Value::Object).collect())
 }

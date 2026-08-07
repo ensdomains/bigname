@@ -1,7 +1,13 @@
 # ADR 0005: Identity Reverse Feed Sidecars
 
-Status: Accepted
+Status: Superseded by the schema-v2 C2 cutover
 Date: 2026-05-20
+
+The decision below describes the retired v1 identity feed. The v2 lookup path
+uses live phase-projection joins and `COUNT(DISTINCT ...)`; the sidecar tables,
+triggers, worker writers, and v1 readiness contract were removed with the
+legacy `public` schema. The historical rationale is retained for benchmark
+interpretation only.
 
 ## Context
 

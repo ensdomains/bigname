@@ -3,7 +3,16 @@
 Status: Accepted
 Date: 2026-06-10
 Accepted: 2026-06-12
-Amended: 2026-07-21 (issue #188)
+Amended: 2026-08-06 (schema-v2 C2 cutover)
+
+## 2026-08-06 Amendment: Schema-v2 Serving Boundary
+
+The API now reads only `bigname_phase` projections and request-scoped verified
+lookup output. The persisted-execution diagnostics route, durable execution
+traces and cache, v1 identity sidecars, worker liveness, and legacy indexer
+liveness have been deleted. `GET /healthz` reports API readiness and phase
+runner state. Historical design discussion below that mentions those deleted
+planes records the input to this ADR rather than current runtime behavior.
 
 ## 2026-07-21 Amendment: Honest Latest-State Collection Cursors
 
@@ -215,15 +224,14 @@ Tier 3 — diagnostics (the only routes carrying pipeline vocabulary):
 | `GET /v2/diagnostics/names/{name}/coverage` | Full coverage taxonomy: `exhaustiveness`, `enumeration_basis`, `source_classes_considered`, `unsupported_reason` detail. |
 | `GET /v2/diagnostics/names/{name}/binding` | Surface-binding explain (binding ids, binding kind, anchors). |
 | `GET /v2/diagnostics/names/{name}/authority` | Authority/control explain (token lineage, control vectors, permission lineage). |
-| `GET /v2/diagnostics/names/{name}/records` | Record inventory and cache internals: selectors, explicit gaps, unsupported families, version boundaries, value sources, and indexed-vs-verified side-by-side comparison (the former `mode=both`). |
-| `GET /v2/diagnostics/names/{name}/execution` | Persisted verified-execution explain: trace id, steps, digests, CCIP participation. |
+| `GET /v2/diagnostics/names/{name}/records` | Record inventory: selectors, explicit gaps, unsupported families, version boundaries, value sources, and indexed-vs-verified side-by-side comparison (the former `mode=both`). |
 | `GET /v2/diagnostics/namespaces/{namespace}/manifests` | Active manifest versions, source families, deployment epochs, capability flags. Replaces `/v1/manifests/{namespace}`. |
 | `GET /v2/diagnostics/events` | Raw normalized-event rows: upstream event kinds, event identity, full provenance. Same filters as `/v2/events`. This is the home of `v1` history `view=full`, resolving ADR 0003's open history full-view decision: the full row shape survives as a diagnostics contract, not a product one. |
 
 `GET /healthz` remains the unversioned operator health contract outside the
 versioned product routes. Its HTTP status and `api_status` are API-local
-process/database readiness; aggregate `status` and `loops` retain indexer and
-worker liveness evidence. `GET /`, `GET /docs`, and `GET /openapi.json` remain
+process/database readiness; aggregate `status` and `loops` retain phase-runner
+state. `GET /`, `GET /docs`, and `GET /openapi.json` remain
 non-contract helpers.
 
 Deleted from the public catalog (capability absorbed as noted): the `profiles/`
@@ -507,9 +515,9 @@ filters, the reserved `/v1/events` parameter block, the `resource` vs
 This answers the open items in
 `docs/internal/api-surface-flattening-scope-decisions.md`: provenance public —
 no, diagnostics-only (Q3); coverage public — simplified on product routes, full
-taxonomy on diagnostics (Q4); one envelope — yes (Q5); record cache metadata —
+taxonomy on diagnostics (Q4); one envelope — yes (Q5); record inventory metadata —
 diagnostics-only (Q8); selector-state distinctions — kept, via the unified
-status vocabulary (Q9); execution traces — diagnostics-only (Q12); search/exact
+status vocabulary (Q9); execution traces — deleted at the C2 cutover (Q12); search/exact
 split — yes (Q20); typed unsupported inside 200s — yes, as `meta` +
 per-item `status` (Q31); `view=full` — deleted (Q33); `mode` public — renamed
 `source`, only on routes where verified execution is first-class (Q34);

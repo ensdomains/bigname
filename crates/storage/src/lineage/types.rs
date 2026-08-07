@@ -17,11 +17,35 @@ pub struct ChainLineageBlock {
 }
 
 /// Persisted canonicality marker for a lineage row.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, sqlx::Type)]
+#[sqlx(type_name = "canonicality_state", rename_all = "lowercase")]
 pub enum CanonicalityState {
     Observed,
     Canonical,
     Safe,
     Finalized,
     Orphaned,
+}
+
+impl CanonicalityState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Observed => "observed",
+            Self::Canonical => "canonical",
+            Self::Safe => "safe",
+            Self::Finalized => "finalized",
+            Self::Orphaned => "orphaned",
+        }
+    }
+
+    pub fn parse(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "observed" => Ok(Self::Observed),
+            "canonical" => Ok(Self::Canonical),
+            "safe" => Ok(Self::Safe),
+            "finalized" => Ok(Self::Finalized),
+            "orphaned" => Ok(Self::Orphaned),
+            _ => anyhow::bail!("unknown canonicality state {value}"),
+        }
+    }
 }

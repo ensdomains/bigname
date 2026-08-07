@@ -1,8 +1,13 @@
 # ADR 0003: API Surface Flattening Plan
 
-Status: Proposed — compatibility-preservation policy superseded by ADR 0006;
-implementation slices 3–6 remain valid enablers
+Status: Superseded by ADR 0006 and the schema-v2 C2 cutover
 Date: 2026-05-06
+
+This document records the pre-v2 flattening plan. References below to v1
+routes, the worker, durable execution traces, replay fences, or the legacy
+`public` projection plane are historical and do not describe the current
+runtime. The current contracts are `docs/api-v2.md`, `docs/storage.md`,
+`docs/projections.md`, and `docs/execution.md`.
 
 ## Context
 

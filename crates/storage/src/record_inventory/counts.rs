@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use super::{
     boundary_key::record_version_boundary_storage_key,
-    snapshot_reads::DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER,
+    canonicality::{DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER, RESOURCE_CANONICALITY_JOINS},
 };
 
 /// Count known public record selectors for exact current inventory keys.
@@ -43,19 +43,15 @@ pub async fn count_record_inventory_selectors_by_lookup_keys(
                     ELSE '[]'::JSONB
                 END
             )::BIGINT AS record_count
-        FROM record_inventory_current ric
+        FROM bigname_phase.record_inventory_current ric
         JOIN UNNEST($1::UUID[], $2::TEXT[])
           AS requested(resource_id, record_version_boundary_key)
           ON requested.resource_id = ric.resource_id
          AND requested.record_version_boundary_key = ric.record_version_boundary_key
-        JOIN resources resource
-          ON resource.resource_id = ric.resource_id
-        JOIN chain_lineage resource_lineage
-          ON resource_lineage.chain_id = resource.chain_id
-         AND resource_lineage.block_hash = resource.block_hash
+        {RESOURCE_CANONICALITY_JOINS}
         WHERE TRUE
         {DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER}
-        "#
+        "#,
     ))
     .bind(&resource_ids)
     .bind(&boundary_keys)

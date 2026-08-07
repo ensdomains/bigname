@@ -20,7 +20,6 @@ mod reverse_primary;
 mod reverse_primary_claims;
 mod support;
 mod unadmitted_controller;
-mod verified_resolution;
 mod wrapper;
 mod wrapper_registration;
 mod wrapper_renewal_and_transfers;

@@ -16,11 +16,10 @@ outcomes or durable [execution traces](docs/glossary.md).
 ## What's here
 
 - `apps/api` — the read API (`/v2/...`, `/graphql`, `/healthz`)
-- `apps/phase-runner` — the Stage B phase supervisor; `ingest` and `interpret`
-  are implemented, while `project`, `verify`, and `live` remain unavailable
-- `apps/worker` — projections, replay, verified execution, inspection commands
+- `apps/phase-runner` — the ingest, interpret, project, verify, and live phase
+  supervisor
 - `crates/` — domain types, storage, manifests, schema-v2 adapters, ingest,
-  interpret, and execution
+  interpret, lookup, and projection behavior
 - `manifests/` — checked-in profile roots such as `mainnet` and `sepolia`, split by chain combo
 - `migrations/` — Postgres schema
 - `schema-v2/` — the fresh phase-runner schema baseline
@@ -31,37 +30,31 @@ outcomes or durable [execution traces](docs/glossary.md).
 ```sh
 cp .env.example .env                       # optional, for custom ports/creds
 docker compose up -d                       # PostgreSQL
-./scripts/migrate                          # apply migrations
-./scripts/dev-up                           # boot api + worker
+cargo phase -- init-schema                 # initialize bigname_phase once
+./scripts/dev-up                           # boot api + configured phase runner
 ```
 
 The API binds to `127.0.0.1:3000` by default. Use `/v2` routes for REST,
 `POST /graphql` for the narrow compatibility surface, and `/healthz` for
-readiness. The API and worker retain the `public` schema while schema-v2 lookup
-reads use `bigname_phase` in the same database. Initialize that namespace once
-with `cargo phase -- init-schema`.
+readiness. The API and phase runner use `bigname_phase` in the same database.
+Initialize that namespace once with `cargo phase -- init-schema`.
 
 Useful one-shots:
 
 - `cargo api -- serve`
 - `cargo phase -- init-schema`
 - `cargo phase -- redo --help`
-- `cargo worker -- run`
-- `cargo worker -- migrate`
 
 Set `BIGNAME_API_CHAIN_RPC_URLS` for schema-v2 verified ENS resolution and
-ENS/60 primary-name lookup. The old live indexer has been
-deleted; the checked-in phase runner is not a complete deployment until the
-project/live port lands. See [`docs/development.md`](docs/development.md).
+ENS/60 primary-name lookup. The phase runner owns ingest, interpret, project,
+verify, and continuous live follow. See [`docs/development.md`](docs/development.md).
 
 ## Container
 
 Published as `ghcr.io/ensdomains/bigname`. The image entrypoint takes a service
-name (`api`, `phases`, `phases-migrate`, `worker`, or `migrate`). `migrate`
-prepares the retained API/worker `public` schema; the one-time
-`phases-migrate` command installs schema-v2 into an empty `bigname_phase`
-namespace in that same database. The phase runner is present for Stage B
-verification and stops at the unavailable project phase.
+name (`api`, `phases`, or `phases-migrate`). The one-time `phases-migrate`
+command installs schema-v2 into an empty `bigname_phase` namespace in that
+same database.
 
 For server deployment:
 
@@ -70,10 +63,9 @@ cp .env.server.example .env.server         # set passwords + image tag
 docker compose --env-file .env.server -f docker-compose.server.yml up -d
 ```
 
-The compose file runs `migrate` once, then leaves `api` and `worker` as
-long-running services. One-shot invocations (`migrate`,
-`bigname-worker inspect ...`) can be run with `docker run --rm
-ghcr.io/ensdomains/bigname:latest <command>`.
+The compose file leaves `api` and `phase-runner` as long-running services.
+Apply reviewed versioned migrations at the deployment boundary before starting
+the new image; the deleted worker migration command is no longer available.
 
 See [`docs/deployment.md`](docs/deployment.md) and [`docs/production.md`](docs/production.md) for the public-edge stack.
 
@@ -98,6 +90,6 @@ Internal planning notes (implementation sequencing, parallel workstreams) live u
 
 - schema-v2 `interpret` writes identity rows, discovery edges, and normalized
   events; adapters provide interpretation behavior, not projection writes
-- the API reads projections, schema-v2 lookup output, and diagnostic execution output, not raw facts
-- raw facts are immutable; projections are rebuildable; retained execution artifacts are durable
+- the API reads projections and request-scoped schema-v2 lookup output, not raw facts
+- raw facts are immutable, projections are rebuildable, and provider lookup responses are not retained
 - update the relevant doc before changing public semantics, shared IDs, manifest schema, or coverage meaning

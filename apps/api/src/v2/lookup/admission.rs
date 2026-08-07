@@ -21,8 +21,16 @@ pub(super) fn require_reverse_records_at_served_head(
 ) -> V2Result<()> {
     for record in records {
         require_record_at_served_head(&record.name_record, selected_snapshot)?;
+        if record.primary_name.as_ref().is_some_and(|primary| {
+            primary.claim_status == bigname_storage::PrimaryNameClaimStatus::Success
+        }) && record.primary_chain_positions.is_none()
+        {
+            return Err(V2Error::stale(
+                "lookup data is unavailable at the selected snapshot",
+            ));
+        }
         if let Some(target) = &record.primary_chain_positions {
-            require_flat_target_at_or_before_served_head(
+            require_name_projection_at_served_head(
                 target,
                 &record.name_record.row.namespace,
                 selected_snapshot,
@@ -42,14 +50,14 @@ fn require_record_at_served_head(
         selected_snapshot,
     )?;
     if let Some(inventory) = record.record_inventory_current.as_ref() {
-        require_flat_target_at_or_before_served_head(
+        require_name_projection_at_served_head(
             &inventory.chain_positions,
             &record.row.namespace,
             selected_snapshot,
         )?;
     }
     for relation in &record.relations {
-        require_flat_target_at_or_before_served_head(
+        require_name_projection_at_served_head(
             &relation.chain_positions,
             &record.row.namespace,
             selected_snapshot,
@@ -70,10 +78,7 @@ pub(crate) fn require_name_projection_at_served_head(
     namespace: &str,
     selected_snapshot: &SelectedSnapshot,
 ) -> V2Result<()> {
-    let projected = ChainPositions::from_value(chain_positions)
-        .map_err(|_| V2Error::stale("lookup data is unavailable at the selected snapshot"))?;
     let slot = match namespace {
-        "ens" if projected.get("ethereum-sepolia").is_some() => "ethereum-sepolia",
         "ens" => "ethereum",
         "basenames" => "base",
         _ => {
@@ -81,6 +86,46 @@ pub(crate) fn require_name_projection_at_served_head(
                 "lookup data is unavailable at the selected snapshot",
             ));
         }
+    };
+    if let Some(target_block_number) = chain_positions
+        .get("target_block_number")
+        .and_then(serde_json::Value::as_i64)
+    {
+        let slot = match namespace {
+            "ens"
+                if selected_snapshot
+                    .chain_positions
+                    .get("ethereum-sepolia")
+                    .is_some() =>
+            {
+                "ethereum-sepolia"
+            }
+            _ => slot,
+        };
+        let target_block_hash = chain_positions
+            .get("target_block_hash")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| V2Error::stale("lookup data is unavailable at the selected snapshot"))?;
+        let selected = selected_snapshot
+            .chain_positions
+            .get(slot)
+            .ok_or_else(|| V2Error::stale("lookup data is unavailable at the selected snapshot"))?;
+        if target_block_number > selected.block_number
+            || (target_block_number == selected.block_number
+                && target_block_hash != selected.block_hash)
+        {
+            return Err(V2Error::stale(
+                "lookup data is unavailable at the selected snapshot",
+            ));
+        }
+        return Ok(());
+    }
+
+    let projected = ChainPositions::from_value(chain_positions)
+        .map_err(|_| V2Error::stale("lookup data is unavailable at the selected snapshot"))?;
+    let slot = match namespace {
+        "ens" if projected.get("ethereum-sepolia").is_some() => "ethereum-sepolia",
+        _ => slot,
     };
     let selected = selected_snapshot
         .chain_positions
@@ -101,48 +146,36 @@ pub(crate) fn require_name_projection_at_served_head(
     Ok(())
 }
 
-pub(crate) fn require_flat_target_at_or_before_served_head(
-    chain_positions: &serde_json::Value,
-    namespace: &str,
-    selected_snapshot: &SelectedSnapshot,
-) -> V2Result<()> {
-    let number = chain_positions
-        .get("target_block_number")
-        .and_then(serde_json::Value::as_i64)
-        .ok_or_else(|| V2Error::stale("lookup data is unavailable at the selected snapshot"))?;
-    let hash = chain_positions
-        .get("target_block_hash")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| V2Error::stale("lookup data is unavailable at the selected snapshot"))?;
-    let expected_chain_id = match namespace {
-        "basenames" => "base-mainnet",
-        "ens"
-            if selected_snapshot
-                .chain_positions
-                .get("ethereum-sepolia")
-                .is_some() =>
-        {
-            "ethereum-sepolia"
-        }
-        "ens" => "ethereum-mainnet",
-        _ => {
-            return Err(V2Error::stale(
-                "lookup data is unavailable at the selected snapshot",
-            ));
-        }
-    };
-    let selected = selected_snapshot
-        .chain_positions
-        .as_map()
-        .values()
-        .find(|position| position.chain_id == expected_chain_id)
-        .ok_or_else(|| V2Error::stale("lookup data is unavailable at the selected snapshot"))?;
-    if number > selected.block_number
-        || (number == selected.block_number && hash != selected.block_hash)
-    {
-        return Err(V2Error::stale(
-            "lookup data is unavailable at the selected snapshot",
-        ));
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use bigname_storage::{ChainPosition, ChainPositions, SelectedSnapshot, SnapshotConsistency};
+    use serde_json::json;
+
+    use super::require_name_projection_at_served_head;
+
+    #[test]
+    fn flat_ens_target_uses_selected_sepolia_slot() {
+        let selected_snapshot = SelectedSnapshot {
+            chain_positions: ChainPositions::new(BTreeMap::from([(
+                "ethereum-sepolia".to_owned(),
+                ChainPosition {
+                    slot: "ethereum-sepolia".to_owned(),
+                    chain_id: "ethereum-sepolia".to_owned(),
+                    block_number: 100,
+                    block_hash: "0xabc".to_owned(),
+                    timestamp: bigname_storage::parse_rfc3339_utc_timestamp("2026-06-10T00:00:00Z")
+                        .unwrap(),
+                },
+            )])),
+            consistency: SnapshotConsistency::Head,
+        };
+        let flat_target = json!({
+            "target_block_number": 100,
+            "target_block_hash": "0xabc",
+        });
+
+        require_name_projection_at_served_head(&flat_target, "ens", &selected_snapshot).unwrap();
     }
-    Ok(())
 }

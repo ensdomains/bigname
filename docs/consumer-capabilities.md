@@ -10,9 +10,9 @@ Wire format and route details live in [`api-v2.md`](api-v2.md) and
 | --- | --- | --- |
 | Lookup | `POST /v2/lookup`, `GET /v2/status` | Batched name/address lookup and indexing readiness. |
 | Product reads | `/v2/names/*`, `/v2/addresses/*`, `/v2/permissions`, `/v2/search`, `/v2/events`, `/v2/resolvers/*`, `/v2/namespaces/*` | Name, record, address, permission, event, resolver, and namespace reads. |
-| Diagnostics | `/v2/diagnostics/*` | Coverage, binding, authority, record, execution, manifest, and event inspection. |
+| Diagnostics | `/v2/diagnostics/*` | Coverage, binding, authority, record, manifest, and event inspection. |
 | GraphQL compatibility | `POST /graphql` | The documented narrow subgraph-compatible operations. |
-| Operator health | `GET /healthz` | API-local process and database readiness. This is not a product route. |
+| Operator health | `GET /healthz` | API process, database, and phase-runner heartbeat readiness. This is not a product route. |
 
 The v1 REST surface has been removed. In particular,
 `POST /v1/identity:lookup` no longer serves the native identity capability.
@@ -40,8 +40,7 @@ it does not preserve the deleted v1 DTOs.
 | Pipeline diagnostics | `/v2/diagnostics/*` | Explicit diagnostic tier, separate from product reads. |
 
 The GraphQL compatibility operations read the schema-v2 current projections
-and preserve the committed Manager response contract. They do not fall back to
-the retained public-schema projections. Name inputs are ENS-normalized and
+and preserve the committed Manager response contract. Name inputs are ENS-normalized and
 matched by namehash within the `ens`
 namespace. While the `project` phase has not completed at the newest stored chain head,
 operations that would return projection rows fail rather than serve the prior
@@ -51,19 +50,6 @@ unsupported record inventories preserve the existing empty record shapes.
 All top-level v2 collections use the standard `page` object. Latest-state
 collections do not claim a frozen snapshot; point-in-time behavior is limited
 to the routes and selectors documented in [`api-v2-routes.md`](api-v2-routes.md).
-
-## Retained storage after v1 removal
-
-The deleted v1 identity route was the sole API reader of the
-`address_names_current_identity_counts` and
-`address_names_current_identity_feed` [sidecars](glossary.md). Their tables,
-indexes, functions, and triggers are intentionally retained, but are orphaned
-from API reads until the slice-3 schema cleanup.
-
-This slice also retains the worker, the execution crate for worker use, legacy
-storage writers, manifest legacy views, and public-schema tables. Their removal
-or migration belongs to slice 3 and is not evidence that the deleted v1 API is
-still served.
 
 ## Replacement boundary
 

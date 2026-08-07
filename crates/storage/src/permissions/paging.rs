@@ -7,8 +7,9 @@ use crate::projection_helpers::{
 };
 
 use super::{
+    canonicality::DEFAULT_PERMISSIONS_CURRENT_READ_FILTER,
     decode::{decode_permissions_current_full_filter_summary, decode_permissions_current_row},
-    reads::{DEFAULT_PERMISSIONS_CURRENT_READ_FILTER, push_permissions_current_filters},
+    reads::push_permissions_current_filters,
     types::{
         PermissionScope, PermissionsCurrentAccountResourceCursor,
         PermissionsCurrentAccountResourcePage, PermissionsCurrentFullFilterSummary,
@@ -52,12 +53,12 @@ pub async fn load_permissions_current_page(
                 pc.inheritance_path,
                 pc.transfer_behavior,
                 pc.provenance,
-                pc.coverage,
+                jsonb_build_object('status', 'projected', 'exhaustiveness', 'not_asserted') AS coverage,
                 pc.chain_positions,
                 pc.canonicality_summary,
                 pc.manifest_version,
                 pc.last_recomputed_at
-            FROM permissions_current pc
+            FROM bigname_phase.permissions_current pc
             WHERE "#,
         );
         push_permissions_current_filters(
@@ -180,12 +181,12 @@ async fn load_permissions_current_account_resource_page_with_summary(
                 pc.inheritance_path,
                 pc.transfer_behavior,
                 pc.provenance,
-                pc.coverage,
+                jsonb_build_object('status', 'projected', 'exhaustiveness', 'not_asserted') AS coverage,
                 pc.chain_positions,
                 pc.canonicality_summary,
                 pc.manifest_version,
                 pc.last_recomputed_at
-            FROM permissions_current pc
+            FROM bigname_phase.permissions_current pc
             WHERE TRUE
             "#,
         );
@@ -239,11 +240,11 @@ async fn load_permissions_current_full_filter_summary(
         SELECT
             COUNT(*)::BIGINT AS row_count,
             COALESCE(jsonb_agg(pc.provenance ORDER BY pc.subject ASC, pc.scope ASC), '[]'::jsonb) AS provenance,
-            (jsonb_agg(pc.coverage ORDER BY pc.subject ASC, pc.scope ASC)->0) AS coverage,
+            (jsonb_agg(jsonb_build_object('status', 'projected', 'exhaustiveness', 'not_asserted') ORDER BY pc.subject ASC, pc.scope ASC)->0) AS coverage,
             COALESCE(jsonb_agg(pc.chain_positions ORDER BY pc.subject ASC, pc.scope ASC), '[]'::jsonb) AS chain_positions,
             COALESCE(jsonb_agg(pc.canonicality_summary ORDER BY pc.subject ASC, pc.scope ASC), '[]'::jsonb) AS canonicality_summaries,
             MAX(pc.last_recomputed_at) AS last_recomputed_at
-        FROM permissions_current pc
+        FROM bigname_phase.permissions_current pc
         WHERE "#,
     );
     push_permissions_current_filters(&mut builder, resource_id, subject, scope_storage_key);
@@ -265,11 +266,11 @@ async fn load_permissions_current_account_resource_summary(
         SELECT
             COUNT(*)::BIGINT AS row_count,
             COALESCE(jsonb_agg(pc.provenance ORDER BY pc.subject COLLATE "C" ASC, pc.resource_id ASC, pc.scope COLLATE "C" ASC), '[]'::jsonb) AS provenance,
-            (jsonb_agg(pc.coverage ORDER BY pc.subject COLLATE "C" ASC, pc.resource_id ASC, pc.scope COLLATE "C" ASC)->0) AS coverage,
+            (jsonb_agg(jsonb_build_object('status', 'projected', 'exhaustiveness', 'not_asserted') ORDER BY pc.subject COLLATE "C" ASC, pc.resource_id ASC, pc.scope COLLATE "C" ASC)->0) AS coverage,
             COALESCE(jsonb_agg(pc.chain_positions ORDER BY pc.subject COLLATE "C" ASC, pc.resource_id ASC, pc.scope COLLATE "C" ASC), '[]'::jsonb) AS chain_positions,
             COALESCE(jsonb_agg(pc.canonicality_summary ORDER BY pc.subject COLLATE "C" ASC, pc.resource_id ASC, pc.scope COLLATE "C" ASC), '[]'::jsonb) AS canonicality_summaries,
             MAX(pc.last_recomputed_at) AS last_recomputed_at
-        FROM permissions_current pc
+        FROM bigname_phase.permissions_current pc
         WHERE TRUE
         "#,
     );
@@ -298,7 +299,7 @@ async fn load_permissions_current_account_resource_count_summary(
             '[]'::jsonb AS chain_positions,
             '[]'::jsonb AS canonicality_summaries,
             NULL::TIMESTAMPTZ AS last_recomputed_at
-        FROM permissions_current pc
+        FROM bigname_phase.permissions_current pc
         WHERE TRUE
         "#,
     );

@@ -12,8 +12,6 @@ use crate::errors::ErrorResponse;
 #[cfg(test)]
 use axum::http::StatusCode;
 #[cfg(test)]
-use bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE;
-#[cfg(test)]
 use std::collections::BTreeMap;
 
 mod bounds;
@@ -42,8 +40,6 @@ pub(crate) const BUILD_SHA: &str = match option_env!("BIGNAME_BUILD_SHA") {
     Some(build_sha) => build_sha,
     None => "unknown",
 };
-#[cfg(test)]
-const VERIFIED_RESOLUTION_REQUEST_TYPE: &str = "verified_resolution";
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
@@ -57,25 +53,19 @@ async fn main() -> Result<()> {
 async fn serve(args: ServeArgs) -> Result<()> {
     args.bounds.validate()?;
     let chain_rpc_urls = args.effective_lookup_chain_rpc_urls()?;
-    let pool = bigname_storage::connect_with_application_name_and_statement_timeout(
+    let pool = bigname_storage::connect_phase_with_application_name_and_statement_timeout(
         &args.database,
         "bigname-api",
         args.bounds.db_statement_timeout(),
     )
     .await?;
-    let lookup_pool = state::connect_lookup_pool(
-        &args.database,
-        "bigname-api-lookup",
-        args.bounds.db_statement_timeout(),
-    )
-    .await?;
-    let health_pool = bigname_storage::connect_reserved_readiness_pool(
+    let health_pool = bigname_storage::connect_phase_reserved_readiness_pool(
         &args.database,
         "bigname-api-health",
         HEALTH_DATABASE_CHECK_TIMEOUT,
     )
     .await?;
-    let expected_status_chain_ids = load_expected_status_chain_ids_at_startup(&lookup_pool).await?;
+    let expected_status_chain_ids = load_expected_status_chain_ids_at_startup(&pool).await?;
     let missing_status_rpc_chains = v2::support::status_freshness::missing_status_rpc_chains(
         &expected_status_chain_ids,
         &chain_rpc_urls,
@@ -90,20 +80,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
         );
     }
     ensure!(
-        args.heartbeat_max_age_secs > 0,
-        "BIGNAME_API_HEARTBEAT_MAX_AGE_SECS must be greater than zero"
-    );
-    ensure!(
         args.phase_heartbeat_max_age_secs > 0,
         "BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS must be greater than zero"
-    );
-    ensure!(
-        args.indexer_chain_heartbeat_max_age_secs > 0,
-        "BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS must be greater than zero"
-    );
-    ensure!(
-        args.worker_rebuild_phase_max_age_secs > 0,
-        "BIGNAME_API_WORKER_REBUILD_PHASE_MAX_AGE_SECS must be greater than zero"
     );
     let status_freshness_config = v2::support::status_freshness::StatusFreshnessConfig::new(
         args.status_provider_timeout_ms,
@@ -112,11 +90,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
         args.status_max_block_lag,
         args.status_max_lag_secs,
     )?;
-    let state = AppState::new_with_rpc_urls(pool, lookup_pool, chain_rpc_urls)
-        .with_heartbeat_max_age_secs(args.heartbeat_max_age_secs)
+    let state = AppState::new_with_rpc_urls(pool, chain_rpc_urls)
         .with_phase_heartbeat_max_age_secs(args.phase_heartbeat_max_age_secs)
-        .with_indexer_chain_heartbeat_max_age_secs(args.indexer_chain_heartbeat_max_age_secs)
-        .with_worker_rebuild_phase_max_age_secs(args.worker_rebuild_phase_max_age_secs)
         .with_status_freshness_config(status_freshness_config);
     state
         .status_freshness
@@ -133,9 +108,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         metrics_bind_addr = %args.metrics_bind_addr,
         version = SOFTWARE_VERSION,
         build_sha = BUILD_SHA,
-        schema_migration_version = bigname_storage::latest_migration_version(),
-        projection_replay_version = bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION,
-        permissions_current_publication_version = bigname_storage::PERMISSIONS_CURRENT_PUBLICATION_VERSION,
+        interpreter_content_hash = bigname_content_hash::INTERPRETER_CONTENT_HASH,
         request_timeout_ms = args.bounds.request_timeout_ms,
         db_statement_timeout_ms = args.bounds.db_statement_timeout_ms,
         health_database_check_timeout_ms = HEALTH_DATABASE_CHECK_TIMEOUT.as_millis(),
@@ -192,11 +165,6 @@ async fn load_expected_status_chain_ids_at_startup(pool: &PgPool) -> Result<Vec<
 #[cfg(test)]
 pub(crate) fn app_router(state: AppState) -> Router {
     let health_pool = state.pool.clone();
-    app_router_with_bounds(state, health_pool, &ApiBoundsConfig::default())
-}
-
-#[cfg(test)]
-pub(crate) fn app_router_with_health_pool(state: AppState, health_pool: PgPool) -> Router {
     app_router_with_bounds(state, health_pool, &ApiBoundsConfig::default())
 }
 

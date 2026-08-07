@@ -22,15 +22,7 @@ case "$command" in
     shift
     exec phase-runner init-schema "$@"
     ;;
-  worker)
-    shift
-    exec bigname-worker run "$@"
-    ;;
-  migrate)
-    shift
-    exec bigname-worker migrate "$@"
-    ;;
-  bigname-api | phase-runner | bigname-worker)
+  bigname-api | phase-runner)
     exec "$@"
     ;;
   *)

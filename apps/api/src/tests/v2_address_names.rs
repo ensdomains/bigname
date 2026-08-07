@@ -25,7 +25,10 @@ async fn v2_get_address_names_returns_record_rows_with_relations_and_primary_fla
     );
     assert_eq!(data[0]["display_name"], json!("alpha.eth"));
     assert_eq!(data[0]["namespace"], json!("ens"));
-    assert_eq!(data[0]["namehash"], json!("node:alpha.eth"));
+    assert_eq!(
+        data[0]["namehash"],
+        json!(bigname_lookup::ens_namehash_hex("alpha.eth")?)
+    );
     assert_eq!(
         data[0]["owner"],
         json!("0x00000000000000000000000000000000000000a1")
@@ -134,6 +137,98 @@ async fn v2_get_address_names_filters_relation_sets_and_any() -> Result<()> {
         ]
     );
     assert_eq!(any_rows[0]["relations"], json!(["registrant", "owner"]));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_address_names_marks_primary_for_a_successful_non_normalized_claim() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    // The projection stores the raw claim spelling and a false is-normalized marker for a valid
+    // claim whose bytes were not already normalized. It is still a successful claim for alpha.eth.
+    upsert_primary_name_current_snapshots(
+        &database.pool,
+        &[PrimaryNameCurrentSnapshot {
+            row: PrimaryNameCurrentRow {
+                address: V2_ADDRESS.to_owned(),
+                namespace: "ens".to_owned(),
+                coin_type: "60".to_owned(),
+                claim_status: PrimaryNameClaimStatus::Success,
+                raw_claim_name: Some("Alpha.eth".to_owned()),
+                claim_provenance: json!({
+                    "source_family": "ens_v1_reverse_l1",
+                    "contract_role": "reverse_registrar",
+                }),
+            },
+            normalized_claim_name: None,
+            claim_name_is_normalized: false,
+        }],
+    )
+    .await?;
+
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v2/addresses/{V2_ADDRESS}/names"),
+    )
+    .await?;
+    let rows = payload["data"]
+        .as_array()
+        .expect("address names data must be an array");
+    let alpha = rows
+        .iter()
+        .find(|row| row["name"] == json!("alpha.eth"))
+        .expect("alpha.eth row must be present");
+    assert_eq!(alpha["is_primary"], json!(true));
+    assert!(
+        rows.iter()
+            .filter(|row| row["name"] != json!("alpha.eth"))
+            .all(|row| row["is_primary"] == json!(false))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_address_names_serves_the_page_when_a_primary_claim_no_longer_normalizes()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    // A successful claim whose stored spelling does not normalize is only reachable while a
+    // normalizer revision is mid-re-derivation. It is one row's defect: the page still serves and
+    // no row claims to be primary.
+    upsert_primary_name_current_snapshots(
+        &database.pool,
+        &[PrimaryNameCurrentSnapshot {
+            row: PrimaryNameCurrentRow {
+                address: V2_ADDRESS.to_owned(),
+                namespace: "ens".to_owned(),
+                coin_type: "60".to_owned(),
+                claim_status: PrimaryNameClaimStatus::Success,
+                raw_claim_name: Some("alpha..eth".to_owned()),
+                claim_provenance: json!({
+                    "source_family": "ens_v1_reverse_l1",
+                    "contract_role": "reverse_registrar",
+                }),
+            },
+            normalized_claim_name: None,
+            claim_name_is_normalized: false,
+        }],
+    )
+    .await?;
+
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v2/addresses/{V2_ADDRESS}/names"),
+    )
+    .await?;
+    let rows = payload["data"]
+        .as_array()
+        .expect("address names data must be an array");
+    assert!(!rows.is_empty());
+    assert!(rows.iter().all(|row| row["is_primary"] == json!(false)));
 
     database.cleanup().await?;
     Ok(())
@@ -403,31 +498,6 @@ async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Resu
 }
 
 #[tokio::test]
-async fn v2_address_role_summary_requires_compatible_permission_publication() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_v2_address_names_fixture(&database).await?;
-    sqlx::query("DELETE FROM permissions_current_publication")
-        .execute(&database.pool)
-        .await?;
-
-    let response = v2_address_names_response_for_database(
-        &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?include=role_summary"),
-    )
-    .await?;
-
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let payload: Value = read_json(response).await?;
-    assert_eq!(payload["error"]["code"], json!("stale"));
-    assert_eq!(
-        payload["error"]["message"],
-        json!("permission data publication is not compatible")
-    );
-
-    database.cleanup().await
-}
-
-#[tokio::test]
 async fn v2_address_role_summary_missing_support_is_partial() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
@@ -436,7 +506,6 @@ async fn v2_address_role_summary_missing_support_is_partial() -> Result<()> {
         .bind(resource_id)
         .execute(&database.pool)
         .await?;
-    mark_permissions_current_projection_ready(&database).await?;
 
     let payload = v2_address_names_payload_for_database(
         &database,
@@ -468,12 +537,11 @@ async fn v2_address_role_summary_marks_wrapper_empty_as_non_authoritative() -> R
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
     let resource_id = Uuid::from_u128(0xb100);
-    bigname_storage::upsert_permissions_current_resource_summary(
+    upsert_phase_permissions_current_resource_summary(
         &database.pool,
         &permission_current_resource_summary(resource_id, Some("wrapper")),
     )
     .await?;
-    mark_permissions_current_projection_ready(&database).await?;
 
     let payload = v2_address_names_payload_for_database(
         &database,
@@ -672,6 +740,305 @@ async fn v2_get_address_names_empty_returns_200_empty_page() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn v2_address_name_collections_exclude_orphaned_phase_lineage_before_project_redo()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+
+    sqlx::raw_sql(
+        r#"
+        INSERT INTO bigname_phase.chain_lineage (
+            chain_id, block_hash, block_number, block_timestamp, canonicality_state
+        ) VALUES (
+            'ethereum-mainnet', '0xreorg-beta', 1002, '2026-04-17T01:00:02Z',
+            'canonical'::bigname_phase.canonicality_state
+        );
+        UPDATE bigname_phase.name_surfaces
+        SET block_hash = '0xreorg-beta', block_number = 1002,
+            canonicality_state = 'canonical'::bigname_phase.canonicality_state
+        WHERE raw_name = 'beta.eth';
+        UPDATE bigname_phase.token_lineages
+        SET block_hash = '0xreorg-beta', block_number = 1002,
+            canonicality_state = 'canonical'::bigname_phase.canonicality_state
+        WHERE token_lineage_id = '00000000-0000-0000-0000-00000000b101'::uuid;
+        UPDATE bigname_phase.resources
+        SET block_hash = '0xreorg-beta', block_number = 1002,
+            canonicality_state = 'canonical'::bigname_phase.canonicality_state
+        WHERE resource_id = '00000000-0000-0000-0000-00000000b100'::uuid;
+        UPDATE bigname_phase.surface_bindings
+        SET block_hash = '0xreorg-beta', block_number = 1002,
+            canonicality_state = 'canonical'::bigname_phase.canonicality_state
+        WHERE surface_binding_id = '00000000-0000-0000-0000-00000000b102'::uuid;
+        UPDATE bigname_phase.chain_lineage
+        SET canonicality_state = 'orphaned'::bigname_phase.canonicality_state
+        WHERE chain_id = 'ethereum-mainnet' AND block_hash = '0xreorg-beta'
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v2/addresses/{V2_ADDRESS}/names"),
+    )
+    .await?;
+    let rows = payload["data"]
+        .as_array()
+        .expect("address names data must be an array");
+    assert_eq!(
+        names(rows),
+        vec![
+            "alpha.eth",
+            "gamma.eth",
+            "shared-one.eth",
+            "shared-two.eth"
+        ]
+    );
+
+    let audit_rows = bigname_storage::load_address_names_current_including_noncanonical(
+        &database.pool,
+        V2_ADDRESS,
+        Some("ens"),
+        None,
+    )
+    .await?;
+    assert!(
+        audit_rows
+            .iter()
+            .any(|row| row.normalized_name == "beta.eth")
+    );
+
+    let compact_page = bigname_storage::load_name_current_list_page(
+        &database.pool,
+        &bigname_storage::NameCurrentListFilter {
+            address: Some(bigname_storage::NameCurrentAddressFilter {
+                address: V2_ADDRESS.to_owned(),
+                relation: bigname_storage::NameCurrentAddressRelationFilter::Any,
+                addresses: None,
+            }),
+            ..Default::default()
+        },
+        bigname_storage::NameCurrentListSort::Name,
+        bigname_storage::NameCurrentListOrder::Asc,
+        None,
+        50,
+        true,
+    )
+    .await?;
+    assert!(
+        compact_page
+            .rows
+            .iter()
+            .all(|row| row.row.normalized_name != "beta.eth")
+    );
+    assert_eq!(compact_page.total_count, Some(4));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_current_name_reads_exclude_orphaned_project_targets_before_redo() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    let beta_logical_name_id: String = sqlx::query_scalar(
+        "SELECT logical_name_id FROM bigname_phase.name_surfaces WHERE raw_name = 'beta.eth'",
+    )
+    .fetch_one(&database.pool)
+    .await?;
+
+    sqlx::raw_sql(
+        r#"
+        INSERT INTO bigname_phase.chain_lineage (
+            chain_id, block_hash, block_number, block_timestamp, canonicality_state
+        ) VALUES
+            ('ethereum-mainnet', '0xproject-address-target', 2001,
+             '2026-04-17T02:00:01Z', 'canonical'),
+            ('ethereum-mainnet', '0xproject-name-target', 2002,
+             '2026-04-17T02:00:02Z', 'canonical'),
+            ('ethereum-mainnet', '0xproject-primary-target', 2003,
+             '2026-04-17T02:00:03Z', 'canonical');
+        UPDATE bigname_phase.address_names_current
+        SET chain_positions = jsonb_build_object(
+                'block_number', 2001,
+                'block_hash', '0xproject-address-target',
+                'target_block_number', 2001,
+                'target_block_hash', '0xproject-address-target'
+            ),
+            canonicality_summary = jsonb_build_object(
+                'state', 'canonical_lineage',
+                'target_block_number', 2001,
+                'target_block_hash', '0xproject-address-target'
+            )
+        WHERE lower(raw_name) = 'beta.eth';
+        UPDATE bigname_phase.name_current
+        SET chain_positions = jsonb_build_object(
+                'ethereum', jsonb_build_object(
+                    'chain_id', 'ethereum-mainnet',
+                    'block_number', 2002,
+                    'block_hash', '0xproject-name-target'
+                )
+            ),
+            canonicality_summary = jsonb_build_object(
+                'state', 'canonical_lineage',
+                'target_block_number', 2002,
+                'target_block_hash', '0xproject-name-target'
+            )
+        WHERE lower(raw_name) = 'beta.eth';
+        UPDATE bigname_phase.primary_names_current
+        SET claim_provenance = claim_provenance || jsonb_build_object(
+                'chain_id', 'ethereum-mainnet',
+                'target_block_number', 2003,
+                'target_block_hash', '0xproject-primary-target'
+            )
+        WHERE address = '0x0000000000000000000000000000000000000abc';
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let project_targets_back_no_identity_rows: bool = sqlx::query_scalar(
+        r#"
+        SELECT NOT EXISTS (
+            SELECT 1 FROM bigname_phase.name_surfaces
+            WHERE block_hash IN (
+                '0xproject-address-target', '0xproject-name-target',
+                '0xproject-primary-target'
+            )
+            UNION ALL
+            SELECT 1 FROM bigname_phase.resources
+            WHERE block_hash IN (
+                '0xproject-address-target', '0xproject-name-target',
+                '0xproject-primary-target'
+            )
+            UNION ALL
+            SELECT 1 FROM bigname_phase.surface_bindings
+            WHERE block_hash IN (
+                '0xproject-address-target', '0xproject-name-target',
+                '0xproject-primary-target'
+            )
+            UNION ALL
+            SELECT 1 FROM bigname_phase.token_lineages
+            WHERE block_hash IN (
+                '0xproject-address-target', '0xproject-name-target',
+                '0xproject-primary-target'
+            )
+        )
+        "#,
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    assert!(project_targets_back_no_identity_rows);
+    assert!(
+        bigname_storage::load_name_current(&database.pool, &beta_logical_name_id)
+            .await?
+            .is_some()
+    );
+    assert!(
+        bigname_storage::load_primary_name_current(&database.pool, V2_ADDRESS, "ens", "60")
+            .await?
+            .is_some()
+    );
+    assert!(
+        bigname_storage::load_address_names_current(
+            &database.pool,
+            V2_ADDRESS,
+            Some("ens"),
+            None,
+        )
+        .await?
+        .iter()
+        .any(|row| row.normalized_name == "beta.eth")
+    );
+
+    sqlx::query(
+        "UPDATE bigname_phase.chain_lineage \
+         SET canonicality_state = 'orphaned' \
+         WHERE block_hash IN ( \
+             '0xproject-address-target', '0xproject-name-target', \
+             '0xproject-primary-target' \
+         )",
+    )
+    .execute(&database.pool)
+    .await?;
+
+    assert!(
+        bigname_storage::load_name_current(&database.pool, &beta_logical_name_id)
+            .await?
+            .is_none()
+    );
+    assert!(
+        bigname_storage::load_primary_name_current(&database.pool, V2_ADDRESS, "ens", "60")
+            .await?
+            .is_none()
+    );
+    let default_rows = bigname_storage::load_address_names_current(
+        &database.pool,
+        V2_ADDRESS,
+        Some("ens"),
+        None,
+    )
+    .await?;
+    assert!(
+        default_rows
+            .iter()
+            .all(|row| row.normalized_name != "beta.eth")
+    );
+    let audit_rows = bigname_storage::load_address_names_current_including_noncanonical(
+        &database.pool,
+        V2_ADDRESS,
+        Some("ens"),
+        None,
+    )
+    .await?;
+    assert!(
+        audit_rows
+            .iter()
+            .any(|row| row.normalized_name == "beta.eth")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_address_name_reads_require_readable_phase_identity_rows() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    let cases = [
+        "UPDATE bigname_phase.name_surfaces SET canonicality_state = 'orphaned' WHERE raw_name = 'beta.eth'",
+        "UPDATE bigname_phase.resources SET canonicality_state = 'orphaned' WHERE resource_id = '00000000-0000-0000-0000-00000000b100'::uuid",
+        "UPDATE bigname_phase.surface_bindings SET canonicality_state = 'orphaned' WHERE surface_binding_id = '00000000-0000-0000-0000-00000000b102'::uuid",
+        "UPDATE bigname_phase.token_lineages SET canonicality_state = 'orphaned' WHERE token_lineage_id = '00000000-0000-0000-0000-00000000b101'::uuid",
+    ];
+    let resets = [
+        "UPDATE bigname_phase.name_surfaces SET canonicality_state = 'finalized' WHERE raw_name = 'beta.eth'",
+        "UPDATE bigname_phase.resources SET canonicality_state = 'finalized' WHERE resource_id = '00000000-0000-0000-0000-00000000b100'::uuid",
+        "UPDATE bigname_phase.surface_bindings SET canonicality_state = 'finalized' WHERE surface_binding_id = '00000000-0000-0000-0000-00000000b102'::uuid",
+        "UPDATE bigname_phase.token_lineages SET canonicality_state = 'finalized' WHERE token_lineage_id = '00000000-0000-0000-0000-00000000b101'::uuid",
+    ];
+
+    for (orphan, reset) in cases.into_iter().zip(resets) {
+        sqlx::query(orphan).execute(&database.pool).await?;
+        let rows = bigname_storage::load_address_names_current(
+            &database.pool,
+            V2_ADDRESS,
+            Some("ens"),
+            None,
+        )
+        .await?;
+        assert!(
+            rows.iter().all(|row| row.normalized_name != "beta.eth"),
+            "canonical address read admitted beta after {orphan}"
+        );
+        sqlx::query(reset).execute(&database.pool).await?;
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 const V2_ADDRESS: &str = "0x0000000000000000000000000000000000000abc";
 const V2_OTHER_ADDRESS: &str = "0x0000000000000000000000000000000000000def";
 const V2_PERMISSION_SUBJECT: &str = "0x0000000000000000000000000000000000000c01";
@@ -806,7 +1173,7 @@ async fn seed_v2_address_name_storage(
         })
         .collect::<Vec<_>>();
 
-    bigname_storage::upsert_raw_blocks(&database.pool, &raw_blocks).await?;
+    upsert_phase_raw_blocks(&database.pool, &raw_blocks).await?;
     upsert_test_name_surfaces(&database.pool, &surfaces).await?;
     upsert_test_token_lineages(&database.pool, &token_lineages).await?;
     upsert_test_resources(&database.pool, &resources).await?;
@@ -876,7 +1243,7 @@ async fn seed_v2_address_name_relations(
         }
     }
 
-    bigname_storage::upsert_address_names_current_rows(&database.pool, &rows).await?;
+    upsert_phase_address_names_current_rows(&database.pool, &rows).await?;
     Ok(())
 }
 
@@ -900,7 +1267,7 @@ async fn seed_v2_address_name_permissions(
         "source_event_kind": "Transfer"
     });
 
-    bigname_storage::upsert_permissions_current_rows(
+    upsert_phase_permissions_current_rows(
         &database.pool,
         &[
             resource_row,
@@ -948,13 +1315,12 @@ async fn seed_v2_address_name_permissions(
         .map(|spec| spec.resource_id)
         .collect::<BTreeSet<_>>()
     {
-        bigname_storage::upsert_permissions_current_resource_summary(
+        upsert_phase_permissions_current_resource_summary(
             &database.pool,
             &permission_current_resource_summary(resource_id, Some("registrar")),
         )
         .await?;
     }
-    mark_permissions_current_projection_ready(database).await?;
     Ok(())
 }
 

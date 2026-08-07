@@ -285,63 +285,6 @@ async fn v2_lookup_marks_unsupported_phase_inventory_fields() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_lookup_serves_phase_projection_after_legacy_row_last_touch() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_identity_name(
-        &database,
-        "ens:stale.eth",
-        "stale.eth",
-        "stale.eth",
-        "namehash:stale.eth",
-        Uuid::from_u128(0x5a0111),
-        Uuid::from_u128(0x5a0112),
-        Uuid::from_u128(0x5a0113),
-        "0x0000000000000000000000000000000000000abc",
-        bigname_storage::AddressNameRelation::TokenHolder,
-        38,
-    )
-    .await?;
-    advance_v2_lookup_ethereum_head(&database, 39, "0xlookup-forward-advanced").await?;
-    let legacy_checkpoint_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM chain_checkpoints")
-            .fetch_one(&database.pool)
-            .await?;
-    assert_eq!(legacy_checkpoint_count, 0);
-    sqlx::query("DELETE FROM address_names_current")
-        .execute(&database.pool)
-        .await?;
-    sqlx::query("DELETE FROM record_inventory_current")
-        .execute(&database.pool)
-        .await?;
-    sqlx::query("DELETE FROM name_current")
-        .execute(&database.pool)
-        .await?;
-    let legacy_projection_count: i64 = sqlx::query_scalar(
-        "SELECT (SELECT COUNT(*) FROM name_current)
-              + (SELECT COUNT(*) FROM address_names_current)
-              + (SELECT COUNT(*) FROM record_inventory_current)",
-    )
-    .fetch_one(&database.pool)
-    .await?;
-    assert_eq!(legacy_projection_count, 0);
-
-    let response = v2_lookup_response_for_database(
-        &database,
-        "/v2/lookup",
-        json!({"inputs": [{"id": "stale", "name": "stale.eth"}]}),
-    )
-    .await?;
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let payload: Value = read_json(response).await?;
-    assert_eq!(payload["data"][0]["status"], json!("ok"));
-    assert_eq!(payload["data"][0]["record"]["name"], json!("stale.eth"));
-    assert_eq!(payload["meta"]["as_of"]["1"]["block_number"], json!(39));
-
-    database.cleanup().await
-}
-
-#[tokio::test]
 async fn v2_lookup_serves_unchanged_phase_projection_after_head_advance() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_identity_name(
@@ -380,14 +323,31 @@ async fn v2_lookup_rejects_address_relation_from_another_phase_publication() -> 
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
     seed_v2_lookup_reverse_fixture(&database, address).await?;
+    sqlx::query(
+        "INSERT INTO bigname_phase.chain_lineage ( \
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state \
+         ) VALUES ( \
+             'ethereum-mainnet', '0xfuture-publication', 43, \
+             '2026-04-17T00:00:43Z', 'canonical' \
+         )",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
     let updated = sqlx::query(
         r#"
-        UPDATE address_names_current
+        UPDATE bigname_phase.address_names_current
         SET chain_positions = jsonb_build_object(
-            'target_block_number', 43,
-            'target_block_hash', '0xfuture-publication'
-        )
-        WHERE raw_name = 'alice.eth'
+                'block_number', 43,
+                'block_hash', '0xfuture-publication',
+                'target_block_number', 43,
+                'target_block_hash', '0xfuture-publication'
+            ),
+            canonicality_summary = jsonb_build_object(
+                'state', 'canonical_lineage',
+                'target_block_number', 43,
+                'target_block_hash', '0xfuture-publication'
+            )
+        WHERE lower(raw_name) = 'alice.eth'
         "#,
     )
     .execute(&database.lookup_pool)
@@ -409,6 +369,64 @@ async fn v2_lookup_rejects_address_relation_from_another_phase_publication() -> 
 }
 
 #[tokio::test]
+async fn v2_lookup_excludes_lower_height_orphaned_name_and_relation_targets() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    sqlx::raw_sql(
+        r#"
+        INSERT INTO bigname_phase.chain_lineage (
+            chain_id, block_hash, block_number, block_timestamp, canonicality_state
+        ) VALUES
+            ('ethereum-mainnet', '0xorphaned-lookup-name', 39,
+             '2026-04-17T00:00:39Z', 'orphaned'),
+            ('ethereum-mainnet', '0xorphaned-lookup-relation', 40,
+             '2026-04-17T00:00:40Z', 'orphaned');
+        UPDATE bigname_phase.name_current
+        SET canonicality_summary = jsonb_build_object(
+                'state', 'canonical_lineage',
+                'target_block_number', 39,
+                'target_block_hash', '0xorphaned-lookup-name'
+            )
+        WHERE lower(raw_name) = 'alice.eth';
+        UPDATE bigname_phase.address_names_current
+        SET chain_positions = jsonb_build_object(
+                'block_number', 40,
+                'block_hash', '0xorphaned-lookup-relation',
+                'target_block_number', 40,
+                'target_block_hash', '0xorphaned-lookup-relation'
+            ),
+            canonicality_summary = jsonb_build_object(
+                'state', 'canonical_lineage',
+                'target_block_number', 40,
+                'target_block_hash', '0xorphaned-lookup-relation'
+            )
+        WHERE lower(raw_name) = 'bob.eth';
+        "#,
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let direct = v2_lookup_json(
+        &database,
+        json!({"inputs": [{"id": "orphaned-name", "name": "alice.eth"}]}),
+    )
+    .await?;
+    assert_eq!(direct["data"][0]["status"], json!("not_found"));
+
+    let reverse = v2_lookup_json(
+        &database,
+        json!({"inputs": [{"id": "orphaned-reverse", "address": address}]}),
+    )
+    .await?;
+    assert_eq!(reverse["data"][0]["status"], json!("ok"));
+    assert_eq!(reverse["data"][0]["records"], json!([]));
+    assert_eq!(reverse["data"][0]["page"]["total_count"], json!(0));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_lookup_excludes_unsupported_phase_relations() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
@@ -416,7 +434,7 @@ async fn v2_lookup_excludes_unsupported_phase_relations() -> Result<()> {
     sqlx::query(
         "UPDATE address_names_current
          SET support_status = 'unsupported', unsupported_reason = 'relation_pending'
-         WHERE raw_name = 'alice.eth'",
+         WHERE lower(raw_name) = 'alice.eth'",
     )
     .execute(&database.lookup_pool)
     .await?;
@@ -442,6 +460,7 @@ async fn v2_lookup_ignores_invalid_phase_primary_claim() -> Result<()> {
         "60",
         bigname_storage::PrimaryNameClaimStatus::InvalidName,
         Some("bad name.eth"),
+        false,
     )
     .await?;
 
@@ -463,6 +482,16 @@ async fn v2_lookup_rejects_primary_claim_from_future_phase_publication() -> Resu
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
     seed_v2_lookup_reverse_fixture(&database, address).await?;
+    sqlx::query(
+        "INSERT INTO bigname_phase.chain_lineage ( \
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state \
+         ) VALUES ( \
+             'ethereum-mainnet', '0xfuture-primary', 43, \
+             '2026-04-17T00:00:43Z', 'canonical' \
+         )",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
     sqlx::query(
         r#"
         UPDATE primary_names_current
@@ -567,7 +596,7 @@ async fn v2_lookup_rejects_head_reorg_before_project_republication() -> Result<(
 
     control.wait_until_reached().await;
     sqlx::query(
-        "INSERT INTO chain_lineage (
+        "INSERT INTO bigname_phase.chain_lineage (
              chain_id, block_hash, block_number, block_timestamp, canonicality_state
          ) VALUES (
              'ethereum-mainnet', '0xlookup-after-reorg', 40,
@@ -662,7 +691,7 @@ async fn v2_lookup_rejects_project_publication_between_selection_and_first_read(
 async fn v2_lookup_internal_head_selection_error_is_sanitized() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let state = database.app_state();
-    state.lookup_pool.close().await;
+    state.pool.close().await;
 
     let response = app_router(state)
         .oneshot(
@@ -886,108 +915,170 @@ async fn v2_lookup_serves_reverse_pagination_after_unrelated_head_advance() -> R
 }
 
 #[tokio::test]
-async fn v2_lookup_reverse_counts_live_rows_instead_of_the_legacy_sidecar() -> Result<()> {
+async fn v2_lookup_reverse_serves_the_batch_when_a_primary_claim_no_longer_normalizes()
+-> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
     seed_v2_lookup_reverse_fixture(&database, address).await?;
-
-    let poisoned = sqlx::query(
-        r#"
-        UPDATE address_names_current_identity_counts
-        SET total_count = 999
-        WHERE address = $1
-          AND roles = 'both'
-        "#,
-    )
-    .bind(address)
-    .execute(&database.pool)
-    .await?;
-    assert_eq!(poisoned.rows_affected(), 1);
-
-    let payload = v2_lookup_json(
+    // A successful claim whose stored spelling does not normalize is one row's defect. The batched
+    // reverse read must still answer, marking nothing primary, rather than failing every input.
+    seed_phase_primary_name_snapshot(
         &database,
-        json!({
-            "profile": "detail",
-            "inputs": [{
-                "id": "addr",
-                "address": address,
-                "page_size": 1
-            }]
-        }),
+        address,
+        "ens",
+        "60",
+        bigname_storage::PrimaryNameClaimStatus::Success,
+        Some("alice..eth"),
+        false,
     )
     .await?;
 
-    assert_eq!(payload["data"][0]["page"]["total_count"], json!(2));
-    assert_eq!(payload["data"][0]["page"]["has_more"], json!(true));
+    let payload = v2_lookup_json(&database, json!({"inputs": [{"address": address}]})).await?;
+
+    assert_eq!(payload["data"][0]["status"], json!("ok"));
+    let records = payload["data"][0]["records"]
+        .as_array()
+        .expect("reverse lookup records must be an array");
+    assert!(!records.is_empty());
+    assert!(records.iter().all(|record| record["is_primary"] == json!(false)));
 
     database.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
-async fn v2_lookup_reverse_ignores_legacy_identity_lineage() -> Result<()> {
+async fn v2_lookup_reverse_orders_pages_by_the_is_primary_it_returns() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
-    let resource_id = Uuid::from_u128(0x5a0211);
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    // The marker says these stored bytes are the published normalized form, so they are served
+    // unchanged and no longer equal the current name row. Paging orders by `is_primary`, so the
+    // ordering predicate and the emitted flag have to be derived the same way. The claim names the
+    // second row in page order, so a re-normalizing ordering would sort it first and the keyset
+    // predicate — built from the emitted flag — would then skip the first row entirely.
+    seed_phase_primary_name_snapshot(
+        &database,
+        address,
+        "ens",
+        "60",
+        bigname_storage::PrimaryNameClaimStatus::Success,
+        Some("Bob.eth"),
+        true,
+    )
+    .await?;
+
+    let mut seen = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..3 {
+        let mut input = json!({"id": "addr", "address": address, "page_size": 1});
+        if let Some(cursor) = cursor.as_deref() {
+            input["cursor"] = json!(cursor);
+        }
+        let payload = v2_lookup_json(
+            &database,
+            json!({"profile": "detail", "inputs": [input]}),
+        )
+        .await?;
+        let records = payload["data"][0]["records"]
+            .as_array()
+            .expect("reverse lookup records must be an array");
+        for record in records {
+            assert_eq!(
+                record["is_primary"],
+                json!(false),
+                "a claim served in its stored spelling must not mark the normalized name primary"
+            );
+            seen.push(
+                record["name"]
+                    .as_str()
+                    .expect("record name must be a string")
+                    .to_owned(),
+            );
+        }
+        match payload["data"][0]["page"]["next_cursor"].as_str() {
+            Some(next) => cursor = Some(next.to_owned()),
+            None => break,
+        }
+    }
+
+    assert_eq!(seen, vec!["alice.eth".to_owned(), "bob.eth".to_owned()]);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_lookup_reverse_pages_a_case_unstable_primary_name_without_repeating_rows() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    // A single-script Cherokee name passes ENSIP-15 byte-identical, so the projection stores it
+    // verbatim — but Postgres `lower()` maps it to the lowercase Cherokee block, i.e. different
+    // bytes. Comparing or sorting through `lower()` would therefore put this row in the
+    // non-primary block while the response reports it as primary, and the keyset built from the
+    // reported flag then serves an earlier row a second time.
+    let cherokee = "ᏣᎳᎩ.eth";
     seed_identity_name(
         &database,
-        "ens:lineage.eth",
-        "lineage.eth",
-        "lineage.eth",
-        "namehash:lineage.eth",
-        resource_id,
-        Uuid::from_u128(0x5a0212),
-        Uuid::from_u128(0x5a0213),
+        "ens:ᏣᎳᎩ.eth",
+        cherokee,
+        cherokee,
+        "namehash:ᏣᎳᎩ.eth",
+        Uuid::from_u128(0x5a0241),
+        Uuid::from_u128(0x5a0242),
+        Uuid::from_u128(0x5a0243),
         address,
-        bigname_storage::AddressNameRelation::TokenHolder,
-        46,
+        bigname_storage::AddressNameRelation::EffectiveController,
+        43,
     )
     .await?;
-    seed_v2_lookup_base_head(&database).await?;
-
-    let readable = v2_lookup_json(
+    seed_phase_primary_name_snapshot(
         &database,
-        json!({
-            "profile": "detail",
-            "inputs": [{"id": "addr", "address": address, "page_size": 10}]
-        }),
+        address,
+        "ens",
+        "60",
+        bigname_storage::PrimaryNameClaimStatus::Success,
+        Some(cherokee),
+        true,
     )
     .await?;
-    assert_eq!(readable["data"][0]["records"][0]["name"], json!("lineage.eth"));
-    assert_eq!(readable["data"][0]["page"]["total_count"], json!(1));
 
-    sqlx::query(
-        "UPDATE chain_lineage
-         SET canonicality_state = 'orphaned'::canonicality_state
-         WHERE chain_id = 'ethereum-mainnet' AND block_hash = '0xresource'",
-    )
-    .execute(&database.pool)
-    .await?;
-    let row_local_state: String = sqlx::query_scalar(
-        "SELECT canonicality_state::text FROM resources WHERE resource_id = $1",
-    )
-    .bind(resource_id)
-    .fetch_one(&database.pool)
-    .await?;
-    assert_eq!(row_local_state, "finalized");
+    let mut seen = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..5 {
+        let mut input = json!({"id": "addr", "address": address, "page_size": 1});
+        if let Some(cursor) = cursor.as_deref() {
+            input["cursor"] = json!(cursor);
+        }
+        let payload =
+            v2_lookup_json(&database, json!({"profile": "detail", "inputs": [input]})).await?;
+        let records = payload["data"][0]["records"]
+            .as_array()
+            .expect("reverse lookup records must be an array");
+        for record in records {
+            let name = record["name"]
+                .as_str()
+                .expect("record name must be a string")
+                .to_owned();
+            assert_eq!(
+                record["is_primary"],
+                json!(name == cherokee),
+                "only the claimed name is primary, got {record}"
+            );
+            seen.push(name);
+        }
+        match payload["data"][0]["page"]["next_cursor"].as_str() {
+            Some(next) => cursor = Some(next.to_owned()),
+            None => break,
+        }
+    }
 
-    let orphaned_response = v2_lookup_response_for_database(
-        &database,
-        "/v2/lookup",
-        json!({
-            "profile": "detail",
-            "inputs": [{"id": "addr", "address": address, "page_size": 10}]
-        }),
-    )
-    .await?;
-    let orphaned_status = orphaned_response.status();
-    let orphaned: Value = read_json(orphaned_response).await?;
-    assert_eq!(orphaned_status, StatusCode::OK, "{orphaned:#}");
     assert_eq!(
-        orphaned["data"][0]["records"][0]["name"],
-        json!("lineage.eth")
+        seen,
+        vec![cherokee.to_owned(), "alice.eth".to_owned(), "bob.eth".to_owned()],
+        "the primary row sorts first and no row is served twice"
     );
-    assert_eq!(orphaned["data"][0]["page"]["total_count"], json!(1));
 
     database.cleanup().await?;
     Ok(())
@@ -1051,24 +1142,9 @@ async fn v2_lookup_reverse_page_and_count_include_primary_when_matching_relation
     );
     unreadable_binding.canonicality_state = CanonicalityState::Orphaned;
     upsert_test_surface_bindings(&database.pool, &[unreadable_binding]).await?;
-    bigname_storage::upsert_address_names_current_rows(
-        &database.pool,
-        &[address_name_current_row(
-            address,
-            logical_name_id,
-            bigname_storage::AddressNameRelation::EffectiveController,
-            "membership-edge.eth",
-            normalized_name,
-            "namehash:membership-edge.eth",
-            unreadable_surface_binding_id,
-            unreadable_resource_id,
-            Some(unreadable_token_lineage_id),
-            47,
-        )],
-    )
-    .await?;
+    // The phase projection omits the relation because its binding is orphaned.
 
-    bigname_storage::upsert_primary_name_current_snapshots(
+    upsert_primary_name_current_snapshots(
         &database.pool,
         &[bigname_storage::PrimaryNameCurrentSnapshot {
             row: bigname_storage::PrimaryNameCurrentRow {
@@ -1091,6 +1167,7 @@ async fn v2_lookup_reverse_page_and_count_include_primary_when_matching_relation
         "60",
         bigname_storage::PrimaryNameClaimStatus::Success,
         Some(normalized_name),
+        true,
     )
     .await?;
     seed_v2_lookup_base_head(&database).await?;
@@ -1430,61 +1507,7 @@ async fn v2_lookup_reverse_feed_uses_detail_pagination_semantics() -> Result<()>
 }
 
 #[tokio::test]
-async fn v2_lookup_reverse_ignores_legacy_coverage_status() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    let address = "0x0000000000000000000000000000000000000abc";
-    seed_v2_lookup_reverse_fixture(&database, address).await?;
-    sqlx::query(
-        r#"
-        UPDATE name_current
-        SET coverage = $2::jsonb
-        WHERE logical_name_id = $1
-        "#,
-    )
-    .bind("ens:alice.eth")
-    .bind(json!({
-        "status": "failed",
-        "failure_reason": "projection_read_failed"
-    }))
-    .execute(&database.pool)
-    .await?;
-    sqlx::query(
-        r#"
-        UPDATE name_current
-        SET coverage = $2::jsonb
-        WHERE logical_name_id = $1
-        "#,
-    )
-    .bind("ens:bob.eth")
-    .bind(json!({
-        "status": "stale"
-    }))
-    .execute(&database.pool)
-    .await?;
-
-    let payload = v2_lookup_json(
-        &database,
-        json!({
-            "profile": "detail",
-            "inputs": [{
-                "address": address
-            }]
-        }),
-    )
-    .await?;
-
-    assert_eq!(payload["data"][0]["status"], json!("ok"));
-    assert_eq!(payload["data"][0]["records"][0]["status"], json!("ok"));
-    assert_eq!(payload["data"][0]["records"][1]["status"], json!("ok"));
-    assert!(payload["data"][0].get("unsupported_reason").is_none());
-    assert!(payload["data"][0]["records"][0].get("unsupported_reason").is_none());
-
-    database.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn v2_lookup_rejects_unmapped_pipeline_reason_values() -> Result<()> {
+async fn v2_lookup_excludes_unsupported_rows_without_leaking_pipeline_reasons() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
     seed_v2_lookup_reverse_fixture(&database, address).await?;
@@ -1494,7 +1517,7 @@ async fn v2_lookup_rejects_unmapped_pipeline_reason_values() -> Result<()> {
             r#"
             UPDATE name_current
             SET support_status = 'unsupported', unsupported_reason = $1
-            WHERE raw_name = 'alice.eth'
+            WHERE lower(raw_name) = 'alice.eth'
             "#,
         )
         .bind(failure_reason)
@@ -1512,13 +1535,10 @@ async fn v2_lookup_rejects_unmapped_pipeline_reason_values() -> Result<()> {
             }),
         )
         .await?;
-        assert_eq!(
-            response.status(),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "{failure_reason}"
-        );
+        assert_eq!(response.status(), StatusCode::OK, "{failure_reason}");
         let payload: Value = read_json(response).await?;
-        assert_eq!(payload["error"]["code"], json!("internal_error"));
+        assert_eq!(payload["data"][0]["records"][0]["name"], json!("bob.eth"));
+        assert!(!payload.to_string().contains(failure_reason));
     }
 
     database.cleanup().await?;
@@ -1724,7 +1744,7 @@ async fn advance_v2_lookup_phase_only_ethereum_head(
 ) -> Result<()> {
     let timestamp = format!("2026-04-17T00:00:{:02}Z", block_number % 60);
     sqlx::query(
-        "INSERT INTO chain_lineage (
+        "INSERT INTO bigname_phase.chain_lineage (
              chain_id, block_hash, block_number, block_timestamp, canonicality_state
          ) VALUES ('ethereum-mainnet', $1, $2, $3::timestamptz, 'finalized')",
     )
@@ -1770,10 +1790,12 @@ async fn advance_v2_lookup_phase_only_ethereum_head(
 }
 
 async fn seed_v2_lookup_reverse_fixture(database: &TestDatabase, address: &str) -> Result<()> {
+    // The interpret gate admits a name surface as active only when its bytes are already the
+    // ENSIP-15 normalized form, so a supported fixture row carries the normalized spelling.
     seed_identity_name(
         database,
         "ens:alice.eth",
-        "Alice.eth",
+        "alice.eth",
         "alice.eth",
         "namehash:alice.eth",
         Uuid::from_u128(0x5a0201),
@@ -1787,7 +1809,7 @@ async fn seed_v2_lookup_reverse_fixture(database: &TestDatabase, address: &str) 
     seed_identity_name(
         database,
         "ens:bob.eth",
-        "Bob.eth",
+        "bob.eth",
         "bob.eth",
         "namehash:bob.eth",
         Uuid::from_u128(0x5a0211),
@@ -1798,7 +1820,7 @@ async fn seed_v2_lookup_reverse_fixture(database: &TestDatabase, address: &str) 
         42,
     )
     .await?;
-    bigname_storage::upsert_primary_name_current_snapshots(
+    upsert_primary_name_current_snapshots(
         &database.pool,
         &[bigname_storage::PrimaryNameCurrentSnapshot {
             row: bigname_storage::PrimaryNameCurrentRow {
@@ -1821,6 +1843,7 @@ async fn seed_v2_lookup_reverse_fixture(database: &TestDatabase, address: &str) 
         "60",
         bigname_storage::PrimaryNameClaimStatus::Success,
         Some("alice.eth"),
+        true,
     )
     .await?;
     seed_v2_lookup_base_head(database).await?;
@@ -1878,13 +1901,6 @@ async fn seed_v2_lookup_relation_scan_fixture(
         .iter()
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
-    let mut raw_blocks = Vec::new();
-    let mut surfaces = Vec::new();
-    let mut token_lineages = Vec::new();
-    let mut resources = Vec::new();
-    let mut bindings = Vec::new();
-    let mut name_rows = Vec::new();
-    let mut address_rows = Vec::new();
     let mut phase_logical_name_ids = Vec::new();
     let mut phase_names = Vec::new();
     let mut phase_namehashes = Vec::new();
@@ -1894,16 +1910,10 @@ async fn seed_v2_lookup_relation_scan_fixture(
     let mut phase_relations = Vec::new();
 
     for index in 0..row_count {
-        let block_number = 1_000 + index as i64;
         let name = format!("scan{index:03}.eth");
-        let logical_name_id = format!("ens:{name}");
-        let namehash = format!("namehash:{name}");
         let resource_id = Uuid::from_u128(0x7100_0000 + index as u128 * 3);
         let token_lineage_id = Uuid::from_u128(0x7100_0001 + index as u128 * 3);
         let surface_binding_id = Uuid::from_u128(0x7100_0002 + index as u128 * 3);
-        let storage_block_hash = format!("0xlookupscan{index:064x}");
-        let name_block_hash = format!("0xname{block_number:02x}");
-        let address_block_hash = format!("0xaddr{block_number:02x}");
         let relation = if owner_match_indexes.contains(&index) {
             bigname_storage::AddressNameRelation::TokenHolder
         } else {
@@ -1917,110 +1927,7 @@ async fn seed_v2_lookup_relation_scan_fixture(
         phase_token_lineage_ids.push(token_lineage_id);
         phase_surface_binding_ids.push(surface_binding_id);
         phase_relations.push(relation.as_str().to_owned());
-
-        raw_blocks.extend([
-            raw_block(
-                "ethereum-mainnet",
-                &storage_block_hash,
-                None,
-                block_number,
-                1_717_180_000 + block_number,
-            ),
-            raw_block(
-                "ethereum-mainnet",
-                &name_block_hash,
-                None,
-                block_number,
-                1_717_180_000 + block_number,
-            ),
-            raw_block(
-                "ethereum-mainnet",
-                &address_block_hash,
-                None,
-                block_number,
-                1_717_180_000 + block_number,
-            ),
-        ]);
-        surfaces.push(collection_name_surface(
-            &logical_name_id,
-            &name,
-            &namehash,
-            block_number,
-        ));
-        token_lineages.push(address_name_token_lineage(
-            token_lineage_id,
-            &storage_block_hash,
-            block_number,
-        ));
-        resources.push(address_name_resource(
-            resource_id,
-            Some(token_lineage_id),
-            &storage_block_hash,
-            block_number,
-        ));
-        bindings.push(address_name_surface_binding(
-            surface_binding_id,
-            &logical_name_id,
-            resource_id,
-            &storage_block_hash,
-            block_number,
-            1_717_180_000 + block_number,
-        ));
-        let name_row = address_name_name_current_row(
-            &logical_name_id,
-            &name,
-            &name,
-            &namehash,
-            surface_binding_id,
-            resource_id,
-            Some(token_lineage_id),
-            block_number,
-            compact_name_declared_summary(
-                address,
-                address,
-                address,
-                1_900_000_000,
-                "2026-04-17T00:00:21Z",
-                "2026-04-17T00:00:11Z",
-            ),
-        );
-        name_rows.push(name_row);
-        let address_row = address_name_current_row(
-            address,
-            &logical_name_id,
-            relation,
-            &name,
-            &name,
-            &namehash,
-            surface_binding_id,
-            resource_id,
-            Some(token_lineage_id),
-            block_number,
-        );
-        address_rows.push(address_row);
     }
-
-    bigname_storage::upsert_raw_blocks(&database.pool, &raw_blocks)
-        .await
-        .context("failed to seed lookup scan raw blocks")?;
-    upsert_test_name_surfaces(&database.pool, &surfaces)
-        .await
-        .context("failed to seed lookup scan name surfaces")?;
-    upsert_test_token_lineages(&database.pool, &token_lineages)
-        .await
-        .context("failed to seed lookup scan token lineages")?;
-    upsert_test_resources(&database.pool, &resources)
-        .await
-        .context("failed to seed lookup scan resources")?;
-    upsert_test_surface_bindings(&database.pool, &bindings)
-        .await
-        .context("failed to seed lookup scan surface bindings")?;
-    bigname_storage::upsert_name_current_rows(&database.pool, &name_rows)
-        .await
-        .context("failed to seed lookup scan name_current rows")?;
-    bigname_storage::upsert_address_names_current_rows(&database.pool, &address_rows)
-        .await
-        .context("failed to seed lookup scan address-name rows")?;
     seed_phase_lookup_scan_rows(
         database,
         address,
@@ -2052,9 +1959,12 @@ async fn seed_phase_lookup_scan_rows(
     publication_positions: &Value,
 ) -> Result<()> {
     let target_positions = json!({
+        "block_number": 10_000,
+        "block_hash": "0xlookup-scan-head",
         "target_block_number": 10_000,
         "target_block_hash": "0xlookup-scan-head",
     });
+    let projection_provenance = json!({ "chain_id": "ethereum-mainnet" });
     let canonicality_summary = json!({
         "state": "canonical_lineage",
         "target_block_number": 10_000,
@@ -2069,7 +1979,7 @@ async fn seed_phase_lookup_scan_rows(
             provenance, canonicality_state
         )
         SELECT token_lineage_id, 'ethereum-mainnet', '0xlookup-scan-head', 10000,
-               '{}'::jsonb, 'finalized'::canonicality_state
+               '{}'::jsonb, 'finalized'::bigname_phase.canonicality_state
         FROM UNNEST($1::UUID[]) AS seeded(token_lineage_id)
         ON CONFLICT (token_lineage_id) DO NOTHING
         "#,
@@ -2085,7 +1995,7 @@ async fn seed_phase_lookup_scan_rows(
         )
         SELECT resource_id, token_lineage_id, 'ethereum-mainnet',
                '0xlookup-scan-head', 10000, '{}'::jsonb,
-               'finalized'::canonicality_state
+               'finalized'::bigname_phase.canonicality_state
         FROM UNNEST($1::UUID[], $2::UUID[])
             AS seeded(resource_id, token_lineage_id)
         ON CONFLICT (resource_id) DO NOTHING
@@ -2111,7 +2021,7 @@ async fn seed_phase_lookup_scan_rows(
                ),
                $4, 'active', '[]'::jsonb, 'ethereum-mainnet',
                '0xlookup-scan-head', 10000, '{}'::jsonb,
-               'finalized'::canonicality_state
+               'finalized'::bigname_phase.canonicality_state
         FROM UNNEST($1::TEXT[], $2::TEXT[], $3::TEXT[])
             AS seeded(logical_name_id, raw_name, namehash)
         ON CONFLICT (logical_name_id) DO NOTHING
@@ -2133,7 +2043,7 @@ async fn seed_phase_lookup_scan_rows(
         SELECT surface_binding_id, logical_name_id, resource_id,
                'declared_registry_path', now(), 'ethereum-mainnet',
                '0xlookup-scan-head', 10000, '{}'::jsonb,
-               'finalized'::canonicality_state
+               'finalized'::bigname_phase.canonicality_state
         FROM UNNEST($1::UUID[], $2::TEXT[], $3::UUID[])
             AS seeded(surface_binding_id, logical_name_id, resource_id)
         ON CONFLICT (surface_binding_id) DO NOTHING
@@ -2154,7 +2064,7 @@ async fn seed_phase_lookup_scan_rows(
         )
         SELECT logical_name_id, 'ens', raw_name, namehash, surface_binding_id,
                resource_id, token_lineage_id, 'declared_registry_path',
-               '{}'::jsonb, 'supported', '{}'::jsonb, $7, $8, 1
+               '{}'::jsonb, 'supported', $7, $8, $9, 1
         FROM UNNEST(
             $1::TEXT[], $2::TEXT[], $3::TEXT[], $4::UUID[], $5::UUID[], $6::UUID[]
         ) AS seeded(
@@ -2170,6 +2080,7 @@ async fn seed_phase_lookup_scan_rows(
     .bind(surface_binding_ids)
     .bind(resource_ids)
     .bind(token_lineage_ids)
+    .bind(&projection_provenance)
     .bind(publication_positions)
     .bind(&canonicality_summary)
     .execute(&mut *transaction)
@@ -2184,7 +2095,7 @@ async fn seed_phase_lookup_scan_rows(
         )
         SELECT lower($1), logical_name_id, relation, 'ens', raw_name, namehash,
                surface_binding_id, resource_id, token_lineage_id,
-               'declared_registry_path', 'supported', '{}'::jsonb, $9, $10, 1
+               'declared_registry_path', 'supported', $9, $10, $11, 1
         FROM UNNEST(
             $2::TEXT[], $3::TEXT[], $4::TEXT[], $5::UUID[], $6::UUID[],
             $7::UUID[], $8::TEXT[]
@@ -2203,6 +2114,7 @@ async fn seed_phase_lookup_scan_rows(
     .bind(resource_ids)
     .bind(token_lineage_ids)
     .bind(relations)
+    .bind(&projection_provenance)
     .bind(&target_positions)
     .bind(&canonicality_summary)
     .execute(&mut *transaction)
@@ -2223,8 +2135,10 @@ fn lookup_record_names(payload: &Value) -> Vec<&str> {
 
 async fn v2_lookup_json(database: &TestDatabase, body: Value) -> Result<Value> {
     let response = v2_lookup_response_for_database(database, "/v2/lookup", body).await?;
-    assert_eq!(response.status(), StatusCode::OK);
-    read_json(response).await
+    let status = response.status();
+    let payload = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {payload:#}");
+    Ok(payload)
 }
 
 async fn v2_get_json(database: &TestDatabase, uri: &str) -> Result<Value> {

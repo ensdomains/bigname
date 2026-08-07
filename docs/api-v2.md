@@ -33,7 +33,7 @@ step-3-gate vocabulary needed by the route schemas:
 
 | `v2` name | Meaning | Replaces (`v1`) |
 | --- | --- | --- |
-| `name` | the ENSIP-15 normalized name string | `normalized_name`, `logical_name_id` (derivable as `namespace:name`) |
+| `name` | the ENSIP-15 normalized name string, except on routes that document an explicit [non-name form](glossary.md#non-name-form) for a label bigname cannot state as a name — today only `GET /v2/names/{name}/subnames` | `normalized_name`, `logical_name_id` (derivable as `namespace:name`) |
 | `display_name` | display form of the name | `canonical_display_name` |
 | `namespace` | public namespace slug used to resolve a name or filter a route, such as `ens` or `basenames` | `namespace` path segment/query usage (unchanged; now echoed consistently) |
 | `namehash` | ENS namehash hex string | `namehash` (unchanged) |
@@ -103,13 +103,11 @@ step-3-gate vocabulary needed by the route schemas:
 | `data` | envelope root payload, and event-row payload when nested inside an event row | compact event payload objects |
 
 `GET /v2/permissions` and `GET /v2/addresses/{address}/names?include=role_summary`
-require the compatible projection-owned permission publication version before
-permission rows are served. Missing or older versions return `409 stale`. These reads
-also verify the publication's read-consistency revision is unchanged before
-returning; an interleaved keyed or full publication returns `409 stale` rather
-than a mixed-generation response. These are schema/publication compatibility
-and request-coherence guards; they do not assert projection freshness.
-The base v2 address-name collection remains available without the expansion.
+read current permission rows and per-resource permission summaries. Canonical
+identity checks exclude rows from an orphaned chain lineage. These routes do
+not claim a request-wide immutable projection generation, and their cursors carry
+no snapshot-validity claim. The base v2 address-name collection remains available
+without the expansion.
 
 Permission-backed v2 reads also classify the served resources from the typed
 projection-owned per-resource permission summary. For a resource-bound
@@ -279,7 +277,7 @@ detail, it belongs on a diagnostics route instead.
 `GET /v2/names/{name}/records` with a verified source execute through the
 schema-v2 lookup engine on every request. Response fields and per-record status
 meaning stay unchanged, but there is no reusable outcome, durable execution
-trace, or legacy execution-cache readback. A direct live answer that disagrees
+trace, or execution-cache readback. A direct live answer that disagrees
 with the exact indexed record used for comparison writes the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger).
 Agreement creates no divergence but may clear a matching active row, wildcard
@@ -338,11 +336,9 @@ remains behind the readable chain head, verified reads degrade to `409 stale`
 instead of executing against mixed generations. Snapshot selection and
 verified lookup now read the same `chain_heads` and `chain_phase_state` project
 row, so this exact-head fence detects only a concurrent head, rewind, or
-project-publication change between their reads; it no longer waits for an
-independently updated legacy checkpoint. This removes the persistent `409
-stale` case on the verified path caused only by the old worker lagging or not
-running. A fast-moving chain can still advance during a provider or CCIP round
-trip, so the post-call generation checks remain necessary.
+project-publication change between their reads. A fast-moving chain can still
+advance during a provider or CCIP round trip, so the post-call generation
+checks remain necessary.
 
 Indexed lookup names, record inventories, address-name relations, resolver
 overviews, and resolver bound names now come from `bigname_phase` projections.
@@ -355,12 +351,9 @@ latest resolver reads also bind that generation to the selected
 `chain_heads` position; historical resolver reads bind to the current
 generation while admitting only rows at or before the requested position.
 
-This is now a single-source projection consistency check rather than a comparison
-between independently advanced phase and public-schema pipelines. It rejects
+This single-source projection consistency check rejects
 future or same-height wrong-fork rows while serving unchanged rows after an
-unrelated head advance. Moving these indexed routes removes both the
-old-worker-lag `409` class and the counterproductive exact-per-row-head `409`
-class from lookup and resolver serving. A real phase lag,
+unrelated head advance. A real phase lag,
 interpreter-hash mismatch, concurrent publication change, or row ahead of the
 selected position still fails closed.
 
@@ -368,8 +361,8 @@ selected position still fails closed.
 
 Diagnostics are the only public routes that may carry pipeline vocabulary.
 They expose coverage taxonomy, binding and authority explanations, record
-inventory/cache internals, persisted execution explanations, active manifests,
-and raw normalized-event rows.
+inventory and indexed-value internals, active manifests, and raw
+normalized-event rows.
 The diagnostics records route drives the same verified lookup engine and can
 write or clear rows in the
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger).
@@ -430,8 +423,7 @@ route's snapshot scope and must not carry extra slots outside that scope.
 
 The API selects current `latest`, `safe`, and `finalized` positions from
 `bigname_phase.chain_heads` and obtains their timestamps from readable
-`bigname_phase.chain_lineage`; it does not read the legacy public-schema
-checkpoint table. Every selection is available only when the current
+`bigname_phase.chain_lineage`. Every selection is available only when the current
 `project` phase is completed at the exact latest head with the API's compiled
 interpreter content hash. Timestamp `at` selection and opaque-token replay
 still choose historical positions: every supplied or resolved position must
@@ -439,13 +431,11 @@ exist in `bigname_phase.chain_lineage` and satisfy the requested finality
 floor, and an authoritative cross-chain selection bounds auxiliary positions
 by its timestamp. The current project-publication check also applies to those
 historical selectors.
-During this source transition, a token or timestamp that selects a block older
-than the retained schema-v2 lineage walk returns `409 conflict`, even if a
-pre-transition public-schema lineage row once covered that block.
+A token or timestamp that selects a block absent from readable phase lineage
+returns `409 conflict`.
 
 API startup discovers the status chain set from the union of
-`bigname_phase.chain_heads` and `bigname_phase.chain_phase_state` instead of
-the legacy public-schema checkpoint and manifest tables. `/v2/status` uses
+`bigname_phase.chain_heads` and `bigname_phase.chain_phase_state`. `/v2/status` uses
 those same relations for its chain set and reads stored head/finality positions
 from `chain_heads`, project progress from the `project` row in
 `chain_phase_state`, and both timestamps from the matching readable
@@ -512,9 +502,22 @@ post-filtering retain `total_count=null`; feed and detail profiles use the same
 count and pagination semantics.
 For a name with multiple relation rows, a readable row admits the name and the
 returned `is_primary` is computed from the current name and primary-name claim
-even when a different primary-matching relation row is unreadable; the former
-page query omitted that name while its sidecar count included it, creating a
-page/count self-inconsistency.
+even when a different primary-matching relation row is unreadable. The retired
+v1 page/sidecar pair disagreed on this case; the v2 live page and count joins
+share the same eligibility rule.
+Reverse address results from `POST /v2/lookup` additionally require the
+projection rows behind a name to be [readable](glossary.md#readable--read-safe)
+*and* supported. Both the name row and the address-relation row that admits it
+must carry a supported support status; a name whose current name row or whose
+matching relation row is unsupported is absent from both the page and
+`total_count` rather than listed with an unsupported reason. Reverse lookup
+results therefore answer which supported names an address holds. This
+deliberately narrows earlier behavior, which listed unsupported names and left
+the caller to read the reason; per-name unsupported detail now lives on the
+name-shaped routes and diagnostics, which read the row directly.
+`GET /v2/addresses/{address}/names` is the exception and is unchanged: it lists
+unsupported rows. It does not carry a per-row reason; read the reason from the
+name-shaped routes or diagnostics for the name in question.
 
 ## Error Model
 

@@ -217,17 +217,6 @@ pub async fn publish_heads(pool: &PgPool, chain_id: &str, heads: &HeadMarkers) -
     if let Some(finalized) = &heads.finalized {
         promote_to_finalized(&mut transaction, chain_id, finalized.number).await?;
     }
-    bigname_storage::invalidate_execution_outcomes_for_orphaned_blocks_in_transaction(
-        &mut transaction,
-    )
-    .await
-    .map_err(|error| {
-        RunnerError::transient(format!(
-            "failed to invalidate execution outcomes after head publication for chain \
-             {chain_id}: {error:#}"
-        ))
-    })?;
-
     persist::markers(
         &mut transaction,
         chain_id,

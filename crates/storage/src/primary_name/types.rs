@@ -50,46 +50,6 @@ impl PrimaryNameClaimStatus {
     }
 }
 
-pub const VERIFIED_PRIMARY_NAME_LOOKUP_KEY: &str = "verified_primary_name_lookup";
-pub const VERIFIED_PRIMARY_NAME_INVALIDATION_KEY: &str = "verified_primary_name_invalidation";
-
-/// Frozen execution request type for verified primary-name readback.
-pub const VERIFIED_PRIMARY_NAME_REQUEST_TYPE: &str = "verified_primary_name";
-
-/// Claim-side tuple hook that later readers can turn into the frozen request key.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VerifiedPrimaryNameLookupHook {
-    pub address: String,
-    pub namespace: String,
-    pub coin_type: String,
-}
-
-impl VerifiedPrimaryNameLookupHook {
-    pub fn request_key(&self) -> String {
-        format!(
-            "{}:{}:{}",
-            self.namespace,
-            normalize_address(&self.address),
-            self.coin_type
-        )
-    }
-}
-
-/// Claim-side invalidation material for one primary-name tuple.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VerifiedPrimaryNameInvalidationHook {
-    pub claim_status: PrimaryNameClaimStatus,
-    pub reverse_claim_provenance: Value,
-    pub primary_claim_source: Option<Value>,
-}
-
-/// Combined lookup and invalidation hooks persisted with one primary-name row.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VerifiedPrimaryNameClaimHooks {
-    pub lookup: VerifiedPrimaryNameLookupHook,
-    pub invalidation: VerifiedPrimaryNameInvalidationHook,
-}
-
 pub(super) fn normalize_address(address: &str) -> String {
     address.to_ascii_lowercase()
 }

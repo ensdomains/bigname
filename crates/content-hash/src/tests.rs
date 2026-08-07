@@ -9,7 +9,9 @@ use super::{
     HASHED_MANIFEST_PROFILES, INTERPRETER_CONTENT_HASH, interpreter_content_hash,
     manifest_profile_hash,
 };
-use crate::compute::{cfg_test_source_exclusions, excluded_source_reason, hashed_source_paths};
+use crate::compute::{
+    cfg_test_source_exclusions, excluded_source_reason, hashed_source_paths, semantic_source_files,
+};
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -115,7 +117,7 @@ fn projection_and_whole_manifest_event_blocks_change_the_hash() {
     let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
 
     tree.write(
-        "apps/worker/src/projection_apply/derive.rs",
+        "crates/project/src/projection.rs",
         "fn derive_invalidations() { let changed = true; }\n",
     );
     let projection_change =
@@ -126,7 +128,7 @@ fn projection_and_whole_manifest_event_blocks_change_the_hash() {
     );
 
     tree.write(
-        "apps/worker/src/projection_apply/derive.rs",
+        "crates/project/src/projection.rs",
         "fn derive_invalidations() {}\n",
     );
     tree.write_example_manifest_details(
@@ -183,38 +185,205 @@ fn normalizer_version_and_test_only_sources_do_not_change_hash() {
             1,
         ),
     );
-    tree.write(
-        "apps/worker/src/name_current/tests.rs",
-        "fn test_only_change() {}\n",
-    );
+    tree.write("crates/project/src/tests.rs", "fn test_only_change() {}\n");
     tree.write_example_manifest_with_normalizer("ensip15@new", "[\"RecordChanged\"]");
     let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
     assert_eq!(first, changed);
 }
 
 #[test]
-fn interpret_runtime_and_schema_writers_do_not_change_hash() {
+fn phase_orchestration_does_not_change_hash() {
     let tree = SampleTree::new();
     let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
 
     tree.write(
-        "crates/interpret/src/write.rs",
-        "fn persist_plain_schema_rows() {}\n",
-    );
-    tree.write(
         "apps/phase-runner/src/interpret_phase.rs",
         "fn run_interpret_phase() {}\n",
+    );
+    tree.write("crates/interpret/src/engine.rs", "fn size_batches() {}\n");
+
+    let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
+    assert_eq!(
+        first, changed,
+        "phase orchestration and the interpret engine must remain outside the hash"
+    );
+}
+
+#[test]
+fn every_hash_input_is_watched_for_rebuilds() {
+    // A hashed root or semantic file that is not watched means editing interpretation code does
+    // not recompile the hash. A scan root is not hashed, but a cfg(test) declaration inside one
+    // changes which files under a hashed root are excluded, so it has the same requirement.
+    let workspace_root = workspace_root();
+    let watched = crate::compute::watched_paths(&workspace_root);
+    let mut inputs = crate::compute::hashed_source_paths(&workspace_root)
+        .expect("checked-in sources must enumerate");
+    inputs.extend(
+        crate::compute::cfg_test_scan_roots()
+            .iter()
+            .map(|scan_root| (*scan_root).to_owned()),
+    );
+    for relative_path in inputs {
+        let path = workspace_root.join(&relative_path);
+        assert!(
+            watched
+                .iter()
+                .any(|watched| path == *watched || path.starts_with(watched)),
+            "{relative_path} is a hash input but not watched"
+        );
+    }
+}
+
+#[test]
+fn a_test_module_declared_in_the_write_parent_stays_out_of_the_hash() {
+    // `write.rs` is the hashed root's parent module but lives outside it, so its `#[cfg(test)]`
+    // declaration has to be seen or the test file lands inside the fence as production input.
+    let tree = SampleTree::new();
+    tree.write(
+        "crates/interpret/src/write.rs",
+        "#[cfg(test)]\nmod tests;\nmod identity_names;\n",
+    );
+    tree.write(
+        "crates/interpret/src/write/tests.rs",
+        "fn test_only_baseline() {}\n",
+    );
+    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+
+    tree.write(
+        "crates/interpret/src/write/tests.rs",
+        "fn test_only_change() {}\n",
     );
 
     let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
     assert_eq!(
         first, changed,
-        "phase orchestration and schema-v2 writers must remain outside the interpreter hash"
+        "a cfg(test) module must not rotate the hash"
     );
 }
 
 #[test]
-fn newly_added_adapter_worker_and_project_modules_affect_the_hash() {
+fn write_conflict_policy_changes_the_hash() {
+    // Which interpreted row wins a persistence conflict decides which identity, discovery, and
+    // preimage rows the projections then read, so it is interpretation, not plumbing.
+    for relative_path in [
+        "crates/interpret/src/write/identity_names.rs",
+        "crates/interpret/src/write.rs",
+        "crates/interpret/src/recompute.rs",
+    ] {
+        let tree = SampleTree::new();
+        let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+
+        tree.write(relative_path, "fn source_priority() -> u8 { 2 }\n");
+
+        let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
+        assert_ne!(first, changed, "{relative_path} must rotate the hash");
+    }
+}
+
+#[test]
+fn semantic_dependencies_of_the_watched_roots_affect_the_hash() {
+    for (relative_path, changed_source) in [
+        (
+            "crates/domain/src/normalization.rs",
+            "pub fn normalize_name() -> bool { false }\n",
+        ),
+        (
+            "crates/lookup/src/reverse_names.rs",
+            "pub fn decode_reverse_names() -> bool { false }\n",
+        ),
+        (
+            "crates/lookup/src/text_records.rs",
+            "pub fn decode_text_records() -> bool { false }\n",
+        ),
+        (
+            "crates/lookup/src/abi.rs",
+            "pub fn namehash() -> bool { false }\n",
+        ),
+        (
+            "crates/lookup/src/record_selector.rs",
+            "pub struct RecordSelector;\n",
+        ),
+        (
+            "crates/lookup/src/json_rpc_envelope.rs",
+            "pub fn classify_response() -> bool { false }\n",
+        ),
+    ] {
+        let tree = SampleTree::new();
+        let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+        tree.write(relative_path, changed_source);
+        let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
+        assert_ne!(
+            first, changed,
+            "{relative_path} decides persisted rows and must rotate the interpreter hash"
+        );
+    }
+}
+
+#[test]
+fn request_scoped_lookup_sources_do_not_change_hash() {
+    let tree = SampleTree::new();
+    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+
+    for relative_path in [
+        "crates/lookup/src/engine.rs",
+        "crates/lookup/src/types.rs",
+        "crates/lookup/src/ccip/gateway.rs",
+        "crates/lookup/src/store/indexed.rs",
+        // Transport only since the envelope interpretation moved to `json_rpc_envelope`: client
+        // construction, timeouts, and endpoint configuration abort a request rather than decide
+        // which response counts as an answer, and its head-block read is serving-only.
+        "crates/lookup/src/rpc.rs",
+        "crates/domain/src/block_interval.rs",
+    ] {
+        tree.write(relative_path, "fn serving_only_change() {}\n");
+    }
+
+    let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
+    assert_eq!(
+        first, changed,
+        "request-scoped serving, transport, and ingest-range sources must stay outside the hash"
+    );
+}
+
+#[test]
+fn a_moved_semantic_source_fails_the_hash_instead_of_narrowing_it() {
+    let tree = SampleTree::new();
+    interpreter_content_hash(tree.path()).expect("baseline must hash");
+    fs::remove_file(tree.path().join("crates/domain/src/normalization.rs"))
+        .expect("semantic source must be removable");
+
+    let error = interpreter_content_hash(tree.path())
+        .expect_err("a missing semantic source must fail loudly");
+    assert!(
+        error
+            .to_string()
+            .contains("crates/domain/src/normalization.rs"),
+        "missing semantic source must name the path: {error}"
+    );
+}
+
+#[test]
+fn checked_in_semantic_sources_are_hash_covered() {
+    let workspace_root = workspace_root();
+    let hashed = hashed_source_paths(&workspace_root)
+        .expect("checked-in source paths must be collectable")
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+
+    for relative_path in semantic_source_files() {
+        assert!(
+            workspace_root.join(relative_path).is_file(),
+            "semantic source {relative_path} must exist on disk"
+        );
+        assert!(
+            hashed.contains(*relative_path),
+            "semantic source {relative_path} is not content-hash covered"
+        );
+    }
+}
+
+#[test]
+fn newly_added_adapter_and_project_modules_affect_the_hash() {
     let adapter_tree = SampleTree::new();
     let adapter_before =
         interpreter_content_hash(adapter_tree.path()).expect("adapter baseline must hash");
@@ -227,20 +396,6 @@ fn newly_added_adapter_worker_and_project_modules_affect_the_hash() {
     assert_ne!(
         adapter_before, adapter_after,
         "a new adapter source file must enter the hash automatically"
-    );
-
-    let worker_tree = SampleTree::new();
-    let worker_before =
-        interpreter_content_hash(worker_tree.path()).expect("worker baseline must hash");
-    worker_tree.write(
-        "apps/worker/src/future_projection.rs",
-        "fn build_future_projection() {}\n",
-    );
-    let worker_after =
-        interpreter_content_hash(worker_tree.path()).expect("new worker module must hash");
-    assert_ne!(
-        worker_before, worker_after,
-        "a new non-excluded worker source file must enter the hash automatically"
     );
 
     let project_tree = SampleTree::new();
@@ -279,32 +434,12 @@ fn excluded_sources_are_insensitive_but_production_support_is_hashed() {
     let tree = SampleTree::new();
     let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
 
-    tree.write("apps/worker/src/cli.rs", "struct ChangedCli;\n");
-    tree.write(
-        "apps/worker/src/inspect/canonicality.rs",
-        "fn changed_inspection() {}\n",
-    );
-    tree.write(
-        "apps/worker/src/name_current/tests.rs",
-        "fn changed_projection_test() {}\n",
-    );
-    tree.write(
-        "apps/worker/src/primary_name/projection/test_hooks.rs",
-        "fn changed_projection_hook() {}\n",
-    );
-    tree.write(
-        "apps/worker/src/primary_name/hydration/test_hooks.rs",
-        "fn changed_hydration_hook() {}\n",
-    );
-    tree.write(
-        "apps/worker/src/record_inventory/hydration_tests_support.rs",
-        "fn changed_hydration_support() {}\n",
-    );
+    tree.write("crates/project/src/tests.rs", "fn changed_test() {}\n");
     let excluded_change =
         interpreter_content_hash(tree.path()).expect("excluded sources must be inspectable");
     assert_eq!(
         first, excluded_change,
-        "CLI, inspection, and cfg(test)-only sources must be excluded"
+        "cfg(test)-only sources must be excluded"
     );
 
     tree.write(
@@ -323,17 +458,17 @@ fn excluded_sources_are_insensitive_but_production_support_is_hashed() {
 fn conventionally_named_source_is_hashed_without_a_cfg_test_gate() {
     let tree = SampleTree::new();
     tree.write(
-        "apps/worker/src/name_current.rs",
+        "crates/project/src/conventional.rs",
         "mod tests;\npub fn project() -> bool { true }\n",
     );
     tree.write(
-        "apps/worker/src/name_current/tests.rs",
+        "crates/project/src/conventional/tests.rs",
         "pub fn interpret() -> bool { false }\n",
     );
     let first = interpreter_content_hash(tree.path()).expect("production module must hash");
 
     tree.write(
-        "apps/worker/src/name_current/tests.rs",
+        "crates/project/src/conventional/tests.rs",
         "pub fn interpret() -> bool { true }\n",
     );
     let changed = interpreter_content_hash(tree.path()).expect("changed module must hash");
@@ -343,62 +478,19 @@ fn conventionally_named_source_is_hashed_without_a_cfg_test_gate() {
 #[test]
 fn descendants_of_a_cfg_test_module_are_excluded() {
     let tree = SampleTree::new();
+    tree.write("crates/project/src/tests/mod.rs", "mod support;\n");
     tree.write(
-        "apps/worker/src/name_current/tests/mod.rs",
-        "mod support;\n",
-    );
-    tree.write(
-        "apps/worker/src/name_current/tests/support.rs",
+        "crates/project/src/tests/support.rs",
         "pub fn fixture() -> bool { false }\n",
     );
     let first = interpreter_content_hash(tree.path()).expect("test module tree must hash");
 
     tree.write(
-        "apps/worker/src/name_current/tests/support.rs",
+        "crates/project/src/tests/support.rs",
         "pub fn fixture() -> bool { true }\n",
     );
     let changed = interpreter_content_hash(tree.path()).expect("changed test helper must hash");
     assert_eq!(first, changed);
-}
-
-#[test]
-fn every_worker_source_on_disk_is_hashed_or_has_a_documented_exclusion() {
-    let workspace_root = workspace_root();
-    let hashed = hashed_source_paths(&workspace_root)
-        .expect("checked-in source paths must be collectable")
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    let mut disk_sources = Vec::new();
-    collect_rust_files(&workspace_root.join("apps/worker/src"), &mut disk_sources);
-
-    for source in disk_sources {
-        let relative_path = workspace_relative(&workspace_root, &source);
-        if hashed.contains(&relative_path) {
-            assert!(
-                excluded_source_reason(&workspace_root, &source)
-                    .expect("source exclusion must be inspectable")
-                    .is_none(),
-                "hashed worker source {relative_path} must not also be excluded"
-            );
-        } else {
-            let reason = excluded_source_reason(&workspace_root, &source)
-                .expect("source exclusion must be inspectable")
-                .unwrap_or_else(|| {
-                    panic!(
-                        "worker source {relative_path} is neither hashed nor explicitly excluded"
-                    )
-                });
-            assert!(
-                !reason.trim().is_empty(),
-                "worker source exclusion {relative_path} must have a justification"
-            );
-        }
-    }
-
-    assert!(
-        hashed.contains("apps/worker/src/projection_apply/derive.rs"),
-        "invalidation derivation is projection rebuild semantics and must be hashed"
-    );
 }
 
 #[test]
@@ -466,7 +558,6 @@ fn cfg_test_gated_sources_are_excluded_and_hashed_sources_are_not_test_gated() {
 fn manifest_parser_fails_loudly_below_the_checked_in_floor() {
     let tree = SampleTree::empty();
     tree.write("crates/adapters/src/lib.rs", "fn interpret() {}\n");
-    tree.write("apps/worker/src/name_current.rs", "fn project() {}\n");
     tree.write(
         "manifests/mainnet/undersized.toml",
         concat!(
@@ -508,17 +599,24 @@ impl SampleTree {
             "pub fn admit() -> bool { true }\n",
         );
         tree.write(
-            "apps/worker/src/name_current.rs",
+            "crates/project/src/lib.rs",
             "#[cfg(test)]\nmod tests;\npub fn project() -> bool { true }\n",
         );
         tree.write(
-            "apps/worker/src/name_current/tests.rs",
+            "crates/project/src/tests.rs",
             "fn test_only_baseline() {}\n",
         );
         tree.write(
-            "apps/worker/src/projection_apply/derive.rs",
+            "crates/project/src/projection.rs",
             "fn derive_invalidations() {}\n",
         );
+        tree.write(
+            "crates/interpret/src/write/identity_names.rs",
+            "fn source_priority() -> u8 { 1 }\n",
+        );
+        for relative_path in semantic_source_files() {
+            tree.write(relative_path, "pub fn semantics() -> bool { true }\n");
+        }
         tree.write_manifest_floor();
         tree
     }
@@ -720,7 +818,10 @@ fn discover_cfg_test_module_sources(workspace_root: &Path) -> BTreeSet<String> {
         &workspace_root.join("crates/project/src"),
         &mut source_files,
     );
-    collect_rust_files(&workspace_root.join("apps/worker/src"), &mut source_files);
+    collect_rust_files(
+        &workspace_root.join("crates/interpret/src"),
+        &mut source_files,
+    );
     let mut gated_sources = BTreeSet::new();
 
     for parent_module in source_files {

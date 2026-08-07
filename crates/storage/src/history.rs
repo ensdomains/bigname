@@ -15,8 +15,6 @@ use uuid::Uuid;
 use crate::{CanonicalityState, address_names::AddressNameRelation};
 
 use address_matches::load_address_history_selector;
-#[cfg(test)]
-use address_matches::{ENS_V1_AUTHORITY_DERIVATION_KIND, ENS_V2_REGISTRY_DERIVATION_KIND};
 use paging::{load_event_history_rows, load_history, load_history_head};
 use selectors::{name_history_selector, resource_history_selector};
 
@@ -85,7 +83,6 @@ pub struct HistorySummary {
     pub normalized_event_ids: Vec<String>,
     pub raw_fact_refs: Vec<Value>,
     pub manifest_versions: Vec<Value>,
-    pub execution_trace_id: Option<String>,
     pub chain_position_samples: Vec<HistoryChainPositionSample>,
     pub last_updated: Option<OffsetDateTime>,
 }
@@ -572,6 +569,3 @@ async fn load_logical_name_ids_for_resource_id(
         .into_iter()
         .collect())
 }
-
-#[cfg(test)]
-mod tests;

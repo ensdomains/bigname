@@ -62,8 +62,8 @@ async fn seed_graphql_compat_fixture(database: &TestDatabase) -> Result<()> {
     upsert_test_token_lineages(
         &database.pool,
         &[
-            address_name_token_lineage(alice_tl, "0xtl-alice", 411),
-            address_name_token_lineage(bob_tl, "0xtl-bob", 412),
+            address_name_token_lineage(alice_tl, "0xname19b", 411),
+            address_name_token_lineage(bob_tl, "0xname19c", 412),
         ],
     )
     .await?;
@@ -94,7 +94,7 @@ async fn seed_graphql_compat_fixture(database: &TestDatabase) -> Result<()> {
         ],
     )
     .await?;
-    bigname_storage::upsert_address_names_current_rows(
+    upsert_phase_address_names_current_rows(
         &database.pool,
         &[
             address_name_current_row(
@@ -164,190 +164,6 @@ async fn seed_graphql_compat_fixture(database: &TestDatabase) -> Result<()> {
         .await?;
 
     seed_graphql_fallback_fixture(database).await?;
-    seed_phase_graphql_compat_fixture(database, "ethereum-mainnet").await?;
-    Ok(())
-}
-
-async fn seed_phase_graphql_compat_fixture(
-    database: &TestDatabase,
-    chain_id: &str,
-) -> Result<()> {
-    let mut transaction = database.lookup_pool.begin().await?;
-    for statement in [
-        r#"
-        INSERT INTO token_lineages (
-            token_lineage_id, chain_id, block_hash, block_number,
-            provenance, canonicality_state
-        )
-        SELECT DISTINCT nc.token_lineage_id, head.chain_id,
-               head.latest_block_hash, head.latest_block_number,
-               '{"seed":"graphql_phase_fixture"}'::jsonb,
-               'finalized'::canonicality_state
-        FROM public.name_current nc
-        CROSS JOIN chain_heads head
-        WHERE head.chain_id = $1 AND nc.namespace = 'ens'
-          AND nc.token_lineage_id IS NOT NULL
-        ON CONFLICT (token_lineage_id) DO NOTHING
-        "#,
-        r#"
-        INSERT INTO resources (
-            resource_id, token_lineage_id, chain_id, block_hash, block_number,
-            provenance, canonicality_state
-        )
-        SELECT DISTINCT nc.resource_id, nc.token_lineage_id, head.chain_id,
-               head.latest_block_hash, head.latest_block_number,
-               '{"seed":"graphql_phase_fixture"}'::jsonb,
-               'finalized'::canonicality_state
-        FROM public.name_current nc
-        CROSS JOIN chain_heads head
-        WHERE head.chain_id = $1 AND nc.namespace = 'ens'
-          AND nc.resource_id IS NOT NULL
-        ON CONFLICT (resource_id) DO NOTHING
-        "#,
-        r#"
-        INSERT INTO name_surfaces (
-            logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
-            namehash, labelhashes, normalizer_version, visibility_state,
-            normalization_errors, chain_id, block_hash, block_number,
-            provenance, canonicality_state
-        )
-        SELECT nc.namespace || ':' || nc.namehash, nc.namespace,
-               nc.canonical_display_name, ARRAY[]::text[], ''::bytea,
-               nc.namehash, ARRAY[]::text[], 'ensip15@ens-normalize-0.1.1',
-               'active', '[]'::jsonb, head.chain_id, head.latest_block_hash,
-               head.latest_block_number, '{"seed":"graphql_phase_fixture"}'::jsonb,
-               'finalized'::canonicality_state
-        FROM public.name_current nc
-        CROSS JOIN chain_heads head
-        WHERE head.chain_id = $1 AND nc.namespace = 'ens'
-        ON CONFLICT (logical_name_id) DO NOTHING
-        "#,
-        r#"
-        INSERT INTO surface_bindings (
-            surface_binding_id, logical_name_id, resource_id, binding_kind,
-            active_from, chain_id, block_hash, block_number, provenance,
-            canonicality_state
-        )
-        SELECT nc.surface_binding_id, nc.namespace || ':' || nc.namehash,
-               nc.resource_id, nc.binding_kind, lineage.block_timestamp,
-               head.chain_id, head.latest_block_hash, head.latest_block_number,
-               '{"seed":"graphql_phase_fixture"}'::jsonb,
-               'finalized'::canonicality_state
-        FROM public.name_current nc
-        CROSS JOIN chain_heads head
-        JOIN chain_lineage lineage
-          ON lineage.chain_id = head.chain_id
-         AND lineage.block_hash = head.latest_block_hash
-         AND lineage.block_number = head.latest_block_number
-        WHERE head.chain_id = $1 AND nc.namespace = 'ens'
-          AND nc.surface_binding_id IS NOT NULL
-        ON CONFLICT (surface_binding_id) DO NOTHING
-        "#,
-        r#"
-        INSERT INTO name_current (
-            logical_name_id, namespace, raw_name, namehash, surface_binding_id,
-            resource_id, token_lineage_id, binding_kind, declared_summary,
-            support_status, provenance, chain_positions, canonicality_summary,
-            manifest_version
-        )
-        SELECT nc.namespace || ':' || nc.namehash, nc.namespace,
-               nc.canonical_display_name, nc.namehash, nc.surface_binding_id,
-               nc.resource_id, nc.token_lineage_id, nc.binding_kind,
-               nc.declared_summary, 'supported', nc.provenance,
-               jsonb_build_object(
-                   CASE head.chain_id
-                       WHEN 'ethereum-mainnet' THEN 'ethereum'
-                       WHEN 'base-mainnet' THEN 'base'
-                       ELSE head.chain_id
-                   END,
-                   jsonb_build_object(
-                       'chain_id', head.chain_id,
-                       'block_number', head.latest_block_number,
-                       'block_hash', head.latest_block_hash,
-                       'timestamp', to_char(
-                           lineage.block_timestamp AT TIME ZONE 'UTC',
-                           'YYYY-MM-DD"T"HH24:MI:SS"Z"'
-                       )
-                   )
-               ), nc.canonicality_summary,
-               GREATEST(nc.manifest_version, 1)
-        FROM public.name_current nc
-        CROSS JOIN chain_heads head
-        JOIN chain_lineage lineage
-          ON lineage.chain_id = head.chain_id
-         AND lineage.block_hash = head.latest_block_hash
-         AND lineage.block_number = head.latest_block_number
-        WHERE head.chain_id = $1 AND nc.namespace = 'ens'
-        ON CONFLICT (logical_name_id) DO UPDATE SET
-            declared_summary = EXCLUDED.declared_summary,
-            chain_positions = EXCLUDED.chain_positions
-        "#,
-        r#"
-        INSERT INTO address_names_current (
-            address, logical_name_id, relation, namespace, raw_name, namehash,
-            surface_binding_id, resource_id, token_lineage_id, binding_kind,
-            support_status, provenance, chain_positions, canonicality_summary,
-            manifest_version
-        )
-        SELECT lower(anc.address), anc.namespace || ':' || anc.namehash,
-               anc.relation::text, anc.namespace, anc.canonical_display_name,
-               anc.namehash, anc.surface_binding_id, anc.resource_id,
-               anc.token_lineage_id, anc.binding_kind, 'supported',
-               jsonb_set(
-                   COALESCE(anc.provenance, '{}'::jsonb),
-                   '{chain_id}', to_jsonb(head.chain_id)
-               ),
-               jsonb_build_object(
-                   'target_block_number', head.latest_block_number,
-                   'target_block_hash', head.latest_block_hash
-               ), anc.canonicality_summary, GREATEST(anc.manifest_version, 1)
-        FROM public.address_names_current anc
-        CROSS JOIN chain_heads head
-        WHERE head.chain_id = $1 AND anc.namespace = 'ens'
-        ON CONFLICT (address, logical_name_id, relation) DO UPDATE SET
-            provenance = EXCLUDED.provenance,
-            chain_positions = EXCLUDED.chain_positions
-        "#,
-    ] {
-        sqlx::query(statement)
-            .bind(chain_id)
-            .execute(&mut *transaction)
-            .await?;
-    }
-    transaction.commit().await?;
-    Ok(())
-}
-
-async fn seed_phase_graphql_record_inventories(database: &TestDatabase) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO bigname_phase.record_inventory_current (
-            resource_id, record_version_boundary_key, record_version_boundary,
-            selectors, unsupported_families, entries, support_status,
-            provenance, chain_positions, canonicality_summary, manifest_version
-        )
-        SELECT inventory.resource_id, md5(inventory.record_version_boundary::text),
-               inventory.record_version_boundary, inventory.selectors,
-               inventory.unsupported_families, inventory.entries, 'supported',
-               inventory.provenance,
-               jsonb_build_object(
-                   'target_block_number', head.latest_block_number,
-                   'target_block_hash', head.latest_block_hash
-               ), inventory.canonicality_summary,
-               GREATEST(inventory.manifest_version, 1)
-        FROM public.record_inventory_current inventory
-        JOIN bigname_phase.resources resource
-          ON resource.resource_id = inventory.resource_id
-        JOIN bigname_phase.chain_heads head
-          ON head.chain_id = resource.chain_id
-        ON CONFLICT (resource_id, record_version_boundary_key) DO UPDATE SET
-            selectors = EXCLUDED.selectors,
-            entries = EXCLUDED.entries,
-            chain_positions = EXCLUDED.chain_positions
-        "#,
-    )
-    .execute(&database.pool)
-    .await?;
     Ok(())
 }
 
@@ -366,8 +182,8 @@ async fn seed_graphql_fallback_fixture(database: &TestDatabase) -> Result<()> {
     upsert_test_token_lineages(
         &database.pool,
         &[
-            address_name_token_lineage(carol_tl, "0xtl-carol", 413),
-            address_name_token_lineage(dave_tl, "0xtl-dave", 414),
+            address_name_token_lineage(carol_tl, "0xname19d", 413),
+            address_name_token_lineage(dave_tl, "0xname19e", 414),
         ],
     )
     .await?;
@@ -395,7 +211,7 @@ async fn seed_graphql_fallback_fixture(database: &TestDatabase) -> Result<()> {
         ],
     )
     .await?;
-    bigname_storage::upsert_address_names_current_rows(
+    upsert_phase_address_names_current_rows(
         &database.pool,
         &[
             address_name_current_row(
@@ -480,7 +296,7 @@ async fn seed_graphql_fallback_fixture(database: &TestDatabase) -> Result<()> {
         .await?;
     sqlx::query(
         r#"
-        UPDATE chain_lineage lineage
+        UPDATE bigname_phase.chain_lineage lineage
         SET block_timestamp = '1970-01-01T00:00:00Z'::timestamptz
         FROM name_surfaces surface
         WHERE surface.logical_name_id = 'ens:dave.eth'
@@ -516,7 +332,7 @@ async fn seed_alice_record_inventory(database: &TestDatabase) -> Result<()> {
     record_version_boundary["logical_name_id"] =
         json!(format!("ens:{GRAPHQL_ALICE_NAMEHASH}"));
 
-    bigname_storage::upsert_record_inventory_current_rows(
+    upsert_phase_record_inventory_current_rows(
         &database.pool,
         &[bigname_storage::RecordInventoryCurrentRow {
             resource_id,
@@ -592,7 +408,6 @@ async fn seed_alice_record_inventory(database: &TestDatabase) -> Result<()> {
         }],
     )
     .await?;
-    seed_phase_graphql_record_inventories(database).await?;
     Ok(())
 }
 
@@ -615,7 +430,7 @@ async fn seed_bob_record_inventory(database: &TestDatabase) -> Result<()> {
             .expect("bob fixture row must yield a record-inventory lookup key");
     record_version_boundary["logical_name_id"] = json!(format!("ens:{GRAPHQL_BOB_NAMEHASH}"));
 
-    bigname_storage::upsert_record_inventory_current_rows(
+    upsert_phase_record_inventory_current_rows(
         &database.pool,
         &[bigname_storage::RecordInventoryCurrentRow {
             resource_id,
@@ -667,7 +482,6 @@ async fn seed_bob_record_inventory(database: &TestDatabase) -> Result<()> {
         }],
     )
     .await?;
-    seed_phase_graphql_record_inventories(database).await?;
     Ok(())
 }
 
@@ -774,7 +588,7 @@ async fn graphql_domains_list_batch_mixes_hit_and_clean_miss() -> Result<()> {
 
 /// Reproduce the live Sepolia shape end-to-end: erin's `name_current` row is positioned on
 /// `ethereum-sepolia` (which the mainnet-gated verified-resolution lookup rejects — the any-chain
-/// key must serve it), and her inventory row is keyed by a *pointered* boundary (the worker fills
+/// key must serve it), and her inventory row is keyed by a *pointered* boundary (projection fills
 /// the anchoring event pointer; the caller-derived boundary is pointer-less), so the read only
 /// succeeds through the anchor fallback. This is exactly the drift class found on live data.
 async fn seed_erin_sepolia_record_fixture(database: &TestDatabase) -> Result<()> {
@@ -784,7 +598,7 @@ async fn seed_erin_sepolia_record_fixture(database: &TestDatabase) -> Result<()>
 
     upsert_test_token_lineages(
         &database.pool,
-        &[address_name_token_lineage(erin_tl, "0xtl-erin", 415)],
+        &[address_name_token_lineage(erin_tl, "0xname19f", 415)],
     )
     .await?;
     upsert_test_resources(
@@ -828,19 +642,18 @@ async fn seed_erin_sepolia_record_fixture(database: &TestDatabase) -> Result<()>
         }
     });
     database.insert_name_current_row(erin_row.clone()).await?;
-    seed_phase_graphql_compat_fixture(database, "ethereum-sepolia").await?;
 
     let (resource_id, declared_boundary) =
         bigname_storage::resolution_record_inventory_lookup_key_any_chain(&erin_row)
             .expect("erin's sepolia row must yield an any-chain lookup key");
-    // The worker keys its row with the anchoring event pointer filled in — same anchor, different
+    // Projection keys its row with the anchoring event pointer filled in — same anchor, different
     // exact key. The GraphQL read must land on it via the anchor fallback.
     let mut pointered_boundary = declared_boundary.clone();
     pointered_boundary["logical_name_id"] = json!(format!("ens:{GRAPHQL_ERIN_NAMEHASH}"));
     pointered_boundary["normalized_event_id"] = json!(12_345);
     pointered_boundary["event_kind"] = json!("RecordChanged");
 
-    bigname_storage::upsert_record_inventory_current_rows(
+    upsert_phase_record_inventory_current_rows(
         &database.pool,
         &[bigname_storage::RecordInventoryCurrentRow {
             resource_id,
@@ -892,7 +705,6 @@ async fn seed_erin_sepolia_record_fixture(database: &TestDatabase) -> Result<()>
         }],
     )
     .await?;
-    seed_phase_graphql_record_inventories(database).await?;
     Ok(())
 }
 
@@ -987,20 +799,10 @@ fn print_subgraph_sdl_for_blessing() {
 }
 
 #[tokio::test]
-async fn graphql_compatibility_reads_survive_legacy_projection_removal() -> Result<()> {
+async fn graphql_compatibility_reads_phase_projections() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_graphql_compat_fixture(&database).await?;
     seed_alice_record_inventory(&database).await?;
-    sqlx::query("DELETE FROM public.record_inventory_current")
-        .execute(&database.pool)
-        .await?;
-    sqlx::query("DELETE FROM public.address_names_current")
-        .execute(&database.pool)
-        .await?;
-    sqlx::query("DELETE FROM public.name_current")
-        .execute(&database.pool)
-        .await?;
-
     let payload = post_graphql(
         database.app_state(),
         r#"query PhaseOnly($id: String!, $where: DomainFilter!) {
@@ -1191,14 +993,19 @@ async fn graphql_connection_count_snapshot_metadata_is_bounded() -> Result<()> {
     sqlx::query(
         r#"
         UPDATE bigname_phase.address_names_current
-        SET chain_positions = jsonb_build_object(
-            'target_block_number', CASE raw_name
-                WHEN 'Alice.eth' THEN 401
-                WHEN 'Bob.eth' THEN 402
-                WHEN 'Carol.eth' THEN 403
-                ELSE 404
-            END,
-            'target_block_hash', '0x' || lower(split_part(raw_name, '.', 1))
+        SET chain_positions = jsonb_set(
+            jsonb_set(
+                chain_positions,
+                '{ethereum,block_number}',
+                to_jsonb(CASE raw_name
+                    WHEN 'Alice.eth' THEN 401
+                    WHEN 'Bob.eth' THEN 402
+                    WHEN 'Carol.eth' THEN 403
+                    ELSE 404
+                END)
+            ),
+            '{ethereum,block_hash}',
+            to_jsonb('0x' || lower(split_part(raw_name, '.', 1)))
         )
         WHERE namespace = 'ens'
         "#,
@@ -1374,8 +1181,12 @@ async fn graphql_lists_and_counts_scope_rows_to_the_selected_snapshot_chains() -
                support_status, unsupported_reason,
                jsonb_set(provenance, '{chain_id}', '"ethereum-sepolia"'),
                jsonb_build_object(
-                   'target_block_number', 10940282,
-                   'target_block_hash', '0xother-chain'
+                   'ethereum-sepolia', jsonb_build_object(
+                       'chain_id', 'ethereum-sepolia',
+                       'block_number', 10940282,
+                       'block_hash', '0xother-chain',
+                       'timestamp', '2026-05-28T13:15:36Z'
+                   )
                ), canonicality_summary, manifest_version
         FROM bigname_phase.address_names_current
         WHERE logical_name_id = 'ens:' || $1

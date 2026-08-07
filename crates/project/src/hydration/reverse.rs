@@ -13,6 +13,16 @@ use crate::{Marker, ProjectError, Result};
 
 const BATCH_SIZE: usize = 250;
 
+/// ENSv1 reverse resolvers that answer `name()` without emitting a record event, so the claim can
+/// only be learned by calling them. The reference indexer records the same for this deployment
+/// (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L311 @ ensnode@2017ae6)
+/// (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L316 @ ensnode@2017ae6).
+/// This list selects which reverse claims get hydrated and therefore which
+/// `primary_names_current` rows exist, so it lives inside the interpreter content hash's watched
+/// roots rather than in a serving crate.
+const EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES: &[&str] =
+    &["0xa2c122be93b0074270ebee7f6b7292c7deb45047"];
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct ReverseIdentity {
     address: String,
@@ -142,7 +152,7 @@ pub(super) async fn load_candidates(pool: &PgPool, head: &Marker) -> Result<Cand
 }
 
 async fn load_active_candidates(pool: &PgPool, head: &Marker) -> Result<Vec<ReverseCandidate>> {
-    let resolvers = bigname_storage::ENS_LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES;
+    let resolvers = EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES;
     type Row = (
         String,
         String,

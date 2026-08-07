@@ -1,32 +1,10 @@
-mod address_replacement;
-mod canonicality;
-mod collapse;
 mod count;
 mod decode;
-mod full_rebuild;
 mod page;
 mod query;
 mod read;
 mod types;
-mod write;
-
-pub use address_replacement::{
-    AddressNamesCurrentAddressReplacement, begin_address_names_current_address_replacement,
-    drop_address_names_current_address_replacement,
-    insert_address_names_current_address_replacement_rows,
-    publish_address_names_current_address_replacement, replace_address_names_current_logical_names,
-};
-pub use collapse::collapse_address_name_current_rows;
 pub use count::{AddressNamesCurrentCountFilter, count_address_names_current_for_app_filter};
-pub(crate) use full_rebuild::rebuild_address_names_current_identity_sidecars_in_transaction;
-pub use full_rebuild::{
-    AddressNamesCurrentFullRebuild, begin_address_names_current_full_rebuild,
-    drop_address_names_current_full_rebuild, insert_address_names_current_full_rebuild_rows,
-    insert_address_names_current_full_rebuild_rows_in_transaction,
-    publish_address_names_current_full_rebuild,
-    publish_address_names_current_full_rebuild_in_transaction,
-    rebuild_address_names_current_identity_sidecars,
-};
 pub use page::{
     load_address_names_current_page, load_address_names_current_page_sorted_for_relations,
 };
@@ -42,12 +20,87 @@ pub use types::{
     AddressNamesCurrentSortedCursorValue, AddressNamesCurrentSortedPage,
     AddressNamesCurrentSummary,
 };
-pub use write::{
-    clear_address_names_current, delete_address_names_current, upsert_address_names_current_rows,
-};
 
-#[cfg(test)]
-use page::address_names_current_cursor_from_entry;
+pub(crate) const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = r#"
+  AND anc.canonicality_summary ->> 'state' = 'canonical_lineage'
+  AND EXISTS (
+      SELECT 1
+      FROM bigname_phase.chain_lineage projection_lineage
+      WHERE projection_lineage.chain_id = anc.provenance ->> 'chain_id'
+        AND projection_lineage.block_hash = anc.chain_positions ->> 'target_block_hash'
+        AND projection_lineage.canonicality_state IN (
+            'canonical'::bigname_phase.canonicality_state,
+            'safe'::bigname_phase.canonicality_state,
+            'finalized'::bigname_phase.canonicality_state
+        )
+  )
+  AND surface.canonicality_state IN (
+      'canonical'::bigname_phase.canonicality_state,
+      'safe'::bigname_phase.canonicality_state,
+      'finalized'::bigname_phase.canonicality_state
+  )
+  AND surface_lineage.canonicality_state IN (
+      'canonical'::bigname_phase.canonicality_state,
+      'safe'::bigname_phase.canonicality_state,
+      'finalized'::bigname_phase.canonicality_state
+  )
+  AND resource.canonicality_state IN (
+      'canonical'::bigname_phase.canonicality_state,
+      'safe'::bigname_phase.canonicality_state,
+      'finalized'::bigname_phase.canonicality_state
+  )
+  AND resource_lineage.canonicality_state IN (
+      'canonical'::bigname_phase.canonicality_state,
+      'safe'::bigname_phase.canonicality_state,
+      'finalized'::bigname_phase.canonicality_state
+  )
+  AND binding.canonicality_state IN (
+      'canonical'::bigname_phase.canonicality_state,
+      'safe'::bigname_phase.canonicality_state,
+      'finalized'::bigname_phase.canonicality_state
+  )
+  AND binding_lineage.canonicality_state IN (
+      'canonical'::bigname_phase.canonicality_state,
+      'safe'::bigname_phase.canonicality_state,
+      'finalized'::bigname_phase.canonicality_state
+  )
+  AND binding.active_to IS NULL
+  AND (
+      anc.token_lineage_id IS NULL
+      OR (
+          token_lineage.canonicality_state IN (
+              'canonical'::bigname_phase.canonicality_state,
+              'safe'::bigname_phase.canonicality_state,
+              'finalized'::bigname_phase.canonicality_state
+          )
+          AND token_lineage_lineage.canonicality_state IN (
+              'canonical'::bigname_phase.canonicality_state,
+              'safe'::bigname_phase.canonicality_state,
+              'finalized'::bigname_phase.canonicality_state
+          )
+      )
+  )
+"#;
 
-#[cfg(test)]
-mod tests;
+pub(crate) const DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS: &str = r#"
+  JOIN bigname_phase.name_surfaces surface
+    ON surface.logical_name_id = anc.logical_name_id
+  JOIN bigname_phase.resources resource
+    ON resource.resource_id = anc.resource_id
+  JOIN bigname_phase.surface_bindings binding
+    ON binding.surface_binding_id = anc.surface_binding_id
+  LEFT JOIN bigname_phase.token_lineages token_lineage
+    ON token_lineage.token_lineage_id = anc.token_lineage_id
+  JOIN bigname_phase.chain_lineage surface_lineage
+    ON surface_lineage.chain_id = surface.chain_id
+   AND surface_lineage.block_hash = surface.block_hash
+  JOIN bigname_phase.chain_lineage resource_lineage
+    ON resource_lineage.chain_id = resource.chain_id
+   AND resource_lineage.block_hash = resource.block_hash
+  JOIN bigname_phase.chain_lineage binding_lineage
+    ON binding_lineage.chain_id = binding.chain_id
+   AND binding_lineage.block_hash = binding.block_hash
+  LEFT JOIN bigname_phase.chain_lineage token_lineage_lineage
+    ON token_lineage_lineage.chain_id = token_lineage.chain_id
+   AND token_lineage_lineage.block_hash = token_lineage.block_hash
+"#;

@@ -15,13 +15,11 @@ use super::super::{
 mod authority;
 mod binding;
 mod coverage;
-mod execution;
 mod records;
 
 pub(crate) use authority::get_name_authority_diagnostic;
 pub(crate) use binding::get_name_binding_diagnostic;
 pub(crate) use coverage::get_name_coverage_diagnostic;
-pub(crate) use execution::get_name_execution_diagnostic;
 pub(crate) use records::get_name_records_diagnostic;
 
 const DIAGNOSTIC_NAME_QUERY_PARAMS: &[&str] = &["namespace", "at", "finality"];
@@ -101,7 +99,7 @@ async fn resolve_diagnostic_name_with_resolution_auxiliary(
     )
     .await?;
     let selected_snapshot = resolve_v2_snapshot_for(
-        &state.lookup_pool,
+        &state.pool,
         &scope,
         params.at.as_ref(),
         params.finality,

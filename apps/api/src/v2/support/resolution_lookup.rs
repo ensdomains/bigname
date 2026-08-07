@@ -49,12 +49,10 @@ pub(crate) async fn execute_resolution_lookup(
             timestamp: format_timestamp(position.timestamp),
         })
         .collect::<Vec<_>>();
-    let response = bigname_lookup::LookupEngine::new(
-        state.lookup_pool.clone(),
-        state.lookup_chain_rpc_urls.clone(),
-    )
-    .lookup_at_positions(request, &admitted_positions)
-    .await;
+    let response =
+        bigname_lookup::LookupEngine::new(state.pool.clone(), state.lookup_chain_rpc_urls.clone())
+            .lookup_at_positions(request, &admitted_positions)
+            .await;
     match response {
         Ok(response) => {
             expose_lookup_positions(selected_snapshot, &response)?;

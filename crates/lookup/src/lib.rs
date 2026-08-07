@@ -5,7 +5,9 @@ mod call;
 mod ccip;
 mod engine;
 mod error;
+mod json_rpc_envelope;
 mod primary_name;
+mod record_selector;
 mod reverse_names;
 mod rpc;
 mod store;
@@ -15,6 +17,7 @@ mod types;
 pub use engine::LookupEngine;
 pub use error::{ErrorKind, LookupError, Result};
 pub use primary_name::{EnsPrimaryNameLookup, EnsPrimaryNameStatus};
+pub use record_selector::RecordSelector;
 pub use reverse_names::{
     EnsReverseNameMulticallBlock, EnsReverseNameMulticallRequest, EnsReverseNameMulticallResult,
     execute_ens_reverse_name_multicall,
@@ -26,7 +29,7 @@ pub use text_records::{
 };
 pub use types::{
     LedgerAction, LookupPosition, LookupRecordResult, LookupRecordStatus, LookupRequest,
-    LookupResponse, RecordSelector,
+    LookupResponse,
 };
 
 pub const ENS_NAMESPACE: &str = "ens";

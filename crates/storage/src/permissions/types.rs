@@ -4,13 +4,6 @@ use serde_json::{Value, json};
 use sqlx::types::time::OffsetDateTime;
 use uuid::Uuid;
 
-/// Public-reader compatibility version for the atomically published permission projection.
-///
-/// This is independent of worker replay progress. Bump it when permission rows and their
-/// projection-owned companion artifacts must be republished together before API readers can
-/// safely decode them.
-pub const PERMISSIONS_CURRENT_PUBLICATION_VERSION: i32 = 2;
-
 /// Persisted current effective permission row for one resource-anchored subject and scope.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PermissionsCurrentRow {

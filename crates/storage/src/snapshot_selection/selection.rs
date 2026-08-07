@@ -452,20 +452,20 @@ async fn load_lineage_position_at_or_before(
             block_number,
             block_timestamp,
             canonicality_state::TEXT AS canonicality_state
-        FROM chain_lineage
+        FROM bigname_phase.chain_lineage
         WHERE chain_id = $1
           AND block_timestamp <= $2
           AND (
               ($3 = 'head' AND canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
+                  'canonical'::bigname_phase.canonicality_state,
+                  'safe'::bigname_phase.canonicality_state,
+                  'finalized'::bigname_phase.canonicality_state
               ))
               OR ($3 = 'safe' AND canonicality_state IN (
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
+                  'safe'::bigname_phase.canonicality_state,
+                  'finalized'::bigname_phase.canonicality_state
               ))
-              OR ($3 = 'finalized' AND canonicality_state = 'finalized'::canonicality_state)
+              OR ($3 = 'finalized' AND canonicality_state = 'finalized'::bigname_phase.canonicality_state)
           )
         ORDER BY block_timestamp DESC, block_number DESC, block_hash DESC
         LIMIT 1

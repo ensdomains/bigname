@@ -1,13 +1,14 @@
 use std::{collections::BTreeMap, sync::LazyLock, time::Duration};
 
-use alloy_json_rpc::{
-    Id, Request as JsonRpcRequest, RequestPacket, ResponsePacket, ResponsePayload,
-};
+use alloy_json_rpc::{Id, Request as JsonRpcRequest, RequestPacket};
 use alloy_transport_http::Http;
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::Url;
 use serde_json::Value;
 use tower::Service;
+
+use crate::json_rpc_envelope::classify_response;
+pub(crate) use crate::json_rpc_envelope::{JsonRpcCallError, JsonRpcCallResult};
 
 static JSON_RPC_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
@@ -166,20 +167,6 @@ pub(crate) struct JsonRpcHttpClient {
     has_configured_timeouts: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct JsonRpcCallResult {
-    pub request_payload: Value,
-    pub response_payload: Value,
-    pub result: std::result::Result<Value, JsonRpcCallError>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct JsonRpcCallError {
-    pub code: Option<i64>,
-    pub message: String,
-    pub data: Option<Value>,
-}
-
 impl JsonRpcHttpClient {
     pub(crate) fn new(endpoint: &str) -> Result<Self> {
         Self::with_client(endpoint, JSON_RPC_HTTP_CLIENT.clone(), false)
@@ -244,34 +231,8 @@ impl JsonRpcHttpClient {
             .call(RequestPacket::Single(request))
             .await
             .with_context(|| format!("failed to send JSON-RPC request for {request_context}"))?;
-        let ResponsePacket::Single(response) = response else {
-            bail!(
-                "provider returned a batch response for single JSON-RPC request {request_context}"
-            );
-        };
-        let response_payload =
-            serde_json::to_value(&response).context("failed to encode JSON-RPC response")?;
-        let result =
-            match response.payload {
-                ResponsePayload::Success(result) => Ok(raw_value_to_json(result.as_ref())
-                    .context("failed to decode JSON-RPC result")?),
-                ResponsePayload::Failure(error) => Err(JsonRpcCallError {
-                    code: Some(error.code),
-                    message: error.message.into_owned(),
-                    data: error
-                        .data
-                        .as_deref()
-                        .map(raw_value_to_json)
-                        .transpose()
-                        .context("failed to decode JSON-RPC error data")?,
-                }),
-            };
-        Ok((response_payload, result))
+        classify_response(request_context, response)
     }
-}
-
-fn raw_value_to_json(value: &serde_json::value::RawValue) -> Result<Value> {
-    serde_json::from_str(value.get()).context("failed to decode raw JSON value")
 }
 
 #[cfg(test)]

@@ -23,7 +23,6 @@ pub(super) async fn load_history_summary(
                 normalized_event_ids: Vec::new(),
                 raw_fact_refs: Vec::new(),
                 manifest_versions: Vec::new(),
-                execution_trace_id: None,
                 chain_position_samples: Vec::new(),
                 last_updated: None,
             }))
@@ -103,37 +102,6 @@ async fn load_history_full_summary(
                 ) FILTER (WHERE ne.normalized_event_id IS NOT NULL),
                 '[]'::jsonb
             ) AS manifest_versions,
-            (
-                array_agg(
-                    COALESCE(
-                        CASE
-                            WHEN jsonb_typeof(ne.after_state -> 'provenance') = 'object'
-                                THEN ne.after_state -> 'provenance' ->> 'execution_trace_id'
-                        END,
-                        CASE
-                            WHEN jsonb_typeof(ne.before_state -> 'provenance') = 'object'
-                                THEN ne.before_state -> 'provenance' ->> 'execution_trace_id'
-                        END
-                    )
-                    ORDER BY
-        "#,
-    );
-    push_history_order_terms(&mut builder);
-    builder.push(
-        r#"
-                ) FILTER (
-                    WHERE COALESCE(
-                        CASE
-                            WHEN jsonb_typeof(ne.after_state -> 'provenance') = 'object'
-                                THEN ne.after_state -> 'provenance' ->> 'execution_trace_id'
-                        END,
-                        CASE
-                            WHEN jsonb_typeof(ne.before_state -> 'provenance') = 'object'
-                                THEN ne.before_state -> 'provenance' ->> 'execution_trace_id'
-                        END
-                    ) IS NOT NULL
-                )
-            )[1] AS execution_trace_id,
             MAX(rb.block_timestamp) AS last_updated
         "#,
     );
@@ -158,7 +126,6 @@ async fn load_history_full_summary(
             .context("failed to decode normalized-event history summary raw refs")?,
         manifest_versions: json_array(&crate::sql_row::get(&row, "manifest_versions")?)
             .context("failed to decode normalized-event history summary manifest versions")?,
-        execution_trace_id: crate::sql_row::get(&row, "execution_trace_id")?,
         chain_position_samples: Vec::new(),
         last_updated: crate::sql_row::get(&row, "last_updated")?,
     })

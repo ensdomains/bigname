@@ -9,11 +9,11 @@ authorized below.
 
 `phase-runner init-schema` is the runtime installer for this baseline. It
 installs into an empty `bigname_phase` PostgreSQL schema and refuses a nonempty
-phase schema until a reviewed upgrade or rebuild mechanism exists. During Stage
-B the surviving API and worker continue to use `public` in the same database;
-they move to schema-v2 only with their later port. The shared database permits
-atomic phase-lineage orphaning and retained execution-cache invalidation across
-the two namespaces.
+phase schema until a reviewed upgrade or rebuild mechanism exists. The phase
+runner writes this schema and the API reads its projections, lookup state, and
+operational status. The retired `public` indexing schema is removed by the
+append-only SQLx migration history; reorg publication repairs only current
+phase state and guarded resolution-divergence observations.
 
 After installation, the supervised runner and `verify` redo require a second
 database URL for a dedicated login with USAGE on `bigname_phase` and SELECT on
@@ -30,11 +30,11 @@ Canonicality promotion follows the stored transition graph one edge at a time. W
 
 ## Raw facts and inspection
 
-`raw_transactions`, `raw_receipts`, and `raw_logs` store immutable [raw facts](../docs/glossary.md) under a block hash. Intake writes these tables. The interpreter, hydration code, and the read-only `phase-runner inspect block-canonicality` and `raw-events` windows read them. The [storage census](../simplification-audit-20260730.md#cratesstorage-fable) and the [permanent raw-store decision](../simplification-audit-20260730.md#maintainer-question-list-consolidated-for-decision) authorize these tables; [audit entry 9](../simplification-audit-20260730.md#inventory--verdicts) authorizes their inspection reads.
+`raw_transactions`, `raw_receipts`, and `raw_logs` store immutable [raw facts](../docs/glossary.md) under a block hash. Intake writes these tables. Interpretation, projection hydration, and the read-only `phase-runner inspect block-canonicality` and `raw-events` windows read them. The [storage census](../simplification-audit-20260730.md#cratesstorage-fable) and the [permanent raw-store decision](../simplification-audit-20260730.md#maintainer-question-list-consolidated-for-decision) authorize these tables; [audit entry 9](../simplification-audit-20260730.md#inventory--verdicts) authorizes their inspection reads.
 
 ## Identity and contract admission
 
-`contract_instances`, `contract_instance_addresses`, `discovery_edges`, `token_lineages`, `resources`, `name_surfaces`, and `surface_bindings` store stable contract, token, authority-object, raw-name, and name-to-authority identities. Manifest sync writes declared contract rows. The interpreter writes event-derived identity rows. [Projection](../docs/glossary.md) and execution code read them. The [identity storage census](../simplification-audit-20260730.md#cratesstorage-fable), the [raw-label normalization decision](../simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity), and the [event-announcement discovery design](../simplification-audit-20260730.md#discovery-design-decided-2026-07-30) authorize these tables.
+`contract_instances`, `contract_instance_addresses`, `discovery_edges`, `token_lineages`, `resources`, `name_surfaces`, and `surface_bindings` store stable contract, token, authority-object, raw-name, and name-to-authority identities. Manifest sync writes declared contract rows. The interpreter writes event-derived identity rows. [Projection](../docs/glossary.md) and request-scoped lookup code read them. The [identity storage census](../simplification-audit-20260730.md#cratesstorage-fable), the [raw-label normalization decision](../simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity), and the [event-announcement discovery design](../simplification-audit-20260730.md#discovery-design-decided-2026-07-30) authorize these tables.
 
 A [`registry_announcement` discovery edge](../docs/glossary.md#registry-announcement-edge-registry_announcement) is the announcing registry's self-edge admitted forward-only by `RegistryCreated`; every other discovery kind still requires distinct endpoints, as ruled by the audit's [discovery design](../simplification-audit-20260730.md#discovery-design-decided-2026-07-30).
 
@@ -45,7 +45,7 @@ An attacker-controlled label that cannot decode as PostgreSQL-safe UTF-8 still h
 
 ## Manifest declarations
 
-`manifest_versions`, `manifest_contract_instances`, and `manifest_discovery_rules` store loaded declarations, declared contracts, start blocks, proxy links, ABI data, and admission rules. Manifest sync writes these tables. Intake, interpretation, projection, and execution read them. The [manifest census](../simplification-audit-20260730.md#cratesmanifests--domain--metrics-fable) authorizes the declaration tables. The [declared-means-supported decision](../simplification-audit-20260730.md#maintainer-question-list-consolidated-for-decision) excludes a capability-flag table. During the staged port, existing authored flags remain inside `manifest_payload` and keep their current meaning; changes to them are part of `SourceManifestUpdated`. The later API-and-surface port in the [replacement build plan](../simplification-build-plan-20260730.md) removes the authored fields when it adopts declared-means-supported.
+`manifest_versions`, `manifest_contract_instances`, and `manifest_discovery_rules` store loaded declarations, declared contracts, start blocks, proxy links, ABI data, and admission rules. Manifest sync writes these tables. Intake, interpretation, projection, and request-scoped lookup read them. The [manifest census](../simplification-audit-20260730.md#cratesmanifests--domain--metrics-fable) authorizes the declaration tables. The [declared-means-supported decision](../simplification-audit-20260730.md#maintainer-question-list-consolidated-for-decision) excludes a separate capability-flag table. Authored capability flags remain inside `manifest_payload`, and changes to them are part of `SourceManifestUpdated`.
 
 The authored manifest field remains `deployment_epoch` under the public [manifest contract](../docs/manifests.md#required-fields). Manifest sync stores that value unchanged in `manifest_versions.deployment_label`; it does not reinterpret or mint a second identifier. The schema-v2 writer applies this one-to-one field mapping in inserts, uniqueness checks, and prior-declaration queries. `manifest_payload` retains the authored field name.
 
@@ -91,7 +91,7 @@ owners are defined by the canonical
 
 ## Current projections
 
-`name_current`, `children_current`, `permissions_current`, `permissions_current_resource_summary`, `record_inventory_current`, `resolver_current`, `address_names_current`, and `primary_names_current` are the retained current-state tables written by the seven project-phase builders. The project phase is their single writer. The API and GraphQL read them after the later Stage C cutover. The [worker census](../simplification-audit-20260730.md#appsworker--cratesexecution-fable) and the [storage census](../simplification-audit-20260730.md#cratesstorage-fable) authorize this enumerated set. The [support-status decision](../simplification-audit-20260730.md#kimi-k3-second-opinion-lenses--adjudicated) keeps explicit support fields and removes exhaustiveness accounting.
+`name_current`, `children_current`, `permissions_current`, `permissions_current_resource_summary`, `record_inventory_current`, `resolver_current`, `address_names_current`, and `primary_names_current` are the current-state tables written by the seven project-phase builders. The project phase is their single writer; the API and GraphQL read them now. The [historical simplification census](../simplification-audit-20260730.md#appsworker--cratesexecution-fable) and the [storage census](../simplification-audit-20260730.md#cratesstorage-fable) authorize this enumerated set. The [support-status decision](../simplification-audit-20260730.md#kimi-k3-second-opinion-lenses--adjudicated) keeps explicit support fields and removes exhaustiveness accounting.
 
 Each run reads canonical-lineage identity rows and normalized events into
 connection-local stages. It builds all retained families before one database

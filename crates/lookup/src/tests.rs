@@ -462,14 +462,12 @@ async fn least_privileged_api_role_can_guard_and_write_only_through_functions() 
     .execute(fixture.pool())
     .await?;
 
-    let connect_options = bigname_storage::stamp_projection_replay_version(
-        fixture
-            .pool()
-            .connect_options()
-            .as_ref()
-            .clone()
-            .options([("role", role_name.as_str())]),
-    );
+    let connect_options = fixture
+        .pool()
+        .connect_options()
+        .as_ref()
+        .clone()
+        .options([("role", role_name.as_str())]);
     let api_pool = PgPoolOptions::new()
         .max_connections(2)
         .connect_with(connect_options)

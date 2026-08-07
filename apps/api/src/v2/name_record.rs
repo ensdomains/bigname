@@ -119,7 +119,7 @@ pub(crate) async fn get_name_record(
     )
     .await?;
     let mut selected_snapshot = resolve_v2_snapshot_for(
-        &state.lookup_pool,
+        &state.pool,
         &scope,
         params.at.as_ref(),
         params.finality,

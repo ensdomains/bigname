@@ -92,14 +92,6 @@ async fn v2_get_primary_name_executes_lookup_each_time_without_legacy_persistenc
         9,
         "v2 primary-name verification must execute again on every request"
     );
-    assert_eq!(
-        persisted_route_local_primary_name_counts(
-            &database,
-            V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
-        )
-        .await?,
-        (0, 0)
-    );
     let ledger_count: i64 = sqlx::query_scalar("SELECT count(*) FROM resolution_divergences")
         .fetch_one(&lookup_pool)
         .await?;
@@ -123,7 +115,7 @@ async fn v2_get_primary_name_uses_one_phase_position_without_legacy_checkpoint()
             "ens",
             "60",
             PrimaryNameClaimStatus::Success,
-            None,
+            Some("legacy-worker.eth"),
         )
         .await?;
     database
@@ -195,12 +187,6 @@ async fn v2_get_primary_name_uses_one_phase_position_without_legacy_checkpoint()
         ])
     );
 
-    let legacy_checkpoint_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM chain_checkpoints")
-            .fetch_one(&database.pool)
-            .await?;
-    assert_eq!(legacy_checkpoint_count, 0);
-
     let indexed_response = app_router(state)
         .oneshot(
             Request::builder()
@@ -241,7 +227,7 @@ async fn v2_get_primary_name_returns_mixed_answers_at_one_position() -> Result<(
             "ens",
             "60",
             PrimaryNameClaimStatus::Success,
-            None,
+            Some("taytems.eth"),
         )
         .await?;
     database
@@ -356,6 +342,164 @@ async fn v2_get_primary_name_normalizes_schema_v2_successful_claim() -> Result<(
             "status": "ok",
             "name": "taytems.eth"
         }])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_primary_name_reports_an_unnormalizable_stored_claim_as_invalid_name() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_005,
+                "block_hash": "0xprimary-unnormalizable",
+                "timestamp": "2026-04-17T00:00:05Z"
+            }
+        }))
+        .await?;
+    // The projection classifies an unnormalizable claim `invalid_name`, so a stored `success` row
+    // that no longer normalizes is only reachable mid-normalizer-revision. Report it with the same
+    // vocabulary rather than a name-less `ok` or a failed read.
+    seed_schema_v2_primary_name_claim(
+        &database.lookup_pool,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        "ens",
+        "60",
+        "taytems..eth",
+        false,
+    )
+    .await?;
+
+    let payload = v2_primary_name_payload_for_database(
+        &database,
+        &format!(
+            "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
+        ),
+    )
+    .await?;
+    assert_eq!(
+        payload["data"]["answers"],
+        json!([{
+            "source": "indexed",
+            "status": "invalid_name",
+            "raw_claim_name": "taytems..eth"
+        }])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_primary_name_publishes_an_already_normalized_claim_as_stored() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_005,
+                "block_hash": "0xprimary-prenormalized",
+                "timestamp": "2026-04-17T00:00:05Z"
+            }
+        }))
+        .await?;
+    // The marker asserts the stored bytes are the projection's normalized form, so the read path
+    // publishes them unchanged. Seeding bytes the current normalizer would rewrite is what makes
+    // the two branches distinguishable: a re-normalizing reader would answer "taytems.eth" and
+    // silently restate an already-published name after a normalizer revision.
+    seed_schema_v2_primary_name_claim(
+        &database.lookup_pool,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        "ens",
+        "60",
+        "Taytems.eth",
+        true,
+    )
+    .await?;
+
+    let payload = v2_primary_name_payload_for_database(
+        &database,
+        &format!(
+            "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
+        ),
+    )
+    .await?;
+    assert_eq!(
+        payload["data"]["answers"],
+        json!([{
+            "source": "indexed",
+            "status": "ok",
+            "name": "Taytems.eth"
+        }])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_primary_name_excludes_lower_height_orphaned_project_target() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_005,
+                "block_hash": "0xprimary-readable-head",
+                "timestamp": "2026-04-17T00:00:05Z"
+            }
+        }))
+        .await?;
+    seed_schema_v2_primary_name_claim(
+        &database.lookup_pool,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        "ens",
+        "60",
+        "orphaned.eth",
+        true,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO bigname_phase.chain_lineage (
+            chain_id, block_hash, block_number, block_timestamp, canonicality_state
+        ) VALUES (
+            'ethereum-mainnet', '0xorphaned-primary-target', 21000004,
+            '2026-04-17T00:00:04Z', 'orphaned'
+        )
+        "#,
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let updated = sqlx::query(
+        r#"
+        UPDATE bigname_phase.primary_names_current
+        SET claim_provenance = claim_provenance || jsonb_build_object(
+                'chain_id', 'ethereum-mainnet',
+                'target_block_number', 21000004,
+                'target_block_hash', '0xorphaned-primary-target'
+            )
+        WHERE address = lower($1)
+          AND namespace = 'ens'
+          AND coin_type = '60'
+        "#,
+    )
+    .bind(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS)
+    .execute(&database.lookup_pool)
+    .await?;
+    assert_eq!(updated.rows_affected(), 1);
+
+    let payload = v2_primary_name_payload_for_database(
+        &database,
+        &format!(
+            "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
+        ),
+    )
+    .await?;
+    assert_eq!(
+        payload["data"]["answers"],
+        json!([{"source": "indexed", "status": "not_found"}])
     );
 
     database.cleanup().await
@@ -558,14 +702,6 @@ async fn v2_get_primary_name_keeps_provider_response_timeout_in_band_without_per
             }
         ])
     );
-    assert_eq!(
-        persisted_route_local_primary_name_counts(
-            &database,
-            V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
-        )
-        .await?,
-        (0, 0)
-    );
     let ledger_count: i64 = sqlx::query_scalar("SELECT count(*) FROM resolution_divergences")
         .fetch_one(&lookup_pool)
         .await?;
@@ -617,14 +753,6 @@ async fn v2_get_primary_name_aborts_provider_transport_failure_without_persisten
     let payload: Value = read_json(response).await?;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{payload}");
     assert_eq!(payload["error"]["code"], json!("internal_error"));
-    assert_eq!(
-        persisted_route_local_primary_name_counts(
-            &database,
-            V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
-        )
-        .await?,
-        (0, 0)
-    );
     let ledger_count: i64 = sqlx::query_scalar("SELECT count(*) FROM resolution_divergences")
         .fetch_one(&lookup_pool)
         .await?;
@@ -641,8 +769,7 @@ async fn v2_get_basenames_primary_name_verified_is_explicitly_unsupported_and_ba
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000bcd";
     seed_v2_basenames_primary_name_snapshot_positions(&database).await?;
-    seed_v2_basenames_primary_name_persisted_verified(&database, address).await?;
-    assert_basenames_primary_execution_artifact_slots(&database, address, &["ethereum"]).await?;
+    seed_v2_basenames_primary_name_claim(&database, address).await?;
 
     let verified = v2_primary_name_payload_for_database(
         &database,
@@ -685,7 +812,7 @@ async fn v2_get_basenames_primary_name_normalization_gate_keeps_meta_base_scoped
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000bcf";
     seed_v2_basenames_primary_name_snapshot_positions(&database).await?;
-    seed_v2_basenames_primary_name_persisted_verified(&database, address).await?;
+    seed_v2_basenames_primary_name_claim(&database, address).await?;
     database
         .insert_primary_name_current_normalized_claim_name(
             address,
@@ -735,7 +862,7 @@ async fn v2_get_basenames_primary_name_without_persisted_verified_stays_base_sco
             "basenames",
             V2_BASENAMES_PRIMARY_COIN_TYPE,
             PrimaryNameClaimStatus::Success,
-            None,
+            Some("alice.base.eth"),
         )
         .await?;
     database
@@ -850,38 +977,6 @@ async fn v2_primary_name_response_for_database(
         .context("v2 primary-name request failed")
 }
 
-async fn persisted_route_local_primary_name_counts(
-    database: &TestDatabase,
-    address: &str,
-) -> Result<(i64, i64)> {
-    let request_key = format!("ens:{address}:60");
-    let trace_count = sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT COUNT(*)
-        FROM execution_traces
-        WHERE request_type = 'verified_primary_name'
-          AND namespace = 'ens'
-          AND request_key = $1
-        "#,
-    )
-    .bind(&request_key)
-    .fetch_one(&database.pool)
-    .await?;
-    let outcome_count = sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT COUNT(*)
-        FROM execution_cache_outcomes
-        WHERE request_type = 'verified_primary_name'
-          AND namespace = 'ens'
-          AND request_key = $1
-        "#,
-    )
-    .bind(request_key)
-    .fetch_one(&database.pool)
-    .await?;
-    Ok((trace_count, outcome_count))
-}
-
 fn assert_primary_name_snapshot_meta(payload: &Value) {
     assert!(
         payload["meta"]["as_of"].is_object(),
@@ -935,44 +1030,6 @@ fn assert_primary_name_snapshot_token_slots(payload: &Value, expected_slots: &[&
     assert_eq!(actual, expected);
 }
 
-async fn assert_basenames_primary_execution_artifact_slots(
-    database: &TestDatabase,
-    address: &str,
-    expected_slots: &[&str],
-) -> Result<()> {
-    let request_key = format!("basenames:{address}:{V2_BASENAMES_PRIMARY_COIN_TYPE}");
-    let requested_positions: Value = sqlx::query_scalar(
-        r#"
-        SELECT requested_chain_positions
-        FROM execution_cache_outcomes
-        WHERE request_type = $1
-          AND namespace = 'basenames'
-          AND request_key = $2
-        "#,
-    )
-    .bind(VERIFIED_PRIMARY_NAME_REQUEST_TYPE)
-    .bind(request_key)
-    .fetch_one(&database.pool)
-    .await?;
-    let actual = requested_positions
-        .as_array()
-        .expect("primary-name requested chain positions must be an array")
-        .iter()
-        .filter_map(|position| {
-            position
-                .get("chain_id")
-                .and_then(Value::as_str)
-                .and_then(|chain_id| chain_id.strip_suffix("-mainnet"))
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    let expected = expected_slots
-        .iter()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(actual, expected);
-    Ok(())
-}
-
 async fn seed_v2_basenames_primary_name_snapshot_positions(database: &TestDatabase) -> Result<()> {
     database
         .seed_snapshot_selector_chain_positions(&json!({
@@ -1015,6 +1072,20 @@ async fn seed_schema_v2_primary_name_claim(
     name: &str,
     claim_name_is_normalized: bool,
 ) -> Result<()> {
+    let chain_id = if namespace == "basenames" {
+        "base-mainnet"
+    } else {
+        "ethereum-mainnet"
+    };
+    let (target_block_number, target_block_hash): (i64, String) = sqlx::query_as(
+        "SELECT block_number, block_hash FROM bigname_phase.chain_lineage \
+         WHERE chain_id = $1 \
+           AND canonicality_state IN ('canonical', 'safe', 'finalized') \
+         ORDER BY block_number DESC, block_hash LIMIT 1",
+    )
+    .bind(chain_id)
+    .fetch_one(pool)
+    .await?;
     sqlx::query(
         r#"
         INSERT INTO primary_names_current (
@@ -1041,42 +1112,26 @@ async fn seed_schema_v2_primary_name_claim(
     .bind(name)
     .bind(claim_name_is_normalized)
     .bind(json!({
-        "chain_id": if namespace == "basenames" {
-            "base-mainnet"
-        } else {
-            "ethereum-mainnet"
-        }
+        "chain_id": chain_id,
+        "target_block_number": target_block_number,
+        "target_block_hash": target_block_hash,
     }))
     .execute(pool)
     .await?;
     Ok(())
 }
 
-async fn seed_v2_basenames_primary_name_persisted_verified(
+async fn seed_v2_basenames_primary_name_claim(
     database: &TestDatabase,
     address: &str,
 ) -> Result<()> {
-    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000004a);
-    let verified_primary_name = json!({
-        "status": "success",
-        "name": {
-            "logical_name_id": "basenames:alice.base.eth",
-            "namespace": "basenames",
-            "normalized_name": "alice.base.eth",
-            "canonical_display_name": "Alice.base.eth",
-            "namehash": "0x0000000000000000000000000000000000000000000000000000000000000b45",
-            "resource_id": "00000000-0000-0000-0000-000000000654",
-            "binding_kind": "declared_registry_path"
-        }
-    });
-
     database
         .insert_primary_name_current_claim_row(
             address,
             "basenames",
             V2_BASENAMES_PRIMARY_COIN_TYPE,
             PrimaryNameClaimStatus::Success,
-            None,
+            Some("alice.base.eth"),
         )
         .await?;
     database
@@ -1088,25 +1143,5 @@ async fn seed_v2_basenames_primary_name_persisted_verified(
             true,
         )
         .await?;
-
-    let finished_at = timestamp(1_717_172_410);
-    let trace = primary_name_execution_trace(
-        execution_trace_id,
-        "basenames",
-        address,
-        V2_BASENAMES_PRIMARY_COIN_TYPE,
-        verified_primary_name.clone(),
-        finished_at,
-    );
-    let outcome = primary_name_execution_outcome(
-        execution_trace_id,
-        "basenames",
-        address,
-        V2_BASENAMES_PRIMARY_COIN_TYPE,
-        verified_primary_name,
-        finished_at,
-    );
-    upsert_execution_trace(&database.pool, &trace).await?;
-    upsert_execution_outcome(&database.pool, &outcome).await?;
     Ok(())
 }

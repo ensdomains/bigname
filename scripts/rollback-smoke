@@ -11,9 +11,6 @@ Usage: scripts/rollback-smoke [--no-network]
 Runs the local rollback smoke gate:
   - no-network sanity, when requested
   - local pinned upstream refs
-  - checked-in migrations twice, proving idempotence after rollback
-  - live manifest-drift audit
-  - runtime watch-plan inspection
   - prebuilt local API binary
   - local API /healthz contract (ready with live loops, honestly degraded without them)
 
@@ -136,21 +133,6 @@ run_pinned_refs_check() {
   scripts/sync-refs --check
 }
 
-run_migrations() {
-  log "$1"
-  cargo run "${cargo_args[@]}" -p bigname-worker -- migrate
-}
-
-run_manifest_drift_audit_gate() {
-  log "checking live manifest-drift audit"
-  cargo run "${cargo_args[@]}" -p bigname-worker -- manifest-drift audit --json
-}
-
-run_watch_plan_inspection_gate() {
-  log "checking runtime watch-plan inspection"
-  cargo run "${cargo_args[@]}" -p bigname-worker -- inspect watch-plan --json
-}
-
 build_api_for_readiness() {
   log "building API binary for health probe"
   cargo build "${cargo_args[@]}" -p bigname-api --bin bigname-api
@@ -185,18 +167,17 @@ run_readiness_check() {
       return 0
     fi
 
-    # The API still exposes legacy indexer and worker heartbeat slots until its
-    # later port. A standalone smoke database has neither process, so
-    # not_started is admissible.
-    # A stale status proves a heartbeat row exists and must fail instead of masking a wedged loop.
+    # A standalone smoke database has no phase runner. not_started is expected
+    # after phase schema initialization; unavailable is expected before it.
+    # A stale status proves a heartbeat row exists and must fail instead of
+    # masking a wedged loop.
     if [ "$http_status" = "200" ] \
       && grep -q '"status":"degraded"' "$health_body_tmp" \
       && grep -q '"api_status":"ready"' "$health_body_tmp" \
       && grep -q '"process":{"status":"running"}' "$health_body_tmp" \
       && grep -q '"database":{"status":"reachable","reachable":true' "$health_body_tmp" \
-      && grep -Eq '"indexer":{"status":"(running|not_started)"' "$health_body_tmp" \
-      && grep -Eq '"worker":{"status":"(running|not_started)"' "$health_body_tmp"; then
-      log "standalone health contract passed; absent service loops are explicitly not_started"
+      && grep -Eq '"phase_runner":{"status":"(not_started|unavailable)"' "$health_body_tmp"; then
+      log "standalone health contract passed; absent phase state is explicit"
       return 0
     fi
 
@@ -213,10 +194,6 @@ require_command grep
 require_command seq
 assert_no_network_mode
 run_pinned_refs_check
-run_migrations "applying checked-in migrations"
-run_migrations "re-applying checked-in migrations for rollback idempotence"
-run_manifest_drift_audit_gate
-run_watch_plan_inspection_gate
 build_api_for_readiness
 run_readiness_check
 log "rollback smoke gate passed"

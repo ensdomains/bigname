@@ -1,11 +1,6 @@
 mod ids;
-mod merge;
 mod read;
 mod types;
-mod validate;
-mod write;
-mod write_fast;
-mod write_rows;
 
 pub use ids::ens_v2_registry_resource_id;
 pub use read::{
@@ -19,12 +14,3 @@ pub use read::{
     load_token_lineage_including_noncanonical,
 };
 pub use types::{NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage};
-pub use write::{
-    upsert_name_surfaces, upsert_name_surfaces_without_snapshots, upsert_resources,
-    upsert_resources_without_snapshots, upsert_surface_bindings,
-    upsert_surface_bindings_without_snapshots, upsert_token_lineages,
-    upsert_token_lineages_without_snapshots,
-};
-
-#[cfg(test)]
-mod tests;

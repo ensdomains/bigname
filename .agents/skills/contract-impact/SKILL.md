@@ -32,4 +32,4 @@ Produce a short note:
 
 - Public behavior, coverage meaning, shared IDs/enums, manifest schema, source authority, replay semantics, or replacement meaning require docs in the same change.
 - ENSv1, ENSv2, and Basenames behavior claims require pinned `.refs/` citations; unsupported claims must not be written.
-- Hard-stop if the change would make adapters write projections, API read raw facts for normal reads, execution depend on adapter internals, or unsupported behavior become implicit.
+- Hard-stop if the change would make adapters write projections, API read raw facts for normal reads, lookup depend on adapter internals, or unsupported behavior become implicit.

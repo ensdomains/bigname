@@ -5,8 +5,6 @@ pub const BASENAMES_NAMESPACE: &str = "basenames";
 pub const BASE_MAINNET_CHAIN_ID: &str = "base-mainnet";
 pub const ETHEREUM_MAINNET_CHAIN_ID: &str = "ethereum-mainnet";
 pub const BASENAMES_L1_RESOLVER_ADDRESS: &str = "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31";
-pub const ENS_LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES: &[&str] =
-    &["0xa2c122be93b0074270ebee7f6b7292c7deb45047"];
 
 pub trait VerifiedResolutionRecord {
     fn record_key(&self) -> &str;
@@ -53,13 +51,6 @@ pub(crate) fn resolution_projection_chain_position_from_value(
         block_hash: json_string_field(json_field(value, "block_hash"))?,
         timestamp: json_string_field(json_field(value, "timestamp"))?,
     })
-}
-
-pub(crate) fn array_or_empty(value: Option<&Value>) -> Value {
-    value
-        .and_then(Value::as_array)
-        .map(|items| Value::Array(items.clone()))
-        .unwrap_or_else(|| Value::Array(Vec::new()))
 }
 
 pub(crate) fn summary_is_unsupported(section: Option<&Value>) -> bool {

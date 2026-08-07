@@ -1,6 +1,5 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use alloy_primitives::Address;
 use anyhow::Result;
 
 use crate::harness::{
@@ -181,43 +180,6 @@ pub async fn derive_ens_v1_from_rpc_ingest(
     derive_ens_v1_on_rpc_alias(anvil, deployment, EnsV1RawFactPath::RpcIngest).await
 }
 
-/// SQL scalar expression that compares the latest non-orphaned code-hash
-/// observations used by resolver-profile admission for two addresses.
-pub fn resolver_code_hash_comparison_sql(
-    candidate: Address,
-    profile_seed: Address,
-    expect_match: bool,
-) -> String {
-    let comparison = if expect_match { "=" } else { "<>" };
-    format!(
-        "COALESCE((SELECT candidate.code_hash {comparison} seed.code_hash \
-         FROM LATERAL ( \
-             SELECT code_hash FROM raw_code_hashes \
-             WHERE chain_id = 'ethereum-mainnet' \
-               AND lower(contract_address) = '{candidate:#x}' \
-               AND canonicality_state <> 'orphaned' \
-             ORDER BY block_number DESC, \
-               CASE canonicality_state \
-                 WHEN 'finalized' THEN 4 WHEN 'safe' THEN 3 \
-                 WHEN 'canonical' THEN 2 WHEN 'observed' THEN 1 ELSE 0 \
-               END DESC, raw_code_hash_id DESC \
-             LIMIT 1 \
-         ) candidate \
-         CROSS JOIN LATERAL ( \
-             SELECT code_hash FROM raw_code_hashes \
-             WHERE chain_id = 'ethereum-mainnet' \
-               AND lower(contract_address) = '{profile_seed:#x}' \
-               AND canonicality_state <> 'orphaned' \
-             ORDER BY block_number DESC, \
-               CASE canonicality_state \
-                 WHEN 'finalized' THEN 4 WHEN 'safe' THEN 3 \
-                 WHEN 'canonical' THEN 2 WHEN 'observed' THEN 1 ELSE 0 \
-               END DESC, raw_code_hash_id DESC \
-             LIMIT 1 \
-         ) seed), FALSE)"
-    )
-}
-
 /// Readiness predicate for an exactly identified canonical normalized event.
 /// Scenarios with additional constraints should keep spelling out those
 /// constraints so this helper does not weaken their stop condition.
@@ -290,30 +252,6 @@ pub async fn ingest_at_current_head(
     }];
     ingest_local_chains(&chains, false, ready_sql, |scratch, repo_root| {
         manifests::generate_local_profile(scratch, repo_root, &deployment.manifest_targets())
-    })
-    .await
-}
-
-pub async fn ingest_and_serve_with_ens_execution(
-    anvil: &Anvil,
-    deployment: &EnsV1Deployment,
-    universal_resolver: &crate::harness::artifacts::Deployed,
-    ready_sql: Option<&str>,
-) -> Result<PipelineRun> {
-    // Keep the normal post-event margin so the selected head is deliberately
-    // newer than name_current's last-event block. Verified execution and
-    // explain readback must still share the selected-snapshot cache identity.
-    let chains = [LocalChain {
-        anvil,
-        id: "ethereum-mainnet",
-    }];
-    ingest_local_chains(&chains, true, ready_sql, |scratch, repo_root| {
-        let mut targets = deployment.manifest_targets();
-        targets.insert(
-            "universal_resolver",
-            (universal_resolver.address, universal_resolver.block_number),
-        );
-        manifests::generate_local_profile(scratch, repo_root, &targets)
     })
     .await
 }

@@ -3,22 +3,7 @@ async fn v2_status_and_startup_chain_discovery_read_phase_state() -> Result<()> 
     let database = TestDatabase::new_migrated().await?;
     sqlx::raw_sql(
         r#"
-        INSERT INTO chain_checkpoints (
-            chain_id, canonical_block_hash, canonical_block_number,
-            safe_block_hash, safe_block_number,
-            finalized_block_hash, finalized_block_number
-        ) VALUES
-            ('ethereum-mainnet', '0xlegacy-latest', 999,
-             '0xlegacy-safe', 998, '0xlegacy-finalized', 997),
-            ('base-mainnet', '0xlegacy-base', 888, NULL, NULL, NULL, NULL)
-        "#,
-    )
-    .execute(&database.pool)
-    .await?;
-
-    sqlx::raw_sql(
-        r#"
-        INSERT INTO chain_lineage (
+        INSERT INTO bigname_phase.chain_lineage (
             chain_id, block_hash, block_number, block_timestamp,
             canonicality_state
         ) VALUES
@@ -100,7 +85,7 @@ async fn v2_status_maps_phase_lifecycle_and_heartbeat_to_readiness() -> Result<(
     let database = TestDatabase::new_migrated().await?;
     sqlx::raw_sql(
         r#"
-        INSERT INTO chain_lineage (
+        INSERT INTO bigname_phase.chain_lineage (
             chain_id, block_hash, block_number, block_timestamp,
             canonicality_state
         ) VALUES
@@ -154,7 +139,7 @@ async fn v2_status_maps_phase_lifecycle_and_heartbeat_to_readiness() -> Result<(
     let state = database
         .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
         .await?
-        .with_heartbeat_max_age_secs(1);
+        .with_phase_heartbeat_max_age_secs(1);
     state
         .status_freshness
         .seed_success(
@@ -252,7 +237,7 @@ async fn v2_status_maps_phase_lifecycle_and_heartbeat_to_readiness() -> Result<(
         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project';
         UPDATE service_heartbeats
         SET started_at = now() - interval '1 minute',
-            heartbeat_at = now() - interval '30 seconds'
+            heartbeat_at = now()
         WHERE service_name = 'phase-runner' AND chain_id = 'ethereum-mainnet'
         "#,
     )

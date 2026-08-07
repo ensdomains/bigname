@@ -15,7 +15,7 @@ pub(super) fn push_history_source(
 pub(super) fn push_history_lineage_join(builder: &mut QueryBuilder<'_, Postgres>) {
     builder.push(
         r#"
-        LEFT JOIN chain_lineage rb
+        LEFT JOIN bigname_phase.chain_lineage rb
           ON rb.chain_id = ne.chain_id
          AND rb.block_hash = ne.block_hash
         "#,
@@ -30,16 +30,16 @@ pub(super) fn push_history_canonicality_filter(
         builder.push(
             r#"
             AND ne.canonicality_state IN (
-                'canonical'::canonicality_state,
-                'safe'::canonicality_state,
-                'finalized'::canonicality_state
+                'canonical'::bigname_phase.canonicality_state,
+                'safe'::bigname_phase.canonicality_state,
+                'finalized'::bigname_phase.canonicality_state
             )
             AND (
                 ne.block_hash IS NULL
                 OR rb.canonicality_state IN (
-                    'canonical'::canonicality_state,
-                    'safe'::canonicality_state,
-                    'finalized'::canonicality_state
+                    'canonical'::bigname_phase.canonicality_state,
+                    'safe'::bigname_phase.canonicality_state,
+                    'finalized'::bigname_phase.canonicality_state
                 )
             )
             "#,
@@ -55,14 +55,14 @@ pub(super) fn push_readable_anchored_row_filter(
     builder.push(format!(
         r#"
         AND {row_alias}.canonicality_state IN (
-            'canonical'::canonicality_state,
-            'safe'::canonicality_state,
-            'finalized'::canonicality_state
+            'canonical'::bigname_phase.canonicality_state,
+            'safe'::bigname_phase.canonicality_state,
+            'finalized'::bigname_phase.canonicality_state
         )
         AND {lineage_alias}.canonicality_state IN (
-            'canonical'::canonicality_state,
-            'safe'::canonicality_state,
-            'finalized'::canonicality_state
+            'canonical'::bigname_phase.canonicality_state,
+            'safe'::bigname_phase.canonicality_state,
+            'finalized'::bigname_phase.canonicality_state
         )
         "#,
     ));

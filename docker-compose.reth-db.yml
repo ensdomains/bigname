@@ -4,10 +4,15 @@ services:
       - default
       - eth_archive_node
 
-  worker:
+  phase-runner:
     networks:
       - default
       - eth_archive_node
+    volumes:
+      - type: bind
+        source: ${RETH_DATA_DIR:?set RETH_DATA_DIR to the host's canonical reth database directory}
+        target: ${RETH_DATA_DIR:?set RETH_DATA_DIR to the in-container canonical reth database directory}
+        read_only: true
 
 
 networks:

@@ -55,32 +55,3 @@ pub struct ChildrenCurrentPage {
     pub next_cursor: Option<ChildrenCurrentKeysetCursor>,
     pub summary: ChildrenCurrentSummary,
 }
-
-/// Canonical declared-child subregistry event seed for rebuilding declared child rows.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DeclaredChildEventSource {
-    pub parent_logical_name_id: String,
-    pub child_logical_name_id: String,
-    pub namespace: String,
-    pub canonical_display_name: String,
-    pub normalized_name: String,
-    pub namehash: String,
-    pub labelhash: Option<String>,
-    pub label_source: Option<String>,
-    pub owner: Option<String>,
-    pub registrant: Option<String>,
-    pub normalized_event_id: i64,
-    pub event_identity: String,
-    pub source_family: String,
-    pub manifest_version: i64,
-    pub source_manifest_id: Option<i64>,
-    pub chain_id: String,
-    pub block_number: i64,
-    pub block_hash: String,
-    pub transaction_hash: String,
-    pub log_index: i64,
-    pub raw_fact_ref: Value,
-    pub normalized_event_ids: Vec<i64>,
-    pub raw_fact_refs: Value,
-    pub manifest_versions: Value,
-}

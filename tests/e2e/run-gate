@@ -16,7 +16,7 @@ export BIGNAME_E2E_PROFILE_BINARY_DIR="$profile_binary_dir"
 
 expected_passed=79
 expected_failed=0
-expected_ignored=6
+expected_ignored=3
 test_threads="${BIGNAME_E2E_TEST_THREADS:-8}"
 
 cd "$repo_root"

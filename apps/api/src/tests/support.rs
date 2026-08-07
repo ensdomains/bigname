@@ -1,10 +1,4 @@
-use std::{
-    str::FromStr,
-    sync::{
-        Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+use std::{str::FromStr, sync::atomic::{AtomicU64, Ordering}};
 
 use anyhow::Context;
 use axum::{
@@ -13,13 +7,10 @@ use axum::{
     response::Response,
 };
 use bigname_storage::{
-    CanonicalityState, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, ExecutionTraceStep,
-    NameSurface, NormalizedEvent, PermissionScope, PermissionsCurrentRow, PrimaryNameClaimStatus,
-    PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot, RawBlock, ResolverCurrentRow, Resource,
-    SurfaceBinding, SurfaceBindingKind, TokenLineage, default_database_url,
-    load_primary_name_current, parse_rfc3339_utc_timestamp, upsert_execution_outcome,
-    upsert_execution_trace, upsert_primary_name_current_rows,
-    upsert_primary_name_current_snapshots,
+    CanonicalityState, NameSurface, NormalizedEvent, PermissionScope, PermissionsCurrentRow,
+    PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot,
+    ResolverCurrentRow, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
+    default_database_url, load_primary_name_current, parse_rfc3339_utc_timestamp,
 };
 use bigname_test_support::TestDatabaseConfig;
 use serde::de::DeserializeOwned;
@@ -35,13 +26,923 @@ use tower::ServiceExt;
 use super::*;
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
-static WORKER_CARGO_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RawBlock {
+    chain_id: String,
+    block_hash: String,
+    parent_hash: Option<String>,
+    block_number: i64,
+    block_timestamp: OffsetDateTime,
+    logs_bloom: Option<Vec<u8>>,
+    transactions_root: Option<String>,
+    receipts_root: Option<String>,
+    state_root: Option<String>,
+    canonicality_state: CanonicalityState,
+}
+
+fn phase_support_from_coverage(coverage: &Value) -> (&'static str, Option<String>) {
+    if coverage.get("status").and_then(Value::as_str) == Some("unsupported") {
+        let reason = coverage
+            .get("unsupported_reason")
+            .and_then(Value::as_str)
+            .unwrap_or("unsupported")
+            .to_owned();
+        ("unsupported", Some(reason))
+    } else {
+        ("supported", None)
+    }
+}
+
+fn phase_logical_identity(namespace: &str, name: &str) -> Result<(String, String)> {
+    let namehash = bigname_lookup::ens_namehash_hex(name)?;
+    Ok((format!("{namespace}:{namehash}"), namehash))
+}
+
+async fn upsert_phase_raw_blocks(pool: &PgPool, rows: &[RawBlock]) -> Result<Vec<RawBlock>> {
+    for row in rows {
+        sqlx::query(
+            r#"
+            INSERT INTO bigname_phase.chain_lineage (
+                chain_id, block_hash, parent_hash, block_number, block_timestamp,
+                canonicality_state
+            )
+            VALUES ($1, $2, $3, $4, $5, $6::bigname_phase.canonicality_state)
+            ON CONFLICT (chain_id, block_hash) DO NOTHING
+            "#,
+        )
+        .bind(&row.chain_id)
+        .bind(&row.block_hash)
+        .bind(&row.parent_hash)
+        .bind(row.block_number)
+        .bind(row.block_timestamp)
+        .bind(row.canonicality_state.as_str())
+        .execute(pool)
+        .await?;
+    }
+    Ok(rows.to_vec())
+}
+
+async fn upsert_phase_name_current_rows(
+    pool: &PgPool,
+    rows: &[bigname_storage::NameCurrentRow],
+) -> Result<Vec<bigname_storage::NameCurrentRow>> {
+    for row in rows {
+        let (support_status, mut unsupported_reason) = phase_support_from_coverage(&row.coverage);
+        if unsupported_reason.as_deref() == Some("unsupported") {
+            unsupported_reason = Some("name_coverage_unsupported_reason_missing".to_owned());
+        }
+        let phase_identity: Option<(String, String)> = sqlx::query_as(
+            "SELECT logical_name_id, namehash FROM bigname_phase.name_surfaces
+             WHERE namespace = $1 AND lower(raw_name) = lower($2)
+             ORDER BY logical_name_id
+             LIMIT 1",
+        )
+        .bind(&row.namespace)
+        .bind(&row.normalized_name)
+        .fetch_optional(pool)
+        .await?;
+        let (logical_name_id, namehash) = match phase_identity {
+            Some(identity) => identity,
+            None => phase_logical_identity(&row.namespace, &row.normalized_name)?,
+        };
+        let chain_id = phase_projection_source_position(&row.chain_positions)?
+            .get("chain_id")
+            .and_then(Value::as_str)
+            .context("name_current fixture position must include chain_id")?
+            .to_owned();
+        let (target_block_number, target_block_hash) =
+            phase_projection_target_for_chain(pool, &chain_id, &row.chain_positions).await?;
+        let mut provenance = row.provenance.clone();
+        provenance
+            .as_object_mut()
+            .context("name_current fixture provenance must be an object")?
+            .insert("chain_id".to_owned(), json!(chain_id));
+        let chain_positions = align_phase_chain_positions(pool, &row.chain_positions).await?;
+        let canonicality_summary = json!({
+            "state": "canonical_lineage",
+            "target_block_number": target_block_number,
+            "target_block_hash": target_block_hash,
+        });
+        sqlx::query(
+            r#"
+            INSERT INTO bigname_phase.name_current (
+                logical_name_id, namespace, raw_name, namehash, surface_binding_id,
+                resource_id, token_lineage_id, binding_kind, declared_summary,
+                support_status, unsupported_reason, provenance, chain_positions,
+                canonicality_summary, manifest_version, last_recomputed_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            ON CONFLICT (logical_name_id) DO UPDATE SET
+                raw_name = EXCLUDED.raw_name,
+                surface_binding_id = EXCLUDED.surface_binding_id,
+                resource_id = EXCLUDED.resource_id,
+                token_lineage_id = EXCLUDED.token_lineage_id,
+                binding_kind = EXCLUDED.binding_kind,
+                declared_summary = EXCLUDED.declared_summary,
+                support_status = EXCLUDED.support_status,
+                unsupported_reason = EXCLUDED.unsupported_reason,
+                provenance = EXCLUDED.provenance,
+                chain_positions = EXCLUDED.chain_positions,
+                canonicality_summary = EXCLUDED.canonicality_summary,
+                manifest_version = EXCLUDED.manifest_version,
+                last_recomputed_at = EXCLUDED.last_recomputed_at
+            "#,
+        )
+        .bind(logical_name_id)
+        .bind(&row.namespace)
+        .bind(&row.canonical_display_name)
+        .bind(namehash)
+        .bind(row.surface_binding_id)
+        .bind(row.resource_id)
+        .bind(row.token_lineage_id)
+        .bind(row.binding_kind.map(|value| value.as_str()))
+        .bind(&row.declared_summary)
+        .bind(support_status)
+        .bind(unsupported_reason)
+        .bind(provenance)
+        .bind(chain_positions)
+        .bind(canonicality_summary)
+        .bind(row.manifest_version)
+        .bind(row.last_recomputed_at)
+        .execute(pool)
+        .await?;
+    }
+    Ok(rows.to_vec())
+}
+
+async fn upsert_phase_record_inventory_current_rows(
+    pool: &PgPool,
+    rows: &[bigname_storage::RecordInventoryCurrentRow],
+) -> Result<Vec<bigname_storage::RecordInventoryCurrentRow>> {
+    for row in rows {
+        let mut record_version_boundary = row.record_version_boundary.clone();
+        if let Some(logical_name_id) = record_version_boundary
+            .get("logical_name_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            && let Some((namespace, name_or_hash)) = logical_name_id.split_once(':')
+            && !(name_or_hash.starts_with("0x") && name_or_hash.len() == 66)
+        {
+            record_version_boundary["logical_name_id"] =
+                json!(bigname_storage::logical_name_id_for_name(namespace, name_or_hash));
+        }
+        let projected_chain_positions: Option<Value> = sqlx::query_scalar(
+            "SELECT chain_positions FROM bigname_phase.name_current
+             WHERE resource_id = $1
+             ORDER BY last_recomputed_at DESC
+             LIMIT 1",
+        )
+        .bind(row.resource_id)
+        .fetch_optional(pool)
+        .await?;
+        if let Some(projected) = projected_chain_positions.as_ref()
+            && let Some(positions) = projected.as_object()
+        {
+            let boundary_chain_id = record_version_boundary
+                .pointer("/chain_position/chain_id")
+                .and_then(Value::as_str);
+            let position = positions
+                .values()
+                .find(|position| {
+                    position.get("chain_id").and_then(Value::as_str) == boundary_chain_id
+                })
+                .or_else(|| (positions.len() == 1).then(|| positions.values().next()).flatten());
+            if let Some(position) = position {
+                record_version_boundary["chain_position"] = position.clone();
+            }
+        }
+        let requested_chain_positions =
+            align_phase_chain_positions(pool, &row.chain_positions).await?;
+        let snapshot_positions = if requested_chain_positions
+            .as_object()
+            .is_some_and(|positions| !positions.is_empty())
+        {
+            requested_chain_positions
+        } else {
+            projected_chain_positions.unwrap_or_else(|| json!({}))
+        };
+        let chain_id = record_version_boundary
+            .pointer("/chain_position/chain_id")
+            .and_then(Value::as_str)
+            .context("record inventory boundary is missing chain_position.chain_id")?;
+        let target = snapshot_positions
+            .as_object()
+            .into_iter()
+            .flat_map(|positions| positions.values())
+            .find(|position| position.get("chain_id").and_then(Value::as_str) == Some(chain_id))
+            .context("record inventory snapshot is missing its boundary chain position")?;
+        let (target_block_number, target_block_hash) =
+            phase_projection_target_for_chain(pool, chain_id, target).await?;
+        let chain_positions = json!({
+            "block_number": target_block_number,
+            "block_hash": target_block_hash,
+            "target_block_number": target_block_number,
+            "target_block_hash": target_block_hash,
+        });
+        let mut provenance = row.provenance.clone();
+        provenance
+            .as_object_mut()
+            .context("record inventory fixture provenance must be an object")?
+            .insert("chain_id".to_owned(), json!(chain_id));
+        let canonicality_summary = json!({
+            "state": "canonical_lineage",
+            "target_block_number": target_block_number,
+            "target_block_hash": target_block_hash,
+        });
+        let boundary_key = bigname_storage::record_version_boundary_storage_key(
+            &record_version_boundary,
+            row.resource_id,
+        )?;
+        let (support_status, unsupported_reason) = phase_support_from_coverage(&row.coverage);
+        sqlx::query(
+            r#"
+            INSERT INTO bigname_phase.record_inventory_current (
+                resource_id, record_version_boundary_key, record_version_boundary,
+                selectors, unsupported_families, last_change, entries, support_status,
+                unsupported_reason, provenance, chain_positions, canonicality_summary,
+                manifest_version, last_recomputed_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            ON CONFLICT (resource_id, record_version_boundary_key) DO UPDATE SET
+                record_version_boundary = EXCLUDED.record_version_boundary,
+                selectors = EXCLUDED.selectors,
+                unsupported_families = EXCLUDED.unsupported_familIES,
+                last_change = EXCLUDED.last_change,
+                entries = EXCLUDED.entries,
+                support_status = EXCLUDED.support_status,
+                unsupported_reason = EXCLUDED.unsupported_reason,
+                provenance = EXCLUDED.provenance,
+                chain_positions = EXCLUDED.chain_positions,
+                canonicality_summary = EXCLUDED.canonicality_summary,
+                manifest_version = EXCLUDED.manifest_version,
+                last_recomputed_at = EXCLUDED.last_recomputed_at
+            "#,
+        )
+        .bind(row.resource_id)
+        .bind(boundary_key)
+        .bind(record_version_boundary)
+        .bind(&row.selectors)
+        .bind(&row.unsupported_families)
+        .bind(&row.last_change)
+        .bind(&row.entries)
+        .bind(support_status)
+        .bind(unsupported_reason)
+        .bind(provenance)
+        .bind(chain_positions)
+        .bind(canonicality_summary)
+        .bind(row.manifest_version)
+        .bind(row.last_recomputed_at)
+        .execute(pool)
+        .await?;
+    }
+    Ok(rows.to_vec())
+}
+
+fn phase_chain_positions(value: &Value) -> Value {
+    let Some(positions) = value.as_object() else {
+        return value.clone();
+    };
+    Value::Object(
+        positions
+            .values()
+            .filter_map(|position| {
+                let chain_id = position.get("chain_id")?.as_str()?;
+                let slot = match chain_id {
+                    "ethereum-mainnet" => "ethereum",
+                    "ethereum-sepolia" => "ethereum-sepolia",
+                    "base-mainnet" => "base",
+                    _ => chain_id,
+                };
+                Some((slot.to_owned(), position.clone()))
+            })
+            .collect(),
+    )
+}
+
+async fn align_phase_chain_positions(pool: &PgPool, value: &Value) -> Result<Value> {
+    let mut aligned = phase_chain_positions(value);
+    let Some(positions) = aligned.as_object_mut() else {
+        return Ok(aligned);
+    };
+    for position in positions.values_mut() {
+        let Some(chain_id) = position.get("chain_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(block_number) = position.get("block_number").and_then(Value::as_i64) else {
+            continue;
+        };
+        let readable: Option<(String, String)> = sqlx::query_as(
+            r#"
+            SELECT block_hash,
+                   to_char(block_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+            FROM bigname_phase.chain_lineage
+            WHERE chain_id = $1 AND block_number = $2
+              AND canonicality_state IN ('canonical', 'safe', 'finalized')
+            LIMIT 1
+            "#,
+        )
+        .bind(chain_id)
+        .bind(block_number)
+        .fetch_optional(pool)
+        .await?;
+        if let Some((block_hash, timestamp)) = readable {
+            position["block_hash"] = json!(block_hash);
+            position["timestamp"] = json!(timestamp);
+        }
+    }
+    Ok(aligned)
+}
+
+fn phase_projection_source_position(value: &Value) -> Result<&Value> {
+    if value.get("block_number").is_some() {
+        Ok(value)
+    } else {
+        value
+            .as_object()
+            .and_then(|positions| positions.values().next())
+            .context("projection fixture requires one source chain position")
+    }
+}
+
+fn phase_flat_projection_position(block_number: i64, block_hash: &str) -> Value {
+    json!({
+        "block_number": block_number,
+        "block_hash": block_hash,
+        "target_block_number": block_number,
+        "target_block_hash": block_hash,
+    })
+}
+
+async fn upsert_phase_address_names_current_rows(
+    pool: &PgPool,
+    rows: &[bigname_storage::AddressNameCurrentRow],
+) -> Result<Vec<bigname_storage::AddressNameCurrentRow>> {
+    for row in rows {
+        let (support_status, unsupported_reason) = phase_support_from_coverage(&row.coverage);
+        let (logical_name_id, namehash) =
+            phase_logical_identity(&row.namespace, &row.normalized_name)?;
+        let chain_positions: Option<Value> = sqlx::query_scalar(
+            "SELECT chain_positions FROM bigname_phase.name_current
+             WHERE logical_name_id = $1",
+        )
+        .bind(&logical_name_id)
+        .fetch_optional(pool)
+        .await?;
+        let chain_positions = match chain_positions {
+            Some(chain_positions) => chain_positions,
+            None => align_phase_chain_positions(pool, &row.chain_positions).await?,
+        };
+        let chain_id = phase_projection_source_position(&chain_positions)?
+            .get("chain_id")
+            .and_then(Value::as_str)
+            .context("address_names_current fixture position must include chain_id")?
+            .to_owned();
+        let (target_block_number, target_block_hash) =
+            phase_projection_target_for_chain(pool, &chain_id, &chain_positions).await?;
+        let mut provenance = row.provenance.clone();
+        provenance
+            .as_object_mut()
+            .context("address_names_current fixture provenance must be an object")?
+            .insert("chain_id".to_owned(), json!(chain_id));
+        let chain_positions =
+            phase_flat_projection_position(target_block_number, &target_block_hash);
+        let canonicality_summary = json!({
+            "state": "canonical_lineage",
+            "target_block_number": target_block_number,
+            "target_block_hash": target_block_hash,
+        });
+        sqlx::query(
+            r#"
+            INSERT INTO bigname_phase.address_names_current (
+                address, logical_name_id, relation, namespace, raw_name, namehash,
+                surface_binding_id, resource_id, token_lineage_id, binding_kind,
+                support_status, unsupported_reason, provenance, chain_positions,
+                canonicality_summary, manifest_version, last_recomputed_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            ON CONFLICT (address, logical_name_id, relation) DO UPDATE SET
+                raw_name = EXCLUDED.raw_name,
+                support_status = EXCLUDED.support_status,
+                unsupported_reason = EXCLUDED.unsupported_reason,
+                provenance = EXCLUDED.provenance,
+                chain_positions = EXCLUDED.chain_positions,
+                canonicality_summary = EXCLUDED.canonicality_summary,
+                manifest_version = EXCLUDED.manifest_version,
+                last_recomputed_at = EXCLUDED.last_recomputed_at
+            "#,
+        )
+        .bind(row.address.to_ascii_lowercase())
+        .bind(logical_name_id)
+        .bind(row.relation.as_str())
+        .bind(&row.namespace)
+        .bind(&row.canonical_display_name)
+        .bind(namehash)
+        .bind(row.surface_binding_id)
+        .bind(row.resource_id)
+        .bind(row.token_lineage_id)
+        .bind(row.binding_kind.as_str())
+        .bind(support_status)
+        .bind(unsupported_reason)
+        .bind(provenance)
+        .bind(chain_positions)
+        .bind(canonicality_summary)
+        .bind(row.manifest_version)
+        .bind(row.last_recomputed_at)
+        .execute(pool)
+        .await?;
+    }
+    Ok(rows.to_vec())
+}
+
+async fn upsert_phase_children_current_rows(
+    pool: &PgPool,
+    rows: &[bigname_storage::ChildrenCurrentRow],
+) -> Result<Vec<bigname_storage::ChildrenCurrentRow>> {
+    for row in rows {
+        let parent_name = row
+            .parent_logical_name_id
+            .split_once(':')
+            .map(|(_, name)| name)
+            .unwrap_or(&row.parent_logical_name_id);
+        let (parent_logical_name_id, _) =
+            phase_logical_identity(&row.namespace, parent_name)?;
+        let (child_logical_name_id, namehash) =
+            phase_logical_identity(&row.namespace, &row.normalized_name)?;
+        let chain_id = phase_projection_source_position(&row.chain_positions)?
+            .get("chain_id")
+            .and_then(Value::as_str)
+            .context("children_current fixture position must include chain_id")?
+            .to_owned();
+        let (target_block_number, target_block_hash) =
+            phase_projection_target_for_chain(pool, &chain_id, &row.chain_positions).await?;
+        let mut provenance = row.provenance.clone();
+        provenance
+            .as_object_mut()
+            .context("children_current fixture provenance must be an object")?
+            .insert("chain_id".to_owned(), json!(chain_id));
+        let chain_positions =
+            phase_flat_projection_position(target_block_number, &target_block_hash);
+        let canonicality_summary = json!({
+            "state": "canonical",
+            "target_block_number": target_block_number,
+            "target_block_hash": target_block_hash,
+        });
+        sqlx::query(
+            r#"
+            INSERT INTO bigname_phase.children_current (
+                parent_logical_name_id, child_logical_name_id, surface_class,
+                namespace, raw_name, decoded_name, namehash, labelhash, owner,
+                registrant, provenance, chain_positions, canonicality_summary,
+                manifest_version, last_recomputed_at
+            )
+            VALUES ($1, $2, $3, $4, convert_to($5, 'UTF8'), $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            ON CONFLICT (parent_logical_name_id, child_logical_name_id, surface_class)
+            DO UPDATE SET
+                raw_name = EXCLUDED.raw_name,
+                decoded_name = EXCLUDED.decoded_name,
+                owner = EXCLUDED.owner,
+                registrant = EXCLUDED.registrant,
+                provenance = EXCLUDED.provenance,
+                chain_positions = EXCLUDED.chain_positions,
+                canonicality_summary = EXCLUDED.canonicality_summary,
+                manifest_version = EXCLUDED.manifest_version,
+                last_recomputed_at = EXCLUDED.last_recomputed_at
+            "#,
+        )
+        .bind(parent_logical_name_id)
+        .bind(child_logical_name_id)
+        .bind(&row.surface_class)
+        .bind(&row.namespace)
+        .bind(&row.canonical_display_name)
+        .bind(namehash)
+        .bind(row.labelhash.as_deref().unwrap_or(&row.namehash))
+        .bind(&row.owner)
+        .bind(&row.registrant)
+        .bind(provenance)
+        .bind(chain_positions)
+        .bind(canonicality_summary)
+        .bind(row.manifest_version)
+        .bind(row.last_recomputed_at)
+        .execute(pool)
+        .await?;
+    }
+    Ok(rows.to_vec())
+}
+
+async fn upsert_phase_permissions_current_rows(
+    pool: &PgPool,
+    rows: &[PermissionsCurrentRow],
+) -> Result<Vec<PermissionsCurrentRow>> {
+    for row in rows {
+        let (chain_id, block_number, block_hash) =
+            phase_permission_projection_target(pool, row.resource_id, &row.chain_positions).await?;
+        let transfer_behavior = row
+            .transfer_behavior
+            .as_object()
+            .map(|value| Value::Object(value.clone()))
+            .unwrap_or_else(|| json!({}));
+        let mut provenance = row.provenance.clone();
+        provenance
+            .as_object_mut()
+            .context("permission provenance must be an object")?
+            .insert("chain_id".to_owned(), json!(chain_id));
+        let chain_positions = json!({
+            "block_number": block_number,
+            "block_hash": block_hash,
+            "target_block_number": block_number,
+            "target_block_hash": block_hash,
+        });
+        let canonicality_summary = json!({
+            "state": "canonical",
+            "target_block_number": block_number,
+            "target_block_hash": block_hash,
+        });
+        sqlx::query(
+            r#"
+            INSERT INTO bigname_phase.permissions_current (
+                resource_id, subject, scope, scope_kind, scope_detail,
+                effective_powers, grant_source, revocation_source, inheritance_path,
+                transfer_behavior, provenance, chain_positions, canonicality_summary,
+                manifest_version, last_recomputed_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            ON CONFLICT (resource_id, subject, scope) DO UPDATE SET
+                effective_powers = EXCLUDED.effective_powers,
+                grant_source = EXCLUDED.grant_source,
+                revocation_source = EXCLUDED.revocation_source,
+                inheritance_path = EXCLUDED.inheritance_path,
+                transfer_behavior = EXCLUDED.transfer_behavior,
+                provenance = EXCLUDED.provenance,
+                chain_positions = EXCLUDED.chain_positions,
+                canonicality_summary = EXCLUDED.canonicality_summary,
+                manifest_version = EXCLUDED.manifest_version,
+                last_recomputed_at = EXCLUDED.last_recomputed_at
+            "#,
+        )
+        .bind(row.resource_id)
+        .bind(row.subject.to_ascii_lowercase())
+        .bind(row.scope.storage_key())
+        .bind(row.scope.kind())
+        .bind(row.scope.detail())
+        .bind(&row.effective_powers)
+        .bind(&row.grant_source)
+        .bind(&row.revocation_source)
+        .bind(&row.inheritance_path)
+        .bind(transfer_behavior)
+        .bind(provenance)
+        .bind(chain_positions)
+        .bind(canonicality_summary)
+        .bind(row.manifest_version)
+        .bind(row.last_recomputed_at)
+        .execute(pool)
+        .await?;
+    }
+    Ok(rows.to_vec())
+}
+
+/// Authority kinds the permission projection builder treats as projected authority.
+const PHASE_PROJECTED_PERMISSION_AUTHORITY_KINDS: &[&str] = &[
+    "registrar",
+    "registry",
+    "registry_only",
+    "registry_owner",
+    "registrant",
+    "resolver",
+    "ens_v2_registry",
+];
+
+/// Mirror `crates/project/src/builders/permissions.rs`: the projected support columns come from
+/// the resource's authority kind, not from the coverage the reader synthesizes back out of them.
+/// Deriving them from the fixture's coverage instead would keep the unknown-authority state that
+/// production writes out of the typed read path.
+fn phase_permission_summary_support(
+    authority_kind: Option<&str>,
+) -> (&'static str, Option<&'static str>) {
+    match authority_kind {
+        Some(kind) if PHASE_PROJECTED_PERMISSION_AUTHORITY_KINDS.contains(&kind) => {
+            ("supported", None)
+        }
+        Some("wrapper") => (
+            "unsupported",
+            Some("ensv1_wrapper_holder_permissions_not_projected"),
+        ),
+        _ => (
+            "unsupported",
+            Some("resource_permission_authority_not_projected"),
+        ),
+    }
+}
+
+async fn upsert_phase_permissions_current_resource_summary(
+    pool: &PgPool,
+    row: &bigname_storage::PermissionsCurrentResourceSummary,
+) -> Result<()> {
+    let (support_status, unsupported_reason) =
+        phase_permission_summary_support(row.authority_kind.as_deref());
+    let (chain_id, block_number, block_hash) =
+        phase_permission_projection_target(pool, row.resource_id, &row.chain_positions).await?;
+    let mut provenance = row.provenance.clone();
+    provenance
+        .as_object_mut()
+        .context("permission summary provenance must be an object")?
+        .insert("chain_id".to_owned(), json!(chain_id));
+    let chain_positions = json!({
+        "block_number": block_number,
+        "block_hash": block_hash,
+        "target_block_number": block_number,
+        "target_block_hash": block_hash,
+    });
+    let canonicality_summary = json!({
+        "state": "canonical_lineage",
+        "target_block_number": block_number,
+        "target_block_hash": block_hash,
+    });
+    sqlx::query(
+        r#"
+        INSERT INTO bigname_phase.permissions_current_resource_summary (
+            resource_id, authority_kind, root_resource_id, support_status,
+            unsupported_reason, provenance, chain_positions, canonicality_summary,
+            manifest_version, last_recomputed_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ON CONFLICT (resource_id) DO UPDATE SET
+            authority_kind = EXCLUDED.authority_kind,
+            root_resource_id = EXCLUDED.root_resource_id,
+            support_status = EXCLUDED.support_status,
+            unsupported_reason = EXCLUDED.unsupported_reason,
+            provenance = EXCLUDED.provenance,
+            chain_positions = EXCLUDED.chain_positions,
+            canonicality_summary = EXCLUDED.canonicality_summary,
+            manifest_version = EXCLUDED.manifest_version,
+            last_recomputed_at = EXCLUDED.last_recomputed_at
+        "#,
+    )
+    .bind(row.resource_id)
+    .bind(&row.authority_kind)
+    .bind(row.root_resource_id)
+    .bind(support_status)
+    .bind(unsupported_reason)
+    .bind(provenance)
+    .bind(chain_positions)
+    .bind(canonicality_summary)
+    .bind(row.manifest_version)
+    .bind(row.last_recomputed_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn phase_permission_projection_target(
+    pool: &PgPool,
+    resource_id: Uuid,
+    source_positions: &Value,
+) -> Result<(String, i64, String)> {
+    let chain_id: String = sqlx::query_scalar(
+        "SELECT chain_id FROM bigname_phase.resources WHERE resource_id = $1",
+    )
+    .bind(resource_id)
+    .fetch_one(pool)
+    .await?;
+    let (block_number, block_hash) =
+        phase_projection_target_for_chain(pool, &chain_id, source_positions).await?;
+    Ok((chain_id, block_number, block_hash))
+}
+
+async fn phase_projection_target_for_chain(
+    pool: &PgPool,
+    chain_id: &str,
+    source_positions: &Value,
+) -> Result<(i64, String)> {
+    let position = phase_projection_source_position(source_positions)?;
+    let block_number = position
+        .get("block_number")
+        .and_then(Value::as_i64)
+        .context("permission fixture source position requires block_number")?;
+    let requested_block_hash = position
+        .get("block_hash")
+        .and_then(Value::as_str)
+        .context("permission fixture source position requires block_hash")?;
+    let timestamp = position
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .unwrap_or("2026-04-17T00:00:00Z");
+    let existing_block_hash: Option<String> = sqlx::query_scalar(
+        "SELECT block_hash FROM bigname_phase.chain_lineage \
+         WHERE chain_id = $1 AND block_number = $2 \
+           AND canonicality_state IN ('canonical', 'safe', 'finalized') \
+         ORDER BY block_hash LIMIT 1",
+    )
+    .bind(chain_id)
+    .bind(block_number)
+    .fetch_optional(pool)
+    .await?;
+    let block_hash = existing_block_hash.unwrap_or_else(|| requested_block_hash.to_owned());
+    sqlx::query(
+        "INSERT INTO bigname_phase.chain_lineage ( \
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state \
+         ) VALUES ($1, $2, $3, $4::timestamptz, 'canonical') \
+         ON CONFLICT (chain_id, block_hash) DO NOTHING",
+    )
+    .bind(chain_id)
+    .bind(&block_hash)
+    .bind(block_number)
+    .bind(timestamp)
+    .execute(pool)
+    .await?;
+    Ok((block_number, block_hash))
+}
+
+async fn upsert_phase_resolver_current_rows(
+    pool: &PgPool,
+    rows: &[ResolverCurrentRow],
+) -> Result<Vec<ResolverCurrentRow>> {
+    for row in rows {
+        let (support_status, unsupported_reason) = phase_support_from_coverage(&row.coverage);
+        sqlx::query(
+            r#"
+            INSERT INTO bigname_phase.resolver_current (
+                chain_id, resolver_address, declared_summary, support_status,
+                unsupported_reason, provenance, chain_positions, canonicality_summary,
+                manifest_version, last_recomputed_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (chain_id, resolver_address) DO UPDATE SET
+                declared_summary = EXCLUDED.declared_summary,
+                support_status = EXCLUDED.support_status,
+                unsupported_reason = EXCLUDED.unsupported_reason,
+                provenance = EXCLUDED.provenance,
+                chain_positions = EXCLUDED.chain_positions,
+                canonicality_summary = EXCLUDED.canonicality_summary,
+                manifest_version = EXCLUDED.manifest_version,
+                last_recomputed_at = EXCLUDED.last_recomputed_at
+            "#,
+        )
+        .bind(&row.chain_id)
+        .bind(row.resolver_address.to_ascii_lowercase())
+        .bind(&row.declared_summary)
+        .bind(support_status)
+        .bind(unsupported_reason)
+        .bind(&row.provenance)
+        .bind(phase_chain_positions(&row.chain_positions))
+        .bind(&row.canonicality_summary)
+        .bind(row.manifest_version)
+        .bind(row.last_recomputed_at)
+        .execute(pool)
+        .await?;
+    }
+    Ok(rows.to_vec())
+}
 
 struct TestDatabase {
     database: bigname_test_support::TestDatabase,
     pool: PgPool,
     lookup_pool: PgPool,
     database_name: String,
+}
+
+async fn upsert_primary_name_current_rows(
+    pool: &PgPool,
+    rows: &[PrimaryNameCurrentRow],
+) -> Result<()> {
+    for row in rows {
+        let raw_claim_name = matches!(
+            row.claim_status,
+            PrimaryNameClaimStatus::Success | PrimaryNameClaimStatus::InvalidName
+        )
+        .then_some(row.raw_claim_name.as_ref())
+        .flatten();
+        let claim_provenance =
+            phase_primary_claim_provenance(pool, &row.namespace, &row.claim_provenance).await?;
+        sqlx::query(
+            r#"
+            INSERT INTO bigname_phase.primary_names_current (
+                address, coin_type, namespace, claim_status, raw_claim_name,
+                claim_name_is_normalized, unsupported_reason, claim_provenance
+            )
+            VALUES ($1, $2, $3, $4, $5, false, $6, $7)
+            ON CONFLICT (address, coin_type, namespace) DO UPDATE SET
+                claim_status = EXCLUDED.claim_status,
+                raw_claim_name = EXCLUDED.raw_claim_name,
+                claim_name_is_normalized = EXCLUDED.claim_name_is_normalized,
+                unsupported_reason = EXCLUDED.unsupported_reason,
+                claim_provenance = EXCLUDED.claim_provenance
+            "#,
+        )
+        .bind(row.address.to_ascii_lowercase())
+        .bind(&row.coin_type)
+        .bind(&row.namespace)
+        .bind(row.claim_status.as_str())
+        .bind(raw_claim_name)
+        .bind((row.claim_status == PrimaryNameClaimStatus::Unsupported).then_some("unsupported"))
+        .bind(claim_provenance)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn upsert_primary_name_current_snapshots(
+    pool: &PgPool,
+    snapshots: &[PrimaryNameCurrentSnapshot],
+) -> Result<()> {
+    for snapshot in snapshots {
+        let raw_claim_name = matches!(
+            snapshot.row.claim_status,
+            PrimaryNameClaimStatus::Success | PrimaryNameClaimStatus::InvalidName
+        )
+        .then(|| {
+            snapshot
+                .normalized_claim_name
+                .as_ref()
+                .or(snapshot.row.raw_claim_name.as_ref())
+        })
+        .flatten();
+        let claim_provenance = phase_primary_claim_provenance(
+            pool,
+            &snapshot.row.namespace,
+            &snapshot.row.claim_provenance,
+        )
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO bigname_phase.primary_names_current (
+                address, coin_type, namespace, claim_status, raw_claim_name,
+                claim_name_is_normalized, unsupported_reason, claim_provenance
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (address, coin_type, namespace) DO UPDATE SET
+                claim_status = EXCLUDED.claim_status,
+                raw_claim_name = EXCLUDED.raw_claim_name,
+                claim_name_is_normalized = EXCLUDED.claim_name_is_normalized,
+                unsupported_reason = EXCLUDED.unsupported_reason,
+                claim_provenance = EXCLUDED.claim_provenance
+            "#,
+        )
+        .bind(snapshot.row.address.to_ascii_lowercase())
+        .bind(&snapshot.row.coin_type)
+        .bind(&snapshot.row.namespace)
+        .bind(snapshot.row.claim_status.as_str())
+        .bind(raw_claim_name)
+        .bind(raw_claim_name.is_some() && snapshot.claim_name_is_normalized)
+        .bind(
+            (snapshot.row.claim_status == PrimaryNameClaimStatus::Unsupported)
+                .then_some("unsupported"),
+        )
+        .bind(claim_provenance)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn phase_primary_claim_provenance(
+    pool: &PgPool,
+    namespace: &str,
+    source: &Value,
+) -> Result<Value> {
+    let mut provenance = source.clone();
+    let object = provenance
+        .as_object_mut()
+        .context("primary-name fixture provenance must be an object")?;
+    let chain_id = object
+        .get("chain_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            if namespace == "basenames" {
+                "base-mainnet".to_owned()
+            } else {
+                "ethereum-mainnet".to_owned()
+            }
+        });
+    let requested_target = object
+        .get("target_block_number")
+        .and_then(Value::as_i64)
+        .zip(object.get("target_block_hash").and_then(Value::as_str))
+        .map(|(block_number, block_hash)| {
+            json!({
+                "block_number": block_number,
+                "block_hash": block_hash,
+                "timestamp": "2026-04-17T00:00:00Z",
+            })
+        });
+    let (block_number, block_hash) = match requested_target {
+        Some(position) => phase_projection_target_for_chain(pool, &chain_id, &position).await?,
+        None => sqlx::query_as(
+            "SELECT block_number, block_hash FROM bigname_phase.chain_lineage \
+             WHERE chain_id = $1 \
+               AND canonicality_state IN ('canonical', 'safe', 'finalized') \
+             ORDER BY block_number DESC, block_hash LIMIT 1",
+        )
+        .bind(&chain_id)
+        .fetch_one(pool)
+        .await?,
+    };
+    object.insert("chain_id".to_owned(), json!(chain_id));
+    object.insert("target_block_number".to_owned(), json!(block_number));
+    object.insert("target_block_hash".to_owned(), json!(block_hash));
+    Ok(provenance)
 }
 
 
@@ -51,8 +952,8 @@ impl TestDatabase {
     }
 
     async fn new_with_schemas(
-        initialize_manifest_schema: bool,
-        initialize_name_current_schema: bool,
+        _initialize_manifest_schema: bool,
+        _initialize_name_current_schema: bool,
     ) -> Result<Self> {
         let database = bigname_test_support::TestDatabase::create(
             TestDatabaseConfig::new("bigname_api_test")
@@ -66,403 +967,15 @@ impl TestDatabase {
         let pool = database.pool().clone();
         let database_name = database.database_name().to_owned();
 
-        if initialize_manifest_schema {
-            sqlx::query(
-                r#"
-                    CREATE TYPE manifest_rollout_status AS ENUM (
-                        'draft',
-                        'shadow',
-                        'active',
-                        'deprecated'
-                    )
-                    "#,
-            )
-            .execute(&pool)
-            .await
-            .context("failed to create manifest_rollout_status for API tests")?;
-            sqlx::query(
-                r#"
-                    CREATE TYPE capability_support_status AS ENUM (
-                        'unsupported',
-                        'shadow',
-                        'supported'
-                    )
-                    "#,
-            )
-            .execute(&pool)
-            .await
-            .context("failed to create capability_support_status for API tests")?;
-            sqlx::query(
-                r#"
-                    CREATE TABLE manifest_versions (
-                        manifest_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-                        manifest_version BIGINT NOT NULL CHECK (manifest_version > 0),
-                        namespace TEXT NOT NULL,
-                        source_family TEXT NOT NULL,
-                        chain TEXT NOT NULL,
-                        deployment_epoch TEXT NOT NULL,
-                        rollout_status manifest_rollout_status NOT NULL,
-                        normalizer_version TEXT NOT NULL,
-                        file_path TEXT NOT NULL,
-                        manifest_payload JSONB NOT NULL,
-                        loaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
-                    )
-                    "#,
-            )
-            .execute(&pool)
-            .await
-            .context("failed to create manifest_versions for API tests")?;
-            sqlx::query(
-                    r#"
-                    CREATE TABLE manifest_capability_flags (
-                        manifest_id BIGINT NOT NULL REFERENCES manifest_versions (manifest_id) ON DELETE CASCADE,
-                        capability_name TEXT NOT NULL,
-                        status capability_support_status NOT NULL,
-                        notes TEXT,
-                        PRIMARY KEY (manifest_id, capability_name)
-                    )
-                    "#,
-                )
-                .execute(&pool)
-                .await
-                .context("failed to create manifest_capability_flags for API tests")?;
-        }
-
-        if initialize_name_current_schema {
-            sqlx::query(
-                r#"
-                    CREATE TYPE canonicality_state AS ENUM (
-                        'observed',
-                        'canonical',
-                        'safe',
-                        'finalized',
-                        'orphaned'
-                    )
-                    "#,
-            )
-            .execute(&pool)
-            .await
-            .context("failed to create canonicality_state for API tests")?;
-            sqlx::query(
-                r#"
-                    CREATE TABLE chain_checkpoints (
-                        chain_id TEXT PRIMARY KEY,
-                        canonical_block_hash TEXT,
-                        canonical_block_number BIGINT,
-                        safe_block_hash TEXT,
-                        safe_block_number BIGINT,
-                        finalized_block_hash TEXT,
-                        finalized_block_number BIGINT,
-                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        CHECK ((canonical_block_hash IS NULL) = (canonical_block_number IS NULL)),
-                        CHECK ((safe_block_hash IS NULL) = (safe_block_number IS NULL)),
-                        CHECK ((finalized_block_hash IS NULL) = (finalized_block_number IS NULL))
-                    )
-                    "#,
-            )
-            .execute(&pool)
-            .await
-            .context("failed to create chain_checkpoints for API tests")?;
-            sqlx::query(
-                r#"
-                    CREATE TABLE chain_lineage (
-                        chain_id TEXT NOT NULL,
-                        block_hash TEXT NOT NULL,
-                        parent_hash TEXT,
-                        block_number BIGINT NOT NULL CHECK (block_number >= 0),
-                        block_timestamp TIMESTAMPTZ NOT NULL,
-                        canonicality_state canonicality_state NOT NULL DEFAULT 'observed',
-                        observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        inserted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        PRIMARY KEY (chain_id, block_hash)
-                    )
-                    "#,
-            )
-            .execute(&pool)
-            .await
-            .context("failed to create chain_lineage for API tests")?;
-            sqlx::query(
-                r#"
-                    CREATE TABLE chain_header_audit (
-                        chain_id TEXT NOT NULL,
-                        block_hash TEXT NOT NULL,
-                        logs_bloom BYTEA,
-                        transactions_root TEXT,
-                        receipts_root TEXT,
-                        state_root TEXT,
-                        observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        PRIMARY KEY (chain_id, block_hash),
-                        FOREIGN KEY (chain_id, block_hash)
-                            REFERENCES chain_lineage (chain_id, block_hash)
-                            ON DELETE CASCADE,
-                        CHECK (
-                            logs_bloom IS NOT NULL
-                            OR transactions_root IS NOT NULL
-                            OR receipts_root IS NOT NULL
-                            OR state_root IS NOT NULL
-                        )
-                    )
-                    "#,
-            )
-            .execute(&pool)
-            .await
-            .context("failed to create chain_header_audit for API tests")?;
-            sqlx::query(
-                r#"
-                    CREATE TABLE name_surfaces (
-                        logical_name_id TEXT PRIMARY KEY,
-                        namespace TEXT NOT NULL,
-                        canonical_display_name TEXT NOT NULL,
-                        normalized_name TEXT NOT NULL,
-                        namehash TEXT NOT NULL,
-                        chain_id TEXT NOT NULL DEFAULT 'ethereum-mainnet',
-                        block_hash TEXT NOT NULL DEFAULT '0xsurface',
-                        block_number BIGINT NOT NULL DEFAULT 20999998,
-                        canonicality_state canonicality_state NOT NULL DEFAULT 'finalized',
-                        CHECK (logical_name_id = namespace || ':' || normalized_name)
-                    )
-                    "#,
-            )
-            .execute(&pool)
-            .await
-            .context("failed to create name_surfaces for API tests")?;
-            sqlx::query(
-                r#"
-                    CREATE TABLE resources (
-                        resource_id UUID PRIMARY KEY,
-                        chain_id TEXT NOT NULL DEFAULT 'ethereum-mainnet',
-                        block_hash TEXT NOT NULL DEFAULT '0xresource',
-                        block_number BIGINT NOT NULL DEFAULT 21000001,
-                        canonicality_state canonicality_state NOT NULL DEFAULT 'finalized'
-                    )
-                    "#,
-            )
-            .execute(&pool)
-            .await
-            .context("failed to create resources for API tests")?;
-            sqlx::query(
-                r#"
-                    CREATE TABLE token_lineages (
-                        token_lineage_id UUID PRIMARY KEY,
-                        chain_id TEXT NOT NULL DEFAULT 'ethereum-mainnet',
-                        block_hash TEXT NOT NULL DEFAULT '0xlineage',
-                        block_number BIGINT NOT NULL DEFAULT 21000000,
-                        canonicality_state canonicality_state NOT NULL DEFAULT 'finalized'
-                    )
-                    "#,
-            )
-            .execute(&pool)
-            .await
-            .context("failed to create token_lineages for API tests")?;
-            sqlx::query(
-                r#"
-                    CREATE TABLE surface_bindings (
-                        surface_binding_id UUID PRIMARY KEY,
-                        logical_name_id TEXT NOT NULL REFERENCES name_surfaces (logical_name_id),
-                        resource_id UUID NOT NULL REFERENCES resources (resource_id),
-                        binding_kind TEXT NOT NULL,
-                        active_to TIMESTAMPTZ,
-                        chain_id TEXT NOT NULL DEFAULT 'ethereum-mainnet',
-                        block_hash TEXT NOT NULL DEFAULT '0xbinding',
-                        block_number BIGINT NOT NULL DEFAULT 21000003,
-                        canonicality_state canonicality_state NOT NULL DEFAULT 'finalized',
-                        CHECK (
-                            binding_kind IN (
-                                'declared_registry_path',
-                                'linked_subregistry_path',
-                                'resolver_alias_path',
-                                'observed_wildcard_path',
-                                'migration_rebind',
-                                'observed_only'
-                            )
-                        )
-                    )
-                    "#,
-            )
-            .execute(&pool)
-            .await
-            .context("failed to create surface_bindings for API tests")?;
-            sqlx::query(
-                r#"
-                    CREATE TABLE name_current (
-                        logical_name_id TEXT PRIMARY KEY REFERENCES name_surfaces (logical_name_id),
-                        namespace TEXT NOT NULL,
-                        canonical_display_name TEXT NOT NULL,
-                        normalized_name TEXT NOT NULL,
-                        namehash TEXT NOT NULL,
-                        surface_binding_id UUID REFERENCES surface_bindings (surface_binding_id),
-                        resource_id UUID REFERENCES resources (resource_id),
-                        token_lineage_id UUID REFERENCES token_lineages (token_lineage_id),
-                        binding_kind TEXT,
-                        declared_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        provenance JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        coverage JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        chain_positions JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        canonicality_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        manifest_version BIGINT NOT NULL CHECK (manifest_version > 0),
-                        last_recomputed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        CHECK (logical_name_id = namespace || ':' || normalized_name),
-                        CHECK (
-                            (surface_binding_id IS NULL AND resource_id IS NULL AND binding_kind IS NULL)
-                            OR
-                            (surface_binding_id IS NOT NULL AND resource_id IS NOT NULL AND binding_kind IS NOT NULL)
-                        ),
-                        CHECK (
-                            token_lineage_id IS NULL
-                            OR resource_id IS NOT NULL
-                        ),
-                        CHECK (
-                            binding_kind IS NULL
-                            OR binding_kind IN (
-                                'declared_registry_path',
-                                'linked_subregistry_path',
-                                'resolver_alias_path',
-                                'observed_wildcard_path',
-                                'migration_rebind',
-                                'observed_only'
-                            )
-                        )
-                    )
-                    "#,
-            )
-            .execute(&pool)
-            .await
-            .context("failed to create name_current for API tests")?;
-            sqlx::query(
-                r#"
-                    CREATE TABLE record_inventory_current (
-                        resource_id UUID NOT NULL REFERENCES resources (resource_id),
-                        record_version_boundary_key TEXT NOT NULL,
-                        record_version_boundary JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        enumeration_basis JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        selectors JSONB NOT NULL DEFAULT '[]'::jsonb,
-                        explicit_gaps JSONB NOT NULL DEFAULT '[]'::jsonb,
-                        unsupported_families JSONB NOT NULL DEFAULT '[]'::jsonb,
-                        last_change JSONB,
-                        entries JSONB NOT NULL DEFAULT '[]'::jsonb,
-                        provenance JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        coverage JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        chain_positions JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        canonicality_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        manifest_version BIGINT NOT NULL CHECK (manifest_version > 0),
-                        last_recomputed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        inserted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        PRIMARY KEY (resource_id, record_version_boundary_key),
-                        CHECK (record_version_boundary_key <> '')
-                    )
-                    "#,
-            )
-            .execute(&pool)
-            .await
-            .context("failed to create record_inventory_current for API tests")?;
-            sqlx::query(
-                r#"
-                    CREATE TABLE execution_traces (
-                        execution_trace_id UUID PRIMARY KEY,
-                        request_type TEXT NOT NULL,
-                        request_key TEXT NOT NULL,
-                        namespace TEXT NOT NULL,
-                        chain_context JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        manifest_context JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        contracts_called JSONB NOT NULL DEFAULT '[]'::jsonb,
-                        gateway_digests JSONB NOT NULL DEFAULT '[]'::jsonb,
-                        final_payload JSONB,
-                        failure_payload JSONB,
-                        request_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        finished_at TIMESTAMPTZ NOT NULL,
-                        inserted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        CHECK (jsonb_typeof(chain_context) = 'object' AND chain_context <> '{}'::jsonb),
-                        CHECK (
-                            jsonb_typeof(manifest_context) = 'object'
-                            AND manifest_context <> '{}'::jsonb
-                        ),
-                        CHECK (jsonb_typeof(contracts_called) = 'array'),
-                        CHECK (jsonb_typeof(gateway_digests) = 'array'),
-                        CHECK (jsonb_typeof(request_metadata) = 'object'),
-                        CHECK (final_payload IS NOT NULL OR failure_payload IS NOT NULL)
-                    )
-                    "#,
-            )
-            .execute(&pool)
-            .await
-            .context("failed to create execution_traces for API tests")?;
-            sqlx::query(
-                r#"
-                    CREATE TABLE execution_steps (
-                        execution_trace_id UUID NOT NULL REFERENCES execution_traces (execution_trace_id) ON DELETE CASCADE,
-                        step_index BIGINT NOT NULL CHECK (step_index >= 0),
-                        step_kind TEXT NOT NULL,
-                        input_digest TEXT,
-                        output_digest TEXT,
-                        latency_ms BIGINT CHECK (latency_ms IS NULL OR latency_ms >= 0),
-                        canonicality_dependency JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        step_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        inserted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        PRIMARY KEY (execution_trace_id, step_index),
-                        CHECK (
-                            jsonb_typeof(canonicality_dependency) = 'object'
-                            AND canonicality_dependency <> '{}'::jsonb
-                        ),
-                        CHECK (jsonb_typeof(step_payload) = 'object')
-                    )
-                    "#,
-            )
-            .execute(&pool)
-            .await
-            .context("failed to create execution_steps for API tests")?;
-            sqlx::query(
-                r#"
-                    CREATE TABLE execution_cache_outcomes (
-                        execution_cache_key TEXT PRIMARY KEY,
-                        request_key TEXT NOT NULL,
-                        requested_chain_positions JSONB NOT NULL DEFAULT '[]'::jsonb,
-                        manifest_versions JSONB NOT NULL DEFAULT '[]'::jsonb,
-                        topology_version_boundary JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        record_version_boundary JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        execution_trace_id UUID NOT NULL REFERENCES execution_traces (execution_trace_id) ON DELETE CASCADE,
-                        request_type TEXT NOT NULL,
-                        namespace TEXT NOT NULL,
-                        outcome_payload JSONB,
-                        failure_payload JSONB,
-                        finished_at TIMESTAMPTZ NOT NULL,
-                        inserted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        CHECK (request_key <> ''),
-                        CHECK (
-                            jsonb_typeof(requested_chain_positions) = 'array'
-                            AND requested_chain_positions <> '[]'::jsonb
-                        ),
-                        CHECK (
-                            jsonb_typeof(manifest_versions) = 'array'
-                            AND manifest_versions <> '[]'::jsonb
-                        ),
-                        CHECK (
-                            jsonb_typeof(topology_version_boundary) = 'object'
-                            AND topology_version_boundary <> '{}'::jsonb
-                        ),
-                        CHECK (
-                            jsonb_typeof(record_version_boundary) = 'object'
-                            AND record_version_boundary <> '{}'::jsonb
-                        ),
-                        CHECK (outcome_payload IS NOT NULL OR failure_payload IS NOT NULL)
-                    )
-                    "#,
-            )
-            .execute(&pool)
-            .await
-            .context("failed to create execution_cache_outcomes for API tests")?;
-        }
-
         let mut database = Self {
             database,
             lookup_pool: pool.clone(),
             pool,
             database_name,
         };
-        if initialize_name_current_schema {
-            database.initialize_lookup_schema().await?;
-            database.lookup_pool = database.open_lookup_pool().await?;
-        }
+        database.initialize_lookup_schema().await?;
+        database.lookup_pool = database.open_lookup_pool().await?;
+        database.pool = database.lookup_pool.clone();
         Ok(database)
     }
 
@@ -477,6 +990,7 @@ impl TestDatabase {
             .await?;
         database.initialize_lookup_schema().await?;
         database.lookup_pool = database.open_lookup_pool().await?;
+        database.pool = database.lookup_pool.clone();
         Ok(database)
     }
 
@@ -512,15 +1026,13 @@ impl TestDatabase {
 
     async fn open_lookup_pool(&self) -> Result<PgPool> {
         let config = self.database_config(6)?;
-        let options = bigname_storage::stamp_projection_replay_version(
-            PgConnectOptions::from_str(
-                config
-                    .database_url
-                    .as_deref()
-                    .context("lookup test database URL is missing")?,
-            )?
-            .options([("search_path", "bigname_phase".to_owned())]),
-        );
+        let options = PgConnectOptions::from_str(
+            config
+                .database_url
+                .as_deref()
+                .context("lookup test database URL is missing")?,
+        )?
+        .options([("search_path", "bigname_phase".to_owned())]);
         PgPoolOptions::new()
             .max_connections(config.max_connections)
             .connect_with(options)
@@ -533,7 +1045,6 @@ impl TestDatabase {
         chain_rpc_urls: bigname_lookup::ChainRpcUrls,
     ) -> Result<AppState> {
         Ok(AppState::new_with_rpc_urls(
-            self.pool.clone(),
             self.lookup_pool.clone(),
             chain_rpc_urls,
         ))
@@ -541,7 +1052,6 @@ impl TestDatabase {
 
     fn app_state(&self) -> AppState {
         AppState::new_with_rpc_urls(
-            self.pool.clone(),
             self.lookup_pool.clone(),
             bigname_lookup::ChainRpcUrls::default(),
         )
@@ -581,14 +1091,14 @@ impl TestDatabase {
                     manifest_version,
                     namespace,
                     source_family,
-                    chain,
-                    deployment_epoch,
+                    chain_id,
+                    deployment_label,
                     rollout_status,
                     normalizer_version,
                     file_path,
                     manifest_payload
                 )
-                VALUES ($1, $2, $3, $4, $5, $6::manifest_rollout_status, $7, $8, $9::jsonb)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 RETURNING manifest_id
                 "#,
         )
@@ -600,7 +1110,19 @@ impl TestDatabase {
         .bind(rollout_status)
         .bind(normalizer_version)
         .bind(file_path)
-        .bind("{}")
+        .bind(json!({
+            "manifest_version": manifest_version,
+            "namespace": namespace,
+            "source_family": source_family,
+            "chain": chain,
+            "deployment_epoch": deployment_epoch,
+            "rollout_status": rollout_status,
+            "normalizer_version": normalizer_version,
+            "capability_flags": {},
+            "roots": [],
+            "contracts": [],
+            "discovery_rules": []
+        }))
         .fetch_one(&self.pool)
         .await
         .context("failed to insert manifest_version for API test")?
@@ -617,13 +1139,14 @@ impl TestDatabase {
     ) -> Result<()> {
         sqlx::query(
             r#"
-                INSERT INTO manifest_capability_flags (
-                    manifest_id,
-                    capability_name,
-                    status,
-                    notes
+                UPDATE bigname_phase.manifest_versions
+                SET manifest_payload = jsonb_set(
+                    manifest_payload,
+                    ARRAY['capability_flags', $2],
+                    jsonb_build_object('status', $3, 'notes', $4::text),
+                    true
                 )
-                VALUES ($1, $2, $3::capability_support_status, $4)
+                WHERE manifest_id = $1
                 "#,
         )
         .bind(manifest_id)
@@ -632,7 +1155,7 @@ impl TestDatabase {
         .bind(notes)
         .execute(&self.pool)
         .await
-        .context("failed to insert manifest capability flag for API test")?;
+        .context("failed to update phase manifest capability flag for API test")?;
 
         Ok(())
     }
@@ -649,89 +1172,71 @@ impl TestDatabase {
         token_lineage_id: Uuid,
         surface_binding_id: Uuid,
     ) -> Result<()> {
-        seed_readable_lineage_anchors(
+        let chain_id = chain_id_for_namespace(namespace);
+        upsert_test_name_surfaces(
             &self.pool,
-            [
-                (
-                    "ethereum-mainnet",
-                    "0xlineage",
-                    21_000_000,
-                    CanonicalityState::Finalized,
-                ),
-                (
-                    "ethereum-mainnet",
-                    "0xresource",
-                    21_000_001,
-                    CanonicalityState::Finalized,
-                ),
-                (
-                    "ethereum-mainnet",
-                    "0xsurface",
-                    20_999_998,
-                    CanonicalityState::Finalized,
-                ),
-                (
-                    "ethereum-mainnet",
-                    "0xbinding",
-                    21_000_003,
-                    CanonicalityState::Finalized,
-                ),
-            ],
+            &[NameSurface {
+                logical_name_id: logical_name_id.to_owned(),
+                namespace: namespace.to_owned(),
+                input_name: normalized_name.to_owned(),
+                canonical_display_name: canonical_display_name.to_owned(),
+                normalized_name: normalized_name.to_owned(),
+                dns_encoded_name: normalized_name.as_bytes().to_vec(),
+                namehash: namehash.to_owned(),
+                labelhashes: Vec::new(),
+                normalizer_version: bigname_domain::normalization::ENS_NORMALIZER_VERSION.to_owned(),
+                normalization_warnings: json!([]),
+                normalization_errors: json!([]),
+                chain_id: chain_id.to_owned(),
+                block_hash: "0xsurface".to_owned(),
+                block_number: 20_999_998,
+                provenance: json!({"seed": "api_test"}),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
         )
         .await?;
-
-        sqlx::query(
-            r#"
-                INSERT INTO name_surfaces (
-                    logical_name_id,
-                    namespace,
-                    canonical_display_name,
-                    normalized_name,
-                    namehash
-                )
-                VALUES ($1, $2, $3, $4, $5)
-                "#,
+        upsert_test_token_lineages(
+            &self.pool,
+            &[TokenLineage {
+                token_lineage_id,
+                chain_id: chain_id.to_owned(),
+                block_hash: "0xlineage".to_owned(),
+                block_number: 21_000_000,
+                provenance: json!({"seed": "api_test"}),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
         )
-        .bind(logical_name_id)
-        .bind(namespace)
-        .bind(canonical_display_name)
-        .bind(normalized_name)
-        .bind(namehash)
-        .execute(&self.pool)
-        .await
-        .context("failed to insert name_surface for API test")?;
-
-        sqlx::query("INSERT INTO resources (resource_id) VALUES ($1)")
-            .bind(resource_id)
-            .execute(&self.pool)
-            .await
-            .context("failed to insert resource for API test")?;
-
-        sqlx::query("INSERT INTO token_lineages (token_lineage_id) VALUES ($1)")
-            .bind(token_lineage_id)
-            .execute(&self.pool)
-            .await
-            .context("failed to insert token_lineage for API test")?;
-
-        sqlx::query(
-            r#"
-                INSERT INTO surface_bindings (
-                    surface_binding_id,
-                    logical_name_id,
-                    resource_id,
-                    binding_kind
-                )
-                VALUES ($1, $2, $3, $4)
-                "#,
+        .await?;
+        upsert_test_resources(
+            &self.pool,
+            &[Resource {
+                resource_id,
+                token_lineage_id: Some(token_lineage_id),
+                chain_id: chain_id.to_owned(),
+                block_hash: "0xresource".to_owned(),
+                block_number: 21_000_001,
+                provenance: json!({"seed": "api_test"}),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
         )
-        .bind(surface_binding_id)
-        .bind(logical_name_id)
-        .bind(resource_id)
-        .bind("declared_registry_path")
-        .execute(&self.pool)
-        .await
-        .context("failed to insert surface_binding for API test")?;
-
+        .await?;
+        upsert_test_surface_bindings(
+            &self.pool,
+            &[SurfaceBinding {
+                surface_binding_id,
+                logical_name_id: logical_name_id.to_owned(),
+                resource_id,
+                binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+                active_from: timestamp(1_717_171_700),
+                active_to: None,
+                chain_id: chain_id.to_owned(),
+                block_hash: "0xbinding".to_owned(),
+                block_number: 21_000_003,
+                provenance: json!({"seed": "api_test"}),
+                canonicality_state: CanonicalityState::Finalized,
+            }],
+        )
+        .await?;
         Ok(())
     }
 
@@ -742,7 +1247,7 @@ impl TestDatabase {
         token_lineage_id: Uuid,
         surface_binding_id: Uuid,
     ) -> Result<()> {
-        bigname_storage::upsert_raw_blocks(
+        upsert_phase_raw_blocks(
             &self.pool,
             &[
                 raw_block("ethereum-mainnet", "0xsurface", None, 98, 1_717_171_698),
@@ -785,10 +1290,14 @@ impl TestDatabase {
         Ok(())
     }
 
-    async fn insert_name_current_row(&self, row: bigname_storage::NameCurrentRow) -> Result<()> {
+    async fn insert_name_current_row(
+        &self,
+        mut row: bigname_storage::NameCurrentRow,
+    ) -> Result<()> {
+        row.chain_positions = align_phase_chain_positions(&self.pool, &row.chain_positions).await?;
         self.seed_snapshot_selector_chain_positions(&row.chain_positions)
             .await?;
-        bigname_storage::upsert_name_current_rows(&self.pool, &[row])
+        upsert_phase_name_current_rows(&self.pool, &[row])
             .await
             .context("failed to upsert name_current row for API test")?;
         Ok(())
@@ -798,7 +1307,7 @@ impl TestDatabase {
         &self,
         row: bigname_storage::RecordInventoryCurrentRow,
     ) -> Result<()> {
-        bigname_storage::upsert_record_inventory_current_rows(&self.pool, &[row])
+        upsert_phase_record_inventory_current_rows(&self.pool, &[row])
             .await
             .context("failed to upsert record_inventory_current row for API test")?;
         Ok(())
@@ -833,18 +1342,15 @@ impl TestDatabase {
 
             sqlx::query(
                 r#"
-                INSERT INTO chain_lineage (
+                INSERT INTO bigname_phase.chain_lineage (
                     chain_id,
                     block_hash,
                     block_number,
                     block_timestamp,
                     canonicality_state
                 )
-                VALUES ($1, $2, $3, $4, 'finalized'::canonicality_state)
-                ON CONFLICT (chain_id, block_hash) DO UPDATE SET
-                    block_number = EXCLUDED.block_number,
-                    block_timestamp = EXCLUDED.block_timestamp,
-                    canonicality_state = EXCLUDED.canonicality_state
+                VALUES ($1, $2, $3, $4, 'finalized'::bigname_phase.canonicality_state)
+                ON CONFLICT DO NOTHING
                 "#,
             )
             .bind(chain_id)
@@ -858,28 +1364,17 @@ impl TestDatabase {
             })?;
 
             sqlx::query(
-                r#"
-                INSERT INTO chain_lineage (
-                    chain_id,
-                    block_hash,
-                    block_number,
-                    block_timestamp,
-                    canonicality_state
-                )
-                VALUES ($1, $2, $3, $4, 'canonical'::canonicality_state)
-                ON CONFLICT (chain_id, block_hash) DO NOTHING
-                "#,
+                "UPDATE bigname_phase.chain_lineage
+                 SET canonicality_state = 'canonical'
+                 WHERE chain_id = $1 AND block_hash = $2
+                   AND canonicality_state = 'observed'",
             )
             .bind(chain_id)
             .bind(block_hash)
-            .bind(block_number)
-            .bind(timestamp)
             .execute(&self.lookup_pool)
-            .await
-            .with_context(|| format!("failed to seed phase lineage for {chain_id}"))?;
-
+            .await?;
             sqlx::query(
-                "UPDATE chain_lineage
+                "UPDATE bigname_phase.chain_lineage
                  SET canonicality_state = 'safe'
                  WHERE chain_id = $1 AND block_hash = $2
                    AND canonicality_state = 'canonical'",
@@ -889,7 +1384,7 @@ impl TestDatabase {
             .execute(&self.lookup_pool)
             .await?;
             sqlx::query(
-                "UPDATE chain_lineage
+                "UPDATE bigname_phase.chain_lineage
                  SET canonicality_state = 'finalized'
                  WHERE chain_id = $1 AND block_hash = $2
                    AND canonicality_state = 'safe'",
@@ -992,242 +1487,6 @@ impl TestDatabase {
             bigname_domain::normalization::ENS_NORMALIZER_VERSION,
         )
         .await?;
-        Ok(())
-    }
-
-    async fn rebuild_name_current(&self, logical_name_id: &str) -> Result<()> {
-        let database_url = std::env::var("BIGNAME_DATABASE_URL")
-            .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| default_database_url().to_owned());
-        let base_options = PgConnectOptions::from_str(&database_url)
-            .context("failed to parse database URL for API worker rebuild")?;
-        let rebuild_database_url = base_options
-            .database(&self.database_name)
-            .to_url_lossy()
-            .to_string();
-        let logical_name_id = logical_name_id.to_owned();
-        let logical_name_id_for_seed = logical_name_id.clone();
-        let worker_manifest_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../apps/worker/Cargo.toml");
-
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let _guard = WORKER_CARGO_LOCK
-                .lock()
-                .expect("worker cargo lock must not be poisoned");
-            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-            let output = std::process::Command::new(cargo)
-                .arg("run")
-                .arg("--quiet")
-                .arg("--manifest-path")
-                .arg(worker_manifest_path)
-                .arg("--")
-                .arg("name-current")
-                .arg("rebuild")
-                .arg("--database-url")
-                .arg(&rebuild_database_url)
-                .arg("--logical-name-id")
-                .arg(&logical_name_id)
-                .output()
-                .with_context(|| {
-                    format!(
-                        "failed to invoke worker name_current rebuild for {logical_name_id}"
-                    )
-                })?;
-
-            if !output.status.success() {
-                return Err(anyhow::anyhow!(
-                    "worker name_current rebuild failed for {logical_name_id}\nstdout:\n{}\nstderr:\n{}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr),
-                ));
-            }
-
-            Ok(())
-        })
-        .await
-        .context("worker name_current rebuild task panicked")??;
-
-        if let Some(row) = bigname_storage::load_name_current(&self.pool, &logical_name_id_for_seed)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to load rebuilt name_current row {logical_name_id_for_seed} for selector seed"
-                )
-            })?
-        {
-            self.seed_snapshot_selector_chain_positions(&row.chain_positions)
-                .await?;
-        }
-
-        Ok(())
-    }
-
-    async fn seed_basenames_exact_name_rebuild_inputs(
-        &self,
-        logical_name_id: &str,
-        resource_id: Uuid,
-        token_lineage_id: Uuid,
-        surface_binding_id: Uuid,
-    ) -> Result<()> {
-        bigname_storage::upsert_raw_blocks(
-            &self.pool,
-            &[
-                raw_block("base-mainnet", "0xbase-surface", None, 98, 1_717_171_698),
-                raw_block("base-mainnet", "0xbase-resource", None, 99, 1_717_171_699),
-                raw_block("base-mainnet", "0xbase-binding", None, 100, 1_717_171_700),
-                raw_block("base-mainnet", "0xbase-grant", None, 101, 1_717_171_701),
-                raw_block("base-mainnet", "0xbase-authority", None, 102, 1_717_171_702),
-                raw_block("base-mainnet", "0xbase-resolver", None, 103, 1_717_171_703),
-            ],
-        )
-        .await
-        .context("failed to upsert raw blocks for basenames exact-name API test")?;
-        upsert_test_name_surfaces(
-            &self.pool,
-            &[NameSurface {
-                logical_name_id: logical_name_id.to_owned(),
-                namespace: "basenames".to_owned(),
-                input_name: "alice.base.eth".to_owned(),
-                canonical_display_name: "Alice.base.eth".to_owned(),
-                normalized_name: "alice.base.eth".to_owned(),
-                dns_encoded_name: b"alice.base.eth".to_vec(),
-                namehash: "namehash:alice.base.eth".to_owned(),
-                labelhashes: vec!["labelhash:alice.base.eth".to_owned()],
-                normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
-                normalization_warnings: json!([]),
-                normalization_errors: json!([]),
-                chain_id: "base-mainnet".to_owned(),
-                block_hash: "0xbase-surface".to_owned(),
-                block_number: 98,
-                provenance: json!({"seed": "basenames_exact_name_surface"}),
-                canonicality_state: CanonicalityState::Canonical,
-            }],
-        )
-        .await
-        .context("failed to upsert basenames name surface for API test")?;
-        upsert_test_token_lineages(
-            &self.pool,
-            &[TokenLineage {
-                token_lineage_id,
-                chain_id: "base-mainnet".to_owned(),
-                block_hash: "0xbase-resource".to_owned(),
-                block_number: 99,
-                provenance: json!({"seed": "basenames_exact_name_token_lineage"}),
-                canonicality_state: CanonicalityState::Canonical,
-            }],
-        )
-        .await
-        .context("failed to upsert basenames token lineage for API test")?;
-        upsert_test_resources(
-            &self.pool,
-            &[Resource {
-                resource_id,
-                token_lineage_id: Some(token_lineage_id),
-                chain_id: "base-mainnet".to_owned(),
-                block_hash: "0xbase-resource".to_owned(),
-                block_number: 99,
-                provenance: json!({"seed": "basenames_exact_name_resource"}),
-                canonicality_state: CanonicalityState::Canonical,
-            }],
-        )
-        .await
-        .context("failed to upsert basenames resource for API test")?;
-        upsert_test_surface_bindings(
-            &self.pool,
-            &[SurfaceBinding {
-                surface_binding_id,
-                logical_name_id: logical_name_id.to_owned(),
-                resource_id,
-                binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
-                active_from: timestamp(1_717_171_700),
-                active_to: None,
-                chain_id: "base-mainnet".to_owned(),
-                block_hash: "0xbase-binding".to_owned(),
-                block_number: 100,
-                provenance: json!({"seed": "basenames_exact_name_binding"}),
-                canonicality_state: CanonicalityState::Canonical,
-            }],
-        )
-        .await
-        .context("failed to upsert basenames surface binding for API test")?;
-        bigname_storage::insert_normalized_event_fixtures(
-            &self.pool,
-            &[
-                NormalizedEvent {
-                    event_identity: "api-test:basenames:grant".to_owned(),
-                    namespace: "basenames".to_owned(),
-                    logical_name_id: Some(logical_name_id.to_owned()),
-                    resource_id: Some(resource_id),
-                    event_kind: "RegistrationGranted".to_owned(),
-                    source_family: "basenames_base_registrar".to_owned(),
-                    manifest_version: 3,
-                    source_manifest_id: None,
-                    chain_id: Some("base-mainnet".to_owned()),
-                    block_number: Some(101),
-                    block_hash: Some("0xbase-grant".to_owned()),
-                    transaction_hash: Some("0xtxbasegrant".to_owned()),
-                    log_index: Some(0),
-                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:basenames:grant"}),
-                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                    canonicality_state: CanonicalityState::Canonical,
-                    before_state: json!({}),
-                    after_state: json!({
-                        "authority_kind": "registrar",
-                        "authority_key": "registrar:base-mainnet:alice",
-                        "registrant": "0x00000000000000000000000000000000000000aa",
-                        "expiry": 1_900_000_000_i64,
-                    }),
-                },
-                NormalizedEvent {
-                    event_identity: "api-test:basenames:authority".to_owned(),
-                    namespace: "basenames".to_owned(),
-                    logical_name_id: Some(logical_name_id.to_owned()),
-                    resource_id: Some(resource_id),
-                    event_kind: "AuthorityTransferred".to_owned(),
-                    source_family: "basenames_base_registry".to_owned(),
-                    manifest_version: 3,
-                    source_manifest_id: None,
-                    chain_id: Some("base-mainnet".to_owned()),
-                    block_number: Some(102),
-                    block_hash: Some("0xbase-authority".to_owned()),
-                    transaction_hash: Some("0xtxbaseauthority".to_owned()),
-                    log_index: Some(0),
-                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:basenames:authority"}),
-                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                    canonicality_state: CanonicalityState::Canonical,
-                    before_state: json!({}),
-                    after_state: json!({
-                        "owner": "0x00000000000000000000000000000000000000bb",
-                    }),
-                },
-                NormalizedEvent {
-                    event_identity: "api-test:basenames:resolver".to_owned(),
-                    namespace: "basenames".to_owned(),
-                    logical_name_id: Some(logical_name_id.to_owned()),
-                    resource_id: Some(resource_id),
-                    event_kind: "ResolverChanged".to_owned(),
-                    source_family: "basenames_base_resolver".to_owned(),
-                    manifest_version: 4,
-                    source_manifest_id: None,
-                    chain_id: Some("base-mainnet".to_owned()),
-                    block_number: Some(103),
-                    block_hash: Some("0xbase-resolver".to_owned()),
-                    transaction_hash: Some("0xtxbaseresolver".to_owned()),
-                    log_index: Some(0),
-                    raw_fact_ref: json!({"kind": "raw_log", "event_identity": "api-test:basenames:resolver"}),
-                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
-                    canonicality_state: CanonicalityState::Canonical,
-                    before_state: json!({}),
-                    after_state: json!({
-                        "resolver": "0x0000000000000000000000000000000000000abc",
-                        "namehash": "namehash:alice.base.eth",
-                    }),
-                },
-            ],
-        )
-        .await
-        .context("failed to upsert basenames normalized events for API test")?;
-
         Ok(())
     }
 
@@ -1343,7 +1602,7 @@ async fn seed_schema_v2_lookup_head(
     timestamp: &str,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO chain_lineage
+        "INSERT INTO bigname_phase.chain_lineage
             (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
          VALUES ($1, $2, $3, $4::timestamptz, 'canonical')
          ON CONFLICT (chain_id, block_hash) DO NOTHING",
@@ -1545,15 +1804,20 @@ async fn seed_schema_v2_ens_record_lookup(
              resource_id, binding_kind, declared_summary, support_status,
              provenance, chain_positions, canonicality_summary, manifest_version)
          VALUES ($1, 'ens', 'alice.eth', $2, $3, $4, 'declared_registry_path',
-                 jsonb_build_object('topology', $5::jsonb), 'supported', '{}', $6,
-                 jsonb_build_object('state', 'canonical'), 1)",
+                 jsonb_build_object('topology', $5::jsonb), 'supported', $6, $7, $8, 1)",
     )
     .bind(&logical_name_id)
     .bind(&namehash)
     .bind(binding_id)
     .bind(resource_id)
     .bind(&topology)
+    .bind(json!({ "chain_id": "ethereum-mainnet" }))
     .bind(&positions)
+    .bind(json!({
+        "state": "canonical_lineage",
+        "target_block_number": block_number,
+        "target_block_hash": block_hash,
+    }))
     .execute(pool)
     .await?;
     sqlx::query(
@@ -1561,15 +1825,20 @@ async fn seed_schema_v2_ens_record_lookup(
             (resource_id, record_version_boundary_key, record_version_boundary,
              selectors, unsupported_families, entries, support_status, provenance,
              chain_positions, canonicality_summary, manifest_version)
-         VALUES ($1, 'boundary-1', $2, $3, '[]', $4, 'supported', '{}', $5,
-                 jsonb_build_object('state', 'canonical'), 1)",
+         VALUES ($1, $2, $3, $4, '[]', $5, 'supported', $6, $7,
+                 $8, 1)",
     )
     .bind(resource_id)
+    .bind(bigname_storage::record_version_boundary_storage_key(
+        &boundary,
+        resource_id,
+    )?)
     .bind(&boundary)
     .bind(json!([{
         "record_key": "addr:60",
         "record_family": "addr",
-        "selector_key": "60"
+        "selector_key": "60",
+        "cacheable": true
     }]))
     .bind(json!([{
         "record_key": "addr:60",
@@ -1578,9 +1847,15 @@ async fn seed_schema_v2_ens_record_lookup(
         "status": "success",
         "value": { "coin_type": "60", "value": indexed_address }
     }]))
+    .bind(json!({ "chain_id": "ethereum-mainnet" }))
     .bind(json!({
         "target_block_number": block_number,
         "target_block_hash": block_hash
+    }))
+    .bind(json!({
+        "state": "canonical_lineage",
+        "target_block_number": block_number,
+        "target_block_hash": block_hash,
     }))
     .execute(pool)
     .await?;
@@ -1741,14 +2016,20 @@ async fn seed_schema_v2_basenames_record_lookup(
              provenance, chain_positions, canonicality_summary, manifest_version)
          VALUES ($1, 'basenames', 'alice.base.eth', $2, $3, $4,
                  'declared_registry_path', jsonb_build_object('topology', $5::jsonb),
-                 'supported', '{}', $6, jsonb_build_object('state', 'canonical'), 2)",
+                 'supported', $6, $7, $8, 2)",
     )
     .bind(&logical_name_id)
     .bind(&namehash)
     .bind(binding_id)
     .bind(resource_id)
     .bind(&topology)
+    .bind(json!({ "chain_id": "base-mainnet" }))
     .bind(&positions)
+    .bind(json!({
+        "state": "canonical_lineage",
+        "target_block_number": block_number,
+        "target_block_hash": base_block_hash,
+    }))
     .execute(pool)
     .await?;
     sqlx::query(
@@ -1756,15 +2037,20 @@ async fn seed_schema_v2_basenames_record_lookup(
             (resource_id, record_version_boundary_key, record_version_boundary,
              selectors, unsupported_families, entries, support_status, provenance,
              chain_positions, canonicality_summary, manifest_version)
-         VALUES ($1, 'boundary-1', $2, $3, '[]', $4, 'supported', '{}', $5,
-                 jsonb_build_object('state', 'canonical'), 2)",
+         VALUES ($1, $2, $3, $4, '[]', $5, 'supported', $6, $7,
+                 $8, 2)",
     )
     .bind(resource_id)
+    .bind(bigname_storage::record_version_boundary_storage_key(
+        &boundary,
+        resource_id,
+    )?)
     .bind(&boundary)
     .bind(json!([{
         "record_key": "addr:60",
         "record_family": "addr",
-        "selector_key": "60"
+        "selector_key": "60",
+        "cacheable": true
     }]))
     .bind(json!([{
         "record_key": "addr:60",
@@ -1773,9 +2059,15 @@ async fn seed_schema_v2_basenames_record_lookup(
         "status": "success",
         "value": { "coin_type": "60", "value": indexed_address }
     }]))
+    .bind(json!({ "chain_id": "base-mainnet" }))
     .bind(json!({
         "target_block_number": block_number,
         "target_block_hash": base_block_hash
+    }))
+    .bind(json!({
+        "state": "canonical_lineage",
+        "target_block_number": block_number,
+        "target_block_hash": base_block_hash,
     }))
     .execute(pool)
     .await?;
@@ -1834,23 +2126,28 @@ async fn seed_readable_lineage_anchors<'a>(
             continue;
         }
 
+        let block_timestamp = parse_rfc3339_utc_timestamp(&format!(
+            "2026-04-17T00:00:{:02}Z",
+            block_number.rem_euclid(60)
+        ))
+        .map_err(|error| anyhow::anyhow!(error))?;
         sqlx::query(
             r#"
-            INSERT INTO chain_lineage (
+            INSERT INTO bigname_phase.chain_lineage (
                 chain_id,
                 block_hash,
                 block_number,
                 block_timestamp,
                 canonicality_state
             )
-            VALUES ($1, $2, $3, $4, $5::canonicality_state)
-            ON CONFLICT (chain_id, block_hash) DO NOTHING
+            VALUES ($1, $2, $3, $4, $5::bigname_phase.canonicality_state)
+            ON CONFLICT DO NOTHING
             "#,
         )
         .bind(chain_id)
         .bind(block_hash)
         .bind(block_number)
-        .bind(timestamp(1_700_000_000 + block_number))
+        .bind(block_timestamp)
         .bind(canonicality_state.as_str())
         .execute(pool)
         .await
@@ -1860,6 +2157,88 @@ async fn seed_readable_lineage_anchors<'a>(
     }
 
     Ok(())
+}
+
+async fn readable_lineage_anchor(
+    pool: &PgPool,
+    chain_id: &str,
+    block_hash: &str,
+    block_number: i64,
+    canonicality_state: CanonicalityState,
+) -> Result<(String, i64)> {
+    seed_readable_lineage_anchors(
+        pool,
+        [(chain_id, block_hash, block_number, canonicality_state)],
+    )
+    .await?;
+    sqlx::query_as::<_, (String, i64)>(
+        r#"
+        SELECT block_hash, block_number
+        FROM bigname_phase.chain_lineage
+        WHERE chain_id = $1
+          AND block_number = $2
+          AND canonicality_state IN ('canonical', 'safe', 'finalized')
+        LIMIT 1
+        "#,
+    )
+    .bind(chain_id)
+    .bind(block_number)
+    .fetch_one(pool)
+    .await
+    .context("readable test lineage anchor must exist")
+}
+
+async fn identity_lineage_anchor(
+    pool: &PgPool,
+    chain_id: &str,
+    block_hash: &str,
+    block_number: i64,
+) -> Result<(String, i64)> {
+    let block_timestamp = parse_rfc3339_utc_timestamp(&format!(
+        "2026-04-17T00:00:{:02}Z",
+        block_number.rem_euclid(60)
+    ))
+    .map_err(|error| anyhow::anyhow!(error))?;
+    sqlx::query(
+        r#"
+        INSERT INTO bigname_phase.chain_lineage (
+            chain_id, block_hash, block_number, block_timestamp, canonicality_state
+        )
+        VALUES ($1, $2, $3, $4, 'observed'::bigname_phase.canonicality_state)
+        ON CONFLICT (chain_id, block_hash) DO NOTHING
+        "#,
+    )
+    .bind(chain_id)
+    .bind(block_hash)
+    .bind(block_number)
+    .bind(block_timestamp)
+    .execute(pool)
+    .await?;
+    Ok((block_hash.to_owned(), block_number))
+}
+
+async fn identity_lineage_anchor_for_state(
+    pool: &PgPool,
+    chain_id: &str,
+    block_hash: &str,
+    block_number: i64,
+    canonicality_state: CanonicalityState,
+) -> Result<(String, i64)> {
+    if matches!(
+        canonicality_state,
+        CanonicalityState::Canonical | CanonicalityState::Safe | CanonicalityState::Finalized
+    ) {
+        readable_lineage_anchor(
+            pool,
+            chain_id,
+            block_hash,
+            block_number,
+            canonicality_state,
+        )
+        .await
+    } else {
+        identity_lineage_anchor(pool, chain_id, block_hash, block_number).await
+    }
 }
 
 async fn upsert_test_token_lineages(
@@ -1878,7 +2257,37 @@ async fn upsert_test_token_lineages(
         }),
     )
     .await?;
-    bigname_storage::upsert_token_lineages(pool, token_lineages).await
+    for row in token_lineages {
+        let (block_hash, block_number) = identity_lineage_anchor_for_state(
+            pool,
+            &row.chain_id,
+            &row.block_hash,
+            row.block_number,
+            row.canonicality_state,
+        )
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO bigname_phase.token_lineages (
+                token_lineage_id, chain_id, block_hash, block_number, provenance,
+                canonicality_state
+            )
+            VALUES ($1, $2, $3, $4, $5, $6::bigname_phase.canonicality_state)
+            ON CONFLICT (token_lineage_id) DO UPDATE SET
+                provenance = EXCLUDED.provenance,
+                canonicality_state = EXCLUDED.canonicality_state
+            "#,
+        )
+        .bind(row.token_lineage_id)
+        .bind(&row.chain_id)
+        .bind(block_hash)
+        .bind(block_number)
+        .bind(&row.provenance)
+        .bind(row.canonicality_state.as_str())
+        .execute(pool)
+        .await?;
+    }
+    Ok(token_lineages.to_vec())
 }
 
 async fn upsert_test_resources(
@@ -1897,7 +2306,39 @@ async fn upsert_test_resources(
         }),
     )
     .await?;
-    bigname_storage::upsert_resources(pool, resources).await
+    for row in resources {
+        let (block_hash, block_number) = identity_lineage_anchor_for_state(
+            pool,
+            &row.chain_id,
+            &row.block_hash,
+            row.block_number,
+            row.canonicality_state,
+        )
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO bigname_phase.resources (
+                resource_id, token_lineage_id, chain_id, block_hash, block_number,
+                provenance, canonicality_state
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7::bigname_phase.canonicality_state)
+            ON CONFLICT (resource_id) DO UPDATE SET
+                token_lineage_id = EXCLUDED.token_lineage_id,
+                provenance = EXCLUDED.provenance,
+                canonicality_state = EXCLUDED.canonicality_state
+            "#,
+        )
+        .bind(row.resource_id)
+        .bind(row.token_lineage_id)
+        .bind(&row.chain_id)
+        .bind(block_hash)
+        .bind(block_number)
+        .bind(&row.provenance)
+        .bind(row.canonicality_state.as_str())
+        .execute(pool)
+        .await?;
+    }
+    Ok(resources.to_vec())
 }
 
 async fn upsert_test_name_surfaces(
@@ -1916,7 +2357,60 @@ async fn upsert_test_name_surfaces(
         }),
     )
     .await?;
-    bigname_storage::upsert_name_surfaces(pool, name_surfaces).await
+    for row in name_surfaces {
+        let (block_hash, block_number) = identity_lineage_anchor_for_state(
+            pool,
+            &row.chain_id,
+            &row.block_hash,
+            row.block_number,
+            row.canonicality_state,
+        )
+        .await?;
+        let (logical_name_id, namehash) =
+            phase_logical_identity(&row.namespace, &row.normalized_name)?;
+        let raw_labels = row
+            .normalized_name
+            .split('.')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let labelhashes = raw_labels
+            .iter()
+            .map(|label| format!("{:#x}", alloy_primitives::keccak256(label.as_bytes())))
+            .collect::<Vec<_>>();
+        sqlx::query(
+            r#"
+            INSERT INTO bigname_phase.name_surfaces (
+                logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+                namehash, labelhashes, normalizer_version, visibility_state,
+                normalization_errors, chain_id, block_hash, block_number, provenance,
+                canonicality_state
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', $9, $10, $11, $12, $13,
+                    $14::bigname_phase.canonicality_state)
+            ON CONFLICT (logical_name_id) DO UPDATE SET
+                raw_name = EXCLUDED.raw_name,
+                provenance = EXCLUDED.provenance,
+                canonicality_state = EXCLUDED.canonicality_state
+            "#,
+        )
+        .bind(logical_name_id)
+        .bind(&row.namespace)
+        .bind(&row.canonical_display_name)
+        .bind(raw_labels)
+        .bind(&row.dns_encoded_name)
+        .bind(namehash)
+        .bind(labelhashes)
+        .bind(&row.normalizer_version)
+        .bind(&row.normalization_errors)
+        .bind(&row.chain_id)
+        .bind(block_hash)
+        .bind(block_number)
+        .bind(&row.provenance)
+        .bind(row.canonicality_state.as_str())
+        .execute(pool)
+        .await?;
+    }
+    Ok(name_surfaces.to_vec())
 }
 
 async fn upsert_test_surface_bindings(
@@ -1935,7 +2429,50 @@ async fn upsert_test_surface_bindings(
         }),
     )
     .await?;
-    bigname_storage::upsert_surface_bindings(pool, bindings).await
+    for row in bindings {
+        let (block_hash, block_number) = identity_lineage_anchor_for_state(
+            pool,
+            &row.chain_id,
+            &row.block_hash,
+            row.block_number,
+            row.canonicality_state,
+        )
+        .await?;
+        let (namespace, name) = row
+            .logical_name_id
+            .split_once(':')
+            .context("test surface binding logical_name_id must include namespace")?;
+        let (logical_name_id, _) = phase_logical_identity(namespace, name)?;
+        sqlx::query(
+            r#"
+            INSERT INTO bigname_phase.surface_bindings (
+                surface_binding_id, logical_name_id, resource_id, binding_kind,
+                active_from, active_to, chain_id, block_hash, block_number, provenance,
+                canonicality_state
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                    $11::bigname_phase.canonicality_state)
+            ON CONFLICT (surface_binding_id) DO UPDATE SET
+                active_to = EXCLUDED.active_to,
+                provenance = EXCLUDED.provenance,
+                canonicality_state = EXCLUDED.canonicality_state
+            "#,
+        )
+        .bind(row.surface_binding_id)
+        .bind(logical_name_id)
+        .bind(row.resource_id)
+        .bind(row.binding_kind.as_str())
+        .bind(row.active_from)
+        .bind(row.active_to)
+        .bind(&row.chain_id)
+        .bind(block_hash)
+        .bind(block_number)
+        .bind(&row.provenance)
+        .bind(row.canonicality_state.as_str())
+        .execute(pool)
+        .await?;
+    }
+    Ok(bindings.to_vec())
 }
 
 fn raw_block(
@@ -2120,6 +2657,7 @@ fn permission_current_row(
                 "deployment_epoch": "ens_v2",
             }],
             "derivation_kind": "permissions_current_rebuild",
+            "chain_id": "ethereum-mainnet",
         }),
         coverage: json!({
             "status": "full",
@@ -2129,18 +2667,16 @@ fn permission_current_row(
             "unsupported_reason": null,
         }),
         chain_positions: json!({
-            "ethereum": {
-                "chain_id": "ethereum-mainnet",
-                "block_number": block_number,
-                "block_hash": format!("0xperm{block_number:02x}"),
-                "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60),
-            }
+            "block_number": block_number,
+            "block_hash": format!("0xperm{block_number:02x}"),
+            "target_block_number": block_number,
+            "target_block_hash": format!("0xperm{block_number:02x}"),
+            "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60),
         }),
         canonicality_summary: json!({
-            "status": "finalized",
-            "chains": {
-                "ethereum-mainnet": "finalized",
-            }
+            "state": "canonical",
+            "target_block_number": block_number,
+            "target_block_hash": format!("0xperm{block_number:02x}"),
         }),
         manifest_version,
         last_recomputed_at: timestamp(1_717_174_000 + block_number),
@@ -2153,9 +2689,11 @@ fn permission_current_resource_summary(
 ) -> bigname_storage::PermissionsCurrentResourceSummary {
     let authority_kind = authority_kind.map(str::to_owned);
     let coverage = match authority_kind.as_deref() {
+        Some(kind) if PHASE_PROJECTED_PERMISSION_AUTHORITY_KINDS.contains(&kind) => {
+            bigname_storage::ResourcePermissionCoverage::authoritative(["permissions_current"])
+        }
         Some("wrapper") => bigname_storage::ResourcePermissionCoverage::ensv1_wrapper_holder_permissions_not_projected(),
-        Some(_) => bigname_storage::ResourcePermissionCoverage::authoritative(["permissions_current"]),
-        None => bigname_storage::ResourcePermissionCoverage::resource_authority_not_projected(),
+        _ => bigname_storage::ResourcePermissionCoverage::resource_authority_not_projected(),
     };
     bigname_storage::PermissionsCurrentResourceSummary {
         resource_id,
@@ -2164,44 +2702,23 @@ fn permission_current_resource_summary(
         coverage,
         provenance: json!({
             "derivation_kind": "permissions_current_resource_summary_rebuild",
+            "chain_id": "ethereum-mainnet",
         }),
         chain_positions: json!({
-            "ethereum-mainnet": {
-                "chain_id": "ethereum-mainnet",
-                "block_number": 1,
-                "block_hash": "0xpermission-summary",
-                "timestamp": "2024-05-31T01:13:20Z",
-            }
+            "block_number": 1,
+            "block_hash": "0xpermission-summary",
+            "target_block_number": 1,
+            "target_block_hash": "0xpermission-summary",
+            "timestamp": "2024-05-31T01:13:20Z",
         }),
         canonicality_summary: json!({
-            "status": "finalized",
-            "chains": {"ethereum-mainnet": "finalized"},
+            "state": "canonical_lineage",
+            "target_block_number": 1,
+            "target_block_hash": "0xpermission-summary",
         }),
         manifest_version: 1,
         last_recomputed_at: timestamp(1_717_174_000),
     }
-}
-
-async fn mark_permissions_current_projection_ready(database: &TestDatabase) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO permissions_current_publication (
-            projection,
-            publication_version,
-            data_revision,
-            published_at
-        )
-        VALUES ('permissions_current', $1, 1, now())
-        ON CONFLICT (projection) DO UPDATE SET
-            publication_version = EXCLUDED.publication_version,
-            data_revision = permissions_current_publication.data_revision + 1,
-            published_at = EXCLUDED.published_at
-        "#,
-    )
-    .bind(bigname_storage::PERMISSIONS_CURRENT_PUBLICATION_VERSION)
-    .execute(&database.pool)
-    .await?;
-    Ok(())
 }
 
 fn resolver_current_row(chain_id: &str, resolver_address: &str) -> ResolverCurrentRow {
@@ -2297,7 +2814,6 @@ fn resolver_current_row(chain_id: &str, resolver_address: &str) -> ResolverCurre
                 "chain": chain_id,
                 "deployment_epoch": "ens_v2",
             }],
-            "execution_trace_id": null,
             "derivation_kind": "resolver_current_rebuild",
         }),
         coverage: json!({
@@ -2400,8 +2916,7 @@ fn exact_name_row(
                     "deployment_epoch": "ens_v1"
                 }
             ],
-            "execution_trace_id": null,
-            "derivation_kind": "projection_apply"
+            "derivation_kind": "name_current_rebuild"
         }),
         coverage: json!({
             "status": "full",
@@ -2647,412 +3162,6 @@ fn worker_record_inventory_current_row(
     }
 }
 
-fn resolution_execution_requested_chain_positions() -> Value {
-    json!([{
-        "chain_id": "ethereum-mainnet",
-        "block_number": 21_000_003,
-        "block_hash": "0xbinding"
-    }])
-}
-
-fn resolution_execution_request_key(records: &[&str]) -> String {
-    let mut records = records
-        .iter()
-        .map(|record| (*record).to_owned())
-        .collect::<Vec<_>>();
-    records.sort_unstable();
-    format!("ens:alice.eth:{}", records.join(","))
-}
-
-fn resolution_execution_trace(
-    execution_trace_id: Uuid,
-    request_key: &str,
-    request_record_keys: &[&str],
-    verified_queries: Value,
-) -> ExecutionTrace {
-    ExecutionTrace {
-        execution_trace_id,
-        request_type: VERIFIED_RESOLUTION_REQUEST_TYPE.to_owned(),
-        request_key: request_key.to_owned(),
-        namespace: "ens".to_owned(),
-        chain_context: json!({
-            "requested_positions": resolution_execution_requested_chain_positions(),
-        }),
-        manifest_context: json!({
-            "manifest_versions": [{
-                "source_family": "ens_execution",
-                "manifest_version": 5
-            }]
-        }),
-        contracts_called: json!([
-            {
-                "chain_id": "ethereum-mainnet",
-                "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
-                "selector": "0x9061b923"
-            }
-        ]),
-        gateway_digests: json!([]),
-        final_payload: Some(json!({
-            "verified_queries": verified_queries.clone()
-        })),
-        failure_payload: None,
-        request_metadata: json!({
-            "surface": "alice.eth",
-            "record_keys": request_record_keys,
-            "entrypoint": "universal_resolver",
-            "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"
-        }),
-        finished_at: Some(timestamp(1_717_171_900)),
-        steps: vec![
-            ExecutionTraceStep {
-                step_index: 0,
-                step_kind: "load_declared_topology".to_owned(),
-                input_digest: Some("sha256:topology-input".to_owned()),
-                output_digest: Some("sha256:topology-output".to_owned()),
-                latency_ms: Some(4),
-                canonicality_dependency: json!({
-                    "ethereum-mainnet": {
-                        "block_hash": "0xbinding",
-                        "block_number": 21_000_003,
-                        "state": "finalized"
-                    }
-                }),
-                step_payload: json!({
-                    "entrypoint": "universal_resolver",
-                    "resolver": "0x0000000000000000000000000000000000000abc"
-                }),
-            },
-            ExecutionTraceStep {
-                step_index: 1,
-                step_kind: "call_universal_resolver".to_owned(),
-                input_digest: Some("sha256:resolver-input".to_owned()),
-                output_digest: Some("sha256:resolver-output".to_owned()),
-                latency_ms: Some(28),
-                canonicality_dependency: json!({
-                    "ethereum-mainnet": {
-                        "block_hash": "0xbinding",
-                        "block_number": 21_000_003,
-                        "state": "finalized"
-                    }
-                }),
-                step_payload: json!({
-                    "name": "alice.eth",
-                    "record_count": 2
-                }),
-            },
-        ],
-    }
-}
-
-fn resolution_execution_outcome(
-    execution_trace_id: Uuid,
-    request_key: &str,
-    verified_queries: Value,
-    logical_name_id: &str,
-    resource_id: Uuid,
-) -> ExecutionOutcome {
-    resolution_execution_outcome_with_boundaries(
-        execution_trace_id,
-        request_key,
-        verified_queries,
-        record_inventory_boundary(logical_name_id, resource_id),
-        record_inventory_boundary(logical_name_id, resource_id),
-    )
-}
-
-fn resolution_execution_outcome_with_boundaries(
-    execution_trace_id: Uuid,
-    request_key: &str,
-    verified_queries: Value,
-    topology_version_boundary: Value,
-    record_version_boundary: Value,
-) -> ExecutionOutcome {
-    ExecutionOutcome {
-        cache_key: ExecutionCacheKey {
-            request_key: request_key.to_owned(),
-            requested_chain_positions: resolution_execution_requested_chain_positions(),
-            manifest_versions: json!([
-                {
-                    "manifest_version": 3,
-                    "source_family": "ens_v1_registry",
-                    "chain": "ethereum-mainnet",
-                    "deployment_epoch": "ens_v1"
-                }
-            ]),
-            topology_version_boundary,
-            record_version_boundary,
-        },
-        execution_trace_id,
-        request_type: VERIFIED_RESOLUTION_REQUEST_TYPE.to_owned(),
-        namespace: "ens".to_owned(),
-        outcome_payload: Some(json!({
-            "verified_queries": verified_queries
-        })),
-        failure_payload: None,
-        finished_at: timestamp(1_717_171_900),
-    }
-}
-
-fn primary_name_execution_requested_chain_positions() -> Value {
-    json!([{
-        "chain_id": "ethereum-mainnet",
-        "block_number": 21_000_010,
-        "block_hash": "0xprimary"
-    }])
-}
-
-fn primary_name_execution_manifest_versions_for_namespace(namespace: &str) -> Value {
-    match namespace {
-        "ens" => json!([{
-            "manifest_version": 3,
-            "source_family": "ens_execution"
-        }]),
-        "basenames" => json!([{
-            "manifest_version": 4,
-            "source_family": "basenames_execution"
-        }]),
-        other => panic!("unsupported primary-name test namespace {other}"),
-    }
-}
-
-fn primary_name_topology_version_boundary() -> Value {
-    record_inventory_boundary(
-        "ens:alice.eth",
-        Uuid::from_u128(0x0e7ec7ace0000000000000000000bbb1),
-    )
-}
-
-fn primary_name_record_version_boundary() -> Value {
-    record_inventory_boundary(
-        "ens:alice.eth",
-        Uuid::from_u128(0x0e7ec7ace0000000000000000000bbb2),
-    )
-}
-
-fn primary_name_execution_request_key(namespace: &str, address: &str, coin_type: &str) -> String {
-    format!("{namespace}:{}:{coin_type}", address.to_ascii_lowercase())
-}
-
-fn primary_name_execution_trace(
-    execution_trace_id: Uuid,
-    namespace: &str,
-    address: &str,
-    coin_type: &str,
-    verified_primary_name: Value,
-    finished_at: OffsetDateTime,
-) -> ExecutionTrace {
-    let normalized_address = address.to_ascii_lowercase();
-    let manifest_versions = primary_name_execution_manifest_versions_for_namespace(namespace);
-    let status = verified_primary_name
-        .get("status")
-        .and_then(Value::as_str)
-        .expect("verified_primary_name payload must include string status");
-    let (contracts_called, gateway_digests, steps) = match (namespace, status) {
-        ("ens", "success" | "mismatch" | "execution_failed") => (
-            json!([{
-                "chain_id": "ethereum-mainnet",
-                "contract_address": "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe",
-                "selector": "0x9061b923"
-            }]),
-            json!([]),
-            vec![ExecutionTraceStep {
-                step_index: 0,
-                step_kind: "call_universal_resolver".to_owned(),
-                input_digest: Some("sha256:primary-input".to_owned()),
-                output_digest: Some("sha256:primary-output".to_owned()),
-                latency_ms: Some(14),
-                canonicality_dependency: json!({
-                    "ethereum-mainnet": {
-                        "block_hash": "0xprimary",
-                        "block_number": 21_000_010,
-                        "state": "finalized"
-                    }
-                }),
-                step_payload: json!({
-                    "address": normalized_address,
-                    "coin_type": coin_type
-                }),
-            }],
-        ),
-        ("basenames", "success" | "mismatch" | "execution_failed") => (
-            json!([{
-                "chain_id": "ethereum-mainnet",
-                "contract_address": "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31",
-                "selector": "0x9061b923"
-            }]),
-            json!(["sha256:basenames-primary-name"]),
-            vec![
-                ExecutionTraceStep {
-                    step_index: 0,
-                    step_kind: "call_l1_resolver".to_owned(),
-                    input_digest: Some("sha256:primary-input".to_owned()),
-                    output_digest: Some("sha256:primary-output".to_owned()),
-                    latency_ms: Some(14),
-                    canonicality_dependency: json!({
-                        "ethereum-mainnet": {
-                            "block_hash": "0xprimary",
-                            "block_number": 21_000_010,
-                            "state": "finalized"
-                        }
-                    }),
-                    step_payload: json!({
-                        "address": normalized_address,
-                        "coin_type": coin_type
-                    }),
-                },
-                ExecutionTraceStep {
-                    step_index: 1,
-                    step_kind: "complete_offchain_lookup".to_owned(),
-                    input_digest: Some("sha256:gateway-input".to_owned()),
-                    output_digest: Some("sha256:gateway-output".to_owned()),
-                    latency_ms: Some(19),
-                    canonicality_dependency: json!({
-                        "ethereum-mainnet": {
-                            "block_hash": "0xprimary",
-                            "block_number": 21_000_010,
-                            "state": "finalized"
-                        }
-                    }),
-                    step_payload: json!({
-                        "gateway": "https://basenames.example.test"
-                    }),
-                },
-            ],
-        ),
-        ("ens" | "basenames", "not_found" | "unsupported") => (
-            json!([]),
-            json!([]),
-            vec![ExecutionTraceStep {
-                step_index: 0,
-                step_kind: "load_primary_name_claim".to_owned(),
-                input_digest: Some("sha256:claim-input".to_owned()),
-                output_digest: Some("sha256:claim-output".to_owned()),
-                latency_ms: Some(2),
-                canonicality_dependency: json!({
-                    "ethereum-mainnet": {
-                        "block_hash": "0xprimary",
-                        "block_number": 21_000_010,
-                        "state": "finalized"
-                    }
-                }),
-                step_payload: json!({
-                    "address": normalized_address,
-                    "coin_type": coin_type
-                }),
-            }],
-        ),
-        ("ens" | "basenames", "invalid_name") => (
-            json!([]),
-            json!([]),
-            vec![
-                ExecutionTraceStep {
-                    step_index: 0,
-                    step_kind: "load_primary_name_claim".to_owned(),
-                    input_digest: Some("sha256:claim-input".to_owned()),
-                    output_digest: Some("sha256:claim-output".to_owned()),
-                    latency_ms: Some(2),
-                    canonicality_dependency: json!({
-                        "ethereum-mainnet": {
-                            "block_hash": "0xprimary",
-                            "block_number": 21_000_010,
-                            "state": "finalized"
-                        }
-                    }),
-                    step_payload: json!({
-                        "address": normalized_address,
-                        "coin_type": coin_type
-                    }),
-                },
-                ExecutionTraceStep {
-                    step_index: 1,
-                    step_kind: "normalize_claimed_name".to_owned(),
-                    input_digest: Some("sha256:normalize-input".to_owned()),
-                    output_digest: Some("sha256:normalize-output".to_owned()),
-                    latency_ms: Some(1),
-                    canonicality_dependency: json!({
-                        "ethereum-mainnet": {
-                            "block_hash": "0xprimary",
-                            "block_number": 21_000_010,
-                            "state": "finalized"
-                        }
-                    }),
-                    step_payload: json!({
-                        "normalizer_version": "ensip15@ens-normalize-0.1.1",
-                        "error": "claim_name_not_normalizable"
-                    }),
-                },
-            ],
-        ),
-        (other, _) if other != "ens" && other != "basenames" => {
-            panic!("unsupported primary-name test namespace {other}")
-        }
-        (_, other) => panic!("unsupported primary-name test status {other}"),
-    };
-    ExecutionTrace {
-        execution_trace_id,
-        request_type: bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE.to_owned(),
-        request_key: primary_name_execution_request_key(namespace, &normalized_address, coin_type),
-        namespace: namespace.to_owned(),
-        chain_context: json!({
-            "requested_positions": primary_name_execution_requested_chain_positions(),
-        }),
-        manifest_context: json!({
-            "manifest_versions": manifest_versions,
-        }),
-        contracts_called,
-        gateway_digests,
-        final_payload: Some(json!({
-            "verified_primary_name": verified_primary_name.clone()
-        })),
-        failure_payload: None,
-        request_metadata: json!({
-            "normalized_address": normalized_address,
-            "coin_type": coin_type,
-            "namespace": namespace,
-            "cache_identity": {
-                "requested_chain_positions": primary_name_execution_requested_chain_positions(),
-                "manifest_versions": manifest_versions,
-                "topology_version_boundary": primary_name_topology_version_boundary(),
-                "record_version_boundary": primary_name_record_version_boundary(),
-            }
-        }),
-        finished_at: Some(finished_at),
-        steps,
-    }
-}
-
-fn primary_name_execution_outcome(
-    execution_trace_id: Uuid,
-    namespace: &str,
-    address: &str,
-    coin_type: &str,
-    verified_primary_name: Value,
-    finished_at: OffsetDateTime,
-) -> ExecutionOutcome {
-    let normalized_address = address.to_ascii_lowercase();
-    ExecutionOutcome {
-        cache_key: ExecutionCacheKey {
-            request_key: primary_name_execution_request_key(
-                namespace,
-                &normalized_address,
-                coin_type,
-            ),
-            requested_chain_positions: primary_name_execution_requested_chain_positions(),
-            manifest_versions: primary_name_execution_manifest_versions_for_namespace(namespace),
-            topology_version_boundary: primary_name_topology_version_boundary(),
-            record_version_boundary: primary_name_record_version_boundary(),
-        },
-        execution_trace_id,
-        request_type: bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE.to_owned(),
-        namespace: namespace.to_owned(),
-        outcome_payload: Some(json!({
-            "verified_primary_name": verified_primary_name
-        })),
-        failure_payload: None,
-        finished_at,
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn address_name_name_current_row(
     logical_name_id: &str,
@@ -3065,13 +3174,15 @@ fn address_name_name_current_row(
     block_number: i64,
     declared_summary: Value,
 ) -> bigname_storage::NameCurrentRow {
+    let namespace = logical_name_id
+        .split_once(':')
+        .map(|(namespace, _)| namespace)
+        .expect("logical_name_id must include namespace");
+    let chain_id = chain_id_for_namespace(namespace);
+    let chain_slot = chain_slot_for_namespace(namespace);
     bigname_storage::NameCurrentRow {
         logical_name_id: logical_name_id.to_owned(),
-        namespace: logical_name_id
-            .split_once(':')
-            .map(|(namespace, _)| namespace)
-            .expect("logical_name_id must include namespace")
-            .to_owned(),
+        namespace: namespace.to_owned(),
         canonical_display_name: canonical_display_name.to_owned(),
         normalized_name: normalized_name.to_owned(),
         namehash: namehash.to_owned(),
@@ -3092,8 +3203,7 @@ fn address_name_name_current_row(
                 "chain": "ethereum-mainnet",
                 "deployment_epoch": "ens_v1",
             }],
-            "execution_trace_id": null,
-            "derivation_kind": "projection_apply",
+            "derivation_kind": "name_current_rebuild",
         }),
         coverage: json!({
             "status": "full",
@@ -3103,8 +3213,8 @@ fn address_name_name_current_row(
             "enumeration_basis": "exact_name",
         }),
         chain_positions: json!({
-            "ethereum": {
-                "chain_id": "ethereum-mainnet",
+            chain_slot: {
+                "chain_id": chain_id,
                 "block_number": block_number,
                 "block_hash": format!("0xname{block_number:02x}"),
                 "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60),
@@ -3113,7 +3223,7 @@ fn address_name_name_current_row(
         canonicality_summary: json!({
             "status": "finalized",
             "chains": {
-                "ethereum-mainnet": "finalized"
+                chain_id: "finalized"
             }
         }),
         manifest_version: 3,
@@ -3193,7 +3303,6 @@ fn declared_child_row(
                 "source_family": source_family_for_namespace(namespace),
                 "source_manifest_id": null,
             }],
-            "execution_trace_id": null,
             "derivation_kind": "children_current_rebuild",
         }),
         chain_positions: json!({
@@ -3220,11 +3329,7 @@ fn labelhash_for_display_name(display_name: &str) -> Option<String> {
         .split('.')
         .next()
         .filter(|label| !label.is_empty())
-        .map(|label| {
-            bigname_storage::label_preimage_from_label(label, "api_test", 1, json!({}))
-                .expect("test label must hash")
-                .labelhash
-        })
+        .map(|label| format!("{:#x}", alloy_primitives::keccak256(label.as_bytes())))
 }
 
 fn chain_id_for_namespace(namespace: &str) -> &'static str {
@@ -3316,15 +3421,17 @@ fn address_name_current_row(
     token_lineage_id: Option<Uuid>,
     block_number: i64,
 ) -> bigname_storage::AddressNameCurrentRow {
+    let namespace = logical_name_id
+        .split_once(':')
+        .map(|(namespace, _)| namespace)
+        .expect("logical_name_id must include namespace");
+    let chain_id = chain_id_for_namespace(namespace);
+    let chain_slot = chain_slot_for_namespace(namespace);
     bigname_storage::AddressNameCurrentRow {
         address: address.to_owned(),
         logical_name_id: logical_name_id.to_owned(),
         relation,
-        namespace: logical_name_id
-            .split_once(':')
-            .map(|(namespace, _)| namespace)
-            .expect("logical_name_id must include namespace")
-            .to_owned(),
+        namespace: namespace.to_owned(),
         canonical_display_name: display_name.to_owned(),
         normalized_name: normalized_name.to_owned(),
         namehash: namehash.to_owned(),
@@ -3343,7 +3450,6 @@ fn address_name_current_row(
                 "source_family": "ens_v1_registrar_l1",
                 "source_manifest_id": null,
             }],
-            "execution_trace_id": null,
             "derivation_kind": "address_names_current_rebuild",
         }),
         coverage: json!({
@@ -3354,8 +3460,8 @@ fn address_name_current_row(
             "enumeration_basis": "surface_current_relations",
         }),
         chain_positions: json!({
-            "ethereum": {
-                "chain_id": "ethereum-mainnet",
+            chain_slot: {
+                "chain_id": chain_id,
                 "block_number": block_number,
                 "block_hash": format!("0xaddr{block_number:02x}"),
                 "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60),
@@ -3364,7 +3470,7 @@ fn address_name_current_row(
         canonicality_summary: json!({
             "status": "finalized",
             "chains": {
-                "ethereum-mainnet": "finalized"
+                chain_id: "finalized"
             }
         }),
         manifest_version: 3,
@@ -3532,19 +3638,34 @@ async fn seed_identity_name(
         block_number,
     );
 
-    database
-        .seed_name_current_binding_migrated(
-            logical_name_id,
-            resource_id,
-            token_lineage_id,
-            surface_binding_id,
-        )
-        .await?;
+    if name_row.namespace == "basenames" {
+        database
+            .seed_name_current_binding(
+                logical_name_id,
+                &name_row.namespace,
+                normalized_name,
+                display_name,
+                namehash,
+                resource_id,
+                token_lineage_id,
+                surface_binding_id,
+            )
+            .await?;
+    } else {
+        database
+            .seed_name_current_binding_migrated(
+                logical_name_id,
+                resource_id,
+                token_lineage_id,
+                surface_binding_id,
+            )
+            .await?;
+    }
     database.insert_name_current_row(name_row.clone()).await?;
     database
         .insert_record_inventory_current_row(inventory.clone())
         .await?;
-    bigname_storage::upsert_address_names_current_rows(
+    upsert_phase_address_names_current_rows(
         &database.pool,
         std::slice::from_ref(&address_row),
     )
@@ -3559,7 +3680,6 @@ async fn seed_identity_name(
         address,
         relation,
         &name_row.declared_summary,
-        &inventory,
     )
     .await?;
 
@@ -3577,13 +3697,20 @@ async fn seed_phase_identity_name(
     address: &str,
     relation: bigname_storage::AddressNameRelation,
     declared_summary: &Value,
-    inventory: &bigname_storage::RecordInventoryCurrentRow,
 ) -> Result<()> {
-    let namespace = if normalized_name.ends_with(".base.eth") && normalized_name != "base.eth" {
-        "basenames"
-    } else {
-        "ens"
-    };
+    let projected_namespace: Option<String> = sqlx::query_scalar(
+        "SELECT namespace FROM bigname_phase.name_current WHERE resource_id = $1 LIMIT 1",
+    )
+    .bind(resource_id)
+    .fetch_optional(&database.lookup_pool)
+    .await?;
+    let namespace = projected_namespace.as_deref().unwrap_or_else(|| {
+        if normalized_name.ends_with(".base.eth") && normalized_name != "base.eth" {
+            "basenames"
+        } else {
+            "ens"
+        }
+    });
     let namehash = bigname_lookup::ens_namehash_hex(normalized_name)?;
     let logical_name_id = format!("{namespace}:{namehash}");
     let normalized = bigname_domain::normalization::normalize_name(display_name)
@@ -3591,10 +3718,7 @@ async fn seed_phase_identity_name(
     let labelhashes = normalized
         .normalized_labels
         .iter()
-        .map(|label| {
-            bigname_storage::label_preimage_from_label(label, "api_test", 1, json!({}))
-                .map(|preimage| preimage.labelhash)
-        })
+        .map(|label| Ok(format!("{:#x}", alloy_primitives::keccak256(label.as_bytes()))))
         .collect::<Result<Vec<_>>>()?;
     let chain_id = if namespace == "basenames" {
         "base-mainnet"
@@ -3614,7 +3738,7 @@ async fn seed_phase_identity_name(
                    'YYYY-MM-DD"T"HH24:MI:SS"Z"'
                )
         FROM chain_heads head
-        JOIN chain_lineage lineage
+        JOIN bigname_phase.chain_lineage lineage
           ON lineage.chain_id = head.chain_id
          AND lineage.block_hash = head.latest_block_hash
          AND lineage.block_number = head.latest_block_number
@@ -3633,14 +3757,6 @@ async fn seed_phase_identity_name(
             "timestamp": timestamp_text,
         }
     });
-    let target_positions = json!({
-        "target_block_number": block_number,
-        "target_block_hash": block_hash,
-    });
-    let boundary_key = format!(
-        "{logical_name_id}:{resource_id}:0:{block_number}:{block_hash}"
-    );
-
     let mut transaction = database.lookup_pool.begin().await?;
     sqlx::query(
         r#"
@@ -3729,10 +3845,12 @@ async fn seed_phase_identity_name(
             manifest_version
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, 'declared_registry_path', $8,
-            'supported', '{}'::jsonb, $9, $10, 1
+            'supported', $9, $10, $11, 1
         ) ON CONFLICT (logical_name_id) DO UPDATE SET
             declared_summary = EXCLUDED.declared_summary,
-            chain_positions = EXCLUDED.chain_positions
+            provenance = EXCLUDED.provenance,
+            chain_positions = EXCLUDED.chain_positions,
+            canonicality_summary = EXCLUDED.canonicality_summary
         "#,
     )
     .bind(&logical_name_id)
@@ -3743,33 +3861,8 @@ async fn seed_phase_identity_name(
     .bind(resource_id)
     .bind(token_lineage_id)
     .bind(declared_summary)
+    .bind(json!({ "chain_id": chain_id }))
     .bind(&publication_positions)
-    .bind(json!({
-        "state": "canonical_lineage",
-        "target_block_number": block_number,
-        "target_block_hash": block_hash,
-    }))
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO record_inventory_current (
-            resource_id, record_version_boundary_key, record_version_boundary,
-            selectors, unsupported_families, entries, support_status,
-            provenance, chain_positions, canonicality_summary, manifest_version
-        ) VALUES ($1, $2, $3, $4, $5, $6, 'supported', '{}'::jsonb, $7, $8, 1)
-        ON CONFLICT (resource_id, record_version_boundary_key) DO UPDATE SET
-            entries = EXCLUDED.entries,
-            chain_positions = EXCLUDED.chain_positions
-        "#,
-    )
-    .bind(resource_id)
-    .bind(boundary_key)
-    .bind(&inventory.record_version_boundary)
-    .bind(&inventory.selectors)
-    .bind(&inventory.unsupported_families)
-    .bind(&inventory.entries)
-    .bind(&target_positions)
     .bind(json!({
         "state": "canonical_lineage",
         "target_block_number": block_number,
@@ -3786,9 +3879,11 @@ async fn seed_phase_identity_name(
             manifest_version
         ) VALUES (
             lower($1), $2, $3, $4, $5, $6, $7, $8, $9,
-            'declared_registry_path', 'supported', '{}'::jsonb, $10, $11, 1
+            'declared_registry_path', 'supported', $10, $11, $12, 1
         ) ON CONFLICT (address, logical_name_id, relation) DO UPDATE SET
-            chain_positions = EXCLUDED.chain_positions
+            provenance = EXCLUDED.provenance,
+            chain_positions = EXCLUDED.chain_positions,
+            canonicality_summary = EXCLUDED.canonicality_summary
         "#,
     )
     .bind(address)
@@ -3800,7 +3895,8 @@ async fn seed_phase_identity_name(
     .bind(surface_binding_id)
     .bind(resource_id)
     .bind(token_lineage_id)
-    .bind(target_positions)
+    .bind(json!({ "chain_id": chain_id }))
+    .bind(phase_flat_projection_position(block_number, &block_hash))
     .bind(json!({
         "state": "canonical_lineage",
         "target_block_number": block_number,
@@ -3819,6 +3915,7 @@ async fn seed_phase_primary_name_snapshot(
     coin_type: &str,
     claim_status: bigname_storage::PrimaryNameClaimStatus,
     raw_claim_name: Option<&str>,
+    claim_name_is_normalized: bool,
 ) -> Result<()> {
     let chain_id = if namespace == "basenames" {
         "base-mainnet"
@@ -3864,7 +3961,7 @@ async fn seed_phase_primary_name_snapshot(
     .bind(namespace)
     .bind(status)
     .bind(raw_claim_name)
-    .bind(status == "success")
+    .bind(claim_name_is_normalized)
     .bind(unsupported_reason)
     .bind(claim_provenance)
     .execute(&database.lookup_pool)

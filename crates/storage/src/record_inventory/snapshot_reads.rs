@@ -11,22 +11,10 @@ use crate::snapshot_selection::{
 };
 
 use super::{
-    boundary_key::record_version_boundary_storage_key,
+    boundary_key::{boundary_has_event_pointer, boundary_str, record_version_boundary_storage_key},
+    canonicality::{DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER, RESOURCE_CANONICALITY_JOINS},
     row_decode::{RecordInventoryCurrentRow, decode_record_inventory_current_row},
 };
-
-pub(super) const DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER: &str = r#"
-  AND resource.canonicality_state IN (
-      'canonical'::canonicality_state,
-      'safe'::canonicality_state,
-      'finalized'::canonicality_state
-  )
-  AND resource_lineage.canonicality_state IN (
-      'canonical'::canonicality_state,
-      'safe'::canonicality_state,
-      'finalized'::canonicality_state
-  )
-"#;
 
 /// Load one record-inventory projection row by resource and exact version boundary.
 pub async fn load_record_inventory_current(
@@ -49,24 +37,20 @@ pub async fn load_record_inventory_current(
         SELECT
             ric.resource_id,
             ric.record_version_boundary,
-            ric.enumeration_basis,
+            jsonb_build_object('observed_selectors', true, 'capability_declared_families', true, 'globally_enumerable', false) AS enumeration_basis,
             ric.selectors,
-            ric.explicit_gaps,
+            '[]'::jsonb AS explicit_gaps,
             ric.unsupported_families,
             ric.last_change,
             ric.entries,
             ric.provenance,
-            ric.coverage,
+            CASE WHEN ric.support_status = 'supported' THEN jsonb_build_object('status', 'projected', 'exhaustiveness', 'not_asserted') ELSE jsonb_build_object('status', 'unsupported', 'exhaustiveness', 'not_asserted', 'unsupported_reason', ric.unsupported_reason) END AS coverage,
             ric.chain_positions,
             ric.canonicality_summary,
             ric.manifest_version,
             ric.last_recomputed_at
-        FROM record_inventory_current ric
-        JOIN resources resource
-          ON resource.resource_id = ric.resource_id
-        JOIN chain_lineage resource_lineage
-          ON resource_lineage.chain_id = resource.chain_id
-         AND resource_lineage.block_hash = resource.block_hash
+        FROM bigname_phase.record_inventory_current ric
+        {RESOURCE_CANONICALITY_JOINS}
         WHERE ric.resource_id = $1
           AND ric.record_version_boundary_key = $2
         {DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER}
@@ -156,24 +140,20 @@ pub async fn load_record_inventory_current_batch(
             ric.resource_id,
             ric.record_version_boundary_key,
             ric.record_version_boundary,
-            ric.enumeration_basis,
+            jsonb_build_object('observed_selectors', true, 'capability_declared_families', true, 'globally_enumerable', false) AS enumeration_basis,
             ric.selectors,
-            ric.explicit_gaps,
+            '[]'::jsonb AS explicit_gaps,
             ric.unsupported_families,
             ric.last_change,
             ric.entries,
             ric.provenance,
-            ric.coverage,
+            CASE WHEN ric.support_status = 'supported' THEN jsonb_build_object('status', 'projected', 'exhaustiveness', 'not_asserted') ELSE jsonb_build_object('status', 'unsupported', 'exhaustiveness', 'not_asserted', 'unsupported_reason', ric.unsupported_reason) END AS coverage,
             ric.chain_positions,
             ric.canonicality_summary,
             ric.manifest_version,
             ric.last_recomputed_at
-        FROM record_inventory_current ric
-        JOIN resources resource
-          ON resource.resource_id = ric.resource_id
-        JOIN chain_lineage resource_lineage
-          ON resource_lineage.chain_id = resource.chain_id
-         AND resource_lineage.block_hash = resource.block_hash
+        FROM bigname_phase.record_inventory_current ric
+        {RESOURCE_CANONICALITY_JOINS}
         WHERE (ric.resource_id, ric.record_version_boundary_key) IN (
             SELECT * FROM unnest($1::uuid[], $2::text[])
         )
@@ -228,21 +208,6 @@ pub async fn load_record_inventory_current_batch(
     Ok(output)
 }
 
-fn boundary_has_event_pointer(record_version_boundary: &Value) -> bool {
-    record_version_boundary
-        .get("normalized_event_id")
-        .is_some_and(|value| !value.is_null())
-        && record_version_boundary
-            .get("event_kind")
-            .is_some_and(|value| !value.is_null())
-}
-
-fn boundary_str<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
-    path.iter()
-        .try_fold(value, |current, key| current.get(*key))
-        .and_then(Value::as_str)
-}
-
 /// Find the persisted boundary of the (at most one) projection row sharing the caller boundary's
 /// anchor. Errors on an ambiguous match — the projection holds one row per resource, so two rows
 /// with the same anchor mean the table is in a state the caller must not silently pick from.
@@ -285,22 +250,24 @@ async fn find_record_inventory_boundary_by_anchor(
             )
         })?;
 
-    let boundaries = sqlx::query(
+    let boundaries = sqlx::query(&format!(
         r#"
-        SELECT record_version_boundary
-        FROM record_inventory_current
-        WHERE resource_id = $1
-          AND record_version_boundary ->> 'logical_name_id' = $2
-          AND record_version_boundary -> 'chain_position' ->> 'chain_id' = $3
-          AND (record_version_boundary -> 'chain_position' ->> 'block_number')::bigint = $4
-          AND record_version_boundary -> 'chain_position' ->> 'block_hash' = $5
-          AND record_version_boundary -> 'chain_position' ->> 'timestamp' = $6
+        SELECT ric.record_version_boundary
+        FROM bigname_phase.record_inventory_current ric
+        {RESOURCE_CANONICALITY_JOINS}
+        WHERE ric.resource_id = $1
+          AND ric.record_version_boundary ->> 'logical_name_id' = $2
+          AND ric.record_version_boundary -> 'chain_position' ->> 'chain_id' = $3
+          AND (ric.record_version_boundary -> 'chain_position' ->> 'block_number')::bigint = $4
+          AND ric.record_version_boundary -> 'chain_position' ->> 'block_hash' = $5
+          AND ric.record_version_boundary -> 'chain_position' ->> 'timestamp' = $6
+          {DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER}
         ORDER BY
-          (record_version_boundary ->> 'normalized_event_id') IS NULL ASC,
-          (record_version_boundary ->> 'normalized_event_id')::bigint DESC NULLS LAST
+          (ric.record_version_boundary ->> 'normalized_event_id') IS NULL ASC,
+          (ric.record_version_boundary ->> 'normalized_event_id')::bigint DESC NULLS LAST
         LIMIT 2
         "#,
-    )
+    ))
     .bind(resource_id)
     .bind(logical_name_id)
     .bind(chain_id)
@@ -351,23 +318,30 @@ pub async fn load_record_inventory_current_for_snapshot(
         return Ok(SnapshotProjectionRead::NotFound);
     };
 
-    match ensure_projection_chain_positions_match(
+    if phase_projection_target(&row)?.is_some() {
+        if !record_inventory_projection_covers_selected_snapshot(
+            pool,
+            &row,
+            selected_chain_positions,
+        )
+        .await?
+        {
+            return Err(SnapshotSelectionError::stale(
+                "record_inventory_current projection does not match the selected snapshot",
+            ));
+        }
+    } else if let Err(error) = ensure_projection_chain_positions_match(
         "record_inventory_current",
         &row.chain_positions,
         selected_chain_positions,
-    ) {
-        Ok(()) => {}
-        Err(error) => {
-            if !record_inventory_projection_covers_selected_snapshot(
-                pool,
-                &row,
-                selected_chain_positions,
-            )
-            .await?
-            {
-                return Err(error);
-            }
-        }
+    ) && !record_inventory_projection_covers_selected_snapshot(
+        pool,
+        &row,
+        selected_chain_positions,
+    )
+    .await?
+    {
+        return Err(error);
     }
     Ok(SnapshotProjectionRead::Found(row))
 }
@@ -377,6 +351,39 @@ async fn record_inventory_projection_covers_selected_snapshot(
     row: &RecordInventoryCurrentRow,
     selected_chain_positions: &ChainPositions,
 ) -> std::result::Result<bool, SnapshotSelectionError> {
+    if let Some((chain_id, target_block_number, target_block_hash)) = phase_projection_target(row)?
+    {
+        let selected_by_chain_id = positions_by_chain_id(selected_chain_positions)?;
+        let Some(selected_position) = selected_by_chain_id.get(chain_id) else {
+            return Ok(false);
+        };
+        if selected_position.block_number < target_block_number {
+            return Ok(false);
+        }
+        if selected_position.block_number == target_block_number {
+            return Ok(selected_position.block_hash == target_block_hash);
+        }
+        if !phase_target_is_canonical_lineage_member(
+            pool,
+            chain_id,
+            target_block_number,
+            target_block_hash,
+        )
+        .await?
+        {
+            return Ok(false);
+        }
+        return record_inventory_has_newer_projection_inputs(
+            pool,
+            row,
+            chain_id,
+            target_block_number,
+            selected_position.block_number,
+        )
+        .await
+        .map(|has_newer_inputs| !has_newer_inputs);
+    }
+
     let projected = ChainPositions::from_value(&row.chain_positions).map_err(|error| {
         SnapshotSelectionError::stale(format!(
             "record_inventory_current projection has unusable chain_positions: {}",
@@ -424,6 +431,39 @@ async fn record_inventory_projection_covers_selected_snapshot(
     Ok(true)
 }
 
+fn phase_projection_target(
+    row: &RecordInventoryCurrentRow,
+) -> std::result::Result<Option<(&str, i64, &str)>, SnapshotSelectionError> {
+    let Some(target_block_number) = row
+        .chain_positions
+        .get("target_block_number")
+        .and_then(Value::as_i64)
+    else {
+        return Ok(None);
+    };
+    let target_block_hash = row
+        .chain_positions
+        .get("target_block_hash")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            SnapshotSelectionError::stale(
+                "record_inventory_current projection has no target block hash",
+            )
+        })?;
+    let chain_id = row
+        .record_version_boundary
+        .pointer("/chain_position/chain_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            SnapshotSelectionError::stale(
+                "record_inventory_current projection target has no chain id",
+            )
+        })?;
+    Ok(Some((chain_id, target_block_number, target_block_hash)))
+}
+
 fn positions_by_chain_id(
     positions: &ChainPositions,
 ) -> std::result::Result<BTreeMap<String, &ChainPosition>, SnapshotSelectionError> {
@@ -451,14 +491,14 @@ async fn position_is_canonical_lineage_member(
         r#"
         SELECT EXISTS (
             SELECT 1
-            FROM chain_lineage
+            FROM bigname_phase.chain_lineage
             WHERE chain_id = $1
               AND block_hash = $2
               AND block_number = $3
               AND canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
+                  'canonical'::bigname_phase.canonicality_state,
+                  'safe'::bigname_phase.canonicality_state,
+                  'finalized'::bigname_phase.canonicality_state
               )
         )
         "#,
@@ -472,6 +512,40 @@ async fn position_is_canonical_lineage_member(
         SnapshotSelectionError::internal(format!(
             "failed to check record_inventory_current chain position block {} on chain {chain_id}: {error}",
             position.block_hash
+        ))
+    })
+}
+
+async fn phase_target_is_canonical_lineage_member(
+    pool: &PgPool,
+    chain_id: &str,
+    block_number: i64,
+    block_hash: &str,
+) -> std::result::Result<bool, SnapshotSelectionError> {
+    sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM bigname_phase.chain_lineage
+            WHERE chain_id = $1
+              AND block_hash = $2
+              AND block_number = $3
+              AND canonicality_state IN (
+                  'canonical'::bigname_phase.canonicality_state,
+                  'safe'::bigname_phase.canonicality_state,
+                  'finalized'::bigname_phase.canonicality_state
+              )
+        )
+        "#,
+    )
+    .bind(chain_id)
+    .bind(block_hash)
+    .bind(block_number)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| {
+        SnapshotSelectionError::internal(format!(
+            "failed to check record_inventory_current target block {block_hash} on chain {chain_id}: {error}"
         ))
     })
 }
@@ -493,21 +567,21 @@ async fn record_inventory_has_newer_projection_inputs(
         SELECT EXISTS (
             SELECT 1
             FROM normalized_events ne
-            JOIN chain_lineage ne_lineage
+            JOIN bigname_phase.chain_lineage ne_lineage
               ON ne_lineage.chain_id = ne.chain_id
              AND ne_lineage.block_hash = ne.block_hash
             WHERE ne.chain_id = $1
               AND ne.block_number > $2
               AND ne.block_number <= $3
               AND ne.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
+                  'canonical'::bigname_phase.canonicality_state,
+                  'safe'::bigname_phase.canonicality_state,
+                  'finalized'::bigname_phase.canonicality_state
               )
               AND ne_lineage.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
+                  'canonical'::bigname_phase.canonicality_state,
+                  'safe'::bigname_phase.canonicality_state,
+                  'finalized'::bigname_phase.canonicality_state
               )
               AND ne.event_kind IN (
                   'RecordChanged',
@@ -535,46 +609,4 @@ async fn record_inventory_has_newer_projection_inputs(
             row.resource_id
         ))
     })
-}
-
-/// Delete one record-inventory projection row so a worker can rebuild that exact key.
-pub async fn delete_record_inventory_current(
-    pool: &PgPool,
-    resource_id: Uuid,
-    record_version_boundary: &Value,
-) -> Result<u64> {
-    let record_version_boundary_key = record_version_boundary_storage_key(
-        record_version_boundary,
-        resource_id,
-    )
-    .with_context(|| {
-        format!(
-            "failed to derive record_inventory_current delete key for resource_id {resource_id}"
-        )
-    })?;
-
-    sqlx::query(
-        r#"
-        DELETE FROM record_inventory_current
-        WHERE resource_id = $1
-          AND record_version_boundary_key = $2
-        "#,
-    )
-    .bind(resource_id)
-    .bind(&record_version_boundary_key)
-    .execute(pool)
-    .await
-    .with_context(|| {
-        format!("failed to delete record_inventory_current row for resource_id {resource_id}")
-    })
-    .map(|result| result.rows_affected())
-}
-
-/// Clear the record-inventory projection so a worker can perform a one-shot rebuild.
-pub async fn clear_record_inventory_current(pool: &PgPool) -> Result<u64> {
-    sqlx::query("DELETE FROM record_inventory_current")
-        .execute(pool)
-        .await
-        .context("failed to clear record_inventory_current rows")
-        .map(|result| result.rows_affected())
 }

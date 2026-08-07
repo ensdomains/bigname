@@ -66,10 +66,8 @@ closes that baseline and makes the observed edge current. An observation naming
 the same implementation records event-derived evidence alongside the baseline.
 Later manifest synchronization preserves either current observed edge instead
 of resetting it to the declaration. The declared implementation remains
-deployment metadata used to seed the baseline. The live manifest-drift audit
-can emit a `proxy_implementation_drift` observation when the declaration and
-persisted manifest-declared proxy edge diverge; that comparison joins the
-`manifest_declared_proxy` edge, not the current `Upgraded` edge. Baseline
+deployment metadata used to seed the baseline. There is no separate runtime
+manifest-drift observation job. Baseline
 materialization and handling of upgrade observations are the schema-v2
 consumers that keep `proxy_kind` in the manifest schema.
 
@@ -173,9 +171,9 @@ Capability ownership attaches to the declaring `source_family`. It is never impl
 
 `ens_execution` owns verified resolution at the ENS Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` with `verified_resolution = "shadow"`.[^ens-docs-univ][^v1-ur-deploy][^v1-ursol-l8] The pinned `.refs/` artifact is the implementation/ABI anchor; the lookup entry is the proxy address. The shadow flag records manifest ownership for the execution substrate; public ENS verified-resolution support is gated by the route-level support classes in `docs/api-v2-routes.md` and `docs/execution.md`, not by widening this manifest flag.
 
-The ENS primary-name route does not introduce a second manifest capability. `ens_execution` remains the execution owner for exact-tuple persisted `verified_primary_name` readback and for the hash-pinned ENS/60 missing-tuple producer under the same execution-owner manifest, without turning `verified_resolution = "shadow"` into a route-level primary-name support flag. For trace provenance, that producer selects the active execution-owner version when one exists and otherwise the newest shadow version for the same deployment epoch; this lookup records ownership and does not change route support.
+The ENS primary-name route does not introduce a second manifest capability. `ens_execution` supplies the manifest selection for the request-scoped, hash-pinned ENS/60 missing-tuple lookup under the same owner manifest, without turning `verified_resolution = "shadow"` into a route-level primary-name support flag. Indexed exact-tuple claim state lives in `bigname_phase.primary_names_current`; provider lookup responses are not persisted as execution outcomes or traces.
 
-`ens_v1_reverse_l1` owns declared reverse-claim intake at the Mainnet `addr.reverse` Reverse Registrar `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`.[^v1-revreg-deploy][^v1-revreg-l15][^v1-revreg-l19] No dedicated `claimed_primary_name` flag is needed for the exact-tuple persisted-readback contract.
+`ens_v1_reverse_l1` owns declared reverse-claim intake at the Mainnet `addr.reverse` Reverse Registrar `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`.[^v1-revreg-deploy][^v1-revreg-l15][^v1-revreg-l19] No dedicated `claimed_primary_name` flag is needed for that indexed claim-state contract.
 
 `ens_v1_registry_l1` owns the current ENS registry at `0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E` with `start_block = 9380380`,[^subgraph-l15] plus `ENSRegistryOld` at `0x314159265dd8dbb310642f98f50c066173c1259b` with `start_block = 3327417` as a migration-aware input.[^subgraph-l39][^subgraph-l44] Old-registry logs do not union with current logs by latest block: a current-registry `NewOwner` marks the node migrated; later old-registry `NewOwner`, `Transfer`, `NewTTL`, and non-root `NewResolver` updates for that node are suppressed.[^subgraph-ts-l134][^subgraph-ts-l230][^subgraph-ts-l238][^subgraph-ts-l246] Root-resolver updates from the old registry are the one frozen exception.[^v1-ensregfb-l40]
 
@@ -241,7 +239,8 @@ The L1 Resolver address appears in both `basenames_l1_compat` and `basenames_exe
 
 `basenames_execution` v2 capability-promotes only the [path class](glossary.md) where `resolver_path[0].logical_name_id` equals the route surface, `wildcard.source = null`, `alias.final_target = null`, `subregistry_path = []`, `transport.source_chain_id = "base-mainnet"`, `transport.target_chain_id = "ethereum-mainnet"`, and `transport.contract_address = "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31"`. Alias-participating, wildcard-derived, linked-subregistry, transport-free, and offchain-gateway classes return selector-local `unsupported`.[^bn-readme-l71]
 
-`verified_primary_name` for Basenames runs through `basenames_execution` under the same flag. The matching `primary_names_current(address, coin_type, namespace)` row is the only claim-side anchor; `verified_primary_name.provenance` carries `{execution_trace_id, manifest_versions}` matching the top-level `execution_trace_id`.
+`basenames_execution` does not admit verified primary-name lookup. The current
+verified primary-name product path is limited to ENS coin type `60`.
 
 Basenames registry `NewResolver` updates a node binding but does not discover a contract. Base-side resolver-local events use the `basenames_base_resolver` signature set across all emitting addresses. Resolver-local supported behavior still requires `L2Resolver`-compatible profile admission for the emitted family. This match-all rule does not admit the L1 Resolver or offchain gateways.[^bn-registry-l19][^bn-registry-l223][^bn-l2resolver-l4][^bn-l2resolver-l16][^bn-l2resolver-l29][^bn-l2resolver-l182][^bn-l2resolver-l209][^bn-l2resolver-l225]
 
@@ -329,10 +328,8 @@ The schema-v2 project phase has no code-hash reader. ENSv1 and Basenames use
 only exact resolver addresses declared by the active manifest, while ENSv2
 uses the latest canonical resolver-family `Upgraded` history and the active
 manifest's `resolver_implementations` list. A manifest admission change
-reclassifies the affected address inline; there is no journal or queue. The old
-public-schema worker still reads retained `raw_code_hashes` through its legacy
-resolver-profile views until the Stage C API cutover, but those views do not
-feed schema-v2 projections.
+reclassifies the affected address inline; there is no journal, queue, code-hash
+reader, or legacy resolver-profile view.
 
 ## Watch-plan expansion
 
@@ -347,17 +344,19 @@ Watch-plan expansion starts from active manifest roots by `contract_instance_id`
 - Legacy watch rows may denormalize address and code-hash state, but their durable explanation path is `manifest root → discovery edge(s) → contract_instance_id`; schema-v2 resolver classification does not read that denormalization.
 - Address-only watch state is rebuildable from manifests, instance attributes, and active discovery edges.
 
-`bigname-worker inspect watch-plan --json` exposes active watched contracts with source kind (`manifest_root`, `manifest_contract`, `discovery_edge`), source families, contract instance IDs, chain addresses, source manifest IDs, and active block ranges. It is read-only over existing state.
+The materialized watch plan is derived from active manifests and discovery
+edges. No worker watch-plan inspection command remains.
 
 ## Capability policy
 
-Capabilities gate behavior, not public-contract existence. An unsupported capability surfaces as `coverage.unsupported_reason` or a typed error. Shadow capabilities write facts and traces without enabling general reads. Adding a new capability is additive only when it does not change prior semantics.
+Capabilities gate behavior, not public-contract existence. An unsupported capability surfaces as `coverage.unsupported_reason` or a typed error. Shadow capabilities admit facts without enabling general reads. Adding a new capability is additive only when it does not change prior semantics.
 
 ## Ownership
 
 - Manifest/discovery owners maintain the TOML files.
 - Schema-v2 interpretation consumes manifest versions as inputs.
-- Execution owners depend on manifest versions for cache keys and invalidation.
+- Lookup uses manifest versions and admitted entrypoints for request-scoped
+  provider execution.
 - Schema changes require a doc-first update to this file.
 
 ---
@@ -365,9 +364,9 @@ Capabilities gate behavior, not public-contract existence. An unsupported capabi
 ## Bootstrap `start_block` provenance
 
 Known historical starts cite a pinned upstream source. Targets without a pinned
-source omit `start_block`; the deleted old-indexer automatic bootstrap skipped
-them rather than inventing values. Basenames mainnet families and the ENS
-Universal Resolver remain unknown. The current Stage B loader fallback described
+source omit `start_block`; historical bootstrap skipped them rather than
+inventing values. Basenames mainnet families and the ENS Universal Resolver
+remain unknown. The current phase-loader fallback described
 above does not change that provenance rule.
 
 | Target | `start_block` | Source |

@@ -2,8 +2,8 @@
 
 This package exercises ENSv1, ENSv2, and Basenames contract emissions against
 schema-v2 through the production `phase-runner` binary. It does not start the
-deleted indexer or coordinate live intake through the retained worker and v1
-API. Assertions that previously read HTTP responses now read schema-v2
+deleted indexer or worker and does not start an API server. Assertions that
+previously read HTTP responses now read schema-v2
 [projections](../../docs/glossary.md#projection) and phase state directly
 through the test-only `ProjectionReader`.
 
@@ -26,7 +26,7 @@ run without the count assertion:
 scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml --locked -- --test-threads=8
 ```
 
-The gate requires the exact library-test summary `79 passed; 0 failed; 6
+The gate requires the exact library-test summary `79 passed; 0 failed; 3
 ignored`. It checks both Cargo's exit status and the passed/failed/ignored
 counts, so a prematurely successful process or an accidentally filtered suite
 cannot satisfy CI.
@@ -43,7 +43,7 @@ cannot satisfy CI.
    execute `phase-runner redo` for interpret and project. This is the
    deterministic fixture pattern used by the production phase-runner tests.
    Scenarios that add facts in stages synchronously replay each selected
-   snapshot; they do not claim a continuously running worker or live
+   snapshot; they do not claim a continuously running service or live
    checkpoint.
 4. Provider-fault and intake-path parity scenarios execute the real JSON-RPC
    ingest redo path.
@@ -75,9 +75,9 @@ cannot satisfy CI.
    dropped. The counted gate retains links only for in-process build sharing
    and removes its run-scoped directory on exit.
 
-The verification-only execution scenario remains deferred because its only
-observable contract is the public lookup/explain API. No runnable scenario
-claims v1 API integration or deleted checkpoint/completeness semantics.
+The executor-only verified-resolution scenario was deleted with the legacy
+execution plane. Public lookup behavior remains covered by API crate tests; no
+runnable e2e scenario claims deleted checkpoint or completeness semantics.
 
 ## CI shape
 
@@ -88,24 +88,25 @@ continues to require the e2e job.
 
 ## Coverage ledger
 
-The semantic inventory contains 61 scenario tests:
+The semantic inventory contains 58 scenario tests:
 
 - 55 retargeted and runnable;
-- 5 explicitly retired with one-line reasons;
-- 1 explicitly deferred to C2/C3.
+- 3 explicitly retired with one-line reasons.
 
 The 55 runnable scenarios include the #154 known-defect reproduction described
 above; it is kept runnable so the provider path and explicit repair remain
 observable rather than being hidden as an ignored test.
 
-The crate contains 85 total tests when 24 harness/support checks are included.
-The pre-retarget crate contained 88; the net change is -3: five obsolete
-Cargo-artifact tests for the obsolete indexer/worker/v1-API coordination
-bundle were removed, while deployment-profile binary lifecycle and normalized-event
+The crate contains 82 total tests when 24 harness/support checks are included.
+The pre-retarget crate contained 88; the net change is -6: obsolete
+Cargo-artifact tests for the old indexer, worker, v1 API, and execution plane
+were removed, while deployment-profile binary lifecycle and normalized-event
 parity-completeness regression tests were added. The pure in-memory
 `catchup_equivalence::primary_route_normalization_preserves_contract_instance_identity`
 normalization oracle is counted as support rather than as a contract-backed
-semantic scenario. No semantic scenario was silently removed.
+semantic scenario. The final worker-coordination stub, verified-resolution
+scenario, and stale observed-code-hash admission scenario were removed
+explicitly with issue #314.
 
 ### Retargeted and runnable (55)
 
@@ -174,33 +175,26 @@ semantic scenario. No semantic scenario was silently removed.
   `wrapper_renewal_and_transfers::wrapped_erc1155_single_and_batch_transfers_preserve_identity`;
   `wrapper_renewal_and_transfers::wrapped_renewal_tracks_registrar_expiry_without_wrapper_event`.
 
-### Retired with reason (5)
+### Retired with reason (3)
 
-- `register_eth_name::live_worker_applies_registration_and_renewal_while_api_serves` — deleting `apps/indexer` removed the live intake-to-worker-to-v1-API coordination this scenario required.
 - `provider_faults::transient_get_code_retries_primary_without_using_configured_fallback` — runtime bytecode-hash admission and its `eth_getCode` retry path were deleted in Stage B.
 - `provider_faults::pruned_get_code_fails_closed_then_uses_configured_fallback` — the code-hash archive fallback was deleted with runtime bytecode-hash admission.
-- `resolver_records::byte_identical_public_resolver_copy_converges_to_admitted_profile` — observed-code-hash resolver admission was replaced by declared-list classification.
 - `registry_preimages::registry_only_non_eth_tree_derives_declared_state` — generic resolver `NameChanged` no longer materializes an unknown registry-only surface under the schema-v2 identity gate.
-
-### Deferred to C2/C3 (1)
-
-- `verified_resolution::direct_path_verified_query_via_local_universal_resolver_persists_trace` — this is exclusively a public lookup/explain API contract over execution output; it cannot be asserted honestly before API cutover.
 
 ### Count deltas
 
 | Measure | Historical baseline | Retargeted suite | Delta |
 | --- | ---: | ---: | ---: |
-| Total crate tests | 88 | 85 | -3 |
-| Semantic scenario inventory | 62 at the retarget base, including one pure helper | 61 | -1 reclassified |
+| Total crate tests | 88 | 82 | -6 |
+| Semantic scenario inventory | 62 at the retarget base, including one pure helper | 58 | -1 reclassified, -3 deleted |
 | Runnable passed-count gate | 65 in the historical Anvil gate | 79 | +14 |
-| Anvil-backed semantic inventory | 65 historical gate reference | 61 | -4 |
+| Anvil-backed semantic inventory | 65 historical gate reference | 58 | -7 |
 | Runnable Anvil-backed semantic scenarios | 65 historical gate reference | 55 | -10 |
 
 The two 65 comparisons are reported because that is the historical gate
 reference, but the current passed-count denominator is explicit: 55 runnable
-Anvil scenarios and 24 harness/support checks produce 79 passes. Six Anvil
-semantic scenarios are explicitly
-ignored (five retired and one deferred).
+Anvil scenarios and 24 harness/support checks produce 79 passes. Three semantic
+scenarios are explicitly ignored with their retired behavior recorded above.
 
 ## Diagnostics
 

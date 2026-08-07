@@ -1,10 +1,12 @@
 use sqlx::types::time::OffsetDateTime;
 use sqlx::{Postgres, QueryBuilder};
 
-use super::canonicality::DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER;
 use super::types::{
     AddressNameRelation, AddressNamesCurrentDedupe, AddressNamesCurrentOrder,
     AddressNamesCurrentSort, AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue,
+};
+use super::{
+    DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
 };
 
 pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
@@ -23,15 +25,20 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
                 anc.logical_name_id,
                 anc.relation,
                 anc.namespace,
-                anc.canonical_display_name,
-                anc.normalized_name,
+                anc.raw_name AS canonical_display_name,
+                lower(anc.raw_name) AS normalized_name,
                 anc.namehash,
                 anc.surface_binding_id,
                 anc.resource_id,
                 anc.token_lineage_id,
                 anc.binding_kind,
                 anc.provenance,
-                anc.coverage,
+                CASE WHEN anc.support_status = 'supported'
+                     THEN jsonb_build_object('status', 'projected', 'exhaustiveness', 'not_asserted')
+                     ELSE jsonb_build_object(
+                         'status', 'unsupported', 'exhaustiveness', 'not_asserted',
+                         'unsupported_reason', anc.unsupported_reason
+                     ) END AS coverage,
                 anc.chain_positions,
                 anc.canonicality_summary,
                 anc.manifest_version,
@@ -42,30 +49,11 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
                     WHEN 'effective_controller' THEN 2
                     ELSE 99
                 END AS relation_rank
-            FROM address_names_current anc
-            JOIN name_surfaces surface
-              ON surface.logical_name_id = anc.logical_name_id
-            JOIN resources resource
-              ON resource.resource_id = anc.resource_id
-            JOIN surface_bindings binding
-              ON binding.surface_binding_id = anc.surface_binding_id
-            LEFT JOIN token_lineages token_lineage
-              ON token_lineage.token_lineage_id = anc.token_lineage_id
-            JOIN chain_lineage surface_lineage
-              ON surface_lineage.chain_id = surface.chain_id
-             AND surface_lineage.block_hash = surface.block_hash
-            JOIN chain_lineage resource_lineage
-              ON resource_lineage.chain_id = resource.chain_id
-             AND resource_lineage.block_hash = resource.block_hash
-            JOIN chain_lineage binding_lineage
-              ON binding_lineage.chain_id = binding.chain_id
-             AND binding_lineage.block_hash = binding.block_hash
-            LEFT JOIN chain_lineage token_lineage_lineage
-              ON token_lineage_lineage.chain_id = token_lineage.chain_id
-             AND token_lineage_lineage.block_hash = token_lineage.block_hash
-            WHERE anc.address =
+            FROM bigname_phase.address_names_current anc
         "#,
     );
+    builder.push(DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS);
+    builder.push(" WHERE anc.address =");
     builder.push(" ");
     builder.push_bind(address);
 
@@ -83,12 +71,11 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
         builder.push(")");
     }
     if let Some(prefix) = q {
-        builder.push(" AND anc.normalized_name LIKE ");
+        builder.push(" AND lower(anc.raw_name) LIKE ");
         builder.push_bind(format!("{}%", escape_like_pattern(prefix)));
         builder.push(" ESCAPE '\\'");
     }
     builder.push(DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER);
-
     match dedupe_by {
         AddressNamesCurrentDedupe::Surface => builder.push(
             r#"

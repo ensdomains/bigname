@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use sqlx::{PgPool, Postgres, QueryBuilder, postgres::PgRow, types::time::OffsetDateTime};
 
 use super::{
-    DEFAULT_NAME_CURRENT_LINEAGE_JOINS, DEFAULT_NAME_CURRENT_READ_FILTER, NameCurrentRow,
-    decode_name_current_row,
+    DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER, DEFAULT_NAME_CURRENT_LINEAGE_JOINS,
+    DEFAULT_NAME_CURRENT_READ_FILTER, NameCurrentRow, decode_name_current_row,
 };
 use crate::{
     AddressNameRelation,
@@ -119,55 +119,6 @@ pub struct NameCurrentListPage {
     pub next_cursor: Option<NameCurrentListCursor>,
     pub total_count: Option<u64>,
 }
-
-const DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER: &str = r#"
-  AND membership_surface.canonicality_state IN (
-      'canonical'::canonicality_state,
-      'safe'::canonicality_state,
-      'finalized'::canonicality_state
-  )
-  AND membership_surface_lineage.canonicality_state IN (
-      'canonical'::canonicality_state,
-      'safe'::canonicality_state,
-      'finalized'::canonicality_state
-  )
-  AND membership_resource.canonicality_state IN (
-      'canonical'::canonicality_state,
-      'safe'::canonicality_state,
-      'finalized'::canonicality_state
-  )
-  AND membership_resource_lineage.canonicality_state IN (
-      'canonical'::canonicality_state,
-      'safe'::canonicality_state,
-      'finalized'::canonicality_state
-  )
-  AND membership_binding.canonicality_state IN (
-      'canonical'::canonicality_state,
-      'safe'::canonicality_state,
-      'finalized'::canonicality_state
-  )
-  AND membership_binding_lineage.canonicality_state IN (
-      'canonical'::canonicality_state,
-      'safe'::canonicality_state,
-      'finalized'::canonicality_state
-  )
-  AND membership_binding.active_to IS NULL
-  AND (
-      anc.token_lineage_id IS NULL
-      OR (
-          membership_token_lineage.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-          AND membership_token_lineage_lineage.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-      )
-  )
-"#;
 
 /// Shared projection of the derived list columns from the `filtered_names` CTE. Every list/count
 /// read path appends its own `WHERE` / `ORDER BY` / `LIMIT` after this so the column shape that
@@ -401,8 +352,8 @@ fn push_filtered_name_current_cte<'a>(
             SELECT
                 nc.logical_name_id,
                 nc.namespace,
-                nc.canonical_display_name,
-                nc.normalized_name,
+                nc.raw_name AS canonical_display_name,
+                lower(nc.raw_name) AS normalized_name,
                 nc.namehash,
                 nc.surface_binding_id,
                 nc.resource_id,
@@ -410,7 +361,12 @@ fn push_filtered_name_current_cte<'a>(
                 nc.binding_kind,
                 nc.declared_summary,
                 nc.provenance,
-                nc.coverage,
+                CASE WHEN nc.support_status = 'supported'
+                     THEN jsonb_build_object('status', 'projected', 'exhaustiveness', 'not_asserted')
+                     ELSE jsonb_build_object(
+                         'status', 'unsupported', 'exhaustiveness', 'not_asserted',
+                         'unsupported_reason', nc.unsupported_reason
+                     ) END AS coverage,
                 nc.chain_positions,
                 nc.canonicality_summary,
                 nc.manifest_version,
@@ -463,14 +419,14 @@ fn push_filtered_name_current_cte<'a>(
         r#"
                 ) AS expiry_date,
                 NULLIF(LOWER(nc.declared_summary #>> '{resolver,address}'), '') AS resolver_address
-            FROM name_current nc
-            JOIN name_surfaces surface
+            FROM bigname_phase.name_current nc
+            JOIN bigname_phase.name_surfaces surface
               ON surface.logical_name_id = nc.logical_name_id
-            LEFT JOIN resources resource
+            LEFT JOIN bigname_phase.resources resource
               ON resource.resource_id = nc.resource_id
-            LEFT JOIN surface_bindings binding
+            LEFT JOIN bigname_phase.surface_bindings binding
               ON binding.surface_binding_id = nc.surface_binding_id
-            LEFT JOIN token_lineages token_lineage
+            LEFT JOIN bigname_phase.token_lineages token_lineage
               ON token_lineage.token_lineage_id = nc.token_lineage_id
         "#,
     );
@@ -498,25 +454,25 @@ fn push_address_membership_cte<'a>(
         r#"
         address_membership AS (
             SELECT DISTINCT anc.logical_name_id
-            FROM address_names_current anc
-            JOIN name_surfaces membership_surface
+            FROM bigname_phase.address_names_current anc
+            JOIN bigname_phase.name_surfaces membership_surface
               ON membership_surface.logical_name_id = anc.logical_name_id
-            JOIN resources membership_resource
+            JOIN bigname_phase.resources membership_resource
               ON membership_resource.resource_id = anc.resource_id
-            JOIN surface_bindings membership_binding
+            JOIN bigname_phase.surface_bindings membership_binding
               ON membership_binding.surface_binding_id = anc.surface_binding_id
-            LEFT JOIN token_lineages membership_token_lineage
+            LEFT JOIN bigname_phase.token_lineages membership_token_lineage
               ON membership_token_lineage.token_lineage_id = anc.token_lineage_id
-            JOIN chain_lineage membership_surface_lineage
+            JOIN bigname_phase.chain_lineage membership_surface_lineage
               ON membership_surface_lineage.chain_id = membership_surface.chain_id
              AND membership_surface_lineage.block_hash = membership_surface.block_hash
-            JOIN chain_lineage membership_resource_lineage
+            JOIN bigname_phase.chain_lineage membership_resource_lineage
               ON membership_resource_lineage.chain_id = membership_resource.chain_id
              AND membership_resource_lineage.block_hash = membership_resource.block_hash
-            JOIN chain_lineage membership_binding_lineage
+            JOIN bigname_phase.chain_lineage membership_binding_lineage
               ON membership_binding_lineage.chain_id = membership_binding.chain_id
              AND membership_binding_lineage.block_hash = membership_binding.block_hash
-            LEFT JOIN chain_lineage membership_token_lineage_lineage
+            LEFT JOIN bigname_phase.chain_lineage membership_token_lineage_lineage
               ON membership_token_lineage_lineage.chain_id = membership_token_lineage.chain_id
              AND membership_token_lineage_lineage.block_hash = membership_token_lineage.block_hash
             WHERE "#,
@@ -561,21 +517,21 @@ fn push_name_current_filter_predicates<'a>(
         builder.push_bind(namespace);
     }
     if let Some(name) = filter.name.as_deref() {
-        builder.push(" AND nc.normalized_name = ");
+        builder.push(" AND lower(nc.raw_name) = ");
         builder.push_bind(name);
     }
     if let Some(prefix) = filter.prefix.as_deref() {
-        builder.push(" AND nc.normalized_name LIKE ");
+        builder.push(" AND lower(nc.raw_name) LIKE ");
         builder.push_bind(format!("{}%", escape_like_pattern(prefix)));
         builder.push(" ESCAPE '\\'");
     }
     if let Some(contains) = filter.contains.as_deref() {
-        builder.push(" AND nc.normalized_name LIKE ");
+        builder.push(" AND lower(nc.raw_name) LIKE ");
         builder.push_bind(format!("%{}%", escape_like_pattern(contains)));
         builder.push(" ESCAPE '\\'");
     }
     if let Some(contains_nocase) = filter.contains_nocase.as_deref() {
-        builder.push(" AND LOWER(nc.normalized_name) LIKE ");
+        builder.push(" AND lower(nc.raw_name) LIKE ");
         builder.push_bind(format!(
             "%{}%",
             escape_like_pattern(&contains_nocase.to_ascii_lowercase())
@@ -594,6 +550,3 @@ fn push_name_current_filter_predicates<'a>(
 }
 
 include!("list_paging.rs");
-
-#[cfg(test)]
-mod tests;

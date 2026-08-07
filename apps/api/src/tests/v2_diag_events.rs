@@ -56,7 +56,10 @@ async fn v2_get_diagnostic_events_returns_raw_rows_and_infers_namespace() -> Res
         surface_bound["raw_fact_ref"],
         json!({"kind": "raw_log", "event_identity": "diag:surface-bound"})
     );
-    assert_eq!(surface_bound["derivation_kind"], json!("diag_test_derivation"));
+    assert_eq!(
+        surface_bound["derivation_kind"],
+        json!("ens_v1_unwrapped_authority")
+    );
     assert_eq!(surface_bound["canonicality_state"], json!("canonical"));
     assert_eq!(
         surface_bound["before_state"]["subject"],
@@ -242,14 +245,14 @@ async fn seed_v2_diag_events_fixture(database: &TestDatabase) -> Result<()> {
         DIAG_EVENTS_LOGICAL_NAME_ID,
         "Diag.eth",
         "node:diag.eth",
-        305,
+        301,
         resource_id,
         token_lineage_id,
         surface_binding_id,
     )
     .await?;
 
-    bigname_storage::upsert_address_names_current_rows(
+    upsert_phase_address_names_current_rows(
         &database.pool,
         &[address_name_current_row(
             DIAG_EVENTS_ADDRESS,
@@ -266,7 +269,7 @@ async fn seed_v2_diag_events_fixture(database: &TestDatabase) -> Result<()> {
     )
     .await?;
 
-    bigname_storage::upsert_raw_blocks(
+    upsert_phase_raw_blocks(
         &database.pool,
         &[
             raw_block("ethereum-mainnet", "0xdiag302", None, 302, 1_700_000_302),
@@ -278,17 +281,19 @@ async fn seed_v2_diag_events_fixture(database: &TestDatabase) -> Result<()> {
         ],
     )
     .await?;
-    bigname_storage::advance_chain_checkpoints(
-        &database.pool,
-        &bigname_storage::ChainCheckpointUpdate {
-            chain_id: "base-mainnet".to_owned(),
-            canonical: Some(bigname_storage::CheckpointBlockRef {
-                block_hash: "0xbasediag401".to_owned(),
-                block_number: 401,
-            }),
-            ..bigname_storage::ChainCheckpointUpdate::default()
-        },
+    sqlx::query(
+        r#"
+        INSERT INTO bigname_phase.chain_heads (
+            chain_id, latest_block_hash, latest_block_number
+        )
+        VALUES ('base-mainnet', '0xbasediag401', 401)
+        ON CONFLICT (chain_id) DO UPDATE SET
+            latest_block_hash = EXCLUDED.latest_block_hash,
+            latest_block_number = EXCLUDED.latest_block_number,
+            updated_at = now()
+        "#,
     )
+    .execute(&database.pool)
     .await?;
 
     bigname_storage::insert_normalized_event_fixtures(

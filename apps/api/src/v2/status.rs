@@ -45,10 +45,10 @@ pub(crate) async fn get_status(
     _no_query: NoQueryParams,
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<StatusData>>> {
-    let read = match bigname_storage::load_phase_indexing_status(&state.lookup_pool).await {
+    let read = match bigname_storage::load_phase_indexing_status(&state.pool).await {
         Ok(read) => read,
         Err(load_error) => {
-            if crate::state::is_absent_phase_schema(&state.lookup_pool, &load_error).await {
+            if crate::state::is_absent_phase_schema(&state.pool, &load_error).await {
                 warn!(
                     service = "api",
                     error = ?load_error,
@@ -264,11 +264,11 @@ mod tests {
         ])
         .expect("test RPC map must be valid");
         let state = AppState::new(
-            PgPool::connect_lazy_with(bigname_storage::stamp_projection_replay_version(
+            PgPool::connect_lazy_with(
                 "postgres://bigname:bigname@127.0.0.1:5432/bigname"
                     .parse()
                     .expect("static test database URL must parse"),
-            )),
+            ),
             chain_rpc_urls,
         );
         let observed_at = OffsetDateTime::now_utc();
@@ -327,11 +327,11 @@ mod tests {
             dead_letter_count: 0,
         };
         let state = AppState::new(
-            PgPool::connect_lazy_with(bigname_storage::stamp_projection_replay_version(
+            PgPool::connect_lazy_with(
                 "postgres://bigname:bigname@127.0.0.1:5432/bigname"
                     .parse()
                     .expect("static test database URL must parse"),
-            )),
+            ),
             bigname_lookup::ChainRpcUrls::default(),
         );
 

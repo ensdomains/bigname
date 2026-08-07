@@ -3,31 +3,29 @@ use sqlx::PgPool;
 
 use crate::{IndexingStatusChainRow, IndexingStatusRead};
 
+/// The chains schema-v2 readers expect the phase runner to be working on: every chain with a
+/// stored head or any phase state. Shared so per-chain readiness reads cannot drift into
+/// disagreeing about which chains a missing row is missing from.
+pub const PHASE_EXPECTED_CHAIN_IDS_SELECT: &str = r#"
+    SELECT chain_id FROM bigname_phase.chain_heads
+    UNION
+    SELECT chain_id FROM bigname_phase.chain_phase_state
+"#;
+
 pub async fn load_phase_expected_status_chain_ids(pool: &PgPool) -> Result<Vec<String>> {
-    sqlx::query_scalar(
-        r#"
-        SELECT chain_id
-        FROM (
-            SELECT chain_id FROM chain_heads
-            UNION
-            SELECT chain_id FROM chain_phase_state
-        ) AS known_chains
-        ORDER BY chain_id
-        "#,
-    )
+    sqlx::query_scalar(&format!(
+        "SELECT chain_id FROM ({PHASE_EXPECTED_CHAIN_IDS_SELECT}) AS known_chains \
+         ORDER BY chain_id"
+    ))
     .fetch_all(pool)
     .await
     .context("failed to load expected schema-v2 indexing status chains")
 }
 
 pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
-    let rows = sqlx::query(
+    let rows = sqlx::query(&format!(
         r#"
-        WITH known_chains AS (
-            SELECT chain_id FROM chain_heads
-            UNION
-            SELECT chain_id FROM chain_phase_state
-        )
+        WITH known_chains AS ({PHASE_EXPECTED_CHAIN_IDS_SELECT})
         SELECT
             known_chains.chain_id,
             head.latest_block_number,
@@ -54,14 +52,14 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
         LEFT JOIN chain_phase_state project
           ON project.chain_id = known_chains.chain_id
          AND project.phase_name = 'project'
-        LEFT JOIN chain_lineage latest_lineage
+        LEFT JOIN bigname_phase.chain_lineage latest_lineage
           ON latest_lineage.chain_id = head.chain_id
          AND latest_lineage.block_number = head.latest_block_number
          AND latest_lineage.block_hash = head.latest_block_hash
          AND latest_lineage.canonicality_state IN (
              'canonical', 'safe', 'finalized'
          )
-        LEFT JOIN chain_lineage projected_lineage
+        LEFT JOIN bigname_phase.chain_lineage projected_lineage
           ON projected_lineage.chain_id = project.chain_id
          AND projected_lineage.block_number = project.current_block_number
          AND projected_lineage.block_hash = project.current_block_hash
@@ -77,8 +75,8 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
               AND chain_id = known_chains.chain_id
         ) heartbeat ON TRUE
         ORDER BY known_chains.chain_id
-        "#,
-    )
+        "#
+    ))
     .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
     .fetch_all(pool)
     .await
