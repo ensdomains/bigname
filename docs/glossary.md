@@ -69,7 +69,17 @@ batches (today 500-block ranges). Grids never split a block: the block is the
 atomic unit every grid loads. Where the boundaries fall is an execution
 detail, not an input to interpretation — surviving identity rows, discovery
 edges, and normalized events must be identical across grids over identical
-input.
+input. That identity is verified for the ENSv1 divergence classes
+[#336](https://github.com/ensdomains/bigname/issues/336) catalogued, with two
+known open exceptions of distinct kinds:
+[#348](https://github.com/ensdomains/bigname/issues/348) is a true grid
+divergence, on the ENSv2 resolver path — a late resolver `RecordChanged` on a
+lapsed registration keeps an attribution only in a grid that never splits the
+walk;
+[#347](https://github.com/ensdomains/bigname/issues/347) diverges
+whole-walk versus split-walk output but is not a boundary-carry artifact —
+the uninterrupted walk under-derives a wrapper authority lapse that a split
+walk derives.
 
 **Stored-history verification** — the read-only phase that compares canonical
 selected raw logs with the chain's configured reference source through a
@@ -767,8 +777,17 @@ it.
 **Run shape** — how one interpret walk executes over its input: fresh (from
 the start of the chain), incremental (continuing from retained prior events),
 or resumed (continuing from a persisted progress marker after an interruption,
-including an interrupted redo's persisted intermediate state). Batch-independence rules
-require identical surviving rows in every run shape over identical input.
+including an interrupted redo's persisted intermediate state).
+Batch-independence rules require identical surviving rows in every run shape
+over identical input. That identity is verified for the ENSv1 divergence
+classes [#336](https://github.com/ensdomains/bigname/issues/336) catalogued,
+with two known open exceptions of distinct kinds:
+[#348](https://github.com/ensdomains/bigname/issues/348) is a batch-boundary
+divergence, on the ENSv2 resolver path — an attribution an uninterrupted walk
+keeps and a walk continued across a batch boundary does not reproduce;
+[#347](https://github.com/ensdomains/bigname/issues/347) is not a
+boundary-carry artifact — the uninterrupted walk under-derives a wrapper
+authority lapse that a walk split into two shapes derives.
 
 **Shadow** — (1) manifest rollout/capability value: facts and traces are
 written but general public reads are not enabled; (2) *shadow comparison*:

@@ -374,11 +374,24 @@ payload arbitration, supersession, full-closure proof, or adapter-checkpoint
 reuse.
 
 Physical batching is an execution detail, not an input to interpretation.
-Identity rows, discovery edges, and normalized events are a pure function of
-the canonical raw facts and the declared manifests, discovery rules, and
+Identity rows, discovery edges, and normalized events must be a pure function
+of the canonical raw facts and the declared manifests, discovery rules, and
 admissions: a fresh full walk, an incremental follow, and a resumed session
-over identical input write identical rows no matter where the 500-block batch
-boundaries fall. Three rules keep the written rows batch-independent:
+over identical input must write identical rows no matter where the 500-block
+batch boundaries fall. The guarantee is verified for the divergence classes
+[#336](https://github.com/ensdomains/bigname/issues/336) identified on the
+ENSv1 path — the permutation lane's pinned batch-artifact counts sit at zero —
+with two known open exceptions of distinct kinds.
+[#348](https://github.com/ensdomains/bigname/issues/348) is a batch-boundary
+divergence of exactly the kind this rule condemns, on the ENSv2 resolver
+path: a late resolver `RecordChanged` on a lapsed registration keeps an
+attribution in an uninterrupted walk that a walk split across a batch
+boundary does not reproduce, and production, which always walks in physical
+batches, does not carry the attribution across a boundary.
+[#347](https://github.com/ensdomains/bigname/issues/347) is not a
+boundary-carry artifact: an uninterrupted walk under-derives a wrapper
+authority lapse (`AuthorityEpochChanged` with its `PermissionChanged`) that a
+split walk derives. Three rules keep the written rows batch-independent:
 
 - `before_state` chains over the emitted event stream: a retained event's
   `before_state` is the `after_state` of the previous retained event under the
