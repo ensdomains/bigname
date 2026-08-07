@@ -8,7 +8,7 @@ use super::{
     },
     names::{child_node, dns_encode, labelhash, namehash, reverse_labels},
     scenario::{
-        Action, AuthorityShape, Dimensions, ExpiryWindow, Perturbation, RecordState,
+        Action, AuthorityShape, BurstPhase, Dimensions, ExpiryWindow, Perturbation, RecordState,
         RegistrationPath, SubnameShape, WrapState, action, emission, stage,
     },
     world::Wiring,
@@ -90,7 +90,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                 wires.resolver,
                 V1Resolver::AddrChanged { node, a: successor }.encode_log_data(),
             );
-            rewrite.burst = true;
+            rewrite.burst = Some(BurstPhase::PostRegistrationRewrite);
             actions.push(action(
                 format!("{label}:rewrite-after-registration"),
                 stage::WRITE,
@@ -443,19 +443,23 @@ fn burst_around_registration(
     first: Address,
     second: Address,
 ) {
-    let burst = |a: Address| {
+    let burst = |a: Address, phase: BurstPhase| {
         let mut emission = emission(
             wires.resolver,
             V1Resolver::AddrChanged { node, a }.encode_log_data(),
         );
-        emission.burst = true;
+        emission.burst = Some(phase);
         emission
     };
     // The controller's event is the last emission of every registration path, so popping and
     // re-pushing it keeps the registry setup between the two burst writes.
     let controller = onboarding.emissions.pop().expect("registration emits");
-    onboarding.emissions.insert(0, burst(first));
-    onboarding.emissions.push(burst(second));
+    onboarding
+        .emissions
+        .insert(0, burst(first, BurstPhase::PreOwnership));
+    onboarding
+        .emissions
+        .push(burst(second, BurstPhase::RetargetWindow));
     onboarding.emissions.push(controller);
 }
 

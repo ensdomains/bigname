@@ -33,17 +33,23 @@ mod permutation;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use alloy_primitives::{B256, keccak256};
+use alloy_sol_types::SolEvent;
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use permutation::{
     convergence::BatchBoundaryArtifacts,
     directed::Directed,
-    events::declared_events,
+    events::{
+        V1LegacyController, V1Registry, V1Resolver, V1UnwrappedController, V1WrappedController,
+        declared_events,
+    },
     invariants::{IdentityReferences, assert_upsert_guards_agree, converge, split},
-    scenario,
+    names::{labelhash, namehash},
+    scenario::{self, BurstPhase},
     world::{
-        ENS_V1_MAINNET, ENS_V2_SEPOLIA, Wiring, World, assert_pins_are_current,
+        ENS_V1_MAINNET, ENS_V2_SEPOLIA, GeneratedLog, Wiring, World, assert_pins_are_current,
         assert_worlds_cover_deployments, checked_in_manifests, declared_event_kinds,
         declared_event_topics,
     },
@@ -88,7 +94,7 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
     let mut emitted_topic0s = BTreeSet::new();
     let mut event_kinds: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     let mut derived = Vec::new();
-    let mut burst_reach: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    let mut burst_reach: BTreeMap<&str, BurstReach> = BTreeMap::new();
     for world in WORLDS {
         let wiring = Wiring::build(world, &checked_in)?;
         let declared = wiring.declared_instances();
@@ -97,8 +103,7 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
         let mut logs = 0_usize;
         let mut world_artifacts = BatchBoundaryArtifacts::default();
         let mut world_detaches = 0_usize;
-        let mut world_burst_cases = 0_usize;
-        let mut world_burst_derivations = 0_usize;
+        let mut world_burst = BurstReach::default();
         for case in 0..cases {
             let seed = base.wrapping_add(case.wrapping_mul(CASE_STRIDE));
             let scenario = scenario::generate(world, &wiring, seed);
@@ -110,24 +115,37 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
                     .filter_map(|log| log.topics.first())
                     .map(|topic| topic.to_ascii_lowercase()),
             );
-            world_burst_cases += usize::from(scenario.dimensions.pre_registration_burst);
-            // Absolute chain positions of the logs the burst added, so the run can count how many
-            // of them the interpretation actually derives an event from.
-            let burst_positions: BTreeSet<(i64, i64, i64)> = scenario
+            world_burst.cases += usize::from(scenario.dimensions.pre_registration_burst);
+            // Absolute chain positions of the logs the burst added, with the phase the generator
+            // claims for each, so the run can count how many of them the interpretation actually
+            // derives an event from, per phase.
+            let burst_positions: BTreeMap<(i64, i64, i64), BurstPhase> = scenario
                 .logs
                 .iter()
-                .filter(|log| log.burst)
-                .map(|log| {
-                    (
-                        scenario.blocks[log.block_index].number,
-                        log.transaction_index,
-                        log.log_index,
-                    )
+                .filter_map(|log| {
+                    log.burst.map(|phase| {
+                        (
+                            (
+                                scenario.blocks[log.block_index].number,
+                                log.transaction_index,
+                                log.log_index,
+                            ),
+                            phase,
+                        )
+                    })
                 })
                 .collect();
             let context = scenario.describe();
             let input = wiring.batch_input(&scenario.blocks, &scenario.logs)?;
             let batches = split(input.blocks.len(), seed ^ SPLIT_SALT);
+            if scenario.dimensions.pre_registration_burst {
+                match verify_burst_phases(&context, &scenario, &batches) {
+                    Ok(cross_batch) => {
+                        world_burst.cross_batch_cases += usize::from(cross_batch);
+                    }
+                    Err(error) => failures.push(format!("{error:?}")),
+                }
+            }
             match check(
                 &context,
                 world,
@@ -154,7 +172,13 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
                         .extend(outcome.event_kinds);
                     world_artifacts.absorb(outcome.artifacts);
                     world_detaches += outcome.subregistry_detaches;
-                    world_burst_derivations += outcome.burst_derivations;
+                    for (total, derived) in world_burst
+                        .derivations
+                        .iter_mut()
+                        .zip(outcome.burst_derivations)
+                    {
+                        *total += derived;
+                    }
                 }
                 Err(error) => failures.push(format!("{error:?}")),
             }
@@ -170,7 +194,7 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
         artifacts.insert(world.label, world_artifacts);
         subregistry_detaches.insert(world.label, world_detaches);
         derived.push((world.label, events, logs));
-        burst_reach.insert(world.label, (world_burst_cases, world_burst_derivations));
+        burst_reach.insert(world.label, world_burst);
     }
     for (world, kinds) in &event_kinds {
         eprintln!(
@@ -451,7 +475,7 @@ struct Outcome {
     events: usize,
     event_kinds: BTreeSet<String>,
     subregistry_detaches: usize,
-    burst_derivations: usize,
+    burst_derivations: [usize; BurstPhase::COUNT],
     artifacts: BatchBoundaryArtifacts,
 }
 
@@ -462,7 +486,7 @@ fn check(
     manifests: &[i64],
     input: bigname_adapters::schema_v2::BatchInput,
     batches: Vec<std::ops::Range<usize>>,
-    burst_positions: &BTreeSet<(i64, i64, i64)>,
+    burst_positions: &BTreeMap<(i64, i64, i64), BurstPhase>,
 ) -> Result<Outcome> {
     if batches.len() < 2 {
         bail!("{context}: a split replay of fewer than two batches proves nothing");
@@ -493,21 +517,15 @@ fn check(
         .count();
     // Same whole-sequence pass as the detach count: whether a burst write derives must not depend
     // on where the batches fell.
-    let burst_derivations = converged
-        .whole
-        .output
-        .normalized_events
-        .iter()
-        .filter(|event| {
-            if let (Some(block), Some(transaction), Some(log)) =
-                (event.block_number, event.transaction_index, event.log_index)
-            {
-                burst_positions.contains(&(block, transaction, log))
-            } else {
-                false
-            }
-        })
-        .count();
+    let mut burst_derivations = [0_usize; BurstPhase::COUNT];
+    for event in &converged.whole.output.normalized_events {
+        if let (Some(block), Some(transaction), Some(log)) =
+            (event.block_number, event.transaction_index, event.log_index)
+            && let Some(phase) = burst_positions.get(&(block, transaction, log))
+        {
+            burst_derivations[phase.index()] += 1;
+        }
+    }
     // The whole-sequence pass is the shape a backfill runs, and it may attribute rows the split
     // replay leaves unattributed, so it needs its own foreign-key and canonicality check.
     let whole = format!("{context} whole-sequence pass");
@@ -524,6 +542,161 @@ fn check(
         burst_derivations,
         artifacts: converged.artifacts,
     })
+}
+
+/// The phase a burst marker claims is the generator's word; this checks that word against the
+/// generated stream, per burst name. The reorders it exists to catch keep every log, marker, and
+/// count the pins measure — emit the controller's registration event ahead of both marked writes,
+/// or move the marked writes into transactions of their own, and the corpus totals are unchanged
+/// while no marked write lands in the retarget interval the burst exists to reach — so counts
+/// alone cannot see it. A name's ownership setup is the first registry `NewOwner` whose (node,
+/// label) hashes to the node the burst writes carry, and its controller registration the first
+/// controller `NameRegistered` naming that label; first is the onboarding pair, because the
+/// name's re-registration and late registry writes sit at a later stage than its registration and
+/// so land after it in the stream. The marked writes must also share the registration's
+/// transaction: reconciliation's retarget interval is transaction-scoped, so log order alone does
+/// not place a write inside it. Returns whether any staged rewrite lands in a later batch than
+/// its registration under the case's own split, feeding the cross-batch floor.
+fn verify_burst_phases(
+    context: &str,
+    scenario: &scenario::Scenario,
+    batches: &[std::ops::Range<usize>],
+) -> Result<bool> {
+    let new_owner = format!("{:#x}", V1Registry::NewOwner::SIGNATURE_HASH);
+    let controllers = [
+        format!("{:#x}", V1LegacyController::NameRegistered::SIGNATURE_HASH),
+        format!("{:#x}", V1WrappedController::NameRegistered::SIGNATURE_HASH),
+        format!(
+            "{:#x}",
+            V1UnwrappedController::NameRegistered::SIGNATURE_HASH
+        ),
+    ];
+    let position = |log: &GeneratedLog| {
+        (
+            scenario.blocks[log.block_index].number,
+            log.transaction_index,
+            log.log_index,
+        )
+    };
+    let mut marked: BTreeMap<&str, [Option<&GeneratedLog>; BurstPhase::COUNT]> = BTreeMap::new();
+    for log in scenario.logs.iter().filter(|log| log.burst.is_some()) {
+        let phase = log.burst.expect("filtered to marked logs");
+        let Some(node) = log.topics.get(1) else {
+            bail!("{context}: a burst-marked log carries no node topic: {log:?}");
+        };
+        let slot = &mut marked.entry(node.as_str()).or_default()[phase.index()];
+        if slot.replace(log).is_some() {
+            bail!("{context}: the burst name writing node {node} has two logs marked {phase:?}");
+        }
+    }
+    let mut cross_batch = false;
+    for (node, phases) in marked {
+        if phases.iter().any(Option::is_none) {
+            bail!(
+                "{context}: the burst logs writing node {node} are not one per phase, so the \
+                 burst shape lost a leg: {phases:?}"
+            );
+        }
+        let [pre_ownership, retarget_window, rewrite] = phases.map(Option::unwrap);
+        let setup_log = scenario
+            .logs
+            .iter()
+            .find(|log| {
+                log.topics.first() == Some(&new_owner)
+                    && log
+                        .topics
+                        .get(1..3)
+                        .and_then(child_node_from_topics)
+                        .as_deref()
+                        == Some(node)
+            })
+            .with_context(|| {
+                format!(
+                    "{context}: no registry NewOwner sets up node {node}, which the burst writes"
+                )
+            })?;
+        let controller_log = scenario
+            .logs
+            .iter()
+            .find(|log| {
+                log.topics
+                    .first()
+                    .is_some_and(|topic| controllers.contains(topic))
+                    && log.topics.get(1) == setup_log.topics.get(2)
+            })
+            .with_context(|| {
+                format!("{context}: no controller NameRegistered registers node {node}")
+            })?;
+        let setup = position(setup_log);
+        let controller = position(controller_log);
+        let write = position(pre_ownership);
+        if (write.0, write.1) != (controller.0, controller.1)
+            || (setup.0, setup.1) != (controller.0, controller.1)
+        {
+            bail!(
+                "{context}: the burst for node {node} no longer sits in the registration's \
+                 transaction — the pre-ownership write sits at {write:?}, the ownership setup at \
+                 {setup:?}, the controller registration at {controller:?}: the retarget interval \
+                 is transaction-scoped, so a write in another transaction is outside it however \
+                 the log order reads"
+            );
+        }
+        if write >= setup || write >= controller {
+            bail!(
+                "{context}: the burst log marked PreOwnership for node {node} sits at {write:?}, \
+                 but the name's ownership setup sits at {setup:?} and its controller registration \
+                 at {controller:?}: the write no longer precedes the registration — the generator \
+                 reordered the registration ahead of the marked write, or the annotation went \
+                 stale"
+            );
+        }
+        let write = position(retarget_window);
+        if (write.0, write.1) != (controller.0, controller.1) {
+            bail!(
+                "{context}: the burst log marked RetargetWindow for node {node} sits at \
+                 {write:?}, outside the registration's transaction ({controller:?}): the retarget \
+                 interval is transaction-scoped, so no marked write sits inside it however the \
+                 log order reads"
+            );
+        }
+        if write <= setup || write >= controller {
+            bail!(
+                "{context}: the burst log marked RetargetWindow for node {node} sits at \
+                 {write:?}, outside the interval between the name's ownership setup at {setup:?} \
+                 and its controller registration at {controller:?}: no marked write sits in \
+                 reconciliation's strict retarget interval — the reach the burst exists to prove \
+                 is gone, whatever the counts read"
+            );
+        }
+        let write = position(rewrite);
+        if write <= controller {
+            bail!(
+                "{context}: the burst log marked PostRegistrationRewrite for node {node} sits at \
+                 {write:?}, on or before the name's controller registration at {controller:?}: \
+                 the staged rewrite no longer follows the registration — the generator reordered, \
+                 or the annotation went stale"
+            );
+        }
+        let batch_of = |log: &GeneratedLog| {
+            batches
+                .iter()
+                .position(|range| range.contains(&log.block_index))
+        };
+        cross_batch |= batch_of(controller_log) != batch_of(rewrite);
+    }
+    Ok(cross_batch)
+}
+
+/// The child node a registry `NewOwner`'s (node, label) topics commit to. The burst writes carry
+/// that child node, so this is what ties a marked log to its name's ownership setup.
+fn child_node_from_topics(path: &[String]) -> Option<String> {
+    let [parent, label] = path else { return None };
+    let parent = parent.parse::<B256>().ok()?;
+    let label = label.parse::<B256>().ok()?;
+    let mut bytes = [0_u8; 64];
+    bytes[..32].copy_from_slice(parent.as_slice());
+    bytes[32..].copy_from_slice(label.as_slice());
+    Some(format!("{:#x}", keccak256(bytes)))
 }
 
 /// An event that clears a subregistry the name was carrying — a different interpretation path from
@@ -651,19 +824,39 @@ const MINIMUM_VOLUMES: &[(&str, usize, usize)] = &[
     (ENS_V2_SEPOLIA.label, 675, 1390),
 ];
 
-/// The pre-registration burst axis's reach at the default corpus: per world, how many cases the
-/// axis fired in, and how many events the whole-sequence pass derives from the logs the burst
-/// added. Presence alone would let the axis rot silently — the burst is a few percent of the
-/// corpus, so zeroing its draw or malforming its logs (the interpreter then drops them) moves
-/// neither the kind floor nor the volume floors. Every burst log derives exactly one event today,
-/// so the second column is also the burst-log count; a malformed fragment lowers it. The corpus
-/// event total nets ~2 fewer than the burst-log count across the corpus — the burst's extra action
-/// re-rolls each burst case's layout, and same-transaction reconciliation collapses derivations
-/// the burst-free layout kept — so compare this column against the burst logs, not the corpus
-/// event delta. ENSv2's zero row pins the axis as ENSv1-only until someone deliberately extends it
-/// there.
-const EXPECTED_BURST_REACH: &[(&str, usize, usize)] =
-    &[(ENS_V1_MAINNET.label, 8, 42), (ENS_V2_SEPOLIA.label, 0, 0)];
+/// The pre-registration burst axis's reach at the default corpus, per world: how many cases the
+/// axis fired in, how many events the whole-sequence pass derives from the burst's logs per
+/// marked phase — pre-ownership, retarget window, post-registration rewrite — and a floor on how
+/// many of those cases land the staged rewrite in a later batch than the registration under the
+/// case's own split. Presence alone would let the axis rot silently — the burst is a few percent
+/// of the corpus, so zeroing its draw or malforming its logs (the interpreter then drops them)
+/// moves neither the kind floor nor the volume floors. Every burst log derives exactly one event
+/// today, so the phase columns are also the per-phase burst-log counts; a malformed fragment
+/// lowers one. The corpus event total nets ~2 fewer than the burst-log count across the corpus —
+/// the burst's extra action re-rolls each burst case's layout, and same-transaction
+/// reconciliation collapses derivations the burst-free layout kept — so compare these columns
+/// against the burst logs, not the corpus event delta.
+///
+/// The flat total did not bind the topology: emitting the controller's registration event ahead
+/// of both marked writes keeps every log, marker, and count while no marked write lands in the
+/// retarget interval the burst exists to reach. The per-phase columns bind what each phase
+/// accounts for, and `verify_burst_phases` binds the phases themselves against the generated
+/// stream — including the registration's transaction, which the retarget interval is scoped to —
+/// so a reorder cannot carry stale annotations. The last column floors the cross-batch
+/// placements: a rewrite the split replay always processes in the registration's own batch never
+/// exercises a boundary-restored tail, which the convergence claim relies on. ENSv2's zero row
+/// pins the axis as ENSv1-only until someone deliberately extends it there.
+const EXPECTED_BURST_REACH: &[(&str, usize, [usize; BurstPhase::COUNT], usize)] = &[
+    (ENS_V1_MAINNET.label, 8, [14, 14, 14], 5),
+    (ENS_V2_SEPOLIA.label, 0, [0, 0, 0], 0),
+];
+
+#[derive(Clone, Copy, Debug, Default)]
+struct BurstReach {
+    cases: usize,
+    derivations: [usize; BurstPhase::COUNT],
+    cross_batch_cases: usize,
+}
 
 /// Normalized events the pinned manifests declare that the pools deliberately never reach, with the
 /// reason each one is out. Anything a manifest declares that is neither derived nor listed here
@@ -839,7 +1032,7 @@ fn assert_pinned_artifacts(
     Ok(())
 }
 
-fn assert_burst_reach(reach: &BTreeMap<&str, (usize, usize)>) -> Result<()> {
+fn assert_burst_reach(reach: &BTreeMap<&str, BurstReach>) -> Result<()> {
     assert_tables_name_every_world(
         "EXPECTED_BURST_REACH",
         &EXPECTED_BURST_REACH
@@ -847,18 +1040,30 @@ fn assert_burst_reach(reach: &BTreeMap<&str, (usize, usize)>) -> Result<()> {
             .map(|(world, ..)| *world)
             .collect::<Vec<_>>(),
     )?;
-    for (world, cases, derivations) in EXPECTED_BURST_REACH {
+    for (world, cases, derivations, cross_batch) in EXPECTED_BURST_REACH {
         let observed = reach.get(world).copied().unwrap_or_default();
-        if observed != (*cases, *derivations) {
+        if observed.cases != *cases || observed.derivations != *derivations {
             bail!(
-                "{world}: the pre-registration burst fired in {} cases and derived {} events, not \
-                 the pinned ({cases} cases, {derivations} derivations). {DRAWN_CORPUS_CAVEAT} \
-                 Otherwise fewer derivations at the same case count means the burst's writes \
-                 stopped deriving — a fragment the interpreter now drops; more means a fragment \
-                 now derives two events or the burst marking spread to logs the axis did not add; \
-                 and a changed case count means the axis's draw moved",
-                observed.0,
-                observed.1
+                "{world}: the pre-registration burst fired in {} cases and derived {:?} events by \
+                 phase (pre-ownership, retarget window, post-registration rewrite), not the \
+                 pinned ({cases} cases, {derivations:?}). {DRAWN_CORPUS_CAVEAT} Otherwise fewer \
+                 derivations at the same case count means the burst's writes stopped deriving — a \
+                 fragment the interpreter now drops; more means a fragment now derives two events \
+                 or the burst marking spread to logs the axis did not add; and a changed case \
+                 count means the axis's draw moved",
+                observed.cases,
+                observed.derivations
+            );
+        }
+        if observed.cross_batch_cases < *cross_batch {
+            bail!(
+                "{world}: {} burst cases land the staged rewrite in a later batch than the \
+                 registration, under the pinned {cross_batch} — the corpus is losing the \
+                 cross-batch rewrite placements the convergence claim relies on, and a rewrite \
+                 the split replay always processes in the registration's own batch never \
+                 exercises a boundary-restored tail. {DRAWN_CORPUS_CAVEAT} Otherwise the layout \
+                 or the batch split stopped placing the rewrite past a boundary",
+                observed.cross_batch_cases
             );
         }
     }
@@ -909,18 +1114,202 @@ fn volume_floors_fail_under_the_minimum() {
 fn burst_reach_fails_off_the_pin() {
     let at = EXPECTED_BURST_REACH
         .iter()
-        .map(|(world, cases, derivations)| (*world, (*cases, *derivations)))
+        .map(|(world, cases, derivations, cross_batch)| {
+            (
+                *world,
+                BurstReach {
+                    cases: *cases,
+                    derivations: *derivations,
+                    cross_batch_cases: *cross_batch,
+                },
+            )
+        })
         .collect::<BTreeMap<_, _>>();
     assert!(assert_burst_reach(&at).is_ok());
-    let (world, cases, derivations) = EXPECTED_BURST_REACH[0];
+    let (world, ..) = EXPECTED_BURST_REACH[0];
     // The malformed-burst shape: cases unchanged, derivations fallen.
     let mut dropped = at.clone();
-    dropped.insert(world, (cases, derivations - 1));
+    dropped.get_mut(world).expect("a row per world").derivations[1] -= 1;
     assert!(assert_burst_reach(&dropped).is_err());
+    // A derivation moved between phases keeps the flat total the old tuple pinned; only the
+    // per-phase columns see it.
+    let mut shifted = at.clone();
+    let reach = shifted.get_mut(world).expect("a row per world");
+    reach.derivations[0] += 1;
+    reach.derivations[1] -= 1;
+    assert!(assert_burst_reach(&shifted).is_err());
     // The zeroed-draw shape: the axis never fires.
-    let mut silenced = at;
-    silenced.insert(world, (0, 0));
+    let mut silenced = at.clone();
+    silenced.insert(world, BurstReach::default());
     assert!(assert_burst_reach(&silenced).is_err());
+    // The same-batch-rewrite shape: counts intact, cross-batch placement gone.
+    let mut same_batch = at.clone();
+    same_batch
+        .get_mut(world)
+        .expect("a row per world")
+        .cross_batch_cases -= 1;
+    assert!(assert_burst_reach(&same_batch).is_err());
+}
+
+/// The corpus never produces a dishonest annotation, so the honesty check's failure directions
+/// are unit-proved here: one name's burst shape passes; the same logs with the controller's event
+/// moved ahead of both marked writes fail (the reorder the per-phase counts cannot see); the same
+/// logs in the intended order but with a marked write in its own transaction fail (the retarget
+/// interval is transaction-scoped); the same logs with two annotations swapped fail; and a
+/// rewrite in a later block counts only when the split puts it in a later batch.
+#[test]
+fn burst_phase_annotations_fail_when_the_stream_disagrees() {
+    let parent = format!("{:#x}", namehash(&["eth"]));
+    let label = format!("{:#x}", labelhash("alpha"));
+    let node = format!("{:#x}", namehash(&["alpha", "eth"]));
+    let write_topics = || {
+        vec![
+            format!("{:#x}", V1Resolver::AddrChanged::SIGNATURE_HASH),
+            node.clone(),
+        ]
+    };
+    let setup_topics = || {
+        vec![
+            format!("{:#x}", V1Registry::NewOwner::SIGNATURE_HASH),
+            parent.clone(),
+            label.clone(),
+        ]
+    };
+    let controller_topics = || {
+        vec![
+            format!("{:#x}", V1LegacyController::NameRegistered::SIGNATURE_HASH),
+            label.clone(),
+            format!("{:#x}", B256::ZERO),
+        ]
+    };
+    let log =
+        |(block_index, transaction_index, log_index), topics: Vec<String>, burst| GeneratedLog {
+            block_index,
+            transaction_hash: "0x00".to_owned(),
+            transaction_index,
+            log_index,
+            emitter: "0x00000000000000000000000000000000000000aa".to_owned(),
+            topics,
+            data: Vec::new(),
+            burst,
+        };
+    let scenario_for = |logs: Vec<GeneratedLog>| scenario::Scenario {
+        seed: 0,
+        world: &ENS_V1_MAINNET,
+        dimensions: scenario::Dimensions {
+            wrap_state: scenario::WrapState::Unwrapped,
+            record_state: scenario::RecordState::NoResolver,
+            subname_shape: scenario::SubnameShape::None,
+            expiry_window: scenario::ExpiryWindow::Active,
+            authority_shape: scenario::AuthorityShape::SelfOwned,
+            registration_path: scenario::RegistrationPath::Unwrapped,
+            perturbations: Vec::new(),
+            name_count: 1,
+            dense_transactions: false,
+            pre_registration_burst: true,
+        },
+        action_names: Vec::new(),
+        blocks: vec![
+            permutation::world::BlockSpec {
+                number: 15_000_000,
+                hash: "0x01".to_owned(),
+                timestamp: 1_600_000_000,
+            },
+            permutation::world::BlockSpec {
+                number: 15_000_010,
+                hash: "0x02".to_owned(),
+                timestamp: 1_600_086_400,
+            },
+        ],
+        logs,
+    };
+    let one_batch: Vec<std::ops::Range<usize>> = std::iter::once(0..2).collect();
+    let two_batches: Vec<std::ops::Range<usize>> = Vec::from([0..1, 1..2]);
+    let honest = scenario_for(vec![
+        log((0, 0, 0), write_topics(), Some(BurstPhase::PreOwnership)),
+        log((0, 0, 1), setup_topics(), None),
+        log((0, 0, 2), write_topics(), Some(BurstPhase::RetargetWindow)),
+        log((0, 0, 3), controller_topics(), None),
+        log(
+            (0, 0, 4),
+            write_topics(),
+            Some(BurstPhase::PostRegistrationRewrite),
+        ),
+    ]);
+    assert!(
+        !verify_burst_phases("honest", &honest, &one_batch).expect("the intended shape verifies"),
+        "the rewrite shared the registration's batch"
+    );
+    let mut later_block_logs = honest.logs.clone();
+    later_block_logs[4].block_index = 1;
+    let later_block = scenario_for(later_block_logs);
+    assert!(
+        !verify_burst_phases("later-block-same-batch", &later_block, &one_batch)
+            .expect("the intended shape verifies"),
+        "a rewrite in a later block but the same batch is not cross-batch coverage"
+    );
+    assert!(
+        verify_burst_phases("later-block-later-batch", &later_block, &two_batches)
+            .expect("the intended shape verifies"),
+        "the rewrite landed in a later batch than the registration"
+    );
+    let reordered = scenario_for(vec![
+        log((0, 0, 0), controller_topics(), None),
+        log((0, 0, 1), write_topics(), Some(BurstPhase::PreOwnership)),
+        log((0, 0, 2), setup_topics(), None),
+        log((0, 0, 3), write_topics(), Some(BurstPhase::RetargetWindow)),
+        log(
+            (0, 0, 4),
+            write_topics(),
+            Some(BurstPhase::PostRegistrationRewrite),
+        ),
+    ]);
+    let error = format!(
+        "{:?}",
+        verify_burst_phases("reordered", &reordered, &one_batch)
+            .expect_err("a stale annotation must fail")
+    );
+    assert!(
+        error.contains("PreOwnership"),
+        "the failure names the phase whose binding rotted: {error}"
+    );
+    // The intended log order with the pre-ownership write in a transaction of its own: every
+    // phase ordering holds, but the marked write is outside the retarget interval.
+    let split_transactions = scenario_for(vec![
+        log((0, 0, 0), write_topics(), Some(BurstPhase::PreOwnership)),
+        log((0, 1, 0), setup_topics(), None),
+        log((0, 1, 1), write_topics(), Some(BurstPhase::RetargetWindow)),
+        log((0, 1, 2), controller_topics(), None),
+        log(
+            (0, 2, 0),
+            write_topics(),
+            Some(BurstPhase::PostRegistrationRewrite),
+        ),
+    ]);
+    let error = format!(
+        "{:?}",
+        verify_burst_phases("split-transactions", &split_transactions, &one_batch)
+            .expect_err("a marked write outside the registration's transaction must fail")
+    );
+    assert!(
+        error.contains("transaction"),
+        "the failure names the transaction binding that rotted: {error}"
+    );
+    let mislabeled = scenario_for(vec![
+        log((0, 0, 0), write_topics(), Some(BurstPhase::RetargetWindow)),
+        log((0, 0, 1), setup_topics(), None),
+        log((0, 0, 2), write_topics(), Some(BurstPhase::PreOwnership)),
+        log((0, 0, 3), controller_topics(), None),
+        log(
+            (0, 0, 4),
+            write_topics(),
+            Some(BurstPhase::PostRegistrationRewrite),
+        ),
+    ]);
+    assert!(
+        verify_burst_phases("mislabeled", &mislabeled, &one_batch).is_err(),
+        "swapped annotations must fail even though the logs are in the intended order"
+    );
 }
 
 fn knob(name: &str, fallback: u64) -> Result<u64> {

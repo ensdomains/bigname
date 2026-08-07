@@ -9,14 +9,41 @@ use super::{
     world::{BlockSpec, GeneratedLog, Wiring, World},
 };
 
+/// Where in its name's onboarding the generator intends a burst-marked log to land. Carried on
+/// the marker itself, so the value the lane pins is the generator's claim; the lane then checks
+/// that claim against the generated stream rather than trusting it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BurstPhase {
+    /// Before the name's ownership setup (the registry's `NewOwner`).
+    PreOwnership,
+    /// After the ownership setup but before the controller's `NameRegistered` — reconciliation's
+    /// strict retarget interval, the reach the burst exists to prove.
+    RetargetWindow,
+    /// The staged same-selector rewrite after the registration.
+    PostRegistrationRewrite,
+}
+
+impl BurstPhase {
+    pub const COUNT: usize = 3;
+
+    pub fn index(self) -> usize {
+        match self {
+            Self::PreOwnership => 0,
+            Self::RetargetWindow => 1,
+            Self::PostRegistrationRewrite => 2,
+        }
+    }
+}
+
 /// One raw log, still unpositioned. Emissions inside an action stay in one transaction.
 pub struct Emission {
     pub emitter: String,
     pub topics: Vec<String>,
     pub data: Vec<u8>,
-    /// Marks the fragments `pool_v1`'s pre-registration burst adds, so the lane can attribute
-    /// derived events to them and pin that they derive at all.
-    pub burst: bool,
+    /// Marks the fragments `pool_v1`'s pre-registration burst adds, with the phase the generator
+    /// intends each to land in, so the lane can attribute derived events to them and pin that
+    /// they derive at all.
+    pub burst: Option<BurstPhase>,
 }
 
 /// Dependency stages. Within one subject — a name, the root, a registry — a later stage names
@@ -64,7 +91,7 @@ pub fn emission(emitter: &str, encoded: LogData) -> Emission {
         emitter: emitter.to_owned(),
         topics: encoded_topics(&encoded),
         data: encoded.data.to_vec(),
-        burst: false,
+        burst: None,
     }
 }
 
