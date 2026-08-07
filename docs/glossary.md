@@ -367,16 +367,17 @@ so the child cannot be taken on the ENSv2 side and keeps resolving through
 ENSv1 for as long as it stays unmigrated. Three conditions must hold at once,
 and failing each one means something different:
 
-1. *Not migrated yet* — the label has no live entry in the parent's ENSv2
-   registry
+1. *Never registered on ENSv2* — the label has never had an entry, live or
+   lapsed, in the parent's ENSv2 registry
    (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293 @ ens_v2@ccaeb58).
-   Failing this does not release the label; it is the opposite. ENSv2 is
-   already authoritative and registration reverts, `LabelAlreadyRegistered`
-   for a live entry
-   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L437 @ ens_v2@ccaeb58)
-   or `LabelAlreadyReserved` for a reserved one
-   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L439 @ ens_v2@ccaeb58).
-   Only an expired ENSv2 entry can be registered again
+   Failing this is permanent: once the label has had an entry, ENSv2 is its
+   authority and the protection never comes back. What becomes of the label is
+   then decided on the ENSv2 side alone — a registered entry blocks
+   registration with `LabelAlreadyRegistered`
+   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L437 @ ens_v2@ccaeb58),
+   a reserved one with `LabelAlreadyReserved`
+   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L439 @ ens_v2@ccaeb58),
+   and only an expired ENSv2 entry can be registered again
    (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L428 @ ens_v2@ccaeb58).
 2. *`PARENT_CANNOT_CONTROL` burned* — the child is *helper-positive* under
    `LibMigration.isEmancipatedChild`, the superset the three-way split below is
