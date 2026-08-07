@@ -58,8 +58,8 @@ use permutation::{
 /// derives an `AuthorityEpochChanged` and its `PermissionChanged` that the whole pass does not, so
 /// the two disagree about when the wrapper's authority lapsed. That is a live interpreter
 /// divergence this lane found and not a batch-boundary artifact — the whole pass derives strictly
-/// less, which is the direction `EXPECTED_ARTIFACTS` does not cover. Raising this knob will report
-/// it; it needs its own issue and fix, not a wider allowance here.
+/// less, which is the direction `EXPECTED_ARTIFACTS` does not cover. It is issue #347. Raising this
+/// knob will report it; the fix belongs there, not in a wider allowance here.
 const DEFAULT_CASES: u64 = 48;
 const DEFAULT_SEED: u64 = 0x6e0d_5eed;
 /// Distance between case seeds. Deliberately *not* the SplitMix64 increment: because that increment
