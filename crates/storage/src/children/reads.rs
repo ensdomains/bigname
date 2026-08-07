@@ -19,9 +19,10 @@ use super::{
 /// form for a preimage that does not decode. The three arms answer in that order: the decoded
 /// name, the escape-encoded raw bytes, and the documented
 /// `[<labelhash-without-0x>].<parent-name>` placeholder — never a null into a mandatory field.
-/// The parent portion is the parent's stored spelling verbatim, which is itself empty when no
-/// label of the parent decoded; that parent cannot be addressed by name, so the shape is
-/// unreachable from the subnames route and only the audit read can observe it.
+/// The parent portion is the parent's stored spelling verbatim. It is empty only for the
+/// zero-label root surface: a parent whose own labels do not decode is written shadow, and both
+/// children projection arms admit active parents only. No route can address the empty name, so the
+/// trailing-dot string that root would produce never reaches a served page.
 const CHILD_DISPLAY_NAME_EXPR: &str = r#"COALESCE(
     cc.decoded_name,
     encode(cc.raw_name, 'escape'),
@@ -131,7 +132,8 @@ pub async fn load_children_current_summaries(
     }
     // The summary annotates the page, so it has to admit exactly the rows the page admits —
     // including the projection-target lineage fence that fails closed on an orphaned target whose
-    // identity anchors are still canonical.
+    // identity anchors are still canonical. The aggregate order below is internal and covers every
+    // readable child, not the page: do not pair these arrays with page rows by index.
     let rows = sqlx::query(&format!(
         r#"
         WITH requested AS (

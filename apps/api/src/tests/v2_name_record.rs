@@ -2198,10 +2198,14 @@ async fn v2_get_subnames_paginates_across_a_child_with_no_observed_label() -> Re
         .iter()
         .map(|row| row["name"].as_str().expect("row name").to_owned())
         .collect::<Vec<_>>();
-    assert!(
-        names.iter().any(|name| name == "\\377\tbad.parent.eth"),
-        "an undecodable label must be escape-encoded, not dropped: {names:?}"
-    );
+    let escaped_row = with_undecodable["data"]
+        .as_array()
+        .expect("subnames data")
+        .iter()
+        .find(|row| row["labelhash"] == "0xfeed0002")
+        .expect("the undecodable label must be served, not dropped");
+    assert_eq!(escaped_row["name"], "\\377\tbad.parent.eth", "{names:?}");
+    assert_eq!(escaped_row["display_name"], "\\377\tBad.parent.eth");
 
     // The audit read has no keyset to drop the row, so it decodes the name directly.
     let parent_logical_name_id: String = sqlx::query_scalar(
@@ -3547,7 +3551,7 @@ async fn seed_v2_subnames_undecodable_child(
     let namehash = format!("node:undecodable-{}", labelhash.trim_start_matches("0x"));
     // A high-bit byte and a control byte: PostgreSQL's `escape` encoding octal-escapes the first
     // and passes the second through, which is the half of the documented rule easiest to get wrong.
-    let raw_name = [&[0xffu8, 0x09][..], b"bad.", parent_name.as_bytes()].concat();
+    let raw_name = [&[0xffu8, 0x09][..], b"Bad.", parent_name.as_bytes()].concat();
     sqlx::query(
         r#"
         INSERT INTO bigname_phase.children_current (

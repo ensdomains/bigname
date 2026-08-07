@@ -370,14 +370,17 @@ Field ownership:
   labelhash but not the label, so two [non-name
   forms](glossary.md#non-name-form) are reachable here. A child whose label has
   never been observed carries `[<labelhash-without-0x>].<parent-name>` in
-  `display_name` and its lower-cased form in `name`. A label observed as bytes
-  that are not valid UTF-8, or that contain a NUL, is escape-encoded instead, by
-  PostgreSQL's `escape` rule: a NUL as `\000`, each byte above `0x7f` as a
-  backslash and three octal digits, a backslash doubled, and every other byte
-  verbatim. Neither form is reserved syntax — a label really spelled
-  `[<64 hex digits>].<parent>`, or really containing a backslash, produces the
-  same string — so distinguish rows by `namehash` and `labelhash` rather than by
-  parsing the served text. Neither form is addressable, and neither may be fed
+  `display_name` and its lower-cased form in `name`. When a label is observed as
+  bytes that are not valid UTF-8, or that contain a NUL, the row instead carries
+  the whole stored child name — those label bytes, a dot, and the parent's —
+  encoded by PostgreSQL's `escape` rule: a NUL as `\000`, each byte above `0x7f`
+  as a backslash and three octal digits, a backslash doubled, and every other
+  byte verbatim. The rule runs over the whole string, so a non-ASCII parent
+  portion is octal-escaped along with the label. Neither form is reserved syntax
+  — a label really spelled `[<64 hex digits>].<parent>`, or really spelled like
+  escape output such as `\377bad`, produces the same string — so distinguish
+  rows by `namehash` and `labelhash` rather than by parsing the served text.
+  Neither form is addressable, and neither may be fed
   back into a name-shaped route. Resolver records are not included here;
   use `GET /v2/names/{name}/records` for `resolver`, `addresses`,
   `text_records`, and `content_hash`.

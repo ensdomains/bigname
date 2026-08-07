@@ -644,12 +644,14 @@ bigname cannot state as a name. Registry events prove a child node and its
 labelhash without proving the label, so some children have no name to serve;
 rather than omit the row or return null, the read composes a readable stand-in.
 Two exist today, both on `GET /v2/names/{name}/subnames`: the placeholder
-`[<labelhash-without-0x>].<parent-name>` for a label never observed, and the
-PostgreSQL `escape` encoding of the raw bytes for a label observed as bytes that
-are not valid UTF-8 or that contain a NUL. Neither is reserved syntax — a label
-really spelled that way produces the same string — so a caller distinguishing
-rows should use `namehash` and `labelhash`, not the served text. A non-name form
-is not addressable and may not be fed back into a name-shaped route.
+`[<labelhash-without-0x>].<parent-name>` for a label never observed, and, for a
+label observed as bytes that are not valid UTF-8 or that contain a NUL, the
+PostgreSQL `escape` encoding of the whole stored child name — the parent portion
+included, since the encoding runs over the whole byte string. Neither is
+reserved syntax — a label really spelled that way produces the same string — so
+a caller distinguishing rows should use `namehash` and `labelhash`, not the
+served text. A non-name form is not addressable and may not be fed back into a
+name-shaped route.
 
 **Normalized event** — the current-interpretation-epoch record of one semantic
 protocol transition, carrying identity, provenance, optional chain position,
