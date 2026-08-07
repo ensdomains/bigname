@@ -1,13 +1,13 @@
 ---
 name: consumer-slice
-description: Scope or implement one end-to-end bigname consumer capability. Use when work maps a first-party or public capability to routes, projections, execution behavior, manifests, tests, rollout criteria, or any parity/replacement claim.
+description: Scope or implement one end-to-end bigname consumer capability. Use when work maps a first-party or public capability to routes, projections, lookup behavior, manifests, tests, rollout criteria, or any parity/replacement claim.
 metadata:
   kind: playbook
 ---
 
 # Consumer Slice
 
-Start with `docs/consumer-capabilities.md`, then read only the API, projection, execution, manifest, and storage docs needed for the capability.
+Start with `docs/consumer-capabilities.md`, then read only the API, projection, lookup, manifest, and storage docs needed for the capability.
 
 ## Slice contract
 
@@ -16,7 +16,7 @@ For one capability, state:
 1. consumer capability and explicit non-goals
 2. route or routes and response mode
 3. declared vs verified responsibility
-4. storage/projection/execution path
+4. storage/projection/lookup path
 5. manifest or authority assumptions
 6. coverage and unsupported behavior
 7. tests, fixtures, and rollout/rollback evidence

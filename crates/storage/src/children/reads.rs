@@ -14,11 +14,13 @@ use super::{
     },
 };
 
-/// A registry edge proves a child node and its labelhash but not the label itself, so Project
-/// writes the name columns null until a preimage arrives. The read path names such a child by the
-/// documented `[<labelhash-without-0x>].<parent-name>` placeholder rather than returning null into
-/// a mandatory field. The parent name comes from a subquery so the expression holds on the
-/// audit path too, which omits the identity joins.
+/// Registry events prove a child node and its labelhash but not the label itself, so Project
+/// writes the name columns null until a preimage arrives, and stores raw bytes with no decoded
+/// form for a preimage that does not decode. The three arms answer in that order: the decoded
+/// name, the escape-encoded raw bytes, and the documented
+/// `[<labelhash-without-0x>].<parent-name>` placeholder — never a null into a mandatory field.
+/// The parent name comes from a subquery so the expression holds on the audit path too, which
+/// omits the identity joins.
 const CHILD_DISPLAY_NAME_EXPR: &str = r#"COALESCE(
     cc.decoded_name,
     encode(cc.raw_name, 'escape'),

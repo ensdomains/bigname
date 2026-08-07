@@ -33,7 +33,7 @@ step-3-gate vocabulary needed by the route schemas:
 
 | `v2` name | Meaning | Replaces (`v1`) |
 | --- | --- | --- |
-| `name` | the ENSIP-15 normalized name string, except where a route documents an explicit non-name placeholder for a name that was never observed | `normalized_name`, `logical_name_id` (derivable as `namespace:name`) |
+| `name` | the ENSIP-15 normalized name string, except on routes that document an explicit non-name form for a label bigname cannot state as a name | `normalized_name`, `logical_name_id` (derivable as `namespace:name`) |
 | `display_name` | display form of the name | `canonical_display_name` |
 | `namespace` | public namespace slug used to resolve a name or filter a route, such as `ens` or `basenames` | `namespace` path segment/query usage (unchanged; now echoed consistently) |
 | `namehash` | ENS namehash hex string | `namehash` (unchanged) |

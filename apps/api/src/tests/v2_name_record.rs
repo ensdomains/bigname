@@ -2186,6 +2186,23 @@ async fn v2_get_subnames_paginates_across_a_child_with_no_observed_label() -> Re
     );
     assert_eq!(seen.len(), 4, "every child must be paged exactly once: {seen:?}");
 
+    // A preimage whose label bytes do not decode is stored raw with no decoded form; the read
+    // escape-encodes it. It is equally not an addressable name, and equally must not fail the page.
+    seed_v2_subnames_undecodable_child(&database, "parent.eth", "0xfeed0002").await?;
+    let with_undecodable =
+        v2_subnames_payload_for_database(&database, "/v2/names/parent.eth/subnames?page_size=20")
+            .await?;
+    let names = with_undecodable["data"]
+        .as_array()
+        .expect("subnames data")
+        .iter()
+        .map(|row| row["name"].as_str().expect("row name").to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        names.iter().any(|name| name == r"\377bad.parent.eth"),
+        "an undecodable label must be escape-encoded, not dropped: {names:?}"
+    );
+
     // The audit read has no keyset to drop the row, so it decodes the name directly.
     let parent_logical_name_id: String = sqlx::query_scalar(
         "SELECT logical_name_id FROM bigname_phase.name_surfaces WHERE raw_name = 'parent.eth'",
@@ -3504,6 +3521,51 @@ async fn seed_v2_subnames_fixture(database: &TestDatabase) -> Result<()> {
         }))
         .await?;
 
+    Ok(())
+}
+
+/// Seeds the shape Project writes for a preimage whose label bytes do not decode: raw bytes
+/// stored with no decoded form.
+async fn seed_v2_subnames_undecodable_child(
+    database: &TestDatabase,
+    parent_name: &str,
+    labelhash: &str,
+) -> Result<()> {
+    let parent_logical_name_id: String = sqlx::query_scalar(
+        "SELECT logical_name_id FROM bigname_phase.name_surfaces WHERE raw_name = $1",
+    )
+    .bind(parent_name)
+    .fetch_one(&database.pool)
+    .await?;
+    let (chain_positions, canonicality_summary): (Value, Value) = sqlx::query_as(
+        "SELECT chain_positions, canonicality_summary FROM bigname_phase.children_current \
+         WHERE parent_logical_name_id = $1 AND raw_name IS NOT NULL LIMIT 1",
+    )
+    .bind(&parent_logical_name_id)
+    .fetch_one(&database.pool)
+    .await?;
+    let namehash = format!("node:undecodable-{}", labelhash.trim_start_matches("0x"));
+    let raw_name = [&[0xffu8][..], b"bad.", parent_name.as_bytes()].concat();
+    sqlx::query(
+        r#"
+        INSERT INTO bigname_phase.children_current (
+            parent_logical_name_id, child_logical_name_id, surface_class, namespace,
+            raw_name, namehash, labelhash, provenance, chain_positions,
+            canonicality_summary, manifest_version
+        ) VALUES ($1, 'ens:' || $2, 'declared', 'ens', $3, $2, $4,
+                  jsonb_build_object('chain_id', 'ethereum-mainnet',
+                                     'derivation_kind', 'children_current_rebuild'),
+                  $5, $6, 1)
+        "#,
+    )
+    .bind(&parent_logical_name_id)
+    .bind(&namehash)
+    .bind(&raw_name)
+    .bind(labelhash)
+    .bind(chain_positions)
+    .bind(canonicality_summary)
+    .execute(&database.pool)
+    .await?;
     Ok(())
 }
 
