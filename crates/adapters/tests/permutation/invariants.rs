@@ -673,6 +673,13 @@ fn absorb_discovered_admissions(admitted: &mut Vec<AddressAdmissionInput>, from:
         // the address's `active_to_block_number` and drops deactivated edges, so a resolver whose
         // pointer has since moved stays admitted here for every later batch. That is the same
         // over-admitting direction, still open.
+        //
+        // TODO(#320): modelling closes becomes required, not optional, before any pool gains a
+        // pointer-move action — one that moves a resolver or registry pointer off an address that
+        // later emits logs. Until then the gap is inert: both worlds statically pre-admit every
+        // log-emitting address, so the carry never decides whether a log is interpreted. With
+        // such an action the over-admission above would read a dropped-log divergence as
+        // convergence.
         let Some(edge) = from.discovery_edges.iter().find(|edge| {
             edge.to_contract_instance_id == address.contract_instance_id
                 && edge.chain_id == address.chain_id

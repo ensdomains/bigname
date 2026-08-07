@@ -159,8 +159,8 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
     }
     // Guards against one world going dark: the other world's events would keep an aggregate count
     // positive while every invariant here passed over empty vectors.
-    for (label, events, logs) in derived {
-        if events == 0 {
+    for (label, events, logs) in &derived {
+        if *events == 0 {
             bail!("{label}: derived no normalized events from {logs} raw logs");
         }
     }
@@ -182,7 +182,8 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
     if cases != DEFAULT_CASES {
         return Ok(());
     }
-    assert_pinned_artifacts(&artifacts, &subregistry_detaches)
+    assert_pinned_artifacts(&artifacts, &subregistry_detaches)?;
+    assert_volume_floors(&derived)
 }
 
 #[test]
@@ -587,6 +588,19 @@ const DRAWN_CORPUS_CAVEAT: &str = "If the scenario pools, the axes, the seeded d
 const EXPECTED_SUBREGISTRY_DETACHES: &[(&str, usize)] =
     &[(ENS_V1_MAINNET.label, 0), (ENS_V2_SEPOLIA.label, 33)];
 
+/// Per-world corpus volume floors — minimum raw-log and normalized-event totals the default
+/// corpus must reach, in the print order of the run line above. The artifact pins are empty since
+/// the #336 fix and the kind floor needs only one witness per kind, so without these a generator
+/// regression that collapses corpus volume while keeping one witness per required kind passes
+/// silently. Floors, not exact pins: a deeper sweep and legitimate generator evolution both grow
+/// these totals, and only the default corpus asserts them (the same gate as the pins). Derived
+/// from the default-corpus run at 8b6d796d — ens_v1_mainnet 1404 raw logs and 4514 normalized
+/// events, ens_v2_sepolia 965 and 1987 — with each floor 70% of that run, truncated.
+const MINIMUM_VOLUMES: &[(&str, usize, usize)] = &[
+    (ENS_V1_MAINNET.label, 982, 3159),
+    (ENS_V2_SEPOLIA.label, 675, 1390),
+];
+
 /// Normalized events the pinned manifests declare that the pools deliberately never reach, with the
 /// reason each one is out. Anything a manifest declares that is neither derived nor listed here
 /// fails the lane, so adding an event to a manifest forces a decision instead of silently widening
@@ -761,6 +775,29 @@ fn assert_pinned_artifacts(
     Ok(())
 }
 
+fn assert_volume_floors(derived: &[(&str, usize, usize)]) -> Result<()> {
+    assert_tables_name_every_world(
+        "MINIMUM_VOLUMES",
+        &MINIMUM_VOLUMES
+            .iter()
+            .map(|(world, ..)| *world)
+            .collect::<Vec<_>>(),
+    )?;
+    for (world, min_logs, min_events) in MINIMUM_VOLUMES {
+        let Some((_, events, logs)) = derived.iter().find(|(label, ..)| label == world) else {
+            bail!("{world} produced nothing for MINIMUM_VOLUMES to check");
+        };
+        if events < min_events || logs < min_logs {
+            bail!(
+                "{world} produced {events} normalized events from {logs} raw logs, under the \
+                 volume floor of {min_events} events and {min_logs} logs: the corpus collapsed. \
+                 {DRAWN_CORPUS_CAVEAT} Otherwise find what the generator stopped emitting"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn knob(name: &str, fallback: u64) -> Result<u64> {
     match std::env::var(name) {
         Ok(value) => value
@@ -792,8 +829,9 @@ fn knob(name: &str, fallback: u64) -> Result<u64> {
 /// nothing exempted. Whether that loses a binding the interpreter meant to keep depends on where
 /// the intended binding sits, which this test does not establish — it pins the dangling reference.
 ///
-/// This asserts the current, wrong behaviour. When the interpreter stops emitting it, this test
-/// fails and becomes the fix's acceptance test.
+/// This asserts the current, wrong behaviour. The #339 fix does not retire this test: it inverts
+/// it into the fixed-state acceptance test — assert that no closure exemption dangles and that
+/// the boundary binding survives — so the mechanism keeps its regression coverage either way.
 #[test]
 fn a_boundary_closure_exempts_a_binding_the_same_batch_no_longer_opens() -> Result<()> {
     let checked_in = checked_in_manifests()?;
@@ -833,7 +871,9 @@ fn a_boundary_closure_exempts_a_binding_the_same_batch_no_longer_opens() -> Resu
         bail!(
             "{context}: expected exactly the boundary closure {expected:?} to exempt a binding the \
              batch no longer opens, found {dangling:?}. A closure that stopped dangling is issue \
-             #339 fixed — retire this test. A different one is a new defect"
+             #339 fixed — invert this test into the fixed-state acceptance test (no dangling \
+             exemption, the boundary binding survives); do not retire it. A different one is a \
+             new defect"
         );
     }
     Ok(())

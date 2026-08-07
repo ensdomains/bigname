@@ -92,11 +92,14 @@ struct Row {
 /// Which emission of a repeated key survives the upsert. Most families keep the first writer;
 /// `label_preimages` overwrites whenever the incoming source priority is at least the stored one
 /// (`crates/interpret/src/write/identity_names.rs`), and the adapter writes one priority, so the
-/// last emission wins there.
+/// last emission wins there. `Every` compares the full per-key multiset instead of a survivor: the
+/// families using it repeat a key only as a replay that must be identical, so a successor emission
+/// that disagrees with the first is a divergence the kept-row comparison would discard unseen.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Keeps {
     First,
     Last,
+    Every,
 }
 
 /// Reconciliation can drop a superseded resource row whose only in-batch reference moved to a later
@@ -190,7 +193,8 @@ fn assert_event_stream(
 }
 
 /// Identity rows are upserts keyed by their primary key, so batching changes how many times a row
-/// is replayed but never which rows exist. Only the emission the upsert keeps is compared.
+/// is replayed but never which rows exist. `First`/`Last` families compare only the emission the
+/// upsert keeps; `Every` families compare every emission.
 fn assert_identity_family(
     context: &str,
     family: &'static str,
@@ -199,6 +203,9 @@ fn assert_identity_family(
     split: &[Row],
     known: &mut BatchBoundaryArtifacts,
 ) -> Result<()> {
+    if keeps == Keeps::Every {
+        return assert_emission_multiset(context, family, whole, split);
+    }
     let whole_first = kept_by_key(whole, keeps);
     let split_first = kept_by_key(split, keeps);
     let whole_keys = whole_first.keys().cloned().collect::<BTreeSet<_>>();
@@ -232,6 +239,60 @@ fn assert_identity_family(
         }
     }
     Ok(())
+}
+
+/// A family whose repeated keys are meant to be identical replays has no survivor to model, so
+/// model the repetitions: per key, the order-normalized list of every emission's body and anchor
+/// must match exactly. A successor emission the split replay derives with a different body or
+/// anchor, or a repeat count that differs, is a divergence `Keeps::First` discarded before
+/// comparing. No rebase allowance: these families are not in `ANCHOR_REBASE_FAMILIES`, so any
+/// anchor difference fails rather than counting.
+fn assert_emission_multiset(
+    context: &str,
+    family: &'static str,
+    whole: &[Row],
+    split: &[Row],
+) -> Result<()> {
+    let whole = group_by_key(whole);
+    let split = group_by_key(split);
+    if whole == split {
+        return Ok(());
+    }
+    let render = |emissions: Option<&Vec<(&str, &str)>>| {
+        emissions.map_or_else(|| "<none>".to_owned(), |list| format!("{list:?}"))
+    };
+    let mut report = Vec::new();
+    for key in whole.keys().chain(split.keys()).collect::<BTreeSet<_>>() {
+        let (whole, split) = (whole.get(key), split.get(key));
+        if whole != split {
+            report.push(format!(
+                "{key}\n      whole={}\n   replayed={}",
+                render(whole),
+                render(split)
+            ));
+        }
+    }
+    bail!(
+        "{context}: split replay's {family} emissions diverge from the whole-sequence pass beyond \
+         the kept row:\n  {}",
+        report.join("\n  ")
+    );
+}
+
+/// Per key, the order-normalized list of every emission's body and anchor. Sorting rather than
+/// set-collecting so a repeated identical emission counts twice, as it must.
+fn group_by_key<'a>(rows: &'a [Row]) -> BTreeMap<&'a str, Vec<(&'a str, &'a str)>> {
+    let mut grouped: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
+    for row in rows {
+        grouped
+            .entry(row.key.as_str())
+            .or_default()
+            .push((row.body.as_str(), row.anchor.as_str()));
+    }
+    for emissions in grouped.values_mut() {
+        emissions.sort_unstable();
+    }
+    grouped
 }
 
 /// The resource upsert refuses any re-emission whose lineage is not null-safe-equal to the stored
@@ -403,6 +464,8 @@ fn kept_by_key(rows: &[Row], keeps: Keeps) -> BTreeMap<String, &Row> {
             Keeps::Last => {
                 kept.insert(row.key.clone(), row);
             }
+            // Handled by `assert_emission_multiset`, which never reduces to a kept row.
+            Keeps::Every => unreachable!("Every compares the full emission multiset"),
         }
     }
     kept
@@ -502,13 +565,13 @@ fn families(
         ),
         (
             "contract_addresses",
-            Keeps::First,
+            Keeps::Every,
             contract_addresses(fresh),
             contract_addresses(replayed),
         ),
         (
             "discovery_edges",
-            Keeps::First,
+            Keeps::Every,
             discovery_edges(fresh),
             discovery_edges(replayed),
         ),
@@ -599,10 +662,11 @@ fn surface_bindings(output: &BatchOutput) -> Vec<Row> {
         .map(|row| Row {
             key: row.surface_binding_id.to_string(),
             body: format!(
-                "{}:{}:{}:{}:{}",
+                "{}:{}:{}:{}:{}:{}",
                 row.logical_name_id,
                 row.resource_id,
                 row.binding_kind,
+                row.chain_id,
                 row.active_from,
                 row.canonicality_state
             ),
