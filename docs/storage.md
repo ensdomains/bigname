@@ -116,8 +116,9 @@ that range. Raw facts are never edited by replay.
 
 The interpret engine loads the prior identity state required by the range,
 folds physical batches without changing semantic order, and revalidates the
-resume marker and current block anchors in the write transaction. A concurrent reorg
-therefore cannot publish interpretation derived from an unreadable branch.
+resume marker and current block anchors in the write transaction. A concurrent
+reorg therefore cannot publish interpretation derived from an unreadable
+branch.
 
 Redo preparation restages only identities anchored inside the range, so an
 identity derived before it keeps its anchor even when an in-range event
@@ -159,14 +160,16 @@ rather than by a rotation:
 - the phase runner, which owns the redo marker, decides the replay range each
   run receives, and publishes the
   [lineage orphaning epoch](glossary.md#lineage-orphaning-epoch) interpret's
-  prior cache revalidates against. It is outside the hash on purpose — no semantic
-  interpretation may live there — but that is a rule it must be held to, not a
-  property the hash enforces;
+  prior cache revalidates against. It is outside the hash on purpose — no
+  semantic interpretation may live there — but that is a rule it must be held
+  to, not a property the hash enforces;
 - checked-in SQL, meaning migration trigger bodies and the schema-v2 baseline
   constraints;
-- chain intake's event-signature allowlist, which decides which resolver logs
-  become raw facts at all on the all-emitter path. A change there is a
-  re-ingest decision as well as a re-derivation one.
+- chain intake's event-signature allowlist, which decides which resolver and
+  registry-announcement logs become raw facts at all on the all-emitter path —
+  the logs matched by topic with no address filter, and so the only way an
+  unwatched emitter's logs are retained. A change there is a re-ingest decision
+  as well as a re-derivation one.
 
 Treat a change to any of them as a re-derivation decision and follow the
 [planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary).

@@ -216,14 +216,19 @@ fn every_hash_input_is_watched_for_rebuilds() {
     // changes which files under a hashed root are excluded, so it has the same requirement.
     let workspace_root = workspace_root();
     let watched = crate::compute::watched_paths(&workspace_root);
-    for relative_path in crate::compute::cfg_test_scan_roots()
-        .iter()
-        .chain(crate::compute::hashed_roots())
-        .chain(semantic_source_files())
-    {
-        let path = workspace_root.join(relative_path);
+    let mut inputs = crate::compute::hashed_source_paths(&workspace_root)
+        .expect("checked-in sources must enumerate");
+    inputs.extend(
+        crate::compute::cfg_test_scan_roots()
+            .iter()
+            .map(|scan_root| (*scan_root).to_owned()),
+    );
+    for relative_path in inputs {
+        let path = workspace_root.join(&relative_path);
         assert!(
-            watched.contains(&path),
+            watched
+                .iter()
+                .any(|watched| path == *watched || path.starts_with(watched)),
             "{relative_path} is a hash input but not watched"
         );
     }
