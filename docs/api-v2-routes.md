@@ -510,9 +510,9 @@ Field ownership:
   publishes, so a successful claim recorded in a non-normalized spelling still
   marks its name primary. A spelling the projection already recorded as its
   normalized form is instead compared verbatim, so such a claim marks a row
-  primary only where the published spelling is exactly that row's name. A successful claim whose stored spelling does
-  not normalize likewise marks no row primary, and the primary-name route
-  reports it as `invalid_name`. Resolver records are not included; use
+  primary only where the published spelling is exactly that row's name. A
+  successful claim whose stored spelling does not normalize likewise marks no
+  row primary, and the primary-name route reports it as `invalid_name`. Resolver records are not included; use
   `GET /v2/names/{name}/records` for resolver data.
   `include=role_summary` adds
   `role_summary: [{address, grants: [{grant_scope, powers}]}]` grouped by the
