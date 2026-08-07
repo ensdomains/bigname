@@ -260,6 +260,32 @@ mod tests {
     }
 
     #[test]
+    fn an_inverted_block_range_never_reaches_the_warehouse() {
+        let error = query::build_query(
+            &CoinbaseSqlFilterPack {
+                chain: "base-mainnet".to_owned(),
+                from_block: 100,
+                to_block: 99,
+                addresses: vec!["0x0000000000000000000000000000000000000001".to_owned()],
+                topic0s: Vec::new(),
+                event_signatures: Vec::new(),
+                scan_all_emitters: false,
+                source_families: Vec::new(),
+            },
+            None,
+            PAGE_LIMIT,
+        )
+        .expect_err("an inverted range must not become a BETWEEN that matches nothing");
+
+        assert!(
+            error
+                .to_string()
+                .contains("filter pack start 100 is after end 99"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn live_proven_query_limits_are_restored() {
         assert_eq!(PAGE_LIMIT, 10_000);
         assert_eq!(SQL_CHAR_LIMIT, 10_000);

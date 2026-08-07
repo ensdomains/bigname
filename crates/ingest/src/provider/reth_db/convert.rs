@@ -153,7 +153,7 @@ pub(super) fn i64_to_u64(value: i64, label: &str) -> Result<u64> {
     u64::try_from(value).with_context(|| format!("{label} cannot be negative: {value}"))
 }
 
-fn u64_to_i64(value: u64, label: &str) -> Result<i64> {
+pub(super) fn u64_to_i64(value: u64, label: &str) -> Result<i64> {
     i64::try_from(value).with_context(|| format!("{label} {value} does not fit in i64"))
 }
 

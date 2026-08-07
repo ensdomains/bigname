@@ -68,6 +68,17 @@ impl ChainProvider {
         }
     }
 
+    /// Lowest block this source can still serve, when the source can report one.
+    ///
+    /// Only the datadir reader answers: an RPC endpoint owns its retention behind the
+    /// wire, so a caller cannot read that boundary out of it.
+    pub async fn earliest_available_block(&self) -> Result<Option<i64>> {
+        match self {
+            Self::JsonRpc(_) => Ok(None),
+            Self::RethDb(provider) => provider.earliest_available_block().await.map(Some),
+        }
+    }
+
     pub async fn resolve(&self, numbers: &[i64]) -> Result<Vec<ResolvedBlock>> {
         match self {
             Self::JsonRpc(provider) => provider.resolve(numbers).await,

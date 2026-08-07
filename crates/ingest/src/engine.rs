@@ -20,6 +20,7 @@ use crate::{
 
 mod live;
 mod query;
+mod source_floor;
 
 const BLOCKS_PER_BATCH: i64 = 256;
 const COINBASE_BLOCKS_PER_BATCH: i64 = 1_024;
@@ -122,6 +123,7 @@ impl Engine {
 
     async fn run_normal_batch(&self, mut request: BatchRequest) -> Result<BatchOutcome> {
         sort_sources(&mut request.sources);
+        self.enforce_source_floors(&request).await?;
         let primary = primary_source(&request.sources)?;
         let primary_provider = self.provider(&request.chain_id, primary).await?;
         let head_snapshot = primary_provider
@@ -238,6 +240,7 @@ impl Engine {
 
     async fn run_redo_batch(&self, mut request: BatchRequest) -> Result<BatchOutcome> {
         sort_sources(&mut request.sources);
+        self.enforce_source_floors(&request).await?;
         let (range_from, range_to) = request.redo_range.expect("redo range is present");
         let from = request
             .resume_current
@@ -365,6 +368,8 @@ impl Engine {
         });
         let facts = fetch_selected_facts(&provider, &resolved, selected.clone()).await?;
         let estimated_write_bytes = estimated_write_bytes(&facts);
+        self.enforce_window_floor(chain_id, source, from, to)
+            .await?;
         crate::write::store(
             &self.pool,
             chain_id,

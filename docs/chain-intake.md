@@ -124,6 +124,81 @@ non-orphaned discovery edge whose window does not overlap the discovered
 address window is also a configuration error. Planning stops and names the
 governing manifest and inconsistent bounds for either error.
 
+Planning also refuses a range the source cannot serve. Before any window is
+fetched, a local reth source reports its earliest available block — reth's
+expired-history floor, raised to the lowest block its receipt static files still
+cover — and planning fails as a configuration error naming that floor and the
+requested range instead of reading a pruned window as empty coverage. The floor
+is read a second time after a window is fetched and before it is stored, because
+a node can prune while a batch is in flight; a window whose floor rose under it
+fails the same way rather than being recorded. The live suffix is checked the same
+way once its common ancestor is known, because extending the published head does
+not imply starting above a floor that moved during downtime or a deep reorg.
+
+Those refusals are an early, cheap answer, not the guarantee. The reported floor
+is optimistic even on an idle node: reth advances a receipt static file's block
+position before deciding whether to write that block's receipts
+(upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2504 @ reth@88505c7f)
+(upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2512 @ reth@88505c7f),
+so the lowest retained range can begin with receipt-less blocks, and a receipt log
+filter can drop individual receipts inside a block that was written
+(upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2528 @ reth@88505c7f).
+The guarantee is at the read: every fetched block whose receipt count does not
+match the transaction count in its retained body indices fails the log read. That
+covers what no floor can express — receipt-less blocks inside a retained range,
+receipts pruned out of database tables, and a partial receipt list, which would
+otherwise attribute logs to the wrong transaction. Pruning
+receipts deletes whole static-file ranges while leaving their headers readable
+(upstream: .refs/reth/crates/prune/prune/src/segments/receipts.rs:L34 @ reth@88505c7f)
+(upstream: .refs/reth/crates/prune/prune/src/segments/mod.rs:L41 @ reth@88505c7f),
+and a deleted range reads back as no rows and no error
+(upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L1996 @ reth@88505c7f)
+(upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L1998 @ reth@88505c7f).
+
+The rule is deliberately stricter than the reference client's own guard. reth
+refuses an `eth_getLogs` range below its expired-history floor with
+`PrunedHistoryUnavailable`
+(upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L584 @ reth@88505c7f)
+(upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L586 @ reth@88505c7f),
+but that floor tracks the lowest transaction static file
+(upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L1221 @ reth@88505c7f)
+(upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L1224 @ reth@88505c7f),
+so a node whose receipts were pruned while its transactions were kept passes the
+guard, and each of its receipt-less blocks then contributes no logs rather than
+an error
+(upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L1265 @ reth@88505c7f)
+(upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L1272 @ reth@88505c7f).
+Intake reads receipts directly, so it refuses there too. That widening is
+recorded in `docs/upstream.md` § Known divergences. The receipt floor is read
+from the static files on disk, so it bounds nothing on a node that keeps
+receipts in database tables
+(upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L188 @ reth@88505c7f)
+(upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L190 @ reth@88505c7f),
+whose row-wise prune checkpoints are not read. On that configuration the floor
+falls back to expired history alone, and the receipt-count check is what stops a
+pruned window from being recorded: any block whose bloom admits a watched event
+fails the read rather than contributing nothing. A node pruning receipts by log
+filter is upstream-healthy but cannot serve historical intake at all, because the
+receipts it dropped are exactly the ones our reader would have to account for.
+
+Historical ingest is judged on the source's declared start block, not on how far
+its cursor has advanced, so a resumed run whose cursor already stands above the
+floor is refused too: planning cannot tell coverage recorded before the node
+pruned from coverage recorded through a pruned window, and refuses both until
+the node holds the declared range again or the declared start block moves. A
+redo is judged on what it has left to read instead: its range start, the source's
+declared start, and the block after its own durable progress, whichever is
+highest. A redo that has not reached the floor yet is refused, one already past
+it keeps running, and one with nothing left to read plans nothing for that
+source. Work already recorded is not re-examined: a completed ingest phase is not
+planned again, so a chain that recorded a pruned window before this rule existed
+keeps that stored coverage. Re-indexing it needs the node to hold the range
+again — a fresh resync or redo across the pruned window is refused rather than
+silently repeating the empty read. Live follow plans no declared range, so it is
+judged on the suffix it is about to load. Sources that do not read a node's
+database report no floor: an RPC endpoint owns its retention behind the wire,
+and the Coinbase SQL warehouse is not a block provider at all.
+
 ## Reorgs and required downstream redo
 
 Head publication marks a displaced readable suffix orphaned and invalidates

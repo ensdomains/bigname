@@ -14,6 +14,10 @@ impl RethDbProvider {
         bail!("Reth DB support was not compiled")
     }
 
+    pub async fn earliest_available_block(&self) -> Result<i64> {
+        bail!("Reth DB support was not compiled")
+    }
+
     pub async fn resolve(&self, _numbers: &[i64]) -> Result<Vec<ResolvedBlock>> {
         bail!("Reth DB support was not compiled")
     }

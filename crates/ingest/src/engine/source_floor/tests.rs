@@ -1,0 +1,510 @@
+use std::sync::Arc;
+
+use anyhow::Result as AnyResult;
+use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use super::*;
+use crate::{ErrorKind, engine::LiveBatchRequest, provider::ChainProvider};
+
+// Each test owns its endpoint: the injected floor is keyed by endpoint, and CI runs
+// these as threads in one process.
+const PRUNED_DATADIR: &str = "/var/lib/reth/pruned-datadir-fixture";
+const UNREADABLE_DATADIR: &str = "/var/lib/reth/absent-datadir-fixture";
+const REDO_DATADIR: &str = "/var/lib/reth/pruned-redo-datadir-fixture";
+const V1_REGISTRY_START: i64 = 3_327_417;
+const MERGE_RECEIPT_SEGMENT_START: i64 = 15_500_000;
+const RACE_CHAIN: &str = "ingest-floor-race";
+const RACE_BLOCK_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
+const RACE_ADDRESS: &str = "0x0000000000000000000000000000000000000002";
+const HEAD_BLOCK_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000003";
+
+#[tokio::test]
+async fn a_range_below_the_node_floor_fails_the_phase_instead_of_completing() -> AnyResult<()> {
+    let database = TestDatabase::create(TestDatabaseConfig::new("ingest_source_floor")).await?;
+    let _floor = test_floors::install(PRUNED_DATADIR, MERGE_RECEIPT_SEGMENT_START);
+    let engine = Engine::new(database.pool().clone());
+
+    let historical = engine
+        .run_batch(request(PRUNED_DATADIR, None))
+        .await
+        .expect_err("planning a pruned range must fail rather than complete");
+    let redo = engine
+        .run_batch(request(PRUNED_DATADIR, Some((3_000_000, 4_000_000))))
+        .await
+        .expect_err("redoing a pruned range must fail rather than complete");
+
+    // Only ErrorKind::Transient is retried; a floor refusal has to stop the phase.
+    assert_eq!(historical.kind(), ErrorKind::Configuration);
+    assert_eq!(redo.kind(), ErrorKind::Configuration);
+    assert!(
+        historical.to_string().contains("15500000")
+            && historical.to_string().contains("3327417..=head"),
+        "{historical}"
+    );
+    assert!(
+        redo.to_string().contains("15500000") && redo.to_string().contains("3327417..=4000000"),
+        "{redo}"
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn a_floor_rising_while_a_window_is_in_flight_stops_the_write() -> AnyResult<()> {
+    let database = single_block_database("ingest_source_floor_race").await?;
+    // The node prunes the moment it has served the window: planning finds block 0
+    // servable, and only a floor read taken after the fetch sees otherwise.
+    let node = test_floors::pruning_node(0, 1);
+    let endpoint = single_block_chain_endpoint(Arc::clone(&node)).await?;
+    let _floor = test_floors::install_node(&endpoint, node);
+    let engine = Engine::new(database.pool().clone());
+
+    let error = engine
+        .run_batch(BatchRequest {
+            chain_id: RACE_CHAIN.to_owned(),
+            sources: vec![SourceDescriptor {
+                key: "race-rpc".to_owned(),
+                kind: "rpc".to_owned(),
+                start_block: 0,
+                endpoint: endpoint.clone(),
+            }],
+            cursors: Vec::new(),
+            redo_range: None,
+            resume_current: None,
+        })
+        .await
+        .expect_err("a window fetched below a risen floor must not be recorded");
+
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert!(error.to_string().contains("0..=0"), "{error}");
+    let recorded: i64 = sqlx::query_scalar("SELECT count(*) FROM chain_lineage")
+        .fetch_one(database.pool())
+        .await?;
+    assert_eq!(recorded, 0, "the refused window must leave no coverage");
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn a_live_suffix_below_the_floor_is_refused_before_it_is_loaded() -> AnyResult<()> {
+    let database = single_block_database("ingest_source_floor_live").await?;
+    sqlx::query(
+        "
+        INSERT INTO chain_lineage (
+            chain_id, block_hash, parent_hash, block_number,
+            block_timestamp, canonicality_state
+        )
+        VALUES ($1, $2, NULL, 0, now(), 'finalized')
+        ",
+    )
+    .bind(RACE_CHAIN)
+    .bind(RACE_BLOCK_HASH)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "
+        INSERT INTO chain_heads (
+            chain_id, latest_block_hash, latest_block_number,
+            safe_block_hash, safe_block_number,
+            finalized_block_hash, finalized_block_number
+        )
+        VALUES ($1, $2, 0, $2, 0, $2, 0)
+        ",
+    )
+    .bind(RACE_CHAIN)
+    .bind(RACE_BLOCK_HASH)
+    .execute(database.pool())
+    .await?;
+    // The node pruned past the published head while this chain was not following. The
+    // floor drops back once the window is served, so only a check taken before loading
+    // can refuse it.
+    let node = test_floors::pruning_node(2, 0);
+    let endpoint = single_block_chain_endpoint(Arc::clone(&node)).await?;
+    let _floor = test_floors::install_node(&endpoint, node);
+    let engine = Engine::new(database.pool().clone());
+
+    let error = engine
+        .run_live_batch(LiveBatchRequest {
+            chain_id: RACE_CHAIN.to_owned(),
+            sources: vec![SourceDescriptor {
+                key: "live-rpc".to_owned(),
+                kind: "rpc".to_owned(),
+                start_block: 0,
+                endpoint: endpoint.clone(),
+            }],
+            live_handoff: Marker {
+                number: 0,
+                hash: RACE_BLOCK_HASH.to_owned(),
+            },
+        })
+        .await
+        .expect_err("a live suffix below the floor must be refused");
+
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert!(error.to_string().contains("1..=1"), "{error}");
+    let recorded: i64 = sqlx::query_scalar("SELECT count(*) FROM chain_lineage")
+        .fetch_one(database.pool())
+        .await?;
+    assert_eq!(
+        recorded, 1,
+        "the refused suffix must leave the ancestry alone"
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn an_rpc_source_reports_no_floor() -> AnyResult<()> {
+    let provider = ChainProvider::new("base-mainnet", "rpc", "https://rpc.example.com/")?;
+
+    assert_eq!(provider.earliest_available_block().await?, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_warehouse_source_is_planned_without_asking_it_for_a_floor() -> AnyResult<()> {
+    let database =
+        TestDatabase::create(TestDatabaseConfig::new("ingest_source_floor_base")).await?;
+    let engine = Engine::new(database.pool().clone());
+
+    // Coinbase SQL is not a block provider at all, so asking it for a floor would
+    // fail every base-mainnet batch.
+    engine
+        .enforce_source_floors(&BatchRequest {
+            chain_id: "base-mainnet".to_owned(),
+            sources: vec![
+                SourceDescriptor {
+                    key: "base-coinbase".to_owned(),
+                    kind: "coinbase-sql".to_owned(),
+                    start_block: 0,
+                    endpoint: "coinbase-sql://warehouse".to_owned(),
+                },
+                SourceDescriptor {
+                    key: "base-rpc".to_owned(),
+                    kind: "rpc".to_owned(),
+                    start_block: crate::BASE_COINBASE_SEAM_BLOCK,
+                    endpoint: "https://rpc.example.com/".to_owned(),
+                },
+            ],
+            cursors: Vec::new(),
+            redo_range: None,
+            resume_current: None,
+        })
+        .await?;
+    database.cleanup().await
+}
+
+#[cfg(feature = "reth-db")]
+#[tokio::test]
+async fn planning_reads_the_floor_from_the_configured_datadir() -> AnyResult<()> {
+    let database =
+        TestDatabase::create(TestDatabaseConfig::new("ingest_source_floor_datadir")).await?;
+    let engine = Engine::new(database.pool().clone());
+
+    let error = engine
+        .enforce_source_floors(&request(UNREADABLE_DATADIR, None))
+        .await
+        .expect_err("an unreadable datadir must fail the floor read");
+
+    assert!(
+        error
+            .to_string()
+            .contains("failed to read the earliest available block for source ethereum-reth"),
+        "{error}"
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn a_redo_range_above_the_floor_is_planned_on_a_pruned_node() -> AnyResult<()> {
+    let database =
+        TestDatabase::create(TestDatabaseConfig::new("ingest_source_floor_redo")).await?;
+    let _floor = test_floors::install(REDO_DATADIR, MERGE_RECEIPT_SEGMENT_START);
+    let engine = Engine::new(database.pool().clone());
+
+    // The declared window starts below the floor, but this redo range does not.
+    engine
+        .enforce_source_floors(&request(
+            REDO_DATADIR,
+            Some((
+                MERGE_RECEIPT_SEGMENT_START,
+                MERGE_RECEIPT_SEGMENT_START + 100,
+            )),
+        ))
+        .await?;
+    database.cleanup().await
+}
+
+#[test]
+fn a_redo_range_that_ends_below_the_source_window_plans_nothing() {
+    let source = source(PRUNED_DATADIR);
+
+    assert_eq!(
+        planned_range(&source, Some((0, V1_REGISTRY_START - 1)), None),
+        None
+    );
+    assert_eq!(
+        planned_range(&source, Some((0, V1_REGISTRY_START)), None),
+        Some((V1_REGISTRY_START, Some(V1_REGISTRY_START)))
+    );
+    assert_eq!(
+        planned_range(&source, None, None),
+        Some((V1_REGISTRY_START, None))
+    );
+}
+
+#[test]
+fn a_resumed_redo_is_judged_on_what_it_has_left_to_read() {
+    let source = source(PRUNED_DATADIR);
+    let resumed = Marker {
+        number: V1_REGISTRY_START + 150,
+        hash: "resume".to_owned(),
+    };
+
+    assert_eq!(
+        planned_range(
+            &source,
+            Some((V1_REGISTRY_START, V1_REGISTRY_START + 200)),
+            Some(&resumed)
+        ),
+        Some((V1_REGISTRY_START + 151, Some(V1_REGISTRY_START + 200))),
+        "a redo already durable through 150 must be judged on 151.."
+    );
+    assert_eq!(
+        planned_range(
+            &source,
+            Some((V1_REGISTRY_START, V1_REGISTRY_START + 150)),
+            Some(&resumed)
+        ),
+        None,
+        "a redo with nothing left to read plans nothing"
+    );
+}
+
+async fn single_block_database(name: &str) -> AnyResult<TestDatabase> {
+    let database = TestDatabase::create(TestDatabaseConfig::new(name)).await?;
+    for schema in [
+        include_str!("../../../../../schema-v2/baseline/01_chain.sql"),
+        include_str!("../../../../../schema-v2/baseline/02_raw_facts.sql"),
+        include_str!("../../../../../schema-v2/baseline/03_identity.sql"),
+        include_str!("../../../../../schema-v2/baseline/04_manifests.sql"),
+    ] {
+        sqlx::raw_sql(schema).execute(database.pool()).await?;
+    }
+    sqlx::query(
+        "
+        INSERT INTO manifest_versions (
+            manifest_version, namespace, source_family, chain_id,
+            deployment_label, rollout_status, normalizer_version,
+            file_path, manifest_payload
+        )
+        VALUES (1, 'test', 'test_floor', $1, 'fixture', 'active',
+                'ensip15@ens-normalize-0.1.1', 'fixture.toml', $2)
+        ",
+    )
+    .bind(RACE_CHAIN)
+    .bind(json!({
+        "manifest_version": 1,
+        "namespace": "test",
+        "source_family": "test_floor",
+        "chain": RACE_CHAIN,
+        "deployment_epoch": "fixture",
+        "rollout_status": "active",
+        "normalizer_version": "ensip15@ens-normalize-0.1.1",
+        "resolver_implementations": [],
+        "capability_flags": {},
+        "roots": [],
+        "contracts": [{
+            "name": "registry",
+            "role": "registry",
+            "address": RACE_ADDRESS,
+            "proxy_kind": "none",
+            "start_block": 0,
+            "events": ["Transfer"]
+        }],
+        "discovery_rules": [],
+        "abi": {
+            "events": [{
+                "name": "Transfer",
+                "fragment": "event Transfer(address indexed from, address indexed to, uint256 value)",
+                "emitter_roles": ["registry"],
+                "normalized_events": []
+            }],
+            "calls": []
+        }
+    }))
+    .execute(database.pool())
+    .await?;
+    let manifest_id: i64 =
+        sqlx::query_scalar("SELECT manifest_id FROM manifest_versions WHERE chain_id = $1")
+            .bind(RACE_CHAIN)
+            .fetch_one(database.pool())
+            .await?;
+    let contract_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "
+        INSERT INTO contract_instances (
+            contract_instance_id, chain_id, contract_kind, provenance
+        )
+        VALUES ($1, $2, 'contract', '{}'::jsonb)
+        ",
+    )
+    .bind(contract_id)
+    .bind(RACE_CHAIN)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "
+        INSERT INTO manifest_contract_instances (
+            manifest_id, chain_id, declaration_kind, declaration_name,
+            contract_instance_id, declared_address, role, proxy_kind,
+            start_block_number
+        )
+        VALUES ($1, $2, 'contract', 'registry', $3, $4, 'registry', 'none', 0)
+        ",
+    )
+    .bind(manifest_id)
+    .bind(RACE_CHAIN)
+    .bind(contract_id)
+    .bind(RACE_ADDRESS)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "
+        INSERT INTO contract_instance_addresses (
+            contract_instance_id, chain_id, address,
+            active_from_block_number, source_manifest_id, provenance
+        )
+        VALUES ($1, $2, $3, 0, $4, '{}'::jsonb)
+        ",
+    )
+    .bind(contract_id)
+    .bind(RACE_CHAIN)
+    .bind(RACE_ADDRESS)
+    .bind(manifest_id)
+    .execute(database.pool())
+    .await?;
+    Ok(database)
+}
+
+/// Serves one canonical block, enough for a batch to plan, fetch, and try to store.
+///
+/// Serving the block payloads is the last read of a window, so the node prunes there:
+/// a floor read taken before the fetch still sees the pre-prune floor.
+async fn single_block_chain_endpoint(node: Arc<test_floors::PruningNode>) -> AnyResult<String> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("http://{}/", listener.local_addr()?);
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let node = Arc::clone(&node);
+            tokio::spawn(async move {
+                while let Some(body) = read_request_body(&mut socket).await {
+                    let response =
+                        serde_json::from_str::<Value>(&body).map_or(Value::Null, |request| {
+                            match request {
+                                Value::Array(calls) => {
+                                    Value::Array(calls.iter().map(respond).collect())
+                                }
+                                single => respond(&single),
+                            }
+                        });
+                    if body.contains("eth_getBlockByHash") {
+                        node.observe_fetch();
+                    }
+                    let payload = response.to_string();
+                    let http = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    if socket.write_all(http.as_bytes()).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    Ok(endpoint)
+}
+
+async fn read_request_body(socket: &mut tokio::net::TcpStream) -> Option<String> {
+    let mut request = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    loop {
+        let read = socket.read(&mut chunk).await.ok()?;
+        if read == 0 {
+            return None;
+        }
+        request.extend_from_slice(&chunk[..read]);
+        let text = String::from_utf8_lossy(&request).into_owned();
+        if let Some(end) = text.find("\r\n\r\n") {
+            let declared = text[..end]
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())?
+                })
+                .unwrap_or(0);
+            let body = &text[end + 4..];
+            if body.len() >= declared {
+                return Some(body.to_owned());
+            }
+        }
+    }
+}
+
+fn respond(call: &Value) -> Value {
+    let selector = call
+        .get("params")
+        .and_then(|params| params.get(0))
+        .and_then(Value::as_str)
+        .unwrap_or("latest");
+    let result = match call.get("method").and_then(Value::as_str) {
+        Some("eth_getBlockByNumber" | "eth_getBlockByHash") => block_json(selector),
+        Some("eth_getLogs") => json!([]),
+        _ => Value::Null,
+    };
+    json!({
+        "jsonrpc": "2.0",
+        "id": call.get("id").cloned().unwrap_or_else(|| json!(1)),
+        "result": result
+    })
+}
+
+/// Block 0, plus block 1 for callers that need a head above a stored ancestor.
+fn block_json(selector: &str) -> Value {
+    let one =
+        matches!(selector, "0x1" | "latest" | "safe" | "finalized") || selector == HEAD_BLOCK_HASH;
+    if one {
+        return json!({
+            "hash": HEAD_BLOCK_HASH,
+            "parentHash": RACE_BLOCK_HASH,
+            "number": "0x1",
+            "timestamp": "0x65"
+        });
+    }
+    json!({
+        "hash": RACE_BLOCK_HASH,
+        "parentHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "number": "0x0",
+        "timestamp": "0x64"
+    })
+}
+
+fn request(endpoint: &str, redo_range: Option<(i64, i64)>) -> BatchRequest {
+    BatchRequest {
+        chain_id: "ethereum-mainnet".to_owned(),
+        sources: vec![source(endpoint)],
+        cursors: Vec::new(),
+        redo_range,
+        resume_current: None,
+    }
+}
+
+fn source(endpoint: &str) -> SourceDescriptor {
+    SourceDescriptor {
+        key: "ethereum-reth".to_owned(),
+        kind: "reth-db".to_owned(),
+        start_block: V1_REGISTRY_START,
+        endpoint: endpoint.to_owned(),
+    }
+}
