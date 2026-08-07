@@ -205,7 +205,7 @@ Schema, capability ownership detail, and the discovery edge model are in [`manif
 
 ## Discovery graph
 
-Discovery expands the canonical graph through time-versioned indexability and relationship edges: resolver, registry announcement, subregistry, parent, alias, metadata, proxy/implementation, migration, and transport. Each edge stores `edge_id`, `from_contract_instance_id`, `to_contract_instance_id`, `discovered_by`, `edge_kind`, `active_from`, `active_to`, provenance, and canonicality.
+Discovery expands the canonical graph through time-versioned indexability and relationship edges. The schema-v2 baseline constrains `edge_kind` to exactly five values: `resolver`, `subregistry`, `proxy_implementation`, `registry_announcement`, and `migration`. Four of the five have producers; nothing writes `migration`, which is [reserved surface](glossary.md#reserved-surface). (The legacy `public` schema built from `migrations/` never constrained the column, so historical rows there are not bounded by this list.) Each edge stores `edge_id`, `from_contract_instance_id`, `to_contract_instance_id`, `discovered_by`, `edge_kind`, `active_from`, `active_to`, provenance, and canonicality.
 
 ENSv2 mappings:
 
@@ -338,7 +338,7 @@ ENSv2 mappings:
 
 - `TokenResourceLinked` ← upstream `TokenResource(tokenId, resource)`. The only adapter event linking current token ID to upstream EAC resource.[^v2-iperm-l34][^v2-pr-l216]
 - `TokenRegenerated` ← upstream `TokenRegenerated(oldTokenId, newTokenId)`. Preserves `resource_id`, `token_lineage_id`, and active surface binding.[^v2-events-l69][^v2-pr-l451]
-- `TokenControlTransferred` ← each positive-value item in upstream ERC-1155 `TransferSingle` or `TransferBatch` when both `from` and `to` are nonzero. A batch item produces its own normalized event. The upstream update changes the current owner only for positive values and uses the zero address for mint and burn, so those lifecycle logs do not become token-control transfers. Both events are present in the deployed `ETHRegistry` and `UserRegistryImpl` ABIs. (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L652 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L689 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L723 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L760 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L194 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L201 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L208 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L210 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L318 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L333 @ ens_v2@48b3e2d)
+- `TokenControlTransferred` ← each positive-value item in upstream ERC-1155 `TransferSingle` or `TransferBatch` when both `from` and `to` are nonzero. A batch item produces its own normalized event. The upstream update changes the current owner only for positive values and uses the zero address for mint and burn, so those lifecycle logs do not become token-control transfers. Both events are present in the deployed `ETHRegistry` and `UserRegistryImpl` ABIs. (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L652 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L689 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L723 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L760 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L194 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L201 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L208 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L210 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L318 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L333 @ ens_v2@ccaeb58)
 - `SubregistryChanged` ← `SubregistryUpdated`; `ParentChanged` ← `ParentUpdated`.[^v2-events-l49][^v2-events-l75]
 - `AliasChanged` ← `PermissionedResolver.AliasChanged`; the alias path stores source and destination DNS-encoded names.[^v2-iperm-resolver-l14][^v2-pres-l230]
 - `PermissionChanged` and `RootPermissionChanged` ← upstream `EACRolesChanged(resource, account, oldRoleBitmap, newRoleBitmap)`. Root-resource permissions stay distinguishable because EAC root roles are checked separately and satisfy resource-level checks via root fallback; this taxonomy admission covers normalized-event emission and manifest watch admission, while current-state projection consumption is a separate projection contract.[^v2-eac-l19][^v2-eac-l176][^v2-eac-l181] Registry/root sources decode role bitmaps with the post-audit `RegistryRolesLib` vocabulary (`registrar`, `register_reserved`, `set_parent`, `unregister`, `renew`, `set_subregistry`, `set_resolver`, `set_uri`, `can_name`, `upgrade`, `can_transfer_admin`, and the corresponding `admin_` powers). `ROLE_WAS_RESERVED` at bit 32 is a non-power marker retained in the bitmap and omitted from `effective_powers`; unknown bits are likewise omitted rather than surfaced under invented names.[^v2-regroles-l6][^v2-regroles-l9][^v2-regroles-l14][^v2-regroles-l19][^v2-regroles-l24][^v2-regroles-l29][^v2-regroles-l34][^v2-regroles-l39][^v2-regroles-l45][^v2-regroles-l47][^v2-regroles-l50][^v2-regroles-l55][^v2-regroles-l60] Resolver sources decode the resolver vocabulary, including `set_data`, `can_name`, `upgrade`, and their admin powers.[^v2-resroles-l7][^v2-resroles-l51][^v2-resroles-l56][^v2-resroles-l61] `DataChanged` and `NamedDataResource` remain unadmitted even though `set_data` is a named permission power.[^v2-pres-l161][^v2-pres-l437]
@@ -348,9 +348,9 @@ ENSv2 mappings:
 Taxonomy reconciliation decisions:
 
 - `RecordDeleted` is not a separate normalized kind for the currently admitted sources. Deletes are represented as `RecordChanged` payloads with deletion metadata, so consumers only need one record-change stream.
-- `CommitmentMade` is not admitted in the normalized taxonomy yet. Upstream ENSv2 `ETHRegistrar` emits `CommitmentMade(bytes32 commitment)`, but current manifests and adapters do not consume it, and no current projection depends on commitment history. (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L19 @ ens_v2@48b3e2d)
+- `CommitmentMade` is not admitted in the normalized taxonomy yet. Upstream ENSv2 `ETHRegistrar` emits `CommitmentMade(bytes32 commitment)`, but current manifests and adapters do not consume it, and no current projection depends on commitment history. (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L19 @ ens_v2@ccaeb58)
 - `DelegateRetainedAfterTransfer` is not admitted until a concrete source event and consumer projection are specified. Role changes remain `PermissionChanged`, `RootPermissionChanged`, or `PermissionScopeChanged`; token ownership comes from `TokenControlTransferred` rather than inference from a role-event pattern.
-- ERC-1155 `ApprovalForAll` remains unsupported. Operator approval is neither token ownership nor an ENSv2 resource-role grant, and no current projection consumes it. (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L336 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L341 @ ens_v2@48b3e2d)
+- ERC-1155 `ApprovalForAll` remains unsupported. Operator approval is neither token ownership nor an ENSv2 resource-role grant, and no current projection consumes it. (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L336 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L341 @ ens_v2@ccaeb58)
 
 ENSv1 direct wrapper/resolver mappings from admitted NameWrapper and PublicResolver events are `PreimageObserved`, `SurfaceBound`, `SurfaceUnbound`, `AuthorityTransferred`, `ExpiryChanged`, `TokenControlTransferred`, `ResolverChanged`, `PermissionChanged`, `PermissionScopeChanged`, and `RecordChanged`.[^v1-iname-l27][^v1-iname-l31][^v1-iname-l35][^v1-iname-l37][^v1-iname-l38][^v1-nw-l1022][^v1-nw-l1034][^v1-pres-l20][^v1-pres-l51][^v1-pres-l58] The admitted wrapped registrar controller's `NameRenewed` also derives an `ExpiryChanged` for the wrapper resource under `ens_v1_registrar_l1`, as defined above; the source family follows the emitting log while the resource identifies the affected wrapper state. `PermissionScopeChanged` retains the effective fuse bitmap and its derived NameWrapper lifecycle state without inventing a subject grant: unwrapping retains fuse/expiry data, and an unexpired rewrap restores the parent-controlled fuses and larger expiry even though `NameWrapped` emits the supplied arguments. (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L235 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L239 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L242 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L246 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L276 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L901 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L902 @ ens_v1@91c966f) When a separate compatible holder grant exists, current projections apply the derived state, individual owner-controlled fuse bits, and wrapper expiry to that row. (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L10 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L16 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L852 @ ens_v1@91c966f)
 
@@ -422,6 +422,8 @@ restored agreement may clear the matching active row.
 ## Permissions
 
 Permissions are first-class projections and explain views. Track grants by scope (root, registry, resource, resolver, record manager/operator, migration-derived, transport-derived). Each grant records source, revocation source, inheritance path, transfer behavior, scope, and effective powers.
+
+`migration_derived` and `transport_derived` are [reserved surface](glossary.md#reserved-surface): the scope kinds are accepted by the schema and rendered by the API, but no adapter writes either one. `transport_derived` is a remnant of an abandoned cross-chain ENSv2 design in which a name's authority could move between chains. ENSv2 is an Ethereum L1 system and its migration from ENSv1 is single-chain (see [`upstream.md`](upstream.md#known-divergences) § Known divergences for the citations and for the stale upstream comment that says otherwise), so no bigname source family can ever produce a `transport_derived` grant; it is retained only because removing a projection scope kind requires a schema migration. Do not treat it as a supported scope or add exemplars presenting it as expected output; guards that pin the absence of a producer, or that the retained reader still decodes a stored row carrying the value, are the exception.
 
 Public reads expose effective powers directly so callers do not reconstruct
 authority from raw role bitmaps. `GET /v2/permissions` is the current
@@ -821,84 +823,84 @@ the API; route behavior remains owned by API crate tests.
 [^subgraph-ts-l238]: (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L238 @ ens_subgraph@723f1b6)
 [^subgraph-ts-l246]: (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L246 @ ens_subgraph@723f1b6)
 
-[^v2-deploy-root]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/RootRegistry.json:L2 @ ens_v2@48b3e2d)
-[^v2-deploy-ethreg]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L2 @ ens_v2@48b3e2d)
-[^v2-deploy-ethrc]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistrar.json:L2 @ ens_v2@48b3e2d)
-[^v2-deploy-pres]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/PermissionedResolverImpl.json:L2 @ ens_v2@48b3e2d)
+[^v2-deploy-root]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/RootRegistry.json:L2 @ ens_v2@ccaeb58)
+[^v2-deploy-ethreg]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L2 @ ens_v2@ccaeb58)
+[^v2-deploy-ethrc]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistrar.json:L2 @ ens_v2@ccaeb58)
+[^v2-deploy-pres]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/PermissionedResolverImpl.json:L2 @ ens_v2@ccaeb58)
 
-[^v2-userreg-l15]: (upstream: .refs/ens_v2/contracts/src/registry/UserRegistry.sol:L15 @ ens_v2@48b3e2d)
-[^v2-ethrc-l30]: (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L25 @ ens_v2@48b3e2d)
-[^v2-ethrc-l151]: (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L151 @ ens_v2@48b3e2d)
+[^v2-userreg-l15]: (upstream: .refs/ens_v2/contracts/src/registry/UserRegistry.sol:L15 @ ens_v2@ccaeb58)
+[^v2-ethrc-l30]: (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L25 @ ens_v2@ccaeb58)
+[^v2-ethrc-l151]: (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L151 @ ens_v2@ccaeb58)
 
-[^v2-iperm-l34]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L38 @ ens_v2@48b3e2d)
-[^v2-iperm-l57]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L61 @ ens_v2@48b3e2d)
-[^v2-iperm-l67]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L71 @ ens_v2@48b3e2d)
-[^v2-iperm-l72]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L76 @ ens_v2@48b3e2d)
-[^v2-events-l15]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L18 @ ens_v2@48b3e2d)
-[^v2-events-l30]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L33 @ ens_v2@48b3e2d)
-[^v2-events-l49]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56 @ ens_v2@48b3e2d)
-[^v2-events-l59]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L66 @ ens_v2@48b3e2d)
-[^v2-events-l69]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L82 @ ens_v2@48b3e2d)
-[^v2-events-l75]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@48b3e2d)
+[^v2-iperm-l34]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L38 @ ens_v2@ccaeb58)
+[^v2-iperm-l57]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L61 @ ens_v2@ccaeb58)
+[^v2-iperm-l67]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L71 @ ens_v2@ccaeb58)
+[^v2-iperm-l72]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L76 @ ens_v2@ccaeb58)
+[^v2-events-l15]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L18 @ ens_v2@ccaeb58)
+[^v2-events-l30]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L33 @ ens_v2@ccaeb58)
+[^v2-events-l49]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56 @ ens_v2@ccaeb58)
+[^v2-events-l59]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L66 @ ens_v2@ccaeb58)
+[^v2-events-l69]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L82 @ ens_v2@ccaeb58)
+[^v2-events-l75]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@ccaeb58)
 
-[^v2-pr-l28]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L29 @ ens_v2@48b3e2d)
-[^v2-pr-l131]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L142 @ ens_v2@48b3e2d)
-[^v2-pr-l141]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L150 @ ens_v2@48b3e2d)
-[^v2-pr-l151]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L171 @ ens_v2@48b3e2d)
-[^v2-pr-l203]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L452 @ ens_v2@48b3e2d)
-[^v2-pr-l216]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464 @ ens_v2@48b3e2d)
-[^v2-pr-l222]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L471 @ ens_v2@48b3e2d)
-[^v2-pr-l225]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L474 @ ens_v2@48b3e2d)
-[^v2-pr-l237]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201 @ ens_v2@48b3e2d)
-[^v2-pr-l241]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L205 @ ens_v2@48b3e2d)
-[^v2-pr-l242]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L206 @ ens_v2@48b3e2d)
-[^v2-pr-l261]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L233 @ ens_v2@48b3e2d)
-[^v2-pr-l351]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L360 @ ens_v2@48b3e2d)
-[^v2-pr-l451]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L528 @ ens_v2@48b3e2d)
-[^v2-pr-l461]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L537 @ ens_v2@48b3e2d)
-[^v2-pr-l542]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L637 @ ens_v2@48b3e2d)
-[^v2-pr-l547]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L647 @ ens_v2@48b3e2d)
+[^v2-pr-l28]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L29 @ ens_v2@ccaeb58)
+[^v2-pr-l131]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L142 @ ens_v2@ccaeb58)
+[^v2-pr-l141]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L150 @ ens_v2@ccaeb58)
+[^v2-pr-l151]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L171 @ ens_v2@ccaeb58)
+[^v2-pr-l203]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L452 @ ens_v2@ccaeb58)
+[^v2-pr-l216]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464 @ ens_v2@ccaeb58)
+[^v2-pr-l222]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L471 @ ens_v2@ccaeb58)
+[^v2-pr-l225]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L474 @ ens_v2@ccaeb58)
+[^v2-pr-l237]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201 @ ens_v2@ccaeb58)
+[^v2-pr-l241]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L205 @ ens_v2@ccaeb58)
+[^v2-pr-l242]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L206 @ ens_v2@ccaeb58)
+[^v2-pr-l261]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L233 @ ens_v2@ccaeb58)
+[^v2-pr-l351]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L360 @ ens_v2@ccaeb58)
+[^v2-pr-l451]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L528 @ ens_v2@ccaeb58)
+[^v2-pr-l461]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L537 @ ens_v2@ccaeb58)
+[^v2-pr-l542]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L637 @ ens_v2@ccaeb58)
+[^v2-pr-l547]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L647 @ ens_v2@ccaeb58)
 
-[^v2-regroles-l6]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L6 @ ens_v2@48b3e2d)
-[^v2-regroles-l9]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L9 @ ens_v2@48b3e2d)
-[^v2-regroles-l14]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L14 @ ens_v2@48b3e2d)
-[^v2-regroles-l19]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L19 @ ens_v2@48b3e2d)
-[^v2-regroles-l24]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L24 @ ens_v2@48b3e2d)
-[^v2-regroles-l29]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L29 @ ens_v2@48b3e2d)
-[^v2-regroles-l34]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L34 @ ens_v2@48b3e2d)
-[^v2-regroles-l39]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L39 @ ens_v2@48b3e2d)
-[^v2-regroles-l45]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L45 @ ens_v2@48b3e2d)
-[^v2-regroles-l47]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L48 @ ens_v2@48b3e2d)
-[^v2-regroles-l50]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L51 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L53 @ ens_v2@48b3e2d)
-[^v2-regroles-l55]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L56 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L58 @ ens_v2@48b3e2d)
-[^v2-regroles-l60]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L61 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L63 @ ens_v2@48b3e2d)
+[^v2-regroles-l6]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L6 @ ens_v2@ccaeb58)
+[^v2-regroles-l9]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L9 @ ens_v2@ccaeb58)
+[^v2-regroles-l14]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L14 @ ens_v2@ccaeb58)
+[^v2-regroles-l19]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L19 @ ens_v2@ccaeb58)
+[^v2-regroles-l24]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L24 @ ens_v2@ccaeb58)
+[^v2-regroles-l29]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L29 @ ens_v2@ccaeb58)
+[^v2-regroles-l34]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L34 @ ens_v2@ccaeb58)
+[^v2-regroles-l39]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L39 @ ens_v2@ccaeb58)
+[^v2-regroles-l45]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L45 @ ens_v2@ccaeb58)
+[^v2-regroles-l47]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L48 @ ens_v2@ccaeb58)
+[^v2-regroles-l50]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L51 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L53 @ ens_v2@ccaeb58)
+[^v2-regroles-l55]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L56 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L58 @ ens_v2@ccaeb58)
+[^v2-regroles-l60]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L61 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L63 @ ens_v2@ccaeb58)
 
-[^v2-iperm-resolver-l14]: (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L19 @ ens_v2@48b3e2d)
-[^v2-iethreg-l32]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@48b3e2d)
-[^v2-iethreg-l53]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRenewer.sol:L21 @ ens_v2@48b3e2d)
+[^v2-iperm-resolver-l14]: (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L19 @ ens_v2@ccaeb58)
+[^v2-iethreg-l32]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@ccaeb58)
+[^v2-iethreg-l53]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRenewer.sol:L21 @ ens_v2@ccaeb58)
 [^v2-sepolia-dev-iethreg-l53]: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/registrar/interfaces/IETHRegistrar.sol:L53 @ ens_v2_sepolia_dev@554c309) (upstream: .refs/ens_v2_sepolia_dev/contracts/src/registrar/interfaces/IETHRegistrar.sol:L54 @ ens_v2_sepolia_dev@554c309) (upstream: .refs/ens_v2_sepolia_dev/contracts/src/registrar/interfaces/IETHRegistrar.sol:L59 @ ens_v2_sepolia_dev@554c309) (upstream: .refs/ens_v2_sepolia_dev/contracts/src/registrar/interfaces/IETHRegistrar.sol:L60 @ ens_v2_sepolia_dev@554c309)
 
-[^v2-resroles-l7]: (upstream: .refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L7 @ ens_v2@48b3e2d)
-[^v2-resroles-l51]: (upstream: .refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L52 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L54 @ ens_v2@48b3e2d)
-[^v2-resroles-l56]: (upstream: .refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L57 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L59 @ ens_v2@48b3e2d)
-[^v2-resroles-l61]: (upstream: .refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L62 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L64 @ ens_v2@48b3e2d)
+[^v2-resroles-l7]: (upstream: .refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L7 @ ens_v2@ccaeb58)
+[^v2-resroles-l51]: (upstream: .refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L52 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L54 @ ens_v2@ccaeb58)
+[^v2-resroles-l56]: (upstream: .refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L57 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L59 @ ens_v2@ccaeb58)
+[^v2-resroles-l61]: (upstream: .refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L62 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L64 @ ens_v2@ccaeb58)
 
-[^v2-pres-l38]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L33 @ ens_v2@48b3e2d)
-[^v2-pres-l56]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L53 @ ens_v2@48b3e2d)
-[^v2-pres-l70]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L65 @ ens_v2@48b3e2d)
-[^v2-pres-l132]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L142 @ ens_v2@48b3e2d)
-[^v2-pres-l142]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L149 @ ens_v2@48b3e2d)
-[^v2-pres-l153]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L172 @ ens_v2@48b3e2d)
-[^v2-pres-l159]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L178 @ ens_v2@48b3e2d)
-[^v2-pres-l161]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L161 @ ens_v2@48b3e2d)
-[^v2-pres-l230]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L258 @ ens_v2@48b3e2d)
-[^v2-pres-l239]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L273 @ ens_v2@48b3e2d)
-[^v2-pres-l257]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L303 @ ens_v2@48b3e2d)
-[^v2-pres-l282]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L369 @ ens_v2@48b3e2d)
-[^v2-pres-l412]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L508 @ ens_v2@48b3e2d)
-[^v2-pres-l437]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L437 @ ens_v2@48b3e2d)
-[^v2-pres-l650]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L767 @ ens_v2@48b3e2d)
+[^v2-pres-l38]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L33 @ ens_v2@ccaeb58)
+[^v2-pres-l56]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L53 @ ens_v2@ccaeb58)
+[^v2-pres-l70]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L65 @ ens_v2@ccaeb58)
+[^v2-pres-l132]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L142 @ ens_v2@ccaeb58)
+[^v2-pres-l142]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L149 @ ens_v2@ccaeb58)
+[^v2-pres-l153]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L172 @ ens_v2@ccaeb58)
+[^v2-pres-l159]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L178 @ ens_v2@ccaeb58)
+[^v2-pres-l161]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L161 @ ens_v2@ccaeb58)
+[^v2-pres-l230]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L258 @ ens_v2@ccaeb58)
+[^v2-pres-l239]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L273 @ ens_v2@ccaeb58)
+[^v2-pres-l257]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L303 @ ens_v2@ccaeb58)
+[^v2-pres-l282]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L369 @ ens_v2@ccaeb58)
+[^v2-pres-l412]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L508 @ ens_v2@ccaeb58)
+[^v2-pres-l437]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L437 @ ens_v2@ccaeb58)
+[^v2-pres-l650]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L767 @ ens_v2@ccaeb58)
 
-[^v2-eac-l19]: (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L22 @ ens_v2@48b3e2d)
-[^v2-eac-l176]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L180 @ ens_v2@48b3e2d)
-[^v2-eac-l181]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L454 @ ens_v2@48b3e2d)
+[^v2-eac-l19]: (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L22 @ ens_v2@ccaeb58)
+[^v2-eac-l176]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L180 @ ens_v2@ccaeb58)
+[^v2-eac-l181]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L454 @ ens_v2@ccaeb58)
