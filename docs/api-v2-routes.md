@@ -508,9 +508,9 @@ Field ownership:
   route-wide namespace shortcut. The claim is compared in the same normalized
   form the indexed answer from `GET /v2/addresses/{address}/primary-name`
   publishes, so a successful claim recorded in a non-normalized spelling still
-  marks its name primary — unless the projection already recorded that spelling
-  as its normalized form, in which case the stored spelling is compared as
-  published and matches nothing. A successful claim whose stored spelling does
+  marks its name primary. A spelling the projection already recorded as its
+  normalized form is instead compared verbatim, so such a claim marks a row
+  primary only where the published spelling is exactly that row's name. A successful claim whose stored spelling does
   not normalize likewise marks no row primary, and the primary-name route
   reports it as `invalid_name`. Resolver records are not included; use
   `GET /v2/names/{name}/records` for resolver data.

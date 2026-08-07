@@ -166,8 +166,8 @@ expected chain make the aggregate ready. The server compose healthcheck tests
 `api_status` so API liveness does not depend on an indexing loop restart.
 
 Expected chains are the same set `/v2/status` reports: every chain with a
-stored head or any phase state. Two consequences worth knowing before paging on
-this endpoint:
+stored head or any phase state. Three consequences worth knowing before paging
+on this endpoint:
 
 - The runner writes heartbeats between batches, so a batch or an inter-phase
   transition longer than the configured max age reports `stale` on that chain
@@ -179,8 +179,8 @@ this endpoint:
   rows are deleted, which is the same removal `/v2/status` needs.
 - The runner records a chain's phase state when it initializes the chain, which
   is before that chain's first heartbeat. A staged startup therefore reports
-  `degraded` until every expected chain has written a heartbeat within the
-  configured max age, by the same rule as the first bullet in this list.
+  `degraded` until every expected chain has written a heartbeat, which is the
+  missing-heartbeat branch of the rule above rather than an age comparison.
 
 When a chain is missing a heartbeat entirely, the reported `phase`,
 `started_at`, `heartbeat_at`, and `heartbeat_age_seconds` are null: there is no
