@@ -360,17 +360,25 @@ fixed by manifest declaration. Code that identifies these registries by a single
 expected implementation address will miss upgraded ones.
 
 **Migratable child** — a child of an already-migrated name that has not
-migrated yet. Its parent's
+migrated yet *and* has `PARENT_CANNOT_CONTROL` burned — a *helper-positive*
+child, in the three-way split below. Its parent's
 [migration registry](#migration-registry-wrapperregistry) refuses to let anyone
 register that label
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L170 @ ens_v2@ccaeb58),
 so the child cannot be taken on the ENSv2 side and keeps resolving through
-ENSv1 for as long as it stays unmigrated.
+ENSv1 for as long as it stays unmigrated. The qualifier is load-bearing in both
+directions: a child that never had `PARENT_CANNOT_CONTROL` burned is not
+protected at all — the test returns false and the label can be registered out
+from under it
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58)
+— and it cannot migrate either
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L188 @ ens_v2@ccaeb58).
 
-Which children qualify is broader than the name suggests, and this is the one
-place in the migration cluster where "emancipated" must not be read as the
-[emancipated NameWrapper state](#emancipated-namewrapper-state) defined above.
-The gate is `LibMigration.isEmancipatedChild`, which tests only that
+That condition is nonetheless broader than the
+[emancipated NameWrapper state](#emancipated-namewrapper-state) defined above,
+and this is the one place in the migration cluster where "emancipated" must not
+be read as that state. The gate is `LibMigration.isEmancipatedChild`, which
+tests only that
 `PARENT_CANNOT_CONTROL` is burned and the name is not a `.eth` 2LD
 (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L88 @ ens_v2@ccaeb58);
 it never consults `CANNOT_UNWRAP`, so it is *also* true of a
