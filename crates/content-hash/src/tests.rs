@@ -303,6 +303,10 @@ fn semantic_dependencies_of_the_watched_roots_affect_the_hash() {
             "crates/lookup/src/record_selector.rs",
             "pub struct RecordSelector;\n",
         ),
+        (
+            "crates/lookup/src/json_rpc_envelope.rs",
+            "pub fn classify_response() -> bool { false }\n",
+        ),
     ] {
         let tree = SampleTree::new();
         let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
@@ -325,6 +329,9 @@ fn request_scoped_lookup_sources_do_not_change_hash() {
         "crates/lookup/src/types.rs",
         "crates/lookup/src/ccip/gateway.rs",
         "crates/lookup/src/store/indexed.rs",
+        // Transport only since the envelope interpretation moved to `json_rpc_envelope`: client
+        // construction, timeouts, and endpoint configuration abort a request rather than decide
+        // which response counts as an answer.
         "crates/lookup/src/rpc.rs",
         "crates/domain/src/block_interval.rs",
     ] {

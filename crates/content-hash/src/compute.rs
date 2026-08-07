@@ -52,6 +52,10 @@ const SEMANTIC_SOURCE_FILES: &[&str] = &[
     // are persisted.
     "crates/lookup/src/reverse_names.rs",
     "crates/lookup/src/text_records.rs",
+    // Which provider response those calls accept as an answer, and what value is taken from it.
+    // Deliberately not the rest of `crates/lookup/src/rpc.rs`, which is client construction,
+    // timeouts, and endpoint configuration — those abort a request rather than reshape an answer.
+    "crates/lookup/src/json_rpc_envelope.rs",
     // Redo-range preparation and the normalizer-version recompute that drive the stage above.
     "crates/interpret/src/write.rs",
     "crates/interpret/src/recompute.rs",

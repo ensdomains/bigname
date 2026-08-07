@@ -14,16 +14,35 @@ use super::{
     },
 };
 
-const CHILD_SELECT: &str = r#"
+/// A registry edge proves a child node and its labelhash but not the label itself, so Project
+/// writes the name columns null until a preimage arrives. The read path names such a child by the
+/// documented `[<labelhash-without-0x>].<parent-name>` placeholder rather than returning null into
+/// a mandatory field. The parent name comes from a subquery so the expression holds on the
+/// audit path too, which omits the identity joins.
+const CHILD_DISPLAY_NAME_EXPR: &str = r#"COALESCE(
+    cc.decoded_name,
+    encode(cc.raw_name, 'escape'),
+    '[' || substring(lower(cc.labelhash) FROM 3) || '].' || (
+        SELECT parent_surface.raw_name
+        FROM bigname_phase.name_surfaces parent_surface
+        WHERE parent_surface.logical_name_id = cc.parent_logical_name_id
+    )
+)"#;
+
+fn child_select() -> String {
+    format!(
+        r#"
     SELECT cc.parent_logical_name_id, cc.child_logical_name_id, cc.surface_class,
            cc.namespace,
-           COALESCE(cc.decoded_name, encode(cc.raw_name, 'escape')) AS canonical_display_name,
-           lower(COALESCE(cc.decoded_name, encode(cc.raw_name, 'escape'))) AS normalized_name,
+           {CHILD_DISPLAY_NAME_EXPR} AS canonical_display_name,
+           lower({CHILD_DISPLAY_NAME_EXPR}) AS normalized_name,
            cc.namehash, cc.labelhash, cc.owner, cc.registrant, cc.provenance,
            cc.chain_positions, cc.canonicality_summary, cc.manifest_version,
            cc.last_recomputed_at
     FROM bigname_phase.children_current cc
-"#;
+"#
+    )
+}
 
 pub async fn load_children_current(
     pool: &PgPool,
@@ -55,7 +74,7 @@ pub async fn load_children_current_page(
         "children_current page_size must be positive",
         "children_current page_size does not fit in usize",
     )?;
-    let mut builder = QueryBuilder::<Postgres>::new(CHILD_SELECT);
+    let mut builder = QueryBuilder::<Postgres>::new(child_select());
     builder.push(DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS);
     builder.push(" WHERE cc.parent_logical_name_id = ");
     builder.push_bind(parent_logical_name_id);
@@ -63,19 +82,17 @@ pub async fn load_children_current_page(
     builder.push_bind(DECLARED_SURFACE_CLASS);
     builder.push(DEFAULT_CHILDREN_CURRENT_READ_FILTER);
     if let Some(cursor) = cursor {
-        builder.push(
-            " AND (COALESCE(cc.decoded_name, encode(cc.raw_name, 'escape')), \
-             cc.child_logical_name_id) > (",
-        );
+        builder.push(format!(
+            " AND ({CHILD_DISPLAY_NAME_EXPR}, cc.child_logical_name_id) > ("
+        ));
         builder.push_bind(&cursor.canonical_display_name);
         builder.push(", ");
         builder.push_bind(&cursor.child_logical_name_id);
         builder.push(")");
     }
-    builder.push(
-        " ORDER BY COALESCE(cc.decoded_name, encode(cc.raw_name, 'escape')), \
-         cc.child_logical_name_id LIMIT ",
-    );
+    builder.push(format!(
+        " ORDER BY {CHILD_DISPLAY_NAME_EXPR}, cc.child_logical_name_id LIMIT "
+    ));
     builder.push_bind(limit);
     let rows = builder
         .build()
@@ -165,7 +182,7 @@ async fn load_children_current_internal(
     parent_logical_name_id: &str,
     include_noncanonical: bool,
 ) -> Result<Vec<ChildrenCurrentRow>> {
-    let mut query = CHILD_SELECT.to_owned();
+    let mut query = child_select();
     if !include_noncanonical {
         query.push_str(DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS);
     }
@@ -173,7 +190,9 @@ async fn load_children_current_internal(
     if !include_noncanonical {
         query.push_str(DEFAULT_CHILDREN_CURRENT_READ_FILTER);
     }
-    query.push_str(" ORDER BY cc.raw_name, cc.child_logical_name_id");
+    query.push_str(&format!(
+        " ORDER BY {CHILD_DISPLAY_NAME_EXPR}, cc.child_logical_name_id"
+    ));
     let rows = sqlx::query(&query)
         .bind(parent_logical_name_id)
         .bind(DECLARED_SURFACE_CLASS)

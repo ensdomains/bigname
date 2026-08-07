@@ -5,6 +5,7 @@ mod call;
 mod ccip;
 mod engine;
 mod error;
+mod json_rpc_envelope;
 mod primary_name;
 mod record_selector;
 mod reverse_names;

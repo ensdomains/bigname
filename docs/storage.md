@@ -134,18 +134,20 @@ The interpreter content hash covers the current interpretation inputs: the
 adapter, manifest-authority, and project sources, the manifest ABI event
 declarations, and the named semantic dependencies those sources call to decide
 a persisted row — ENS normalization, plus the resolver-call encode/decode,
-record-selector vocabulary, and batched record and reverse-name read helpers
-that project hydration uses. Interpret's persistence stage is covered on the
+record-selector vocabulary, batched record and reverse-name read helpers, and
+the JSON-RPC envelope interpretation deciding which provider response those
+helpers accept as an answer. Interpret's persistence stage is covered on the
 same rule: which interpreted row wins a conflict, how a redo range reopens and
 reanchors bindings, and which surfaces a normalizer-version recompute
 activates all decide which identity, discovery, and label-preimage rows the
 projections then read, so they are interpretation rather than plumbing.
 Interpret's batch sizing stays outside, because folding the same events into
 differently sized physical batches produces the same rows. Request-scoped
-serving and RPC transport are outside because they write no interpreted,
-discovery, or projection row — the guarded divergence ledger is diagnostic
-output, not interpretation input — so a serving-only change does not force a
-re-derivation.
+serving is outside because it writes no interpreted, discovery, or projection
+row — the guarded divergence ledger is diagnostic output, not interpretation
+input. The rest of RPC transport — client construction, timeouts, and endpoint
+configuration — is outside because it can only abort a request, never reshape
+an answer. So a serving-only change does not force a re-derivation.
 
 Several semantic surfaces are outside the hash today and are guarded by review
 rather than by a rotation:

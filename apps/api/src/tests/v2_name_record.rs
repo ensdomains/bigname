@@ -2148,6 +2148,49 @@ async fn v2_subname_collections_exclude_orphaned_project_target_before_redo() ->
 }
 
 #[tokio::test]
+async fn v2_get_subnames_paginates_across_a_child_with_no_observed_label() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+    // A registry edge proves the child node and its labelhash but not the label. Project writes
+    // that row with every name column null and no child name surface — the shape most historical
+    // labels have — and the page must name it by the documented placeholder rather than decoding
+    // a null into a mandatory field.
+    seed_v2_subnames_topology_only_child(&database, "parent.eth", "0xfeed0001").await?;
+
+    let mut seen = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..5 {
+        let uri = match cursor.as_deref() {
+            Some(cursor) => format!(
+                "/v2/names/parent.eth/subnames?page_size=2&cursor={cursor}"
+            ),
+            None => "/v2/names/parent.eth/subnames?page_size=2".to_owned(),
+        };
+        let payload = v2_subnames_payload_for_database(&database, &uri).await?;
+        for row in payload["data"].as_array().expect("subnames data") {
+            seen.push(row["name"].as_str().expect("row name must be a string").to_owned());
+        }
+        match payload["page"]["next_cursor"].as_str() {
+            Some(next) => cursor = Some(next.to_owned()),
+            None => break,
+        }
+    }
+
+    let mut deduped = seen.clone();
+    deduped.sort();
+    deduped.dedup();
+    assert_eq!(deduped.len(), seen.len(), "no row may be served twice: {seen:?}");
+    assert!(
+        seen.contains(&"[feed0001].parent.eth".to_owned()),
+        "the unobserved-label child must be named by its placeholder: {seen:?}"
+    );
+    assert_eq!(seen.len(), 4, "every child must be paged exactly once: {seen:?}");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_subname_counts_agree_with_the_page_when_a_child_target_is_orphaned() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_subnames_fixture(&database).await?;
@@ -3443,6 +3486,49 @@ async fn seed_v2_subnames_fixture(database: &TestDatabase) -> Result<()> {
         }))
         .await?;
 
+    Ok(())
+}
+
+/// Seeds the shape Project writes for a registry edge whose label was never observed: every name
+/// column null and no child `name_surfaces` row.
+async fn seed_v2_subnames_topology_only_child(
+    database: &TestDatabase,
+    parent_name: &str,
+    labelhash: &str,
+) -> Result<()> {
+    let parent_logical_name_id: String = sqlx::query_scalar(
+        "SELECT logical_name_id FROM bigname_phase.name_surfaces WHERE raw_name = $1",
+    )
+    .bind(parent_name)
+    .fetch_one(&database.pool)
+    .await?;
+    let (chain_positions, canonicality_summary): (Value, Value) = sqlx::query_as(
+        "SELECT chain_positions, canonicality_summary FROM bigname_phase.children_current \
+         WHERE parent_logical_name_id = $1 LIMIT 1",
+    )
+    .bind(&parent_logical_name_id)
+    .fetch_one(&database.pool)
+    .await?;
+    let namehash = format!("node:unobserved-{}", labelhash.trim_start_matches("0x"));
+    sqlx::query(
+        r#"
+        INSERT INTO bigname_phase.children_current (
+            parent_logical_name_id, child_logical_name_id, surface_class, namespace,
+            namehash, labelhash, provenance, chain_positions, canonicality_summary,
+            manifest_version
+        ) VALUES ($1, 'ens:' || $2, 'declared', 'ens', $2, $3,
+                  jsonb_build_object('chain_id', 'ethereum-mainnet',
+                                     'label', jsonb_build_object('source', 'registry_edge')),
+                  $4, $5, 1)
+        "#,
+    )
+    .bind(&parent_logical_name_id)
+    .bind(&namehash)
+    .bind(labelhash)
+    .bind(chain_positions)
+    .bind(canonicality_summary)
+    .execute(&database.pool)
+    .await?;
     Ok(())
 }
 
