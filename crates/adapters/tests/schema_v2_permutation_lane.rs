@@ -568,7 +568,7 @@ const REQUIRED_EVENT_KINDS: &[(&str, &[&str])] = &[
 /// resolver `RecordChanged` on a lapsed registration that the whole pass attributes through the
 /// in-memory known-surface carry a boundary-restored split replay does not hold — the v2-path
 /// counterpart of the stale reach the fix constrained on the v1 path, and a live residual, not a
-/// pin.
+/// pin — tracked by issue #348.
 const EXPECTED_ARTIFACTS: &[(&str, &[(&str, usize)])] =
     &[(ENS_V1_MAINNET.label, &[]), (ENS_V2_SEPOLIA.label, &[])];
 
