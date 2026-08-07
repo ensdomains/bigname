@@ -155,6 +155,11 @@ pub struct Dimensions {
     pub perturbations: Vec<Perturbation>,
     pub name_count: usize,
     pub dense_transactions: bool,
+    /// ENSv1 only: wrap each registration action in a same-transaction resolver burst whose record
+    /// writes are log-ordered before the controller's registration, and add a rewrite of the same
+    /// selector after it — the pre-registration resolver traffic the stage ordering otherwise
+    /// keeps unreachable. See `pool_v1::burst_around_registration` for the upstream legality.
+    pub pre_registration_burst: bool,
 }
 
 impl Dimensions {
@@ -201,6 +206,7 @@ impl Dimensions {
                                 perturbations: PERTURBATIONS.to_vec(),
                                 name_count: 1,
                                 dense_transactions: false,
+                                pre_registration_burst: true,
                             });
                         }
                     }
@@ -250,6 +256,9 @@ impl Dimensions {
             perturbations,
             name_count: rng.between(1, 3),
             dense_transactions: rng.chance(1, 3),
+            // `generate` decides this from a side stream; drawing it here would shift every later
+            // draw and redraw the pinned corpus.
+            pre_registration_burst: false,
         }
     }
 
@@ -283,10 +292,16 @@ impl Scenario {
 
 const BASE_TIMESTAMP: i64 = 1_600_000_000;
 const BASE_BLOCK: i64 = 15_000_000;
+/// Salt for the burst axis's side stream. The main draw order — and with it the pinned default
+/// corpus — must stay identical whether or not the burst fires, so the axis draws from a stream
+/// the rest of generation never touches; without that, adding the axis would redraw every case
+/// and move the drawn-corpus pins for reasons unrelated to the burst.
+const PRE_REGISTRATION_BURST_SALT: u64 = 0x5bd1_e995_4a89_1d4b;
 
 pub fn generate(world: &'static World, wiring: &Wiring, seed: u64) -> Scenario {
     let mut rng = Rng::new(seed);
-    let dimensions = Dimensions::draw(&mut rng);
+    let mut dimensions = Dimensions::draw(&mut rng);
+    dimensions.pre_registration_burst = Rng::new(seed ^ PRE_REGISTRATION_BURST_SALT).chance(1, 4);
     let blocks = draw_blocks(&mut rng);
     let settle_timestamp = blocks.last().expect("scenario has blocks").timestamp;
     let mut actions = pool(world, wiring, &dimensions, settle_timestamp);
