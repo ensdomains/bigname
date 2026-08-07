@@ -1776,6 +1776,120 @@ fn interpreter_output_is_identical_across_batch_grids() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn interpreter_output_is_identical_when_later_resolver_traffic_splits_off() -> Result<()> {
+    let corpus: Corpus = serde_json::from_str(RAW_EVENTS)?;
+    let expected: ExpectedSuite = serde_json::from_str(EXPECTED_OUTPUTS)?;
+    let checked_in = checked_in_manifests()?;
+    const CASE_ID: &str = "ens_legacy_register_with_config_midflow_record";
+    let case = corpus
+        .cases
+        .iter()
+        .find(|case| case.id == CASE_ID)
+        .with_context(|| format!("{CASE_ID} missing from the golden corpus"))?
+        .clone();
+    let expected_case = expected
+        .cases
+        .iter()
+        .find(|case| case.id == CASE_ID)
+        .with_context(|| format!("{CASE_ID} missing from the golden outputs"))?;
+
+    // The golden case writes one resolver record mid-transaction at block 200, before the same
+    // transaction's NameRegistered: reconciliation re-keys that record onto the registration,
+    // but the interpreter's in-memory state chain for the record selector already advanced under
+    // the pre-reconciliation key. Repeat the record write at block 210. A whole-grid batch reads
+    // the stale in-memory chain for the late record's before_state; a batch split between the
+    // blocks restores the post-reconciliation stream tail instead. Only re-deriving every
+    // stream-chained before_state from the surviving rows keeps the grids identical.
+    let late_hash = "0xf6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6";
+    let mut late = case;
+    late.id = format!("{CASE_ID}_late_record");
+    let registration_block = late.blocks[0].clone();
+    let late_number = registration_block.number + 10;
+    late.blocks.push(Block {
+        hash: late_hash.to_owned(),
+        number: late_number,
+        timestamp: registration_block.timestamp + 10,
+    });
+    let mut late_record = late
+        .logs
+        .iter()
+        .find(|log| log.emitting_address.ends_with("50cc"))
+        .context("golden case must carry a midflow resolver record")?
+        .clone();
+    late_record.block_hash = late_hash.to_owned();
+    late_record.block_number = late_number;
+    late_record.transaction_hash =
+        "0xf7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7".to_owned();
+    late_record.transaction_index = 0;
+    late_record.log_index = 0;
+    late.logs.push(late_record);
+
+    // batch_input admits only blocks a canonical expected row references, and the golden expected
+    // case covers just the registration block; reference the late block so the repeated record
+    // log stays in the interpreted input.
+    let mut expected_late = expected_case.clone();
+    expected_late.normalized_events.push(serde_json::json!({
+        "block_hash": late_hash,
+        "block_number": late_number,
+    }));
+
+    let input = batch_input(&late, &expected_late, &checked_in)?;
+    let whole = interpret_physical_batches(
+        &late.id,
+        input.clone(),
+        &[BlockRange {
+            from_block: registration_block.number,
+            to_block: late_number,
+        }],
+    )?;
+    let split = interpret_physical_batches(
+        &late.id,
+        input,
+        &[
+            BlockRange {
+                from_block: registration_block.number,
+                to_block: registration_block.number,
+            },
+            BlockRange {
+                from_block: late_number,
+                to_block: late_number,
+            },
+        ],
+    )?;
+    assert_eq!(
+        flatten_outputs(&whole),
+        flatten_outputs(&split),
+        "interpreter output must not depend on whether post-registration resolver traffic shares \
+         a batch with its reconciled registration"
+    );
+    let registration_record = whole
+        .iter()
+        .flat_map(|output| &output.normalized_events)
+        .find(|event| {
+            event.event_kind == "RecordChanged"
+                && event.block_number == Some(registration_block.number)
+        })
+        .context("the corpus must carry the reconciled midflow record")?;
+    let late_record = whole
+        .iter()
+        .flat_map(|output| &output.normalized_events)
+        .find(|event| {
+            event.event_kind == "RecordChanged" && event.block_number == Some(late_number)
+        })
+        .context("the corpus must emit the repeated record in the late block")?;
+    assert!(
+        !late_record.before_state_explicit,
+        "the late record's before_state must come from the stream chain, or the split exercises \
+         no re-thread"
+    );
+    assert_eq!(
+        late_record.before_state, registration_record.after_state,
+        "the late record must chain its before_state from the reconciled record's surviving row"
+    );
+    Ok(())
+}
+
 fn flatten_outputs(outputs: &[BatchOutput]) -> BatchOutput {
     let mut merged = BatchOutput::default();
     for output in outputs {
