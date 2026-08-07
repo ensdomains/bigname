@@ -200,15 +200,39 @@ fn phase_orchestration_does_not_change_hash() {
         "apps/phase-runner/src/interpret_phase.rs",
         "fn run_interpret_phase() {}\n",
     );
-    tree.write(
-        "crates/interpret/src/engine/batching.rs",
-        "fn size_batches() {}\n",
-    );
+    tree.write("crates/interpret/src/engine.rs", "fn size_batches() {}\n");
 
     let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
     assert_eq!(
         first, changed,
         "phase orchestration and interpret engine batching must remain outside the hash"
+    );
+}
+
+#[test]
+fn a_test_module_declared_in_the_write_parent_stays_out_of_the_hash() {
+    // `write.rs` is the hashed root's parent module but lives outside it, so its `#[cfg(test)]`
+    // declaration has to be seen or the test file lands inside the fence as production input.
+    let tree = SampleTree::new();
+    tree.write(
+        "crates/interpret/src/write.rs",
+        "#[cfg(test)]\nmod tests;\nmod identity_names;\n",
+    );
+    tree.write(
+        "crates/interpret/src/write/tests.rs",
+        "fn test_only_baseline() {}\n",
+    );
+    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+
+    tree.write(
+        "crates/interpret/src/write/tests.rs",
+        "fn test_only_change() {}\n",
+    );
+
+    let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
+    assert_eq!(
+        first, changed,
+        "a cfg(test) module must not rotate the hash"
     );
 }
 

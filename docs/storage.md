@@ -134,21 +134,29 @@ adapter, manifest-authority, and project sources, the manifest ABI event
 declarations, and the named semantic dependencies those sources call to decide
 a persisted row — ENS normalization, plus the resolver-call encode/decode,
 record-selector vocabulary, and batched record and reverse-name read helpers
-that project hydration uses. Interpret's write-conflict policy is covered on
-the same rule: which interpreted row wins a persistence conflict decides which
-identity, discovery, and label-preimage rows the projections then read, so it
-is interpretation rather than plumbing. Interpret's engine batching and
-orchestration stay outside, because folding the same events into different
-physical batches is guaranteed to produce the same rows. Request-scoped
-serving, RPC transport, and phase orchestration are also deliberately outside
-it, so a serving-only change does not force a re-derivation. Migration trigger
-bodies are likewise uncovered: a migration deploy already forces its own
-re-derivation under the
-[planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary),
-so hashing them would duplicate a boundary that protocol already draws. A hash rotation requires a planned full-history
-interpretation and projection walk; the system refuses to mix generations from
-different hashes. Moving a covered semantic source without updating the covered
-set fails the build rather than silently narrowing the fingerprint.
+that project hydration uses. Interpret's persistence stage is covered on the
+same rule: which interpreted row wins a conflict, how a redo range reopens and
+reanchors bindings, and which surfaces a normalizer-version recompute
+activates all decide which identity, discovery, and label-preimage rows the
+projections then read, so they are interpretation rather than plumbing.
+Interpret's batch sizing and phase orchestration stay outside, because folding
+the same events into differently sized physical batches produces the same
+rows. Request-scoped serving and RPC transport are outside for the same
+reason, so a serving-only change does not force a re-derivation.
+
+Two semantic surfaces are outside the hash today and are guarded by review
+rather than by a rotation. Interpret's prior-state loader selects which earlier
+interpreted state an adapter sees, so an edit to that selection can change
+interpreted output without rotating the hash. Checked-in SQL — migration
+trigger bodies and the schema-v2 baseline constraints — likewise shapes
+persisted rows. Treat a change to either as a re-derivation decision and
+follow the
+[planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary).
+
+A hash rotation requires a planned full-history interpretation and projection
+walk; the system refuses to mix generations from different hashes. Moving a
+covered semantic source without updating the covered set fails the build rather
+than silently narrowing the fingerprint.
 
 ## Projection publication
 

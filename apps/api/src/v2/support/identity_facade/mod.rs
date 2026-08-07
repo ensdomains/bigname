@@ -303,9 +303,10 @@ fn reverse_identity_record(
     })
 }
 
-/// Pairs with `page::load_normalized_primary_names`: that one admits a claim on chain id plus
-/// target block hash, this one also joins the target block number. They agree except on a corrupt
-/// provenance row, and they only stay in step if they are changed together.
+/// Pairs with `page::load_normalized_primary_names`, which decides the same claim for the ordering
+/// and keyset. Both admit on chain id plus target block hash — `chain_lineage` is keyed on that
+/// pair, so the block number the provenance also carries is redundant here and reading it would
+/// only add a way for the two to disagree. They only stay in step if they are changed together.
 async fn load_identity_primary_name_snapshots(
     pool: &PgPool,
     inputs: &[ReverseIdentityStorageInput],
@@ -345,8 +346,6 @@ async fn load_identity_primary_name_snapshots(
         FROM bigname_phase.primary_names_current primary_name
         JOIN bigname_phase.chain_lineage lineage
           ON lineage.chain_id = primary_name.claim_provenance ->> 'chain_id'
-         AND lineage.block_number =
-             (primary_name.claim_provenance ->> 'target_block_number')::BIGINT
          AND lineage.block_hash = primary_name.claim_provenance ->> 'target_block_hash'
          AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
         WHERE primary_name.address = ANY($1::TEXT[])

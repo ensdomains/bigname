@@ -13,10 +13,13 @@ const ADAPTER_SOURCE_ROOT: &str = "crates/adapters/src";
 const MANIFEST_AUTHORITY_SOURCE_ROOT: &str = "crates/manifests/src";
 const MANIFEST_ROOT: &str = "manifests";
 const PROJECT_SOURCE_ROOT: &str = "crates/project/src";
-/// Write-conflict policy: which interpreted row wins a persistence conflict, and therefore which
-/// identity, discovery, and preimage rows the projections read. The rest of `crates/interpret` is
-/// engine batching and orchestration, which is guaranteed grid-independent and stays outside.
+/// Interpret's persistence stage: which interpreted row wins a conflict, how a redo range reopens
+/// and reanchors bindings, and which surfaces a normalizer-version recompute activates. All of it
+/// decides which identity, discovery, and label-preimage rows the projections then read.
 const INTERPRET_WRITE_SOURCE_ROOT: &str = "crates/interpret/src/write";
+/// Scanned for `#[cfg(test)] mod x;` declarations only. The hashed root's parent module lives here,
+/// so without it a test module declared in `write.rs` would land inside the hashed root undetected.
+const INTERPRET_SOURCE_SCAN_ROOT: &str = "crates/interpret/src";
 const MINIMUM_MANIFEST_EVENT_COUNT: usize = 111;
 const MINIMUM_EVENT_MANIFEST_COUNT: usize = 16;
 const HASH_FORMAT: &[u8] = b"bigname-interpreter-content-v3\0";
@@ -49,7 +52,7 @@ const SEMANTIC_SOURCE_FILES: &[&str] = &[
     // are persisted.
     "crates/lookup/src/reverse_names.rs",
     "crates/lookup/src/text_records.rs",
-    // Module wiring and the recompute entry point for the write-conflict policy above.
+    // Redo-range preparation and the normalizer-version recompute that drive the stage above.
     "crates/interpret/src/write.rs",
     "crates/interpret/src/recompute.rs",
 ];
@@ -145,17 +148,16 @@ fn hash_inputs(format: &[u8], inputs: &mut [Input]) -> String {
     format!("keccak256:{}", hex::encode(keccak256(encoded)))
 }
 
+const CFG_TEST_SCAN_ROOTS: &[&str] = &[
+    ADAPTER_SOURCE_ROOT,
+    MANIFEST_AUTHORITY_SOURCE_ROOT,
+    PROJECT_SOURCE_ROOT,
+    INTERPRET_SOURCE_SCAN_ROOT,
+];
+
 fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
     let mut inputs = Vec::new();
-    let cfg_test_sources = source_paths::cfg_test_sources(
-        workspace_root,
-        &[
-            ADAPTER_SOURCE_ROOT,
-            MANIFEST_AUTHORITY_SOURCE_ROOT,
-            PROJECT_SOURCE_ROOT,
-            INTERPRET_WRITE_SOURCE_ROOT,
-        ],
-    )?;
+    let cfg_test_sources = source_paths::cfg_test_sources(workspace_root, CFG_TEST_SCAN_ROOTS)?;
     collect_rust_sources(
         workspace_root,
         &workspace_root.join(ADAPTER_SOURCE_ROOT),
@@ -431,14 +433,7 @@ pub(crate) fn excluded_source_reason(
     workspace_root: &Path,
     path: &Path,
 ) -> io::Result<Option<&'static str>> {
-    let cfg_test_sources = source_paths::cfg_test_sources(
-        workspace_root,
-        &[
-            ADAPTER_SOURCE_ROOT,
-            MANIFEST_AUTHORITY_SOURCE_ROOT,
-            PROJECT_SOURCE_ROOT,
-        ],
-    )?;
+    let cfg_test_sources = source_paths::cfg_test_sources(workspace_root, CFG_TEST_SCAN_ROOTS)?;
     source_exclusion(workspace_root, path, &cfg_test_sources)
 }
 

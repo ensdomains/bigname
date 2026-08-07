@@ -158,9 +158,9 @@ pub(super) async fn load_reverse_identity_page_rows(
         .collect()
 }
 
-/// Pairs with `load_identity_primary_name_snapshots`: this admits a claim on chain id plus target
-/// block hash, that one also joins the target block number. They agree except on a corrupt
-/// provenance row, and they only stay in step if they are changed together.
+/// Pairs with `identity_facade::load_identity_primary_name_snapshots`, which decides the same claim
+/// for the emitted flag. Both admit on chain id plus target block hash, and they only stay in step
+/// if they are changed together.
 async fn load_normalized_primary_names(
     pool: &PgPool,
     inputs: &[ReverseIdentityStorageInput],
