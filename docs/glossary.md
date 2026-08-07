@@ -320,19 +320,31 @@ so harness or manifest tooling that keys contracts by artifact basename across
 both pins will resolve the wrong one.
 
 **Migration registry** (`WrapperRegistry`) — the ENSv2 registry contract
-deployed for one specific migrated name to hold that name's children. When a
-locked wrapped name migrates, the controller deploys a proxy through
-`VerifiableFactory.deployProxy`
+deployed for one specific migrated **locked** name, to hold that name's
+children. Only the locked branch of migration creates one: whichever contract
+receives the transfer deploys a proxy through `VerifiableFactory.deployProxy`
 (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2@ccaeb58)
 using the name's namehash as the salt
 (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L151 @ ens_v2@ccaeb58),
-and binds it as the name's subregistry, which emits `SubregistryUpdated`
+then binds it as the name's subregistry, which emits `SubregistryUpdated`
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L472 @ ens_v2@ccaeb58).
-Each one is a token receiver in its own right, so it is where that name's
-children migrate to. For discovery this means the set of ENSv2 registries is
-open-ended and grows by contract deployment — one per migrated locked name, all
-sharing a single implementation — rather than being fixed by manifest
-declaration.
+The receiver is the [migration controller](#migration-controller) for a locked
+`.eth` 2LD, but for a locked child it is the parent's own migration registry:
+`WrapperRegistry` inherits the same receiver
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L30 @ ens_v2@ccaeb58),
+so the deployment above runs with the parent registry as the caller. Naming the
+controller as the deployer is wrong for every level below the second. An
+[emancipated child](#migratable-child) gets no registry at all — that branch
+unwraps the name and registers it with whatever subregistry the caller supplied
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58).
+
+Each registry is a token receiver in its own right, so it is where that name's
+children migrate to, and it deploys its children's registries from the same
+implementation it was created from
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L88 @ ens_v2@ccaeb58).
+For discovery this means the set of ENSv2 registries is open-ended and grows by
+contract deployment — one per migrated locked name, at any depth, all sharing a
+single implementation — rather than being fixed by manifest declaration.
 
 **Migratable child** — an emancipated child of an already-migrated name that
 has not migrated yet. Its parent's
