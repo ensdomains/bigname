@@ -1156,7 +1156,13 @@ fn burst_reach_fails_off_the_pin() {
 /// moved ahead of both marked writes fail (the reorder the per-phase counts cannot see); the same
 /// logs in the intended order but with a marked write in its own transaction fail (the retarget
 /// interval is transaction-scoped); the same logs with two annotations swapped fail; and a
-/// rewrite in a later block counts only when the split puts it in a later batch.
+/// rewrite in a later block counts only when the split puts it in a later batch. Every other
+/// branch of the check fails its own shape too: the retarget-window write alone leaving the
+/// registration's transaction (the combined binding covers the pre-ownership write and the
+/// setup), each structural defect — a marked log without a node topic, a duplicated or missing
+/// phase, an ownership setup or controller registration the stream no longer carries — and each
+/// remaining order binding, the retarget-window write past the controller event and the rewrite
+/// ahead of it.
 #[test]
 fn burst_phase_annotations_fail_when_the_stream_disagrees() {
     let parent = format!("{:#x}", namehash(&["eth"]));
@@ -1309,6 +1315,94 @@ fn burst_phase_annotations_fail_when_the_stream_disagrees() {
     assert!(
         verify_burst_phases("mislabeled", &mislabeled, &one_batch).is_err(),
         "swapped annotations must fail even though the logs are in the intended order"
+    );
+    let fails = |name: &str, scenario: &scenario::Scenario| {
+        format!(
+            "{:?}",
+            verify_burst_phases(name, scenario, &one_batch)
+                .expect_err("the rotted shape must fail")
+        )
+    };
+    // The retarget-window write alone leaves the registration's transaction: the combined
+    // binding covers the pre-ownership write and the setup, so only the RetargetWindow
+    // transaction branch sees this shape.
+    let mut window_left_logs = honest.logs.clone();
+    window_left_logs[2].transaction_index = 1;
+    let error = fails("window-left-transaction", &scenario_for(window_left_logs));
+    assert!(
+        error.contains("marked RetargetWindow")
+            && error.contains("outside the registration's transaction"),
+        "the failure names the retarget-window transaction binding: {error}"
+    );
+    // The structural bails, one rotted shape each.
+    let mut no_node_topic_logs = honest.logs.clone();
+    no_node_topic_logs[0].topics.truncate(1);
+    let error = fails("no-node-topic", &scenario_for(no_node_topic_logs));
+    assert!(
+        error.contains("carries no node topic"),
+        "the failure names the missing node topic: {error}"
+    );
+    let mut duplicate_phase_logs = honest.logs.clone();
+    duplicate_phase_logs[2].burst = Some(BurstPhase::PreOwnership);
+    let error = fails("duplicate-phase", &scenario_for(duplicate_phase_logs));
+    assert!(
+        error.contains("two logs marked"),
+        "the failure names the duplicated phase: {error}"
+    );
+    let mut missing_phase_logs = honest.logs.clone();
+    missing_phase_logs[2].burst = None;
+    let error = fails("missing-phase", &scenario_for(missing_phase_logs));
+    assert!(
+        error.contains("not one per phase"),
+        "the failure names the lost leg: {error}"
+    );
+    let mut orphan_setup_logs = honest.logs.clone();
+    orphan_setup_logs[1].topics[2] = format!("{:#x}", labelhash("beta"));
+    let error = fails("orphan-setup", &scenario_for(orphan_setup_logs));
+    assert!(
+        error.contains("no registry NewOwner sets up node"),
+        "the failure names the missing ownership setup: {error}"
+    );
+    let mut orphan_controller_logs = honest.logs.clone();
+    orphan_controller_logs[3].topics[1] = format!("{:#x}", labelhash("beta"));
+    let error = fails("orphan-controller", &scenario_for(orphan_controller_logs));
+    assert!(
+        error.contains("no controller NameRegistered registers node"),
+        "the failure names the missing controller registration: {error}"
+    );
+    // The remaining order bindings, still inside the registration's transaction: the
+    // retarget-window write past the controller event, and the rewrite ahead of it.
+    let window_after_controller = scenario_for(vec![
+        log((0, 0, 0), write_topics(), Some(BurstPhase::PreOwnership)),
+        log((0, 0, 1), setup_topics(), None),
+        log((0, 0, 2), controller_topics(), None),
+        log((0, 0, 3), write_topics(), Some(BurstPhase::RetargetWindow)),
+        log(
+            (0, 0, 4),
+            write_topics(),
+            Some(BurstPhase::PostRegistrationRewrite),
+        ),
+    ]);
+    let error = fails("window-after-controller", &window_after_controller);
+    assert!(
+        error.contains("marked RetargetWindow") && error.contains("outside the interval"),
+        "the failure names the retarget interval: {error}"
+    );
+    let rewrite_before_controller = scenario_for(vec![
+        log((0, 0, 0), write_topics(), Some(BurstPhase::PreOwnership)),
+        log((0, 0, 1), setup_topics(), None),
+        log((0, 0, 2), write_topics(), Some(BurstPhase::RetargetWindow)),
+        log(
+            (0, 0, 3),
+            write_topics(),
+            Some(BurstPhase::PostRegistrationRewrite),
+        ),
+        log((0, 0, 4), controller_topics(), None),
+    ]);
+    let error = fails("rewrite-before-controller", &rewrite_before_controller);
+    assert!(
+        error.contains("no longer follows the registration"),
+        "the failure names the rewrite order: {error}"
     );
 }
 
