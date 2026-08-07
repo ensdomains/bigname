@@ -375,7 +375,11 @@ and failing each one means something different:
    then decided on the ENSv2 side alone — a registered entry blocks
    registration with `LabelAlreadyRegistered`
    (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L437 @ ens_v2@ccaeb58),
-   a reserved one with `LabelAlreadyReserved`
+   a reserved one is claimable only by a holder of `ROLE_REGISTER_RESERVED`
+   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L442 @ ens_v2@ccaeb58) —
+   the premigration-claim path migration itself takes
+   (upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L110 @ ens_v2@ccaeb58) —
+   while re-reserving it reverts `LabelAlreadyReserved`
    (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L439 @ ens_v2@ccaeb58),
    and only an expired ENSv2 entry can be registered again
    (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L428 @ ens_v2@ccaeb58).
