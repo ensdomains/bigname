@@ -299,8 +299,10 @@ impl IdentityReferences {
     }
 }
 
-/// The convergence check keeps one row per key per family, modelling the upsert as "one emission
-/// wins and the rest are harmless replays". That is only half the writer: each upsert carries a
+/// For the families whose convergence check keeps one row per key, the model is the upsert's "one
+/// emission wins and the rest are harmless replays"; `contract_addresses` and `discovery_edges`
+/// compare the full emission multiset instead and are not this check's business. For the kept-row
+/// families that is only half the writer: each upsert carries a
 /// `WHERE` guard, and a re-emission that disagrees with the stored row on a guarded column matches
 /// no row, returns nothing, and fails the batch (`crates/interpret/src/write/identity.rs`,
 /// `identity_names.rs`). Repeats are the norm rather than an edge case — the adapter emits a name
@@ -673,6 +675,15 @@ fn absorb_discovered_admissions(admitted: &mut Vec<AddressAdmissionInput>, from:
         // the address's `active_to_block_number` and drops deactivated edges, so a resolver whose
         // pointer has since moved stays admitted here for every later batch. That is the same
         // over-admitting direction, still open.
+        //
+        // TODO(#320): modelling closes becomes required, not optional, before any pool gains a
+        // pointer-move action — one that moves a resolver or registry pointer off an address that
+        // later emits logs. Until then the gap is inert: every log-emitting address is either
+        // statically pre-admitted (all of ENSv1's, and ENSv2's four role addresses) or, like the
+        // announced registry, matched emitter-agnostically on an event that admits regardless of
+        // emitter and never emits again — so the carry never decides whether a log is
+        // interpreted. With such an action the over-admission above would read a dropped-log
+        // divergence as convergence.
         let Some(edge) = from.discovery_edges.iter().find(|edge| {
             edge.to_contract_instance_id == address.contract_instance_id
                 && edge.chain_id == address.chain_id

@@ -9,11 +9,41 @@ use super::{
     world::{BlockSpec, GeneratedLog, Wiring, World},
 };
 
+/// Where in its name's onboarding the generator intends a burst-marked log to land. Carried on
+/// the marker itself, so the value the lane pins is the generator's claim; the lane then checks
+/// that claim against the generated stream rather than trusting it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BurstPhase {
+    /// Before the name's ownership setup (the registry's `NewOwner`).
+    PreOwnership,
+    /// After the ownership setup but before the controller's `NameRegistered` — reconciliation's
+    /// strict retarget interval, the reach the burst exists to prove.
+    RetargetWindow,
+    /// The staged same-selector rewrite after the registration.
+    PostRegistrationRewrite,
+}
+
+impl BurstPhase {
+    pub const COUNT: usize = 3;
+
+    pub fn index(self) -> usize {
+        match self {
+            Self::PreOwnership => 0,
+            Self::RetargetWindow => 1,
+            Self::PostRegistrationRewrite => 2,
+        }
+    }
+}
+
 /// One raw log, still unpositioned. Emissions inside an action stay in one transaction.
 pub struct Emission {
     pub emitter: String,
     pub topics: Vec<String>,
     pub data: Vec<u8>,
+    /// Marks the fragments `pool_v1`'s pre-registration burst adds, with the phase the generator
+    /// intends each to land in, so the lane can attribute derived events to them and pin that
+    /// they derive at all.
+    pub burst: Option<BurstPhase>,
 }
 
 /// Dependency stages. Within one subject — a name, the root, a registry — a later stage names
@@ -61,6 +91,7 @@ pub fn emission(emitter: &str, encoded: LogData) -> Emission {
         emitter: emitter.to_owned(),
         topics: encoded_topics(&encoded),
         data: encoded.data.to_vec(),
+        burst: None,
     }
 }
 
@@ -155,14 +186,21 @@ pub struct Dimensions {
     pub perturbations: Vec<Perturbation>,
     pub name_count: usize,
     pub dense_transactions: bool,
+    /// ENSv1 only: wrap each label's onboarding registration action in a same-transaction resolver
+    /// burst whose record writes are log-ordered before the controller's registration, and add a
+    /// rewrite of the same selector after it — the pre-registration resolver traffic the stage
+    /// ordering otherwise keeps unreachable. The `Reregistration` perturbation's later registration
+    /// is deliberately not wrapped. See `pool_v1::burst_around_registration` for the legality.
+    pub pre_registration_burst: bool,
 }
 
 impl Dimensions {
     /// Every combination of the axes that decides *which* events a pool contains — wrap state,
     /// record state, subname shape, authorization shape, and registration path — with all
-    /// perturbations enabled. The expiry window, name count, and transaction density only change
-    /// event payloads and layout, never the set of fragments, so they stay pinned. Used to prove
-    /// event coverage without depending on which combinations a seed happens to draw.
+    /// perturbations enabled. The expiry window, name count, transaction density, and the burst
+    /// axis only change event payloads and layout, never the set of fragments, so they stay
+    /// pinned. Used to prove event coverage without depending on which combinations a seed happens
+    /// to draw.
     pub fn exhaustive() -> Vec<Self> {
         let mut all = Vec::new();
         for wrap_state in [
@@ -201,6 +239,7 @@ impl Dimensions {
                                 perturbations: PERTURBATIONS.to_vec(),
                                 name_count: 1,
                                 dense_transactions: false,
+                                pre_registration_burst: true,
                             });
                         }
                     }
@@ -250,6 +289,9 @@ impl Dimensions {
             perturbations,
             name_count: rng.between(1, 3),
             dense_transactions: rng.chance(1, 3),
+            // `generate` decides this from a side stream; drawing it here would shift every later
+            // draw and redraw the pinned corpus.
+            pre_registration_burst: false,
         }
     }
 
@@ -283,10 +325,21 @@ impl Scenario {
 
 const BASE_TIMESTAMP: i64 = 1_600_000_000;
 const BASE_BLOCK: i64 = 15_000_000;
+/// Salt for the burst axis's side stream. The main draw order must be identical whether or not the
+/// burst fires — every case it does not fire in stays byte-identical to the pre-axis corpus, and
+/// the drawn-corpus pins keep their anchor — so the axis draws from a stream the rest of
+/// generation never touches; drawing it from the main stream would redraw every case and move the
+/// pins for reasons unrelated to the burst. Only the ENSv1 pool reads the axis, so only that world
+/// draws it — the side stream is discarded after this one call, so gating the draw cannot shift
+/// any ENSv1 decision, and an ENSv2 failure context always prints false rather than implying a
+/// burst its pool cannot build.
+const PRE_REGISTRATION_BURST_SALT: u64 = 0x5bd1_e995_4a89_1d4b;
 
 pub fn generate(world: &'static World, wiring: &Wiring, seed: u64) -> Scenario {
     let mut rng = Rng::new(seed);
-    let dimensions = Dimensions::draw(&mut rng);
+    let mut dimensions = Dimensions::draw(&mut rng);
+    dimensions.pre_registration_burst = world.label == "ens_v1_mainnet"
+        && Rng::new(seed ^ PRE_REGISTRATION_BURST_SALT).chance(1, 4);
     let blocks = draw_blocks(&mut rng);
     let settle_timestamp = blocks.last().expect("scenario has blocks").timestamp;
     let mut actions = pool(world, wiring, &dimensions, settle_timestamp);
@@ -402,6 +455,7 @@ fn lay_out(
                 emitter: emission.emitter,
                 topics: emission.topics,
                 data: emission.data,
+                burst: emission.burst,
             });
             log_index += 1;
         }
