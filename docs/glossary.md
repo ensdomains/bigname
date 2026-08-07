@@ -339,12 +339,23 @@ unwraps the name and registers it with whatever subregistry the caller supplied
 (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58).
 
 Each registry is a token receiver in its own right, so it is where that name's
-children migrate to, and it deploys its children's registries from the same
-implementation it was created from
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L88 @ ens_v2@ccaeb58).
+children migrate to, and it deploys its children's registries from its own
+*current* implementation
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L88 @ ens_v2@ccaeb58) —
+not from a fixed one, because the implementation address it forwards is baked
+into whichever implementation the proxy points at today
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L53 @ ens_v2@ccaeb58)
+and these registries are upgradeable in place: migration grants `ROLE_UPGRADE`
+into every migrated registry's root bitmap
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L220 @ ens_v2@ccaeb58),
+and an upgrade is bounded only by membership in an allowlist of approved
+implementations
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L280 @ ens_v2@ccaeb58).
 For discovery this means the set of ENSv2 registries is open-ended and grows by
 contract deployment — one per migrated locked name, at any depth, all sharing a
-single implementation — rather than being fixed by manifest declaration.
+single implementation *family* rather than one implementation — instead of being
+fixed by manifest declaration. Code that identifies these registries by a single
+expected implementation address will miss upgraded ones.
 
 **Migratable child** — an emancipated child of an already-migrated name that
 has not migrated yet. Its parent's
