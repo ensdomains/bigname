@@ -180,7 +180,7 @@ this endpoint:
 - The runner records a chain's phase state when it initializes the chain, which
   is before that chain's first heartbeat. A staged startup therefore reports
   `degraded` until every expected chain has written a heartbeat within the
-  configured max age, which is the same condition as the bullet above.
+  configured max age, by the same rule as the first bullet in this list.
 
 When a chain is missing a heartbeat entirely, the reported `phase`,
 `started_at`, `heartbeat_at`, and `heartbeat_age_seconds` are null: there is no

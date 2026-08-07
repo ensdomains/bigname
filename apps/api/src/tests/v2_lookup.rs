@@ -954,7 +954,7 @@ async fn v2_lookup_reverse_orders_pages_by_the_is_primary_it_returns() -> Result
     // The marker says these stored bytes are the published normalized form, so they are served
     // unchanged and no longer equal the current name row. Paging orders by `is_primary`, so the
     // ordering predicate and the emitted flag have to be derived the same way. The claim names the
-    // second row in name order, so a re-normalizing ordering would sort it first and the keyset
+    // second row in page order, so a re-normalizing ordering would sort it first and the keyset
     // predicate — built from the emitted flag — would then skip the first row entirely.
     seed_phase_primary_name_snapshot(
         &database,

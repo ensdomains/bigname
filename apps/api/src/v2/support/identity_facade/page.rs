@@ -209,14 +209,15 @@ async fn load_normalized_primary_names(
     for row in rows {
         let input_index = row.try_get::<i32, _>("input_index")? as usize;
         let namespace: String = row.try_get("namespace")?;
-        let raw_name: String = row.try_get("raw_claim_name")?;
+        let raw_name: Option<String> = row.try_get("raw_claim_name")?;
         // Same derivation the emitted `is_primary` uses, so the ordering and keyset predicate this
-        // map feeds cannot disagree with the flag the response carries. A claim that yields no
+        // map feeds cannot disagree with the flag the response carries. The status is `Success`
+        // because the query above selects only successful claims. A claim that yields no
         // normalized name marks nothing primary instead of failing the batch.
         let Some(normalized) = bigname_storage::normalized_claim_name(
             bigname_storage::PrimaryNameClaimStatus::Success,
             row.try_get("claim_name_is_normalized")?,
-            Some(&raw_name),
+            raw_name.as_deref(),
         ) else {
             continue;
         };

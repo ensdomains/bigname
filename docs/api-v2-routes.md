@@ -505,11 +505,13 @@ Field ownership:
   Address-name rows add `is_primary` and `relations`, where `relations` is the
   subset of `owner`, `manager`, and `registrant` that matched. `is_primary` is
   evaluated against that row namespace's coin-type-60 primary-name claim, not a
-  route-wide namespace shortcut. The claim is compared in its normalized form,
-  so a successful claim recorded in a non-normalized spelling still marks its
-  name primary, matching the indexed answer from
-  `GET /v2/addresses/{address}/primary-name`. A successful claim whose stored
-  spelling does not normalize marks no row primary, and the primary-name route
+  route-wide namespace shortcut. The claim is compared in the same normalized
+  form the indexed answer from `GET /v2/addresses/{address}/primary-name`
+  publishes, so a successful claim recorded in a non-normalized spelling still
+  marks its name primary — unless the projection already recorded that spelling
+  as its normalized form, in which case the stored spelling is compared as
+  published and matches nothing. A successful claim whose stored spelling does
+  not normalize likewise marks no row primary, and the primary-name route
   reports it as `invalid_name`. Resolver records are not included; use
   `GET /v2/names/{name}/records` for resolver data.
   `include=role_summary` adds
