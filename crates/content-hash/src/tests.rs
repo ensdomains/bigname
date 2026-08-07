@@ -210,16 +210,21 @@ fn phase_orchestration_does_not_change_hash() {
 }
 
 #[test]
-fn every_cfg_test_scan_root_is_watched_for_rebuilds() {
-    // A scan root is not hashed, but a cfg(test) declaration inside one changes which files under
-    // a hashed root are excluded. Without a rerun trigger the compiled hash would go stale.
+fn every_hash_input_is_watched_for_rebuilds() {
+    // A hashed root or semantic file that is not watched means editing interpretation code does
+    // not recompile the hash. A scan root is not hashed, but a cfg(test) declaration inside one
+    // changes which files under a hashed root are excluded, so it has the same requirement.
     let workspace_root = workspace_root();
     let watched = crate::compute::watched_paths(&workspace_root);
-    for scan_root in crate::compute::cfg_test_scan_roots() {
-        let path = workspace_root.join(scan_root);
+    for relative_path in crate::compute::cfg_test_scan_roots()
+        .iter()
+        .chain(crate::compute::hashed_roots())
+        .chain(semantic_source_files())
+    {
+        let path = workspace_root.join(relative_path);
         assert!(
             watched.contains(&path),
-            "{scan_root} is scanned but not watched"
+            "{relative_path} is a hash input but not watched"
         );
     }
 }

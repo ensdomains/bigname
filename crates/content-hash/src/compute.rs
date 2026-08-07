@@ -437,6 +437,17 @@ pub(crate) fn cfg_test_scan_roots() -> &'static [&'static str] {
 }
 
 #[cfg(test)]
+pub(crate) fn hashed_roots() -> &'static [&'static str] {
+    &[
+        ADAPTER_SOURCE_ROOT,
+        MANIFEST_AUTHORITY_SOURCE_ROOT,
+        MANIFEST_ROOT,
+        PROJECT_SOURCE_ROOT,
+        INTERPRET_WRITE_SOURCE_ROOT,
+    ]
+}
+
+#[cfg(test)]
 pub(crate) fn excluded_source_reason(
     workspace_root: &Path,
     path: &Path,

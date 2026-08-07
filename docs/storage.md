@@ -114,9 +114,9 @@ hash, canonical raw facts, and requested block range. A bounded Interpret redo
 may replace only derived identity, discovery, and normalized-event output in
 that range. Raw facts are never edited by replay.
 
-The phase runner loads the prior identity state required by the range, folds
-physical batches without changing semantic order, and revalidates the resume
-marker and current block anchors in the write transaction. A concurrent reorg
+The interpret engine loads the prior identity state required by the range,
+folds physical batches without changing semantic order, and revalidates the
+resume marker and current block anchors in the write transaction. A concurrent reorg
 therefore cannot publish interpretation derived from an unreadable branch.
 
 Redo preparation restages only identities anchored inside the range, so an
@@ -141,8 +141,10 @@ activates all decide which identity, discovery, and label-preimage rows the
 projections then read, so they are interpretation rather than plumbing.
 Interpret's batch sizing stays outside, because folding the same events into
 differently sized physical batches produces the same rows. Request-scoped
-serving and RPC transport are outside because they write nothing, so a
-serving-only change does not force a re-derivation.
+serving and RPC transport are outside because they write no interpreted,
+discovery, or projection row — the guarded divergence ledger is diagnostic
+output, not interpretation input — so a serving-only change does not force a
+re-derivation.
 
 Several semantic surfaces are outside the hash today and are guarded by review
 rather than by a rotation:
@@ -155,12 +157,16 @@ rather than by a rotation:
   reuse rule, which decides whether a batch folds onto retained adapter state
   or reloads it;
 - the phase runner, which owns the redo marker, decides the replay range each
-  run receives, and publishes the head epoch interpret's prior cache
-  revalidates against. It is outside the hash on purpose — no semantic
+  run receives, and publishes the
+  [lineage orphaning epoch](glossary.md#lineage-orphaning-epoch) interpret's
+  prior cache revalidates against. It is outside the hash on purpose — no semantic
   interpretation may live there — but that is a rule it must be held to, not a
   property the hash enforces;
 - checked-in SQL, meaning migration trigger bodies and the schema-v2 baseline
-  constraints.
+  constraints;
+- chain intake's event-signature allowlist, which decides which resolver logs
+  become raw facts at all on the all-emitter path. A change there is a
+  re-ingest decision as well as a re-derivation one.
 
 Treat a change to any of them as a re-derivation decision and follow the
 [planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary).
