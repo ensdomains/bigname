@@ -5,10 +5,11 @@
 //! widening what counts as a success turns a batch that aborts today into persisted
 //! `primary_names_current` and `record_inventory_current` values — which puts this module inside
 //! the interpreter content hash. The rest of `rpc` is HTTP client construction, timeouts, and
-//! endpoint configuration, which can only abort a request, never reshape an answer.
+//! endpoint configuration, which can only abort a request, plus a head-block read no hydration
+//! path calls. Route any new provider-result interpretation hydration reaches through here.
 
-use alloy_json_rpc::{Response, ResponsePayload};
-use anyhow::{Context, Result};
+use alloy_json_rpc::{ResponsePacket, ResponsePayload};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -28,8 +29,12 @@ pub(crate) struct JsonRpcCallError {
 type ClassifiedResponse = (Value, std::result::Result<Value, JsonRpcCallError>);
 
 pub(crate) fn classify_response(
-    response: Response<Box<serde_json::value::RawValue>>,
+    request_context: &str,
+    response: ResponsePacket,
 ) -> Result<ClassifiedResponse> {
+    let ResponsePacket::Single(response) = response else {
+        bail!("provider returned a batch response for single JSON-RPC request {request_context}");
+    };
     let response_payload =
         serde_json::to_value(&response).context("failed to encode JSON-RPC response")?;
     let result = match response.payload {

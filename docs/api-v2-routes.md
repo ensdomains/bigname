@@ -366,7 +366,12 @@ Field ownership:
 - Response shape: `data` is an array of dedicated subname rows in dictionary
   vocabulary: `name`, `display_name`, `namespace`, `namehash`, `labelhash`,
   `owner`, `registrant`, `registration_status`, `registered_at`,
-  `created_at`, and `expires_at`. Resolver records are not included here;
+  `created_at`, and `expires_at`. A registry edge proves the child node and its
+  labelhash but not the label, so a child whose label has never been observed is
+  named `[<labelhash-without-0x>].<parent-name>` in both `name` and
+  `display_name`. Square brackets are outside normalized ENS label syntax, so
+  callers can recognize such a row; it is not addressable as a name and must not
+  be fed back into a name-shaped route. Resolver records are not included here;
   use `GET /v2/names/{name}/records` for `resolver`, `addresses`,
   `text_records`, and `content_hash`.
   `include=counts` adds `subname_count`, the row's direct subname count.

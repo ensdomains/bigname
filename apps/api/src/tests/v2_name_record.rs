@@ -2186,6 +2186,24 @@ async fn v2_get_subnames_paginates_across_a_child_with_no_observed_label() -> Re
     );
     assert_eq!(seen.len(), 4, "every child must be paged exactly once: {seen:?}");
 
+    // The audit read has no keyset to drop the row, so it decodes the name directly.
+    let parent_logical_name_id: String = sqlx::query_scalar(
+        "SELECT logical_name_id FROM bigname_phase.name_surfaces WHERE raw_name = 'parent.eth'",
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    let audited = bigname_storage::load_children_current_including_noncanonical(
+        &database.pool,
+        &parent_logical_name_id,
+    )
+    .await?;
+    assert!(
+        audited
+            .iter()
+            .any(|row| row.canonical_display_name == "[feed0001].parent.eth"),
+        "the audit read must name the unobserved-label child too"
+    );
+
     database.cleanup().await?;
     Ok(())
 }
@@ -3518,7 +3536,10 @@ async fn seed_v2_subnames_topology_only_child(
             manifest_version
         ) VALUES ($1, 'ens:' || $2, 'declared', 'ens', $2, $3,
                   jsonb_build_object('chain_id', 'ethereum-mainnet',
-                                     'label', jsonb_build_object('source', 'registry_edge')),
+                                     'derivation_kind', 'children_current_rebuild',
+                                     'coverage', jsonb_build_object(
+                                         'status', 'projected',
+                                         'exhaustiveness', 'not_asserted')),
                   $4, $5, 1)
         "#,
     )

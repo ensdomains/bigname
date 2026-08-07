@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, sync::LazyLock, time::Duration};
 
-use alloy_json_rpc::{Id, Request as JsonRpcRequest, RequestPacket, ResponsePacket};
+use alloy_json_rpc::{Id, Request as JsonRpcRequest, RequestPacket};
 use alloy_transport_http::Http;
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::Url;
@@ -231,12 +231,7 @@ impl JsonRpcHttpClient {
             .call(RequestPacket::Single(request))
             .await
             .with_context(|| format!("failed to send JSON-RPC request for {request_context}"))?;
-        let ResponsePacket::Single(response) = response else {
-            bail!(
-                "provider returned a batch response for single JSON-RPC request {request_context}"
-            );
-        };
-        classify_response(response)
+        classify_response(request_context, response)
     }
 }
 

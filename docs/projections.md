@@ -103,10 +103,13 @@ is `registrant`, `token_holder`, and `effective_controller`. Surface is the
 default unit; resource deduplication is explicit.
 
 `children_current` stores direct and classified child relations. For registry
-events that expose only a labelhash, Project uses a verified label preimage when
-available. Otherwise it publishes the recognizable placeholder
-`[<labelhash-without-0x>].<parent-name>`. A preimage improves readability but
-does not create ownership or exact-name authority. ENSv2 direct and linked
+events that expose only a labelhash, Project composes the child name from a
+verified label preimage when one exists and leaves every name column null when
+none does — the labelhash and child node are proven, the label is not. Reads
+name such a child by the recognizable placeholder
+`[<labelhash-without-0x>].<parent-name>`, built from the parent's stored
+spelling, and lower-case it for the normalized form. A preimage improves
+readability but does not create ownership or exact-name authority. ENSv2 direct and linked
 children derive from admitted graph events rather than token enumeration.[^v1-registry-l45][^v1-registry-l82][^v2-events-l49][^v2-events-l75]
 
 ## History
