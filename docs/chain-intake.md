@@ -186,15 +186,16 @@ its cursor has advanced, so a resumed run whose cursor already stands above the
 floor is refused too: planning cannot tell coverage recorded before the node
 pruned from coverage recorded through a pruned window, and refuses both until
 the node holds the declared range again or the declared start block moves. A
-redo is judged on its own range instead — clipped to the source's declared start
-— so a redo entirely above the floor still runs on a pruned node, and a redo
-ending below a source's declared start plans nothing for that source and is
-unaffected. Work already recorded is not re-examined: a completed ingest phase
-is not planned again, so a chain that recorded a pruned window before this rule
-existed keeps that stored coverage; a resync or a redo over the same range is
-refused rather than silently repeating the empty read, so the node has to hold
-the range before it can be re-indexed. Live follow plans no declared range, so it is judged on the suffix it is about to
-load. Sources that do not read a node's
+redo is judged on what it has left to read instead: its range start, the source's
+declared start, and the block after its own durable progress, whichever is
+highest. A redo that has not reached the floor yet is refused, one already past
+it keeps running, and one with nothing left to read plans nothing for that
+source. Work already recorded is not re-examined: a completed ingest phase is not
+planned again, so a chain that recorded a pruned window before this rule existed
+keeps that stored coverage. Re-indexing it needs the node to hold the range
+again — a fresh resync or redo across the pruned window is refused rather than
+silently repeating the empty read. Live follow plans no declared range, so it is
+judged on the suffix it is about to load. Sources that do not read a node's
 database report no floor: an RPC endpoint owns its retention behind the wire,
 and the Coinbase SQL warehouse is not a block provider at all.
 
