@@ -171,6 +171,7 @@ mod tests {
             canonicality_state: "canonical".to_owned(),
             before_state: json!({}),
             after_state: json!({}),
+            before_state_explicit: false,
         }
     }
 

@@ -5,9 +5,9 @@ mod normalized;
 
 use bigname_adapters::schema_v2::BatchOutput;
 use bigname_adapters::schema_v2::seam::{
-    EVENT_CLOSE_TIME_SQL, LOG_INDEX_KEY, REDO_BINDING_CLOSE_CLAMP_SQL, SURFACE_BINDING_ID_KEY,
-    SURFACE_BOUND_EVENT_KIND, SURFACE_UNBOUND_EVENT_KIND, TOKEN_LINEAGE_ID_KEY,
-    TRANSACTION_INDEX_KEY,
+    EVENT_CLOSE_TIME_SQL, LOG_INDEX_KEY, PREIMAGE_OBSERVATION_EVENT_KIND,
+    REDO_BINDING_CLOSE_CLAMP_SQL, SURFACE_BINDING_ID_KEY, SURFACE_BOUND_EVENT_KIND,
+    SURFACE_UNBOUND_EVENT_KIND, TOKEN_LINEAGE_ID_KEY, TRANSACTION_INDEX_KEY,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 
@@ -240,6 +240,7 @@ async fn stage_referenced_stable_identities(
                  AND lineage.block_hash = event.block_hash
                  AND lineage.block_number = event.block_number
                 WHERE identity.chain_id = $1
+                  AND identity.block_number BETWEEN $2 AND $3
                   AND event.block_number BETWEEN $2 AND $3
                   AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
                   AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
@@ -436,6 +437,13 @@ async fn reanchor_stable_identities(
             "token_lineages" => TOKEN_LINEAGE_ID_KEY,
             _ => unreachable!("fixed stable identity table"),
         };
+        let candidate_filter = if table == "name_surfaces" {
+            // Only an observation that re-states the surface body can anchor the surface; a
+            // surviving reference of any other kind must not move the anchor or deactivated_at.
+            format!("AND event.event_kind = '{PREIMAGE_OBSERVATION_EVENT_KIND}'")
+        } else {
+            String::new()
+        };
         let deactivation_assignment = if table == "name_surfaces" {
             ",
                 deactivated_at = CASE
@@ -472,8 +480,10 @@ async fn reanchor_stable_identities(
                  AND lineage.block_number = event.block_number
                 WHERE identity.chain_id = $1
                   AND identity.block_number BETWEEN $2 AND $3
+                  AND identity.canonicality_state = 'orphaned'
                   AND event.block_number IS NOT NULL
                   AND event.block_number NOT BETWEEN $2 AND $3
+                  {candidate_filter}
                   AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
                   AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
             )

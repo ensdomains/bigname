@@ -48,9 +48,9 @@ use permutation::{
     },
 };
 
-/// 48 permutations per world. Deeper sweeps are clean to at least 600 per world, so this is a
-/// runtime budget, and below the rate of the rarer batch-boundary artifacts — see
-/// `EXPECTED_ARTIFACTS`.
+/// 48 permutations per world, so this is a runtime budget, and below the rate of the rarer
+/// batch-boundary artifacts — see `EXPECTED_ARTIFACTS` for the residual a 600-case sweep still
+/// reaches.
 ///
 /// It is no longer below a known failure. Once the ENSv1 pool started emitting the registrar mint
 /// that a wrapped registration really makes, a sweep of 600 per world fails 3 of 1200 sequences,
@@ -552,22 +552,25 @@ const REQUIRED_EVENT_KINDS: &[(&str, &[&str])] = &[
 /// The batch-boundary differences the default corpus reproduces exactly, keyed as
 /// `BatchBoundaryArtifacts::counts` reports them. The artifact classes themselves are shapes, so
 /// without an equality gate a regression that blanked `before_state` on every split-replay event,
-/// or dropped attribution wholesale, would stay inside an allowed shape and pass. Each count is a
-/// real whole-pass versus split-replay divergence, tracked by issue #336: fixing those makes the
-/// counts fall, and emptying this table is that fix's acceptance test.
+/// or dropped attribution wholesale, would stay inside an allowed shape and pass. Each count was a
+/// real whole-pass versus split-replay divergence, tracked by issue #336, and emptying this table
+/// was that fix's acceptance test: under the fix the default corpus produces none (ENSv1
+/// `rebased_anchors:resources` fell 60 to 0), so any class that appears here is a batch-boundary
+/// regression.
 ///
-/// Pinned per world, because at this depth the two are disjoint: the only class the default corpus
-/// reaches is ENSv1's. A single cross-world total would read the same if ENSv2 started diverging
-/// while ENSv1 stopped.
+/// Pinned per world, because the two can diverge independently: a single cross-world total would
+/// read the same if one world stopped while the other started.
 ///
 /// A class missing from a row means the default corpus does not reach it, not that it cannot
-/// happen — `counts` omits zero-count classes. At 600 cases per world the same generator reaches
-/// ENSv1 `carried_before_states` 7 times and ENSv2 `rebased_attributions` 4 times, both absent
-/// here. So a row shrinking is only evidence of a fix once the deeper sweep agrees.
-const EXPECTED_ARTIFACTS: &[(&str, &[(&str, usize)])] = &[
-    (ENS_V1_MAINNET.label, &[("rebased_anchors:resources", 60)]),
-    (ENS_V2_SEPOLIA.label, &[]),
-];
+/// happen — `counts` omits zero-count classes. The 600-case sweep agrees with the fix on the
+/// classes it covered (ENSv1 `carried_before_states` fell 7 to 0 alongside the anchors), with one
+/// survivor it did not cover: ENSv2 `rebased_attributions` still occurs 4 times, each a late
+/// resolver `RecordChanged` on a lapsed registration that the whole pass attributes through the
+/// in-memory known-surface carry a boundary-restored split replay does not hold — the v2-path
+/// counterpart of the stale reach the fix constrained on the v1 path, and a live residual, not a
+/// pin — tracked by issue #348.
+const EXPECTED_ARTIFACTS: &[(&str, &[(&str, usize)])] =
+    &[(ENS_V1_MAINNET.label, &[]), (ENS_V2_SEPOLIA.label, &[])];
 
 /// The first thing to rule out when a pinned count moves: these are counts over the sequences one
 /// seed draws, so they are not evidence about the interpreter until the corpus is held fixed.

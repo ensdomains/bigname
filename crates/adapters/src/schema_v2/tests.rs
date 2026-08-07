@@ -3406,13 +3406,29 @@ fn registration_to_the_controller_discards_the_transient_registry_self_grant() -
             .all(|event| event.resource_id == Some(registrar_resource)),
         "the controller/registrant must have no active duplicate grant on the transient registry-only resource"
     );
+    let registry_only_resources = output
+        .resources
+        .iter()
+        .filter(|resource| resource.token_lineage_id.is_none())
+        .map(|resource| resource.resource_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        registry_only_resources.len(),
+        1,
+        "the superseded registry-only resource is retained at its first derivation block: {:?}",
+        output.resources
+    );
     assert_eq!(
         output
             .resources
             .iter()
             .map(|resource| resource.resource_id)
             .collect::<std::collections::BTreeSet<_>>(),
-        std::collections::BTreeSet::from([registrar_resource])
+        std::collections::BTreeSet::from_iter(
+            registry_only_resources
+                .into_iter()
+                .chain([registrar_resource])
+        )
     );
     assert_batch_referential_integrity(
         &output,
@@ -3446,6 +3462,7 @@ fn incomplete_registration_event(
         canonicality_state: "canonical".to_owned(),
         before_state: json!({}),
         after_state,
+        before_state_explicit: false,
     }
 }
 
@@ -4446,6 +4463,30 @@ fn assert_same_transaction_controller_setup(
             .all(|event| event.resource_id == Some(registrar_resource)),
         "every reconciled registry event must use the registrar resource"
     );
+    let registry_only_resource_ids = output
+        .resources
+        .iter()
+        .filter(|resource| resource.token_lineage_id.is_none())
+        .map(|resource| resource.resource_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        registry_only_resource_ids.len(),
+        1,
+        "the superseded registry-only resource is retained at its first derivation block: {:?}",
+        output.resources
+    );
+    let registry_only_resource = registry_only_resource_ids
+        .into_iter()
+        .next()
+        .expect("one registry-only resource");
+    assert!(
+        output
+            .resources
+            .iter()
+            .filter(|resource| resource.resource_id == registry_only_resource)
+            .all(|resource| resource.block_number == 1),
+        "every emission of the retained registry-only resource anchors at its first derivation block"
+    );
     let batch_resource_ids = output
         .resources
         .iter()
@@ -4453,8 +4494,8 @@ fn assert_same_transaction_controller_setup(
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         batch_resource_ids,
-        std::collections::BTreeSet::from([registrar_resource]),
-        "the superseded registry-only resource must not survive the reconciled batch"
+        std::collections::BTreeSet::from([registrar_resource, registry_only_resource]),
+        "the batch carries the registrar resource plus the retained superseded registry-only resource"
     );
     assert!(
         registry_permission_events
@@ -9395,6 +9436,7 @@ fn reconciliation_probe_event(
         canonicality_state: "canonical".to_owned(),
         before_state: json!({}),
         after_state,
+        before_state_explicit: false,
     }
 }
 

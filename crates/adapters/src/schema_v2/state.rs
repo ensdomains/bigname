@@ -503,6 +503,12 @@ impl State {
         releases
     }
 
+    /// Per-state-key `after_state` tails of the retained event stream, used to seed the
+    /// post-reconciliation before-state re-thread.
+    pub(super) fn value_tails(&self) -> &OrdMap<String, Value> {
+        &self.values
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn transition(
         &mut self,

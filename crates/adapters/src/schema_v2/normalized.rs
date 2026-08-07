@@ -6,6 +6,7 @@ use super::{
     manifest::ManifestSource,
     model::{BatchOutput, NormalizedEvent, RawBlockInput, RawLogInput},
     protocol::EventDraft,
+    seam::PREIMAGE_OBSERVATION_EVENT_KIND,
     state::State,
     state_key::interpreter_state_key,
 };
@@ -18,6 +19,7 @@ pub(super) fn materialize(
     output: &mut BatchOutput,
 ) {
     for (ordinal, draft) in events.into_iter().enumerate() {
+        let before_state_explicit = draft.explicit_before.is_some();
         let before_state = state.transition(
             &selected.source.namespace,
             draft.logical_name_id.as_deref(),
@@ -79,6 +81,7 @@ pub(super) fn materialize(
             canonicality_state: raw.canonicality_state.clone(),
             before_state,
             after_state: draft.after_state,
+            before_state_explicit,
         });
     }
 }
@@ -92,6 +95,7 @@ pub(super) fn materialize_boundary(
 ) {
     for (ordinal, draft) in events.into_iter().enumerate() {
         let derivation = derivation_kind(&source.source_family, &draft.event_kind);
+        let before_state_explicit = draft.explicit_before.is_some();
         let state_key = interpreter_state_key(
             &source.namespace,
             draft.logical_name_id.as_deref(),
@@ -141,6 +145,7 @@ pub(super) fn materialize_boundary(
             canonicality_state: block.canonicality_state.clone(),
             before_state,
             after_state: draft.after_state,
+            before_state_explicit,
         });
     }
 }
@@ -190,7 +195,7 @@ pub(super) fn preimage_event(
                 &selected.source.namespace,
                 logical_name_id.as_deref(),
                 None,
-                "PreimageObserved",
+                PREIMAGE_OBSERVATION_EVENT_KIND,
                 &selected.source.source_family,
                 &state_scope,
             )),
@@ -207,7 +212,7 @@ pub(super) fn preimage_event(
         namespace: selected.source.namespace.clone(),
         logical_name_id,
         resource_id: None,
-        event_kind: "PreimageObserved".to_owned(),
+        event_kind: PREIMAGE_OBSERVATION_EVENT_KIND.to_owned(),
         source_family: selected.source.source_family.clone(),
         manifest_version: selected.source.manifest_version,
         source_manifest_id: Some(selected.source.manifest_id),
@@ -222,5 +227,8 @@ pub(super) fn preimage_event(
         canonicality_state: raw.canonicality_state.clone(),
         before_state: json!({}),
         after_state,
+        // Preimage observations never enter the interpreter state stream; their empty before is
+        // fixed, so the re-thread must leave it alone.
+        before_state_explicit: true,
     }
 }

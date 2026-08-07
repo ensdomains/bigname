@@ -3246,6 +3246,108 @@ async fn redo_reanchors_a_stable_binding_after_same_timestamp_predecessor_remova
 }
 
 #[tokio::test]
+async fn redo_keeps_reproduced_identity_anchors_at_their_first_derivation_block() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_identity_anchor").await?;
+    let chain = "interpret-identity-anchor";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice"), (2, "alice")]).await?;
+    run_engine(scratch.pool(), chain, 0, 2, InterpretRunMode::Normal).await?;
+
+    let before = identity_anchors(scratch.pool(), chain).await?;
+    assert!(
+        before
+            .iter()
+            .any(|(table, _, block, state)| table == "name_surfaces"
+                && *block == 1
+                && state == "canonical"),
+        "the full walk anchors alice's name surface at block 1 with a later reference: {before:?}"
+    );
+
+    run_engine(scratch.pool(), chain, 1, 1, InterpretRunMode::Redo).await?;
+
+    let after = identity_anchors(scratch.pool(), chain).await?;
+    assert_eq!(
+        before, after,
+        "identities the redo replay reproduces must keep their first derivation anchor"
+    );
+    scratch.cleanup().await
+}
+
+async fn identity_anchors(
+    pool: &PgPool,
+    chain_id: &str,
+) -> Result<Vec<(String, String, i64, String)>> {
+    let mut rows = Vec::new();
+    for (table, id_column) in [
+        ("name_surfaces", "logical_name_id"),
+        ("resources", "resource_id"),
+        ("token_lineages", "token_lineage_id"),
+    ] {
+        let statement = format!(
+            "SELECT '{table}', {id_column}::text, block_number, canonicality_state::text
+             FROM {table} WHERE chain_id = $1 ORDER BY {id_column}"
+        );
+        rows.extend(
+            sqlx::query_as::<_, (String, String, i64, String)>(&statement)
+                .bind(chain_id)
+                .fetch_all(pool)
+                .await?,
+        );
+    }
+    rows.sort();
+    Ok(rows)
+}
+
+#[tokio::test]
+async fn suffix_redo_keeps_identities_anchored_before_its_range_at_their_first_derivation_block()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_suffix_redo_anchor").await?;
+    let chain = "interpret-suffix-redo-anchor";
+    seed_prior_owner_registration_fixture(
+        scratch.pool(),
+        chain,
+        PriorOwnerRegistrationFlow::LegacyTwoOwnerChanges,
+        REGISTRANT,
+    )
+    .await?;
+    run_engine(scratch.pool(), chain, 0, 2, InterpretRunMode::Normal).await?;
+    run_engine(scratch.pool(), chain, 3, 3, InterpretRunMode::Normal).await?;
+
+    let retained_resource: Uuid = sqlx::query_scalar(
+        "SELECT resource_id FROM normalized_events
+         WHERE chain_id = $1
+           AND source_family = 'ens_v1_registry_l1'
+           AND event_kind = 'PermissionChanged'
+           AND after_state ->> 'subject' = $2
+           AND block_number = 1",
+    )
+    .bind(chain)
+    .bind(PRIOR_REGISTRY_OWNER)
+    .fetch_one(scratch.pool())
+    .await?;
+    let before = identity_anchors(scratch.pool(), chain).await?;
+    let retained_anchor: (i64, String) = sqlx::query_as(
+        "SELECT block_number, block_hash FROM resources WHERE chain_id = $1 AND resource_id = $2",
+    )
+    .bind(chain)
+    .bind(retained_resource)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        retained_anchor.0, 1,
+        "the superseded registry resource stays anchored at its first derivation block"
+    );
+
+    run_engine(scratch.pool(), chain, 2, 3, InterpretRunMode::Redo).await?;
+
+    let after = identity_anchors(scratch.pool(), chain).await?;
+    assert_eq!(
+        before, after,
+        "a redo starting after an identity's first derivation block must not move that anchor"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn discovery_redo_reopens_an_edge_when_the_replacement_range_omits_its_close() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_discovery_reopen").await?;
     let chain = "interpret-discovery-reopen";
@@ -3465,8 +3567,32 @@ async fn partial_redo_restores_resource_and_token_anchors_from_150_to_250() -> R
     .bind(token_lineage_id)
     .execute(scratch.pool())
     .await?;
+    // The surface heal only accepts an observation that re-states the surface body, so plant a
+    // body-carrying preimage observation alongside the resource/token observation.
     sqlx::query(
-        "DELETE FROM normalized_events WHERE chain_id = $1 AND event_identity <> 'anchor-observation-250'",
+        "
+        INSERT INTO normalized_events (
+            event_identity, namespace, logical_name_id, resource_id, event_kind,
+            source_family, manifest_version, source_manifest_id, chain_id,
+            block_number, block_hash, raw_fact_ref, derivation_kind,
+            canonicality_state, before_state, after_state
+        )
+        SELECT 'surface-observation-250', namespace, logical_name_id, resource_id,
+               event_kind, source_family, manifest_version, source_manifest_id,
+               chain_id, 250, $2, jsonb_build_object('kind', 'raw_block'),
+               derivation_kind, 'canonical', before_state, after_state
+        FROM normalized_events
+        WHERE chain_id = $1 AND event_kind = 'PreimageObserved'
+        ORDER BY normalized_event_id
+        LIMIT 1
+        ",
+    )
+    .bind(chain)
+    .bind(block_hash(chain, 250))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "DELETE FROM normalized_events WHERE chain_id = $1 AND event_identity NOT IN ('anchor-observation-250', 'surface-observation-250')",
     )
     .bind(chain)
     .execute(scratch.pool())
@@ -3494,62 +3620,10 @@ async fn partial_redo_restores_resource_and_token_anchors_from_150_to_250() -> R
     .bind(block_hash(chain, 150))
     .execute(scratch.pool())
     .await?;
-    let transaction_hash = format!("{chain}-transaction-150");
-    sqlx::query(
-        "
-        INSERT INTO raw_transactions (
-            chain_id, block_hash, block_number, transaction_hash,
-            transaction_index, from_address, to_address
-        )
-        VALUES ($1, $2, 150, $3, 0, $4, $5)
-        ",
-    )
-    .bind(chain)
-    .bind(block_hash(chain, 150))
-    .bind(&transaction_hash)
-    .bind(SENDER)
-    .bind(CONTRACT)
-    .execute(scratch.pool())
-    .await?;
-    let token_id = versioned_token("alice", 1);
-    let owner: Address = "0x0000000000000000000000000000000000000061".parse()?;
-    let registration = v2_registry_events::LabelRegistered {
-        tokenId: token_id,
-        labelHash: keccak256(b"alice"),
-        label: "alice".to_owned(),
-        owner,
-        expiry: 1_000,
-        sender: SENDER.parse()?,
-    }
-    .encode_log_data();
-    insert_log_at(
-        scratch.pool(),
-        chain,
-        150,
-        &transaction_hash,
-        0,
-        CONTRACT,
-        registration.topics(),
-        registration.data.as_ref(),
-    )
-    .await?;
-    let resource = v2_registry_events::TokenResource {
-        tokenId: token_id,
-        resource: U256::from(5001),
-    }
-    .encode_log_data();
-    insert_log_at(
-        scratch.pool(),
-        chain,
-        150,
-        &transaction_hash,
-        1,
-        CONTRACT,
-        resource.topics(),
-        resource.data.as_ref(),
-    )
-    .await?;
-
+    // The redone range deliberately holds no raw facts re-deriving these identities, so the
+    // replay leaves them orphaned and the completion heal re-anchors all three to the surviving
+    // observation at 250. An identity the replay does reproduce keeps its first derivation
+    // anchor (covered by redo_keeps_reproduced_identity_anchors_at_their_first_derivation_block).
     for redo_attempt in 1..=2 {
         run_engine(scratch.pool(), chain, 100, 200, InterpretRunMode::Redo).await?;
 
@@ -3609,7 +3683,7 @@ async fn partial_redo_reanchors_shadow_deactivation_time_to_surviving_observatio
                250, $2, jsonb_build_object('kind', 'raw_block'),
                derivation_kind, 'canonical', '{}'::jsonb, after_state
         FROM normalized_events
-        WHERE chain_id = $1 AND logical_name_id IS NOT NULL
+        WHERE chain_id = $1 AND logical_name_id IS NOT NULL AND event_kind = 'PreimageObserved'
         ORDER BY normalized_event_id
         LIMIT 1
         ",
@@ -3638,8 +3712,11 @@ async fn partial_redo_reanchors_shadow_deactivation_time_to_surviving_observatio
     .bind(block_hash(chain, 150))
     .execute(scratch.pool())
     .await?;
-    insert_name_registered(scratch.pool(), chain, 150, hostile_label).await?;
 
+    // The redone range deliberately holds no raw facts reproducing the shadow surface, so the
+    // replay leaves it orphaned and the completion heal re-anchors it to the surviving
+    // observation. An identity the replay does reproduce keeps its first derivation anchor
+    // (covered by redo_keeps_reproduced_identity_anchors_at_their_first_derivation_block).
     run_engine(scratch.pool(), chain, 100, 200, InterpretRunMode::Redo).await?;
 
     let anchor: (i64, i64) = sqlx::query_as(
@@ -3653,6 +3730,99 @@ async fn partial_redo_reanchors_shadow_deactivation_time_to_surviving_observatio
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(anchor, (250, 250));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn redo_heal_leaves_a_surface_orphaned_without_a_body_carrying_observation() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_surface_heal_body").await?;
+    let chain = "interpret-surface-heal-body";
+    let hostile_label = "bad\u{1}";
+    seed_fixture(scratch.pool(), chain, &[(1, hostile_label)]).await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+
+    sqlx::query(
+        "
+        INSERT INTO chain_lineage (
+            chain_id, block_hash, parent_hash, block_number, block_timestamp,
+            canonicality_state
+        )
+        SELECT $1,
+               $1 || '-block-' || height::text,
+               $1 || '-block-' || (height - 1)::text,
+               height,
+               to_timestamp(height),
+               'canonical'::canonicality_state
+        FROM generate_series(2, 250) AS height
+        ",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    // A reference that carries no surface body: production only persists one alongside a
+    // surface re-emission, and none was derived here.
+    sqlx::query(
+        "
+        INSERT INTO normalized_events (
+            event_identity, namespace, logical_name_id, resource_id, event_kind,
+            source_family, manifest_version, source_manifest_id, chain_id,
+            block_number, block_hash, raw_fact_ref, derivation_kind,
+            canonicality_state, before_state, after_state
+        )
+        SELECT 'permission-observation-250', namespace, logical_name_id, NULL,
+               'PermissionChanged', source_family, manifest_version, source_manifest_id,
+               chain_id, 250, $2, jsonb_build_object('kind', 'raw_block'),
+               derivation_kind, 'canonical', '{}'::jsonb, '{}'::jsonb
+        FROM normalized_events
+        WHERE chain_id = $1 AND logical_name_id IS NOT NULL
+        ORDER BY normalized_event_id
+        LIMIT 1
+        ",
+    )
+    .bind(chain)
+    .bind(block_hash(chain, 250))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "DELETE FROM normalized_events WHERE chain_id = $1 AND event_identity <> 'permission-observation-250'",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "
+        UPDATE name_surfaces
+        SET block_number = 150,
+            block_hash = $2,
+            deactivated_at = to_timestamp(150),
+            canonicality_state = 'canonical'
+        WHERE chain_id = $1
+        ",
+    )
+    .bind(chain)
+    .bind(block_hash(chain, 150))
+    .execute(scratch.pool())
+    .await?;
+
+    run_engine(scratch.pool(), chain, 100, 200, InterpretRunMode::Redo).await?;
+
+    let row: (i64, String, i64) = sqlx::query_as(
+        "
+        SELECT block_number,
+               canonicality_state::text,
+               extract(epoch FROM deactivated_at)::bigint
+        FROM name_surfaces
+        WHERE chain_id = $1
+        ",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        row,
+        (150, "orphaned".to_owned(), 150),
+        "a reference carrying no surface body must not anchor or deactivate the surface"
+    );
     scratch.cleanup().await
 }
 

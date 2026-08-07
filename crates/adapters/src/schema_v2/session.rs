@@ -1,6 +1,10 @@
 use anyhow::{Context, bail};
+use serde_json::{Value, json};
 
-use super::{BatchInput, BatchOutput, RawLogInput, catalog::Catalog, state::State};
+use super::{
+    BatchInput, BatchOutput, RawLogInput, catalog::Catalog, seam::INTERPRETER_STATE_KEY,
+    state::State,
+};
 
 /// Opaque retained adapter state that can be moved into the next batch for the same chain.
 #[derive(Debug, Eq, PartialEq)]
@@ -105,6 +109,7 @@ fn interpret_loaded(
 ) -> anyhow::Result<BatchOutput> {
     let mut output = BatchOutput::default();
     let mut raw_logs = raw_logs.into_iter().peekable();
+    let prior_tails = state.value_tails().clone();
     for block in blocks {
         super::settle_block_boundary(catalog, block, state, &mut output)?;
         while raw_logs.peek().is_some_and(|raw| {
@@ -124,7 +129,30 @@ fn interpret_loaded(
         );
     }
     super::protocol::reconcile_batch(&mut output);
+    rethread_before_states(&mut output, prior_tails);
     Ok(output)
+}
+
+// Reconciliation can drop events or rewrite their interpreter state keys after in-memory
+// transitions have already read state written under the pre-reconciliation keys. Re-derive every
+// stream-chained before_state from the surviving rows so the emitted stream — and nothing else —
+// determines what each event observes, keeping the output independent of where batch boundaries
+// fall.
+fn rethread_before_states(output: &mut BatchOutput, prior_tails: imbl::OrdMap<String, Value>) {
+    let mut tails = prior_tails;
+    for event in &mut output.normalized_events {
+        let Some(state_key) = event
+            .raw_fact_ref
+            .get(INTERPRETER_STATE_KEY)
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        if !event.before_state_explicit {
+            event.before_state = tails.get(state_key).cloned().unwrap_or_else(|| json!({}));
+        }
+        tails.insert(state_key.to_owned(), event.after_state.clone());
+    }
 }
 
 fn interpret_raw(

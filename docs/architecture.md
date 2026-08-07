@@ -108,7 +108,7 @@ Resolver-family normalized events attach `logical_name_id` and `resource_id` onl
 
 A standalone ENSv1 or Basenames registry-owner observation for a node without a materialized `NameSurface` creates the node-scoped direct-registry resource, but it does not independently create a public surface or binding. A registry-owner observation attributed to a live registrar lease, including ownership setup reconciled within the registration transaction, instead remains retained interpreter state without creating a separate direct-registry resource, surface, or binding; that attribution keeps the direct-registry authority dormant. Once a registrar or wrapper observation materializes the surface, retained direct-registry authority may become its fallback. If release of the active registrar lease makes a nonzero retained registry owner authoritative, the release boundary must materialize the registry-anchored resource and open its replacement `SurfaceBinding` in the same interpret batch. The resource and binding use block-boundary provenance because upstream registrar availability is derived by comparing the stored expiry plus the 90-day grace period with `block.timestamp`, rather than by a lease-expiry log (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L103 @ ens_v1@91c966f). The retained registry owner survives that registrar release because ENS stores node ownership independently until another registry ownership write replaces it (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L7 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L13 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L170 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L171 @ ens_v1@91c966f). This rule does not widen ENSv2 registry-name topology or emit either side of a parent-child binding for an otherwise unknown registry-only surface.
 
-ENSv1 authority moves (wrap, unwrap, re-registration) carry the identity change in `resource_id` and `token_lineage_id`; ordinary lifecycle stays `declared_registry_path`. A new `SurfaceBinding` row appears only when the bound `resource_id` changes — transfer and expiry within the same anchor do not. Same-transaction reconciliation considers only setup observations whose `source_event == NewOwner` when removing transient controller artifacts; its canonical admitted case is the retired 2019 controller stream and its register/reclaim-shaped ownership setup. Registrar reclaim writes the registry through `setSubnodeOwner`, which emits `NewOwner` (upstream: .refs/ens_subgraph/subgraph.yaml:L145 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L148 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L162 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L165 @ ens_subgraph@723f1b6) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L174 @ ens_v1@91c966f). The current controller's resolver path also registers first to `address(this)`, but then calls registry `setRecord`; that ownership write emits `Transfer`, not `NewOwner`, so it never enters this removal branch. This is benign: the general same-transaction reconciliation still attributes the incoming `Transfer` observations to the registration resource (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L294 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L301 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L33 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L39 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L68 @ ens_v1@91c966f). In the wrapped registration path, NameWrapper registers the registrar token and registry ownership to itself while the separate `wrappedOwner` remains the user; the incoming NameWrapper `resource_control` grant therefore belongs to the registrar-backed registration resource even though its subject differs from the registration event's registrant (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L291 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L297 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L300 @ ens_v1@91c966f). `NameWrapped` is emitted within that wrapper call before the controller emits its later `NameRegistered`, so the later registrar observation records the registrar resource without displacing the active wrapper resource (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f). Basenames writes the final owner directly before its registrar emits `NameRegistered`, so it has no equivalent wrapper-owner split or transient controller-owner epoch (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L423 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L425 @ basenames@1809bbc). When block-scoped replay has preloaded an older registry-only authority for that name, same-transaction registry and resolver observations that establish the incoming registration are attributed to the new registrar resource. Resolver records before the first registry ownership-setup observation retain the predecessor resource. From that first setup through `NameRegistered`, otherwise-unattached or registry-only resolver records belong to the registration resource; records already attached to another materialized resource retain their event-time authority. Pre-registration membership for permission events is decided by revocation semantics, not by comparing a subject with the registrant: revocations, plus matching earlier grants that those revocations close, stay on the preceding registry-only resource so latest-wins permission projection supersedes them. Other incoming grants move to the registration resource. The registry-only resource row remains in the batch while preceding history references it. A proven transient registration-controller `NewOwner` observation and that controller's matching self-grant and self-revoke are setup artifacts rather than a separate authority transition. Renewals and wrapper observations retain their event-time authority. This registration-setup rule does not define a registry-only `RegistrationGranted` pre-state contract.
+ENSv1 authority moves (wrap, unwrap, re-registration) carry the identity change in `resource_id` and `token_lineage_id`; ordinary lifecycle stays `declared_registry_path`. A new `SurfaceBinding` row appears only when the bound `resource_id` changes — transfer and expiry within the same anchor do not. Same-transaction reconciliation considers only setup observations whose `source_event == NewOwner` when removing transient controller artifacts; its canonical admitted case is the retired 2019 controller stream and its register/reclaim-shaped ownership setup. Registrar reclaim writes the registry through `setSubnodeOwner`, which emits `NewOwner` (upstream: .refs/ens_subgraph/subgraph.yaml:L145 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L148 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L162 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/subgraph.yaml:L165 @ ens_subgraph@723f1b6) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L174 @ ens_v1@91c966f). The current controller's resolver path also registers first to `address(this)`, but then calls registry `setRecord`; that ownership write emits `Transfer`, not `NewOwner`, so it never enters this removal branch. This is benign: the general same-transaction reconciliation still attributes the incoming `Transfer` observations to the registration resource (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L294 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L301 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L33 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L39 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L68 @ ens_v1@91c966f). In the wrapped registration path, NameWrapper registers the registrar token and registry ownership to itself while the separate `wrappedOwner` remains the user; the incoming NameWrapper `resource_control` grant therefore belongs to the registrar-backed registration resource even though its subject differs from the registration event's registrant (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L291 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L297 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L300 @ ens_v1@91c966f). `NameWrapped` is emitted within that wrapper call before the controller emits its later `NameRegistered`, so the later registrar observation records the registrar resource without displacing the active wrapper resource (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f). Basenames writes the final owner directly before its registrar emits `NameRegistered`, so it has no equivalent wrapper-owner split or transient controller-owner epoch (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L423 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L425 @ basenames@1809bbc). When block-scoped replay has preloaded an older registry-only authority for that name, same-transaction registry and resolver observations that establish the incoming registration are attributed to the new registrar resource. Resolver records before the first registry ownership-setup observation retain the predecessor resource. From that first setup through `NameRegistered`, otherwise-unattached or registry-only resolver records belong to the registration resource; records already attached to another materialized resource retain their event-time authority. Pre-registration membership for permission events is decided by revocation semantics, not by comparing a subject with the registrant: revocations, plus matching earlier grants that those revocations close, stay on the preceding registry-only resource so latest-wins permission projection supersedes them. Other incoming grants move to the registration resource. The superseded registry-only resource row is always retained at its first derivation block, whether or not a surviving same-batch row references it. A proven transient registration-controller `NewOwner` observation and that controller's matching self-grant and self-revoke are setup artifacts rather than a separate authority transition. Renewals and wrapper observations retain their event-time authority. This registration-setup rule does not define a registry-only `RegistrationGranted` pre-state contract.
 
 For born-wrapped registrations, registrar authority state tracks the final registry owner separately from the controller event's registrant. On unwrap, NameWrapper transfers the registrar token from itself to the requested registrant, so that registrar transfer closes NameWrapper's grant on the registration resource (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L391 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L394 @ ens_v1@91c966f).
 
@@ -359,11 +359,75 @@ Every normalized event carries: namespace, `logical_name_id` when applicable, `r
 Normalized events are schema-v2 interpreter transitions. Interpretation loads
 canonical raw facts in chain order and carries the compact prior state needed
 across physical batches. A redo is an explicit bounded operation: it prepares
-the selected derived range, replays it through the same interpreter, and
-re-anchors stable identities when the winning facts reproduce them. The
+the selected derived range, replays it through the same interpreter, and heals
+identities the replay did not reproduce. Preparation restages only identities
+whose stored anchor lies inside the redone range, so a redo that starts after
+an identity's derivation block cannot move that anchor forward; an identity
+the replay re-observes keeps its anchor at its first derivation block, and
+only an identity still
+orphaned after the replay is re-anchored to the earliest surviving reference
+outside the redone range — for a name surface, the earliest surviving
+body-carrying `PreimageObserved` observation of that name, and a surface with
+no surviving body-carrying observation stays orphaned. The
 deleted old-schema storage layer no longer provides general field repair,
 payload arbitration, supersession, full-closure proof, or adapter-checkpoint
 reuse.
+
+Physical batching is an execution detail, not an input to interpretation.
+Identity rows, discovery edges, and normalized events must be a pure function
+of the canonical raw facts and the declared manifests, discovery rules, and
+admissions: a fresh full walk, an incremental follow, and a resumed session
+over identical input must write identical rows no matter where the 500-block
+batch boundaries fall. The guarantee is verified for the divergence classes
+[#336](https://github.com/ensdomains/bigname/issues/336) identified on the
+ENSv1 path — the permutation lane's pinned batch-artifact counts sit at zero —
+with two known open exceptions of distinct kinds.
+[#348](https://github.com/ensdomains/bigname/issues/348) is a batch-boundary
+divergence of exactly the kind this rule condemns, on the ENSv2 resolver
+path: a late resolver `RecordChanged` on a lapsed registration keeps an
+attribution in an uninterrupted walk that a walk split across a batch
+boundary does not reproduce, and production, which always walks in physical
+batches, does not carry the attribution across a boundary.
+[#347](https://github.com/ensdomains/bigname/issues/347) is not a
+boundary-carry artifact: an uninterrupted walk under-derives a wrapper
+authority lapse (`AuthorityEpochChanged` with its `PermissionChanged`) that a
+split walk derives. Three rules keep the written rows batch-independent:
+
+- `before_state` chains over the emitted event stream: a retained event's
+  `before_state` is the `after_state` of the previous retained event under the
+  same final `raw_fact_ref.interpreter_state_key` (`{}` at stream start),
+  seeded from the pre-batch retained state. Events that same-transaction
+  reconciliation later drops or re-keys leave no trace in surviving
+  stream-chained state: each retained `before_state` is re-derived from the
+  surviving stream alone. Interpreter-declared explicit befores (deliberate
+  snapshots such as wrapper fuse state or permission grant bodies) are exempt
+  from re-threading and are written as computed at emission, with one
+  carve-out: same-transaction re-attribution to a registration (the second
+  rule) resets the before to `{}`, so the registration's stream starts from
+  an empty snapshot. A surviving explicit before may quote in-memory state a
+  later-dropped same-transaction event wrote; that snapshot is computed
+  identically in every [run shape](glossary.md#run-shape). The block-scoped
+  predecessor-epoch
+  permission closures keep their computed snapshot.
+- Identity attribution is fixed at emission, with one exception:
+  same-transaction reconciliation may attribute registry, resolver, and
+  permission observations to a registration established later in the same
+  transaction, and predecessor-epoch permission closures may be attributed
+  when they share the registration's block. Reconciliation never reaches
+  across a block boundary — batches never split a block, so the block is the
+  atomic unit every [batch grid](glossary.md#batch-grid) loads — so
+  predecessor-epoch observations that only
+  a later block's registration could identify keep their event-time
+  attribution (null `logical_name_id`/`resource_id` where no authority was
+  known) in every run shape (fresh, incremental, or
+  resumed).
+- Resource rows anchor at their first derivation block. A superseded
+  registry-only resource emission is retained even when no surviving
+  same-batch row references it, so the first-committed identity upsert anchors
+  the resource at the same block in every run shape. The single mover is the
+  bounded redo's orphan healing above: an identity still orphaned after a
+  replay re-anchors to the earliest surviving reference outside the redone
+  range.
 
 ## Resolution
 

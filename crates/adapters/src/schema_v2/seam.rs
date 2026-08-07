@@ -6,6 +6,7 @@ use anyhow::{Context, bail};
 use serde_json::{Value, json};
 use time::{Duration, OffsetDateTime};
 
+pub const PREIMAGE_OBSERVATION_EVENT_KIND: &str = "PreimageObserved";
 pub const SURFACE_BOUND_EVENT_KIND: &str = "SurfaceBound";
 pub const SURFACE_UNBOUND_EVENT_KIND: &str = "SurfaceUnbound";
 pub const SURFACE_BINDING_ID_KEY: &str = "surface_binding_id";
