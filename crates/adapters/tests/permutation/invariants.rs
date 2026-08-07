@@ -668,6 +668,11 @@ fn absorb_discovered_admissions(admitted: &mut Vec<AddressAdmissionInput>, from:
         // manifest id and leaves the role null, and the range starts at the later of the two
         // (`crates/interpret/src/load.rs`). Modelling any of that more loosely would admit in the
         // split replay what production would not, which reads as convergence.
+        //
+        // Opens only: the close side is not modelled. Production bounds the range by the edge's and
+        // the address's `active_to_block_number` and drops deactivated edges, so a resolver whose
+        // pointer has since moved stays admitted here for every later batch. That is the same
+        // over-admitting direction, still open.
         let Some(edge) = from.discovery_edges.iter().find(|edge| {
             edge.to_contract_instance_id == address.contract_instance_id
                 && edge.chain_id == address.chain_id

@@ -49,8 +49,17 @@ use permutation::{
 };
 
 /// 48 permutations per world. Deeper sweeps are clean to at least 600 per world, so this is a
-/// runtime budget rather than the edge of a known failure, and below the rate of the rarer
-/// batch-boundary artifacts — see `EXPECTED_ARTIFACTS`.
+/// runtime budget, and below the rate of the rarer batch-boundary artifacts — see
+/// `EXPECTED_ARTIFACTS`.
+///
+/// It is no longer below a known failure. Once the ENSv1 pool started emitting the registrar mint
+/// that a wrapped registration really makes, a sweep of 600 per world fails 3 of 1200 sequences,
+/// every one of them `registration_path: Wrapped` with `expiry_window: PastGrace`: the split replay
+/// derives an `AuthorityEpochChanged` and its `PermissionChanged` that the whole pass does not, so
+/// the two disagree about when the wrapper's authority lapsed. That is a live interpreter
+/// divergence this lane found and not a batch-boundary artifact — the whole pass derives strictly
+/// less, which is the direction `EXPECTED_ARTIFACTS` does not cover. Raising this knob will report
+/// it; it needs its own issue and fix, not a wider allowance here.
 const DEFAULT_CASES: u64 = 48;
 const DEFAULT_SEED: u64 = 0x6e0d_5eed;
 /// Distance between case seeds. Deliberately *not* the SplitMix64 increment: because that increment
@@ -556,7 +565,7 @@ const REQUIRED_EVENT_KINDS: &[(&str, &[&str])] = &[
 /// ENSv1 `carried_before_states` 7 times and ENSv2 `rebased_attributions` 4 times, both absent
 /// here. So a row shrinking is only evidence of a fix once the deeper sweep agrees.
 const EXPECTED_ARTIFACTS: &[(&str, &[(&str, usize)])] = &[
-    (ENS_V1_MAINNET.label, &[("rebased_anchors:resources", 63)]),
+    (ENS_V1_MAINNET.label, &[("rebased_anchors:resources", 60)]),
     (ENS_V2_SEPOLIA.label, &[]),
 ];
 

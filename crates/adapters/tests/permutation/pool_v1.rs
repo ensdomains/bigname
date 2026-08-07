@@ -163,7 +163,8 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
             }
         }
 
-        if dimensions.wrap_state != WrapState::Unwrapped {
+        let born_wrapped = dimensions.registration_path == RegistrationPath::Wrapped;
+        if dimensions.wrap_state != WrapState::Unwrapped || born_wrapped {
             let fuses = match dimensions.wrap_state {
                 WrapState::WrappedLocked => WRAPPED_2LD_FUSES | CANNOT_UNWRAP,
                 _ => WRAPPED_2LD_FUSES,
@@ -172,11 +173,18 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                 format!("{label}:wrap"),
                 stage::LINK,
                 vec![
+                    // Only an unwrapped name is handed to the wrapper; one registered through the
+                    // wrapped controller is already wrapper-owned, and re-emitting the registry
+                    // Transfer would acquire it twice.
                     emission(
                         wires.registry,
                         V1Registry::Transfer {
                             node,
-                            owner: wrapper_address,
+                            owner: if born_wrapped {
+                                registrant
+                            } else {
+                                wrapper_address
+                            },
                         }
                         .encode_log_data(),
                     ),
@@ -439,6 +447,19 @@ fn registration(
             ),
         ],
         RegistrationPath::Wrapped => vec![
+            // The registrar mints to the wrapper in the same transaction, then the registry names
+            // the wrapper as owner (upstream:
+            // .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @
+            // ens_v1@91c966f). Without the mint the wrapped path had no token lineage at all.
+            emission(
+                wires.registrar,
+                V1RegistrarToken::Transfer {
+                    from: Address::ZERO,
+                    to: wrapper,
+                    tokenId: U256::from_be_bytes(hash.0),
+                }
+                .encode_log_data(),
+            ),
             emission(
                 wires.registry,
                 V1Registry::NewOwner {

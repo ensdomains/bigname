@@ -354,9 +354,11 @@ fn draw_blocks(rng: &mut Rng) -> Vec<BlockSpec> {
             timestamp,
         });
         number += i64::try_from(rng.between(1, 40)).expect("gap fits i64");
-        // The final gap is long enough that a lapsed lease settles at a block boundary.
+        // The final gap is long enough that a lapsed lease settles at a block boundary, and longer
+        // than the 200 days the past-grace window backdates an expiry, so that a registration is
+        // never already expired at the block it is registered in.
         timestamp += if index + 2 == count {
-            i64::try_from(rng.between(90, 400)).expect("gap fits i64") * 86_400
+            i64::try_from(rng.between(201, 400)).expect("gap fits i64") * 86_400
         } else {
             i64::try_from(rng.between(1, 48)).expect("gap fits i64") * 3_600
         };
