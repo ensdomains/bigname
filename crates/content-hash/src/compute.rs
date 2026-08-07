@@ -81,6 +81,9 @@ pub(crate) fn watched_paths(workspace_root: &Path) -> Vec<PathBuf> {
         workspace_root.join(MANIFEST_ROOT),
         workspace_root.join(PROJECT_SOURCE_ROOT),
         workspace_root.join(INTERPRET_WRITE_SOURCE_ROOT),
+        // Not hashed, but scanned: a cfg(test) declaration here changes which files under the
+        // hashed root are excluded, so it has to trigger a rebuild.
+        workspace_root.join(INTERPRET_SOURCE_SCAN_ROOT),
     ];
     paths.extend(
         SEMANTIC_SOURCE_FILES

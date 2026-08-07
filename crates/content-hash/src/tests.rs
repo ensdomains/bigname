@@ -786,6 +786,10 @@ fn discover_cfg_test_module_sources(workspace_root: &Path) -> BTreeSet<String> {
         &workspace_root.join("crates/project/src"),
         &mut source_files,
     );
+    collect_rust_files(
+        &workspace_root.join("crates/interpret/src"),
+        &mut source_files,
+    );
     let mut gated_sources = BTreeSet::new();
 
     for parent_module in source_files {

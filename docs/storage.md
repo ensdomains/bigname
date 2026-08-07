@@ -139,18 +139,24 @@ same rule: which interpreted row wins a conflict, how a redo range reopens and
 reanchors bindings, and which surfaces a normalizer-version recompute
 activates all decide which identity, discovery, and label-preimage rows the
 projections then read, so they are interpretation rather than plumbing.
-Interpret's batch sizing and phase orchestration stay outside, because folding
-the same events into differently sized physical batches produces the same
-rows. Request-scoped serving and RPC transport are outside for the same
-reason, so a serving-only change does not force a re-derivation.
+Interpret's batch sizing stays outside, because folding the same events into
+differently sized physical batches produces the same rows. Request-scoped
+serving, RPC transport, and phase orchestration are outside because they
+decide no persisted row, so a serving-only change does not force a
+re-derivation.
 
-Two semantic surfaces are outside the hash today and are guarded by review
-rather than by a rotation. Interpret's prior-state loader selects which earlier
-interpreted state an adapter sees, so an edit to that selection can change
-interpreted output without rotating the hash. Checked-in SQL — migration
-trigger bodies and the schema-v2 baseline constraints — likewise shapes
-persisted rows. Treat a change to either as a re-derivation decision and
-follow the
+Several semantic surfaces are outside the hash today and are guarded by review
+rather than by a rotation:
+
+- interpret's input loader — which earlier interpreted state an adapter sees,
+  which manifest versions and admitted address ranges it reads, and the order
+  raw logs arrive in;
+- the interpret engine's redo and completion gates, which decide whether a run
+  clears a redo range or reanchors stable identities;
+- checked-in SQL, meaning migration trigger bodies and the schema-v2 baseline
+  constraints.
+
+Treat a change to any of them as a re-derivation decision and follow the
 [planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary).
 
 A hash rotation requires a planned full-history interpretation and projection
