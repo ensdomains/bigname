@@ -333,8 +333,10 @@ The receiver is the [migration controller](#migration-controller) for a locked
 `WrapperRegistry` inherits the same receiver
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L30 @ ens_v2@ccaeb58),
 so the deployment above runs with the parent registry as the caller. Naming the
-controller as the deployer is wrong for every level below the second. An
-[emancipated child](#migratable-child) gets no registry at all — that branch
+controller as the deployer is wrong for every level below the second. A
+*non-locked* [helper-positive child](#migratable-child) gets no registry at
+all — a locked child does get one, per the split in that entry — because that
+branch
 unwraps the name and registers it with whatever subregistry the caller supplied
 (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58).
 
@@ -357,13 +359,55 @@ single implementation *family* rather than one implementation — instead of bei
 fixed by manifest declaration. Code that identifies these registries by a single
 expected implementation address will miss upgraded ones.
 
-**Migratable child** — an emancipated child of an already-migrated name that
-has not migrated yet. Its parent's
+**Migratable child** — a child of an already-migrated name that has not
+migrated yet. Its parent's
 [migration registry](#migration-registry-wrapperregistry) refuses to let anyone
 register that label
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L170 @ ens_v2@ccaeb58),
 so the child cannot be taken on the ENSv2 side and keeps resolving through
-ENSv1 for as long as it stays unmigrated. This is a legitimate steady state,
+ENSv1 for as long as it stays unmigrated.
+
+Which children qualify is broader than the name suggests, and this is the one
+place in the migration cluster where "emancipated" must not be read as the
+[emancipated NameWrapper state](#emancipated-namewrapper-state) defined above.
+The gate is `LibMigration.isEmancipatedChild`, which tests only that
+`PARENT_CANNOT_CONTROL` is burned and the name is not a `.eth` 2LD
+(upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L88 @ ens_v2@ccaeb58);
+it never consults `CANNOT_UNWRAP`, so it is *also* true of a
+[locked](#locked-namewrapper-state) child, and that is the predicate the
+migratable-child test uses
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58).
+Three states therefore have to be kept apart, because two of them migrate by
+different paths:
+
+- *Helper-positive child* — any child satisfying `isEmancipatedChild`. This is
+  the superset that "migratable child" is defined over, and it is not a
+  migration path in itself.
+- *Locked child* — helper-positive and `CANNOT_UNWRAP` burned
+  (upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L76 @ ens_v2@ccaeb58).
+  The receiver tests locked **first**
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L127 @ ens_v2@ccaeb58),
+  so such a child never reaches the emancipated branch: its ERC-1155 moves to
+  the [Graveyard](#graveyard) with no unwrap
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
+  and it gets a [migration registry](#migration-registry-wrapperregistry) of its
+  own
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2@ccaeb58).
+- *Non-locked helper-positive child* — the true emancipated state, and the only
+  one that reaches the second branch
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L176 @ ens_v2@ccaeb58).
+  It is unwrapped into the Graveyard
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58)
+  and injected into the parent's existing registry with no registry deployed for
+  it
+  (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58).
+
+Anything else reverts
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L188 @ ens_v2@ccaeb58).
+Reading the no-deploy rule as covering every helper-positive child is the
+mistake this three-way split exists to prevent.
+
+The unmigrated state is a legitimate steady state,
 not a transient one: a name tree can have a parent whose registration is
 ENSv2-authoritative and a child whose control and records stay
 ENSv1-authoritative, and nothing terminates that split automatically — it ends
@@ -415,7 +459,9 @@ wrong events and the wrong terminal state:
   one is a recognized old `PublicResolver`
   (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L138 @ ens_v2@ccaeb58)
   (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L140 @ ens_v2@ccaeb58).
-- *Emancipated child.* Resolver cleared, then unwrapped into the Graveyard
+- *Emancipated child, in the narrow non-locked sense
+  ([three-way split](#migratable-child)) — a locked child takes the bullet
+  above instead.* Resolver cleared, then unwrapped into the Graveyard
   (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L177 @ ens_v2@ccaeb58)
   (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58).
 

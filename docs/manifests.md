@@ -82,7 +82,7 @@ Basenames resolver classification instead requires the resolver address itself
 to be an active `[[contracts]]` declaration. Neither path reads or infers a
 runtime code hash.
 
-For `[[discovery_rules]]`, the only authorable `admission` value is `reachable_from_root` — the discovered edge is authoritative while its `from_role` endpoint remains reachable from an active manifest root under an allowed rule. Internal labels like `manifest_declared` and `manifest_successor` are storage tags, not authored values.
+For `[[discovery_rules]]`, the only authorable `admission` value is `reachable_from_root` — the discovered edge is authoritative while its `from_role` endpoint remains reachable from an active manifest root under an allowed rule. Internal labels are storage tags, not authored values: `manifest_declared` is an `admission_basis`, and `manifest_declared_proxy` is the `discovery_source` written alongside it for manifest-declared proxy edges.
 
 `[abi]` is optional. When present, it declares the Solidity ABI fragments that this manifest version authorizes for adapter, execution, or watch-plan use. ABI entries are source-family metadata; they do not by themselves promote public capability support.
 
