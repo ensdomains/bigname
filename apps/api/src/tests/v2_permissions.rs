@@ -468,7 +468,7 @@ async fn v2_get_permissions_decodes_and_serves_a_stored_reserved_scope() -> Resu
         113,
     );
     apply_raw_log_permission_lineage(&mut residual_row, "set_resolver", 113);
-    bigname_storage::upsert_permissions_current_rows(&database.pool, &[residual_row]).await?;
+    upsert_phase_permissions_current_rows(&database.pool, &[residual_row]).await?;
 
     let response = v2_permissions_response_for_database(
         &database,
@@ -511,7 +511,7 @@ async fn v2_permissions_serve_unprojected_authority_resources_as_partial() -> Re
                 .as_array()
                 .expect("permissions data must be an array")
                 .len(),
-            5
+            4
         );
         assert_eq!(payload["meta"]["completeness"], json!("partial"));
         assert_eq!(
