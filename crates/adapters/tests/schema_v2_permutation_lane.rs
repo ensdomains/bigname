@@ -18,7 +18,8 @@
 //! The knobs drop some of the assertions about what the corpus reaches, because those are
 //! properties of the default corpus rather than of any seed: a reduced or reseeded run drops the
 //! interpretation-coverage floor, and any run that is not exactly the default corpus also drops the
-//! exact artifact and detach counts, which a deeper sweep would legitimately exceed. A deeper sweep
+//! exact artifact and detach counts and the volume floors, which a deeper sweep would legitimately
+//! exceed. A deeper sweep
 //! at the default seed keeps the coverage floor, which only grows. The invariants themselves — the
 //! ones a failure would report — run on every sequence whatever the knobs say.
 //!
@@ -790,12 +791,29 @@ fn assert_volume_floors(derived: &[(&str, usize, usize)]) -> Result<()> {
         if events < min_events || logs < min_logs {
             bail!(
                 "{world} produced {events} normalized events from {logs} raw logs, under the \
-                 volume floor of {min_events} events and {min_logs} logs: the corpus collapsed. \
+                 volume floor ({min_events} events, {min_logs} logs): the corpus collapsed. \
                  {DRAWN_CORPUS_CAVEAT} Otherwise find what the generator stopped emitting"
             );
         }
     }
     Ok(())
+}
+
+/// The floor is a minimum in both axes: the observed totals pass it, and one event or one log
+/// below it fails — including the failure path, which the lane's own green run never exercises.
+#[test]
+fn volume_floors_fail_under_the_minimum() {
+    let at = MINIMUM_VOLUMES
+        .iter()
+        .map(|(world, logs, events)| (*world, *events, *logs))
+        .collect::<Vec<_>>();
+    assert!(assert_volume_floors(&at).is_ok());
+    let mut one_event_under = at.clone();
+    one_event_under[0].1 -= 1;
+    assert!(assert_volume_floors(&one_event_under).is_err());
+    let mut one_log_under = at;
+    one_log_under[1].2 -= 1;
+    assert!(assert_volume_floors(&one_log_under).is_err());
 }
 
 fn knob(name: &str, fallback: u64) -> Result<u64> {

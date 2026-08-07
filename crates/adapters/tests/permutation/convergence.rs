@@ -83,6 +83,7 @@ impl std::fmt::Display for BatchBoundaryArtifacts {
     }
 }
 
+#[derive(Clone)]
 struct Row {
     key: String,
     body: String,
@@ -778,4 +779,38 @@ fn discovery_edge_closures(output: &BatchOutput) -> Vec<Row> {
             anchor: String::new(),
         })
         .collect()
+}
+
+/// The corpus never repeats these families' keys today, so the failure direction only exists here:
+/// a divergent successor body fails, a different repeat count fails, order alone does not.
+#[test]
+fn emission_multiset_fails_on_any_divergence_kept_row_comparison_missed() {
+    let row = |key: &str, body: &str, anchor: &str| Row {
+        key: key.to_owned(),
+        body: body.to_owned(),
+        anchor: anchor.to_owned(),
+    };
+    let whole = vec![
+        row("k", "first-body", "a1"),
+        row("k", "second-body", "a2"),
+        row("k", "second-body", "a2"),
+        row("other", "x", "a3"),
+    ];
+    // Identical kept row and key set — only a successor's body differs.
+    let divergent_successor = vec![
+        row("k", "first-body", "a1"),
+        row("k", "second-body", "a2"),
+        row("k", "divergent", "a2"),
+        row("other", "x", "a3"),
+    ];
+    assert!(assert_emission_multiset("test", "family", &whole, &divergent_successor).is_err());
+    let fewer_repeats = vec![
+        row("k", "first-body", "a1"),
+        row("k", "second-body", "a2"),
+        row("other", "x", "a3"),
+    ];
+    assert!(assert_emission_multiset("test", "family", &whole, &fewer_repeats).is_err());
+    let mut reordered = whole.clone();
+    reordered.swap(0, 2);
+    assert!(assert_emission_multiset("test", "family", &whole, &reordered).is_ok());
 }

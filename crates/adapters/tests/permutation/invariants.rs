@@ -299,8 +299,10 @@ impl IdentityReferences {
     }
 }
 
-/// The convergence check keeps one row per key per family, modelling the upsert as "one emission
-/// wins and the rest are harmless replays". That is only half the writer: each upsert carries a
+/// For the families whose convergence check keeps one row per key, the model is the upsert's "one
+/// emission wins and the rest are harmless replays"; `contract_addresses` and `discovery_edges`
+/// compare the full emission multiset instead and are not this check's business. For the kept-row
+/// families that is only half the writer: each upsert carries a
 /// `WHERE` guard, and a re-emission that disagrees with the stored row on a guarded column matches
 /// no row, returns nothing, and fails the batch (`crates/interpret/src/write/identity.rs`,
 /// `identity_names.rs`). Repeats are the norm rather than an edge case — the adapter emits a name
