@@ -13,6 +13,10 @@ const ADAPTER_SOURCE_ROOT: &str = "crates/adapters/src";
 const MANIFEST_AUTHORITY_SOURCE_ROOT: &str = "crates/manifests/src";
 const MANIFEST_ROOT: &str = "manifests";
 const PROJECT_SOURCE_ROOT: &str = "crates/project/src";
+/// Write-conflict policy: which interpreted row wins a persistence conflict, and therefore which
+/// identity, discovery, and preimage rows the projections read. The rest of `crates/interpret` is
+/// engine batching and orchestration, which is guaranteed grid-independent and stays outside.
+const INTERPRET_WRITE_SOURCE_ROOT: &str = "crates/interpret/src/write";
 const MINIMUM_MANIFEST_EVENT_COUNT: usize = 111;
 const MINIMUM_EVENT_MANIFEST_COUNT: usize = 16;
 const HASH_FORMAT: &[u8] = b"bigname-interpreter-content-v3\0";
@@ -45,6 +49,9 @@ const SEMANTIC_SOURCE_FILES: &[&str] = &[
     // are persisted.
     "crates/lookup/src/reverse_names.rs",
     "crates/lookup/src/text_records.rs",
+    // Module wiring and the recompute entry point for the write-conflict policy above.
+    "crates/interpret/src/write.rs",
+    "crates/interpret/src/recompute.rs",
 ];
 
 #[allow(dead_code)]
@@ -70,6 +77,7 @@ pub(crate) fn watched_paths(workspace_root: &Path) -> Vec<PathBuf> {
         workspace_root.join(MANIFEST_AUTHORITY_SOURCE_ROOT),
         workspace_root.join(MANIFEST_ROOT),
         workspace_root.join(PROJECT_SOURCE_ROOT),
+        workspace_root.join(INTERPRET_WRITE_SOURCE_ROOT),
     ];
     paths.extend(
         SEMANTIC_SOURCE_FILES
@@ -145,6 +153,7 @@ fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
             ADAPTER_SOURCE_ROOT,
             MANIFEST_AUTHORITY_SOURCE_ROOT,
             PROJECT_SOURCE_ROOT,
+            INTERPRET_WRITE_SOURCE_ROOT,
         ],
     )?;
     collect_rust_sources(
@@ -165,6 +174,12 @@ fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
     collect_rust_sources(
         workspace_root,
         &workspace_root.join(PROJECT_SOURCE_ROOT),
+        &cfg_test_sources,
+        &mut inputs,
+    )?;
+    collect_rust_sources(
+        workspace_root,
+        &workspace_root.join(INTERPRET_WRITE_SOURCE_ROOT),
         &cfg_test_sources,
         &mut inputs,
     )?;

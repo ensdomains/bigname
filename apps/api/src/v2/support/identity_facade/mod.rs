@@ -303,6 +303,9 @@ fn reverse_identity_record(
     })
 }
 
+/// Pairs with `page::load_normalized_primary_names`: that one admits a claim on chain id plus
+/// target block hash, this one also joins the target block number. They agree except on a corrupt
+/// provenance row, and they only stay in step if they are changed together.
 async fn load_identity_primary_name_snapshots(
     pool: &PgPool,
     inputs: &[ReverseIdentityStorageInput],

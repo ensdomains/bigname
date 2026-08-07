@@ -80,14 +80,14 @@ pub(super) async fn load_reverse_identity_page_rows(
             FROM (
                 SELECT anc.logical_name_id,
                        bool_or(COALESCE(
-                           requested.primary_names ->> anc.namespace = lower(anc.raw_name),
+                           requested.primary_names ->> anc.namespace = anc.raw_name,
                            false
                        )) AS is_primary,
                        min(CASE
                            WHEN anc.relation IN ('registrant', 'token_holder') THEN 0
                            ELSE 1
                        END)::SMALLINT AS role_rank,
-                       lower(anc.raw_name) AS normalized_name,
+                       anc.raw_name AS normalized_name,
                        anc.namespace,
                        anc.namehash
                 FROM readable_relations anc
@@ -101,8 +101,7 @@ pub(super) async fn load_reverse_identity_page_rows(
                       OR (requested.roles = 'managed'
                           AND anc.relation = 'effective_controller')
                   )
-                GROUP BY anc.logical_name_id, lower(anc.raw_name), anc.namespace,
-                         anc.namehash
+                GROUP BY anc.logical_name_id, anc.raw_name, anc.namespace, anc.namehash
             ) grouped
             WHERE NOT requested.cursor_present
                OR (
@@ -159,6 +158,9 @@ pub(super) async fn load_reverse_identity_page_rows(
         .collect()
 }
 
+/// Pairs with `load_identity_primary_name_snapshots`: this admits a claim on chain id plus target
+/// block hash, that one also joins the target block number. They agree except on a corrupt
+/// provenance row, and they only stay in step if they are changed together.
 async fn load_normalized_primary_names(
     pool: &PgPool,
     inputs: &[ReverseIdentityStorageInput],
@@ -210,10 +212,13 @@ async fn load_normalized_primary_names(
         let input_index = row.try_get::<i32, _>("input_index")? as usize;
         let namespace: String = row.try_get("namespace")?;
         let raw_name: Option<String> = row.try_get("raw_claim_name")?;
-        // Same derivation the emitted `is_primary` uses, so the ordering and keyset predicate this
-        // map feeds cannot disagree with the flag the response carries. The status is `Success`
-        // because the query above selects only successful claims. A claim that yields no
-        // normalized name marks nothing primary instead of failing the batch.
+        // Same derivation the emitted `is_primary` uses, so this map and the flag the response
+        // carries evaluate the same predicate over the same two strings. The page rows and the
+        // primary-name snapshots are separate statements, so a projection write landing between
+        // them can still skew one against the other for one request; that is the ordinary
+        // latest-state race, not a predicate disagreement. The status is `Success` because the
+        // query above selects only successful claims. A claim that yields no normalized name
+        // marks nothing primary instead of failing the batch.
         let Some(normalized) = bigname_storage::normalized_claim_name(
             bigname_storage::PrimaryNameClaimStatus::Success,
             row.try_get("claim_name_is_normalized")?,

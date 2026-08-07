@@ -1008,6 +1008,83 @@ async fn v2_lookup_reverse_orders_pages_by_the_is_primary_it_returns() -> Result
 }
 
 #[tokio::test]
+async fn v2_lookup_reverse_pages_a_case_unstable_primary_name_without_repeating_rows() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    // A single-script Cherokee name passes ENSIP-15 byte-identical, so the projection stores it
+    // verbatim — but Postgres `lower()` maps it to the lowercase Cherokee block, i.e. different
+    // bytes. Comparing or sorting through `lower()` would therefore put this row in the
+    // non-primary block while the response reports it as primary, and the keyset built from the
+    // reported flag then serves an earlier row a second time.
+    let cherokee = "ᏣᎳᎩ.eth";
+    seed_identity_name(
+        &database,
+        "ens:ᏣᎳᎩ.eth",
+        cherokee,
+        cherokee,
+        "namehash:ᏣᎳᎩ.eth",
+        Uuid::from_u128(0x5a0241),
+        Uuid::from_u128(0x5a0242),
+        Uuid::from_u128(0x5a0243),
+        address,
+        bigname_storage::AddressNameRelation::EffectiveController,
+        43,
+    )
+    .await?;
+    seed_phase_primary_name_snapshot(
+        &database,
+        address,
+        "ens",
+        "60",
+        bigname_storage::PrimaryNameClaimStatus::Success,
+        Some(cherokee),
+        true,
+    )
+    .await?;
+
+    let mut seen = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..5 {
+        let mut input = json!({"id": "addr", "address": address, "page_size": 1});
+        if let Some(cursor) = cursor.as_deref() {
+            input["cursor"] = json!(cursor);
+        }
+        let payload =
+            v2_lookup_json(&database, json!({"profile": "detail", "inputs": [input]})).await?;
+        let records = payload["data"][0]["records"]
+            .as_array()
+            .expect("reverse lookup records must be an array");
+        for record in records {
+            let name = record["name"]
+                .as_str()
+                .expect("record name must be a string")
+                .to_owned();
+            assert_eq!(
+                record["is_primary"],
+                json!(name == cherokee),
+                "only the claimed name is primary, got {record}"
+            );
+            seen.push(name);
+        }
+        match payload["data"][0]["page"]["next_cursor"].as_str() {
+            Some(next) => cursor = Some(next.to_owned()),
+            None => break,
+        }
+    }
+
+    assert_eq!(
+        seen,
+        vec![cherokee.to_owned(), "alice.eth".to_owned(), "bob.eth".to_owned()],
+        "the primary row sorts first and no row is served twice"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_lookup_reverse_page_and_count_include_primary_when_matching_relation_is_unreadable()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -1713,10 +1790,12 @@ async fn advance_v2_lookup_phase_only_ethereum_head(
 }
 
 async fn seed_v2_lookup_reverse_fixture(database: &TestDatabase, address: &str) -> Result<()> {
+    // The interpret gate admits a name surface as active only when its bytes are already the
+    // ENSIP-15 normalized form, so a supported fixture row carries the normalized spelling.
     seed_identity_name(
         database,
         "ens:alice.eth",
-        "Alice.eth",
+        "alice.eth",
         "alice.eth",
         "namehash:alice.eth",
         Uuid::from_u128(0x5a0201),
@@ -1730,7 +1809,7 @@ async fn seed_v2_lookup_reverse_fixture(database: &TestDatabase, address: &str) 
     seed_identity_name(
         database,
         "ens:bob.eth",
-        "Bob.eth",
+        "bob.eth",
         "bob.eth",
         "namehash:bob.eth",
         Uuid::from_u128(0x5a0211),

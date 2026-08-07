@@ -46,14 +46,18 @@ async fn healthz_judges_the_worst_expected_chain_not_the_freshest_heartbeat() ->
     assert_eq!(missing_loop["status"], json!("stale"));
     assert_eq!(missing["status"], json!("degraded"));
     assert_eq!(missing["api_status"], json!("ready"));
-    // A chain with no heartbeat is not described by another chain's evidence.
+    // A chain with no heartbeat is not described by another chain's evidence. The keys stay
+    // present and carry null, so index-and-compare would also pass on a dropped key.
     for field in [
         "phase",
         "started_at",
         "heartbeat_at",
         "heartbeat_age_seconds",
     ] {
-        assert_eq!(missing_loop[field], Value::Null, "{field}");
+        let value = missing_loop
+            .get(field)
+            .unwrap_or_else(|| panic!("{field} must be present"));
+        assert!(value.is_null(), "{field} must be null, got {value}");
     }
     assert_eq!(missing_loop["max_age_seconds"], json!(60));
 

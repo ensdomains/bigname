@@ -192,24 +192,43 @@ fn normalizer_version_and_test_only_sources_do_not_change_hash() {
 }
 
 #[test]
-fn interpret_runtime_and_schema_writers_do_not_change_hash() {
+fn phase_orchestration_does_not_change_hash() {
     let tree = SampleTree::new();
     let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
 
     tree.write(
-        "crates/interpret/src/write.rs",
-        "fn persist_plain_schema_rows() {}\n",
-    );
-    tree.write(
         "apps/phase-runner/src/interpret_phase.rs",
         "fn run_interpret_phase() {}\n",
+    );
+    tree.write(
+        "crates/interpret/src/engine/batching.rs",
+        "fn size_batches() {}\n",
     );
 
     let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
     assert_eq!(
         first, changed,
-        "phase orchestration and schema-v2 writers must remain outside the interpreter hash"
+        "phase orchestration and interpret engine batching must remain outside the hash"
     );
+}
+
+#[test]
+fn write_conflict_policy_changes_the_hash() {
+    // Which interpreted row wins a persistence conflict decides which identity, discovery, and
+    // preimage rows the projections then read, so it is interpretation, not plumbing.
+    for relative_path in [
+        "crates/interpret/src/write/identity_names.rs",
+        "crates/interpret/src/write.rs",
+        "crates/interpret/src/recompute.rs",
+    ] {
+        let tree = SampleTree::new();
+        let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+
+        tree.write(relative_path, "fn source_priority() -> u8 { 2 }\n");
+
+        let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
+        assert_ne!(first, changed, "{relative_path} must rotate the hash");
+    }
 }
 
 #[test]
@@ -534,6 +553,10 @@ impl SampleTree {
         tree.write(
             "crates/project/src/projection.rs",
             "fn derive_invalidations() {}\n",
+        );
+        tree.write(
+            "crates/interpret/src/write/identity_names.rs",
+            "fn source_priority() -> u8 { 1 }\n",
         );
         for relative_path in semantic_source_files() {
             tree.write(relative_path, "pub fn semantics() -> bool { true }\n");
