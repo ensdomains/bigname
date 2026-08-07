@@ -808,9 +808,10 @@ fn discovery_edge_closures(output: &BatchOutput) -> Vec<Row> {
         .collect()
 }
 
-/// The corpus repeats these families' keys only as same-body re-observations, so the failure
-/// directions only exist here: a uniformly divergent replay body fails, a different repeat count
-/// fails, a within-pass body change fails on either pass, and anchor order alone does not.
+/// The corpus repeats only contract_addresses keys today, always as same-body re-observations, so
+/// the failure directions only exist here: a uniformly divergent replay body fails, a different
+/// repeat count fails, a within-pass body change fails on either pass, and anchor order alone does
+/// not.
 #[test]
 fn emission_multiset_and_its_repeat_premise_fail_on_each_divergence_shape() {
     let row = |key: &str, body: &str, anchor: &str| Row {

@@ -656,8 +656,12 @@ const MINIMUM_VOLUMES: &[(&str, usize, usize)] = &[
 /// added. Presence alone would let the axis rot silently — the burst is a few percent of the
 /// corpus, so zeroing its draw or malforming its logs (the interpreter then drops them) moves
 /// neither the kind floor nor the volume floors. Every burst log derives exactly one event today,
-/// so the second column is also the burst-log count; a malformed fragment lowers it. ENSv2's zero
-/// row pins the axis as ENSv1-only until someone deliberately extends it there.
+/// so the second column is also the burst-log count; a malformed fragment lowers it. The corpus
+/// event total nets ~2 fewer than the burst-log count across the corpus — the burst's extra action
+/// re-rolls each burst case's layout, and same-transaction reconciliation collapses derivations
+/// the burst-free layout kept — so compare this column against the burst logs, not the corpus
+/// event delta. ENSv2's zero row pins the axis as ENSv1-only until someone deliberately extends it
+/// there.
 const EXPECTED_BURST_REACH: &[(&str, usize, usize)] =
     &[(ENS_V1_MAINNET.label, 8, 42), (ENS_V2_SEPOLIA.label, 0, 0)];
 
