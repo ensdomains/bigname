@@ -594,10 +594,10 @@ const EXPECTED_SUBREGISTRY_DETACHES: &[(&str, usize)] =
 /// regression that collapses corpus volume while keeping one witness per required kind passes
 /// silently. Floors, not exact pins: a deeper sweep and legitimate generator evolution both grow
 /// these totals, and only the default corpus asserts them (the same gate as the pins). Derived
-/// from the default-corpus run at 8b6d796d — ens_v1_mainnet 1404 raw logs and 4514 normalized
-/// events, ens_v2_sepolia 965 and 1987 — with each floor 70% of that run, truncated.
+/// from the default-corpus run that introduced them — ens_v1_mainnet 1446 raw logs and 4554
+/// normalized events, ens_v2_sepolia 965 and 1987 — with each floor 70% of that run, truncated.
 const MINIMUM_VOLUMES: &[(&str, usize, usize)] = &[
-    (ENS_V1_MAINNET.label, 982, 3159),
+    (ENS_V1_MAINNET.label, 1012, 3187),
     (ENS_V2_SEPOLIA.label, 675, 1390),
 ];
 

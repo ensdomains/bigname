@@ -676,10 +676,12 @@ fn absorb_discovered_admissions(admitted: &mut Vec<AddressAdmissionInput>, from:
         //
         // TODO(#320): modelling closes becomes required, not optional, before any pool gains a
         // pointer-move action — one that moves a resolver or registry pointer off an address that
-        // later emits logs. Until then the gap is inert: both worlds statically pre-admit every
-        // log-emitting address, so the carry never decides whether a log is interpreted. With
-        // such an action the over-admission above would read a dropped-log divergence as
-        // convergence.
+        // later emits logs. Until then the gap is inert: every log-emitting address is either
+        // statically pre-admitted (all of ENSv1's, and ENSv2's four role addresses) or, like the
+        // announced registry, matched emitter-agnostically on an event that admits regardless of
+        // emitter and never emits again — so the carry never decides whether a log is
+        // interpreted. With such an action the over-admission above would read a dropped-log
+        // divergence as convergence.
         let Some(edge) = from.discovery_edges.iter().find(|edge| {
             edge.to_contract_instance_id == address.contract_instance_id
                 && edge.chain_id == address.chain_id

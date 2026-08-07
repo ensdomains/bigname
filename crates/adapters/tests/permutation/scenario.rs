@@ -155,10 +155,11 @@ pub struct Dimensions {
     pub perturbations: Vec<Perturbation>,
     pub name_count: usize,
     pub dense_transactions: bool,
-    /// ENSv1 only: wrap each registration action in a same-transaction resolver burst whose record
-    /// writes are log-ordered before the controller's registration, and add a rewrite of the same
-    /// selector after it — the pre-registration resolver traffic the stage ordering otherwise
-    /// keeps unreachable. See `pool_v1::burst_around_registration` for the upstream legality.
+    /// ENSv1 only: wrap each label's onboarding registration action in a same-transaction resolver
+    /// burst whose record writes are log-ordered before the controller's registration, and add a
+    /// rewrite of the same selector after it — the pre-registration resolver traffic the stage
+    /// ordering otherwise keeps unreachable. The `Reregistration` perturbation's later registration
+    /// is deliberately not wrapped. See `pool_v1::burst_around_registration` for the legality.
     pub pre_registration_burst: bool,
 }
 
@@ -292,10 +293,11 @@ impl Scenario {
 
 const BASE_TIMESTAMP: i64 = 1_600_000_000;
 const BASE_BLOCK: i64 = 15_000_000;
-/// Salt for the burst axis's side stream. The main draw order — and with it the pinned default
-/// corpus — must stay identical whether or not the burst fires, so the axis draws from a stream
-/// the rest of generation never touches; without that, adding the axis would redraw every case
-/// and move the drawn-corpus pins for reasons unrelated to the burst.
+/// Salt for the burst axis's side stream. The main draw order must be identical whether or not the
+/// burst fires — every case it does not fire in stays byte-identical to the pre-axis corpus, and
+/// the drawn-corpus pins keep their anchor — so the axis draws from a stream the rest of
+/// generation never touches; drawing it from the main stream would redraw every case and move the
+/// pins for reasons unrelated to the burst.
 const PRE_REGISTRATION_BURST_SALT: u64 = 0x5bd1_e995_4a89_1d4b;
 
 pub fn generate(world: &'static World, wiring: &Wiring, seed: u64) -> Scenario {

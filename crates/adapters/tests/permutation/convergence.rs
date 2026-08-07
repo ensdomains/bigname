@@ -94,7 +94,10 @@ struct Row {
 /// (`crates/interpret/src/write/identity_names.rs`), and the adapter writes one priority, so the
 /// last emission wins there. `Every` compares the full per-key multiset instead of a survivor: the
 /// families using it repeat a key only as a replay that must be identical, so a successor emission
-/// that disagrees with the first is a divergence the kept-row comparison would discard unseen.
+/// that disagrees with the first is a divergence the kept-row comparison would discard unseen. The
+/// default corpus today never repeats their keys, so the multiset path reduces to the kept-row
+/// comparison until the pools evolve a repeat — the same honest-reach caveat `EXPECTED_ARTIFACTS`
+/// carries for classes the corpus does not reach.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Keeps {
     First,
