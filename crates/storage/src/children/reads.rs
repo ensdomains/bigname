@@ -20,8 +20,9 @@ use super::{
 /// the escape-encoded raw bytes, and the documented `[<labelhash-without-0x>].<parent-name>`
 /// placeholder. The first two are null exactly when Project had nothing to write; the placeholder
 /// is total, which is what keeps a null out of a mandatory field. The escape arm re-encodes the
-/// whole stored string, so a non-ASCII parent portion is octal-escaped too; only the placeholder
-/// carries the parent's stored spelling verbatim. That spelling is empty only for the zero-label
+/// whole stored string, so a non-ASCII parent portion is octal-escaped too, while the placeholder
+/// carries the parent's spelling as-is — and reads it here rather than inheriting the copy Project
+/// composed into the name columns. That spelling is empty only for the zero-label
 /// root surface, since a parent whose own labels do not decode is written
 /// `visibility_state = 'shadow'` and both children projection arms admit active parents only. No
 /// route can address the empty name, so the trailing-dot string that root would produce never
