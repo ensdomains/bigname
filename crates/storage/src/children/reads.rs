@@ -14,7 +14,10 @@ use super::{
     },
 };
 
-/// Registry events prove a child node and its labelhash but not the label itself, so Project
+/// `NewOwner` carries the labelhash, not the label
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L45 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L82 @ ens_v1@91c966f),
+/// so a registry event proves a child node and its labelhash but not the label itself. Project
 /// writes the name columns null until a preimage arrives, and stores raw bytes with no decoded
 /// form for a preimage that does not decode. The arms answer in that order: the decoded name,
 /// the escape-encoded raw bytes, and the documented `[<labelhash-without-0x>].<parent-name>`
