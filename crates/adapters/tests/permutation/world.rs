@@ -314,6 +314,8 @@ pub struct GeneratedLog {
     pub emitter: String,
     pub topics: Vec<String>,
     pub data: Vec<u8>,
+    /// Carries `Emission::burst` through layout; see `scenario::Emission`.
+    pub burst: bool,
 }
 
 fn find_checked_in<'a>(

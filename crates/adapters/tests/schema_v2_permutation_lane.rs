@@ -18,8 +18,8 @@
 //! The knobs drop some of the assertions about what the corpus reaches, because those are
 //! properties of the default corpus rather than of any seed: a reduced or reseeded run drops the
 //! interpretation-coverage floor, and any run that is not exactly the default corpus also drops the
-//! exact artifact and detach counts and the volume floors, which a deeper sweep would legitimately
-//! exceed. A deeper sweep
+//! exact artifact, detach, and burst-reach counts and the volume floors, which a deeper sweep would
+//! legitimately exceed. A deeper sweep
 //! at the default seed keeps the coverage floor, which only grows. The invariants themselves — the
 //! ones a failure would report — run on every sequence whatever the knobs say.
 //!
@@ -88,6 +88,7 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
     let mut emitted_topic0s = BTreeSet::new();
     let mut event_kinds: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     let mut derived = Vec::new();
+    let mut burst_reach: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
     for world in WORLDS {
         let wiring = Wiring::build(world, &checked_in)?;
         let declared = wiring.declared_instances();
@@ -96,6 +97,8 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
         let mut logs = 0_usize;
         let mut world_artifacts = BatchBoundaryArtifacts::default();
         let mut world_detaches = 0_usize;
+        let mut world_burst_cases = 0_usize;
+        let mut world_burst_derivations = 0_usize;
         for case in 0..cases {
             let seed = base.wrapping_add(case.wrapping_mul(CASE_STRIDE));
             let scenario = scenario::generate(world, &wiring, seed);
@@ -107,10 +110,33 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
                     .filter_map(|log| log.topics.first())
                     .map(|topic| topic.to_ascii_lowercase()),
             );
+            world_burst_cases += usize::from(scenario.dimensions.pre_registration_burst);
+            // Absolute chain positions of the logs the burst added, so the run can count how many
+            // of them the interpretation actually derives an event from.
+            let burst_positions: BTreeSet<(i64, i64, i64)> = scenario
+                .logs
+                .iter()
+                .filter(|log| log.burst)
+                .map(|log| {
+                    (
+                        scenario.blocks[log.block_index].number,
+                        log.transaction_index,
+                        log.log_index,
+                    )
+                })
+                .collect();
             let context = scenario.describe();
             let input = wiring.batch_input(&scenario.blocks, &scenario.logs)?;
             let batches = split(input.blocks.len(), seed ^ SPLIT_SALT);
-            match check(&context, world, &declared, &manifest_ids, input, batches) {
+            match check(
+                &context,
+                world,
+                &declared,
+                &manifest_ids,
+                input,
+                batches,
+                &burst_positions,
+            ) {
                 Ok(outcome) => {
                     // Per sequence, not just per world: an admission or role mismatch that dropped
                     // most sequences would leave the world total positive and the kind floor
@@ -128,6 +154,7 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
                         .extend(outcome.event_kinds);
                     world_artifacts.absorb(outcome.artifacts);
                     world_detaches += outcome.subregistry_detaches;
+                    world_burst_derivations += outcome.burst_derivations;
                 }
                 Err(error) => failures.push(format!("{error:?}")),
             }
@@ -143,6 +170,7 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
         artifacts.insert(world.label, world_artifacts);
         subregistry_detaches.insert(world.label, world_detaches);
         derived.push((world.label, events, logs));
+        burst_reach.insert(world.label, (world_burst_cases, world_burst_derivations));
     }
     for (world, kinds) in &event_kinds {
         eprintln!(
@@ -184,6 +212,7 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
         return Ok(());
     }
     assert_pinned_artifacts(&artifacts, &subregistry_detaches)?;
+    assert_burst_reach(&burst_reach)?;
     assert_volume_floors(&derived)
 }
 
@@ -422,6 +451,7 @@ struct Outcome {
     events: usize,
     event_kinds: BTreeSet<String>,
     subregistry_detaches: usize,
+    burst_derivations: usize,
     artifacts: BatchBoundaryArtifacts,
 }
 
@@ -432,6 +462,7 @@ fn check(
     manifests: &[i64],
     input: bigname_adapters::schema_v2::BatchInput,
     batches: Vec<std::ops::Range<usize>>,
+    burst_positions: &BTreeSet<(i64, i64, i64)>,
 ) -> Result<Outcome> {
     if batches.len() < 2 {
         bail!("{context}: a split replay of fewer than two batches proves nothing");
@@ -460,6 +491,23 @@ fn check(
         .iter()
         .filter(|event| is_subregistry_detach(event))
         .count();
+    // Same whole-sequence pass as the detach count: whether a burst write derives must not depend
+    // on where the batches fell.
+    let burst_derivations = converged
+        .whole
+        .output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            if let (Some(block), Some(transaction), Some(log)) =
+                (event.block_number, event.transaction_index, event.log_index)
+            {
+                burst_positions.contains(&(block, transaction, log))
+            } else {
+                false
+            }
+        })
+        .count();
     // The whole-sequence pass is the shape a backfill runs, and it may attribute rows the split
     // replay leaves unattributed, so it needs its own foreign-key and canonicality check.
     let whole = format!("{context} whole-sequence pass");
@@ -473,6 +521,7 @@ fn check(
         events,
         event_kinds,
         subregistry_detaches,
+        burst_derivations,
         artifacts: converged.artifacts,
     })
 }
@@ -601,6 +650,16 @@ const MINIMUM_VOLUMES: &[(&str, usize, usize)] = &[
     (ENS_V1_MAINNET.label, 1012, 3187),
     (ENS_V2_SEPOLIA.label, 675, 1390),
 ];
+
+/// The pre-registration burst axis's reach at the default corpus: per world, how many cases the
+/// axis fired in, and how many events the whole-sequence pass derives from the logs the burst
+/// added. Presence alone would let the axis rot silently — the burst is a few percent of the
+/// corpus, so zeroing its draw or malforming its logs (the interpreter then drops them) moves
+/// neither the kind floor nor the volume floors. Every burst log derives exactly one event today,
+/// so the second column is also the burst-log count; a malformed fragment lowers it. ENSv2's zero
+/// row pins the axis as ENSv1-only until someone deliberately extends it there.
+const EXPECTED_BURST_REACH: &[(&str, usize, usize)] =
+    &[(ENS_V1_MAINNET.label, 8, 42), (ENS_V2_SEPOLIA.label, 0, 0)];
 
 /// Normalized events the pinned manifests declare that the pools deliberately never reach, with the
 /// reason each one is out. Anything a manifest declares that is neither derived nor listed here
@@ -776,6 +835,32 @@ fn assert_pinned_artifacts(
     Ok(())
 }
 
+fn assert_burst_reach(reach: &BTreeMap<&str, (usize, usize)>) -> Result<()> {
+    assert_tables_name_every_world(
+        "EXPECTED_BURST_REACH",
+        &EXPECTED_BURST_REACH
+            .iter()
+            .map(|(world, ..)| *world)
+            .collect::<Vec<_>>(),
+    )?;
+    for (world, cases, derivations) in EXPECTED_BURST_REACH {
+        let observed = reach.get(world).copied().unwrap_or_default();
+        if observed != (*cases, *derivations) {
+            bail!(
+                "{world}: the pre-registration burst fired in {} cases and derived {} events, not \
+                 the pinned ({cases} cases, {derivations} derivations). {DRAWN_CORPUS_CAVEAT} \
+                 Otherwise fewer derivations at the same case count means the burst's writes \
+                 stopped deriving — a fragment the interpreter now drops; more means a fragment \
+                 now derives two events or the burst marking spread to logs the axis did not add; \
+                 and a changed case count means the axis's draw moved",
+                observed.0,
+                observed.1
+            );
+        }
+    }
+    Ok(())
+}
+
 fn assert_volume_floors(derived: &[(&str, usize, usize)]) -> Result<()> {
     assert_tables_name_every_world(
         "MINIMUM_VOLUMES",
@@ -814,6 +899,24 @@ fn volume_floors_fail_under_the_minimum() {
     let mut one_log_under = at;
     one_log_under[1].2 -= 1;
     assert!(assert_volume_floors(&one_log_under).is_err());
+}
+
+#[test]
+fn burst_reach_fails_off_the_pin() {
+    let at = EXPECTED_BURST_REACH
+        .iter()
+        .map(|(world, cases, derivations)| (*world, (*cases, *derivations)))
+        .collect::<BTreeMap<_, _>>();
+    assert!(assert_burst_reach(&at).is_ok());
+    let (world, cases, derivations) = EXPECTED_BURST_REACH[0];
+    // The malformed-burst shape: cases unchanged, derivations fallen.
+    let mut dropped = at.clone();
+    dropped.insert(world, (cases, derivations - 1));
+    assert!(assert_burst_reach(&dropped).is_err());
+    // The zeroed-draw shape: the axis never fires.
+    let mut silenced = at;
+    silenced.insert(world, (0, 0));
+    assert!(assert_burst_reach(&silenced).is_err());
 }
 
 fn knob(name: &str, fallback: u64) -> Result<u64> {

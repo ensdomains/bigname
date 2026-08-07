@@ -86,13 +86,15 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
             burst_around_registration(&mut onboarding, &wires, node, successor, operator);
             // The same selector written after registration: whether the rewrite lands in the burst
             // block or a later one is the layout's seeded choice, and both placements matter.
+            let mut rewrite = emission(
+                wires.resolver,
+                V1Resolver::AddrChanged { node, a: successor }.encode_log_data(),
+            );
+            rewrite.burst = true;
             actions.push(action(
                 format!("{label}:rewrite-after-registration"),
                 stage::WRITE,
-                vec![emission(
-                    wires.resolver,
-                    V1Resolver::AddrChanged { node, a: successor }.encode_log_data(),
-                )],
+                vec![rewrite],
             ));
         }
         actions.push(onboarding);
@@ -442,10 +444,12 @@ fn burst_around_registration(
     second: Address,
 ) {
     let burst = |a: Address| {
-        emission(
+        let mut emission = emission(
             wires.resolver,
             V1Resolver::AddrChanged { node, a }.encode_log_data(),
-        )
+        );
+        emission.burst = true;
+        emission
     };
     // The controller's event is the last emission of every registration path, so popping and
     // re-pushing it keeps the registry setup between the two burst writes.

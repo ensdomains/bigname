@@ -14,6 +14,9 @@ pub struct Emission {
     pub emitter: String,
     pub topics: Vec<String>,
     pub data: Vec<u8>,
+    /// Marks the fragments `pool_v1`'s pre-registration burst adds, so the lane can attribute
+    /// derived events to them and pin that they derive at all.
+    pub burst: bool,
 }
 
 /// Dependency stages. Within one subject — a name, the root, a registry — a later stage names
@@ -61,6 +64,7 @@ pub fn emission(emitter: &str, encoded: LogData) -> Emission {
         emitter: emitter.to_owned(),
         topics: encoded_topics(&encoded),
         data: encoded.data.to_vec(),
+        burst: false,
     }
 }
 
@@ -298,13 +302,17 @@ const BASE_BLOCK: i64 = 15_000_000;
 /// burst fires — every case it does not fire in stays byte-identical to the pre-axis corpus, and
 /// the drawn-corpus pins keep their anchor — so the axis draws from a stream the rest of
 /// generation never touches; drawing it from the main stream would redraw every case and move the
-/// pins for reasons unrelated to the burst.
+/// pins for reasons unrelated to the burst. Only the ENSv1 pool reads the axis, so only that world
+/// draws it — the side stream is discarded after this one call, so gating the draw cannot shift
+/// any ENSv1 decision, and an ENSv2 failure context always prints false rather than implying a
+/// burst its pool cannot build.
 const PRE_REGISTRATION_BURST_SALT: u64 = 0x5bd1_e995_4a89_1d4b;
 
 pub fn generate(world: &'static World, wiring: &Wiring, seed: u64) -> Scenario {
     let mut rng = Rng::new(seed);
     let mut dimensions = Dimensions::draw(&mut rng);
-    dimensions.pre_registration_burst = Rng::new(seed ^ PRE_REGISTRATION_BURST_SALT).chance(1, 4);
+    dimensions.pre_registration_burst = world.label == "ens_v1_mainnet"
+        && Rng::new(seed ^ PRE_REGISTRATION_BURST_SALT).chance(1, 4);
     let blocks = draw_blocks(&mut rng);
     let settle_timestamp = blocks.last().expect("scenario has blocks").timestamp;
     let mut actions = pool(world, wiring, &dimensions, settle_timestamp);
@@ -420,6 +428,7 @@ fn lay_out(
                 emitter: emission.emitter,
                 topics: emission.topics,
                 data: emission.data,
+                burst: emission.burst,
             });
             log_index += 1;
         }
