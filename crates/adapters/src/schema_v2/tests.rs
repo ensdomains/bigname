@@ -4724,6 +4724,19 @@ const LLL_UNMASKED_WORD: &str =
 const LLL_UNMASKED_WORD_ADDRESS: &str = "0xd98285f7567f8792844f9b90060cf135648dfc80";
 const LLL_NEW_RESOLVER_TOPIC0: &str =
     "0x335721b01866dc23fbee8b6b2c7b1e14d6f05c28cd35a2c934239f94095602a0";
+// Mainnet block 5,648,711, tx 0x6ec35801f33b0567db124139383e98866f1a650f9f732a28a81bb6e680fc0681
+// log 174: the caller passed the ASCII hex string "c0684cb53c168148eaa013c38d1c0f39" as the
+// owner argument and the LLL registry logged it unmasked (#361 census: 2 dirty NewOwner logs).
+const LLL_UNMASKED_OWNER_WORD_ASCII: &str =
+    "0x6330363834636235336331363831343865616130313363333864316330663339";
+const LLL_UNMASKED_OWNER_WORD_ASCII_LOW20: &str = "0x3831343865616130313363333864316330663339";
+// Mainnet block 7,460,548, tx 0x4e7397f41323fc05b48319e9aed64507140c71229af84fe97a39f5a49117484e
+// log 59: the second and last dirty NewOwner word chain-wide.
+const LLL_UNMASKED_OWNER_WORD: &str =
+    "0x32d5c6d3dd27313d9a3280b8b535d797a3e2309d85ab3d522a52d1bae889c843";
+const LLL_UNMASKED_OWNER_WORD_LOW20: &str = "0xb535d797a3e2309d85ab3d522a52d1bae889c843";
+const LLL_NEW_OWNER_TOPIC0: &str =
+    "0xce0457fe73731f824cc272376169235128c118b49d344817417c6d108d155e82";
 // Mainnet block 4,003,999, tx 0xafb6d7ac92f6beb3f3df6a9bbfaeb2f99b9db020ee69199af95f2e8ea5253467
 // log 18: the old registry's only NewTTL with an unmasked word — a 20-byte value sits in the
 // declared uint64 slot (#361 census: 1 of 7 NewTTL logs chain-wide).
@@ -4824,34 +4837,75 @@ fn lll_era_unmasked_resolver_word_decodes_as_its_low_20_bytes() -> anyhow::Resul
 }
 
 #[test]
-fn lll_era_unmasked_owner_word_decodes_as_its_low_20_bytes() -> anyhow::Result<()> {
-    let parent = B256::repeat_byte(0x11);
-    let labelhash = keccak256(b"lll-owner");
-    let output = interpret_test_batch(lll_old_registry_input(vec![lll_old_registry_raw(
-        vec![
-            format!("{:#x}", v1_registry::NewOwner::SIGNATURE_HASH),
-            format!("{parent:#x}"),
-            format!("{labelhash:#x}"),
-        ],
-        hex::decode(LLL_UNMASKED_WORD)?,
-    )]))?;
-    let subregistry_changed = output
-        .normalized_events
-        .iter()
-        .find(|event| {
-            event.event_kind == "SubregistryChanged"
-                && event.after_state["source_event"] == "NewOwner"
-        })
-        .expect("unmasked owner word must still yield the subregistry change");
-    assert_eq!(
-        subregistry_changed.after_state["owner"],
-        json!(LLL_UNMASKED_WORD_ADDRESS)
-    );
+fn lll_era_unmasked_owner_words_decode_as_their_low_20_bytes() -> anyhow::Result<()> {
+    // Both dirty NewOwner logs that exist chain-wide (#361 census), with their real bytes.
+    for (raw, expected_owner) in [
+        (
+            RawLogInput {
+                block_hash: "0x018c38ad118e456dc6b6fcc310490a4f60134171ded4ae783c45a362e821f3e9"
+                    .to_owned(),
+                block_number: 5_648_711,
+                transaction_hash:
+                    "0x6ec35801f33b0567db124139383e98866f1a650f9f732a28a81bb6e680fc0681".to_owned(),
+                transaction_index: 102,
+                log_index: 174,
+                ..lll_old_registry_raw(
+                    vec![
+                        LLL_NEW_OWNER_TOPIC0.to_owned(),
+                        "0x8352da3d0ebe15fd4bd7def280458b52cdb17c9c50ef26bed05f77a09a37033d"
+                            .to_owned(),
+                        "0x6630353636393265383962393531363132383865306565373939353535636238"
+                            .to_owned(),
+                    ],
+                    hex::decode(LLL_UNMASKED_OWNER_WORD_ASCII)?,
+                )
+            },
+            LLL_UNMASKED_OWNER_WORD_ASCII_LOW20,
+        ),
+        (
+            RawLogInput {
+                block_hash: "0xf6010f4a2a9be5eb308d28dc2354c19e0c0fa73479bfca765fc762b682f7faf2"
+                    .to_owned(),
+                block_number: 7_460_548,
+                transaction_hash:
+                    "0x4e7397f41323fc05b48319e9aed64507140c71229af84fe97a39f5a49117484e".to_owned(),
+                transaction_index: 57,
+                log_index: 59,
+                ..lll_old_registry_raw(
+                    vec![
+                        LLL_NEW_OWNER_TOPIC0.to_owned(),
+                        "0x9b30bbebf69e7d4322e460170bffd882b7c81cddd3b5d6a6989b78e226657321"
+                            .to_owned(),
+                        "0x1000000000000000000000000000000000000000000000000000000000000000"
+                            .to_owned(),
+                    ],
+                    hex::decode(LLL_UNMASKED_OWNER_WORD)?,
+                )
+            },
+            LLL_UNMASKED_OWNER_WORD_LOW20,
+        ),
+    ] {
+        let output = interpret_test_batch(lll_old_registry_input(vec![raw]))?;
+        let subregistry_changed = output
+            .normalized_events
+            .iter()
+            .find(|event| {
+                event.event_kind == "SubregistryChanged"
+                    && event.after_state["source_event"] == "NewOwner"
+            })
+            .expect("unmasked owner word must still yield the subregistry change");
+        assert_eq!(
+            subregistry_changed.after_state["owner"],
+            json!(expected_owner)
+        );
+    }
     Ok(())
 }
 
 #[test]
 fn lll_era_unmasked_transfer_word_decodes_as_its_low_20_bytes() -> anyhow::Result<()> {
+    // Transfer has zero dirty words chain-wide (#361 census), so unlike the NewOwner/
+    // NewResolver/NewTTL fixtures this one legitimately stays synthetic.
     let node = B256::repeat_byte(0x22);
     let output = interpret_test_batch(lll_old_registry_input(vec![lll_old_registry_raw(
         vec![
