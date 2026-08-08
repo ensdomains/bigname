@@ -1,20 +1,49 @@
 #[allow(dead_code)]
 mod support;
 
-use alloy_primitives::keccak256;
+use std::{sync::Arc, time::Duration};
+
+use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_sol_types::{SolEvent, sol};
 use anyhow::Result;
-use bigname_project::{BatchRequest, Engine, RunMode};
+use bigname_interpret::{
+    BatchRequest as InterpretBatchRequest, Engine as InterpretEngine,
+    NORMALIZATION_STATE_REPAIR_REASON, RunMode as InterpretRunMode,
+};
+use bigname_project::{BatchRequest, Engine, Marker, RunMode};
 use bigname_storage::{
     ENS_RAINBOW_SOURCE_KIND, ens_namehash_label_bytes, import_label_preimages_from_ens_names_table,
     load_children_current_page,
 };
+use phase_runner::{
+    INTERPRETER_CONTENT_HASH,
+    capacity::CapacityGuard,
+    config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
+    interpret_phase::InterpretPhase,
+    phase::{BlockRange, LoopbackPhase, PhaseName, PhaseSet},
+    project_phase::ProjectPhase,
+    runner::{PhaseRunner, RedoPhase},
+    state::PhaseStore,
+};
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::{PgPool, types::Uuid};
+use tokio_util::sync::CancellationToken;
 
 use support::ScratchDatabase;
 
+sol! {
+    event NameRegistered(
+        string name,
+        bytes32 indexed label,
+        address indexed owner,
+        uint256 expires
+    );
+}
+
 const CHAIN: &str = "rainbow-fixture";
 const OWNER: &str = "0x00000000000000000000000000000000000000a1";
+const REGISTRAR: &str = "0x00000000000000000000000000000000000000b2";
+const SENDER: &str = "0x00000000000000000000000000000000000000c3";
 const NORMALIZER: &str = "ensip15@ens-normalize-0.1.1";
 const CHAIN_OBSERVED_PRIORITY: i32 = 100;
 
@@ -32,7 +61,7 @@ async fn rainbow_import_then_project_redo_serves_decoded_labels() -> Result<()> 
     let scratch = ScratchDatabase::create("production_rainbow_import_e2e").await?;
     seed_children_fixture(scratch.pool(), &["alice", "mallory", "Alice"]).await?;
 
-    run_project(scratch.pool(), RunMode::Normal, 0, 3).await?;
+    run_project(scratch.pool(), None, RunMode::Normal, 0, 3).await?;
     assert_eq!(
         child_display_names(scratch.pool()).await?,
         sorted(vec![
@@ -95,7 +124,7 @@ async fn rainbow_import_then_project_redo_serves_decoded_labels() -> Result<()> 
         "the hash-mismatched candidate must leave no row"
     );
 
-    run_project(scratch.pool(), RunMode::Redo, 0, 3).await?;
+    run_project(scratch.pool(), None, RunMode::Redo, 0, 3).await?;
     assert_eq!(
         child_display_names(scratch.pool()).await?,
         sorted(vec![
@@ -190,6 +219,113 @@ async fn rainbow_import_paginates_batches_and_honors_the_limit() -> Result<()> {
     scratch.cleanup().await
 }
 
+#[tokio::test]
+async fn rainbow_rows_are_reachable_by_recompute_flags_after_a_version_bump() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_rainbow_recompute_repair").await?;
+    seed_registrar_fixture(scratch.pool(), "alice").await?;
+    seed_ens_names(scratch.pool(), &[("alice", "alice")]).await?;
+    let summary = import_label_preimages_from_ens_names_table(scratch.pool(), None, None).await?;
+    assert_eq!(summary.retained_row_count, 1);
+
+    // A normalizer-version bump lands after the import; rows written under the old version
+    // are stale until recompute-flags re-derives their flags.
+    sqlx::query(
+        "UPDATE label_preimages SET normalizer_version = 'stale-version'
+         WHERE decoded_label = 'alice'",
+    )
+    .execute(scratch.pool())
+    .await?;
+
+    // The chain's first observation of the label halts interpretation with the
+    // recompute-flags repair instruction.
+    let error = run_interpret(scratch.pool(), 0, 1)
+        .await
+        .expect_err("a stale rainbow preimage must wedge the interpret upsert");
+    assert!(
+        error
+            .to_string()
+            .contains(NORMALIZATION_STATE_REPAIR_REASON),
+        "unexpected interpret error: {error:#}"
+    );
+
+    let store = PhaseStore::new(scratch.pool().clone());
+    store.initialize_chain(CHAIN).await?;
+    seed_completed_project_extent(scratch.pool(), 1).await?;
+    let phases = PhaseSet::with_ingest_interpret_and_project(
+        Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+        Arc::new(InterpretPhase::new(scratch.pool().clone())),
+        Arc::new(ProjectPhase::new(scratch.pool().clone())),
+    )?;
+    PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "rainbow-recompute-repair",
+        test_timing(),
+    )?
+    .redo(
+        &chain_config()?,
+        RedoPhase::RecomputeFlags,
+        BlockRange::new(0, 1)?,
+        CancellationToken::new(),
+    )
+    .await?;
+
+    let repaired: (String, bool, Option<String>) = sqlx::query_as(
+        "SELECT normalizer_version, normalized_under_version, normalization_error
+         FROM label_preimages WHERE decoded_label = 'alice'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(repaired, (NORMALIZER.into(), true, None));
+
+    run_interpret(scratch.pool(), 0, 1).await?;
+    let upgraded: (String, i32) = sqlx::query_as(
+        "SELECT source_kind, source_priority FROM label_preimages WHERE decoded_label = 'alice'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(upgraded.1, CHAIN_OBSERVED_PRIORITY);
+    assert_ne!(upgraded.0, ENS_RAINBOW_SOURCE_KIND);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn windowed_project_run_does_not_pick_up_a_newly_imported_preimage() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_rainbow_windowed_run").await?;
+    seed_children_fixture(scratch.pool(), &["alice"]).await?;
+    seed_lineage(scratch.pool(), 4, 5).await?;
+
+    run_project(scratch.pool(), None, RunMode::Normal, 0, 3).await?;
+    assert_eq!(
+        child_display_names(scratch.pool()).await?,
+        vec![placeholder("alice")]
+    );
+
+    seed_ens_names(scratch.pool(), &[("alice", "alice")]).await?;
+    import_label_preimages_from_ens_names_table(scratch.pool(), None, None).await?;
+
+    // A windowed catch-up run re-derives only names whose events fall inside the window, so
+    // the imported preimage does not re-enter scope here; the documented repair is the
+    // full-range redo below.
+    let resume = Marker {
+        number: 3,
+        hash: block_hash(3),
+    };
+    run_project(scratch.pool(), Some(resume), RunMode::Normal, 4, 5).await?;
+    assert_eq!(
+        child_display_names(scratch.pool()).await?,
+        vec![placeholder("alice")]
+    );
+
+    run_project(scratch.pool(), None, RunMode::Redo, 0, 5).await?;
+    assert_eq!(
+        child_display_names(scratch.pool()).await?,
+        vec!["alice.eth".to_owned()]
+    );
+    scratch.cleanup().await
+}
+
 fn labelhash_hex(label: &str) -> String {
     format!("{:#x}", keccak256(label.as_bytes()))
 }
@@ -221,14 +357,20 @@ fn sorted(mut names: Vec<String>) -> Vec<String> {
     names
 }
 
-async fn run_project(pool: &PgPool, mode: RunMode, from_block: i64, to_block: i64) -> Result<()> {
+async fn run_project(
+    pool: &PgPool,
+    resume: Option<Marker>,
+    mode: RunMode,
+    from_block: i64,
+    to_block: i64,
+) -> Result<()> {
     let outcome = Engine::new(pool.clone())
         .run_batch(BatchRequest {
             chain_id: CHAIN.into(),
             target_block: to_block,
             affected_from_block: from_block,
             affected_to_block: to_block,
-            resume_current: None,
+            resume_current: resume,
             mode,
         })
         .await?;
@@ -236,8 +378,22 @@ async fn run_project(pool: &PgPool, mode: RunMode, from_block: i64, to_block: i6
     Ok(())
 }
 
-async fn seed_lineage(pool: &PgPool, through: i64) -> Result<()> {
-    for number in 0..=through {
+async fn run_interpret(pool: &PgPool, from_block: i64, to_block: i64) -> Result<()> {
+    let outcome = InterpretEngine::new(pool.clone())
+        .run_batch(InterpretBatchRequest {
+            chain_id: CHAIN.into(),
+            from_block,
+            to_block,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    assert!(outcome.complete);
+    Ok(())
+}
+
+async fn seed_lineage(pool: &PgPool, from: i64, through: i64) -> Result<()> {
+    for number in from..=through {
         sqlx::query(
             "INSERT INTO chain_lineage (
                  chain_id, block_hash, parent_hash, block_number,
@@ -255,7 +411,7 @@ async fn seed_lineage(pool: &PgPool, through: i64) -> Result<()> {
 }
 
 async fn seed_children_fixture(pool: &PgPool, labels: &[&str]) -> Result<()> {
-    seed_lineage(pool, 3).await?;
+    seed_lineage(pool, 0, 3).await?;
     sqlx::query(
         "INSERT INTO name_surfaces (
              logical_name_id, namespace, raw_name, raw_labels,
@@ -307,6 +463,188 @@ async fn seed_ens_names(pool: &PgPool, rows: &[(&str, &str)]) -> Result<()> {
             .await?;
     }
     Ok(())
+}
+
+async fn seed_registrar_fixture(pool: &PgPool, label: &str) -> Result<()> {
+    seed_lineage(pool, 0, 1).await?;
+    let contract_instance_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO contract_instances VALUES ($1, $2, 'contract', '{}'::jsonb, now())")
+        .bind(contract_instance_id)
+        .bind(CHAIN)
+        .execute(pool)
+        .await?;
+    let payload = json!({
+        "manifest_version": 1,
+        "namespace": "ens",
+        "source_family": "ens_v1_registrar_l1",
+        "chain": CHAIN,
+        "deployment_epoch": "fixture",
+        "rollout_status": "active",
+        "normalizer_version": NORMALIZER,
+        "capability_flags": {},
+        "roots": [],
+        "contracts": [{
+            "role": "registrar",
+            "address": REGISTRAR,
+            "proxy_kind": "none",
+            "implementation": null,
+            "start_block": 0
+        }],
+        "discovery_rules": [],
+        "abi": { "events": [{
+            "name": "NameRegistered",
+            "fragment": "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+            "emitter_roles": ["registrar"],
+            "normalized_events": ["RegistrationGranted"]
+        }], "calls": [] }
+    });
+    let manifest_id: i64 = sqlx::query_scalar(
+        "INSERT INTO manifest_versions (
+             manifest_version, namespace, source_family, chain_id, deployment_label,
+             rollout_status, normalizer_version, file_path, manifest_payload
+         ) VALUES (1, 'ens', 'ens_v1_registrar_l1', $1, 'fixture', 'active', $2, $3, $4)
+         RETURNING manifest_id",
+    )
+    .bind(CHAIN)
+    .bind(NORMALIZER)
+    .bind(format!("tests/{CHAIN}-registrar.toml"))
+    .bind(payload)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO manifest_contract_instances (
+             manifest_id, chain_id, declaration_kind, declaration_name,
+             contract_instance_id, declared_address, role, proxy_kind, start_block_number
+         ) VALUES ($1, $2, 'contract', 'registrar', $3, $4, 'registrar', 'none', 0)",
+    )
+    .bind(manifest_id)
+    .bind(CHAIN)
+    .bind(contract_instance_id)
+    .bind(REGISTRAR)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO contract_instance_addresses (
+             contract_instance_id, chain_id, address, active_from_block_number,
+             source_manifest_id, provenance
+         ) VALUES ($1, $2, $3, 0, $4, '{}'::jsonb)",
+    )
+    .bind(contract_instance_id)
+    .bind(CHAIN)
+    .bind(REGISTRAR)
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+    let transaction_hash = format!("{CHAIN}-transaction-1");
+    sqlx::query(
+        "INSERT INTO raw_transactions (
+             chain_id, block_hash, block_number, transaction_hash, transaction_index,
+             from_address, to_address
+         ) VALUES ($1, $2, 1, $3, 0, $4, $5)",
+    )
+    .bind(CHAIN)
+    .bind(block_hash(1))
+    .bind(&transaction_hash)
+    .bind(SENDER)
+    .bind(REGISTRAR)
+    .execute(pool)
+    .await?;
+    let encoded = NameRegistered {
+        name: label.to_owned(),
+        label: B256::from(keccak256(label.as_bytes())),
+        owner: OWNER.parse::<Address>()?,
+        expires: U256::from(1_000_000_u64),
+    }
+    .encode_log_data();
+    let topics = encoded
+        .topics()
+        .iter()
+        .map(|topic| format!("{topic:#x}"))
+        .collect::<Vec<_>>();
+    sqlx::query(
+        "INSERT INTO raw_logs (
+             chain_id, block_hash, block_number, transaction_hash, transaction_index,
+             log_index, emitting_address, topics, data
+         ) VALUES ($1, $2, 1, $3, 0, 0, $4, $5, $6)",
+    )
+    .bind(CHAIN)
+    .bind(block_hash(1))
+    .bind(&transaction_hash)
+    .bind(REGISTRAR)
+    .bind(topics)
+    .bind(encoded.data.as_ref())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn seed_completed_project_extent(pool: &PgPool, head: i64) -> Result<()> {
+    let hash = block_hash(head);
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'completed',
+             current_block_number = $2,
+             current_block_hash = $3,
+             target_block_number = $2,
+             target_block_hash = $3,
+             live_handoff_block_number = CASE
+                 WHEN phase_name = 'ingest' THEN $2
+             END,
+             live_handoff_block_hash = CASE
+                 WHEN phase_name = 'ingest' THEN $3
+             END,
+             input_content_hash = CASE
+                 WHEN phase_name IN ('interpret', 'project') THEN $4
+             END,
+             started_at = now(),
+             finished_at = now()
+         WHERE chain_id = $1
+           AND phase_name IN ('ingest', 'interpret', 'project')",
+    )
+    .bind(CHAIN)
+    .bind(head)
+    .bind(&hash)
+    .bind(INTERPRETER_CONTENT_HASH)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO ingest_cursors (
+             chain_id, source_key, source_kind, seed_basis, start_block_number,
+             next_block_number, target_block_number, last_processed_block_number,
+             last_processed_block_hash
+         ) VALUES ($1, 'source', 'test', 'new_signature_range', 0,
+                   $2, $3, $3, $4)",
+    )
+    .bind(CHAIN)
+    .bind(head.saturating_add(1))
+    .bind(head)
+    .bind(hash)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+fn chain_config() -> phase_runner::error::RunnerResult<ChainConfig> {
+    ChainConfig::new(
+        CHAIN,
+        vec![SourceConfig::new(
+            CHAIN,
+            "source",
+            "test",
+            SeedBasis::NewSignatureRange,
+            0,
+            "http://source.invalid",
+        )?],
+        false,
+    )
+}
+
+fn test_timing() -> TimingConfig {
+    TimingConfig {
+        initial_backoff: Duration::from_millis(1),
+        maximum_backoff: Duration::from_millis(4),
+        live_poll_interval: Duration::from_millis(1),
+    }
 }
 
 fn block_hash(number: i64) -> String {
