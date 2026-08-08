@@ -4770,8 +4770,8 @@ fn lll_old_registry_raw(topics: Vec<String>, data: Vec<u8>) -> RawLogInput {
         block_number: 3_800_374,
         block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(3_800_374),
         canonicality_state: "canonical".to_owned(),
-        transaction_hash:
-            "0x96f71a1980e1b33ba7a67a56007bafdc513f5c584270e9aec14efbb7527e5fc2".to_owned(),
+        transaction_hash: "0x96f71a1980e1b33ba7a67a56007bafdc513f5c584270e9aec14efbb7527e5fc2"
+            .to_owned(),
         transaction_index: 34,
         log_index: 23,
         emitting_address: LLL_OLD_REGISTRY.to_owned(),
@@ -4867,18 +4867,18 @@ fn v1_registry_address_word_with_non_word_data_length_stays_terminal() -> anyhow
         word[..31].to_vec(),
         word.iter().copied().chain([0u8]).collect(),
     ] {
-    let error = interpret_test_batch(lll_old_registry_input(vec![lll_old_registry_raw(
-        vec![
-            LLL_NEW_RESOLVER_TOPIC0.to_owned(),
-            LLL_UNMASKED_WORD.to_owned(),
-        ],
-        data,
-    )]))
-    .expect_err("a data payload that is not exactly one 32-byte word stays terminal");
-    assert!(
-        format!("{error:#}").contains("NewResolver log is malformed"),
-        "unexpected error: {error:#}"
-    );
+        let error = interpret_test_batch(lll_old_registry_input(vec![lll_old_registry_raw(
+            vec![
+                LLL_NEW_RESOLVER_TOPIC0.to_owned(),
+                LLL_UNMASKED_WORD.to_owned(),
+            ],
+            data,
+        )]))
+        .expect_err("a data payload that is not exactly one 32-byte word stays terminal");
+        assert!(
+            format!("{error:#}").contains("NewResolver log is malformed"),
+            "unexpected error: {error:#}"
+        );
     }
     Ok(())
 }

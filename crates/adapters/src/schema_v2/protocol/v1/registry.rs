@@ -8,7 +8,9 @@ use super::super::{
     permissions::{v1_grant_states, v1_revoke_states},
 };
 use super::support::events;
-use crate::evm_abi::{address_hex, decode_event_log, hex_string};
+use crate::evm_abi::{
+    address_hex, decode_event_log, decode_event_log_tolerant_address_word, hex_string,
+};
 use crate::schema_v2::{
     catalog::Selected,
     common::{event_time, stable_uuid},
@@ -37,8 +39,11 @@ pub(super) fn interpret(
 ) -> anyhow::Result<Interpreted> {
     let (mut kinds, mut after, affected_node) = match selected.event.name.as_str() {
         "NewOwner" => {
-            let event =
-                decode_event_log::<NewOwner>(&raw.topics, &raw.data, "NewOwner log is malformed")?;
+            let event = decode_event_log_tolerant_address_word::<NewOwner>(
+                &raw.topics,
+                &raw.data,
+                "NewOwner log is malformed",
+            )?;
             let child = child_node(event.node, event.label);
             (
                 vec!["SubregistryChanged"],
@@ -47,7 +52,7 @@ pub(super) fn interpret(
             )
         }
         "Transfer" => {
-            let event = decode_event_log::<transfer::Transfer>(
+            let event = decode_event_log_tolerant_address_word::<transfer::Transfer>(
                 &raw.topics,
                 &raw.data,
                 "registry Transfer log is malformed",
@@ -59,7 +64,7 @@ pub(super) fn interpret(
             )
         }
         "NewResolver" => {
-            let event = decode_event_log::<NewResolver>(
+            let event = decode_event_log_tolerant_address_word::<NewResolver>(
                 &raw.topics,
                 &raw.data,
                 "NewResolver log is malformed",
