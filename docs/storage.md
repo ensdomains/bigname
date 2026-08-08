@@ -109,10 +109,16 @@ verified store, so it stays.
 `phase-runner label-preimages import-ens-rainbow` walks `ens_names` in
 hash-keyset batches, proof-checks every row, and inserts the survivors with
 `source_kind = 'ens_rainbow_import'` at priority 10 — below the interpreter's
-chain-observed priority 100, so a later chain observation of the same label
-takes provenance precedence. Conflicts on the `label_preimages` primary key
-insert nothing: a re-run is a no-op and an existing verified row is never
-rewritten. Rows carry the same normalization verdict the interpreter stores —
+chain-observed priority 100, so within one normalizer version a later chain
+observation of the same label takes provenance precedence. A normalizer-version
+bump suspends that precedence until repair: every `label_preimages` row written
+under the old version — rainbow-imported rows included — must be refreshed by
+`phase-runner redo --phase recompute-flags` before interpretation of the
+label's next chain observation can proceed, and because rainbow rows carry no
+chain coordinates the recompute selects them chain-independently, so one
+chain's pass repairs every rainbow row. Conflicts on the `label_preimages`
+primary key insert nothing: a re-run is a no-op and an existing verified row
+is never rewritten. Rows carry the same normalization verdict the interpreter stores —
 a proof-checked label whose bytes differ from their normalized form is kept
 with `normalized_under_version = false` and the reason, not discarded. The
 deleted worker importer instead hashed the normalized form, which admitted only
