@@ -114,6 +114,88 @@ fn recompute_flags_accepts_the_all_chains_selector_without_sources() {
 }
 
 #[test]
+fn label_preimages_import_resolves_batch_and_limit_options() {
+    let command = Cli::try_parse_from([
+        "phase-runner",
+        "label-preimages",
+        "import-ens-rainbow",
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+        "--batch-size",
+        "500",
+        "--limit",
+        "1000",
+    ])
+    .expect("rainbow import command must parse")
+    .resolve()
+    .expect("rainbow import command must resolve");
+
+    match command {
+        ResolvedCommand::LabelPreimagesImportEnsRainbow {
+            database_url,
+            batch_size,
+            limit,
+        } => {
+            assert_eq!(database_url, "postgres://phase-runner.invalid/fresh");
+            assert_eq!(batch_size, Some(500));
+            assert_eq!(limit, Some(1000));
+        }
+        _ => panic!("expected rainbow import command"),
+    }
+}
+
+#[test]
+fn label_preimages_import_defaults_to_unbounded_full_table_batches() {
+    let command = Cli::try_parse_from([
+        "phase-runner",
+        "label-preimages",
+        "import-ens-rainbow",
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+    ])
+    .expect("rainbow import command must parse")
+    .resolve()
+    .expect("rainbow import command must resolve");
+
+    match command {
+        ResolvedCommand::LabelPreimagesImportEnsRainbow {
+            batch_size, limit, ..
+        } => {
+            assert_eq!(batch_size, None);
+            assert_eq!(limit, None);
+        }
+        _ => panic!("expected rainbow import command"),
+    }
+}
+
+#[test]
+fn label_preimages_import_rejects_a_zero_batch_size() {
+    Cli::try_parse_from([
+        "phase-runner",
+        "label-preimages",
+        "import-ens-rainbow",
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+        "--batch-size",
+        "0",
+    ])
+    .expect_err("a zero batch size would loop the import without making progress");
+}
+
+#[test]
+fn label_preimages_import_rejects_a_negative_limit() {
+    Cli::try_parse_from([
+        "phase-runner",
+        "label-preimages",
+        "import-ens-rainbow",
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+        "--limit=-1",
+    ])
+    .expect_err("a negative limit is not a bounded import");
+}
+
+#[test]
 fn inspect_cli_resolves_each_kept_schema_v2_window() {
     for (window, expected) in [
         (

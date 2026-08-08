@@ -39,6 +39,7 @@ The canonical ENSv1, ENSv2, and Basenames codebases are pinned under `.refs/`. A
 - `.refs/ens_v2/` — canonical post-audit ENSv2 contracts and current Sepolia deployment
 - `.refs/ens_v2_sepolia_dev/` — historical evidence for deprecated pre-audit `sepolia-dev` manifest versions only
 - `.refs/basenames/` — canonical Basenames Solidity
+- `.refs/ens_rainbow/` — Graph Protocol ENS rainbow-table tooling, labelhash preimage import table-shape evidence only
 - `.refs/ens_subgraph/`, `.refs/ensnode/` — reference indexers for cross-check only
 - `.refs/ens_app_v3/` — ENS app known-resolver metadata for first-party app admission rows only
 - `.refs/ponder/`, `.refs/graph_node/` — reference indexers for chain-intake cross-check only

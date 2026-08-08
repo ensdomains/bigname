@@ -1,9 +1,41 @@
+use clap::{Args, Subcommand};
+
+use super::ResolvedCommand;
 use crate::{
     error::{ErrorKind, RunnerError, RunnerResult},
     phase::BlockRange,
 };
 
-use super::{InspectArgs, InspectRangeArgs, InspectWindow, ResolvedCommand};
+#[derive(Clone, Debug, Args)]
+pub(super) struct InspectArgs {
+    #[arg(long, env = "BIGNAME_DATABASE_URL")]
+    database_url: String,
+
+    #[command(subcommand)]
+    window: InspectWindow,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+enum InspectWindow {
+    /// Show stored block identities, canonicality labels, and fact counts.
+    BlockCanonicality(InspectRangeArgs),
+    /// Show stored lineage and optional audited header fields.
+    StoredLineage(InspectRangeArgs),
+    /// Show retained raw logs with transaction, receipt, and normalized-event context.
+    RawEvents(InspectRangeArgs),
+}
+
+#[derive(Clone, Debug, Args)]
+struct InspectRangeArgs {
+    #[arg(long)]
+    chain: String,
+
+    #[arg(long)]
+    from_block: i64,
+
+    #[arg(long)]
+    to_block: i64,
+}
 
 pub(super) fn resolve(args: InspectArgs) -> RunnerResult<ResolvedCommand> {
     let (kind, chain_id, range) = match args.window {

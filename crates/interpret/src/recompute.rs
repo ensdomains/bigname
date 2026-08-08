@@ -8,6 +8,12 @@ use time::OffsetDateTime;
 
 use crate::{InterpretError, Result};
 
+// Mirrors bigname_storage::ENS_RAINBOW_SOURCE_KIND; interpret does not depend on storage.
+// Rainbow-imported rows carry no chain coordinates in their provenance, so the recompute
+// selection below matches them by source kind, chain-independently: one chain's pass
+// repairs every rainbow row.
+const RAINBOW_IMPORT_SOURCE_KIND: &str = "ens_rainbow_import";
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RecomputeSummary {
     pub same_class_names: u64,
@@ -191,6 +197,7 @@ async fn load_labels(
                   AND event.event_kind = '{PREIMAGE_OBSERVATION_EVENT_KIND}'
                   AND event.after_state ->> 'labelhash' = preimage.labelhash
             )
+            OR preimage.source_kind = '{RAINBOW_IMPORT_SOURCE_KIND}'
          ORDER BY preimage.labelhash
          FOR UPDATE"
     ))
