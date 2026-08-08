@@ -4884,6 +4884,47 @@ fn v1_registry_address_word_with_non_word_data_length_stays_terminal() -> anyhow
 }
 
 #[test]
+fn basenames_registry_unmasked_word_stays_terminal() -> anyhow::Result<()> {
+    const BASENAMES_REGISTRY: &str = "0xb94704422c2a1e396835a571837aa5ae53285a95";
+    let mut registry_admission = admission(72, "registry");
+    registry_admission.address = BASENAMES_REGISTRY.to_owned();
+    let error = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest_with_events(
+            72,
+            "basenames",
+            "basenames_base_registry",
+            &[(
+                "NewResolver",
+                "event NewResolver(bytes32 indexed node, address resolver)",
+                &["registry"],
+                &["ResolverChanged"],
+            )],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![registry_admission],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![RawLogInput {
+            emitting_address: BASENAMES_REGISTRY.to_owned(),
+            ..lll_old_registry_raw(
+                vec![
+                    LLL_NEW_RESOLVER_TOPIC0.to_owned(),
+                    LLL_UNMASKED_WORD.to_owned(),
+                ],
+                hex::decode(LLL_UNMASKED_WORD)?,
+            )
+        }],
+    })
+    .expect_err("basenames_base_registry shares the adapter but keeps the strict decode");
+    assert!(
+        format!("{error:#}").contains("NewResolver log is malformed"),
+        "unexpected error: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
 fn same_block_binding_transitions_follow_log_order() -> anyhow::Result<()> {
     let labels = vec!["alice".to_owned(), "eth".to_owned()];
     let node = super::common::namehash(&labels).parse::<B256>()?;

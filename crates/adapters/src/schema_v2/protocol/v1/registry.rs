@@ -1,5 +1,5 @@
 use alloy_primitives::{B256, keccak256};
-use alloy_sol_types::sol;
+use alloy_sol_types::{SolEvent, sol};
 use anyhow::bail;
 use serde_json::{Value, json};
 
@@ -37,9 +37,13 @@ pub(super) fn interpret(
     raw: &RawLogInput,
     state: &mut State,
 ) -> anyhow::Result<Interpreted> {
+    // Only ens_v1_registry_l1 has an LLL-era emitter whose address words can be unmasked (#361);
+    // basenames_base_registry shares this adapter but keeps the strict decode.
+    let tolerate_unmasked_words = selected.source.source_family == "ens_v1_registry_l1";
     let (mut kinds, mut after, affected_node) = match selected.event.name.as_str() {
         "NewOwner" => {
-            let event = decode_event_log_tolerant_address_word::<NewOwner>(
+            let event = decode_registry_address_event::<NewOwner>(
+                tolerate_unmasked_words,
                 &raw.topics,
                 &raw.data,
                 "NewOwner log is malformed",
@@ -52,7 +56,8 @@ pub(super) fn interpret(
             )
         }
         "Transfer" => {
-            let event = decode_event_log_tolerant_address_word::<transfer::Transfer>(
+            let event = decode_registry_address_event::<transfer::Transfer>(
+                tolerate_unmasked_words,
                 &raw.topics,
                 &raw.data,
                 "registry Transfer log is malformed",
@@ -64,7 +69,8 @@ pub(super) fn interpret(
             )
         }
         "NewResolver" => {
-            let event = decode_event_log_tolerant_address_word::<NewResolver>(
+            let event = decode_registry_address_event::<NewResolver>(
+                tolerate_unmasked_words,
                 &raw.topics,
                 &raw.data,
                 "NewResolver log is malformed",
@@ -546,6 +552,22 @@ fn append_authority_permissions(
                 "resolver-grant",
             );
         }
+    }
+}
+
+fn decode_registry_address_event<E>(
+    tolerate_unmasked_word: bool,
+    topics: &[String],
+    data: &[u8],
+    context: &'static str,
+) -> anyhow::Result<E>
+where
+    E: SolEvent,
+{
+    if tolerate_unmasked_word {
+        decode_event_log_tolerant_address_word::<E>(topics, data, context)
+    } else {
+        decode_event_log::<E>(topics, data, context)
     }
 }
 
