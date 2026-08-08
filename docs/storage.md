@@ -67,7 +67,9 @@ state; it is never identity.
 | selected `raw_*` | Ingest | Immutable transaction, receipt, and log interpretation inputs. |
 | `manifest_*` | manifest synchronization | Authored source declarations and admitted capability versions. |
 | `discovery_*` | Interpret | Canonical discovered edges and admission evidence. |
-| `name_surfaces`, `surface_bindings`, `resources`, `token_lineages`, `label_preimages` | Interpret | Stable identity anchors and verified preimage observations. |
+| `name_surfaces`, `surface_bindings`, `resources`, `token_lineages` | Interpret | Stable identity anchors. |
+| `label_preimages` | Interpret and `phase-runner label-preimages import-ens-rainbow` | Verified labelhash-to-label observations from chain events and the proof-checked rainbow import. |
+| `ens_names` | operator rainbow load | Unverified rainbow-table candidates consumed by the import command. |
 | `normalized_events` | Interpret | Protocol events normalized transactionally with identity output. |
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
 | `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner | Phase progress, repair work, and runtime liveness. |
@@ -88,6 +90,49 @@ explicit block position without turning those responses into raw facts.
 `label_preimages` stores a verified labelhash-to-label observation. A preimage
 may improve readability but cannot create a surface, ownership, resolver,
 record, permission, or primary-name fact by itself.
+
+## Rainbow-table preimage import
+
+The ENS rainbow table maps a labelhash to a candidate human-readable label.
+`ens_names` keeps the upstream table shape — one `(hash, name)` row per
+candidate, where the generator records `hash =
+keccak256(name)`.[^graph-ens-rainbow-table][^graph-ens-rainbow-hash]
+
+Authority stays split between the two tables. `ens_names` is an unverified
+staging store: every operator-loaded row is only a claim. `label_preimages`
+remains the verified store: a candidate becomes a preimage row only when it is
+exactly one DNS label and re-hashes — keccak256 of the raw label bytes — to the
+row's recorded hash. A rejected candidate leaves no trace beyond the import's
+logged counters. Collapsing the split would put unverified claims into the
+verified store, so it stays.
+
+`phase-runner label-preimages import-ens-rainbow` walks `ens_names` in
+hash-keyset batches, proof-checks every row, and inserts the survivors with
+`source_kind = 'ens_rainbow_import'` at priority 10 — below the interpreter's
+chain-observed priority 100, so a later chain observation of the same label
+takes provenance precedence. Conflicts on the `label_preimages` primary key
+insert nothing: a re-run is a no-op and an existing verified row is never
+rewritten. Rows carry the same normalization verdict the interpreter stores —
+a proof-checked label whose bytes differ from their normalized form is kept
+with `normalized_under_version = false` and the reason, not discarded. The
+deleted worker importer instead hashed the normalized form, which admitted only
+already-normalized labels; the current schema keys the labelhash on the raw
+bytes and stores the verdict as a flag, so the port proofs the raw bytes.
+
+The import writes `label_preimages` only — never projection rows. Projections
+pick up the new preimages through Project:
+
+- On a fresh deployment, load `ens_names` and run the import before the first
+  Project walk; the first walk derives child names with the preimages present.
+- On a populated database, run the import and then redo Project over each
+  chain's full retained range, for example
+  `phase-runner redo --chain ethereum-mainnet --phase project --from-block <first retained block> --to-block <head>`.
+  A windowed or incremental Project run re-derives only the names touched by
+  events in its window, so it does not pick up preimages for older child edges;
+  the full-range redo is the required sequence.
+
+[^graph-ens-rainbow-table]: (upstream: .refs/ens_rainbow/src/main.rs:L36 @ ens_rainbow@bc44492)
+[^graph-ens-rainbow-hash]: (upstream: .refs/ens_rainbow/src/main.rs:L50 @ ens_rainbow@bc44492)
 
 ## Canonicality and reorgs
 

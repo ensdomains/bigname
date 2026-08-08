@@ -685,9 +685,11 @@ interpreter versions.
 
 **Preimage observation / label preimage** — learning the human-readable string
 behind a name or label hash, from an event, a retained name surface, or a
-rainbow-table import. Every preimage is proof-checked (normalize, re-hash,
-compare) and improves display only; it never creates ownership, resolver,
-record, or primary-name truth.
+rainbow-table import. Every preimage is proof-checked: the stored labelhash is
+the keccak256 of the raw label bytes, and a candidate that does not re-hash to
+its claimed labelhash is rejected. The normalization verdict is stored as a
+flag, not used as an admission gate. A preimage improves display only; it never
+creates ownership, resolver, record, or primary-name truth.
 
 **Projection** — a disposable read-model table rebuilt deterministically from
 canonical facts and normalized events (standard event-sourcing usage);
