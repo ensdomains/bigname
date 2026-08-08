@@ -355,17 +355,19 @@ mod tests {
         let node = B256::repeat_byte(0x93);
         let mut data = [0u8; ABI_WORD_BYTES];
         data[..24].fill(0xff);
-        let error = decode_event_log_tolerant_uint64_word::<SingleUint64>(
-            &[
-                format!("{:#x}", SingleUint64::SIGNATURE_HASH),
-                format!("{node:#x}"),
-            ],
-            &data[..31],
-            CONTEXT,
-        )
-        .map(|_| ())
-        .expect_err("non-word-length data stays terminal");
-        assert!(is_malformed_event_log(&error));
+        for bad_data in [&data[..31], &[data.as_slice(), &[0]].concat()] {
+            let error = decode_event_log_tolerant_uint64_word::<SingleUint64>(
+                &[
+                    format!("{:#x}", SingleUint64::SIGNATURE_HASH),
+                    format!("{node:#x}"),
+                ],
+                bad_data,
+                CONTEXT,
+            )
+            .map(|_| ())
+            .expect_err("non-word-length data stays terminal");
+            assert!(is_malformed_event_log(&error));
+        }
     }
 
     #[test]

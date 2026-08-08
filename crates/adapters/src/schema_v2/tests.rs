@@ -4940,6 +4940,8 @@ fn basenames_registry_unmasked_word_stays_terminal() -> anyhow::Result<()> {
 
 #[test]
 fn lll_era_unmasked_ttl_word_validates_as_its_low_8_bytes() -> anyhow::Result<()> {
+    // Non-vacuity pairing: if the log silently failed to route,
+    // v1_registry_ttl_word_with_non_word_data_length_stays_terminal would fail.
     let output = interpret_test_batch(lll_old_registry_input(vec![RawLogInput {
         block_hash: "0x012fa0c0011ed099f81e9ea6abb7fe9b92d1a8b63e262603fb8b5f58b75d9efb".to_owned(),
         block_number: 4_003_999,
