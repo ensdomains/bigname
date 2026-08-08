@@ -4715,6 +4715,174 @@ fn migrated_v1_node_ignores_later_old_registry_updates_across_batches() -> anyho
     Ok(())
 }
 
+const LLL_OLD_REGISTRY: &str = "0x314159265dd8dbb310642f98f50c066173c1259b";
+// Mainnet block 3,800,374, tx 0x96f71a1980e1b33ba7a67a56007bafdc513f5c584270e9aec14efbb7527e5fc2
+// log 23: the caller passed the node itself as the resolver argument and the 2017 LLL registry
+// stored and logged the argument word without masking it to the declared address type (#361).
+const LLL_UNMASKED_WORD: &str =
+    "0x93fc662b9e04a687b1e92785d98285f7567f8792844f9b90060cf135648dfc80";
+const LLL_UNMASKED_WORD_ADDRESS: &str = "0xd98285f7567f8792844f9b90060cf135648dfc80";
+const LLL_NEW_RESOLVER_TOPIC0: &str =
+    "0x335721b01866dc23fbee8b6b2c7b1e14d6f05c28cd35a2c934239f94095602a0";
+
+fn lll_old_registry_input(raw_logs: Vec<RawLogInput>) -> BatchInput {
+    let mut old = admission(71, "registry_old");
+    old.address = LLL_OLD_REGISTRY.to_owned();
+    BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest_with_events(
+            71,
+            "ens",
+            "ens_v1_registry_l1",
+            &[
+                (
+                    "NewOwner",
+                    "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+                    &["registry", "registry_old"],
+                    &["SubregistryChanged", "AuthorityTransferred"],
+                ),
+                (
+                    "NewResolver",
+                    "event NewResolver(bytes32 indexed node, address resolver)",
+                    &["registry", "registry_old"],
+                    &["ResolverChanged"],
+                ),
+                (
+                    "Transfer",
+                    "event Transfer(bytes32 indexed node, address owner)",
+                    &["registry", "registry_old"],
+                    &["AuthorityTransferred"],
+                ),
+            ],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![old],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs,
+    }
+}
+
+fn lll_old_registry_raw(topics: Vec<String>, data: Vec<u8>) -> RawLogInput {
+    RawLogInput {
+        chain_id: CHAIN.to_owned(),
+        block_hash: "0xb3b2587814e723ec627a79ac8a7a334321e8b665aa9d46e29068ff3216e60ee8".to_owned(),
+        block_number: 3_800_374,
+        block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(3_800_374),
+        canonicality_state: "canonical".to_owned(),
+        transaction_hash:
+            "0x96f71a1980e1b33ba7a67a56007bafdc513f5c584270e9aec14efbb7527e5fc2".to_owned(),
+        transaction_index: 34,
+        log_index: 23,
+        emitting_address: LLL_OLD_REGISTRY.to_owned(),
+        topics,
+        data,
+    }
+}
+
+#[test]
+fn lll_era_unmasked_resolver_word_decodes_as_its_low_20_bytes() -> anyhow::Result<()> {
+    let output = interpret_test_batch(lll_old_registry_input(vec![lll_old_registry_raw(
+        vec![
+            LLL_NEW_RESOLVER_TOPIC0.to_owned(),
+            LLL_UNMASKED_WORD.to_owned(),
+        ],
+        hex::decode(LLL_UNMASKED_WORD)?,
+    )]))?;
+    let resolver_changed = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "ResolverChanged"
+                && event.after_state["source_event"] == "NewResolver"
+        })
+        .expect("unmasked resolver word must still yield the resolver change");
+    assert_eq!(
+        resolver_changed.after_state["node"],
+        json!(LLL_UNMASKED_WORD)
+    );
+    assert_eq!(
+        resolver_changed.after_state["resolver"],
+        json!(LLL_UNMASKED_WORD_ADDRESS)
+    );
+    Ok(())
+}
+
+#[test]
+fn lll_era_unmasked_owner_word_decodes_as_its_low_20_bytes() -> anyhow::Result<()> {
+    let parent = B256::repeat_byte(0x11);
+    let labelhash = keccak256(b"lll-owner");
+    let output = interpret_test_batch(lll_old_registry_input(vec![lll_old_registry_raw(
+        vec![
+            format!("{:#x}", v1_registry::NewOwner::SIGNATURE_HASH),
+            format!("{parent:#x}"),
+            format!("{labelhash:#x}"),
+        ],
+        hex::decode(LLL_UNMASKED_WORD)?,
+    )]))?;
+    let subregistry_changed = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "SubregistryChanged"
+                && event.after_state["source_event"] == "NewOwner"
+        })
+        .expect("unmasked owner word must still yield the subregistry change");
+    assert_eq!(
+        subregistry_changed.after_state["owner"],
+        json!(LLL_UNMASKED_WORD_ADDRESS)
+    );
+    Ok(())
+}
+
+#[test]
+fn lll_era_unmasked_transfer_word_decodes_as_its_low_20_bytes() -> anyhow::Result<()> {
+    let node = B256::repeat_byte(0x22);
+    let output = interpret_test_batch(lll_old_registry_input(vec![lll_old_registry_raw(
+        vec![
+            format!("{:#x}", v1_registry::Transfer::SIGNATURE_HASH),
+            format!("{node:#x}"),
+        ],
+        hex::decode(LLL_UNMASKED_WORD)?,
+    )]))?;
+    let authority_transferred = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "AuthorityTransferred"
+                && event.after_state["source_event"] == "Transfer"
+        })
+        .expect("unmasked owner word must still yield the authority transfer");
+    assert_eq!(
+        authority_transferred.after_state["owner"],
+        json!(LLL_UNMASKED_WORD_ADDRESS)
+    );
+    Ok(())
+}
+
+#[test]
+fn v1_registry_address_word_with_non_word_data_length_stays_terminal() -> anyhow::Result<()> {
+    let word = hex::decode(LLL_UNMASKED_WORD)?;
+    for data in [
+        word[..31].to_vec(),
+        word.iter().copied().chain([0u8]).collect(),
+    ] {
+    let error = interpret_test_batch(lll_old_registry_input(vec![lll_old_registry_raw(
+        vec![
+            LLL_NEW_RESOLVER_TOPIC0.to_owned(),
+            LLL_UNMASKED_WORD.to_owned(),
+        ],
+        data,
+    )]))
+    .expect_err("a data payload that is not exactly one 32-byte word stays terminal");
+    assert!(
+        format!("{error:#}").contains("NewResolver log is malformed"),
+        "unexpected error: {error:#}"
+    );
+    }
+    Ok(())
+}
+
 #[test]
 fn same_block_binding_transitions_follow_log_order() -> anyhow::Result<()> {
     let labels = vec!["alice".to_owned(), "eth".to_owned()];
