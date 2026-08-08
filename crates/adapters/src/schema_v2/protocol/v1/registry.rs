@@ -9,7 +9,8 @@ use super::super::{
 };
 use super::support::events;
 use crate::evm_abi::{
-    address_hex, decode_event_log, decode_event_log_tolerant_address_word, hex_string,
+    address_hex, decode_event_log, decode_event_log_tolerant_address_word,
+    decode_event_log_tolerant_uint64_word, hex_string,
 };
 use crate::schema_v2::{
     catalog::Selected,
@@ -37,16 +38,17 @@ pub(super) fn interpret(
     raw: &RawLogInput,
     state: &mut State,
 ) -> anyhow::Result<Interpreted> {
-    // Only ens_v1_registry_l1 has an LLL-era emitter whose address words can be unmasked (#361);
-    // basenames_base_registry shares this adapter but keeps the strict decode.
+    // Only ens_v1_registry_l1 has an LLL-era emitter whose address and uint64 words can be
+    // unmasked (#361); basenames_base_registry shares this adapter but keeps the strict decode.
     let tolerate_unmasked_words = selected.source.source_family == "ens_v1_registry_l1";
     let (mut kinds, mut after, affected_node) = match selected.event.name.as_str() {
         "NewOwner" => {
-            let event = decode_registry_address_event::<NewOwner>(
+            let event = decode_registry_event::<NewOwner>(
                 tolerate_unmasked_words,
                 &raw.topics,
                 &raw.data,
                 "NewOwner log is malformed",
+                decode_event_log_tolerant_address_word::<NewOwner>,
             )?;
             let child = child_node(event.node, event.label);
             (
@@ -56,11 +58,12 @@ pub(super) fn interpret(
             )
         }
         "Transfer" => {
-            let event = decode_registry_address_event::<transfer::Transfer>(
+            let event = decode_registry_event::<transfer::Transfer>(
                 tolerate_unmasked_words,
                 &raw.topics,
                 &raw.data,
                 "registry Transfer log is malformed",
+                decode_event_log_tolerant_address_word::<transfer::Transfer>,
             )?;
             (
                 vec![],
@@ -69,11 +72,12 @@ pub(super) fn interpret(
             )
         }
         "NewResolver" => {
-            let event = decode_registry_address_event::<NewResolver>(
+            let event = decode_registry_event::<NewResolver>(
                 tolerate_unmasked_words,
                 &raw.topics,
                 &raw.data,
                 "NewResolver log is malformed",
+                decode_event_log_tolerant_address_word::<NewResolver>,
             )?;
             (
                 vec!["ResolverChanged"],
@@ -82,7 +86,13 @@ pub(super) fn interpret(
             )
         }
         "NewTTL" => {
-            decode_event_log::<NewTTL>(&raw.topics, &raw.data, "NewTTL log is malformed")?;
+            decode_registry_event::<NewTTL>(
+                tolerate_unmasked_words,
+                &raw.topics,
+                &raw.data,
+                "NewTTL log is malformed",
+                decode_event_log_tolerant_uint64_word::<NewTTL>,
+            )?;
             return Ok(Interpreted::new());
         }
         name => bail!("unsupported registry event {name}"),
@@ -555,17 +565,18 @@ fn append_authority_permissions(
     }
 }
 
-fn decode_registry_address_event<E>(
+fn decode_registry_event<E>(
     tolerate_unmasked_word: bool,
     topics: &[String],
     data: &[u8],
     context: &'static str,
+    tolerant: fn(&[String], &[u8], &'static str) -> anyhow::Result<E>,
 ) -> anyhow::Result<E>
 where
     E: SolEvent,
 {
     if tolerate_unmasked_word {
-        decode_event_log_tolerant_address_word::<E>(topics, data, context)
+        tolerant(topics, data, context)
     } else {
         decode_event_log::<E>(topics, data, context)
     }

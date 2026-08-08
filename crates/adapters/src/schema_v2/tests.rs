@@ -4724,6 +4724,15 @@ const LLL_UNMASKED_WORD: &str =
 const LLL_UNMASKED_WORD_ADDRESS: &str = "0xd98285f7567f8792844f9b90060cf135648dfc80";
 const LLL_NEW_RESOLVER_TOPIC0: &str =
     "0x335721b01866dc23fbee8b6b2c7b1e14d6f05c28cd35a2c934239f94095602a0";
+// Mainnet block 4,003,999, tx 0xafb6d7ac92f6beb3f3df6a9bbfaeb2f99b9db020ee69199af95f2e8ea5253467
+// log 18: the old registry's only NewTTL with an unmasked word — a 20-byte value sits in the
+// declared uint64 slot (#361 census: 1 of 7 NewTTL logs chain-wide).
+const LLL_UNMASKED_TTL_WORD: &str =
+    "0x0000000000000000000000005ffc014343cd971b7eb70732021e26c35b744cc4";
+const LLL_NEW_TTL_TOPIC0: &str =
+    "0x1d4f9bbfc9cab89d66e1a1562f2233ccbf1308cb4f63de2ead5787adddb8fa68";
+const LLL_NEW_TTL_NODE: &str = "0xfac963bc058381048d445ea4f8cadd6b70b057034ee1096cec5d49562735b446";
+const BASENAMES_REGISTRY: &str = "0xb94704422c2a1e396835a571837aa5ae53285a95";
 
 fn lll_old_registry_input(raw_logs: Vec<RawLogInput>) -> BatchInput {
     let mut old = admission(71, "registry_old");
@@ -4752,6 +4761,12 @@ fn lll_old_registry_input(raw_logs: Vec<RawLogInput>) -> BatchInput {
                     "event Transfer(bytes32 indexed node, address owner)",
                     &["registry", "registry_old"],
                     &["AuthorityTransferred"],
+                ),
+                (
+                    "NewTTL",
+                    "event NewTTL(bytes32 indexed node, uint64 ttl)",
+                    &["registry", "registry_old"],
+                    &[],
                 ),
             ],
         )],
@@ -4885,7 +4900,6 @@ fn v1_registry_address_word_with_non_word_data_length_stays_terminal() -> anyhow
 
 #[test]
 fn basenames_registry_unmasked_word_stays_terminal() -> anyhow::Result<()> {
-    const BASENAMES_REGISTRY: &str = "0xb94704422c2a1e396835a571837aa5ae53285a95";
     let mut registry_admission = admission(72, "registry");
     registry_admission.address = BASENAMES_REGISTRY.to_owned();
     let error = interpret_test_batch(BatchInput {
@@ -4919,6 +4933,85 @@ fn basenames_registry_unmasked_word_stays_terminal() -> anyhow::Result<()> {
     .expect_err("basenames_base_registry shares the adapter but keeps the strict decode");
     assert!(
         format!("{error:#}").contains("NewResolver log is malformed"),
+        "unexpected error: {error:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn lll_era_unmasked_ttl_word_validates_as_its_low_8_bytes() -> anyhow::Result<()> {
+    let output = interpret_test_batch(lll_old_registry_input(vec![RawLogInput {
+        block_hash: "0x012fa0c0011ed099f81e9ea6abb7fe9b92d1a8b63e262603fb8b5f58b75d9efb".to_owned(),
+        block_number: 4_003_999,
+        transaction_hash: "0xafb6d7ac92f6beb3f3df6a9bbfaeb2f99b9db020ee69199af95f2e8ea5253467"
+            .to_owned(),
+        transaction_index: 27,
+        log_index: 18,
+        ..lll_old_registry_raw(
+            vec![LLL_NEW_TTL_TOPIC0.to_owned(), LLL_NEW_TTL_NODE.to_owned()],
+            hex::decode(LLL_UNMASKED_TTL_WORD)?,
+        )
+    }]))?;
+    assert!(
+        output.normalized_events.is_empty(),
+        "NewTTL is decode-validation only and yields no normalized events: {:?}",
+        output.normalized_events
+    );
+    Ok(())
+}
+
+#[test]
+fn v1_registry_ttl_word_with_non_word_data_length_stays_terminal() -> anyhow::Result<()> {
+    let word = hex::decode(LLL_UNMASKED_TTL_WORD)?;
+    for data in [
+        word[..31].to_vec(),
+        word.iter().copied().chain([0u8]).collect(),
+    ] {
+        let error = interpret_test_batch(lll_old_registry_input(vec![lll_old_registry_raw(
+            vec![LLL_NEW_TTL_TOPIC0.to_owned(), LLL_NEW_TTL_NODE.to_owned()],
+            data,
+        )]))
+        .expect_err("a data payload that is not exactly one 32-byte word stays terminal");
+        assert!(
+            format!("{error:#}").contains("NewTTL log is malformed"),
+            "unexpected error: {error:#}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn basenames_registry_unmasked_ttl_word_stays_terminal() -> anyhow::Result<()> {
+    let mut registry_admission = admission(73, "registry");
+    registry_admission.address = BASENAMES_REGISTRY.to_owned();
+    let error = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest_with_events(
+            73,
+            "basenames",
+            "basenames_base_registry",
+            &[(
+                "NewTTL",
+                "event NewTTL(bytes32 indexed node, uint64 ttl)",
+                &["registry"],
+                &[],
+            )],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![registry_admission],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![RawLogInput {
+            emitting_address: BASENAMES_REGISTRY.to_owned(),
+            ..lll_old_registry_raw(
+                vec![LLL_NEW_TTL_TOPIC0.to_owned(), LLL_NEW_TTL_NODE.to_owned()],
+                hex::decode(LLL_UNMASKED_TTL_WORD)?,
+            )
+        }],
+    })
+    .expect_err("basenames_base_registry shares the adapter but keeps the strict decode");
+    assert!(
+        format!("{error:#}").contains("NewTTL log is malformed"),
         "unexpected error: {error:#}"
     );
     Ok(())

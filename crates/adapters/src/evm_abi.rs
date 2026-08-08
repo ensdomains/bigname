@@ -68,10 +68,38 @@ pub(crate) fn decode_event_log_tolerant_address_word<E>(
 where
     E: SolEvent,
 {
+    decode_event_log_tolerant_word::<E>(topics, data, context, 12)
+}
+
+/// Decodes like `decode_event_log`, except that a data payload of exactly one 32-byte word whose
+/// upper 24 bytes are nonzero decodes as the word's low 8 bytes. Only valid for events whose data
+/// payload is a single uint64 word: the 2017 ENSv1 registry's `NewTTL` logs can carry an unmasked
+/// word in the uint64 slot (one mainnet instance, block 4,003,999; #361, docs/architecture.md
+/// § Source families). Any other malformed shape fails exactly as `decode_event_log`.
+pub(crate) fn decode_event_log_tolerant_uint64_word<E>(
+    topics: &[String],
+    data: &[u8],
+    context: &'static str,
+) -> Result<E>
+where
+    E: SolEvent,
+{
+    decode_event_log_tolerant_word::<E>(topics, data, context, 24)
+}
+
+fn decode_event_log_tolerant_word<E>(
+    topics: &[String],
+    data: &[u8],
+    context: &'static str,
+    mask_bytes: usize,
+) -> Result<E>
+where
+    E: SolEvent,
+{
     match decode_event_log::<E>(topics, data, context) {
         Err(error) if is_malformed_event_log(&error) && data.len() == ABI_WORD_BYTES => {
             let mut masked = data.to_vec();
-            masked[..12].fill(0);
+            masked[..mask_bytes].fill(0);
             decode_event_log::<E>(topics, &masked, context)
         }
         result => result,
@@ -208,12 +236,13 @@ mod tests {
     use alloy_sol_types::{SolEvent, sol};
 
     use super::{
-        ABI_WORD_BYTES, decode_event_log_tolerant_address_word, is_malformed_event_log,
-        saturating_seconds_i64,
+        ABI_WORD_BYTES, decode_event_log_tolerant_address_word,
+        decode_event_log_tolerant_uint64_word, is_malformed_event_log, saturating_seconds_i64,
     };
 
     sol! {
         event SingleAddress(bytes32 indexed node, address who);
+        event SingleUint64(bytes32 indexed node, uint64 ttl);
     }
 
     const CONTEXT: &str = "SingleAddress log is malformed";
@@ -282,6 +311,61 @@ mod tests {
             .expect_err("non-word-length data stays terminal");
             assert!(is_malformed_event_log(&error));
         }
+    }
+
+    #[test]
+    fn tolerant_uint64_word_matches_strict_decode_for_masked_words() {
+        let node = B256::repeat_byte(0x42);
+        let encoded = SingleUint64 { node, ttl: 3_600 }.encode_log_data();
+        let decoded = decode_event_log_tolerant_uint64_word::<SingleUint64>(
+            &encoded
+                .topics()
+                .iter()
+                .map(|topic| format!("{topic:#x}"))
+                .collect::<Vec<_>>(),
+            &encoded.data,
+            CONTEXT,
+        )
+        .expect("masked uint64 word decodes");
+        assert_eq!(decoded.node, node);
+        assert_eq!(decoded.ttl, 3_600);
+    }
+
+    #[test]
+    fn tolerant_uint64_word_decodes_unmasked_word_as_its_low_8_bytes() {
+        let node = B256::repeat_byte(0x93);
+        let mut data = [0u8; ABI_WORD_BYTES];
+        data[..24].fill(0xff);
+        data[24..].copy_from_slice(&[0x5a; 8]);
+        let decoded = decode_event_log_tolerant_uint64_word::<SingleUint64>(
+            &[
+                format!("{:#x}", SingleUint64::SIGNATURE_HASH),
+                format!("{node:#x}"),
+            ],
+            &data,
+            CONTEXT,
+        )
+        .expect("unmasked uint64 word decodes as its low 8 bytes");
+        assert_eq!(decoded.node, node);
+        assert_eq!(decoded.ttl, 0x5a5a_5a5a_5a5a_5a5a);
+    }
+
+    #[test]
+    fn tolerant_uint64_word_stays_malformed_for_non_word_data() {
+        let node = B256::repeat_byte(0x93);
+        let mut data = [0u8; ABI_WORD_BYTES];
+        data[..24].fill(0xff);
+        let error = decode_event_log_tolerant_uint64_word::<SingleUint64>(
+            &[
+                format!("{:#x}", SingleUint64::SIGNATURE_HASH),
+                format!("{node:#x}"),
+            ],
+            &data[..31],
+            CONTEXT,
+        )
+        .map(|_| ())
+        .expect_err("non-word-length data stays terminal");
+        assert!(is_malformed_event_log(&error));
     }
 
     #[test]
