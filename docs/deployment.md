@@ -174,9 +174,31 @@ redo marker and must be rerun with the same range.
 Historical `live` redo is rejected because live follows only the current head.
 Live does not advance the finite per-source ingest cursors. Interpret redo
 checks each source only through its persisted finite target and separately
-requires readable lineage at every height through the effective redo end; do
-not repair a presence failure by editing a cursor past data that source did not
-load. When a full-history Interpret redo for a content-hash rotation starts at
+requires readable lineage at every height through the effective redo end. That
+lineage proves the facts selected by the [watch
+plan](glossary.md#watch-plan--watched-tuple) active when each block was loaded,
+not facts required by a later watch plan.
+
+Manifest synchronization records a [manifest-authority
+marker](glossary.md#manifest-authority-marker) when its authority changes. If
+Interpret redo would discharge that marker by relying on lineage above a finite
+ingest target, use this operator flow:
+
+1. If the change widened the watch plan, complete the [mandatory historical
+   fetch for the affected
+   range](manifests.md#mandatory-historical-fetch-after-watch-plan-widening).
+   Otherwise, confirm that the change widened nothing.
+2. Re-run the redo with `--attest-watch-set-coverage`.
+
+Without the flag, the redo fails closed. With it, the runner logs an error-level
+structured event containing the chain, phase, redo and lineage ranges, and the
+manifest-authority marker. The system cannot verify that the fetch or
+no-widening review happened; the attestation is the operator's responsibility.
+Do not edit cursors. The same conservative gate applies to non-widening changes
+with a Live suffix until issue #376 binds watch-plan evidence to loaded facts.
+No attestation is needed when finite ingest cursors already cover the redo end,
+or for a plain code-hash rotation. When a full-history Interpret redo for a
+content-hash rotation starts at
 the finite ingest bounds after Live has advanced, the runner extends Interpret
 through its recorded head and stamps the range onto Project clipped to
 Project's own recorded head — the same range unless a crash between the two

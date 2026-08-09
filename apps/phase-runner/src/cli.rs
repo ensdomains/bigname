@@ -216,6 +216,12 @@ struct RedoArgs {
     to_block: i64,
 
     #[arg(
+        long,
+        help = "attest manifest-authority coverage after the required historical fetch or a no-widening review"
+    )]
+    attest_watch_set_coverage: bool,
+
+    #[arg(
         long = "source",
         env = "BIGNAME_PHASE_RUNNER_SOURCES",
         value_delimiter = ',',
@@ -268,6 +274,7 @@ pub enum ResolvedCommand {
         timing: TimingConfig,
         phase: RedoPhase,
         range: BlockRange,
+        attest_watch_set_coverage: bool,
         hydration_rpc_urls: bigname_lookup::ChainRpcUrls,
     },
     Rewind {
@@ -395,6 +402,7 @@ fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
         timing: resolve_timing(args.timing)?,
         phase,
         range,
+        attest_watch_set_coverage: args.attest_watch_set_coverage,
         hydration_rpc_urls: resolve_hydration_rpc_urls(&args.hydration_rpc_urls)?,
     })
 }

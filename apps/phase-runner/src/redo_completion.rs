@@ -3,7 +3,21 @@ use sqlx::{Postgres, Transaction};
 use crate::{
     error::{RunnerError, RunnerResult},
     phase::{BlockRange, PhaseName},
+    transitions::PhaseStateRow,
 };
+
+pub(crate) fn restore_previous_lifecycle(previous: &mut PhaseStateRow) -> RunnerResult<()> {
+    if !previous.redo_in_progress {
+        return Ok(());
+    }
+    previous.phase_status = previous.redo_previous_phase_status.take().ok_or_else(|| {
+        RunnerError::data_integrity("active redo is missing its previous phase status")
+    })?;
+    previous.last_error = previous.redo_previous_last_error.take();
+    previous.started_at = previous.redo_previous_started_at.take();
+    previous.finished_at = previous.redo_previous_finished_at.take();
+    Ok(())
+}
 
 pub(crate) enum CompletionCoverage {
     Exact,

@@ -276,6 +276,41 @@ The active match-all sets widen retained live facts from this change forward. Hi
 
 At cutover, these interpretation changes are applied through a fresh-schema rebuild. The cutover carries raw facts, chain lineage, and label preimages, but it does not carry normalized events, identity rows, or projections from the transitional schema. This change therefore has no supported in-place replay over previously derived ENSv2 rows; the one-time historical fetch completes the raw input before the fresh interpretation run.
 
+### Mandatory historical fetch after watch-plan widening
+
+A manifest change widens the [watch
+plan](glossary.md#watch-plan--watched-tuple) when it adds an address, event
+signature, or active block range whose facts were not selected when older
+blocks were loaded. Manifest synchronization records a
+[manifest-authority marker](glossary.md#manifest-authority-marker) on Interpret
+and Project, but it does not fetch the newly watched history. Before rebuilding
+derived state, run an ingest redo over every affected historical range with the
+new manifest profile and the chain's configured sources. For example:
+
+```sh
+phase-runner redo \
+  --chain <chain> \
+  --phase ingest \
+  --from-block <first-affected-block> \
+  --to-block <last-affected-block> \
+  --source <CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV>
+```
+
+An ingest redo fetches and retains the newly selected facts, but intentionally
+does not advance the finite `ingest_cursors` used by the initial spine. After
+the fetch, re-run the required full Interpret redo with
+`--attest-watch-set-coverage`. If review establishes that the authority change
+widened no watch-plan range, the same flag attests that conclusion without a
+fetch. The runner logs the chain, phase, redo and lineage ranges, and the exact
+manifest-authority marker.
+
+The system cannot verify that the historical fetch or the no-widening review
+happened. The flag records the operator's responsibility for that check until
+issue #376 binds the watch-plan fingerprint to coverage evidence. Without the
+flag, an authority-marked Interpret redo that needs Live lineage fails closed;
+with no Live suffix, finite ingest cursor coverage remains sufficient and the
+flag is neither needed nor accepted.
+
 Each admitted edge stores `from_contract_instance_id`, `to_contract_instance_id`, source manifest version, edge kind, discovery source, active range, and provenance.
 
 Discovery resolves `(chain, address, point in time)` to endpoint `contract_instance_id`s before storing the edge. Re-admitting an address that was previously admitted on the same chain reuses the prior `contract_instance_id` and appends a new range; replaying the exact same observation reuses its historical edge epoch instead of appending a duplicate. A new ID is minted only for addresses never admitted on that chain. Manifest-declared and discovered proxy/implementation links share the same edge and active-range rules.
@@ -295,8 +330,9 @@ current watch plan.
 Schema-v2 manifest synchronization retires manifest-declared address ranges and
 updates manifest-declared proxy edges. It does not run a full-source
 reconciliation over event-driven edges. An authority change invalidates the
-interpret and project phase content hashes; explicit redo then re-derives the
-affected discovery rows from retained facts under the new manifest authority.
+interpret and project phase content hashes. Complete the [mandatory historical
+fetch and attested redo](#mandatory-historical-fetch-after-watch-plan-widening)
+before re-deriving affected discovery rows under the new manifest authority.
 The Base project phase also consumes Ethereum Mainnet `basenames_execution`
 authority for Basenames support and provenance. Changing that family therefore
 invalidates the `base-mainnet` project epoch as well, without invalidating its

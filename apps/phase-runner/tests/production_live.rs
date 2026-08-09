@@ -1,14 +1,25 @@
 #[allow(dead_code)]
 mod support;
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::{self, Write},
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use alloy_primitives::Bytes;
 use alloy_sol_types::SolValue;
 use anyhow::Result;
 use axum::{Json, Router, extract::State, routing::post};
-use bigname_ingest::{Engine, LiveBatchRequest, Marker, SourceDescriptor};
+use bigname_ingest::{Engine, LiveBatchRequest, Marker, SourceDescriptor, load_watch_filter};
 use bigname_lookup::ChainRpcUrls;
+use bigname_manifests::{load_repository, sync_schema_v2_repository};
 use bigname_project::Hydrator;
 use phase_runner::{
     INTERPRETER_CONTENT_HASH,
@@ -32,6 +43,8 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::RwLock};
 use tokio_util::sync::CancellationToken;
+use tracing::instrument::WithSubscriber;
+use tracing_subscriber::fmt::MakeWriter;
 use uuid::Uuid;
 
 use support::ScratchDatabase;
@@ -46,6 +59,48 @@ const NAMEHASH: &str = "0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef
 const FAILED_MULTICALL: &str = "__fixture_multicall_failed__";
 const FAILED_MULTICALL_BATCH: &str = "__fixture_multicall_batch_failed__";
 const MULTICALL_RESULTS_PREFIX: &str = "__fixture_multicall_results__:";
+const WATCH_ADDRESS_A: &str = "0x00000000000000000000000000000000000000a1";
+const WATCH_ADDRESS_B: &str = "0x00000000000000000000000000000000000000b2";
+const TRANSFER_TOPIC: &str = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+impl CapturedLogs {
+    fn text(&self) -> String {
+        String::from_utf8(
+            self.0
+                .lock()
+                .expect("captured log lock must not be poisoned")
+                .clone(),
+        )
+        .expect("structured logs must be UTF-8")
+    }
+}
+
+impl<'a> MakeWriter<'a> for CapturedLogs {
+    type Writer = CapturedLogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        CapturedLogWriter(Arc::clone(&self.0))
+    }
+}
+
+impl Write for CapturedLogWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .expect("captured log lock must not be poisoned")
+            .extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 struct FailingInterpretPhase;
 
@@ -56,6 +111,50 @@ impl Phase for FailingInterpretPhase {
 
     fn run_batch(&self, _context: PhaseContext) -> PhaseFuture<'_> {
         Box::pin(async { Err(RunnerError::data_integrity("forced required-redo failure")) })
+    }
+}
+
+struct TransientOnceInterpretPhase {
+    attempts: Arc<AtomicUsize>,
+    loopback: LoopbackPhase,
+}
+
+impl TransientOnceInterpretPhase {
+    fn new(attempts: Arc<AtomicUsize>) -> Self {
+        Self {
+            attempts,
+            loopback: LoopbackPhase::new(PhaseName::Interpret),
+        }
+    }
+}
+
+impl Phase for TransientOnceInterpretPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Interpret
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            Box::pin(async { Err(RunnerError::transient("forced attested-redo retry")) })
+        } else {
+            self.loopback.run_batch(context)
+        }
+    }
+}
+
+struct FailingIngestPhase;
+
+impl Phase for FailingIngestPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Ingest
+    }
+
+    fn run_batch(&self, _context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async {
+            Err(RunnerError::data_integrity(
+                "invalid attestation reached Ingest",
+            ))
+        })
     }
 }
 
@@ -229,6 +328,19 @@ async fn live_reorg_above_the_ingest_handoff_replays_through_the_live_head() -> 
         (1, Some(0)),
         "live follow must not rewrite the finite ingest source extent"
     );
+    let interpret_hash: Option<String> = sqlx::query_scalar(
+        "SELECT input_content_hash
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        interpret_hash.as_deref(),
+        Some(INTERPRETER_CONTENT_HASH),
+        "without manifest invalidation, the live suffix remains eligible for lineage coverage"
+    );
 
     fixture.reorg(2, 2, 4).await;
     wait_for_rederived_or_runner_stop(scratch.pool(), chain, 4, &block_hash(2, 4), &mut task)
@@ -237,6 +349,356 @@ async fn live_reorg_above_the_ingest_handoff_replays_through_the_live_head() -> 
     task.await??;
 
     fixture.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn manifest_authority_change_rejects_live_suffix_lineage_coverage() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_live_manifest_authority_fence").await?;
+    let chain = "manifest-authority-live-suffix";
+    let manifests = WatchManifestFixture::new(chain)?;
+    manifests.write(false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&manifests.root)?).await?;
+    let initial_watch_plan = load_watch_filter(scratch.pool(), chain, 0, 3).await?;
+    assert!(initial_watch_plan.includes(WATCH_ADDRESS_A, TRANSFER_TOPIC, 2));
+    assert!(!initial_watch_plan.includes(WATCH_ADDRESS_B, TRANSFER_TOPIC, 2));
+
+    seed_branch(scratch.pool(), chain, 1, 0, None).await?;
+    publish(scratch.pool(), chain, 1, 0, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 0, &block_hash(1, 0)).await?;
+    let fixture = RpcFixture::spawn_with_b_fact(1, 3, 2).await?;
+    let engine = Arc::new(Engine::new(scratch.pool().clone()));
+    let phases = PhaseSet::with_ingest_interpret_project_and_live(
+        Arc::new(IngestPhase::with_engine(Arc::clone(&engine))),
+        Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(LoopbackPhase::new(PhaseName::Verify)),
+        Arc::new(LivePhase::with_engine(engine)),
+    )?;
+    let runner = Arc::new(PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-live-manifest-authority-fence",
+        fast_timing(),
+    )?);
+    let configured_chain = live_chain(chain, &fixture.endpoint)?;
+    let cancellation = CancellationToken::new();
+    let run_cancellation = cancellation.clone();
+    let live_runner = Arc::clone(&runner);
+    let mut task = tokio::spawn(async move {
+        live_runner
+            .run_chain(&configured_chain, run_cancellation)
+            .await
+    });
+
+    wait_for_rederived_or_runner_stop(scratch.pool(), chain, 3, &block_hash(1, 3), &mut task)
+        .await?;
+    cancellation.cancel();
+    task.await??;
+    let b_facts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM raw_logs WHERE chain_id = $1 AND lower(emitting_address) = $2",
+    )
+    .bind(chain)
+    .bind(WATCH_ADDRESS_B)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        b_facts, 0,
+        "Live loaded the suffix under watch plan A, so the B-fact must not be present"
+    );
+
+    let interrupted_phases = PhaseSet::with_ingest_interpret_project_and_live(
+        Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+        Arc::new(FailingInterpretPhase),
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(LoopbackPhase::new(PhaseName::Verify)),
+        Arc::new(LoopbackPhase::new(PhaseName::Live)),
+    )?;
+    let interrupted_runner = PhaseRunner::new(
+        scratch.runner(),
+        interrupted_phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-live-interrupted-before-manifest-authority",
+        fast_timing(),
+    )?;
+    let interrupted_error = interrupted_runner
+        .redo(
+            &live_chain(chain, &fixture.endpoint)?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 3)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the fixture must retain an interrupted redo before manifest sync");
+    assert!(
+        interrupted_error
+            .to_string()
+            .contains("forced required-redo failure"),
+        "unexpected interrupted-redo fixture failure: {interrupted_error}"
+    );
+    let interrupted_redo: bool = sqlx::query_scalar(
+        "SELECT redo_in_progress
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(interrupted_redo);
+
+    manifests.write(true)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&manifests.root)?).await?;
+    let widened_watch_plan = load_watch_filter(scratch.pool(), chain, 0, 3).await?;
+    assert!(
+        widened_watch_plan.includes(WATCH_ADDRESS_B, TRANSFER_TOPIC, 2),
+        "manifest B must newly select the retained-missing B-fact in the Live suffix"
+    );
+    let recorded_hash: Option<String> = sqlx::query_scalar(
+        "SELECT input_content_hash
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(
+        recorded_hash
+            .as_deref()
+            .is_some_and(|hash| hash.starts_with("manifest-authority:")),
+        "manifest sync must stamp the pre-adoption authority marker"
+    );
+    let manifest_authority_marker = recorded_hash.expect("authority marker was asserted above");
+
+    let redo_runner = loopback_runner(&scratch, "production-live-manifest-authority-redo", false)?;
+
+    // Before the manifest-authority fence, this redo passed the presence guard: the finite cursor
+    // proved only block 0 and readable lineage incorrectly certified the A-loaded suffix 1..=3.
+    let error = redo_runner
+        .redo(
+            &live_chain(chain, &fixture.endpoint)?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 3)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("manifest-authority adoption must not use lineage for the live suffix");
+    assert_eq!(
+        error.kind(),
+        phase_runner::error::ErrorKind::DataIntegrity,
+        "unexpected redo failure: {error}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "raw-data presence check failed for interpret redo on chain \
+manifest-authority-live-suffix: the manifest authority changed since blocks 1..=3 were loaded; \
+complete the documented mandatory historical fetch for any widened range (docs/manifests.md § \
+mandatory historical fetch after watch-plan widening), or confirm that the change widened \
+nothing; then re-run with --attest-watch-set-coverage; see issue #376"
+    );
+
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .without_time()
+        .with_writer(logs.clone())
+        .finish();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attested_phases = PhaseSet::with_ingest_interpret_project_and_live(
+        Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+        Arc::new(TransientOnceInterpretPhase::new(Arc::clone(&attempts))),
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(LoopbackPhase::new(PhaseName::Verify)),
+        Arc::new(LoopbackPhase::new(PhaseName::Live)),
+    )?;
+    let attested_runner = PhaseRunner::new(
+        scratch.runner(),
+        attested_phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-live-manifest-authority-attested-redo",
+        fast_timing(),
+    )?
+    .with_watch_set_coverage_attestation(true);
+    attested_runner
+        .redo(
+            &live_chain(chain, &fixture.endpoint)?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 3)?,
+            CancellationToken::new(),
+        )
+        .with_subscriber(subscriber)
+        .await?;
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    let logs = logs.text();
+    assert_eq!(
+        logs.matches("\"event\":\"manifest_authority_watch_set_coverage_attested\"")
+            .count(),
+        1
+    );
+    assert!(logs.contains("\"chain_id\":\"manifest-authority-live-suffix\""));
+    assert!(logs.contains("\"phase\":\"interpret\""));
+    assert!(logs.contains("\"redo_from_block\":0"));
+    assert!(logs.contains("\"redo_to_block\":3"));
+    assert!(logs.contains("\"lineage_from_block\":1"));
+    assert!(logs.contains("\"lineage_to_block\":3"));
+    assert!(logs.contains(&format!(
+        "\"manifest_authority_marker\":\"{manifest_authority_marker}\""
+    )));
+
+    fixture.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn manifest_authority_change_without_a_live_suffix_keeps_full_cursor_coverage() -> Result<()>
+{
+    let scratch = ScratchDatabase::create("production_manifest_authority_finite_coverage").await?;
+    let chain = "manifest-authority-finite-coverage";
+    seed_branch(scratch.pool(), chain, 1, 0, None).await?;
+    publish(scratch.pool(), chain, 1, 0, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 0, &block_hash(1, 0)).await?;
+    seed_empty_watch_manifest(scratch.pool(), chain).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET input_content_hash = 'manifest-authority:fixture'
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    let unnecessary_attestation = loopback_runner(
+        &scratch,
+        "production-manifest-authority-unnecessary-attestation",
+        true,
+    )?;
+    let error = unnecessary_attestation
+        .redo(
+            &live_chain(chain, "http://unused.invalid")?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 0)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the flag must not be accepted when no lineage fallback is needed");
+    assert_eq!(error.kind(), phase_runner::error::ErrorKind::Configuration);
+    assert_eq!(
+        error.to_string(),
+        "--attest-watch-set-coverage is not valid for interpret redo on chain \
+manifest-authority-finite-coverage: finite ingest cursors already cover the redo range, so the \
+manifest-authority fence would not block"
+    );
+    let phases = PhaseSet::with_ingest_interpret_project_and_live(
+        Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+        Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(LoopbackPhase::new(PhaseName::Verify)),
+        Arc::new(LoopbackPhase::new(PhaseName::Live)),
+    )?;
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-manifest-authority-finite-coverage",
+        fast_timing(),
+    )?;
+
+    runner
+        .redo(
+            &live_chain(chain, "http://unused.invalid")?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 0)?,
+            CancellationToken::new(),
+        )
+        .await?;
+
+    let adopted: Option<String> = sqlx::query_scalar(
+        "SELECT input_content_hash
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(adopted.as_deref(), Some(INTERPRETER_CONTENT_HASH));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn watch_set_coverage_attestation_without_an_authority_marker_is_rejected() -> Result<()> {
+    let scratch =
+        ScratchDatabase::create("production_attestation_without_authority_marker").await?;
+    let chain = "attestation-without-authority-marker";
+    seed_branch(scratch.pool(), chain, 1, 0, None).await?;
+    publish(scratch.pool(), chain, 1, 0, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 0, &block_hash(1, 0)).await?;
+    seed_empty_watch_manifest(scratch.pool(), chain).await?;
+    let runner = loopback_runner(
+        &scratch,
+        "production-attestation-without-authority-marker",
+        true,
+    )?;
+
+    let error = runner
+        .redo(
+            &live_chain(chain, "http://unused.invalid")?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 0)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("an attestation without a manifest-authority fence must fail");
+    assert_eq!(error.kind(), phase_runner::error::ErrorKind::Configuration);
+    assert_eq!(
+        error.to_string(),
+        "--attest-watch-set-coverage is only valid when an interpret redo on chain \
+attestation-without-authority-marker is discharging a manifest-authority marker and would \
+otherwise rely on Live lineage"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn invalid_all_phase_attestation_is_rejected_before_ingest_runs() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_all_attestation_preflight").await?;
+    let chain = "all-attestation-without-authority-marker";
+    seed_branch(scratch.pool(), chain, 1, 0, None).await?;
+    publish(scratch.pool(), chain, 1, 0, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 0, &block_hash(1, 0)).await?;
+    seed_empty_watch_manifest(scratch.pool(), chain).await?;
+    let phases = PhaseSet::with_ingest_interpret_project_and_live(
+        Arc::new(FailingIngestPhase),
+        Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(LoopbackPhase::new(PhaseName::Verify)),
+        Arc::new(LoopbackPhase::new(PhaseName::Live)),
+    )?;
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-all-attestation-preflight",
+        fast_timing(),
+    )?
+    .with_watch_set_coverage_attestation(true);
+
+    let error = runner
+        .redo(
+            &live_chain(chain, "http://unused.invalid")?,
+            RedoPhase::All,
+            BlockRange::new(0, 0)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("an invalid all-phase attestation must fail before Ingest runs");
+    assert_eq!(error.kind(), phase_runner::error::ErrorKind::Configuration);
+    assert_eq!(
+        error.to_string(),
+        "--attest-watch-set-coverage is only valid when an interpret redo on chain \
+all-attestation-without-authority-marker is discharging a manifest-authority marker and would \
+otherwise rely on Live lineage"
+    );
+
     scratch.cleanup().await
 }
 
@@ -1915,6 +2377,28 @@ fn live_chain(chain: &str, endpoint: &str) -> phase_runner::error::RunnerResult<
     )
 }
 
+fn loopback_runner(
+    scratch: &ScratchDatabase,
+    instance_id: &str,
+    attest_watch_set_coverage: bool,
+) -> Result<PhaseRunner> {
+    let phases = PhaseSet::with_ingest_interpret_project_and_live(
+        Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+        Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(LoopbackPhase::new(PhaseName::Verify)),
+        Arc::new(LoopbackPhase::new(PhaseName::Live)),
+    )?;
+    Ok(PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        instance_id,
+        fast_timing(),
+    )?
+    .with_watch_set_coverage_attestation(attest_watch_set_coverage))
+}
+
 fn production_runner(
     scratch: &ScratchDatabase,
     engine: Arc<Engine>,
@@ -2175,6 +2659,76 @@ async fn seed_empty_watch_manifest(pool: &PgPool, chain: &str) -> Result<()> {
     Ok(())
 }
 
+struct WatchManifestFixture {
+    root: PathBuf,
+    chain: String,
+}
+
+impl WatchManifestFixture {
+    fn new(chain: &str) -> Result<Self> {
+        let root = std::env::temp_dir().join(format!(
+            "bigname-live-manifest-authority-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(root.join("test/test_events"))?;
+        Ok(Self {
+            root,
+            chain: chain.to_owned(),
+        })
+    }
+
+    fn write(&self, include_b: bool) -> Result<()> {
+        let roots = if include_b {
+            format!(
+                r#"
+[[roots]]
+name = "source_b"
+address = "{WATCH_ADDRESS_B}"
+start_block = 0
+"#,
+            )
+        } else {
+            "roots = []\n".to_owned()
+        };
+        let manifest = format!(
+            r#"
+manifest_version = 1
+namespace = "test"
+source_family = "test_events"
+chain = "{}"
+deployment_epoch = "fixture"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+discovery_rules = []
+{roots}
+
+[capability_flags]
+
+[[contracts]]
+role = "source_a"
+address = "{WATCH_ADDRESS_A}"
+proxy_kind = "none"
+start_block = 0
+[[abi.events]]
+name = "Transfer"
+fragment = "event Transfer(address indexed from, address indexed to, uint256 value)"
+emitter_roles = ["source_a"]
+normalized_events = []
+status = "supported"
+"#,
+            self.chain
+        );
+        fs::write(self.root.join("test/test_events/v1.toml"), manifest)?;
+        Ok(())
+    }
+}
+
+impl Drop for WatchManifestFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
 async fn seed_reverse_candidate(pool: &PgPool) -> Result<()> {
     seed_reverse_candidate_for(pool, ADDRESS, REVERSE_NODE, "").await
 }
@@ -2334,6 +2888,7 @@ fn block_hash(branch: u64, number: i64) -> String {
 struct RpcChain {
     canonical: Vec<String>,
     blocks: BTreeMap<String, Value>,
+    logs: Vec<Value>,
     reorg_after_number_batch: Option<(u64, i64, i64)>,
 }
 
@@ -2364,6 +2919,25 @@ impl RpcFixture {
             state,
             server,
         })
+    }
+
+    async fn spawn_with_b_fact(branch: u64, through: i64, fact_block: i64) -> Result<Self> {
+        let fixture = Self::spawn(branch, through).await?;
+        fixture.state.write().await.logs.push(json!({
+            "blockHash": block_hash(branch, fact_block),
+            "blockNumber": format!("0x{fact_block:x}"),
+            "transactionHash": format!("0x{:064x}", 9_000_000 + fact_block),
+            "transactionIndex": "0x0",
+            "logIndex": "0x0",
+            "address": WATCH_ADDRESS_B,
+            "topics": [
+                TRANSFER_TOPIC,
+                format!("0x{}", "00".repeat(32)),
+                format!("0x{}", "00".repeat(32))
+            ],
+            "data": format!("0x{}", "00".repeat(32))
+        }));
+        Ok(fixture)
     }
 
     async fn reorg(&self, branch: u64, ancestor: i64, through: i64) {
@@ -2402,6 +2976,7 @@ fn rpc_chain(branch: u64, through: i64) -> RpcChain {
     RpcChain {
         canonical,
         blocks,
+        logs: Vec::new(),
         reorg_after_number_batch: None,
     }
 }
@@ -2483,10 +3058,67 @@ fn chain_rpc_response(state: &RpcChain, request: &Value) -> Value {
             .and_then(Value::as_str)
             .and_then(|hash| state.blocks.get(hash))
             .cloned(),
-        "eth_getLogs" => Some(json!([])),
+        "eth_getLogs" => Some(Value::Array(rpc_logs(&state.logs, params.first()))),
         _ => None,
     };
     json!({"jsonrpc": "2.0", "id": id, "result": result})
+}
+
+fn rpc_logs(logs: &[Value], filter: Option<&Value>) -> Vec<Value> {
+    let filter = filter.cloned().unwrap_or_default();
+    if let Some(block_hash) = filter.get("blockHash").and_then(Value::as_str) {
+        return logs
+            .iter()
+            .filter(|log| log.get("blockHash").and_then(Value::as_str) == Some(block_hash))
+            .cloned()
+            .collect();
+    }
+    let from = rpc_quantity(filter.get("fromBlock")).unwrap_or_default();
+    let to = rpc_quantity(filter.get("toBlock")).unwrap_or(i64::MAX);
+    let addresses = rpc_filter_values(filter.get("address"));
+    let topics = rpc_filter_values(filter.pointer("/topics/0"));
+    logs.iter()
+        .filter(|log| {
+            let number = rpc_quantity(log.get("blockNumber")).unwrap_or_default();
+            let address = log
+                .get("address")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let topic = log
+                .pointer("/topics/0")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            (from..=to).contains(&number)
+                && (addresses.is_empty()
+                    || addresses
+                        .iter()
+                        .any(|expected| expected.eq_ignore_ascii_case(address)))
+                && (topics.is_empty()
+                    || topics
+                        .iter()
+                        .any(|expected| expected.eq_ignore_ascii_case(topic)))
+        })
+        .cloned()
+        .collect()
+}
+
+fn rpc_filter_values(value: Option<&Value>) -> Vec<String> {
+    value.map_or_else(Vec::new, |value| {
+        value.as_array().map_or_else(
+            || value.as_str().map(str::to_owned).into_iter().collect(),
+            |values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            },
+        )
+    })
+}
+
+fn rpc_quantity(value: Option<&Value>) -> Option<i64> {
+    i64::from_str_radix(value?.as_str()?.trim_start_matches("0x"), 16).ok()
 }
 
 struct HydrationRpc {

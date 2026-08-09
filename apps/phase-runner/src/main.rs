@@ -93,6 +93,7 @@ async fn main() -> Result<()> {
             timing,
             phase,
             range,
+            attest_watch_set_coverage,
             hydration_rpc_urls,
         } => {
             let database = RunnerDatabase::connect(&database_url, 4).await?;
@@ -135,7 +136,8 @@ async fn main() -> Result<()> {
                 CapacityGuard::system(capacity),
                 instance_id,
                 timing,
-            )?;
+            )?
+            .with_watch_set_coverage_attestation(attest_watch_set_coverage);
             let report = runner
                 .redo_chains(&chains, phase, range, cancellation)
                 .await?;

@@ -639,6 +639,15 @@ transfer powers before the later wrapper expiry.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L820 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L825 @ ens_v1@91c966f)
 
+**Manifest-authority marker** — a `manifest-authority:<hash>` value that
+manifest synchronization records in a derived phase's input-hash field when
+the active manifest authority changes. It poisons ordinary hash adoption until
+the required full redo begins. The marker proves that authority changed; it
+does not prove that facts required by a widened watch plan were fetched. When
+Interpret would rely on Live lineage above a finite ingest target, the operator
+must complete the manifest widening procedure and explicitly attest it before
+the redo can discharge the marker.
+
 **Non-name form** — a string a route puts in a name-typed field for a label
 bigname cannot state as a name. Registry events prove a child node and its
 labelhash without proving the label, so some children have no name to serve;

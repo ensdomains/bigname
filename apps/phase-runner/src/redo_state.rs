@@ -29,6 +29,7 @@ pub(crate) async fn begin(
     phase: PhaseName,
     mode: &RunMode,
     sources: &[SourceConfig],
+    expected_manifest_authority_marker: Option<&str>,
 ) -> RunnerResult<RedoSession> {
     let mut transaction = pool.begin().await.map_err(|error| {
         RunnerError::database(
@@ -48,7 +49,7 @@ pub(crate) async fn begin(
             .last_error
             .as_deref()
             .is_some_and(crate::redo_recompute::owns_project_refresh);
-    restore_previous_lifecycle(&mut previous)?;
+    crate::redo_completion::restore_previous_lifecycle(&mut previous)?;
     let status = previous.status()?;
     let current_interpreter_hash = bigname_content_hash::INTERPRETER_CONTENT_HASH;
     let recorded_hash = previous.input_content_hash.as_deref();
@@ -81,19 +82,24 @@ pub(crate) async fn begin(
     )
     .await?;
     let execution_range = if phase == PhaseName::Interpret && matches!(mode, RunMode::Redo(_)) {
-        interpret_replay_range(&previous, range)?
+        crate::redo_presence::interpret_replay_range(&previous, range)?
     } else {
         range
     };
-    if phase == PhaseName::Interpret && matches!(mode, RunMode::Redo(_)) {
+    let manifest_attestation = if phase == PhaseName::Interpret && matches!(mode, RunMode::Redo(_))
+    {
         crate::redo_presence::require_interpret_raw_data(
             &mut transaction,
             chain_id,
             sources,
             execution_range,
+            previous.input_content_hash.as_deref(),
+            expected_manifest_authority_marker,
         )
-        .await?;
-    }
+        .await?
+    } else {
+        None
+    };
     require_interrupted_redo_coverage(chain_id, phase, mode, &previous, execution_range)?;
     if !status.can_transition_to(PhaseStatus::Running, true) {
         return Err(invalid_transition(
@@ -175,6 +181,9 @@ pub(crate) async fn begin(
             error,
         )
     })?;
+    if let Some(attestation) = manifest_attestation {
+        attestation.log(chain_id);
+    }
     Ok(RedoSession {
         interrupted_before_redo: matches!(status, PhaseStatus::Running | PhaseStatus::Paused),
         previous,
@@ -182,29 +191,6 @@ pub(crate) async fn begin(
         recompute_flags: matches!(mode, RunMode::RecomputeFlags(_)),
         stage_project_refresh_on_completion,
     })
-}
-
-fn interpret_replay_range(
-    previous: &PhaseStateRow,
-    requested: BlockRange,
-) -> RunnerResult<BlockRange> {
-    let to = previous.current_block_number.ok_or_else(|| {
-        RunnerError::data_integrity("interpret redo cannot determine the recorded interpreted head")
-    })?;
-    BlockRange::new(requested.from, to)
-}
-
-fn restore_previous_lifecycle(previous: &mut PhaseStateRow) -> RunnerResult<()> {
-    if !previous.redo_in_progress {
-        return Ok(());
-    }
-    previous.phase_status = previous.redo_previous_phase_status.take().ok_or_else(|| {
-        RunnerError::data_integrity("active redo is missing its previous phase status")
-    })?;
-    previous.last_error = previous.redo_previous_last_error.take();
-    previous.started_at = previous.redo_previous_started_at.take();
-    previous.finished_at = previous.redo_previous_finished_at.take();
-    Ok(())
 }
 
 fn redo_mode(mode: &RunMode) -> RunnerResult<&'static str> {

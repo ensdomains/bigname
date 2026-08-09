@@ -2,14 +2,33 @@ use crate::{
     config::SourceConfig,
     error::{RunnerError, RunnerResult},
     phase::BlockRange,
+    redo_manifest_attestation::{AttestedManifestAuthority, ManifestAuthorityAttestation},
+    transitions::PhaseStateRow,
 };
+
+pub(crate) fn interpret_replay_range(
+    previous: &PhaseStateRow,
+    requested: BlockRange,
+) -> RunnerResult<BlockRange> {
+    let to = previous.current_block_number.ok_or_else(|| {
+        RunnerError::data_integrity("interpret redo cannot determine the recorded interpreted head")
+    })?;
+    BlockRange::new(requested.from, to)
+}
 
 pub(crate) async fn require_interpret_raw_data(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     chain_id: &str,
     sources: &[SourceConfig],
     range: BlockRange,
-) -> RunnerResult<()> {
+    recorded_input_hash: Option<&str>,
+    expected_manifest_authority_marker: Option<&str>,
+) -> RunnerResult<Option<AttestedManifestAuthority>> {
+    let mut manifest_attestation = ManifestAuthorityAttestation::new(
+        chain_id,
+        recorded_input_hash,
+        expected_manifest_authority_marker,
+    )?;
     let expected_blocks = range
         .to
         .checked_sub(range.from)
@@ -103,10 +122,7 @@ pub(crate) async fn require_interpret_raw_data(
         }
         let required_from = start.max(range.from);
         let required_to = target.map_or(range.to, |target| target.min(range.to));
-        if required_from > required_to {
-            continue;
-        }
-        if next <= required_to {
+        if required_from <= required_to && next <= required_to {
             return Err(RunnerError::data_integrity(format!(
                 "raw-data presence check failed for interpret redo on chain {chain_id}: ingest \
                  cursor {} covers through {}, not required source range {required_from}..={}",
@@ -115,6 +131,12 @@ pub(crate) async fn require_interpret_raw_data(
                 required_to,
             )));
         }
+        if let Some(target) = target.filter(|target| *target < range.to)
+            && next <= range.to
+        {
+            let lineage_from = required_from.max(target.saturating_add(1));
+            manifest_attestation.record_lineage_suffix(lineage_from);
+        }
     }
-    Ok(())
+    manifest_attestation.finish(chain_id, range)
 }

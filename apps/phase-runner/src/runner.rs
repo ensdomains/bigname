@@ -24,6 +24,8 @@ use crate::{
 mod context;
 #[path = "runner_live_follow.rs"]
 mod live_follow;
+#[path = "runner_attestation.rs"]
+mod manifest_attestation;
 #[path = "runner_operator_redo.rs"]
 mod operator_redo;
 #[path = "runner_required_redo.rs"]
@@ -61,6 +63,7 @@ pub struct PhaseRunner {
     capacity: CapacityGuard,
     instance_id: Arc<str>,
     timing: TimingConfig,
+    attest_watch_set_coverage: bool,
 }
 
 impl PhaseRunner {
@@ -87,7 +90,13 @@ impl PhaseRunner {
             capacity,
             instance_id: Arc::from(instance_id),
             timing,
+            attest_watch_set_coverage: false,
         })
+    }
+
+    pub fn with_watch_set_coverage_attestation(mut self, attest: bool) -> Self {
+        self.attest_watch_set_coverage = attest;
+        self
     }
 
     pub async fn run(
@@ -276,12 +285,24 @@ impl PhaseRunner {
         phase_lock: &mut PhaseLock,
     ) -> RunnerResult<()> {
         let phase_name = phase.name();
+        let expected_manifest_authority_marker = (phase_name == PhaseName::Interpret)
+            .then(|| self.expected_manifest_attestation_marker(&chain.chain_id))
+            .flatten();
         let redo_session = if mode.is_redo() {
-            Some(
-                self.store
-                    .begin_redo(&chain.chain_id, phase_name, &mode, chain.sources.as_ref())
-                    .await?,
-            )
+            let session = self
+                .store
+                .begin_redo(
+                    &chain.chain_id,
+                    phase_name,
+                    &mode,
+                    chain.sources.as_ref(),
+                    expected_manifest_authority_marker.as_deref(),
+                )
+                .await?;
+            if phase_name == PhaseName::Interpret {
+                self.clear_manifest_attestation_marker(&chain.chain_id);
+            }
+            Some(session)
         } else {
             match self
                 .store

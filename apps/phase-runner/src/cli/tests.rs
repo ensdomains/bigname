@@ -34,6 +34,36 @@ fn redo_cli_carries_canonical_head_hydration_rpc() {
 }
 
 #[test]
+fn redo_cli_carries_watch_set_coverage_attestation() {
+    let command = Cli::try_parse_from([
+        "phase-runner",
+        "redo",
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+        "--chain",
+        "ethereum-mainnet",
+        "--phase",
+        "interpret",
+        "--from-block",
+        "42",
+        "--to-block",
+        "42",
+        "--attest-watch-set-coverage",
+    ])
+    .expect("redo attestation option must parse")
+    .resolve()
+    .expect("redo attestation option must resolve");
+
+    assert!(matches!(
+        command,
+        ResolvedCommand::Redo {
+            attest_watch_set_coverage: true,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn verify_redo_requires_a_separate_verification_database_url() {
     let command = Cli::try_parse_from([
         "phase-runner",
