@@ -177,33 +177,30 @@ may replace only derived identity, discovery, and normalized-event output in
 that range. Raw facts are never edited by replay.
 
 Interpret redo proves raw-data presence without pretending that Live extended
-each finite ingest source. Each `ingest_cursors` row proves coverage only from
-that source's configured start through its persisted target; Live does not
-advance those source cursors. The redo guard still requires exactly one
-readable `chain_lineage` row at every height in the full execution range, so
-the live-followed suffix is accepted only when its winning blocks were actually
-loaded and published. That lineage proves the facts selected by the [watch
+each finite ingest source. Each `ingest_cursors` row proves that the source
+reached from its configured start through its persisted target; Live does not
+advance those source cursors. The redo guard also requires exactly one readable
+`chain_lineage` row at every height in the full execution range. Cursors and
+lineage both prove only the facts selected by the [watch
 plan](glossary.md#watch-plan--watched-tuple) active when each block was loaded;
-it does not prove facts added by a later watch plan. Manifest synchronization
+neither proves facts added by a later watch plan. Manifest synchronization
 records a [manifest-authority marker](glossary.md#manifest-authority-marker)
-when that authority changes. If an Interpret redo would discharge the marker
-using lineage above a source's finite target, the guard fails closed unless the
-operator passes
+when that authority changes. Every Interpret redo that would discharge the
+marker fails closed unless the operator passes
 `--attest-watch-set-coverage`. Before passing it, the operator must run the
 [mandatory historical fetch for any widened
 range](manifests.md#mandatory-historical-fetch-after-watch-plan-widening), or
 confirm that the change widened nothing. The runner logs an error-level
-structured event with the chain, phase, redo and lineage ranges, and marker for
-every attested discharge.
+structured event with the chain, phase, redo range, and marker for every
+attested discharge.
 
 The system cannot verify the fetch or the no-widening review; the attestation is
 the operator's responsibility. The guard cannot distinguish widening from
-another manifest-authority change, so every such change with a Live suffix is
-fenced until issue #376 binds watch-plan evidence to loaded facts. No
-attestation is needed when finite ingest cursors already cover the redo end or
-for a plain code-hash rotation. A missing lineage height, an ambiguous readable
-height, or an uncovered part of a source's finite target remains a fatal
-presence failure.
+another manifest-authority change, so every such change is fenced regardless of
+finite-cursor or Live-lineage coverage until issue #376 binds watch-plan
+evidence to loaded facts. Plain code-hash rotations remain flagless. A missing
+lineage height, an ambiguous readable height, or an uncovered part of a
+source's finite target remains a fatal presence failure.
 
 The interpret engine loads the prior identity state required by the range,
 folds physical batches without changing semantic order, and revalidates the

@@ -644,9 +644,10 @@ manifest synchronization records in a derived phase's input-hash field when
 the active manifest authority changes. It poisons ordinary hash adoption until
 the required full redo begins. The marker proves that authority changed; it
 does not prove that facts required by a widened watch plan were fetched. When
-Interpret would rely on Live lineage above a finite ingest target, the operator
-must complete the manifest widening procedure and explicitly attest it before
-the redo can discharge the marker.
+Interpret would discharge the marker, the operator must complete the manifest
+widening procedure or confirm that nothing widened, then explicitly attest that
+review. Finite cursors and readable lineage both prove only the watch plan
+active when facts were loaded.
 
 **Non-name form** — a string a route puts in a name-typed field for a label
 bigname cannot state as a name. Registry events prove a child node and its

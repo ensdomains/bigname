@@ -281,18 +281,18 @@ normalized-event upsert, repair, supersession, adapter-checkpoint, or
 coverage-authority machinery. Historical live redo is rejected because live
 is a head follower. When manifest synchronization invalidates Interpret, it
 records a [manifest-authority marker](glossary.md#manifest-authority-marker). A
-redo that would use lineage above a finite ingest target then fails closed. If
-the manifest widened the watch plan, run the [mandatory historical fetch for
-the affected
+redo that would discharge that marker fails closed. If the manifest widened the
+watch plan, run the [mandatory historical fetch for the affected
 range](manifests.md#mandatory-historical-fetch-after-watch-plan-widening);
 otherwise confirm that it widened nothing. Re-run the redo with
 `--attest-watch-set-coverage`. The flag is the
 operator's attestation, and the runner logs the chain, phase, range, and marker.
 The system cannot verify the fetch or the no-widening review. This conservative
-step applies to every manifest-authority change with a Live suffix until issue
-#376 binds watch-plan evidence to the loaded facts. A redo whose finite ingest
-cursors already cover its end does not need the flag. Verify redo uses the same
-scanner as normal verification,
+step applies to every manifest-authority change, including ranges fully covered
+by finite ingest cursors, until issue #376 binds watch-plan evidence to the
+loaded facts. Cursors and readable lineage prove only the facts selected by the
+watch plan active when each block was loaded. Plain code-hash rotations remain
+flagless. Verify redo uses the same scanner as normal verification,
 rechecks the requested finalized range, and persists the level reported by the
 phase. A partial redo retains the level for the full recorded extent; a
 full-extent redo can report the level fixed by the reference source. Its source

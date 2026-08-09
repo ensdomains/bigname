@@ -30,13 +30,9 @@ impl PhaseRunner {
                 "--attest-watch-set-coverage is only valid for interpret or all-phase redo",
             ));
         }
-        crate::redo_manifest_attestation::preflight(
-            self.store.pool(),
-            &chain.chain_id,
-            &chain.sources,
-        )
-        .await
-        .map(Some)
+        crate::redo_manifest_attestation::preflight(self.store.pool(), &chain.chain_id)
+            .await
+            .map(Some)
     }
 
     pub(super) async fn scope_manifest_attestation<F>(

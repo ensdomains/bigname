@@ -1,5 +1,4 @@
 use crate::{
-    config::SourceConfig,
     error::{ErrorKind, RunnerError, RunnerResult},
     phase::{BlockRange, PhaseName},
 };
@@ -16,13 +15,11 @@ fn has_marker_prefix(hash: &str) -> bool {
 pub(crate) struct ManifestAuthorityAttestation {
     marker: Option<String>,
     expected_marker: Option<String>,
-    lineage_from: Option<i64>,
 }
 
 pub(crate) struct AttestedManifestAuthority {
     marker: String,
     range: BlockRange,
-    lineage_from: i64,
 }
 
 impl ManifestAuthorityAttestation {
@@ -42,15 +39,7 @@ impl ManifestAuthorityAttestation {
         Ok(Self {
             marker,
             expected_marker: expected_marker.map(str::to_owned),
-            lineage_from: None,
         })
-    }
-
-    pub(crate) fn record_lineage_suffix(&mut self, from_block: i64) {
-        self.lineage_from = Some(
-            self.lineage_from
-                .map_or(from_block, |current| current.min(from_block)),
-        );
     }
 
     pub(crate) fn finish(
@@ -61,29 +50,19 @@ impl ManifestAuthorityAttestation {
         let Some(marker) = self.marker else {
             return Ok(None);
         };
-        let Some(lineage_from) = self.lineage_from else {
-            if self.expected_marker.is_some() {
-                return Err(fence_not_needed_error(chain_id));
-            }
-            return Ok(None);
-        };
         if self.expected_marker.is_none() {
             return Err(RunnerError::data_integrity(format!(
                 "raw-data presence check failed for interpret redo on chain {chain_id}: the \
-                 manifest authority changed since blocks {lineage_from}..={} were loaded; \
+                 manifest authority changed since blocks {}..={} were loaded; \
                  complete the documented mandatory historical fetch for any widened range \
                  (docs/manifests.md § mandatory historical fetch after watch-plan widening), or \
                  confirm that the change widened nothing; then re-run with \
                  --attest-watch-set-coverage; see issue #376",
-                range.to
+                range.from, range.to
             )));
         }
 
-        Ok(Some(AttestedManifestAuthority {
-            marker,
-            range,
-            lineage_from,
-        }))
+        Ok(Some(AttestedManifestAuthority { marker, range }))
     }
 }
 
@@ -95,19 +74,13 @@ impl AttestedManifestAuthority {
             phase = %PhaseName::Interpret,
             redo_from_block = self.range.from,
             redo_to_block = self.range.to,
-            lineage_from_block = self.lineage_from,
-            lineage_to_block = self.range.to,
             manifest_authority_marker = self.marker,
-            "OPERATOR ATTESTATION: manifest-authority redo began with Live lineage coverage"
+            "OPERATOR ATTESTATION: manifest-authority redo began after watch-set coverage review"
         );
     }
 }
 
-pub(crate) async fn preflight(
-    pool: &PgPool,
-    chain_id: &str,
-    sources: &[SourceConfig],
-) -> RunnerResult<String> {
+pub(crate) async fn preflight(pool: &PgPool, chain_id: &str) -> RunnerResult<String> {
     let state: Option<(Option<String>, Option<i64>)> = sqlx::query_as(
         "SELECT input_content_hash, current_block_number
          FROM chain_phase_state
@@ -128,39 +101,10 @@ pub(crate) async fn preflight(
     let Some(marker) = recorded_hash.filter(|hash| has_marker_prefix(hash)) else {
         return Err(marker_missing_error(chain_id));
     };
-    let Some(redo_end) = current_block_number else {
-        return Err(fence_not_needed_error(chain_id));
-    };
-
-    for source in sources {
-        if source.start_block_number > redo_end {
-            continue;
-        }
-        let cursor: Option<(i64, Option<i64>)> = sqlx::query_as(
-            "SELECT next_block_number, target_block_number
-             FROM ingest_cursors
-             WHERE chain_id = $1 AND source_key = $2",
-        )
-        .bind(chain_id)
-        .bind(&source.source_key)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| {
-            RunnerError::database(
-                format!(
-                    "failed to preflight source {} on chain {chain_id}",
-                    source.source_key
-                ),
-                error,
-            )
-        })?;
-        if cursor.is_some_and(|(next, target)| {
-            target.is_some_and(|target| target < redo_end) && next <= redo_end
-        }) {
-            return Ok(marker);
-        }
+    if current_block_number.is_none() {
+        return Err(no_recorded_extent_error(chain_id));
     }
-    Err(fence_not_needed_error(chain_id))
+    Ok(marker)
 }
 
 fn marker_missing_error(chain_id: &str) -> RunnerError {
@@ -168,8 +112,7 @@ fn marker_missing_error(chain_id: &str) -> RunnerError {
         ErrorKind::Configuration,
         format!(
             "--attest-watch-set-coverage is only valid when an interpret redo on chain \
-             {chain_id} is discharging a manifest-authority marker and would otherwise rely on \
-             Live lineage"
+             {chain_id} is discharging a manifest-authority marker"
         ),
     )
 }
@@ -187,13 +130,12 @@ fn marker_changed_error(chain_id: &str, expected: &str, recorded: Option<&str>) 
     )
 }
 
-fn fence_not_needed_error(chain_id: &str) -> RunnerError {
+fn no_recorded_extent_error(chain_id: &str) -> RunnerError {
     RunnerError::new(
         ErrorKind::Configuration,
         format!(
             "--attest-watch-set-coverage is not valid for interpret redo on chain {chain_id}: \
-             finite ingest cursors already cover the redo range, so the manifest-authority fence \
-             would not block"
+             the manifest-authority marker has no recorded interpreted extent to discharge"
         ),
     )
 }

@@ -491,7 +491,7 @@ async fn manifest_authority_change_rejects_live_suffix_lineage_coverage() -> Res
     assert_eq!(
         error.to_string(),
         "raw-data presence check failed for interpret redo on chain \
-manifest-authority-live-suffix: the manifest authority changed since blocks 1..=3 were loaded; \
+manifest-authority-live-suffix: the manifest authority changed since blocks 0..=3 were loaded; \
 complete the documented mandatory historical fetch for any widened range (docs/manifests.md § \
 mandatory historical fetch after watch-plan widening), or confirm that the change widened \
 nothing; then re-run with --attest-watch-set-coverage; see issue #376"
@@ -539,8 +539,6 @@ nothing; then re-run with --attest-watch-set-coverage; see issue #376"
     assert!(logs.contains("\"phase\":\"interpret\""));
     assert!(logs.contains("\"redo_from_block\":0"));
     assert!(logs.contains("\"redo_to_block\":3"));
-    assert!(logs.contains("\"lineage_from_block\":1"));
-    assert!(logs.contains("\"lineage_to_block\":3"));
     assert!(logs.contains(&format!(
         "\"manifest_authority_marker\":\"{manifest_authority_marker}\""
     )));
@@ -550,8 +548,7 @@ nothing; then re-run with --attest-watch-set-coverage; see issue #376"
 }
 
 #[tokio::test]
-async fn manifest_authority_change_without_a_live_suffix_keeps_full_cursor_coverage() -> Result<()>
-{
+async fn manifest_authority_change_without_a_live_suffix_requires_attestation() -> Result<()> {
     let scratch = ScratchDatabase::create("production_manifest_authority_finite_coverage").await?;
     let chain = "manifest-authority-finite-coverage";
     seed_branch(scratch.pool(), chain, 1, 0, None).await?;
@@ -566,12 +563,14 @@ async fn manifest_authority_change_without_a_live_suffix_keeps_full_cursor_cover
     .bind(chain)
     .execute(scratch.pool())
     .await?;
-    let unnecessary_attestation = loopback_runner(
+    let unattested_runner = loopback_runner(
         &scratch,
-        "production-manifest-authority-unnecessary-attestation",
-        true,
+        "production-manifest-authority-finite-coverage-unattested",
+        false,
     )?;
-    let error = unnecessary_attestation
+    // Before the uniform manifest-authority fence, full finite-cursor coverage let this redo
+    // adopt the new authority without either a historical fetch or an operator attestation.
+    let error = unattested_runner
         .redo(
             &live_chain(chain, "http://unused.invalid")?,
             RedoPhase::Phase(PhaseName::Interpret),
@@ -579,30 +578,23 @@ async fn manifest_authority_change_without_a_live_suffix_keeps_full_cursor_cover
             CancellationToken::new(),
         )
         .await
-        .expect_err("the flag must not be accepted when no lineage fallback is needed");
-    assert_eq!(error.kind(), phase_runner::error::ErrorKind::Configuration);
+        .expect_err("every manifest-authority discharge must require an attestation");
+    assert_eq!(error.kind(), phase_runner::error::ErrorKind::DataIntegrity);
     assert_eq!(
         error.to_string(),
-        "--attest-watch-set-coverage is not valid for interpret redo on chain \
-manifest-authority-finite-coverage: finite ingest cursors already cover the redo range, so the \
-manifest-authority fence would not block"
+        "raw-data presence check failed for interpret redo on chain \
+manifest-authority-finite-coverage: the manifest authority changed since blocks 0..=0 were \
+loaded; complete the documented mandatory historical fetch for any widened range \
+(docs/manifests.md § mandatory historical fetch after watch-plan widening), or confirm that the \
+change widened nothing; then re-run with --attest-watch-set-coverage; see issue #376"
     );
-    let phases = PhaseSet::with_ingest_interpret_project_and_live(
-        Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
-        Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
-        Arc::new(LoopbackPhase::new(PhaseName::Project)),
-        Arc::new(LoopbackPhase::new(PhaseName::Verify)),
-        Arc::new(LoopbackPhase::new(PhaseName::Live)),
-    )?;
-    let runner = PhaseRunner::new(
-        scratch.runner(),
-        phases,
-        CapacityGuard::system(CapacityConfig::default()),
-        "production-manifest-authority-finite-coverage",
-        fast_timing(),
-    )?;
 
-    runner
+    let attested_runner = loopback_runner(
+        &scratch,
+        "production-manifest-authority-finite-coverage-attested",
+        true,
+    )?;
+    attested_runner
         .redo(
             &live_chain(chain, "http://unused.invalid")?,
             RedoPhase::Phase(PhaseName::Interpret),
@@ -620,6 +612,64 @@ manifest-authority fence would not block"
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(adopted.as_deref(), Some(INTERPRETER_CONTENT_HASH));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn manifest_authority_fence_applies_when_all_sources_start_after_redo() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_authority_skipped_sources").await?;
+    let chain = "manifest-authority-skipped-sources";
+    seed_branch(scratch.pool(), chain, 1, 0, None).await?;
+    publish(scratch.pool(), chain, 1, 0, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 0, &block_hash(1, 0)).await?;
+    seed_empty_watch_manifest(scratch.pool(), chain).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET input_content_hash = 'manifest-authority:skipped-sources'
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    let future_source_chain = ChainConfig::new(
+        chain,
+        vec![SourceConfig::new(
+            chain,
+            "future-rpc",
+            "rpc",
+            SeedBasis::NewSignatureRange,
+            1,
+            "http://unused.invalid",
+        )?],
+        false,
+    )?;
+    let runner = loopback_runner(
+        &scratch,
+        "production-manifest-authority-skipped-sources",
+        false,
+    )?;
+
+    // Every configured source is outside 0..=0. Before the uniform fence, the source loop skipped
+    // them all and the marker was silently adopted because no Live suffix had been recorded.
+    let error = runner
+        .redo(
+            &future_source_chain,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 0)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a manifest-authority marker must fence even when every source is skipped");
+    assert_eq!(error.kind(), phase_runner::error::ErrorKind::DataIntegrity);
+    assert_eq!(
+        error.to_string(),
+        "raw-data presence check failed for interpret redo on chain \
+manifest-authority-skipped-sources: the manifest authority changed since blocks 0..=0 were \
+loaded; complete the documented mandatory historical fetch for any widened range \
+(docs/manifests.md § mandatory historical fetch after watch-plan widening), or confirm that the \
+change widened nothing; then re-run with --attest-watch-set-coverage; see issue #376"
+    );
+
     scratch.cleanup().await
 }
 
@@ -651,8 +701,49 @@ async fn watch_set_coverage_attestation_without_an_authority_marker_is_rejected(
     assert_eq!(
         error.to_string(),
         "--attest-watch-set-coverage is only valid when an interpret redo on chain \
-attestation-without-authority-marker is discharging a manifest-authority marker and would \
-otherwise rely on Live lineage"
+attestation-without-authority-marker is discharging a manifest-authority marker"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn watch_set_coverage_attestation_requires_a_recorded_interpret_extent() -> Result<()> {
+    let scratch =
+        ScratchDatabase::create("production_attestation_without_interpret_extent").await?;
+    let chain = "attestation-without-interpret-extent";
+    PhaseStore::new(scratch.pool().clone())
+        .initialize_chain(chain)
+        .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET input_content_hash = 'manifest-authority:no-extent'
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    let runner = loopback_runner(
+        &scratch,
+        "production-attestation-without-interpret-extent",
+        true,
+    )?;
+
+    let error = runner
+        .redo(
+            &live_chain(chain, "http://unused.invalid")?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 0)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("an attestation cannot discharge a marker without an interpreted extent");
+    assert_eq!(error.kind(), phase_runner::error::ErrorKind::Configuration);
+    assert_eq!(
+        error.to_string(),
+        "--attest-watch-set-coverage is not valid for interpret redo on chain \
+attestation-without-interpret-extent: the manifest-authority marker has no recorded interpreted \
+extent to discharge"
     );
 
     scratch.cleanup().await
@@ -695,8 +786,7 @@ async fn invalid_all_phase_attestation_is_rejected_before_ingest_runs() -> Resul
     assert_eq!(
         error.to_string(),
         "--attest-watch-set-coverage is only valid when an interpret redo on chain \
-all-attestation-without-authority-marker is discharging a manifest-authority marker and would \
-otherwise rely on Live lineage"
+all-attestation-without-authority-marker is discharging a manifest-authority marker"
     );
 
     scratch.cleanup().await

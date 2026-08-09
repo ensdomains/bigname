@@ -24,11 +24,12 @@ pub(crate) async fn require_interpret_raw_data(
     recorded_input_hash: Option<&str>,
     expected_manifest_authority_marker: Option<&str>,
 ) -> RunnerResult<Option<AttestedManifestAuthority>> {
-    let mut manifest_attestation = ManifestAuthorityAttestation::new(
+    let manifest_attestation = ManifestAuthorityAttestation::new(
         chain_id,
         recorded_input_hash,
         expected_manifest_authority_marker,
-    )?;
+    )?
+    .finish(chain_id, range)?;
     let expected_blocks = range
         .to
         .checked_sub(range.from)
@@ -131,12 +132,6 @@ pub(crate) async fn require_interpret_raw_data(
                 required_to,
             )));
         }
-        if let Some(target) = target.filter(|target| *target < range.to)
-            && next <= range.to
-        {
-            let lineage_from = required_from.max(target.saturating_add(1));
-            manifest_attestation.record_lineage_suffix(lineage_from);
-        }
     }
-    manifest_attestation.finish(chain_id, range)
+    Ok(manifest_attestation)
 }
