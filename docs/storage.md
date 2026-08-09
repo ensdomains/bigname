@@ -87,9 +87,15 @@ current raw-fact family; there is no retained call-snapshot or generic payload-
 cache table. Project hydration and request-scoped lookup call providers at an
 explicit block position without turning those responses into raw facts.
 
-`label_preimages` stores a verified labelhash-to-label observation. A preimage
+`label_preimages` stores a verified labelhash-to-label observation: the proven
+raw label bytes plus the normalization verdict for those bytes. A preimage
 may improve readability but cannot create a surface, ownership, resolver,
-record, permission, or primary-name fact by itself.
+record, permission, or primary-name fact by itself. The verdict gates how the
+decoded text is consumed: Project composes it into name-typed output only when
+the verdict is true. A false or error verdict keeps the proven bytes in the
+store but withholds the text from names, so serving falls back to the
+documented [non-name forms](glossary.md#non-name-form) — the escape-encoded raw
+bytes when the label does not decode, the labelhash placeholder when it does.
 
 ## Rainbow-table preimage import
 

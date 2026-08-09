@@ -370,7 +370,12 @@ Field ownership:
   labelhash but not the label, so two [non-name
   forms](glossary.md#non-name-form) are reachable here. A child whose label has
   never been observed carries `[<labelhash-without-0x>].<parent-name>` in
-  `display_name` and its lower-cased form in `name`. When a label is observed as
+  `display_name` and its lower-cased form in `name`. The same placeholder serves
+  a child whose label was observed — from the chain or the proof-checked rainbow
+  import — but whose text fails ENSIP-15 normalization: the node commits to the
+  raw label bytes, so serving the text as a name would name a different node,
+  and escaping the valid string would reproduce the same misleading text. When a
+  label is observed as
   bytes that are not valid UTF-8, or that contain a NUL, the row instead carries
   the whole stored child name — those label bytes, a dot, and the parent's —
   encoded by PostgreSQL's `escape` rule: a NUL as `\000`, each byte above `0x7f`

@@ -104,18 +104,25 @@ default unit; resource deduplication is explicit.
 
 `children_current` stores direct and classified child relations. For registry
 events that expose only a labelhash, Project composes the child name from a
-verified label preimage when one exists and leaves every name column null when
-none does — the labelhash and child node are proven, the label is not. Reads
-name such a child by the [non-name form](glossary.md#non-name-form)
+verified label preimage when one exists and its normalization verdict is true,
+and leaves the name columns null when none does — the labelhash and child node
+are proven, the label is not. Reads name such a child by the [non-name
+form](glossary.md#non-name-form)
 `[<labelhash-without-0x>].<parent-name>`, built from the parent's stored
 spelling, and lower-case it for the normalized form. A preimage whose label
 bytes are not valid UTF-8, or contain a NUL, is a third state: Project stores
 the whole child name as raw bytes with no decoded form, and reads escape-encode
-that whole string, parent portion included. Neither shape is an addressable
+that whole string, parent portion included. A preimage whose bytes decode but
+fail the verdict is a fourth state: the text is a valid string but not a name
+for the proven node — serving it would attach a spelling that re-hashes to a
+different node — and escaping it would serve the same misleading text, so
+Project keeps the raw label bytes, withholds the decoded text and both name
+columns, and the placeholder serves. None of these shapes is an addressable
 name. A preimage improves readability but does not create ownership or
 exact-name authority. ENSv2 direct and linked
 children derive from admitted graph events rather than token enumeration, and
-join the child's own active surface, so neither name-less shape arises there.[^v1-registry-l45][^v1-registry-l82][^v2-events-l49][^v2-events-l75]
+join the child's own active surface, so none of the name-less shapes arises
+there.[^v1-registry-l45][^v1-registry-l82][^v2-events-l49][^v2-events-l75]
 
 ## History
 

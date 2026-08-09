@@ -125,13 +125,53 @@ async fn rainbow_import_then_project_redo_serves_decoded_labels() -> Result<()> 
     );
 
     run_project(scratch.pool(), None, RunMode::Redo, 0, 3).await?;
+    // The proof-checked "Alice" row keeps its raw bytes and honest verdict in the store, but
+    // its text fails normalization, so serving must not attach it to the raw-byte node: the
+    // row serves the same placeholder as an unobserved label.
     assert_eq!(
         child_display_names(scratch.pool()).await?,
         sorted(vec![
-            "Alice.eth".to_owned(),
+            placeholder("Alice"),
             "alice.eth".to_owned(),
             placeholder("mallory"),
         ])
+    );
+    let gated: (Option<Vec<u8>>, Option<String>, Vec<u8>, Option<String>) = sqlx::query_as(
+        "SELECT raw_name, decoded_name, raw_label, decoded_label
+         FROM children_current WHERE labelhash = $1",
+    )
+    .bind(labelhash_hex("Alice"))
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(gated, (None, None, b"Alice".to_vec(), None));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn chain_observed_unnormalized_label_serves_the_placeholder() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_chain_observed_verdict_gate").await?;
+    seed_children_fixture(scratch.pool(), &["Alice"]).await?;
+    seed_registrar_manifest_and_log(scratch.pool(), "Alice").await?;
+
+    // The interpreter's own chain-observation path stores the same honest shape the rainbow
+    // import does: proven raw bytes, decoded text, verdict false.
+    run_interpret(scratch.pool(), 0, 1).await?;
+    let stored: (Option<String>, bool, Option<String>) = sqlx::query_as(
+        "SELECT decoded_label, normalized_under_version, normalization_error
+         FROM label_preimages WHERE labelhash = $1",
+    )
+    .bind(labelhash_hex("Alice"))
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(stored.0.as_deref(), Some("Alice"));
+    assert!(!stored.1);
+    assert!(stored.2.as_deref().is_some_and(|error| !error.is_empty()));
+
+    // The projection join is shared with the rainbow path, so the same gate applies.
+    run_project(scratch.pool(), None, RunMode::Normal, 0, 3).await?;
+    assert_eq!(
+        child_display_names(scratch.pool()).await?,
+        vec![placeholder("Alice")]
     );
     scratch.cleanup().await
 }
@@ -467,6 +507,10 @@ async fn seed_ens_names(pool: &PgPool, rows: &[(&str, &str)]) -> Result<()> {
 
 async fn seed_registrar_fixture(pool: &PgPool, label: &str) -> Result<()> {
     seed_lineage(pool, 0, 1).await?;
+    seed_registrar_manifest_and_log(pool, label).await
+}
+
+async fn seed_registrar_manifest_and_log(pool: &PgPool, label: &str) -> Result<()> {
     let contract_instance_id = Uuid::new_v4();
     sqlx::query("INSERT INTO contract_instances VALUES ($1, $2, 'contract', '{}'::jsonb, now())")
         .bind(contract_instance_id)

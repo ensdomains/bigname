@@ -2230,6 +2230,125 @@ async fn v2_get_subnames_paginates_across_a_child_with_no_observed_label() -> Re
 }
 
 #[tokio::test]
+async fn v2_get_subnames_gates_decoded_text_on_the_normalization_verdict() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+    // Project composes the name columns only under a true normalization verdict; a
+    // proof-checked label whose text fails keeps its raw bytes in the projection but is
+    // written with both name columns null, whether the text normalizes to different bytes
+    // ("Alice") or the normalizer errors outright (the ZWJ label).
+    seed_v2_subnames_preimage_child(&database, "parent.eth", "alice", true).await?;
+    seed_v2_subnames_preimage_child(&database, "parent.eth", "Alice", false).await?;
+    seed_v2_subnames_preimage_child(&database, "parent.eth", "Ni\u{200d}ck", false).await?;
+
+    let payload =
+        v2_subnames_payload_for_database(&database, "/v2/names/parent.eth/subnames?page_size=20")
+            .await?;
+    let rows = payload["data"].as_array().expect("subnames data").clone();
+    let row_for_label = |label: &str| {
+        let labelhash = format!("{:#x}", alloy_primitives::keccak256(label.as_bytes()));
+        rows.iter()
+            .find(|row| row["labelhash"] == labelhash)
+            .unwrap_or_else(|| panic!("child for label {label:?} must be served: {rows:?}"))
+    };
+
+    // Verdict true: the decoded name serves, and the served name re-hashes to the served node.
+    let decoded = row_for_label("alice");
+    assert_eq!(decoded["name"], json!("alice.parent.eth"));
+    assert_eq!(decoded["display_name"], json!("alice.parent.eth"));
+    assert_eq!(decoded["namehash"], json!(namehash_of("alice.parent.eth")));
+
+    // Verdict false with decodable text: the placeholder serves against the raw-byte node —
+    // never the text, which would re-hash to a different node than the one proven on chain.
+    let unnormalized = row_for_label("Alice");
+    assert_eq!(
+        unnormalized["name"],
+        json!(format!(
+            "[{}].parent.eth",
+            &format!("{:#x}", alloy_primitives::keccak256(b"Alice"))[2..]
+        ))
+    );
+    assert_eq!(unnormalized["name"], unnormalized["display_name"]);
+    assert_eq!(unnormalized["namehash"], json!(namehash_of("Alice.parent.eth")));
+    assert_ne!(unnormalized["namehash"], json!(namehash_of("alice.parent.eth")));
+
+    // A normalizer error gates the same way.
+    let errored = row_for_label("Ni\u{200d}ck");
+    assert_eq!(
+        errored["name"],
+        json!(format!(
+            "[{}].parent.eth",
+            &format!("{:#x}", alloy_primitives::keccak256("Ni\u{200d}ck".as_bytes()))[2..]
+        ))
+    );
+    assert_eq!(
+        errored["namehash"],
+        json!(namehash_of("Ni\u{200d}ck.parent.eth"))
+    );
+
+    database.cleanup().await
+}
+
+fn namehash_of(name: &str) -> String {
+    let labels = name.split('.').map(str::as_bytes).collect::<Vec<_>>();
+    format!("{:#x}", bigname_storage::ens_namehash_label_bytes(&labels))
+}
+
+/// Seeds the shape Project writes for a proof-checked preimage: the raw label bytes plus, only
+/// when the label's text passes normalization, the composed name columns. A label whose decoded
+/// text fails normalization keeps its raw bytes but is written with both name columns null, so
+/// serving falls to the placeholder.
+async fn seed_v2_subnames_preimage_child(
+    database: &TestDatabase,
+    parent_name: &str,
+    label: &str,
+    verdict_true: bool,
+) -> Result<()> {
+    let parent_logical_name_id: String = sqlx::query_scalar(
+        "SELECT logical_name_id FROM bigname_phase.name_surfaces WHERE raw_name = $1",
+    )
+    .bind(parent_name)
+    .fetch_one(&database.pool)
+    .await?;
+    let (chain_positions, canonicality_summary): (Value, Value) = sqlx::query_as(
+        "SELECT chain_positions, canonicality_summary FROM bigname_phase.children_current \
+         WHERE parent_logical_name_id = $1 LIMIT 1",
+    )
+    .bind(&parent_logical_name_id)
+    .fetch_one(&database.pool)
+    .await?;
+    let mut labels = vec![label.as_bytes()];
+    labels.extend(parent_name.split('.').map(str::as_bytes));
+    let namehash = format!("{:#x}", bigname_storage::ens_namehash_label_bytes(&labels));
+    let labelhash = format!("{:#x}", alloy_primitives::keccak256(label.as_bytes()));
+    let raw_name = format!("{label}.{parent_name}");
+    sqlx::query(
+        r#"
+        INSERT INTO bigname_phase.children_current (
+            parent_logical_name_id, child_logical_name_id, surface_class, namespace,
+            raw_name, decoded_name, raw_label, decoded_label, namehash, labelhash,
+            provenance, chain_positions, canonicality_summary, manifest_version
+        ) VALUES ($1, 'ens:' || $2, 'declared', 'ens', $3, $4, $5, $6, $2, $7,
+                  jsonb_build_object('chain_id', 'ethereum-mainnet',
+                                     'derivation_kind', 'children_current_rebuild'),
+                  $8, $9, 1)
+        "#,
+    )
+    .bind(&parent_logical_name_id)
+    .bind(&namehash)
+    .bind(verdict_true.then_some(raw_name.as_bytes()))
+    .bind(verdict_true.then_some(raw_name.as_str()))
+    .bind(label.as_bytes())
+    .bind(verdict_true.then_some(label))
+    .bind(&labelhash)
+    .bind(chain_positions)
+    .bind(canonicality_summary)
+    .execute(&database.pool)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_subname_counts_agree_with_the_page_when_a_child_target_is_orphaned() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_subnames_fixture(&database).await?;

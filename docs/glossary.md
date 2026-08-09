@@ -644,10 +644,14 @@ bigname cannot state as a name. Registry events prove a child node and its
 labelhash without proving the label, so some children have no name to serve;
 rather than omit the row or return null, the read composes a readable stand-in.
 Two exist today, both on `GET /v2/names/{name}/subnames`: the placeholder
-`[<labelhash-without-0x>].<parent-name>` for a label never observed, and, for a
+`[<labelhash-without-0x>].<parent-name>` for a label never observed or whose
+observed text fails ENSIP-15 normalization, and, for a
 label observed as bytes that are not valid UTF-8 or that contain a NUL, the
 PostgreSQL `escape` encoding of the whole stored child name — the parent portion
-included, since the encoding runs over the whole byte string. Neither is
+included, since the encoding runs over the whole byte string. A
+normalization-failing label takes the placeholder rather than the escape form:
+its decoded text is a valid string but not a name for the proven node, and
+escaping it would serve the same misleading text. Neither is
 reserved syntax — a label really spelled that way produces the same string — so
 a caller distinguishing rows should use `namehash` and `labelhash`, not the
 served text. A non-name form is not addressable and may not be fed back into a
@@ -688,7 +692,9 @@ behind a name or label hash, from an event, a retained name surface, or a
 rainbow-table import. Every preimage is proof-checked: the stored labelhash is
 the keccak256 of the raw label bytes, and a candidate that does not re-hash to
 its claimed labelhash is rejected. The normalization verdict is stored as a
-flag, not used as an admission gate. A preimage improves display only; it never
+flag, not used as an admission gate; it instead gates whether the decoded text
+may serve as a name — see [non-name form](#non-name-form) for what serves when
+it may not. A preimage improves display only; it never
 creates ownership, resolver, record, or primary-name truth.
 
 **Projection** — a disposable read-model table rebuilt deterministically from
