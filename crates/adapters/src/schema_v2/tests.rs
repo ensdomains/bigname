@@ -2730,6 +2730,43 @@ fn role_sensitive_single_admission_preserves_emitter_role() -> anyhow::Result<()
 }
 
 #[test]
+fn role_sensitive_distinct_role_tie_errors_in_either_admission_order() -> anyhow::Result<()> {
+    let registry = admission(73, "registry");
+    let registry_old = admission(73, "registry_old");
+    for admissions in [
+        vec![registry.clone(), registry_old.clone()],
+        vec![registry_old, registry],
+    ] {
+        let catalog = super::catalog::Catalog::new(
+            vec![manifest(
+                73,
+                "ens_v1_registry_l1",
+                "NewOwner",
+                "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+                &["registry", "registry_old"],
+                &["SubregistryChanged", "AuthorityTransferred"],
+            )],
+            Vec::new(),
+            admissions,
+        )?;
+        let raw = raw(v1_registry::NewOwner {
+            node: B256::ZERO,
+            label: keccak256(b"ambiguous-role"),
+            owner: CONTRACT.parse()?,
+        }
+        .encode_log_data());
+        let error = catalog
+            .select(&raw)
+            .expect_err("a distinct-role tie without a discovery rule must fail selection");
+        assert_eq!(
+            error.to_string(),
+            "raw log block-1:0 has ambiguous admitted adapters: ens_v1_registry_l1:NewOwner(bytes32,bytes32,address) (role=registry, instance=00000000-0000-0000-0000-000000000049), ens_v1_registry_l1:NewOwner(bytes32,bytes32,address) (role=registry_old, instance=00000000-0000-0000-0000-000000000049)"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn role_insensitivity_metadata_matches_adapter_implementations() -> anyhow::Result<()> {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -2743,7 +2780,7 @@ fn role_insensitivity_metadata_matches_adapter_implementations() -> anyhow::Resu
     );
     for entry in bigname_manifests::ROLE_INSENSITIVE_EVENTS {
         anyhow::ensure!(
-            pairs.insert((entry.source_family, entry.event)),
+            pairs.insert((entry.source_family.to_owned(), entry.event.to_owned())),
             "duplicate ROLE_INSENSITIVE_EVENTS entry for {} {}",
             entry.source_family,
             entry.event,
@@ -2773,6 +2810,177 @@ fn role_insensitivity_metadata_matches_adapter_implementations() -> anyhow::Resu
             entry.adapter_file,
         );
     }
+
+    // `protocol_rule_lookup_producers` excludes [discovery edges](../../../../docs/glossary.md#discovery-graph--discovery-edge)
+    // that bypass `Catalog::rule`; today that permits the `Upgraded` -> `proxy_implementation` entry.
+    let shared_discovery_overlap = role_insensitivity_discovery_overlap(
+        bigname_manifests::ROLE_INSENSITIVE_EVENTS,
+        &protocol_rule_lookup_producers()?,
+    );
+    anyhow::ensure!(
+        shared_discovery_overlap.is_empty(),
+        "ROLE_INSENSITIVE_EVENTS must not contain rule-backed discovery producers that consume Selected.emitter_role: {shared_discovery_overlap:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn role_insensitivity_discovery_overlap_is_source_family_scoped() {
+    let role_events = [bigname_manifests::RoleInsensitiveEvent {
+        source_family: "role_independent_family",
+        event: "SharedEvent",
+        justification: "test fixture",
+        adapter_file: "adapter/role_independent.rs",
+    }];
+    let mut producers = std::collections::BTreeSet::from([(
+        "rule_backed_family".to_owned(),
+        "SharedEvent".to_owned(),
+        "resolver".to_owned(),
+    )]);
+
+    assert!(
+        role_insensitivity_discovery_overlap(&role_events, &producers).is_empty(),
+        "the same event name in another source family must not overlap"
+    );
+    let exact_overlap = (
+        "role_independent_family".to_owned(),
+        "SharedEvent".to_owned(),
+        "resolver".to_owned(),
+    );
+    producers.insert((
+        exact_overlap.0.clone(),
+        exact_overlap.1.clone(),
+        exact_overlap.2.clone(),
+    ));
+    assert_eq!(
+        role_insensitivity_discovery_overlap(&role_events, &producers),
+        std::collections::BTreeSet::from([exact_overlap]),
+        "a rule-backed producer in the same source family must overlap"
+    );
+}
+
+#[test]
+fn protocol_rule_lookup_producer_scoping_tracks_dispatch_and_shared_helpers() -> anyhow::Result<()>
+{
+    let schema_v2_root = std::path::Path::new("/workspace/schema_v2");
+    let known_families = std::collections::BTreeSet::from([
+        "ens_v2_registry_l1".to_owned(),
+        "ens_v2_registrar_l1".to_owned(),
+        "future_registrar_family".to_owned(),
+        "ens_v2_resolver_l1".to_owned(),
+    ]);
+    let protocol_source = r#"
+        fn interpret(selected: &Selected, raw: &Raw, state: &mut State) {
+            const ROUTE_DIAGNOSTIC: &str = "future_registrar_family";
+            match unrelated.as_str() {
+                "future_registrar_family" => v2_resolver::interpret(selected, raw, state),
+                _ => v2_registry::interpret(selected, raw, state),
+            }
+            match selected.source.source_family.as_str() {
+                "ens_v2_resolver_l1" => v2_resolver::interpret(selected, raw, state),
+                "ens_v2_registry_l1" => v2_registry::interpret(selected, raw, state),
+                "ens_v2_registrar_l1" | "future_registrar_family" => {
+                    v2_registry::interpret(selected, raw, state)
+                }
+                _ => unreachable!(),
+            }
+        }
+    "#;
+    let v2_registry_source = r#"
+        fn interpret(selected: &Selected, raw: &Raw, state: &mut State) {
+            /*
+            if selected.source.source_family == "future_registrar_family" {
+                return v2_resolver::interpret(selected, raw, state);
+            }
+            */
+            if selected.source.source_family == "ens_v2_registrar_l1"
+                || selected.source.source_family == "future_registrar_family"
+            {
+                return registrar::interpret(selected, raw, state);
+            }
+        }
+    "#;
+    let adapter_paths = protocol_adapter_paths_from_dispatch_sources(
+        schema_v2_root,
+        &known_families,
+        protocol_source,
+        "",
+        v2_registry_source,
+    )?;
+    let locations = std::collections::BTreeSet::from([(
+        schema_v2_root.join("protocol/v2_registry/registrar.rs"),
+        "SharedEvent".to_owned(),
+        "resolver".to_owned(),
+    )]);
+    let manifest_events = std::collections::BTreeSet::from([
+        ("ens_v2_registry_l1".to_owned(), "SharedEvent".to_owned()),
+        ("ens_v2_registrar_l1".to_owned(), "SharedEvent".to_owned()),
+        (
+            "future_registrar_family".to_owned(),
+            "SharedEvent".to_owned(),
+        ),
+        ("ens_v2_resolver_l1".to_owned(), "SharedEvent".to_owned()),
+        ("ens_v2_resolver_l1".to_owned(), "DelegatedEvent".to_owned()),
+    ]);
+
+    assert_eq!(
+        scope_protocol_rule_lookup_producers(
+            schema_v2_root,
+            &locations,
+            &manifest_events,
+            &adapter_paths,
+        )?,
+        std::collections::BTreeSet::from([
+            (
+                "ens_v2_registrar_l1".to_owned(),
+                "SharedEvent".to_owned(),
+                "resolver".to_owned(),
+            ),
+            (
+                "future_registrar_family".to_owned(),
+                "SharedEvent".to_owned(),
+                "resolver".to_owned(),
+            ),
+        ])
+    );
+
+    let helper_location = std::collections::BTreeSet::from([(
+        schema_v2_root.join("protocol/shared_helper.rs"),
+        "DelegatedEvent".to_owned(),
+        "resolver".to_owned(),
+    )]);
+    let error = scope_protocol_rule_lookup_producers(
+        schema_v2_root,
+        &helper_location,
+        &manifest_events,
+        &adapter_paths,
+    )
+    .expect_err("an unowned shared helper must fail closed");
+    assert!(error.to_string().contains("has no protocol dispatch owner"));
+    Ok(())
+}
+
+#[test]
+fn checked_in_protocol_adapter_paths_follow_production_dispatch() -> anyhow::Result<()> {
+    let schema_v2_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/schema_v2");
+    let known_families = checked_in_manifest_source_family_events()?
+        .into_iter()
+        .map(|(source_family, _)| source_family)
+        .collect::<std::collections::BTreeSet<_>>();
+    let routes = checked_in_protocol_adapter_paths(&schema_v2_root, &known_families)?;
+
+    assert_eq!(
+        routes.get("ens_v1_resolver_l1"),
+        routes.get("basenames_base_resolver")
+    );
+    assert_eq!(
+        routes.get("ens_v2_registry_l1"),
+        Some(&schema_v2_root.join("protocol/v2_registry.rs"))
+    );
+    assert_eq!(
+        routes.get("ens_v2_registrar_l1"),
+        Some(&schema_v2_root.join("protocol/v2_registry/registrar.rs"))
+    );
     Ok(())
 }
 
@@ -2912,11 +3120,19 @@ fn required_discovery_rules_cover_protocol_rule_lookup_producers() -> anyhow::Re
         {
             let source = &loaded.manifest;
             for event in &source.abi.events {
-                for (_, edge_kind) in producers
-                    .iter()
-                    .filter(|(producer_event, _)| producer_event == &event.name)
+                for (_, _, edge_kind) in
+                    producers
+                        .iter()
+                        .filter(|(producer_family, producer_event, _)| {
+                            producer_family == &source.source_family
+                                && producer_event == &event.name
+                        })
                 {
-                    covered_producers.insert((event.name.clone(), edge_kind.clone()));
+                    covered_producers.insert((
+                        source.source_family.clone(),
+                        event.name.clone(),
+                        edge_kind.clone(),
+                    ));
                     if !covered_cases.insert((
                         environment.to_owned(),
                         source.namespace.clone(),
@@ -9731,8 +9947,25 @@ fn raw_with_topic0(topic0: String) -> RawLogInput {
     }
 }
 
-fn protocol_rule_lookup_producers() -> anyhow::Result<std::collections::BTreeSet<(String, String)>>
-{
+fn protocol_rule_lookup_producers()
+-> anyhow::Result<std::collections::BTreeSet<(String, String, String)>> {
+    let schema_v2_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/schema_v2");
+    let manifest_events = checked_in_manifest_source_family_events()?;
+    let known_families = manifest_events
+        .iter()
+        .map(|(source_family, _)| source_family.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let adapter_paths = checked_in_protocol_adapter_paths(&schema_v2_root, &known_families)?;
+    scope_protocol_rule_lookup_producers(
+        &schema_v2_root,
+        &protocol_rule_lookup_producer_locations()?,
+        &manifest_events,
+        &adapter_paths,
+    )
+}
+
+fn protocol_rule_lookup_producer_locations()
+-> anyhow::Result<std::collections::BTreeSet<(std::path::PathBuf, String, String)>> {
     let schema_v2_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/schema_v2");
     let discovery_path = schema_v2_root.join("discovery.rs");
     let discovery_source = std::fs::read_to_string(&discovery_path)?;
@@ -9754,7 +9987,11 @@ fn protocol_rule_lookup_producers() -> anyhow::Result<std::collections::BTreeSet
                     path.display()
                 )
             })?;
-            producers.insert((event.to_owned(), announcement_edge_kind.clone()));
+            producers.insert((
+                path.clone(),
+                event.to_owned(),
+                announcement_edge_kind.clone(),
+            ));
         }
         for offset in rust_occurrences(&source, "DiscoveryDraft::Edge {") {
             let open = offset
@@ -9782,10 +10019,358 @@ fn protocol_rule_lookup_producers() -> anyhow::Result<std::collections::BTreeSet
                     path.display()
                 )
             })?;
-            producers.insert((event.to_owned(), edge_kind.to_owned()));
+            producers.insert((path.clone(), event.to_owned(), edge_kind.to_owned()));
         }
     }
     Ok(producers)
+}
+
+fn checked_in_manifest_source_family_events()
+-> anyhow::Result<std::collections::BTreeSet<(String, String)>> {
+    let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests");
+    let mut events = std::collections::BTreeSet::new();
+    for environment in ["mainnet", "sepolia"] {
+        let repository = bigname_manifests::load_repository(manifest_root.join(environment))?;
+        for loaded in repository.manifests() {
+            events.extend(
+                loaded
+                    .manifest
+                    .abi
+                    .events
+                    .iter()
+                    .map(|event| (loaded.manifest.source_family.clone(), event.name.clone())),
+            );
+        }
+    }
+    Ok(events)
+}
+
+fn scope_protocol_rule_lookup_producers(
+    schema_v2_root: &std::path::Path,
+    locations: &std::collections::BTreeSet<(std::path::PathBuf, String, String)>,
+    manifest_events: &std::collections::BTreeSet<(String, String)>,
+    adapter_paths: &std::collections::BTreeMap<String, std::path::PathBuf>,
+) -> anyhow::Result<std::collections::BTreeSet<(String, String, String)>> {
+    let mut producers = std::collections::BTreeSet::new();
+    for (path, event, edge_kind) in locations {
+        let mut routed_families = adapter_paths
+            .iter()
+            .filter(|(_, adapter_path)| *adapter_path == path)
+            .map(|(source_family, _)| source_family.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        if path == &schema_v2_root.join("protocol.rs") {
+            routed_families.extend(adapter_paths.keys().cloned());
+        }
+        anyhow::ensure!(
+            !routed_families.is_empty(),
+            "protocol producer {} {} -> {} has no protocol dispatch owner",
+            path.display(),
+            event,
+            edge_kind,
+        );
+        let scoped = routed_families
+            .into_iter()
+            .filter(|source_family| {
+                manifest_events.contains(&(source_family.clone(), event.clone()))
+            })
+            .map(|source_family| (source_family, event.clone(), edge_kind.clone()))
+            .collect::<std::collections::BTreeSet<_>>();
+        anyhow::ensure!(
+            !scoped.is_empty(),
+            "protocol producer {} {} -> {} has no checked-in manifest event in a routed source family",
+            path.display(),
+            event,
+            edge_kind,
+        );
+        producers.extend(scoped);
+    }
+    Ok(producers)
+}
+
+fn checked_in_protocol_adapter_paths(
+    schema_v2_root: &std::path::Path,
+    known_families: &std::collections::BTreeSet<String>,
+) -> anyhow::Result<std::collections::BTreeMap<String, std::path::PathBuf>> {
+    let protocol_source = std::fs::read_to_string(schema_v2_root.join("protocol.rs"))?;
+    let v1_source = std::fs::read_to_string(schema_v2_root.join("protocol/v1.rs"))?;
+    let v2_registry_source =
+        std::fs::read_to_string(schema_v2_root.join("protocol/v2_registry.rs"))?;
+    protocol_adapter_paths_from_dispatch_sources(
+        schema_v2_root,
+        known_families,
+        &protocol_source,
+        &v1_source,
+        &v2_registry_source,
+    )
+}
+
+fn protocol_adapter_paths_from_dispatch_sources(
+    schema_v2_root: &std::path::Path,
+    known_families: &std::collections::BTreeSet<String>,
+    protocol_source: &str,
+    v1_source: &str,
+    v2_registry_source: &str,
+) -> anyhow::Result<std::collections::BTreeMap<String, std::path::PathBuf>> {
+    let mut paths = std::collections::BTreeMap::new();
+    for source_family in known_families {
+        if source_family.ends_with("_execution") || source_family == "basenames_l1_compat" {
+            continue;
+        }
+        let path =
+            if source_family.starts_with("ens_v1_") || source_family.starts_with("basenames_") {
+                let module = dispatch_module_for_family(v1_source, source_family)?;
+                schema_v2_root.join(format!("protocol/v1/{module}.rs"))
+            } else {
+                let module = dispatch_module_for_family(protocol_source, source_family)?;
+                if module == "v2_registry" {
+                    if let Some(nested_module) =
+                        nested_dispatch_module_for_family(v2_registry_source, source_family)?
+                    {
+                        schema_v2_root.join(format!("protocol/v2_registry/{nested_module}.rs"))
+                    } else {
+                        schema_v2_root.join("protocol/v2_registry.rs")
+                    }
+                } else {
+                    schema_v2_root.join(format!("protocol/{module}.rs"))
+                }
+            };
+        paths.insert(source_family.clone(), path);
+    }
+    Ok(paths)
+}
+
+fn dispatch_module_for_family(source: &str, source_family: &str) -> anyhow::Result<String> {
+    let file = syn::parse_file(source)?;
+    let function = production_interpret_function(&file)?;
+    let mut visitor = SourceFamilyMatchVisitor::new(source_family);
+    syn::visit::Visit::visit_block(&mut visitor, &function.block);
+    anyhow::ensure!(
+        visitor.routes.len() == 1,
+        "production dispatch must have exactly one adapter arm for {source_family}, found {:?}",
+        visitor.routes,
+    );
+    one_interpret_target(
+        visitor.routes.pop().expect("one adapter arm"),
+        source_family,
+    )
+}
+
+fn nested_dispatch_module_for_family(
+    source: &str,
+    source_family: &str,
+) -> anyhow::Result<Option<String>> {
+    let file = syn::parse_file(source)?;
+    let function = production_interpret_function(&file)?;
+    let mut match_visitor = SourceFamilyMatchVisitor::new(source_family);
+    syn::visit::Visit::visit_block(&mut match_visitor, &function.block);
+    let mut if_visitor = SourceFamilyIfVisitor::new(source_family);
+    syn::visit::Visit::visit_block(&mut if_visitor, &function.block);
+    let mut routes = match_visitor.routes;
+    routes.extend(if_visitor.routes);
+    anyhow::ensure!(
+        routes.len() <= 1,
+        "nested production dispatch has more than one adapter arm for {source_family}: {routes:?}",
+    );
+    let Some(route) = routes.pop() else {
+        return Ok(None);
+    };
+    one_interpret_target(route, source_family).map(Some)
+}
+
+fn production_interpret_function(file: &syn::File) -> anyhow::Result<&syn::ItemFn> {
+    let functions = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == "interpret" => Some(function),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        functions.len() == 1,
+        "production source must have exactly one top-level interpret function, found {}",
+        functions.len(),
+    );
+    Ok(functions[0])
+}
+
+fn one_interpret_target(
+    modules: std::collections::BTreeSet<String>,
+    source_family: &str,
+) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        modules.len() == 1,
+        "production dispatch arm for {source_family} must target exactly one adapter module, found {modules:?}",
+    );
+    Ok(modules.into_iter().next().expect("one adapter module"))
+}
+
+struct SourceFamilyMatchVisitor<'a> {
+    source_family: &'a str,
+    routes: Vec<std::collections::BTreeSet<String>>,
+}
+
+impl<'a> SourceFamilyMatchVisitor<'a> {
+    fn new(source_family: &'a str) -> Self {
+        Self {
+            source_family,
+            routes: Vec::new(),
+        }
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for SourceFamilyMatchVisitor<'_> {
+    fn visit_expr_match(&mut self, expression: &'ast syn::ExprMatch) {
+        if source_family_match_expression(&expression.expr) {
+            for arm in &expression.arms {
+                if pattern_names_family(&arm.pat, self.source_family) {
+                    let modules = interpret_targets_in_expression(&arm.body);
+                    if !modules.is_empty() {
+                        self.routes.push(modules);
+                    }
+                }
+            }
+            return;
+        }
+        syn::visit::visit_expr_match(self, expression);
+    }
+}
+
+struct SourceFamilyIfVisitor<'a> {
+    source_family: &'a str,
+    routes: Vec<std::collections::BTreeSet<String>>,
+}
+
+impl<'a> SourceFamilyIfVisitor<'a> {
+    fn new(source_family: &'a str) -> Self {
+        Self {
+            source_family,
+            routes: Vec::new(),
+        }
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for SourceFamilyIfVisitor<'_> {
+    fn visit_expr_if(&mut self, expression: &'ast syn::ExprIf) {
+        if condition_names_family(&expression.cond, self.source_family) {
+            let modules = interpret_targets_in_block(&expression.then_branch);
+            if !modules.is_empty() {
+                self.routes.push(modules);
+            }
+            return;
+        }
+        syn::visit::visit_expr_if(self, expression);
+    }
+}
+
+#[derive(Default)]
+struct InterpretTargetVisitor {
+    modules: std::collections::BTreeSet<String>,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for InterpretTargetVisitor {
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(function) = call.func.as_ref() {
+            let segments = function.path.segments.iter().collect::<Vec<_>>();
+            if segments
+                .last()
+                .is_some_and(|segment| segment.ident == "interpret")
+                && segments.len() >= 2
+            {
+                self.modules
+                    .insert(segments[segments.len() - 2].ident.to_string());
+            }
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+}
+
+fn interpret_targets_in_expression(expression: &syn::Expr) -> std::collections::BTreeSet<String> {
+    let mut visitor = InterpretTargetVisitor::default();
+    syn::visit::Visit::visit_expr(&mut visitor, expression);
+    visitor.modules
+}
+
+fn interpret_targets_in_block(block: &syn::Block) -> std::collections::BTreeSet<String> {
+    let mut visitor = InterpretTargetVisitor::default();
+    syn::visit::Visit::visit_block(&mut visitor, block);
+    visitor.modules
+}
+
+fn source_family_match_expression(expression: &syn::Expr) -> bool {
+    match expression {
+        syn::Expr::MethodCall(call) if call.method == "as_str" => {
+            selected_source_family_expression(&call.receiver)
+        }
+        syn::Expr::Group(group) => source_family_match_expression(&group.expr),
+        syn::Expr::Paren(paren) => source_family_match_expression(&paren.expr),
+        _ => false,
+    }
+}
+
+fn selected_source_family_expression(expression: &syn::Expr) -> bool {
+    let syn::Expr::Field(source_family) = expression else {
+        return false;
+    };
+    let syn::Member::Named(source_family_member) = &source_family.member else {
+        return false;
+    };
+    let syn::Expr::Field(source) = source_family.base.as_ref() else {
+        return false;
+    };
+    let syn::Member::Named(source_member) = &source.member else {
+        return false;
+    };
+    let syn::Expr::Path(selected) = source.base.as_ref() else {
+        return false;
+    };
+    source_family_member == "source_family"
+        && source_member == "source"
+        && selected.path.is_ident("selected")
+}
+
+fn pattern_names_family(pattern: &syn::Pat, source_family: &str) -> bool {
+    match pattern {
+        syn::Pat::Lit(literal) => {
+            matches!(&literal.lit, syn::Lit::Str(value) if value.value() == source_family)
+        }
+        syn::Pat::Or(alternatives) => alternatives
+            .cases
+            .iter()
+            .any(|pattern| pattern_names_family(pattern, source_family)),
+        syn::Pat::Paren(paren) => pattern_names_family(&paren.pat, source_family),
+        _ => false,
+    }
+}
+
+fn condition_names_family(condition: &syn::Expr, source_family: &str) -> bool {
+    match condition {
+        syn::Expr::Binary(binary) => {
+            let direct_match = matches!(binary.op, syn::BinOp::Eq(_))
+                && ((selected_source_family_expression(&binary.left)
+                    && string_expression_is(&binary.right, source_family))
+                    || (selected_source_family_expression(&binary.right)
+                        && string_expression_is(&binary.left, source_family)));
+            direct_match
+                || condition_names_family(&binary.left, source_family)
+                || condition_names_family(&binary.right, source_family)
+        }
+        syn::Expr::Group(group) => condition_names_family(&group.expr, source_family),
+        syn::Expr::Paren(paren) => condition_names_family(&paren.expr, source_family),
+        _ => false,
+    }
+}
+
+fn string_expression_is(expression: &syn::Expr, expected: &str) -> bool {
+    matches!(
+        expression,
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(value),
+            ..
+        }) if value.value() == expected
+    )
 }
 
 fn protocol_rule_lookup_source_paths() -> anyhow::Result<Vec<std::path::PathBuf>> {
@@ -9793,6 +10378,30 @@ fn protocol_rule_lookup_source_paths() -> anyhow::Result<Vec<std::path::PathBuf>
     let mut protocol_sources = Vec::new();
     collect_rust_sources(&schema_v2_root, &mut protocol_sources)?;
     Ok(protocol_sources)
+}
+
+fn role_insensitivity_discovery_overlap(
+    role_events: &[bigname_manifests::RoleInsensitiveEvent],
+    producers: &std::collections::BTreeSet<(String, String, String)>,
+) -> std::collections::BTreeSet<(String, String, String)> {
+    role_events
+        .iter()
+        .flat_map(|role_event| {
+            producers
+                .iter()
+                .filter(move |(producer_family, producer_event, _)| {
+                    producer_family == role_event.source_family
+                        && producer_event == role_event.event
+                })
+                .map(move |(_, _, edge_kind)| {
+                    (
+                        role_event.source_family.to_owned(),
+                        role_event.event.to_owned(),
+                        edge_kind.clone(),
+                    )
+                })
+        })
+        .collect()
 }
 
 type RuleLookupCaseKey = (String, String, String, String, u64, String, String, String);
