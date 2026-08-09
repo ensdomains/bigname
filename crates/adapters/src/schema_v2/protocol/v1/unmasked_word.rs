@@ -1,11 +1,34 @@
-//! `ens_v1_registry_l1`'s 2017 LLL-era emitter stored and logged argument words without masking
-//! them to the declared slot width (#361), so a `NewOwner`/`Transfer` data word can carry a value
-//! no `address` type represents. The tolerant decode reads such a word as its low 20 bytes — the
-//! value fallback-registry readers see — but with the upper bytes nonzero no caller can ever
-//! authenticate as the stored owner: on-chain the write grants authority to no one and locks out
-//! the previous owner. The event body therefore records the read-equivalent value with explicit
-//! markers, while interpreter state records no owner, activates no authority, and grants no
-//! permission for it (docs/architecture.md § Source families).
+//! `ens_v1_registry_l1`'s 2017 LLL-era `setOwner` path loaded the full calldata word, routed it to
+//! unmasked owner storage, and emitted it in `Transfer` (#361).
+//! (upstream: .refs/ens_v1_lll/contracts/ENS.lll:L194 @ ens_v1_lll@7e377df)
+//! (upstream: .refs/ens_v1_lll/contracts/ENS.lll:L200 @ ens_v1_lll@7e377df)
+//! (upstream: .refs/ens_v1_lll/contracts/ENS.lll:L73 @ ens_v1_lll@7e377df)
+//! (upstream: .refs/ens_v1_lll/contracts/ENS.lll:L74 @ ens_v1_lll@7e377df)
+//! (upstream: .refs/ens_v1_lll/contracts/ENS.lll:L204 @ ens_v1_lll@7e377df)
+//! (upstream: .refs/ens_v1_lll/contracts/ENS.lll:L205 @ ens_v1_lll@7e377df) The `setSubnodeOwner`
+//! path did the same for `NewOwner`.
+//! (upstream: .refs/ens_v1_lll/contracts/ENS.lll:L221 @ ens_v1_lll@7e377df)
+//! (upstream: .refs/ens_v1_lll/contracts/ENS.lll:L227 @ ens_v1_lll@7e377df)
+//! (upstream: .refs/ens_v1_lll/contracts/ENS.lll:L82 @ ens_v1_lll@7e377df)
+//! (upstream: .refs/ens_v1_lll/contracts/ENS.lll:L83 @ ens_v1_lll@7e377df)
+//! (upstream: .refs/ens_v1_lll/contracts/ENS.lll:L231 @ ens_v1_lll@7e377df)
+//! (upstream: .refs/ens_v1_lll/contracts/ENS.lll:L232 @ ens_v1_lll@7e377df)
+//! (upstream: .refs/ens_v1_lll/contracts/ENS.lll:L233 @ ens_v1_lll@7e377df)
+//! (upstream: .refs/ens_v1_lll/contracts/ENS.lll:L234 @ ens_v1_lll@7e377df) Either event word can
+//! therefore carry a value no `address` type represents. Tolerant decode retains its low 20 bytes
+//! as the fallback-read-equivalent value ratified in
+//! docs/architecture.md § Source families. The typed fallback paths delegate to the old registry.
+//! (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L20 @ ens_v1@91c966f)
+//! (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L31 @ ens_v1@91c966f)
+//! Registry authorization checks its own stored owner record.
+//! (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17 @ ens_v1@91c966f) No caller can
+//! authenticate as an unmasked stored owner because the LLL gate compares the caller to the full
+//! word.
+//! (upstream: .refs/ens_v1_lll/contracts/ENS.lll:L119 @ ens_v1_lll@7e377df)
+//! (upstream: .refs/ens_v1_lll/contracts/ENS.lll:L120 @ ens_v1_lll@7e377df)
+//! (upstream: .refs/ens_v1_lll/contracts/ENS.lll:L121 @ ens_v1_lll@7e377df) The event body retains the
+//! read-equivalent value with explicit markers, while interpreter state records no owner, activates
+//! no authority, and grants no permission for it (docs/architecture.md § Source families).
 
 use alloy_sol_types::SolEvent;
 use serde_json::{Value, json};

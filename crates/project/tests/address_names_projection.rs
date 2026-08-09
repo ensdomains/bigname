@@ -305,6 +305,16 @@ async fn masked_owner_word_clears_the_effective_controller() -> Result<()> {
     .await?;
     assert_eq!(leaked, 0);
 
+    // The exact-name control summary clears the masked tail as well.
+    let masked_control: serde_json::Value = sqlx::query_scalar(
+        "SELECT declared_summary -> 'control' FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(MASKED_LOGICAL)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(masked_control["registry_owner"], serde_json::Value::Null);
+    assert!(masked_control.get("owner").is_none());
+
     // The marker-less path is unchanged: the control name keeps its controller.
     let control_rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT address, relation FROM address_names_current WHERE logical_name_id = $1",
@@ -319,6 +329,17 @@ async fn masked_owner_word_clears_the_effective_controller() -> Result<()> {
             "effective_controller".to_owned()
         )]
     );
+    let control_summary: serde_json::Value = sqlx::query_scalar(
+        "SELECT declared_summary -> 'control' FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(CONTROL_LOGICAL)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        control_summary["registry_owner"],
+        json!(CONTROL_OWNER.to_lowercase())
+    );
+    assert!(control_summary.get("owner").is_none());
 
     database.cleanup().await?;
     Ok(())

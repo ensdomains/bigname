@@ -355,10 +355,14 @@ pub(super) async fn build(
             LIMIT 1
         ) status ON TRUE
         LEFT JOIN LATERAL (
-            SELECT lower(COALESCE(
-                       event.after_state ->> 'registry_owner',
-                       event.after_state ->> 'owner'
-                   )) AS registry_owner
+            SELECT lower(CASE
+                       WHEN event.after_state ->> 'owner_word_unmasked' = 'true'
+                           THEN NULL
+                       ELSE COALESCE(
+                           event.after_state ->> 'registry_owner',
+                           event.after_state ->> 'owner'
+                       )
+                   END) AS registry_owner
             FROM project_events event
             WHERE event.logical_name_id = surface.logical_name_id
               AND event.event_kind IN (
