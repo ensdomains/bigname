@@ -176,6 +176,16 @@ hash, canonical raw facts, and requested block range. A bounded Interpret redo
 may replace only derived identity, discovery, and normalized-event output in
 that range. Raw facts are never edited by replay.
 
+Interpret redo proves raw-data presence without pretending that Live extended
+each finite ingest source. Each `ingest_cursors` row proves coverage only from
+that source's configured start through its persisted target; Live does not
+advance those source cursors. The redo guard still requires exactly one
+readable `chain_lineage` row at every height in the full execution range, so
+the live-followed suffix is accepted only when its winning blocks were actually
+loaded and published. A missing lineage height, an ambiguous readable height,
+or an uncovered part of a source's finite target remains a fatal presence
+failure.
+
 The interpret engine loads the prior identity state required by the range,
 folds physical batches without changing semantic order, and revalidates the
 resume marker and current block anchors in the write transaction. A concurrent
@@ -246,9 +256,14 @@ Treat a change to any of them as a re-derivation decision and follow the
 [planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary).
 
 A hash rotation requires a planned full-history interpretation and projection
-walk; the system refuses to mix generations from different hashes. Moving a
-covered semantic source without updating the covered set fails the build rather
-than silently narrowing the fingerprint.
+walk; the system refuses to mix generations from different hashes. Interpret
+accepts the full finite-ingest range and extends its execution through its
+recorded live-followed head. Its downstream Project redo carries that effective
+range unchanged, and Project adopts the new hash only when the redo covers its
+entire recorded head. An interrupted redo retains that same effective range;
+recovery cannot narrow back to the finite ingest handoff. Moving a covered
+semantic source without updating the covered set fails the build rather than
+silently narrowing the fingerprint.
 
 ## Projection publication
 

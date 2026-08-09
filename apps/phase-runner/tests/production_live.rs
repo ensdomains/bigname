@@ -59,6 +59,22 @@ impl Phase for FailingInterpretPhase {
     }
 }
 
+struct FailingProjectPhase;
+
+impl Phase for FailingProjectPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Project
+    }
+
+    fn run_batch(&self, _context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async {
+            Err(RunnerError::data_integrity(
+                "forced project redo interruption",
+            ))
+        })
+    }
+}
+
 struct FailingVerifyPreflightPhase;
 
 impl Phase for FailingVerifyPreflightPhase {
@@ -177,6 +193,168 @@ async fn live_head_walk_advances_published_markers() -> Result<()> {
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(stored, (4, block_hash(1, 4)));
+    fixture.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn live_reorg_above_the_ingest_handoff_replays_through_the_live_head() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_live_reorg_above_handoff").await?;
+    let chain = "live-reorg-above-handoff";
+    seed_branch(scratch.pool(), chain, 1, 0, None).await?;
+    publish(scratch.pool(), chain, 1, 0, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 0, &block_hash(1, 0)).await?;
+    seed_empty_watch_manifest(scratch.pool(), chain).await?;
+    let fixture = RpcFixture::spawn(1, 4).await?;
+    let engine = Arc::new(Engine::new(scratch.pool().clone()));
+    let runner = production_runner(&scratch, engine, chain)?;
+    let configured_chain = live_chain(chain, &fixture.endpoint)?;
+    let cancellation = CancellationToken::new();
+    let run_cancellation = cancellation.clone();
+    let mut task =
+        tokio::spawn(async move { runner.run_chain(&configured_chain, run_cancellation).await });
+
+    wait_for_rederived_or_runner_stop(scratch.pool(), chain, 4, &block_hash(1, 4), &mut task)
+        .await?;
+    let ingest_cursor: (i64, Option<i64>) = sqlx::query_as(
+        "SELECT next_block_number, target_block_number
+         FROM ingest_cursors
+         WHERE chain_id = $1 AND source_key = 'rpc'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        ingest_cursor,
+        (1, Some(0)),
+        "live follow must not rewrite the finite ingest source extent"
+    );
+
+    fixture.reorg(2, 2, 4).await;
+    wait_for_rederived_or_runner_stop(scratch.pool(), chain, 4, &block_hash(2, 4), &mut task)
+        .await?;
+    cancellation.cancel();
+    task.await??;
+
+    fixture.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn hash_rotation_replays_the_stamped_project_range_through_the_live_head() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_live_hash_rotation").await?;
+    let chain = "live-hash-rotation";
+    seed_branch(scratch.pool(), chain, 1, 0, None).await?;
+    publish(scratch.pool(), chain, 1, 0, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 0, &block_hash(1, 0)).await?;
+    seed_empty_watch_manifest(scratch.pool(), chain).await?;
+    let fixture = RpcFixture::spawn(1, 3).await?;
+    let engine = Arc::new(Engine::new(scratch.pool().clone()));
+    let runner = production_runner(&scratch, engine, chain)?;
+    let configured_chain = live_chain(chain, &fixture.endpoint)?;
+    let cancellation = CancellationToken::new();
+    let run_cancellation = cancellation.clone();
+    let live_runner = Arc::clone(&runner);
+    let mut task = tokio::spawn(async move {
+        live_runner
+            .run_chain(&configured_chain, run_cancellation)
+            .await
+    });
+
+    wait_for_rederived_or_runner_stop(scratch.pool(), chain, 3, &block_hash(1, 3), &mut task)
+        .await?;
+    cancellation.cancel();
+    task.await??;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET input_content_hash = 'keccak256:pre-rotation'
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+
+    let interrupted_phases = PhaseSet::with_ingest_interpret_project_and_live(
+        Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+        Arc::new(InterpretPhase::new(scratch.pool().clone())),
+        Arc::new(FailingProjectPhase),
+        Arc::new(LoopbackPhase::new(PhaseName::Verify)),
+        Arc::new(LoopbackPhase::new(PhaseName::Live)),
+    )?;
+    let interrupted_runner = PhaseRunner::new(
+        scratch.runner(),
+        interrupted_phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-live-hash-rotation-interrupted",
+        fast_timing(),
+    )?;
+    let error = interrupted_runner
+        .redo(
+            &live_chain(chain, &fixture.endpoint)?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 0)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the injected Project failure must retain resumable hash-redo state");
+    assert!(
+        error
+            .to_string()
+            .contains("forced project redo interruption")
+    );
+    let interrupted: (Option<String>, bool, Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT input_content_hash, redo_in_progress,
+                redo_from_block_number, redo_to_block_number
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        interrupted,
+        (
+            Some(INTERPRETER_CONTENT_HASH.to_owned()),
+            true,
+            Some(0),
+            Some(3),
+        )
+    );
+
+    runner
+        .redo(
+            &live_chain(chain, &fixture.endpoint)?,
+            RedoPhase::Phase(PhaseName::Project),
+            BlockRange::new(0, 3)?,
+            CancellationToken::new(),
+        )
+        .await?;
+
+    let adopted: Vec<(String, Option<String>, bool)> = sqlx::query_as(
+        "SELECT phase_name, input_content_hash, redo_in_progress
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')
+         ORDER BY phase_name",
+    )
+    .bind(chain)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        adopted,
+        vec![
+            (
+                "interpret".to_owned(),
+                Some(INTERPRETER_CONTENT_HASH.to_owned()),
+                false,
+            ),
+            (
+                "project".to_owned(),
+                Some(INTERPRETER_CONTENT_HASH.to_owned()),
+                false,
+            ),
+        ]
+    );
+
     fixture.server.abort();
     scratch.cleanup().await
 }

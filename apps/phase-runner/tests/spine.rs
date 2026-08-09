@@ -1136,6 +1136,7 @@ async fn redo_interpret_can_start_a_new_content_hash_epoch() -> Result<()> {
     )
     .await?;
     set_phase_extent(scratch.pool(), chain_id, PhaseName::Interpret, 9).await?;
+    set_phase_extent(scratch.pool(), chain_id, PhaseName::Project, 9).await?;
     sqlx::query(
         "
         UPDATE chain_phase_state

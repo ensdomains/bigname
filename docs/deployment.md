@@ -172,6 +172,16 @@ level, while a redo covering the full retained extent can report the level
 fixed by its source kind. An interrupted attempt keeps the normal resumable
 redo marker and must be rerun with the same range.
 Historical `live` redo is rejected because live follows only the current head.
+Live does not advance the finite per-source ingest cursors. Interpret redo
+checks each source only through its persisted finite target and separately
+requires readable lineage at every height through the effective redo end; do
+not repair a presence failure by editing a cursor past data that source did not
+load. When a full-history Interpret redo for a content-hash rotation starts at
+the finite ingest bounds after Live has advanced, the runner extends Interpret
+through its recorded head and stamps that same range onto Project. Run or resume
+the stamped Project range exactly as recorded. Project hash adoption uses its
+recorded head rather than narrowing the stamp to the older ingest handoff, and
+an interrupted attempt keeps the live-extended range.
 `recompute-flags` recalculates label and name-surface normalization metadata
 under the current normalizer and refreshes the scoped primary-name projection.
 Names that remain active or remain shadow complete without replay. Names that

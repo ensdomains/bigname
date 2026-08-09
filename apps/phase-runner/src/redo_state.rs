@@ -18,7 +18,6 @@ pub(crate) struct RedoSession {
     recompute_flags: bool,
     stage_project_refresh_on_completion: bool,
 }
-
 pub(crate) enum RedoOutcome<'a> {
     Completed(&'a PhaseProgress),
     Failed(&'a RunnerError),
@@ -59,7 +58,15 @@ pub(crate) async fn begin(
     let adopts_new_hash =
         matches!(phase, PhaseName::Interpret | PhaseName::Project) && hash_requires_full_redo;
     if adopts_new_hash {
-        require_full_hash_redo(&mut transaction, chain_id, phase, mode).await?;
+        require_full_hash_redo(
+            &mut transaction,
+            chain_id,
+            phase,
+            mode,
+            previous.current_block_number,
+            previous.redo_in_progress,
+        )
+        .await?;
     }
     let range = mode.range().ok_or_else(|| {
         RunnerError::data_integrity("explicit redo transition is missing its block range")
@@ -288,6 +295,8 @@ async fn require_full_hash_redo(
     chain_id: &str,
     phase: PhaseName,
     mode: &RunMode,
+    recorded_head: Option<i64>,
+    interrupted_redo: bool,
 ) -> RunnerResult<()> {
     let bounds: (Option<i64>, Option<i64>) = sqlx::query_as(
         "
@@ -311,7 +320,7 @@ async fn require_full_hash_redo(
             error,
         )
     })?;
-    let (Some(from), Some(to)) = bounds else {
+    let (Some(from), Some(mut to)) = bounds else {
         return Err(RunnerError::new(
             crate::error::ErrorKind::ContentHashMismatch,
             format!(
@@ -320,6 +329,9 @@ async fn require_full_hash_redo(
             ),
         ));
     };
+    if phase == PhaseName::Project || interrupted_redo {
+        to = to.max(recorded_head.unwrap_or(to));
+    }
     let Some(range) = mode.range() else {
         return Err(RunnerError::data_integrity(
             "hash adoption requires an explicit redo range",

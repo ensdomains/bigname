@@ -60,9 +60,10 @@ pub(crate) async fn require_interpret_raw_data(
         if source.start_block_number > range.to {
             continue;
         }
-        let cursor: Option<(String, String, i64, i64)> = sqlx::query_as(
+        let cursor: Option<(String, String, i64, i64, Option<i64>)> = sqlx::query_as(
             "
-            SELECT source_kind, seed_basis, start_block_number, next_block_number
+            SELECT source_kind, seed_basis, start_block_number, next_block_number,
+                   target_block_number
             FROM ingest_cursors
             WHERE chain_id = $1
               AND source_key = $2
@@ -81,7 +82,7 @@ pub(crate) async fn require_interpret_raw_data(
                 error,
             )
         })?;
-        let (source_kind, seed_basis, start, next) = cursor.ok_or_else(|| {
+        let (source_kind, seed_basis, start, next, target) = cursor.ok_or_else(|| {
             RunnerError::data_integrity(format!(
                 "raw-data presence check failed for interpret redo on chain {chain_id}: configured \
                  ingest source {} has no cursor covering {}..={}",
@@ -101,13 +102,17 @@ pub(crate) async fn require_interpret_raw_data(
             )));
         }
         let required_from = start.max(range.from);
-        if next <= range.to {
+        let required_to = target.map_or(range.to, |target| target.min(range.to));
+        if required_from > required_to {
+            continue;
+        }
+        if next <= required_to {
             return Err(RunnerError::data_integrity(format!(
                 "raw-data presence check failed for interpret redo on chain {chain_id}: ingest \
                  cursor {} covers through {}, not required source range {required_from}..={}",
                 source.source_key,
                 next.saturating_sub(1),
-                range.to,
+                required_to,
             )));
         }
     }

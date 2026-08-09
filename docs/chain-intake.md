@@ -37,6 +37,12 @@ never fetches missing provider data or calls an old adapter; its input is the
 raw-fact range already admitted by `ingest`. The project phase likewise reads
 only canonical identity and normalized-event input.
 
+Per-source cursors remain bounded by the finite ingest snapshot. Live reuses
+the intake write path but does not claim that it extended every historical
+source, so it does not advance those cursors. For later replay, a source cursor
+proves only the part of the requested range through that source's persisted
+target; complete readable lineage proves the Live-loaded suffix.
+
 After the initial spine completes, the live loop takes one provider snapshot,
 fills its bounded gap, then advances or redoes `interpret` and `project` through
 the published head before polling again. Base uses the RPC member of its
