@@ -14,13 +14,24 @@ pub(super) fn resolve(
         return Ok(BTreeMap::new());
     }
     if !all_chains && chains.len() == 1 {
-        if entries.len() != 1 || entries[0].contains('=') {
+        if entries.len() != 1 {
             return Err(configuration_error(
-                "a single-chain redo takes exactly one bare invalidation token",
+                "a single-chain redo takes exactly one invalidation token",
             ));
         }
-        require_token(&entries[0])?;
-        return Ok(BTreeMap::from([(chains[0].clone(), entries[0].clone())]));
+        let selected_chain = &chains[0];
+        let token = if let Some((named_chain, token)) = entries[0].split_once('=') {
+            if named_chain != selected_chain {
+                return Err(configuration_error(format!(
+                    "attestation names chain {named_chain:?}, but the single-chain redo selects {selected_chain:?}"
+                )));
+            }
+            token
+        } else {
+            &entries[0]
+        };
+        require_token(token)?;
+        return Ok(BTreeMap::from([(selected_chain.clone(), token.to_owned())]));
     }
 
     let admitted = (!all_chains).then(|| {

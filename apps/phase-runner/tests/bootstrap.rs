@@ -104,7 +104,7 @@ async fn audit_schema_migration_applies_on_top_of_the_pre_audit_phase_baseline()
     );
     assert_eq!(
         upgraded_markers[0], upgraded_markers[1],
-        "one outstanding authority transition must retain one generation across its phases"
+        "matching legacy markers on one chain must receive one upgrade generation"
     );
 
     database.cleanup().await

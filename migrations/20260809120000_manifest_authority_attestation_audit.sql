@@ -5,8 +5,10 @@ DO $migration$
 BEGIN
     IF to_regclass('bigname_phase.chain_phase_state') IS NOT NULL THEN
         -- Preserve outstanding fences created by the pre-generation marker
-        -- format. Interpret and Project rows from the same chain transition
-        -- receive the same database-minted token.
+        -- format. Rows on one chain that still carry the same legacy marker
+        -- receive the same database-minted token. Each chain-phase marker then
+        -- carries the token of the invalidation that last writes it; a compound
+        -- sync can leave Interpret and Project with different tokens.
         EXECUTE $ddl$
             WITH legacy_generations AS MATERIALIZED (
                 SELECT chain_id,

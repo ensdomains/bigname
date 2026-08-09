@@ -8,6 +8,11 @@ use crate::{
 
 type AuditRow = (String, String, String, String, i64, i64, String, String);
 
+// PostgreSQL `now()` is the transaction timestamp, so `audit.attested_at` equals
+// `phase.started_at` because the audit insert and redo begin share one transaction.
+// No writer may change `started_at` while `redo_in_progress` remains true. If that
+// changes, resume can skip the token gate and replay telemetry; the raw-data coverage
+// check still runs.
 const PENDING_GENERATION_QUERY: &str = "SELECT audit.generation_token
      FROM manifest_authority_attestations audit
      JOIN chain_phase_state phase

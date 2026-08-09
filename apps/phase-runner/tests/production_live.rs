@@ -410,6 +410,8 @@ async fn manifest_authority_change_rejects_live_suffix_lineage_coverage() -> Res
         .await?;
     cancellation.cancel();
     task.await??;
+    recover_stopped_live_after_exit(runner.as_ref(), scratch.pool(), chain, &fixture.endpoint)
+        .await?;
     let b_facts: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM raw_logs WHERE chain_id = $1 AND lower(emitting_address) = $2",
     )
@@ -1437,6 +1439,8 @@ async fn hash_rotation_replays_the_stamped_project_range_through_the_live_head()
         .await?;
     cancellation.cancel();
     task.await??;
+    recover_stopped_live_after_exit(runner.as_ref(), scratch.pool(), chain, &fixture.endpoint)
+        .await?;
     sqlx::query(
         "UPDATE chain_phase_state
          SET input_content_hash = 'keccak256:pre-rotation'
@@ -1472,7 +1476,8 @@ async fn hash_rotation_replays_the_stamped_project_range_through_the_live_head()
     assert!(
         error
             .to_string()
-            .contains("forced project redo interruption")
+            .contains("forced project redo interruption"),
+        "unexpected interrupted hash-rotation error: {error:?}"
     );
     let interrupted: (Option<String>, bool, Option<i64>, Option<i64>) = sqlx::query_as(
         "SELECT input_content_hash, redo_in_progress,
@@ -3188,6 +3193,44 @@ async fn wait_for_rederived_or_runner_stop(
         },
         result = &mut wait => result,
     }
+}
+
+async fn recover_stopped_live_after_exit(
+    runner: &PhaseRunner,
+    pool: &PgPool,
+    chain: &str,
+    endpoint: &str,
+) -> Result<()> {
+    let status: String = sqlx::query_scalar(
+        "SELECT phase_status
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'live'",
+    )
+    .bind(chain)
+    .fetch_one(pool)
+    .await?;
+    if status == "running" {
+        // Cancellation can leave the durable Live row running when it wins between batches.
+        // Exercise normal restart recovery before starting a different writer phase.
+        let stopped = CancellationToken::new();
+        stopped.cancel();
+        runner
+            .run_chain(&live_chain(chain, endpoint)?, stopped)
+            .await?;
+    }
+    let recovered: String = sqlx::query_scalar(
+        "SELECT phase_status
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'live'",
+    )
+    .bind(chain)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        recovered, "completed",
+        "a different writer phase must start only after stopped-Live recovery"
+    );
+    Ok(())
 }
 
 type RewindSnapshot = (
