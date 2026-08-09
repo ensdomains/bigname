@@ -197,6 +197,8 @@ Rules:
 
 - A contract is indexable when an active manifest declares it, an admitted creation event announces it, or an allowed discovery edge makes it reachable from a canonical root. Announcement admission alone does not confer parent or name authority.
 - Re-declaring the same address mints no new instance — it appends a new active range.
+- When one address has multiple active manifest roles, interpretation follows the
+  [selection behavior documented with contract instance admission](manifests.md#admission-selection-for-addresses-with-multiple-declared-roles).
 - Declared proxy implementations resolve to separate `contract_instance_id` nodes; implementation changes update the proxy/implementation edge, not the proxy identity.
 - Capability ownership attaches to the declaring `source_family` only.
 - Draft features may sit behind manifest flags without changing the public contract.

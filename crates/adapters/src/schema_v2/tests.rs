@@ -2704,6 +2704,238 @@ fn role_free_discovery_event_does_not_widen_a_role_specific_rule() -> anyhow::Re
 }
 
 #[test]
+fn required_discovery_rules_cover_protocol_rule_lookup_producers() -> anyhow::Result<()> {
+    let producers = protocol_rule_lookup_producers()?;
+    anyhow::ensure!(
+        !producers.is_empty(),
+        "protocol source must expose at least one manifest-rule lookup producer"
+    );
+    // This documents a known unadmitted [discovery edge](../../../../docs/glossary.md#discovery-graph--discovery-edge)
+    // whose missing [admission](../../../../docs/glossary.md#admission) is pending
+    // https://github.com/ensdomains/bigname/issues/374. It is not an accepted manifest shape.
+    let known_unadmitted_edges = std::collections::BTreeSet::from([(
+        "ens_v2_root_l1".to_owned(),
+        "ResolverUpdated".to_owned(),
+        "resolver".to_owned(),
+    )]);
+
+    let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests");
+    let mut manifest_id = 700;
+    let mut covered_producers = std::collections::BTreeSet::new();
+    let mut covered_cases = std::collections::BTreeSet::new();
+    let mut encountered_known_gaps = std::collections::BTreeSet::new();
+    for environment in ["mainnet", "sepolia"] {
+        let repository = bigname_manifests::load_repository(manifest_root.join(environment))?;
+        for loaded in repository
+            .manifests()
+            .iter()
+            .filter(|loaded| loaded.manifest.rollout_status.is_active())
+        {
+            let source = &loaded.manifest;
+            for event in &source.abi.events {
+                for (_, edge_kind) in producers
+                    .iter()
+                    .filter(|(producer_event, _)| producer_event == &event.name)
+                {
+                    covered_producers.insert((event.name.clone(), edge_kind.clone()));
+                    if !covered_cases.insert((
+                        environment.to_owned(),
+                        source.chain.clone(),
+                        source.deployment_epoch.clone(),
+                        source.manifest_version,
+                        source.rollout_status.as_db_value(),
+                        source.source_family.clone(),
+                        event.name.clone(),
+                        edge_kind.clone(),
+                    )) {
+                        continue;
+                    }
+
+                    let gap_key = (
+                        source.source_family.clone(),
+                        event.name.clone(),
+                        edge_kind.clone(),
+                    );
+                    let is_known_gap = known_unadmitted_edges.contains(&gap_key);
+                    let checked_in_rule = source
+                        .discovery_rules
+                        .iter()
+                        .find(|rule| rule.edge_kind == *edge_kind);
+                    if is_known_gap {
+                        anyhow::ensure!(
+                            checked_in_rule.is_none(),
+                            "known gap {gap_key:?} now has a discovery rule; remove its #374 entry"
+                        );
+                        encountered_known_gaps.insert(gap_key.clone());
+                    } else {
+                        checked_in_rule.with_context(|| {
+                            format!(
+                                "protocol producer {gap_key:?} has no checked-in discovery rule or explicit known-gap entry"
+                            )
+                        })?;
+                    }
+                    let normalized_events = event
+                        .normalized_events
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>();
+                    let source_input = manifest(
+                        manifest_id,
+                        &source.source_family,
+                        &event.name,
+                        &event.fragment,
+                        &[],
+                        &normalized_events,
+                    );
+                    let mut unrelated = admission(manifest_id, "unrelated_role");
+                    unrelated.contract_instance_id = Uuid::from_u128(700);
+                    let mut other = admission(
+                        manifest_id,
+                        checked_in_rule.map_or("other_role", |rule| rule.from_role.as_str()),
+                    );
+                    other.contract_instance_id = unrelated.contract_instance_id;
+                    let catalog = super::catalog::Catalog::new(
+                        vec![source_input],
+                        checked_in_rule
+                            .map(|rule| DiscoveryRuleInput {
+                                manifest_id,
+                                edge_kind: rule.edge_kind.clone(),
+                                from_role: Some(rule.from_role.clone()),
+                                admission: rule.admission.clone(),
+                            })
+                            .into_iter()
+                            .collect(),
+                        vec![unrelated, other],
+                    )?;
+                    let topic0 = event
+                        .topic0()?
+                        .with_context(|| format!("{} must have topic0", event.name))?;
+                    let raw = raw_with_topic0(topic0);
+                    if !is_known_gap {
+                        let rule = checked_in_rule.expect("non-gap rule checked above");
+                        let selected = catalog.select(&raw)?.with_context(|| {
+                            format!(
+                                "{} {} must select an admitted role",
+                                source.source_family, event.name
+                            )
+                        })?;
+                        assert_eq!(
+                            selected.emitter_role.as_deref(),
+                            Some(rule.from_role.as_str()),
+                            "required_discovery_rule must cover {} {} -> {edge_kind}",
+                            source.source_family,
+                            event.name,
+                        );
+                    } else {
+                        let error = catalog.select(&raw).expect_err(
+                            "the #374 known gap must preserve the deterministic role tie",
+                        );
+                        assert!(
+                            error.to_string().contains("ambiguous admitted adapters"),
+                            "required_discovery_rule must preserve the #374 role tie for {} {} -> {edge_kind}: {error:#}",
+                            source.source_family,
+                            event.name,
+                        );
+                    }
+                    manifest_id += 1;
+                }
+            }
+        }
+    }
+
+    assert_eq!(
+        covered_producers, producers,
+        "every rule-lookup producer in protocol source must have a checked-in manifest event"
+    );
+    assert_eq!(
+        encountered_known_gaps, known_unadmitted_edges,
+        "every known-gap entry must still identify a protocol producer with no discovery rule"
+    );
+    Ok(())
+}
+
+#[test]
+fn root_resolver_updated_gap_374_is_terminal_in_active_sepolia_manifest() -> anyhow::Result<()> {
+    const MANIFEST_ID: i64 = 374;
+
+    let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests/sepolia");
+    let repository = bigname_manifests::load_repository(manifest_root)?;
+    let source = &repository
+        .manifests()
+        .iter()
+        .find(|loaded| {
+            loaded.manifest.source_family == "ens_v2_root_l1"
+                && loaded.manifest.rollout_status.is_active()
+        })
+        .context("active Sepolia ens_v2_root_l1 manifest is missing")?
+        .manifest;
+    let contract = source
+        .contracts
+        .iter()
+        .find(|contract| contract.role == "root_registry")
+        .context("active RootRegistry contract role is missing")?;
+    let root = source
+        .roots
+        .iter()
+        .find(|root| root.address.eq_ignore_ascii_case(&contract.address))
+        .context("RootRegistry root and contract declarations must share an address")?;
+    let mut root_admission = admission(MANIFEST_ID, &root.name);
+    root_admission.address = root.address.clone();
+    let mut contract_admission = admission(MANIFEST_ID, &contract.role);
+    contract_admission.address = contract.address.clone();
+    let mut resolver_updated = raw_at(
+        v2_registry::ResolverUpdated {
+            tokenId: U256::from(1),
+            resolver: "0x0000000000000000000000000000000000000043".parse()?,
+            sender: CONTRACT.parse()?,
+        }
+        .encode_log_data(),
+        1,
+        0,
+        &contract.address,
+    );
+    resolver_updated.chain_id = source.chain.clone();
+    let error = interpret_test_batch(BatchInput {
+        chain_id: source.chain.clone(),
+        manifests: vec![ManifestInput {
+            manifest_id: MANIFEST_ID,
+            manifest_version: i64::try_from(source.manifest_version)?,
+            namespace: source.namespace.clone(),
+            source_family: source.source_family.clone(),
+            chain_id: source.chain.clone(),
+            deployment_label: source.deployment_epoch.clone(),
+            normalizer_version: source.normalizer_version.clone(),
+            payload_json: serde_json::to_string(source)?,
+        }],
+        discovery_rules: source
+            .discovery_rules
+            .iter()
+            .map(|rule| DiscoveryRuleInput {
+                manifest_id: MANIFEST_ID,
+                edge_kind: rule.edge_kind.clone(),
+                from_role: Some(rule.from_role.clone()),
+                admission: rule.admission.clone(),
+            })
+            .collect(),
+        admissions: vec![root_admission, contract_admission],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![resolver_updated],
+    })
+    .expect_err("the #374 active-manifest gap must remain an explicit terminal error");
+
+    assert_eq!(
+        error.to_string(),
+        "ResolverUpdated is not admitted by a resolver manifest rule"
+    );
+    Ok(())
+}
+
+#[test]
 fn mainnet_double_declarations_select_the_event_role_in_either_order() -> anyhow::Result<()> {
     const MAINNET_REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
     const MAINNET_REGISTRAR: &str = "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85";
@@ -9233,6 +9465,251 @@ fn admission(manifest_id: i64, role: &str) -> AddressAdmissionInput {
 
 fn raw(encoded: alloy_primitives::LogData) -> RawLogInput {
     raw_at(encoded, 1, 0, CONTRACT)
+}
+
+fn raw_with_topic0(topic0: String) -> RawLogInput {
+    RawLogInput {
+        chain_id: CHAIN.to_owned(),
+        block_hash: "block-1".to_owned(),
+        block_number: 1,
+        block_timestamp: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1),
+        canonicality_state: "canonical".to_owned(),
+        transaction_hash: "transaction-1".to_owned(),
+        transaction_index: 0,
+        log_index: 0,
+        emitting_address: CONTRACT.to_owned(),
+        topics: vec![topic0],
+        data: Vec::new(),
+    }
+}
+
+fn protocol_rule_lookup_producers() -> anyhow::Result<std::collections::BTreeSet<(String, String)>>
+{
+    let schema_v2_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/schema_v2");
+    let discovery_source = std::fs::read_to_string(schema_v2_root.join("discovery.rs"))?;
+    let announcement_edge_kind = registry_announcement_rule_edge_kind(&discovery_source)?;
+    let bypass_edge_kinds = rule_lookup_bypass_edge_kinds(&discovery_source)?;
+    let mut protocol_sources = Vec::new();
+    collect_rust_sources(&schema_v2_root.join("protocol"), &mut protocol_sources)?;
+
+    let mut producers = std::collections::BTreeSet::new();
+    for path in protocol_sources {
+        let source = std::fs::read_to_string(&path)?;
+        let event_arms = rust_string_match_arms(&source)?;
+        for offset in rust_occurrences(&source, "DiscoveryDraft::RegistryAnnouncement") {
+            let event = enclosing_event_arm(&event_arms, offset).with_context(|| {
+                format!(
+                    "{} has a registry-announcement producer outside a named event arm",
+                    path.display()
+                )
+            })?;
+            producers.insert((event.to_owned(), announcement_edge_kind.clone()));
+        }
+        for offset in rust_occurrences(&source, "DiscoveryDraft::Edge {") {
+            let open = offset
+                + source[offset..]
+                    .find('{')
+                    .expect("DiscoveryDraft::Edge marker includes an opening brace");
+            let close = matching_rust_brace(&source, open).with_context(|| {
+                format!(
+                    "{} has an unterminated DiscoveryDraft::Edge constructor",
+                    path.display()
+                )
+            })?;
+            let edge_kind = discovery_edge_kind(&source[open + 1..close]).with_context(|| {
+                format!(
+                    "{} has a DiscoveryDraft::Edge constructor without a literal edge kind",
+                    path.display()
+                )
+            })?;
+            if bypass_edge_kinds.contains(edge_kind) {
+                continue;
+            }
+            let event = enclosing_event_arm(&event_arms, offset).with_context(|| {
+                format!(
+                    "{} produces rule-backed edge {edge_kind} outside a named event arm",
+                    path.display()
+                )
+            })?;
+            producers.insert((event.to_owned(), edge_kind.to_owned()));
+        }
+    }
+    Ok(producers)
+}
+
+fn collect_rust_sources(
+    directory: &std::path::Path,
+    output: &mut Vec<std::path::PathBuf>,
+) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_rust_sources(&path, output)?;
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            output.push(path);
+        }
+    }
+    output.sort();
+    Ok(())
+}
+
+fn registry_announcement_rule_edge_kind(source: &str) -> anyhow::Result<String> {
+    let marker = "DiscoveryDraft::RegistryAnnouncement => {";
+    let start = source
+        .find(marker)
+        .context("discovery materializer has no RegistryAnnouncement arm")?;
+    let open = start
+        + source[start..]
+            .find('{')
+            .expect("RegistryAnnouncement marker includes an opening brace");
+    let close = matching_rust_brace(source, open)
+        .context("discovery materializer has an unterminated RegistryAnnouncement arm")?;
+    let rule_call = source[open..close]
+        .find(".rule(")
+        .map(|offset| open + offset)
+        .context("RegistryAnnouncement arm does not call Catalog::rule")?;
+    first_rust_string(&source[rule_call..close])
+        .map(str::to_owned)
+        .context("RegistryAnnouncement rule call has no literal edge kind")
+}
+
+fn rule_lookup_bypass_edge_kinds(
+    source: &str,
+) -> anyhow::Result<std::collections::BTreeSet<String>> {
+    let assignment = source
+        .split_once("let rule_basis =")
+        .map(|(_, tail)| tail)
+        .context("discovery materializer does not assign rule_basis")?;
+    let rule_lookup = assignment
+        .split_once("catalog\n")
+        .map(|(bypass, _)| bypass)
+        .context("rule_basis does not fall through to Catalog::rule")?;
+    let kinds = rust_occurrences(rule_lookup, "if edge_kind == \"")
+        .into_iter()
+        .filter_map(|offset| first_rust_string(&rule_lookup[offset..]).map(str::to_owned))
+        .collect::<std::collections::BTreeSet<_>>();
+    anyhow::ensure!(
+        !kinds.is_empty(),
+        "discovery materializer must declare its Catalog::rule bypass edge kinds"
+    );
+    Ok(kinds)
+}
+
+fn discovery_edge_kind(body: &str) -> Option<&str> {
+    let value = body.split_once("edge_kind:")?.1.trim_start();
+    first_rust_string(value)
+}
+
+fn first_rust_string(source: &str) -> Option<&str> {
+    let start = source.find('"')? + 1;
+    let end = source[start..].find('"')? + start;
+    Some(&source[start..end])
+}
+
+fn rust_occurrences(source: &str, marker: &str) -> Vec<usize> {
+    let mut offsets = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find(marker) {
+        let offset = cursor + relative;
+        offsets.push(offset);
+        cursor = offset + marker.len();
+    }
+    offsets
+}
+
+fn rust_string_match_arms(source: &str) -> anyhow::Result<Vec<(std::ops::Range<usize>, String)>> {
+    let mut arms = Vec::new();
+    let mut line_start = 0;
+    for line in source.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let Some(after_quote) = trimmed.strip_prefix('"') else {
+            line_start += line.len();
+            continue;
+        };
+        let Some(quote_end) = after_quote.find('"') else {
+            line_start += line.len();
+            continue;
+        };
+        let event = &after_quote[..quote_end];
+        let after_event = &after_quote[quote_end + 1..];
+        let after_event = after_event.trim_start();
+        if !after_event.starts_with("=> {") {
+            line_start += line.len();
+            continue;
+        }
+        let arrow = line.find("=>").expect("trimmed line contains a match arm");
+        let open = line_start
+            + arrow
+            + line[arrow..]
+                .find('{')
+                .expect("block match arm contains an opening brace");
+        let close = matching_rust_brace(source, open)
+            .with_context(|| format!("event arm {event} has an unterminated block"))?;
+        arms.push((open..close + 1, event.to_owned()));
+        line_start += line.len();
+    }
+    Ok(arms)
+}
+
+fn enclosing_event_arm(arms: &[(std::ops::Range<usize>, String)], offset: usize) -> Option<&str> {
+    arms.iter()
+        .filter(|(range, _)| range.contains(&offset))
+        .min_by_key(|(range, _)| range.len())
+        .map(|(_, event)| event.as_str())
+}
+
+fn matching_rust_brace(source: &str, open: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut depth = 0usize;
+    let mut index = open;
+    let mut string = false;
+    let mut character = false;
+    let mut escaped = false;
+    let mut line_comment = false;
+    let mut block_comment_depth = 0usize;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        if line_comment {
+            line_comment = byte != b'\n';
+        } else if block_comment_depth > 0 {
+            if byte == b'/' && next == Some(b'*') {
+                block_comment_depth += 1;
+                index += 1;
+            } else if byte == b'*' && next == Some(b'/') {
+                block_comment_depth -= 1;
+                index += 1;
+            }
+        } else if string || character {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if (string && byte == b'"') || (character && byte == b'\'') {
+                string = false;
+                character = false;
+            }
+        } else if byte == b'/' && next == Some(b'/') {
+            line_comment = true;
+            index += 1;
+        } else if byte == b'/' && next == Some(b'*') {
+            block_comment_depth = 1;
+            index += 1;
+        } else if byte == b'"' {
+            string = true;
+        } else if byte == b'\'' {
+            character = true;
+        } else if byte == b'{' {
+            depth += 1;
+        } else if byte == b'}' {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+        index += 1;
+    }
+    None
 }
 
 fn with_topic0(mut encoded: alloy_primitives::LogData, topic0: B256) -> alloy_primitives::LogData {

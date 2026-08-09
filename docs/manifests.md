@@ -259,6 +259,21 @@ Manifest loading admits source-graph nodes as `contract_instance_id`s, not raw a
 
 Contract addresses persist as time-ranged attributes for raw-fact matching and watch-plan expansion.
 
+### Admission selection for addresses with multiple declared roles
+
+One address may be declared under more than one role in the same manifest. The common case is an
+address declared both as a `[[roots]]` entry and under its contract role. For each raw log,
+interpretation considers the full set of active declarations at that address; database row order
+does not choose the declaration.
+
+When the event produces a discovery edge governed by a role-scoped `discovery_rules` entry, a
+candidate carrying that rule's `from_role` outranks candidates with other roles. Events whose
+interpretation reads the emitter role continue to use `[[abi.events]].emitter_roles` to constrain
+the eligible declarations before selection, so the discovery-rule tie-break does not change their
+role. Equivalent candidates may collapse to one selection. If distinct-role candidates remain and
+the applicable discovery rule cannot choose between them, interpretation stops with the
+deterministic `ambiguous admitted adapters` error; it never picks an arbitrary row.
+
 ## Discovery admission
 
 A contract is an indexable event source when one of these holds:
