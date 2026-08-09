@@ -2321,7 +2321,10 @@ mod tests {
             std::env::temp_dir().join(format!("bigname-e2e-stop-race-{}.log", std::process::id()));
         let log_file = std::fs::File::create(&log_path)?;
         let child = Command::new("sh")
-            .args(["-c", "read -r _; echo deliberate-stop-race-crash >&2; exit 17"])
+            .args([
+                "-c",
+                "read -r _; echo deliberate-stop-race-crash >&2; exit 17",
+            ])
             .kill_on_drop(true)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::from(log_file.try_clone()?))
