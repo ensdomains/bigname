@@ -555,14 +555,18 @@ fn check(
 /// name's re-registration and late registry writes sit at a later stage than its registration and
 /// so land after it in the stream. The marked writes must also share the registration's
 /// transaction: reconciliation's retarget interval is transaction-scoped, so log order alone does
-/// not place a write inside it. Returns whether any staged rewrite lands in a later batch than
-/// its registration under the case's own split, feeding the cross-batch floor.
+/// not place a write inside it. And they must carry the burst's own selector — one same-selector
+/// `AddrChanged` stream — because the post-registration rewrite proves a boundary-restored tail's
+/// rethread reaches that stream only while the selector matches; a rotated record type keeps
+/// every placement and count green. Returns whether any staged rewrite lands in a later batch
+/// than its registration under the case's own split, feeding the cross-batch floor.
 fn verify_burst_phases(
     context: &str,
     scenario: &scenario::Scenario,
     batches: &[std::ops::Range<usize>],
 ) -> Result<bool> {
     let new_owner = format!("{:#x}", V1Registry::NewOwner::SIGNATURE_HASH);
+    let addr_changed = format!("{:#x}", V1Resolver::AddrChanged::SIGNATURE_HASH);
     let controllers = [
         format!("{:#x}", V1LegacyController::NameRegistered::SIGNATURE_HASH),
         format!("{:#x}", V1WrappedController::NameRegistered::SIGNATURE_HASH),
@@ -598,6 +602,23 @@ fn verify_burst_phases(
             );
         }
         let [pre_ownership, retarget_window, rewrite] = phases.map(Option::unwrap);
+        for (leg, phase) in [
+            (pre_ownership, BurstPhase::PreOwnership),
+            (retarget_window, BurstPhase::RetargetWindow),
+            (rewrite, BurstPhase::PostRegistrationRewrite),
+        ] {
+            let selector = leg.topics.first();
+            if selector != Some(&addr_changed) {
+                bail!(
+                    "{context}: the burst log marked {phase:?} for node {node} carries selector \
+                     {selector:?}, not the burst's AddrChanged: the marked legs are one \
+                     same-selector record stream, and the post-registration rewrite proves a \
+                     restored tail's rethread reaches that stream only while the selector \
+                     matches — a rotated record type keeps the node topic, position, \
+                     transaction, batch, and every count green while that reach is gone"
+                );
+            }
+        }
         let setup_log = scenario
             .logs
             .iter()
@@ -1369,6 +1390,33 @@ fn burst_phase_annotations_fail_when_the_stream_disagrees() {
     assert!(
         error.contains("no controller NameRegistered registers node"),
         "the failure names the missing controller registration: {error}"
+    );
+    // The selector rotation the position and transaction bindings cannot see: the marked leg
+    // keeps its node topic, position, transaction, and batch but becomes a valid one-event write
+    // of another record type — here ContenthashChanged, whose topic shape is identical — so the
+    // marked legs stop being one same-selector stream. One shape rotates the rewrite leg, the
+    // other the retarget-window leg.
+    let mut rotated_rewrite_logs = honest.logs.clone();
+    rotated_rewrite_logs[4].topics[0] =
+        format!("{:#x}", V1Resolver::ContenthashChanged::SIGNATURE_HASH);
+    let error = fails(
+        "rotated-rewrite-selector",
+        &scenario_for(rotated_rewrite_logs),
+    );
+    assert!(
+        error.contains("marked PostRegistrationRewrite") && error.contains("same-selector"),
+        "the failure names the rewrite leg's rotated selector: {error}"
+    );
+    let mut rotated_window_logs = honest.logs.clone();
+    rotated_window_logs[2].topics[0] =
+        format!("{:#x}", V1Resolver::ContenthashChanged::SIGNATURE_HASH);
+    let error = fails(
+        "rotated-window-selector",
+        &scenario_for(rotated_window_logs),
+    );
+    assert!(
+        error.contains("marked RetargetWindow") && error.contains("same-selector"),
+        "the failure names the retarget-window leg's rotated selector: {error}"
     );
     // The remaining order bindings, still inside the registration's transaction: the
     // retarget-window write past the controller event, and the rewrite ahead of it.
