@@ -1,4 +1,5 @@
-//! PostgreSQL reads for the phase schema plus shared test migration utilities.
+//! PostgreSQL reads for the phase schema, the verified rainbow label-preimage
+//! import, and shared test migration utilities.
 
 use std::{str::FromStr, time::Duration};
 
@@ -15,6 +16,7 @@ mod evm_primitives;
 mod history;
 mod identity;
 mod identity_facade;
+mod label_preimages;
 mod lineage;
 mod name_current;
 mod normalized_events;
@@ -72,6 +74,10 @@ pub use identity_facade::{
     IdentityPrimaryNameSnapshot, IdentityRecordInventoryRow, IndexingStatusChainRow,
     IndexingStatusRead, ReverseIdentityCursor, ReverseIdentityGroup, ReverseIdentityRecordRow,
     ReverseIdentityRoles, ReverseIdentityStorageInput,
+};
+pub use label_preimages::{
+    ENS_RAINBOW_SOURCE_KIND, LabelPreimageImportSummary,
+    import_label_preimages_from_ens_names_table,
 };
 pub use lineage::{
     CanonicalityState, ChainLineageBlock, chain_lineage_contains_ancestor,

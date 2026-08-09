@@ -25,7 +25,7 @@ pub fn interpret_schema_v2_batch(input: BatchInput) -> anyhow::Result<BatchOutpu
             "incremental adapter output differs from fresh one-shot interpretation"
         );
         assert_restores_exactly(restore_input, &actual, &session)?;
-        return Ok(actual);
+        Ok(actual)
     }
     #[cfg(not(test))]
     {

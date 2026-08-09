@@ -20,6 +20,8 @@ use crate::{
 
 #[path = "cli_inspect.rs"]
 mod inspect_resolution;
+#[path = "cli_label_preimages.rs"]
+mod label_preimages;
 
 #[cfg(test)]
 #[path = "cli/tests.rs"]
@@ -44,7 +46,9 @@ enum Command {
     /// Move the published latest head back to an exact stored ancestor.
     Rewind(RewindArgs),
     /// Read bounded schema-v2 lineage and raw-event inspection windows.
-    Inspect(InspectArgs),
+    Inspect(inspect_resolution::InspectArgs),
+    /// Manage verified label preimages.
+    LabelPreimages(label_preimages::LabelPreimagesArgs),
 }
 
 #[derive(Clone, Debug, Args)]
@@ -243,37 +247,6 @@ struct RewindArgs {
     ancestor_hash: String,
 }
 
-#[derive(Clone, Debug, Args)]
-struct InspectArgs {
-    #[arg(long, env = "BIGNAME_DATABASE_URL")]
-    database_url: String,
-
-    #[command(subcommand)]
-    window: InspectWindow,
-}
-
-#[derive(Clone, Debug, Subcommand)]
-enum InspectWindow {
-    /// Show stored block identities, canonicality labels, and fact counts.
-    BlockCanonicality(InspectRangeArgs),
-    /// Show stored lineage and optional audited header fields.
-    StoredLineage(InspectRangeArgs),
-    /// Show retained raw logs with transaction, receipt, and normalized-event context.
-    RawEvents(InspectRangeArgs),
-}
-
-#[derive(Clone, Debug, Args)]
-struct InspectRangeArgs {
-    #[arg(long)]
-    chain: String,
-
-    #[arg(long)]
-    from_block: i64,
-
-    #[arg(long)]
-    to_block: i64,
-}
-
 pub enum ResolvedCommand {
     InitSchema {
         database_url: String,
@@ -306,6 +279,11 @@ pub enum ResolvedCommand {
         database_url: String,
         request: crate::inspect::InspectionRequest,
     },
+    LabelPreimagesImportEnsRainbow {
+        database_url: String,
+        batch_size: Option<i64>,
+        limit: Option<i64>,
+    },
 }
 
 pub enum RedoChains {
@@ -323,6 +301,7 @@ impl Cli {
             Command::Redo(args) => resolve_redo(args),
             Command::Rewind(args) => resolve_rewind(args),
             Command::Inspect(args) => inspect_resolution::resolve(args),
+            Command::LabelPreimages(args) => label_preimages::resolve(args),
         }
     }
 }

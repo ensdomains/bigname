@@ -19,10 +19,14 @@ use super::{
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L82 @ ens_v1@91c966f),
 /// so a registry event proves a child node and its labelhash but not the label itself. Project
 /// writes the name columns null until a preimage arrives, and stores raw bytes with no decoded
-/// form for a preimage that does not decode. The arms answer in that order: the decoded name,
-/// the escape-encoded raw bytes, and the documented `[<labelhash-without-0x>].<parent-name>`
-/// placeholder. The first two are null exactly when Project had nothing to write; the placeholder
-/// is total, which is what keeps a null out of a mandatory field. The escape arm re-encodes the
+/// form for a preimage that does not decode. A preimage that decodes but fails normalization keeps
+/// its raw bytes in `label_preimages` yet gets both name columns null too: its text must not
+/// serve as a name, and the escaped form would reproduce the same misleading text. The arms
+/// answer in that order: the decoded name, the escape-encoded raw bytes, and the documented
+/// `[<labelhash-without-0x>].<parent-name>` placeholder. The escape arm is therefore reached
+/// only by bytes that do not decode; the placeholder covers both a label never observed and an
+/// observed label whose text is not name-safe. The placeholder is total, which is what keeps a
+/// null out of a mandatory field. The escape arm re-encodes the
 /// whole stored string, so a non-ASCII parent portion is octal-escaped too, while the placeholder
 /// carries the parent's spelling as-is — and reads it here rather than inheriting the copy Project
 /// composed into the name columns. That spelling is empty only for the zero-label

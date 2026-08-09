@@ -10,6 +10,7 @@ pub mod ingest_phase;
 mod ingest_progress;
 pub mod inspect;
 pub mod interpret_phase;
+pub mod label_preimages;
 pub mod live_phase;
 pub mod phase;
 pub mod phase_lock;

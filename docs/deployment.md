@@ -184,7 +184,17 @@ the stamped markers block normal Interpret work. Run the stamped redo to make
 transitions visible; until then, affected names serve their pre-transition
 state. On completion the command writes one JSON object to standard output with
 the same-class and transition counts plus every stamped phase range; this report
-does not depend on `RUST_LOG`. An interrupted recompute resumes from its durable
+does not depend on `RUST_LOG`. After a normalizer-version bump (a change to the
+`ENS_NORMALIZER_VERSION` constant), run `recompute-flags` per chain over the
+chain's full retained range (`--from-block`/`--to-block` are required and a
+bounded range skips labels whose only selection arm is range-scoped) and then a
+full-range Project redo per chain over the chain's full retained range — the
+same full-range redo the [rainbow-table import](storage.md#rainbow-table-preimage-import)
+requires: label verdicts gate what Project composes into served names, and a
+verdict flip on a label with no name surface stamps no redo of its own — only
+surface visibility-class transitions do — so the full-range redo is the
+required sequence to move a surface-less flip into served names. An interrupted
+recompute resumes from its durable
 marker; the
 scoped Project refresh marker created by the command is likewise distinguishable
 and resumable. A completed scoped refresh stays marked as "Interpret flags

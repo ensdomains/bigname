@@ -162,6 +162,14 @@ async fn main() -> Result<()> {
             database_url,
             request,
         } => phase_runner::inspect::run(&database_url, request).await?,
+        ResolvedCommand::LabelPreimagesImportEnsRainbow {
+            database_url,
+            batch_size,
+            limit,
+        } => {
+            phase_runner::label_preimages::import_ens_rainbow(&database_url, batch_size, limit)
+                .await?;
+        }
     }
     Ok(())
 }

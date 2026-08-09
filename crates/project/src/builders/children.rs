@@ -28,22 +28,31 @@ pub(super) async fn build(
               AND event.after_state ->> 'child_node' IS NOT NULL
               AND event.after_state ->> 'labelhash' IS NOT NULL
         ),
+        -- A proof-checked label whose text fails normalization keeps its raw bytes in
+        -- label_preimages but must not serve that text as a name: serving falls to the
+        -- documented placeholder only when both name columns are null, so raw_name is
+        -- suppressed with decoded_name here. Label bytes that do not decode keep raw_name
+        -- for the documented escaped form.
         v1_rows AS (
             SELECT parent.logical_name_id AS parent_logical_name_id,
                    event.namespace || ':' ||
                        lower(event.after_state ->> 'child_node') AS child_logical_name_id,
                    event.namespace,
                    CASE WHEN preimage.raw_label IS NULL THEN NULL
+                       WHEN preimage.decoded_label IS NOT NULL
+                            AND NOT preimage.normalized_under_version THEN NULL
                        WHEN parent.raw_name = '' THEN preimage.raw_label
                        ELSE preimage.raw_label || decode('2e', 'hex') ||
                             convert_to(parent.raw_name, 'UTF8')
                    END AS raw_name,
                    CASE WHEN preimage.decoded_label IS NULL THEN NULL
+                       WHEN NOT preimage.normalized_under_version THEN NULL
                        WHEN parent.raw_name = '' THEN preimage.decoded_label
                        ELSE preimage.decoded_label || '.' || parent.raw_name
                    END AS decoded_name,
                    preimage.raw_label,
-                   preimage.decoded_label,
+                   CASE WHEN preimage.normalized_under_version THEN preimage.decoded_label
+                   END AS decoded_label,
                    lower(event.after_state ->> 'child_node') AS namehash,
                    lower(event.after_state ->> 'labelhash') AS labelhash,
                    lower(event.after_state ->> 'owner') AS owner,
@@ -114,13 +123,19 @@ pub(super) async fn build(
             SELECT parent.logical_name_id AS parent_logical_name_id,
                    child.logical_name_id AS child_logical_name_id,
                    child.namespace,
-                   preimage.raw_label || decode('2e', 'hex') ||
-                       convert_to(parent.raw_name, 'UTF8') AS raw_name,
+                   CASE WHEN preimage.raw_label IS NULL THEN NULL
+                       WHEN preimage.decoded_label IS NOT NULL
+                            AND NOT preimage.normalized_under_version THEN NULL
+                       ELSE preimage.raw_label || decode('2e', 'hex') ||
+                            convert_to(parent.raw_name, 'UTF8')
+                   END AS raw_name,
                    CASE WHEN preimage.decoded_label IS NULL THEN NULL
+                       WHEN NOT preimage.normalized_under_version THEN NULL
                        ELSE preimage.decoded_label || '.' || parent.raw_name
                    END AS decoded_name,
                    preimage.raw_label,
-                   preimage.decoded_label,
+                   CASE WHEN preimage.normalized_under_version THEN preimage.decoded_label
+                   END AS decoded_label,
                    child.namehash,
                    lower(child.labelhashes[1]) AS labelhash,
                    NULL::text AS owner,
