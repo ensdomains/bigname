@@ -1,7 +1,7 @@
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::{model::PriorEventInput, state::State};
+use super::{model::PriorEventInput, protocol::v1::unmasked_word, state::State};
 
 pub(super) fn v2(state: &mut State, event: &PriorEventInput) {
     if event.source_family == "ens_v2_resolver_l1" && event.event_kind == "PreimageObserved" {
@@ -198,35 +198,38 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
             .get("child_node")
             .or_else(|| event.after_state.get("node"))
             .and_then(Value::as_str)
-        && let Some(owner) = event.after_state.get("owner").and_then(Value::as_str)
     {
-        state.set_v1_registry_owner(&event.namespace, namehash, owner.to_owned());
-        state.remember_v1_registry_authority(
-            &event.namespace,
-            namehash,
-            super::state::V1NameState {
-                logical_name_id: event
-                    .logical_name_id
-                    .clone()
-                    .unwrap_or_else(|| format!("{}:{namehash}", event.namespace)),
-                surface_known: event.logical_name_id.is_some(),
-                resource_id: super::common::stable_uuid(&format!(
-                    "resource:registry-only:{}:{namehash}",
-                    event.chain_id
-                )),
-                token_lineage_id: None,
-                authority_source_family: event.source_family.clone(),
-                source_manifest_id: event.source_manifest_id,
-                labelhash: event
-                    .after_state
-                    .get("labelhash")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                expiry: None,
-                owner: Some(owner.to_owned()),
-                authority_key: Some(format!("registry-only:{}:{namehash}", event.chain_id)),
-            },
-        );
+        if unmasked_word::body_has_unmasked_owner_word(&event.after_state) {
+            state.forget_v1_registry_owner(&event.namespace, namehash);
+        } else if let Some(owner) = event.after_state.get("owner").and_then(Value::as_str) {
+            state.set_v1_registry_owner(&event.namespace, namehash, owner.to_owned());
+            state.remember_v1_registry_authority(
+                &event.namespace,
+                namehash,
+                super::state::V1NameState {
+                    logical_name_id: event
+                        .logical_name_id
+                        .clone()
+                        .unwrap_or_else(|| format!("{}:{namehash}", event.namespace)),
+                    surface_known: event.logical_name_id.is_some(),
+                    resource_id: super::common::stable_uuid(&format!(
+                        "resource:registry-only:{}:{namehash}",
+                        event.chain_id
+                    )),
+                    token_lineage_id: None,
+                    authority_source_family: event.source_family.clone(),
+                    source_manifest_id: event.source_manifest_id,
+                    labelhash: event
+                        .after_state
+                        .get("labelhash")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    expiry: None,
+                    owner: Some(owner.to_owned()),
+                    authority_key: Some(format!("registry-only:{}:{namehash}", event.chain_id)),
+                },
+            );
+        }
     }
     if source_event == Some("NewOwner") {
         let node = event.after_state.get("child_node").and_then(Value::as_str);

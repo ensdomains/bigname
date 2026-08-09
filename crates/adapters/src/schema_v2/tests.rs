@@ -4833,13 +4833,23 @@ fn lll_era_unmasked_resolver_word_decodes_as_its_low_20_bytes() -> anyhow::Resul
         resolver_changed.after_state["resolver"],
         json!(LLL_UNMASKED_WORD_ADDRESS)
     );
+    assert_eq!(
+        resolver_changed.after_state["resolver_word_unmasked"],
+        json!(true)
+    );
+    assert_eq!(
+        resolver_changed.after_state["resolver_word_raw"],
+        json!(LLL_UNMASKED_WORD)
+    );
     Ok(())
 }
 
 #[test]
-fn lll_era_unmasked_owner_words_decode_as_their_low_20_bytes() -> anyhow::Result<()> {
-    // Both dirty NewOwner logs that exist chain-wide (#361 census), with their real bytes.
-    for (raw, expected_owner) in [
+fn lll_era_unmasked_owner_words_are_recorded_without_authority() -> anyhow::Result<()> {
+    // Both dirty NewOwner logs that exist chain-wide (#361 census), with their real bytes. The
+    // masked low-20 value stays in the body as the read-equivalent owner, but it is an address no
+    // caller can authenticate as: it must receive no authority and no permission grant.
+    for (raw, expected_owner, raw_word) in [
         (
             RawLogInput {
                 block_hash: "0x018c38ad118e456dc6b6fcc310490a4f60134171ded4ae783c45a362e821f3e9"
@@ -4861,6 +4871,7 @@ fn lll_era_unmasked_owner_words_decode_as_their_low_20_bytes() -> anyhow::Result
                 )
             },
             LLL_UNMASKED_OWNER_WORD_ASCII_LOW20,
+            LLL_UNMASKED_OWNER_WORD_ASCII,
         ),
         (
             RawLogInput {
@@ -4883,6 +4894,7 @@ fn lll_era_unmasked_owner_words_decode_as_their_low_20_bytes() -> anyhow::Result
                 )
             },
             LLL_UNMASKED_OWNER_WORD_LOW20,
+            LLL_UNMASKED_OWNER_WORD,
         ),
     ] {
         let output = interpret_test_batch(lll_old_registry_input(vec![raw]))?;
@@ -4898,12 +4910,49 @@ fn lll_era_unmasked_owner_words_decode_as_their_low_20_bytes() -> anyhow::Result
             subregistry_changed.after_state["owner"],
             json!(expected_owner)
         );
+        assert_eq!(
+            subregistry_changed.after_state["owner_word_unmasked"],
+            json!(true)
+        );
+        assert_eq!(
+            subregistry_changed.after_state["owner_word_raw"],
+            json!(raw_word)
+        );
+        let authority_transferred = output
+            .normalized_events
+            .iter()
+            .find(|event| event.event_kind == "AuthorityTransferred")
+            .expect("the dirty write closes authority like a zero-owner write");
+        assert_eq!(authority_transferred.before_state, json!({"owner": null}));
+        assert_eq!(
+            authority_transferred.after_state["authority_kind"],
+            json!(null)
+        );
+        assert_eq!(
+            authority_transferred.after_state["authority_key"],
+            json!(null)
+        );
+        assert!(
+            output
+                .normalized_events
+                .iter()
+                .all(|event| event.event_kind != "PermissionChanged"),
+            "an unmasked owner word must not mint permission grants"
+        );
+        assert!(
+            output
+                .normalized_events
+                .iter()
+                .all(|event| event.resource_id.is_none()),
+            "an unmasked owner word must not activate an authority resource"
+        );
+        assert!(output.resources.is_empty());
     }
     Ok(())
 }
 
 #[test]
-fn lll_era_unmasked_transfer_word_decodes_as_its_low_20_bytes() -> anyhow::Result<()> {
+fn lll_era_unmasked_transfer_word_is_recorded_without_authority() -> anyhow::Result<()> {
     // Transfer has zero dirty words chain-wide (#361 census), so unlike the NewOwner/
     // NewResolver/NewTTL fixtures this one legitimately stays synthetic.
     let node = B256::repeat_byte(0x22);
@@ -4926,11 +4975,159 @@ fn lll_era_unmasked_transfer_word_decodes_as_its_low_20_bytes() -> anyhow::Resul
         authority_transferred.after_state["owner"],
         json!(LLL_UNMASKED_WORD_ADDRESS)
     );
+    assert_eq!(
+        authority_transferred.after_state["owner_word_unmasked"],
+        json!(true)
+    );
+    assert_eq!(
+        authority_transferred.after_state["owner_word_raw"],
+        json!(LLL_UNMASKED_WORD)
+    );
+    assert_eq!(authority_transferred.before_state, json!({"owner": null}));
+    assert_eq!(
+        authority_transferred.after_state["authority_kind"],
+        json!(null)
+    );
+    assert!(
+        output
+            .normalized_events
+            .iter()
+            .all(|event| event.event_kind != "PermissionChanged"),
+        "an unmasked owner word must not mint permission grants"
+    );
+    assert!(output.resources.is_empty());
     Ok(())
 }
 
 #[test]
-fn v1_registry_address_word_with_non_word_data_length_stays_terminal() -> anyhow::Result<()> {
+fn unmasked_owner_word_closes_a_prior_owner_grant_and_stays_forgotten() -> anyhow::Result<()> {
+    // A dirty write over a node with a real prior owner: the prior grant closes like the
+    // zero-owner arm, the masked tail gains nothing, and the registry-owner state forgets the
+    // node — across a state restore — so a later clean write reports an empty explicit_before.
+    let parent = B256::repeat_byte(0x51);
+    let labelhash = B256::repeat_byte(0x52);
+    let prior_owner = "0x0000000000000000000000000000000000000a11";
+    let clean = v1_registry::NewOwner {
+        node: parent,
+        label: labelhash,
+        owner: prior_owner.parse()?,
+    }
+    .encode_log_data();
+    let first = interpret_test_batch(lll_old_registry_input(vec![RawLogInput {
+        block_number: 10,
+        ..lll_old_registry_raw(
+            clean
+                .topics()
+                .iter()
+                .map(|topic| format!("{topic:#x}"))
+                .collect(),
+            clean.data.to_vec(),
+        )
+    }]))?;
+    assert!(
+        first.normalized_events.iter().any(|event| {
+            event.event_kind == "PermissionChanged"
+                && event.after_state["subject"] == json!(prior_owner)
+                && event.after_state["effective_powers"] == json!(["resource_control"])
+        }),
+        "the clean write must establish the prior owner's grant"
+    );
+
+    let second = interpret_test_batch(BatchInput {
+        prior_events: first.normalized_events.iter().map(prior_event).collect(),
+        ..lll_old_registry_input(vec![RawLogInput {
+            block_number: 11,
+            ..lll_old_registry_raw(
+                vec![
+                    LLL_NEW_OWNER_TOPIC0.to_owned(),
+                    format!("{parent:#x}"),
+                    format!("{labelhash:#x}"),
+                ],
+                hex::decode(LLL_UNMASKED_OWNER_WORD)?,
+            )
+        }])
+    })?;
+    let authority_transferred = second
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "AuthorityTransferred")
+        .expect("the dirty write must close the prior authority");
+    assert_eq!(
+        authority_transferred.before_state,
+        json!({"owner": prior_owner})
+    );
+    assert_eq!(
+        authority_transferred.after_state["owner"],
+        json!(LLL_UNMASKED_OWNER_WORD_LOW20)
+    );
+    assert_eq!(
+        authority_transferred.after_state["authority_kind"],
+        json!(null)
+    );
+    let permission_changes = second
+        .normalized_events
+        .iter()
+        .filter(|event| event.event_kind == "PermissionChanged")
+        .collect::<Vec<_>>();
+    assert!(
+        permission_changes
+            .iter()
+            .any(|event| event.after_state["subject"] == json!(prior_owner)
+                && event.after_state["effective_powers"] == json!([])),
+        "the prior owner's grant must close on the dirty write"
+    );
+    assert!(
+        permission_changes
+            .iter()
+            .all(|event| { event.after_state["subject"] != json!(LLL_UNMASKED_OWNER_WORD_LOW20) }),
+        "the masked tail must receive no grant"
+    );
+
+    let successor_owner = "0x0000000000000000000000000000000000000b22";
+    let successor = v1_registry::NewOwner {
+        node: parent,
+        label: labelhash,
+        owner: successor_owner.parse()?,
+    }
+    .encode_log_data();
+    let third = interpret_test_batch(BatchInput {
+        prior_events: first
+            .normalized_events
+            .iter()
+            .chain(second.normalized_events.iter())
+            .map(prior_event)
+            .collect(),
+        ..lll_old_registry_input(vec![RawLogInput {
+            block_number: 12,
+            ..lll_old_registry_raw(
+                successor
+                    .topics()
+                    .iter()
+                    .map(|topic| format!("{topic:#x}"))
+                    .collect(),
+                successor.data.to_vec(),
+            )
+        }])
+    })?;
+    let succession = third
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "AuthorityTransferred")
+        .expect("the clean successor write must transfer authority");
+    assert_eq!(
+        succession.before_state,
+        json!({"owner": null}),
+        "the dirty write is forgotten rather than remembered as an owner, so the honest \
+         predecessor of the clean successor is no authority holder"
+    );
+    Ok(())
+}
+
+#[test]
+fn v1_registry_unmasked_address_word_at_non_word_lengths_stays_terminal() -> anyhow::Result<()> {
+    // Only the unmasked-word-at-wrong-length case is terminal here: the strict decoder never
+    // checks buffer exhaustion, so a clean word with trailing bytes decodes on the strict first
+    // pass instead (#367 tracks that adapter-wide question).
     let word = hex::decode(LLL_UNMASKED_WORD)?;
     for data in [
         word[..31].to_vec(),
@@ -4943,7 +5140,7 @@ fn v1_registry_address_word_with_non_word_data_length_stays_terminal() -> anyhow
             ],
             data,
         )]))
-        .expect_err("a data payload that is not exactly one 32-byte word stays terminal");
+        .expect_err("an unmasked word whose data is not exactly one 32-byte word is never retried");
         assert!(
             format!("{error:#}").contains("NewResolver log is malformed"),
             "unexpected error: {error:#}"
@@ -4995,7 +5192,7 @@ fn basenames_registry_unmasked_word_stays_terminal() -> anyhow::Result<()> {
 #[test]
 fn lll_era_unmasked_ttl_word_validates_as_its_low_8_bytes() -> anyhow::Result<()> {
     // Non-vacuity pairing: if the log silently failed to route,
-    // v1_registry_ttl_word_with_non_word_data_length_stays_terminal would fail.
+    // v1_registry_unmasked_ttl_word_at_non_word_lengths_stays_terminal would fail.
     let output = interpret_test_batch(lll_old_registry_input(vec![RawLogInput {
         block_hash: "0x012fa0c0011ed099f81e9ea6abb7fe9b92d1a8b63e262603fb8b5f58b75d9efb".to_owned(),
         block_number: 4_003_999,
@@ -5017,7 +5214,7 @@ fn lll_era_unmasked_ttl_word_validates_as_its_low_8_bytes() -> anyhow::Result<()
 }
 
 #[test]
-fn v1_registry_ttl_word_with_non_word_data_length_stays_terminal() -> anyhow::Result<()> {
+fn v1_registry_unmasked_ttl_word_at_non_word_lengths_stays_terminal() -> anyhow::Result<()> {
     let word = hex::decode(LLL_UNMASKED_TTL_WORD)?;
     for data in [
         word[..31].to_vec(),
@@ -5027,7 +5224,7 @@ fn v1_registry_ttl_word_with_non_word_data_length_stays_terminal() -> anyhow::Re
             vec![LLL_NEW_TTL_TOPIC0.to_owned(), LLL_NEW_TTL_NODE.to_owned()],
             data,
         )]))
-        .expect_err("a data payload that is not exactly one 32-byte word stays terminal");
+        .expect_err("an unmasked word whose data is not exactly one 32-byte word is never retried");
         assert!(
             format!("{error:#}").contains("NewTTL log is malformed"),
             "unexpected error: {error:#}"

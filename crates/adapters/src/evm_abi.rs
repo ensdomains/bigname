@@ -52,19 +52,29 @@ where
     Ok(E::new(decoded_topics, decoded_data))
 }
 
+/// A tolerantly decoded event plus its provenance: `unmasked_word` carries the original 32-byte
+/// data word when the strict decode rejected the log and the masked retry accepted it, and is
+/// `None` when the strict decode accepted the log unchanged. Callers that treat the decoded
+/// value as more than a read-equivalent display need the flag to tell a masked word apart from a
+/// genuinely typed value.
+pub(crate) struct TolerantEvent<E> {
+    pub(crate) event: E,
+    pub(crate) unmasked_word: Option<[u8; ABI_WORD_BYTES]>,
+}
+
 /// Decodes like `decode_event_log`, except that a data payload of exactly one 32-byte word whose
 /// upper 12 bytes are nonzero decodes as the word's low 20 bytes. Only valid for events whose
 /// data payload is a single address word: the 2017 ENSv1 registry stored and logged argument
 /// words without masking them to the declared address type, so its `NewOwner`/`NewResolver`/
 /// `Transfer` logs can carry a full 32-byte word in the address slot (#361, docs/architecture.md
 /// § Source families); reference indexers decode such a word as its low 20 bytes
-/// (upstream: .refs/graph_node/graph/src/abi/event_ext.rs:L17 @ graph_node@aefe173). Any other
-/// malformed shape — non-word-length data, bad topics — fails exactly as `decode_event_log`.
+/// (upstream: .refs/graph_node/graph/src/abi/event_ext.rs:L17 @ graph_node@aefe173). The retry is
+/// attempted only for exactly-32-byte data; any other input keeps the strict decoder's result.
 pub(crate) fn decode_event_log_tolerant_address_word<E>(
     topics: &[String],
     data: &[u8],
     context: &'static str,
-) -> Result<E>
+) -> Result<TolerantEvent<E>>
 where
     E: SolEvent,
 {
@@ -75,12 +85,13 @@ where
 /// upper 24 bytes are nonzero decodes as the word's low 8 bytes. Only valid for events whose data
 /// payload is a single uint64 word: the 2017 ENSv1 registry's `NewTTL` logs can carry an unmasked
 /// word in the uint64 slot (one mainnet instance, block 4,003,999; #361, docs/architecture.md
-/// § Source families). Any other malformed shape fails exactly as `decode_event_log`.
+/// § Source families). The retry is attempted only for exactly-32-byte data; any other input
+/// keeps the strict decoder's result.
 pub(crate) fn decode_event_log_tolerant_uint64_word<E>(
     topics: &[String],
     data: &[u8],
     context: &'static str,
-) -> Result<E>
+) -> Result<TolerantEvent<E>>
 where
     E: SolEvent,
 {
@@ -92,7 +103,7 @@ fn decode_event_log_tolerant_word<E>(
     data: &[u8],
     context: &'static str,
     mask_bytes: usize,
-) -> Result<E>
+) -> Result<TolerantEvent<E>>
 where
     E: SolEvent,
 {
@@ -100,9 +111,17 @@ where
         Err(error) if is_malformed_event_log(&error) && data.len() == ABI_WORD_BYTES => {
             let mut masked = data.to_vec();
             masked[..mask_bytes].fill(0);
-            decode_event_log::<E>(topics, &masked, context)
+            let event = decode_event_log::<E>(topics, &masked, context)?;
+            let unmasked_word = exact_word(data)?.to_owned();
+            Ok(TolerantEvent {
+                event,
+                unmasked_word: Some(unmasked_word),
+            })
         }
-        result => result,
+        result => result.map(|event| TolerantEvent {
+            event,
+            unmasked_word: None,
+        }),
     }
 }
 
@@ -236,7 +255,7 @@ mod tests {
     use alloy_sol_types::{SolEvent, sol};
 
     use super::{
-        ABI_WORD_BYTES, decode_event_log_tolerant_address_word,
+        ABI_WORD_BYTES, decode_event_log, decode_event_log_tolerant_address_word,
         decode_event_log_tolerant_uint64_word, is_malformed_event_log, saturating_seconds_i64,
     };
 
@@ -276,8 +295,9 @@ mod tests {
             CONTEXT,
         )
         .expect("masked address word decodes");
-        assert_eq!(decoded.node, node);
-        assert_eq!(decoded.who, who);
+        assert_eq!(decoded.event.node, node);
+        assert_eq!(decoded.event.who, who);
+        assert_eq!(decoded.unmasked_word, None);
     }
 
     #[test]
@@ -292,12 +312,42 @@ mod tests {
             CONTEXT,
         )
         .expect("unmasked address word decodes as its low 20 bytes");
-        assert_eq!(decoded.node, node);
-        assert_eq!(decoded.who, alloy_primitives::Address::repeat_byte(0xab));
+        assert_eq!(decoded.event.node, node);
+        assert_eq!(
+            decoded.event.who,
+            alloy_primitives::Address::repeat_byte(0xab)
+        );
+        assert_eq!(decoded.unmasked_word, Some(data));
+    }
+
+    // The strict decoder validates slot contents but not buffer exhaustion, so a clean word with
+    // trailing bytes passes strict decode without ever reaching the retry; that acceptance is
+    // adapter-wide and tracked as issue #367. Pinned so an alloy upgrade that starts rejecting
+    // trailing bytes trips this test deliberately instead of narrowing acceptance silently.
+    #[test]
+    fn strict_decode_accepts_a_clean_word_with_trailing_bytes() {
+        let node = B256::repeat_byte(0x42);
+        let who = alloy_primitives::Address::repeat_byte(0x24);
+        let encoded = SingleAddress { node, who }.encode_log_data();
+        let topics = encoded
+            .topics()
+            .iter()
+            .map(|topic| format!("{topic:#x}"))
+            .collect::<Vec<_>>();
+        let mut data = encoded.data.to_vec();
+        data.extend_from_slice(&[0xff; ABI_WORD_BYTES]);
+        let strict = decode_event_log::<SingleAddress>(&topics, &data, CONTEXT)
+            .expect("strict decode accepts a clean word followed by trailing bytes");
+        assert_eq!(strict.who, who);
+        let tolerant =
+            decode_event_log_tolerant_address_word::<SingleAddress>(&topics, &data, CONTEXT)
+                .expect("tolerant decode defers to the strict result");
+        assert_eq!(tolerant.event.who, who);
+        assert_eq!(tolerant.unmasked_word, None);
     }
 
     #[test]
-    fn tolerant_address_word_stays_malformed_for_non_word_data() {
+    fn tolerant_address_word_stays_malformed_for_unmasked_word_at_non_word_lengths() {
         let node = B256::repeat_byte(0x93);
         let mut data = [0u8; ABI_WORD_BYTES];
         data[..12].fill(0xff);
@@ -308,7 +358,7 @@ mod tests {
                 CONTEXT,
             )
             .map(|_| ())
-            .expect_err("non-word-length data stays terminal");
+            .expect_err("an unmasked word at a non-word length is never retried");
             assert!(is_malformed_event_log(&error));
         }
     }
@@ -327,8 +377,9 @@ mod tests {
             CONTEXT,
         )
         .expect("masked uint64 word decodes");
-        assert_eq!(decoded.node, node);
-        assert_eq!(decoded.ttl, 3_600);
+        assert_eq!(decoded.event.node, node);
+        assert_eq!(decoded.event.ttl, 3_600);
+        assert_eq!(decoded.unmasked_word, None);
     }
 
     #[test]
@@ -346,12 +397,13 @@ mod tests {
             CONTEXT,
         )
         .expect("unmasked uint64 word decodes as its low 8 bytes");
-        assert_eq!(decoded.node, node);
-        assert_eq!(decoded.ttl, 0x5a5a_5a5a_5a5a_5a5a);
+        assert_eq!(decoded.event.node, node);
+        assert_eq!(decoded.event.ttl, 0x5a5a_5a5a_5a5a_5a5a);
+        assert_eq!(decoded.unmasked_word, Some(data));
     }
 
     #[test]
-    fn tolerant_uint64_word_stays_malformed_for_non_word_data() {
+    fn tolerant_uint64_word_stays_malformed_for_unmasked_word_at_non_word_lengths() {
         let node = B256::repeat_byte(0x93);
         let mut data = [0u8; ABI_WORD_BYTES];
         data[..24].fill(0xff);
@@ -365,7 +417,7 @@ mod tests {
                 CONTEXT,
             )
             .map(|_| ())
-            .expect_err("non-word-length data stays terminal");
+            .expect_err("an unmasked word at a non-word length is never retried");
             assert!(is_malformed_event_log(&error));
         }
     }
