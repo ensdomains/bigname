@@ -6,6 +6,8 @@ mod attribution;
 mod model;
 #[path = "lib/repository.rs"]
 mod repository;
+#[path = "lib/role_insensitivity.rs"]
+mod role_insensitivity;
 mod schema_v2;
 #[cfg(test)]
 #[path = "lib/tests.rs"]
@@ -17,6 +19,10 @@ const REACHABLE_FROM_ROOT_ADMISSION: &str = "reachable_from_root";
 
 pub use model::*;
 pub use repository::load_repository;
+pub use role_insensitivity::{
+    ROLE_INSENSITIVE_EVENTS, RoleInsensitiveEvent, event_allows_empty_emitter_roles,
+    role_insensitivity_justification,
+};
 pub use schema_v2::{SchemaV2ManifestSyncSummary, sync_schema_v2_repository};
 pub use views::*;
 

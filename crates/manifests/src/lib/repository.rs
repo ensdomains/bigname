@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use crate::attribution::validate_block_derived_preimage_attribution;
 use crate::model::RawSourceManifest;
 use crate::{LoadedManifest, ManifestAbi, ManifestLoadStatus, ManifestLoadSummary};
-use crate::{ManifestRepository, SourceManifest};
+use crate::{ManifestRepository, SourceManifest, event_allows_empty_emitter_roles};
 
 const SUPPORTED_NORMALIZER_VERSION: &str = "ensip15@ens-normalize-0.1.1";
 
@@ -365,6 +365,23 @@ fn validate_manifest_abi(manifest: &SourceManifest, path: &Path) -> Result<()> {
         .collect::<BTreeSet<_>>();
 
     for event in &manifest.abi.events {
+        let has_registry_announcement_rule = manifest
+            .discovery_rules
+            .iter()
+            .any(|rule| rule.edge_kind == "registry_announcement");
+        if event.emitter_roles.is_empty()
+            && !event_allows_empty_emitter_roles(
+                &manifest.source_family,
+                &event.name,
+                has_registry_announcement_rule,
+            )
+        {
+            bail!(
+                "manifest ABI event {} in {} has empty emitter_roles; declare emitter_roles, or add the (source_family, event) pair to bigname_manifests::ROLE_INSENSITIVE_EVENTS with a justification that the adapter does not consume Selected.emitter_role",
+                event.name,
+                path.display(),
+            );
+        }
         for role in &event.emitter_roles {
             if !contract_roles.contains(role.as_str()) {
                 bail!(

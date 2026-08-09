@@ -213,6 +213,13 @@ from logs. Retained direct-call observations do not carry the changed state —
 the stored transaction shape does not decode which node was touched — they
 only trigger hydration to recheck.
 
+**Emitter-role-independent event** — a manifest ABI event whose adapter behavior and output do
+not depend on which admitted contract role selected the event. Selection may clear that role only
+for the finite `(source_family, event)` list documented in
+[Manifest authoring](manifests.md#admission-selection-for-addresses-with-multiple-declared-roles);
+events outside that list must declare `emitter_roles`, except for the documented ENSv2 registry
+announcement case.
+
 **Emancipated NameWrapper state** — the ENSv1 NameWrapper lifecycle state in
 which `PARENT_CANNOT_CONTROL` is burned and `CANNOT_UNWRAP` is not. The parent
 can no longer replace or modify the wrapped child, while the wrapped owner can

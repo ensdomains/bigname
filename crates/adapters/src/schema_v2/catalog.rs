@@ -37,7 +37,7 @@ impl Catalog {
             .map(manifest::decode)
             .collect::<anyhow::Result<Vec<_>>>()?;
         for source in &manifests {
-            protocol::validate_manifest(source)?;
+            protocol::validate_manifest(source, &rules)?;
         }
         manifests.sort_by_key(|source| source.manifest_id);
         if manifests.is_empty() {
@@ -267,17 +267,7 @@ impl Catalog {
     }
 
     fn is_match_all(&self, source: &ManifestSource, event: &ManifestEvent) -> bool {
-        match source.source_family.as_str() {
-            "ens_v1_resolver_l1" | "basenames_base_resolver" => true,
-            "ens_v2_registry_l1" if event.name == "RegistryCreated" => self
-                .rule(source.manifest_id, "registry_announcement", None)
-                .is_some(),
-            "ens_v2_resolver_l1" => matches!(
-                event.name.as_str(),
-                "AliasChanged" | "NamedResource" | "NamedTextResource" | "NamedAddrResource"
-            ),
-            _ => false,
-        }
+        protocol::is_match_all(source, event, &self.rules)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -302,14 +292,14 @@ impl Catalog {
                 u8::from(required_rule.is_some_and(|edge_kind| {
                     self.rule(source.manifest_id, edge_kind, role).is_none()
                 }));
-            let emitter_role = if event.emitter_roles.is_empty() && required_rule.is_none() {
-                // Events without manifest-declared `emitter_roles` do not use the row's
-                // role. Clearing it makes equivalent rows select the same adapter
-                // regardless of database order.
-                None
-            } else {
-                role.map(str::to_owned)
-            };
+            let emitter_role =
+                if protocol::role_insensitivity_justification(&source.source_family, &event.name)
+                    .is_some()
+                {
+                    None
+                } else {
+                    role.map(str::to_owned)
+                };
             output.push((
                 rank,
                 discovery_authority_rank,

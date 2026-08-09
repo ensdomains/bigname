@@ -100,7 +100,12 @@ ABI entries use Alloy-parseable human-readable Solidity fragments, not handwritt
 
 - `name` — must match the parsed event name.
 - `fragment` — a human-readable event fragment such as `event ResolverUpdated(uint256 indexed node, address resolver, address sender)`.
-- `emitter_roles` — optional `[[contracts]].role` values that may emit the event.
+- `emitter_roles` — optional `[[contracts]].role` values that may emit the event. An empty list is
+  valid only for a documented
+  [emitter-role-independent event](glossary.md#emitter-role-independent-event). The only exception
+  outside that finite list is `RegistryCreated` in `ens_v2_registry_l1` when the manifest has a
+  `registry_announcement` discovery rule; that event may match without an address admission. Other
+  events without `emitter_roles` fail manifest validation.
 - `normalized_events` — optional normalized event kinds produced from the event.
 - `status` — optional `unsupported` | `shadow` | `supported` marker for the ABI entry.
 - `notes` — optional reviewer-facing context.
@@ -267,12 +272,29 @@ interpretation considers the full set of active declarations at that address; da
 does not choose the declaration.
 
 When the event produces a discovery edge governed by a role-scoped `discovery_rules` entry, a
-candidate carrying that rule's `from_role` outranks candidates with other roles. Events whose
-interpretation reads the emitter role continue to use `[[abi.events]].emitter_roles` to constrain
-the eligible declarations before selection, so the discovery-rule tie-break does not change their
-role. Equivalent candidates may collapse to one selection. If distinct-role candidates remain and
-the applicable discovery rule cannot choose between them, interpretation stops with the
-deterministic `ambiguous admitted adapters` error; it never picks an arbitrary row.
+candidate carrying that rule's `from_role` outranks candidates with other roles. Selection
+otherwise preserves each declaration's role. It clears the selected role only for a checked-in
+`(source_family, event)` entry below whose adapter does not consume it. The checked-in pairs are:
+
+- `ens_v1_resolver_l1`: `ABIChanged`, `AddrChanged`, `AddressChanged`, `ContentChanged`,
+  `ContenthashChanged`, `DNSRecordChanged`, `DNSRecordDeleted`, `DNSZonehashChanged`, `DataChanged`,
+  `InterfaceChanged`, `NameChanged`, `TextChanged`, and `VersionChanged`;
+- `basenames_base_resolver`: `AddrChanged`, `AddressChanged`, `NameChanged`, `TextChanged`, and
+  `VersionChanged`;
+- `ens_v2_resolver_l1`: `AddressChanged`, `AliasChanged`, `ContenthashChanged`, `EACRolesChanged`,
+  `NameChanged`, `NamedAddrResource`, `NamedResource`, `NamedTextResource`, `TextChanged`, `Upgraded`,
+  and `VersionChanged`.
+
+The canonical typed table is `bigname_manifests::ROLE_INSENSITIVE_EVENTS`; every entry carries a
+justification and the adapter file it describes. A manifest that omits `emitter_roles` for any
+other event is rejected unless the `ens_v2_registry_l1` `RegistryCreated` exception described
+above applies.
+
+Role-scoped events use `[[abi.events]].emitter_roles` to constrain eligible declarations before
+selection, so the discovery-rule tie-break does not change their role. Candidates made equivalent
+because the pair appears in the list above may collapse to one selection. If distinct-role
+candidates remain and the applicable discovery rule cannot choose between them, interpretation
+stops with the deterministic `ambiguous admitted adapters` error; it never picks an arbitrary row.
 
 ## Discovery admission
 

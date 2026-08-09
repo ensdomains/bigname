@@ -2665,7 +2665,188 @@ fn registry_created_selects_the_rule_role_independent_of_admission_order() -> an
 }
 
 #[test]
-fn role_free_discovery_event_does_not_widen_a_role_specific_rule() -> anyhow::Result<()> {
+fn role_free_role_sensitive_event_is_rejected() -> anyhow::Result<()> {
+    let error = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            71,
+            "ens_v1_registry_l1",
+            "NewOwner",
+            "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+            &[],
+            &["SubregistryChanged", "AuthorityTransferred"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(71, "registry_old")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw(v1_registry::NewOwner {
+            node: B256::ZERO,
+            label: keccak256(b"role-sensitive"),
+            owner: CONTRACT.parse()?,
+        }
+        .encode_log_data())],
+    })
+    .expect_err("role-free NewOwner must fail manifest validation");
+
+    assert_eq!(
+        error.to_string(),
+        "manifest 71 source family ens_v1_registry_l1 event NewOwner has empty emitter_roles; declare emitter_roles, or add the (source_family, event) pair to bigname_manifests::ROLE_INSENSITIVE_EVENTS with a justification that the adapter does not consume Selected.emitter_role"
+    );
+    Ok(())
+}
+
+#[test]
+fn role_sensitive_single_admission_preserves_emitter_role() -> anyhow::Result<()> {
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            72,
+            "ens_v1_registry_l1",
+            "NewOwner",
+            "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+            &["registry_old"],
+            &["SubregistryChanged", "AuthorityTransferred"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(72, "registry_old")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw(v1_registry::NewOwner {
+            node: B256::ZERO,
+            label: keccak256(b"role-preserved"),
+            owner: CONTRACT.parse()?,
+        }
+        .encode_log_data())],
+    })?;
+
+    let event = output
+        .normalized_events
+        .iter()
+        .find(|event| event.after_state["source_event"] == "NewOwner")
+        .expect("NewOwner normalized event");
+    assert_eq!(event.after_state["emitter_role"], "registry_old");
+    Ok(())
+}
+
+#[test]
+fn role_insensitivity_metadata_matches_adapter_implementations() -> anyhow::Result<()> {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .context("adapters crate sits two directories below the workspace root")?;
+    let mut pairs = std::collections::BTreeSet::new();
+
+    anyhow::ensure!(
+        !bigname_manifests::ROLE_INSENSITIVE_EVENTS.is_empty(),
+        "ROLE_INSENSITIVE_EVENTS must enumerate at least one adapter event"
+    );
+    for entry in bigname_manifests::ROLE_INSENSITIVE_EVENTS {
+        anyhow::ensure!(
+            pairs.insert((entry.source_family, entry.event)),
+            "duplicate ROLE_INSENSITIVE_EVENTS entry for {} {}",
+            entry.source_family,
+            entry.event,
+        );
+        anyhow::ensure!(
+            !entry.justification.trim().is_empty(),
+            "ROLE_INSENSITIVE_EVENTS entry for {} {} requires a justification",
+            entry.source_family,
+            entry.event,
+        );
+
+        let adapter_path = workspace_root.join(entry.adapter_file);
+        let adapter_source = std::fs::read_to_string(&adapter_path)
+            .with_context(|| format!("read adapter source {}", adapter_path.display()))?;
+        anyhow::ensure!(
+            adapter_source.contains(&format!("\"{}\"", entry.event)),
+            "ROLE_INSENSITIVE_EVENTS entry for {} {} does not name an event handled by {}",
+            entry.source_family,
+            entry.event,
+            entry.adapter_file,
+        );
+        anyhow::ensure!(
+            !adapter_source.contains("emitter_role"),
+            "ROLE_INSENSITIVE_EVENTS entry for {} {} points to {} which reads Selected.emitter_role",
+            entry.source_family,
+            entry.event,
+            entry.adapter_file,
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn role_insensitive_events_collapse_distinct_admission_roles() -> anyhow::Result<()> {
+    let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests");
+    let mut variants = std::collections::BTreeMap::<
+        (String, String),
+        std::collections::BTreeMap<String, Vec<String>>,
+    >::new();
+    for environment in ["mainnet", "sepolia"] {
+        let repository = bigname_manifests::load_repository(manifest_root.join(environment))?;
+        for loaded in repository.manifests() {
+            for event in &loaded.manifest.abi.events {
+                variants
+                    .entry((loaded.manifest.source_family.clone(), event.name.clone()))
+                    .or_default()
+                    .insert(event.fragment.clone(), event.normalized_events.clone());
+            }
+        }
+    }
+
+    let mut manifest_id = 720;
+    for entry in bigname_manifests::ROLE_INSENSITIVE_EVENTS {
+        let event_variants = variants
+            .get(&(entry.source_family.to_owned(), entry.event.to_owned()))
+            .with_context(|| {
+                format!(
+                    "ROLE_INSENSITIVE_EVENTS entry for {} {} has no checked-in manifest event",
+                    entry.source_family, entry.event,
+                )
+            })?;
+        for (fragment, normalized_events) in event_variants {
+            let normalized_events = normalized_events
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let source = manifest(
+                manifest_id,
+                entry.source_family,
+                entry.event,
+                fragment,
+                &[],
+                &normalized_events,
+            );
+            let mut first = admission(manifest_id, "first_role");
+            let second = admission(manifest_id, "second_role");
+            first.contract_instance_id = second.contract_instance_id;
+            let catalog =
+                super::catalog::Catalog::new(vec![source], Vec::new(), vec![first, second])?;
+            let topic0 = alloy_json_abi::Event::parse(fragment)?
+                .selector()
+                .to_string();
+            let selected = catalog.select(&raw_with_topic0(topic0))?.with_context(|| {
+                format!(
+                    "{} {} must select from distinct-role admissions",
+                    entry.source_family, entry.event,
+                )
+            })?;
+            assert_eq!(
+                selected.emitter_role, None,
+                "{} {} must clear the selected role for distinct admissions",
+                entry.source_family, entry.event,
+            );
+            manifest_id += 1;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn role_specific_discovery_event_does_not_widen_a_different_role_rule() -> anyhow::Result<()> {
     let error = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest(
@@ -2673,7 +2854,7 @@ fn role_free_discovery_event_does_not_widen_a_role_specific_rule() -> anyhow::Re
             "ens_v2_registry_l1",
             "SubregistryUpdated",
             "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)",
-            &[],
+            &["ETHRegistry"],
             &["SubregistryChanged"],
         )],
         discovery_rules: vec![DiscoveryRuleInput {
@@ -2713,11 +2894,7 @@ fn required_discovery_rules_cover_protocol_rule_lookup_producers() -> anyhow::Re
     // This documents a known unadmitted [discovery edge](../../../../docs/glossary.md#discovery-graph--discovery-edge)
     // whose missing [admission](../../../../docs/glossary.md#admission) is pending
     // https://github.com/ensdomains/bigname/issues/374. It is not an accepted manifest shape.
-    let known_unadmitted_edges = std::collections::BTreeSet::from([(
-        "ens_v2_root_l1".to_owned(),
-        "ResolverUpdated".to_owned(),
-        "resolver".to_owned(),
-    )]);
+    let known_unadmitted_edges = known_unadmitted_rule_lookup_cases();
 
     let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -2742,6 +2919,7 @@ fn required_discovery_rules_cover_protocol_rule_lookup_producers() -> anyhow::Re
                     covered_producers.insert((event.name.clone(), edge_kind.clone()));
                     if !covered_cases.insert((
                         environment.to_owned(),
+                        source.namespace.clone(),
                         source.chain.clone(),
                         source.deployment_epoch.clone(),
                         source.manifest_version,
@@ -2753,31 +2931,35 @@ fn required_discovery_rules_cover_protocol_rule_lookup_producers() -> anyhow::Re
                         continue;
                     }
 
-                    let gap_key = (
-                        source.source_family.clone(),
-                        event.name.clone(),
-                        edge_kind.clone(),
+                    let gap_key = rule_lookup_case_key(
+                        environment,
+                        &source.namespace,
+                        &source.chain,
+                        &source.deployment_epoch,
+                        source.manifest_version,
+                        &source.source_family,
+                        &event.name,
+                        edge_kind,
                     );
-                    let is_known_gap = known_unadmitted_edges.contains(&gap_key);
                     let checked_in_rule = source
                         .discovery_rules
                         .iter()
                         .find(|rule| rule.edge_kind == *edge_kind);
+                    let is_known_gap = validate_rule_lookup_case(
+                        &gap_key,
+                        checked_in_rule.is_some(),
+                        &known_unadmitted_edges,
+                    )?;
                     if is_known_gap {
-                        anyhow::ensure!(
-                            checked_in_rule.is_none(),
-                            "known gap {gap_key:?} now has a discovery rule; remove its #374 entry"
-                        );
                         encountered_known_gaps.insert(gap_key.clone());
-                    } else {
-                        checked_in_rule.with_context(|| {
-                            format!(
-                                "protocol producer {gap_key:?} has no checked-in discovery rule or explicit known-gap entry"
-                            )
-                        })?;
                     }
                     let normalized_events = event
                         .normalized_events
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>();
+                    let emitter_roles = event
+                        .emitter_roles
                         .iter()
                         .map(String::as_str)
                         .collect::<Vec<_>>();
@@ -2786,14 +2968,17 @@ fn required_discovery_rules_cover_protocol_rule_lookup_producers() -> anyhow::Re
                         &source.source_family,
                         &event.name,
                         &event.fragment,
-                        &[],
+                        &emitter_roles,
                         &normalized_events,
                     );
                     let mut unrelated = admission(manifest_id, "unrelated_role");
                     unrelated.contract_instance_id = Uuid::from_u128(700);
                     let mut other = admission(
                         manifest_id,
-                        checked_in_rule.map_or("other_role", |rule| rule.from_role.as_str()),
+                        checked_in_rule.map_or_else(
+                            || emitter_roles.first().copied().unwrap_or("other_role"),
+                            |rule| rule.from_role.as_str(),
+                        ),
                     );
                     other.contract_instance_id = unrelated.contract_instance_id;
                     let catalog = super::catalog::Catalog::new(
@@ -2829,14 +3014,13 @@ fn required_discovery_rules_cover_protocol_rule_lookup_producers() -> anyhow::Re
                             event.name,
                         );
                     } else {
-                        let error = catalog.select(&raw).expect_err(
-                            "the #374 known gap must preserve the deterministic role tie",
-                        );
-                        assert!(
-                            error.to_string().contains("ambiguous admitted adapters"),
-                            "required_discovery_rule must preserve the #374 role tie for {} {} -> {edge_kind}: {error:#}",
-                            source.source_family,
-                            event.name,
+                        let selected = catalog
+                            .select(&raw)?
+                            .context("the #374 event must remain selectable before rule lookup")?;
+                        assert_eq!(
+                            selected.emitter_role.as_deref(),
+                            emitter_roles.first().copied(),
+                            "the #374 case must preserve its manifest-declared emitter role",
                         );
                     }
                     manifest_id += 1;
@@ -2854,6 +3038,60 @@ fn required_discovery_rules_cover_protocol_rule_lookup_producers() -> anyhow::Re
         "every known-gap entry must still identify a protocol producer with no discovery rule"
     );
     Ok(())
+}
+
+#[test]
+fn producer_guard_scans_schema_v2_sibling_modules_but_not_tests() -> anyhow::Result<()> {
+    let sources = protocol_rule_lookup_source_paths()?;
+    let schema_v2_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/schema_v2");
+
+    assert!(sources.contains(&schema_v2_root.join("protocol.rs")));
+    assert!(!sources.contains(&schema_v2_root.join("tests.rs")));
+    Ok(())
+}
+
+#[test]
+fn gap_374_does_not_waive_a_synthetic_active_mainnet_case() {
+    let key = rule_lookup_case_key(
+        "mainnet",
+        "ens",
+        "ethereum-mainnet",
+        "synthetic-mainnet",
+        1,
+        "ens_v2_root_l1",
+        "ResolverUpdated",
+        "resolver",
+    );
+    let error = validate_rule_lookup_case(&key, false, &known_unadmitted_rule_lookup_cases())
+        .expect_err("a mainnet occurrence without a rule must fail the producer guard");
+    assert!(
+        error
+            .to_string()
+            .contains("has no checked-in discovery rule or explicit known-gap entry")
+    );
+}
+
+#[test]
+fn gap_374_does_not_waive_another_namespace() {
+    let namespace = "future-namespace";
+    let key = rule_lookup_case_key(
+        "sepolia",
+        namespace,
+        "ethereum-sepolia",
+        "ens_v2_sepolia_post_audit",
+        2,
+        "ens_v2_root_l1",
+        "ResolverUpdated",
+        "resolver",
+    );
+    let error = validate_rule_lookup_case(&key, false, &known_unadmitted_rule_lookup_cases())
+        .expect_err("the ENS #374 gap must not waive another namespace");
+    assert!(
+        error
+            .to_string()
+            .contains("has no checked-in discovery rule or explicit known-gap entry"),
+        "namespace {namespace} must have an independently checked rule-lookup case"
+    );
 }
 
 #[test]
@@ -3099,7 +3337,7 @@ fn foreign_announcement_does_not_make_declared_admission_tie_match_all() -> anyh
                 &[(
                     "RegistryCreated",
                     "event RegistryCreated()",
-                    &[][..],
+                    &["registry"][..],
                     &["RegistryCreated"][..],
                 )],
             ),
@@ -8615,7 +8853,7 @@ fn invalid_utf8_reverse_name_emits_exact_shadow_preimage() -> anyhow::Result<()>
             "basenames_base_primary",
             "NameForAddrChanged",
             "event NameForAddrChanged(address indexed addr, string name)",
-            &[],
+            &["reverse_registrar"],
             &["ReverseChanged", "RecordChanged"],
         )],
         discovery_rules: Vec::new(),
@@ -9191,7 +9429,17 @@ fn checked_in_manifest_event_corpus_has_typed_schema_v2_adapters() -> anyhow::Re
                 normalizer_version: manifest.normalizer_version.clone(),
                 payload_json: serde_json::to_string(manifest)?,
             })?;
-            super::protocol::validate_manifest(&source)?;
+            let rules = manifest
+                .discovery_rules
+                .iter()
+                .map(|rule| DiscoveryRuleInput {
+                    manifest_id,
+                    edge_kind: rule.edge_kind.clone(),
+                    from_role: Some(rule.from_role.clone()),
+                    admission: rule.admission.clone(),
+                })
+                .collect::<Vec<_>>();
+            super::protocol::validate_manifest(&source, &rules)?;
         }
     }
     Ok(())
@@ -9486,14 +9734,17 @@ fn raw_with_topic0(topic0: String) -> RawLogInput {
 fn protocol_rule_lookup_producers() -> anyhow::Result<std::collections::BTreeSet<(String, String)>>
 {
     let schema_v2_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/schema_v2");
-    let discovery_source = std::fs::read_to_string(schema_v2_root.join("discovery.rs"))?;
+    let discovery_path = schema_v2_root.join("discovery.rs");
+    let discovery_source = std::fs::read_to_string(&discovery_path)?;
     let announcement_edge_kind = registry_announcement_rule_edge_kind(&discovery_source)?;
     let bypass_edge_kinds = rule_lookup_bypass_edge_kinds(&discovery_source)?;
-    let mut protocol_sources = Vec::new();
-    collect_rust_sources(&schema_v2_root.join("protocol"), &mut protocol_sources)?;
+    let protocol_sources = protocol_rule_lookup_source_paths()?;
 
     let mut producers = std::collections::BTreeSet::new();
     for path in protocol_sources {
+        if path == discovery_path {
+            continue;
+        }
         let source = std::fs::read_to_string(&path)?;
         let event_arms = rust_string_match_arms(&source)?;
         for offset in rust_occurrences(&source, "DiscoveryDraft::RegistryAnnouncement") {
@@ -9537,6 +9788,71 @@ fn protocol_rule_lookup_producers() -> anyhow::Result<std::collections::BTreeSet
     Ok(producers)
 }
 
+fn protocol_rule_lookup_source_paths() -> anyhow::Result<Vec<std::path::PathBuf>> {
+    let schema_v2_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/schema_v2");
+    let mut protocol_sources = Vec::new();
+    collect_rust_sources(&schema_v2_root, &mut protocol_sources)?;
+    Ok(protocol_sources)
+}
+
+type RuleLookupCaseKey = (String, String, String, String, u64, String, String, String);
+
+#[allow(clippy::too_many_arguments)]
+fn rule_lookup_case_key(
+    environment: &str,
+    namespace: &str,
+    chain: &str,
+    deployment_label: &str,
+    manifest_version: u64,
+    source_family: &str,
+    event: &str,
+    edge_kind: &str,
+) -> RuleLookupCaseKey {
+    (
+        environment.to_owned(),
+        namespace.to_owned(),
+        chain.to_owned(),
+        deployment_label.to_owned(),
+        manifest_version,
+        source_family.to_owned(),
+        event.to_owned(),
+        edge_kind.to_owned(),
+    )
+}
+
+fn known_unadmitted_rule_lookup_cases() -> std::collections::BTreeSet<RuleLookupCaseKey> {
+    std::collections::BTreeSet::from([rule_lookup_case_key(
+        "sepolia",
+        "ens",
+        "ethereum-sepolia",
+        "ens_v2_sepolia_post_audit",
+        2,
+        "ens_v2_root_l1",
+        "ResolverUpdated",
+        "resolver",
+    )])
+}
+
+fn validate_rule_lookup_case(
+    key: &RuleLookupCaseKey,
+    has_rule: bool,
+    known_unadmitted: &std::collections::BTreeSet<RuleLookupCaseKey>,
+) -> anyhow::Result<bool> {
+    let is_known_gap = known_unadmitted.contains(key);
+    if is_known_gap {
+        anyhow::ensure!(
+            !has_rule,
+            "known gap {key:?} now has a discovery rule; remove its #374 entry"
+        );
+    } else {
+        anyhow::ensure!(
+            has_rule,
+            "protocol producer {key:?} has no checked-in discovery rule or explicit known-gap entry"
+        );
+    }
+    Ok(is_known_gap)
+}
+
 fn collect_rust_sources(
     directory: &std::path::Path,
     output: &mut Vec<std::path::PathBuf>,
@@ -9544,8 +9860,12 @@ fn collect_rust_sources(
     for entry in std::fs::read_dir(directory)? {
         let path = entry?.path();
         if path.is_dir() {
-            collect_rust_sources(&path, output)?;
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            if path.file_name().is_none_or(|name| name != "tests") {
+                collect_rust_sources(&path, output)?;
+            }
+        } else if path.extension().is_some_and(|extension| extension == "rs")
+            && path.file_name().is_none_or(|name| name != "tests.rs")
+        {
             output.push(path);
         }
     }
