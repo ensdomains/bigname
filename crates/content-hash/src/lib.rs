@@ -3,6 +3,7 @@
 use std::{io, path::Path};
 
 mod compute;
+mod lockfile;
 mod source_paths;
 
 include!(concat!(env!("OUT_DIR"), "/interpreter_content_hash.rs"));

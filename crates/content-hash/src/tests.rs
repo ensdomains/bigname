@@ -12,6 +12,33 @@ use super::{
 use crate::compute::{
     cfg_test_source_exclusions, excluded_source_reason, hashed_source_paths, semantic_source_files,
 };
+use crate::lockfile::{decode_crate_fingerprints, decode_crate_lists};
+
+const SAMPLE_DECODE_PACKAGES: &[(&str, &str, &str)] = &[
+    ("alloy-dyn-abi", "1.5.7", "aa"),
+    ("alloy-primitives", "1.5.7", "bb"),
+    ("alloy-sol-macro", "1.5.7", "cc"),
+    ("alloy-sol-macro-expander", "1.5.7", "dd"),
+    ("alloy-sol-macro-input", "1.5.7", "ee"),
+    ("alloy-sol-type-parser", "1.5.7", "ff"),
+    ("alloy-sol-types", "1.5.7", "gg"),
+];
+
+fn sample_lockfile_packages() -> Vec<(&'static str, &'static str, &'static str)> {
+    let mut packages = SAMPLE_DECODE_PACKAGES.to_vec();
+    packages.push(("serde", "1.0.219", "hh"));
+    packages
+}
+
+fn lockfile_document(packages: &[(&str, &str, &str)]) -> String {
+    let mut document = String::new();
+    for (name, version, checksum) in packages {
+        document.push_str(&format!(
+            "[[package]]\nname = {name:?}\nversion = {version:?}\nchecksum = {checksum:?}\n"
+        ));
+    }
+    document
+}
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -232,6 +259,130 @@ fn every_hash_input_is_watched_for_rebuilds() {
             "{relative_path} is a hash input but not watched"
         );
     }
+    assert!(
+        watched.contains(&workspace_root.join("Cargo.lock")),
+        "Cargo.lock supplies the decode-crate fingerprints but is not watched"
+    );
+}
+
+#[test]
+fn decode_crate_version_bumps_rotate_the_hash() {
+    let tree = SampleTree::new();
+    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+
+    let mut packages = sample_lockfile_packages();
+    let bumped = packages
+        .iter_mut()
+        .find(|(name, _, _)| *name == "alloy-sol-types")
+        .expect("sample lockfile carries alloy-sol-types");
+    bumped.1 = "1.5.8";
+    tree.write("Cargo.lock", &lockfile_document(&packages));
+
+    let changed = interpreter_content_hash(tree.path()).expect("bumped lockfile must hash");
+    assert_ne!(
+        first, changed,
+        "a decode-semantic crate bump must rotate the hash"
+    );
+}
+
+#[test]
+fn unrelated_lockfile_bumps_do_not_rotate_the_hash() {
+    let tree = SampleTree::new();
+    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+
+    let mut packages = sample_lockfile_packages();
+    let bumped = packages
+        .iter_mut()
+        .find(|(name, _, _)| *name == "serde")
+        .expect("sample lockfile carries serde");
+    bumped.1 = "1.0.220";
+    tree.write("Cargo.lock", &lockfile_document(&packages));
+
+    let changed = interpreter_content_hash(tree.path()).expect("bumped lockfile must hash");
+    assert_eq!(
+        first, changed,
+        "an unrelated dependency bump must not force a re-derivation"
+    );
+}
+
+#[test]
+fn checked_in_lockfile_covers_the_decode_crate_set() {
+    let (required, optional) = decode_crate_lists();
+    let expected: BTreeSet<&str> = required.iter().chain(optional.iter()).copied().collect();
+    let fingerprints =
+        decode_crate_fingerprints(&workspace_root()).expect("checked-in lockfile must parse");
+    let names: BTreeSet<&str> = fingerprints
+        .iter()
+        .map(|(name, _, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        names, expected,
+        "a renamed or dropped decode crate must fail here, not empty the fingerprint"
+    );
+    for (name, version, checksum) in &fingerprints {
+        assert!(
+            !version.is_empty() && !checksum.is_empty(),
+            "decode crate {name} needs a complete version+checksum fingerprint"
+        );
+    }
+}
+
+#[test]
+fn duplicate_decode_crate_versions_fingerprint_both() {
+    let tree = SampleTree::new();
+    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+
+    // The lockfile can carry two versions of one crate (the workspace lock already does for
+    // other alloy crates); both stanzas must enter the fingerprint, in sorted order.
+    let mut duplicated = sample_lockfile_packages();
+    duplicated.push(("alloy-sol-types", "1.4.0", "zz"));
+    tree.write("Cargo.lock", &lockfile_document(&duplicated));
+    let with_older = interpreter_content_hash(tree.path()).expect("duplicated lockfile must hash");
+    assert_ne!(
+        first, with_older,
+        "a second decode-crate version must rotate the hash"
+    );
+
+    duplicated.reverse();
+    tree.write("Cargo.lock", &lockfile_document(&duplicated));
+    let reversed = interpreter_content_hash(tree.path()).expect("reordered lockfile must hash");
+    assert_eq!(
+        with_older, reversed,
+        "stanza order in the lockfile must not change the fingerprint"
+    );
+}
+
+#[test]
+fn a_missing_lockfile_fails_the_hash_instead_of_narrowing_it() {
+    let tree = SampleTree::new();
+    interpreter_content_hash(tree.path()).expect("baseline must hash");
+    fs::remove_file(tree.path().join("Cargo.lock")).expect("lockfile must be removable");
+
+    let error =
+        interpreter_content_hash(tree.path()).expect_err("a missing lockfile must fail loudly");
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert!(
+        error.to_string().contains("Cargo.lock"),
+        "missing lockfile must name the path: {error}"
+    );
+}
+
+#[test]
+fn a_missing_decode_crate_fails_the_hash_instead_of_narrowing_it() {
+    let tree = SampleTree::new();
+    let packages: Vec<_> = sample_lockfile_packages()
+        .into_iter()
+        .filter(|(name, _, _)| *name != "alloy-primitives")
+        .collect();
+    tree.write("Cargo.lock", &lockfile_document(&packages));
+
+    let error = interpreter_content_hash(tree.path())
+        .expect_err("a lockfile without a required decode crate must fail loudly");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(
+        error.to_string().contains("alloy-primitives"),
+        "missing decode crate must be named: {error}"
+    );
 }
 
 #[test]
@@ -617,6 +768,10 @@ impl SampleTree {
         for relative_path in semantic_source_files() {
             tree.write(relative_path, "pub fn semantics() -> bool { true }\n");
         }
+        tree.write(
+            "Cargo.lock",
+            &lockfile_document(&sample_lockfile_packages()),
+        );
         tree.write_manifest_floor();
         tree
     }

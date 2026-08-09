@@ -73,9 +73,9 @@ struct CfgTestSourceExclusion {
 const CFG_TEST_SOURCE_EXCLUSIONS: &[CfgTestSourceExclusion] = &[];
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct Input {
-    key: String,
-    content: Vec<u8>,
+pub(crate) struct Input {
+    pub(crate) key: String,
+    pub(crate) content: Vec<u8>,
 }
 
 #[allow(dead_code)]
@@ -95,6 +95,7 @@ pub(crate) fn watched_paths(workspace_root: &Path) -> Vec<PathBuf> {
             .iter()
             .map(|relative_path| workspace_root.join(relative_path)),
     );
+    paths.push(workspace_root.join(crate::lockfile::LOCKFILE));
     paths
 }
 
@@ -195,6 +196,7 @@ fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
     )?;
     collect_manifest_event_blocks(workspace_root, &mut inputs)?;
     collect_semantic_sources(workspace_root, &mut inputs)?;
+    crate::lockfile::collect_decode_crate_fingerprints(workspace_root, &mut inputs)?;
     Ok(inputs)
 }
 
@@ -375,10 +377,9 @@ fn finish_manifest_event(
     Ok(())
 }
 
-fn assignment_name(line: &str) -> Option<&str> {
+pub(crate) fn assignment_name(line: &str) -> Option<&str> {
     line.split_once('=').map(|(name, _)| name.trim())
 }
-
 fn collect_files_with_extension(
     directory: &Path,
     extension: &OsStr,
