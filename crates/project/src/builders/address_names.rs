@@ -122,10 +122,16 @@ pub(super) async fn build(
                        ELSE 'ignore'
                    END AS action,
                    lower(CASE event.event_kind
-                       WHEN 'AuthorityTransferred' THEN COALESCE(
-                           event.after_state ->> 'registry_owner',
-                           event.after_state ->> 'owner'
-                       )
+                       WHEN 'AuthorityTransferred' THEN CASE
+                           -- A masked owner word authenticates no caller: the event clears
+                           -- the controller exactly like a zero-owner transition.
+                           WHEN event.after_state ->> 'owner_word_unmasked' = 'true'
+                               THEN '0x0000000000000000000000000000000000000000'
+                           ELSE COALESCE(
+                               event.after_state ->> 'registry_owner',
+                               event.after_state ->> 'owner'
+                           )
+                       END
                        WHEN 'PermissionChanged'
                            THEN event.after_state ->> 'subject'
                    END) AS subject
