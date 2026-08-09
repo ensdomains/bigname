@@ -91,8 +91,13 @@ explicit block position without turning those responses into raw facts.
 raw label bytes plus the normalization verdict for those bytes. A preimage
 may improve readability but cannot create a surface, ownership, resolver,
 record, permission, or primary-name fact by itself. The verdict gates how the
-decoded text is consumed: Project composes it into name-typed output only when
-the verdict is true. A false or error verdict keeps the proven bytes in the
+decoded text is consumed: Project reads it at build time and composes the text
+into name-typed output only when the verdict is true. A later verdict change
+does not reach projections by itself — a recompute-flags verdict flip stamps a
+redo only for a surface visibility-class transition, so a flip on a label with
+no name surface propagates through the full-range Project redo the
+[recompute-flags runbook](deployment.md) requires after a normalizer-version
+bump, not automatically. A false or error verdict keeps the proven bytes in the
 store but withholds the text from names, so serving falls back to the
 documented [non-name forms](glossary.md#non-name-form) — the escape-encoded raw
 bytes when the label does not decode, the labelhash placeholder when it does.
