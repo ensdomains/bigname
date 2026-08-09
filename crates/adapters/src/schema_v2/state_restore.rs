@@ -303,6 +303,10 @@ pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
             .and_then(Value::as_str)
         {
             Some("registrar") => {
+                // Load-bearing assumption for masked writes, whose live arm deliberately
+                // leaves the registrar untouched: state.rs keeps the v1_registrars snapshot
+                // in sync with v1_names while registrar authority is current, which is what
+                // makes this reactivate an equivalent replay.
                 if let Some(owner) = event.after_state.get("owner").and_then(Value::as_str) {
                     state.reactivate_v1_registrar_for_owner(
                         &event.namespace,

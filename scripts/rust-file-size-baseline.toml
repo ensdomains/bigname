@@ -11,6 +11,11 @@ wiring_allowlist_required_loc = 500
 wiring_files = ["lib.rs", "main.rs"]
 
 [[files]]
+path = "crates/adapters/src/schema_v2/state_restore.rs"
+loc = 603
+justification = "Per-family v1 restore arms stay in one file so replay equivalence against the live arms is reviewed in one place; the masked-write snapshot-sync invariant comment pushed the file past the gate, and it stays well under the review threshold."
+
+[[files]]
 path = "crates/storage/src/record_inventory/snapshot_reads.rs"
 loc = 612
 justification = "Snapshot admission, anchor fallback, and canonical-lineage proof remain together; this slice ratchets the file below its base allowance without expanding its responsibilities."
