@@ -8,7 +8,7 @@ use alloy_sol_types::{SolEvent, sol};
 use anyhow::Result;
 use bigname_interpret::{
     BatchRequest as InterpretBatchRequest, Engine as InterpretEngine,
-    NORMALIZATION_STATE_REPAIR_REASON, RunMode as InterpretRunMode,
+    NORMALIZATION_STATE_REPAIR_REASON, RunMode as InterpretRunMode, finalize_recompute_flags,
 };
 use bigname_project::{BatchRequest, Engine, Marker, RunMode};
 use bigname_storage::{
@@ -144,6 +144,71 @@ async fn rainbow_import_then_project_redo_serves_decoded_labels() -> Result<()> 
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(gated, (None, None, b"Alice".to_vec(), None));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn surface_less_verdict_flip_serves_stale_text_until_full_range_project_redo() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_surface_less_verdict_flip").await?;
+    seed_children_fixture(scratch.pool(), &["alice"]).await?;
+    seed_ens_names(scratch.pool(), &[("alice", "alice")]).await?;
+    let summary = import_label_preimages_from_ens_names_table(scratch.pool(), None, None).await?;
+    assert_eq!(summary.retained_row_count, 1);
+
+    run_project(scratch.pool(), None, RunMode::Normal, 0, 3).await?;
+    assert_eq!(
+        child_display_names(scratch.pool()).await?,
+        vec!["alice.eth".to_owned()]
+    );
+
+    // A normalizer bump can flip the label's verdict; recompute-flags rewrites the verdict
+    // columns unconditionally with this UPDATE shape, so applying it directly simulates the
+    // bumped normalizer's verdict for the same raw bytes.
+    sqlx::query(
+        "UPDATE label_preimages
+         SET normalizer_version = $2,
+             normalized_under_version = $3,
+             normalization_error = $4
+         WHERE labelhash = $1",
+    )
+    .bind(labelhash_hex("alice"))
+    .bind("ensip15@ens-normalize-0.1.2")
+    .bind(false)
+    .bind(Some(
+        "raw label is not byte-identical to its normalized form",
+    ))
+    .execute(scratch.pool())
+    .await?;
+
+    // The child is registry-event-only and has no name surface, so the flip produces no
+    // visibility-class transition. The redo trigger keys on the summary's earliest transition
+    // block, so no redo is stamped and the stale text keeps serving: the limitation the
+    // deployment runbook's full-range redo requirement exists for.
+    let mut transaction = scratch.pool().begin().await?;
+    let recompute = finalize_recompute_flags(&mut transaction, CHAIN, 0, 3).await?;
+    transaction.commit().await?;
+    assert!(
+        recompute.earliest_transition_block().is_none(),
+        "a surface-less verdict flip must not report a transition: {recompute:?}"
+    );
+    assert_eq!(
+        (
+            recompute.same_class_names,
+            recompute.shadow_to_active_names,
+            recompute.active_to_shadow_names
+        ),
+        (1, 0, 0)
+    );
+    assert_eq!(
+        child_display_names(scratch.pool()).await?,
+        vec!["alice.eth".to_owned()]
+    );
+
+    run_project(scratch.pool(), None, RunMode::Redo, 0, 3).await?;
+    assert_eq!(
+        child_display_names(scratch.pool()).await?,
+        vec![placeholder("alice")]
+    );
     scratch.cleanup().await
 }
 
