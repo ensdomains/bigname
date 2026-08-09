@@ -178,7 +178,9 @@ requires readable lineage at every height through the effective redo end; do
 not repair a presence failure by editing a cursor past data that source did not
 load. When a full-history Interpret redo for a content-hash rotation starts at
 the finite ingest bounds after Live has advanced, the runner extends Interpret
-through its recorded head and stamps that same range onto Project. Run or resume
+through its recorded head and stamps the range onto Project clipped to
+Project's own recorded head — the same range unless a crash between the two
+phases' live-cycle advances left Project one block behind. Run or resume
 the stamped Project range exactly as recorded. Project hash adoption uses its
 recorded head rather than narrowing the stamp to the older ingest handoff, and
 an interrupted attempt keeps the live-extended range.

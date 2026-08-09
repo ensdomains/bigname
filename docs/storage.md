@@ -259,8 +259,9 @@ A hash rotation requires a planned full-history interpretation and projection
 walk; the system refuses to mix generations from different hashes. Interpret
 accepts the full finite-ingest range and extends its execution through its
 recorded live-followed head. Its downstream Project redo carries that effective
-range unchanged, and Project adopts the new hash only when the redo covers its
-entire recorded head. An interrupted redo retains that same effective range;
+range clipped to Project's own recorded head — identical unless a crash between
+the two phases' live-cycle advances left Project one block behind — and Project
+adopts the new hash only when the redo covers its entire recorded head. An interrupted redo retains that same effective range;
 recovery cannot narrow back to the finite ingest handoff. Moving a covered
 semantic source without updating the covered set fails the build rather than
 silently narrowing the fingerprint.
