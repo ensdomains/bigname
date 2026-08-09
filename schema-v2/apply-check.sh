@@ -187,6 +187,7 @@ BEGIN
             ('label_preimages'),
             ('manifest_contract_instances'),
             ('manifest_discovery_rules'),
+            ('manifest_authority_attestations'),
             ('manifest_versions'),
             ('name_current'),
             ('name_surfaces'),
@@ -234,6 +235,7 @@ BEGIN
             ('label_preimages'),
             ('manifest_contract_instances'),
             ('manifest_discovery_rules'),
+            ('manifest_authority_attestations'),
             ('manifest_versions'),
             ('name_current'),
             ('name_surfaces'),
@@ -299,7 +301,9 @@ BEGIN
 
     -- Add exact exceptions only after maintainer authorization.
     WITH maintainer_authorized_allowlist(table_name, column_name) AS (
-        VALUES ('chain_heads', 'lineage_orphaning_epoch')
+        VALUES
+            ('chain_heads', 'lineage_orphaning_epoch'),
+            ('manifest_authority_attestations', 'generation_token')
     )
     SELECT string_agg(
         format('%I.%I', actual.table_name, actual.column_name),

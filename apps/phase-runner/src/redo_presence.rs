@@ -22,12 +22,19 @@ pub(crate) async fn require_interpret_raw_data(
     sources: &[SourceConfig],
     range: BlockRange,
     recorded_input_hash: Option<&str>,
-    expected_manifest_authority_marker: Option<&str>,
+    supplied_manifest_authority_generation: Option<&str>,
 ) -> RunnerResult<Option<AttestedManifestAuthority>> {
+    let supplied_generation = crate::redo_manifest_attestation::resolve_locked_generation(
+        transaction,
+        chain_id,
+        recorded_input_hash,
+        supplied_manifest_authority_generation,
+    )
+    .await?;
     let manifest_attestation = ManifestAuthorityAttestation::new(
         chain_id,
         recorded_input_hash,
-        expected_manifest_authority_marker,
+        supplied_generation.as_deref(),
     )?
     .finish(chain_id, range)?;
     let expected_blocks = range

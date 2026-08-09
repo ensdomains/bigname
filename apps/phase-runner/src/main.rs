@@ -4,7 +4,9 @@ use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
 use phase_runner::{
     capacity::CapacityGuard,
-    cli::{Cli, RedoChains, ResolvedCommand, resolve_all_redo_chains},
+    cli::{
+        Cli, RedoChains, ResolvedCommand, resolve_all_redo_chains, validate_redo_attestation_chains,
+    },
     database::{RunnerDatabase, VerificationDatabase},
     ingest_phase::IngestPhase,
     interpret_phase::InterpretPhase,
@@ -93,7 +95,7 @@ async fn main() -> Result<()> {
             timing,
             phase,
             range,
-            attest_watch_set_coverage,
+            watch_set_coverage_attestations,
             hydration_rpc_urls,
         } => {
             let database = RunnerDatabase::connect(&database_url, 4).await?;
@@ -105,6 +107,7 @@ async fn main() -> Result<()> {
                         .await?
                 }
             };
+            validate_redo_attestation_chains(&watch_set_coverage_attestations, &chains)?;
             let ingest_engine = Arc::new(bigname_ingest::Engine::new(database.pool().clone()));
             let ingest = Arc::new(IngestPhase::with_engine(ingest_engine));
             let interpret = Arc::new(InterpretPhase::new(database.pool().clone()));
@@ -137,7 +140,7 @@ async fn main() -> Result<()> {
                 instance_id,
                 timing,
             )?
-            .with_watch_set_coverage_attestation(attest_watch_set_coverage);
+            .with_watch_set_coverage_attestations(watch_set_coverage_attestations);
             let report = runner
                 .redo_chains(&chains, phase, range, cancellation)
                 .await?;

@@ -1137,7 +1137,7 @@ async fn invalidated_project_generation_is_stale_before_rpc() -> AnyResult<()> {
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
     sqlx::query(
         "UPDATE chain_phase_state
-         SET input_content_hash = 'manifest-authority:test-invalidation'
+         SET input_content_hash = 'manifest-authority:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:test-invalidation'
          WHERE chain_id = $1 AND phase_name = 'project'",
     )
     .bind(ETHEREUM)
@@ -1166,7 +1166,7 @@ async fn project_generation_change_during_rpc_rejects_the_lookup() -> AnyResult<
         .lookup_with_before_persist(lookup_request(&logical_name_id)?, move || async move {
             sqlx::query(
                 "UPDATE chain_phase_state
-                 SET input_content_hash = 'manifest-authority:test-invalidation'
+                 SET input_content_hash = 'manifest-authority:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:test-invalidation'
                  WHERE chain_id = $1 AND phase_name = 'project'",
             )
             .bind(ETHEREUM)
@@ -2032,7 +2032,7 @@ async fn primary_name_rejects_a_project_generation_change_after_live_calls() -> 
         .lookup_ens_primary_name_with_before_revalidate(target, move || async move {
             sqlx::query(
                 "UPDATE chain_phase_state
-                 SET input_content_hash = 'manifest-authority:test-invalidation'
+                 SET input_content_hash = 'manifest-authority:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:test-invalidation'
                  WHERE chain_id = $1 AND phase_name = 'project'",
             )
             .bind(ETHEREUM)

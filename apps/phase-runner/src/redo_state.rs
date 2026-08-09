@@ -17,19 +17,21 @@ pub(crate) struct RedoSession {
     range: BlockRange,
     recompute_flags: bool,
     stage_project_refresh_on_completion: bool,
+    pub(crate) manifest_authority_audit:
+        Option<crate::redo_manifest_audit::ManifestAuthorityAttestationAudit>,
 }
 pub(crate) enum RedoOutcome<'a> {
     Completed(&'a PhaseProgress),
     Failed(&'a RunnerError),
 }
-
 pub(crate) async fn begin(
     pool: &PgPool,
     chain_id: &str,
     phase: PhaseName,
     mode: &RunMode,
     sources: &[SourceConfig],
-    expected_manifest_authority_marker: Option<&str>,
+    supplied_manifest_authority_generation: Option<&str>,
+    attested_by: &str,
 ) -> RunnerResult<RedoSession> {
     let mut transaction = pool.begin().await.map_err(|error| {
         RunnerError::database(
@@ -94,7 +96,7 @@ pub(crate) async fn begin(
             sources,
             execution_range,
             previous.input_content_hash.as_deref(),
-            expected_manifest_authority_marker,
+            supplied_manifest_authority_generation,
         )
         .await?
     } else {
@@ -115,6 +117,16 @@ pub(crate) async fn begin(
         && previous.redo_from_block_number == Some(execution_range.from)
         && previous.redo_to_block_number == Some(execution_range.to)
         && (!phase.writes_derived_data() || recorded_hash == Some(current_interpreter_hash));
+    let manifest_authority_audit = crate::redo_manifest_audit::record_or_resume(
+        &mut transaction,
+        chain_id,
+        manifest_attestation,
+        execution_range,
+        resume_same_redo,
+        supplied_manifest_authority_generation,
+        attested_by,
+    )
+    .await?;
     sqlx::query(
         "
         UPDATE chain_phase_state
@@ -149,7 +161,7 @@ pub(crate) async fn begin(
                     THEN $10 || substring(last_error FROM char_length($11) + 1)
                 WHEN redo_in_progress THEN last_error
             END,
-            started_at = now(),
+            started_at = CASE WHEN $6 THEN started_at ELSE now() END,
             finished_at = NULL,
             updated_at = now()
         WHERE chain_id = $1
@@ -181,15 +193,13 @@ pub(crate) async fn begin(
             error,
         )
     })?;
-    if let Some(attestation) = manifest_attestation {
-        attestation.log(chain_id);
-    }
     Ok(RedoSession {
         interrupted_before_redo: matches!(status, PhaseStatus::Running | PhaseStatus::Paused),
         previous,
         range: execution_range,
         recompute_flags: matches!(mode, RunMode::RecomputeFlags(_)),
         stage_project_refresh_on_completion,
+        manifest_authority_audit,
     })
 }
 
@@ -406,6 +416,7 @@ pub(crate) async fn finish(
         range,
         recompute_flags,
         stage_project_refresh_on_completion,
+        ..
     } = session;
     let content_hash = if phase.writes_derived_data() {
         Some(bigname_content_hash::INTERPRETER_CONTENT_HASH)

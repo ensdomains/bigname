@@ -49,18 +49,92 @@ fn redo_cli_carries_watch_set_coverage_attestation() {
         "--to-block",
         "42",
         "--attest-watch-set-coverage",
+        "reviewed-generation-token",
     ])
     .expect("redo attestation option must parse")
     .resolve()
     .expect("redo attestation option must resolve");
 
-    assert!(matches!(
-        command,
-        ResolvedCommand::Redo {
-            attest_watch_set_coverage: true,
-            ..
-        }
-    ));
+    let ResolvedCommand::Redo {
+        watch_set_coverage_attestations,
+        ..
+    } = command
+    else {
+        panic!("expected redo command");
+    };
+    assert_eq!(
+        watch_set_coverage_attestations,
+        BTreeMap::from([(
+            "ethereum-mainnet".to_owned(),
+            "reviewed-generation-token".to_owned()
+        )])
+    );
+}
+
+#[test]
+fn multi_chain_redo_requires_and_carries_per_chain_attestations() {
+    let command = Cli::try_parse_from([
+        "phase-runner",
+        "redo",
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+        "--chain",
+        "ethereum-mainnet,base-mainnet",
+        "--phase",
+        "interpret",
+        "--from-block",
+        "42",
+        "--to-block",
+        "42",
+        "--attest-watch-set-coverage",
+        "ethereum-mainnet=ethereum-token",
+        "--attest-watch-set-coverage",
+        "base-mainnet=base-token",
+    ])
+    .expect("per-chain redo attestations must parse")
+    .resolve()
+    .expect("per-chain redo attestations must resolve");
+
+    let ResolvedCommand::Redo {
+        watch_set_coverage_attestations,
+        ..
+    } = command
+    else {
+        panic!("expected redo command");
+    };
+    assert_eq!(
+        watch_set_coverage_attestations,
+        BTreeMap::from([
+            ("base-mainnet".to_owned(), "base-token".to_owned()),
+            ("ethereum-mainnet".to_owned(), "ethereum-token".to_owned()),
+        ])
+    );
+}
+
+#[test]
+fn all_chains_redo_rejects_one_bare_attestation() {
+    let command = Cli::try_parse_from([
+        "phase-runner",
+        "redo",
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+        "--all-chains",
+        "--phase",
+        "interpret",
+        "--from-block",
+        "42",
+        "--to-block",
+        "42",
+        "--attest-watch-set-coverage",
+        "one-token-for-every-chain",
+    ])
+    .expect("a bare all-chains attestation parses before semantic validation");
+    let error = match command.resolve() {
+        Ok(_) => panic!("one bare token must not attest multiple chains"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert!(error.to_string().contains("CHAIN=TOKEN"));
 }
 
 #[test]

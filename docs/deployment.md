@@ -110,9 +110,18 @@ GRANT SELECT ON ALL TABLES IN SCHEMA bigname_phase TO bigname_verify;
 
 The role provisioning is an operational database grant, not schema-v2
 migration authority. Reapply and revalidate the SELECT grant after every
-approved phase-schema rebuild. Do not reuse the writer credential in the
-verification URL: setting a writer session's default transaction to read-only
-does not remove that role's write authority, and startup rejects it.
+approved phase-schema rebuild or additive schema-migration that creates a
+table. In particular, after applying the attestation-audit schema-migration for
+the [manifest-authority marker](glossary.md#manifest-authority-marker), run the
+`GRANT SELECT ON ALL TABLES` statement again before
+starting the runner. Stop every old phase-runner and one-shot redo process
+before applying this schema-migration, and keep them stopped until the new
+binary is ready. An old binary recognizes the marker prefix but does not bind
+its boolean attestation to the new generation token or write the durable audit
+row. PostgreSQL does not extend an earlier all-tables grant to tables created
+later. Do not reuse the writer credential in the verification URL:
+setting a writer session's default transaction to read-only does not remove
+that role's write authority, and startup rejects it.
 
 Each `BIGNAME_PHASE_RUNNER_SOURCES` entry has the form
 `CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV`; the named environment variable
@@ -187,15 +196,24 @@ Interpret redo that would discharge that marker uses this operator flow:
    fetch for the affected
    range](manifests.md#mandatory-historical-fetch-after-watch-plan-widening).
    Otherwise, confirm that the change widened nothing.
-2. Re-run the redo with `--attest-watch-set-coverage`.
+2. Copy the invalidation token printed by the fence error and re-run the redo
+   with `--attest-watch-set-coverage <token>`. For a multi-chain redo, repeat
+   `--attest-watch-set-coverage <chain>=<token>` for each affected chain.
 
 Without the flag, the redo fails closed. With it, the runner logs an error-level
-structured event containing the chain, phase, redo range, and the
-manifest-authority marker. The system cannot verify that the fetch or
-no-widening review happened; the attestation is the operator's responsibility.
-Do not edit cursors. The same conservative gate applies to non-widening changes
-and to ranges fully covered by finite cursors until issue #376 binds watch-plan
-evidence to loaded facts. Plain code-hash rotations remain flagless. When a
+structured event from an immutable audit row containing the chain, phase, redo
+range, authority fingerprint, invalidation token, runner instance ID, and
+attestation time. The audit row is committed in the same transaction that
+begins the marker-discharging redo and is unique for that chain, phase, and
+invalidation generation. A restart re-emits it only after the locked begin
+matches and commits the same active redo; rerunning the same token-valued
+command is valid only for that exact active, audited redo. The locked begin rejects a stale token,
+including one from an earlier transition to the same authority. The system
+cannot verify that the fetch or no-widening review happened; the attestation is the operator's
+responsibility. Do not edit cursors. The same conservative gate applies to
+non-widening changes and to ranges fully covered by finite cursors until issue
+#376 binds watch-plan evidence to loaded facts. Plain code-hash rotations remain
+flagless. When a
 full-history Interpret redo for a content-hash rotation starts at
 the finite ingest bounds after Live has advanced, the runner extends Interpret
 through its recorded head and stamps the range onto Project clipped to

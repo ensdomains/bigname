@@ -218,7 +218,8 @@ impl PhaseStore {
         phase: PhaseName,
         mode: &RunMode,
         sources: &[SourceConfig],
-        expected_manifest_authority_marker: Option<&str>,
+        supplied_manifest_authority_generation: Option<&str>,
+        attested_by: &str,
     ) -> RunnerResult<RedoSession> {
         redo_state::begin(
             &self.pool,
@@ -226,7 +227,8 @@ impl PhaseStore {
             phase,
             mode,
             sources,
-            expected_manifest_authority_marker,
+            supplied_manifest_authority_generation,
+            attested_by,
         )
         .await
     }

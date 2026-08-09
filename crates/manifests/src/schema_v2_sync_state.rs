@@ -155,7 +155,7 @@ pub(super) async fn invalidate_changed_derived_epochs(
         }
         let encoded = serde_json::to_vec(&(chain_id.as_str(), desired_manifests))
             .context("failed to fingerprint manifest authority")?;
-        let marker = format!("manifest-authority:{}", hex::encode(keccak256(encoded)));
+        let marker = invalidation_marker(transaction, encoded, &chain_id).await?;
         sqlx::query(
             "
             UPDATE chain_phase_state
@@ -181,7 +181,12 @@ pub(super) async fn invalidate_changed_derived_epochs(
             desired.basenames_execution.as_slice(),
         ))
         .context("failed to fingerprint Basenames project manifest authority")?;
-        let marker = format!("manifest-authority:{}", hex::encode(keccak256(encoded)));
+        let marker = invalidation_marker(
+            transaction,
+            encoded,
+            "Base project Basenames execution dependency",
+        )
+        .await?;
         sqlx::query(
             "UPDATE chain_phase_state
              SET input_content_hash = $2,
@@ -197,6 +202,23 @@ pub(super) async fn invalidate_changed_derived_epochs(
         .context("failed to invalidate Base project epoch for Basenames execution authority")?;
     }
     Ok(())
+}
+
+async fn invalidation_marker(
+    transaction: &mut Transaction<'_, Postgres>,
+    encoded_authority: Vec<u8>,
+    context: &str,
+) -> Result<String> {
+    let generation: String = sqlx::query_scalar("SELECT gen_random_uuid()::text")
+        .fetch_one(&mut **transaction)
+        .await
+        .with_context(|| {
+            format!("failed to mint manifest-authority invalidation generation for {context}")
+        })?;
+    Ok(format!(
+        "manifest-authority:{}:{generation}",
+        hex::encode(keccak256(encoded_authority))
+    ))
 }
 
 fn record_authority(

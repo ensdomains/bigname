@@ -62,6 +62,8 @@ const MULTICALL_RESULTS_PREFIX: &str = "__fixture_multicall_results__:";
 const WATCH_ADDRESS_A: &str = "0x00000000000000000000000000000000000000a1";
 const WATCH_ADDRESS_B: &str = "0x00000000000000000000000000000000000000b2";
 const TRANSFER_TOPIC: &str = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const TEST_AUTHORITY_FINGERPRINT: &str =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 #[derive(Clone, Default)]
 struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
@@ -111,6 +113,18 @@ impl Phase for FailingInterpretPhase {
 
     fn run_batch(&self, _context: PhaseContext) -> PhaseFuture<'_> {
         Box::pin(async { Err(RunnerError::data_integrity("forced required-redo failure")) })
+    }
+}
+
+struct PanickingInterpretPhase;
+
+impl Phase for PanickingInterpretPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Interpret
+    }
+
+    fn run_batch(&self, _context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async { panic!("forced second crash after audited redo restart") })
     }
 }
 
@@ -468,9 +482,12 @@ async fn manifest_authority_change_rejects_live_suffix_lineage_coverage() -> Res
             .is_some_and(|hash| hash.starts_with("manifest-authority:")),
         "manifest sync must stamp the pre-adoption authority marker"
     );
-    let manifest_authority_marker = recorded_hash.expect("authority marker was asserted above");
+    let first_b_marker = recorded_hash.expect("authority marker was asserted above");
+    let (first_b_fingerprint, first_b_generation) = manifest_authority_parts(&first_b_marker)?;
+    let first_b_fingerprint = first_b_fingerprint.to_owned();
+    let first_b_generation = first_b_generation.to_owned();
 
-    let redo_runner = loopback_runner(&scratch, "production-live-manifest-authority-redo", false)?;
+    let redo_runner = loopback_runner(&scratch, "production-live-manifest-authority-redo")?;
 
     // Before the manifest-authority fence, this redo passed the presence guard: the finite cursor
     // proved only block 0 and readable lineage incorrectly certified the A-loaded suffix 1..=3.
@@ -490,12 +507,94 @@ async fn manifest_authority_change_rejects_live_suffix_lineage_coverage() -> Res
     );
     assert_eq!(
         error.to_string(),
-        "raw-data presence check failed for interpret redo on chain \
+        format!(
+            "raw-data presence check failed for interpret redo on chain \
 manifest-authority-live-suffix: the manifest authority changed since blocks 0..=3 were loaded; \
+invalidation token {first_b_generation}; \
 complete the documented mandatory historical fetch for any widened range (docs/manifests.md § \
 mandatory historical fetch after watch-plan widening), or confirm that the change widened \
-nothing; then re-run with --attest-watch-set-coverage; see issue #376"
+nothing; then re-run with --attest-watch-set-coverage {first_b_generation} (or \
+--attest-watch-set-coverage manifest-authority-live-suffix={first_b_generation} in a multi-chain \
+redo); see issue #376"
+        )
     );
+
+    // The operator reviewed the first transition to watch plan B. A competing sync changes the
+    // current authority before redo begins, so that review must not authorize the replacement.
+    manifests.write(false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&manifests.root)?).await?;
+    let a_marker: String = sqlx::query_scalar(
+        "SELECT input_content_hash
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    let (_, a_generation) = manifest_authority_parts(&a_marker)?;
+    let a_generation = a_generation.to_owned();
+    let stale_review_runner = loopback_runner(&scratch, "production-live-stale-review-token")?
+        .with_watch_set_coverage_attestation(chain, &first_b_generation);
+    let swap_error = stale_review_runner
+        .redo(
+            &live_chain(chain, &fixture.endpoint)?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 3)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a sync in the review window must invalidate the operator's old token");
+    assert_eq!(
+        swap_error.kind(),
+        phase_runner::error::ErrorKind::Configuration
+    );
+    assert!(swap_error.to_string().contains(&first_b_generation));
+    assert!(swap_error.to_string().contains(&a_generation));
+
+    loopback_runner(&scratch, "production-live-authority-a-discharge")?
+        .with_watch_set_coverage_attestation(chain, &a_generation)
+        .redo(
+            &live_chain(chain, &fixture.endpoint)?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 3)?,
+            CancellationToken::new(),
+        )
+        .await?;
+
+    // Returning to the identical B authority is a new invalidation generation. This pins the ABA
+    // interleaving: a stalled command carrying the first B token cannot discharge the second B
+    // marker even though its deterministic authority fingerprint is the same.
+    manifests.write(true)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&manifests.root)?).await?;
+    let second_b_marker: String = sqlx::query_scalar(
+        "SELECT input_content_hash
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    let (second_b_fingerprint, second_b_generation) = manifest_authority_parts(&second_b_marker)?;
+    let second_b_generation = second_b_generation.to_owned();
+    assert_eq!(second_b_fingerprint, first_b_fingerprint);
+    assert_ne!(second_b_generation, first_b_generation);
+    let stale_aba_runner = loopback_runner(&scratch, "production-live-stale-aba-token")?
+        .with_watch_set_coverage_attestation(chain, &first_b_generation);
+    let aba_error = stale_aba_runner
+        .redo(
+            &live_chain(chain, &fixture.endpoint)?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 3)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the first B token must not discharge the later B invalidation");
+    assert_eq!(
+        aba_error.kind(),
+        phase_runner::error::ErrorKind::Configuration
+    );
+    assert!(aba_error.to_string().contains(&first_b_generation));
+    assert!(aba_error.to_string().contains(&second_b_generation));
 
     let logs = CapturedLogs::default();
     let subscriber = tracing_subscriber::fmt()
@@ -518,12 +617,12 @@ nothing; then re-run with --attest-watch-set-coverage; see issue #376"
         "production-live-manifest-authority-attested-redo",
         fast_timing(),
     )?
-    .with_watch_set_coverage_attestation(true);
+    .with_watch_set_coverage_attestation(chain, &second_b_generation);
     attested_runner
         .redo(
             &live_chain(chain, &fixture.endpoint)?,
             RedoPhase::Phase(PhaseName::Interpret),
-            BlockRange::new(0, 3)?,
+            BlockRange::new(0, 0)?,
             CancellationToken::new(),
         )
         .with_subscriber(subscriber)
@@ -533,15 +632,41 @@ nothing; then re-run with --attest-watch-set-coverage; see issue #376"
     assert_eq!(
         logs.matches("\"event\":\"manifest_authority_watch_set_coverage_attested\"")
             .count(),
-        1
+        2,
+        "the first begin and the validated in-process retry must both emit from the durable row"
     );
     assert!(logs.contains("\"chain_id\":\"manifest-authority-live-suffix\""));
     assert!(logs.contains("\"phase\":\"interpret\""));
     assert!(logs.contains("\"redo_from_block\":0"));
     assert!(logs.contains("\"redo_to_block\":3"));
     assert!(logs.contains(&format!(
-        "\"manifest_authority_marker\":\"{manifest_authority_marker}\""
+        "\"authority_fingerprint\":\"{first_b_fingerprint}\""
     )));
+    assert!(logs.contains(&format!("\"generation_token\":\"{second_b_generation}\"")));
+    assert!(logs.contains("\"attested_by\":\"production-live-manifest-authority-attested-redo\""));
+    assert_eq!(logs.matches("\"replayed\":false").count(), 1);
+    assert_eq!(logs.matches("\"replayed\":true").count(), 1);
+    let durable_audit: (String, String, String, i64, i64, String) = sqlx::query_as(
+        "SELECT authority_fingerprint, generation_token, phase_name,
+                redo_from_block_number, redo_to_block_number, attested_by
+         FROM manifest_authority_attestations
+         WHERE chain_id = $1 AND generation_token = $2",
+    )
+    .bind(chain)
+    .bind(&second_b_generation)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        durable_audit,
+        (
+            first_b_fingerprint,
+            second_b_generation,
+            "interpret".to_owned(),
+            0,
+            3,
+            "production-live-manifest-authority-attested-redo".to_owned(),
+        )
+    );
 
     fixture.server.abort();
     scratch.cleanup().await
@@ -555,18 +680,19 @@ async fn manifest_authority_change_without_a_live_suffix_requires_attestation() 
     publish(scratch.pool(), chain, 1, 0, 0, 0).await?;
     seed_completed_spine(scratch.pool(), chain, 0, &block_hash(1, 0)).await?;
     seed_empty_watch_manifest(scratch.pool(), chain).await?;
+    let generation = "finite-coverage-generation";
     sqlx::query(
         "UPDATE chain_phase_state
-         SET input_content_hash = 'manifest-authority:fixture'
+         SET input_content_hash = $2
          WHERE chain_id = $1 AND phase_name = 'interpret'",
     )
     .bind(chain)
+    .bind(manifest_authority_marker(generation))
     .execute(scratch.pool())
     .await?;
     let unattested_runner = loopback_runner(
         &scratch,
         "production-manifest-authority-finite-coverage-unattested",
-        false,
     )?;
     // Before the uniform manifest-authority fence, full finite-cursor coverage let this redo
     // adopt the new authority without either a historical fetch or an operator attestation.
@@ -582,18 +708,22 @@ async fn manifest_authority_change_without_a_live_suffix_requires_attestation() 
     assert_eq!(error.kind(), phase_runner::error::ErrorKind::DataIntegrity);
     assert_eq!(
         error.to_string(),
-        "raw-data presence check failed for interpret redo on chain \
+        format!(
+            "raw-data presence check failed for interpret redo on chain \
 manifest-authority-finite-coverage: the manifest authority changed since blocks 0..=0 were \
-loaded; complete the documented mandatory historical fetch for any widened range \
+loaded; invalidation token {generation}; complete the documented mandatory historical fetch for any widened range \
 (docs/manifests.md § mandatory historical fetch after watch-plan widening), or confirm that the \
-change widened nothing; then re-run with --attest-watch-set-coverage; see issue #376"
+change widened nothing; then re-run with --attest-watch-set-coverage {generation} (or \
+--attest-watch-set-coverage manifest-authority-finite-coverage={generation} in a multi-chain \
+redo); see issue #376"
+        )
     );
 
     let attested_runner = loopback_runner(
         &scratch,
         "production-manifest-authority-finite-coverage-attested",
-        true,
-    )?;
+    )?
+    .with_watch_set_coverage_attestation(chain, generation);
     attested_runner
         .redo(
             &live_chain(chain, "http://unused.invalid")?,
@@ -612,6 +742,496 @@ change widened nothing; then re-run with --attest-watch-set-coverage; see issue 
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(adopted.as_deref(), Some(INTERPRETER_CONTENT_HASH));
+    let audit_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+         FROM manifest_authority_attestations
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(audit_rows, 1, "an attested discharge must be durable");
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn attestation_audit_survives_a_crash_before_telemetry_and_reemits_on_restart() -> Result<()>
+{
+    let scratch = ScratchDatabase::create("production_manifest_attestation_crash_audit").await?;
+    let chain = "manifest-attestation-crash-audit";
+    let generation = "crash-window-generation";
+    seed_branch(scratch.pool(), chain, 1, 0, None).await?;
+    publish(scratch.pool(), chain, 1, 0, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 0, &block_hash(1, 0)).await?;
+    seed_empty_watch_manifest(scratch.pool(), chain).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET input_content_hash = $2
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .bind(manifest_authority_marker(generation))
+    .execute(scratch.pool())
+    .await?;
+
+    let crash_runner = loopback_runner(&scratch, "production-attestation-crash")?
+        .with_watch_set_coverage_attestation(chain, generation)
+        .with_manifest_authority_audit_before_emit(|| {
+            panic!("forced process crash before attestation telemetry emission")
+        });
+    let crash_chain = live_chain(chain, "http://unused.invalid")?;
+    let crashed = tokio::spawn(async move {
+        crash_runner
+            .redo(
+                &crash_chain,
+                RedoPhase::Phase(PhaseName::Interpret),
+                BlockRange::new(0, 0).expect("valid crash-window range"),
+                CancellationToken::new(),
+            )
+            .await
+    })
+    .await
+    .expect_err("the fixture must crash after the redo-begin transaction commits");
+    assert!(crashed.is_panic());
+
+    let durable: (i64, bool, Option<String>) = sqlx::query_as(
+        "SELECT (
+             SELECT count(*)
+             FROM manifest_authority_attestations
+             WHERE chain_id = $1 AND phase_name = 'interpret' AND generation_token = $2
+         ), redo_in_progress, input_content_hash
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .bind(generation)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(durable.0, 1, "the audit row must commit before telemetry");
+    assert!(durable.1, "the committed redo must remain resumable");
+    assert_eq!(durable.2.as_deref(), Some(INTERPRETER_CONTENT_HASH));
+
+    let tokenless_logs = CapturedLogs::default();
+    let tokenless_subscriber = tracing_subscriber::fmt()
+        .json()
+        .without_time()
+        .with_writer(tokenless_logs.clone())
+        .finish();
+    let tokenless_error = loopback_runner(&scratch, "production-attestation-tokenless-restart")?
+        .redo(
+            &live_chain(chain, "http://unused.invalid")?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 0)?,
+            CancellationToken::new(),
+        )
+        .with_subscriber(tokenless_subscriber)
+        .await
+        .expect_err("an interrupted audited redo must require its generation token");
+    assert!(tokenless_error.to_string().contains(generation));
+    assert!(
+        !tokenless_logs.text().contains("\"replayed\":true"),
+        "a rejected tokenless command must not emit replay telemetry"
+    );
+
+    let remaining_chain = "manifest-attestation-crash-audit-remaining";
+    let remaining_generation = "remaining-chain-generation";
+    seed_branch(scratch.pool(), remaining_chain, 1, 0, None).await?;
+    publish(scratch.pool(), remaining_chain, 1, 0, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), remaining_chain, 0, &block_hash(1, 0)).await?;
+    seed_empty_watch_manifest(scratch.pool(), remaining_chain).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET input_content_hash = $2
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(remaining_chain)
+    .bind(manifest_authority_marker(remaining_generation))
+    .execute(scratch.pool())
+    .await?;
+
+    let stale_logs = CapturedLogs::default();
+    let stale_subscriber = tracing_subscriber::fmt()
+        .json()
+        .without_time()
+        .with_writer(stale_logs.clone())
+        .finish();
+    let stale_resume_error = loopback_runner(&scratch, "production-attestation-stale-restart")?
+        .with_watch_set_coverage_attestation(chain, "stale-restart-generation")
+        .redo(
+            &live_chain(chain, "http://unused.invalid")?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 0)?,
+            CancellationToken::new(),
+        )
+        .with_subscriber(stale_subscriber)
+        .await
+        .expect_err("an interrupted audited redo must reject a different generation");
+    assert!(
+        stale_resume_error
+            .to_string()
+            .contains("stale-restart-generation")
+    );
+    assert!(stale_resume_error.to_string().contains(generation));
+    assert!(
+        !stale_logs.text().contains("\"replayed\":true"),
+        "a rejected stale-token command must not emit replay telemetry"
+    );
+
+    let second_crash_phases = PhaseSet::with_ingest_interpret_project_and_live(
+        Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+        Arc::new(PanickingInterpretPhase),
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(LoopbackPhase::new(PhaseName::Verify)),
+        Arc::new(LoopbackPhase::new(PhaseName::Live)),
+    )?;
+    let second_crash_runner = PhaseRunner::new(
+        scratch.runner(),
+        second_crash_phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-attestation-second-crash",
+        fast_timing(),
+    )?
+    .with_watch_set_coverage_attestation(chain, generation);
+    let second_crash_chain = live_chain(chain, "http://unused.invalid")?;
+    let second_crash = tokio::spawn(async move {
+        second_crash_runner
+            .redo(
+                &second_crash_chain,
+                RedoPhase::Phase(PhaseName::Interpret),
+                BlockRange::new(0, 0).expect("valid second-crash range"),
+                CancellationToken::new(),
+            )
+            .await
+    })
+    .await
+    .expect_err("the resumed phase must crash after its locked begin");
+    assert!(second_crash.is_panic());
+    let audit_still_matches_active_redo: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM manifest_authority_attestations audit
+             JOIN chain_phase_state phase
+               ON phase.chain_id = audit.chain_id
+              AND phase.phase_name = audit.phase_name
+              AND phase.redo_in_progress
+              AND phase.redo_from_block_number = audit.redo_from_block_number
+              AND phase.redo_to_block_number = audit.redo_to_block_number
+              AND phase.started_at = audit.attested_at
+             WHERE audit.chain_id = $1 AND audit.generation_token = $2
+         )",
+    )
+    .bind(chain)
+    .bind(generation)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(
+        audit_still_matches_active_redo,
+        "a second crash must preserve the durable audit association"
+    );
+
+    let replayed_logs = CapturedLogs::default();
+    let replay_subscriber = tracing_subscriber::fmt()
+        .json()
+        .without_time()
+        .with_writer(replayed_logs.clone())
+        .finish();
+    let restart_report = loopback_runner(&scratch, "production-attestation-crash-restart")?
+        .with_watch_set_coverage_attestation(chain, generation)
+        .with_watch_set_coverage_attestation(remaining_chain, remaining_generation)
+        .redo_chains(
+            &[
+                live_chain(chain, "http://unused.invalid")?,
+                live_chain(remaining_chain, "http://unused.invalid")?,
+            ],
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 0)?,
+            CancellationToken::new(),
+        )
+        .with_subscriber(replay_subscriber)
+        .await?;
+    assert!(
+        restart_report.stopped_chains.is_empty(),
+        "the audited chain must resume without blocking a later chain: {:?}",
+        restart_report.stopped_chains
+    );
+    let replayed_logs = replayed_logs.text();
+    assert_eq!(
+        replayed_logs.matches("\"replayed\":true").count(),
+        1,
+        "restart must re-emit the durable row once: {replayed_logs}"
+    );
+    assert!(replayed_logs.contains(&format!("\"generation_token\":\"{generation}\"")));
+    assert!(replayed_logs.contains("\"replayed\":true"));
+    let audit_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+         FROM manifest_authority_attestations
+         WHERE chain_id = $1 AND phase_name = 'interpret' AND generation_token = $2",
+    )
+    .bind(chain)
+    .bind(generation)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        audit_rows, 1,
+        "restart must not duplicate the durable audit"
+    );
+    let remaining_audit_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+         FROM manifest_authority_attestations
+         WHERE chain_id = $1 AND phase_name = 'interpret' AND generation_token = $2",
+    )
+    .bind(remaining_chain)
+    .bind(remaining_generation)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        remaining_audit_rows, 1,
+        "the remaining chain must discharge its current generation"
+    );
+    let completed_token_error =
+        loopback_runner(&scratch, "production-attestation-completed-token-reuse")?
+            .with_watch_set_coverage_attestation(chain, generation)
+            .redo(
+                &live_chain(chain, "http://unused.invalid")?,
+                RedoPhase::Phase(PhaseName::Interpret),
+                BlockRange::new(0, 0)?,
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("a completed discharge must make its token invalid");
+    assert!(
+        completed_token_error
+            .to_string()
+            .contains("is not discharging a manifest-authority marker")
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn audited_restart_rejects_a_changed_effective_range_before_replay() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_attestation_exact_restart_range").await?;
+    let chain = "manifest-attestation-exact-restart-range";
+    let generation = "exact-restart-range-generation";
+    seed_branch(scratch.pool(), chain, 1, 0, None).await?;
+    publish(scratch.pool(), chain, 1, 0, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 0, &block_hash(1, 0)).await?;
+    seed_empty_watch_manifest(scratch.pool(), chain).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET input_content_hash = $2
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .bind(manifest_authority_marker(generation))
+    .execute(scratch.pool())
+    .await?;
+
+    let interrupted_phases = PhaseSet::with_ingest_interpret_project_and_live(
+        Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+        Arc::new(FailingInterpretPhase),
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(LoopbackPhase::new(PhaseName::Verify)),
+        Arc::new(LoopbackPhase::new(PhaseName::Live)),
+    )?;
+    PhaseRunner::new(
+        scratch.runner(),
+        interrupted_phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-attestation-exact-range-begin",
+        fast_timing(),
+    )?
+    .with_watch_set_coverage_attestation(chain, generation)
+    .redo(
+        &live_chain(chain, "http://unused.invalid")?,
+        RedoPhase::Phase(PhaseName::Interpret),
+        BlockRange::new(0, 0)?,
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("the fixture must leave the attested redo interrupted");
+
+    // Model the recorded Interpret head moving after the audited begin. The token belongs to the
+    // durable effective range 0..=0 and must not silently authorize a restart widened to 0..=1.
+    seed_branch(scratch.pool(), chain, 1, 1, Some((0, block_hash(1, 0)))).await?;
+    publish(scratch.pool(), chain, 1, 1, 0, 0).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET current_block_number = 1, current_block_hash = $2,
+             target_block_number = 1, target_block_hash = $2
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .bind(block_hash(1, 1))
+    .execute(scratch.pool())
+    .await?;
+
+    let rejected_logs = CapturedLogs::default();
+    let rejected_subscriber = tracing_subscriber::fmt()
+        .json()
+        .without_time()
+        .with_writer(rejected_logs.clone())
+        .finish();
+    let error = loopback_runner(&scratch, "production-attestation-exact-range-reject")?
+        .with_watch_set_coverage_attestation(chain, generation)
+        .redo(
+            &live_chain(chain, "http://unused.invalid")?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 0)?,
+            CancellationToken::new(),
+        )
+        .with_subscriber(rejected_subscriber)
+        .await
+        .expect_err("the generation token must not authorize a different effective range");
+    assert!(
+        error
+            .to_string()
+            .contains("active audited Interpret redo range 0..=0")
+    );
+    assert!(error.to_string().contains("resolves to 0..=1"));
+    assert!(
+        !rejected_logs.text().contains("\"replayed\":true"),
+        "a rejected range change must not emit replay telemetry"
+    );
+    let persisted_range: (Option<i64>, Option<i64>, bool) = sqlx::query_as(
+        "SELECT phase.redo_from_block_number, phase.redo_to_block_number,
+                phase.started_at = audit.attested_at
+         FROM chain_phase_state phase
+         JOIN manifest_authority_attestations audit
+           ON audit.chain_id = phase.chain_id
+          AND audit.phase_name = phase.phase_name
+          AND audit.generation_token = $2
+         WHERE phase.chain_id = $1 AND phase.phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .bind(generation)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(persisted_range, (Some(0), Some(0), true));
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn locked_begin_rejects_an_audit_created_after_tokenless_preflight() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_attestation_locked_tokenless_race").await?;
+    let chain = "manifest-attestation-locked-tokenless-race";
+    let generation = "locked-tokenless-race-generation";
+    seed_branch(scratch.pool(), chain, 1, 0, None).await?;
+    publish(scratch.pool(), chain, 1, 0, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 0, &block_hash(1, 0)).await?;
+    seed_empty_watch_manifest(scratch.pool(), chain).await?;
+
+    let mut blocker = scratch.pool().begin().await?;
+    sqlx::query(
+        "SELECT phase_name
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'
+         FOR UPDATE",
+    )
+    .bind(chain)
+    .fetch_one(&mut *blocker)
+    .await?;
+
+    let rejected_logs = CapturedLogs::default();
+    let rejected_subscriber = tracing_subscriber::fmt()
+        .json()
+        .without_time()
+        .with_writer(rejected_logs.clone())
+        .finish();
+    let racing_runner = loopback_runner(&scratch, "production-attestation-tokenless-racer")?;
+    let racing_chain = live_chain(chain, "http://unused.invalid")?;
+    let racing = tokio::spawn(async move {
+        racing_runner
+            .redo(
+                &racing_chain,
+                RedoPhase::Phase(PhaseName::Interpret),
+                BlockRange::new(0, 0).expect("valid raced range"),
+                CancellationToken::new(),
+            )
+            .with_subscriber(rejected_subscriber)
+            .await
+    });
+
+    let mut waiting_on_locked_begin = false;
+    for _ in 0..200 {
+        waiting_on_locked_begin = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM pg_stat_activity
+                 WHERE datname = current_database()
+                   AND wait_event_type = 'Lock'
+                   AND query LIKE '%SELECT phase_name%'
+                   AND query LIKE '%FROM chain_phase_state%'
+                   AND query LIKE '%FOR UPDATE%'
+             )",
+        )
+        .fetch_one(scratch.pool())
+        .await?;
+        if waiting_on_locked_begin {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        waiting_on_locked_begin,
+        "the tokenless command must preflight before waiting on the locked begin"
+    );
+
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running', redo_in_progress = true, redo_mode = 'redo',
+             redo_previous_phase_status = phase_status,
+             redo_previous_last_error = last_error,
+             redo_previous_started_at = started_at,
+             redo_previous_finished_at = finished_at,
+             redo_from_block_number = 0, redo_to_block_number = 0,
+             started_at = now(), finished_at = NULL
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .execute(&mut *blocker)
+    .await?;
+    sqlx::query(
+        "INSERT INTO manifest_authority_attestations (
+             chain_id, phase_name, generation_token, authority_fingerprint,
+             redo_from_block_number, redo_to_block_number, attested_by, attested_at
+         )
+         SELECT chain_id, phase_name, $2, $3, 0, 0, 'racing-attested-runner', started_at
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .bind(generation)
+    .bind(TEST_AUTHORITY_FINGERPRINT)
+    .execute(&mut *blocker)
+    .await?;
+    blocker.commit().await?;
+
+    let error = racing
+        .await?
+        .expect_err("locked begin must reject an audit that appeared after tokenless preflight");
+    assert!(error.to_string().contains(generation));
+    assert!(
+        !rejected_logs.text().contains("\"replayed\":true"),
+        "the raced tokenless command must not emit replay telemetry"
+    );
+    let preserved: (bool, Option<i64>, Option<i64>, bool) = sqlx::query_as(
+        "SELECT phase.redo_in_progress, phase.redo_from_block_number,
+                phase.redo_to_block_number, phase.started_at = audit.attested_at
+         FROM chain_phase_state phase
+         JOIN manifest_authority_attestations audit
+           ON audit.chain_id = phase.chain_id
+          AND audit.phase_name = phase.phase_name
+          AND audit.generation_token = $2
+         WHERE phase.chain_id = $1 AND phase.phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .bind(generation)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(preserved, (true, Some(0), Some(0), true));
+
     scratch.cleanup().await
 }
 
@@ -623,12 +1243,14 @@ async fn manifest_authority_fence_applies_when_all_sources_start_after_redo() ->
     publish(scratch.pool(), chain, 1, 0, 0, 0).await?;
     seed_completed_spine(scratch.pool(), chain, 0, &block_hash(1, 0)).await?;
     seed_empty_watch_manifest(scratch.pool(), chain).await?;
+    let generation = "skipped-sources-generation";
     sqlx::query(
         "UPDATE chain_phase_state
-         SET input_content_hash = 'manifest-authority:skipped-sources'
+         SET input_content_hash = $2
          WHERE chain_id = $1 AND phase_name = 'interpret'",
     )
     .bind(chain)
+    .bind(manifest_authority_marker(generation))
     .execute(scratch.pool())
     .await?;
     let future_source_chain = ChainConfig::new(
@@ -643,11 +1265,7 @@ async fn manifest_authority_fence_applies_when_all_sources_start_after_redo() ->
         )?],
         false,
     )?;
-    let runner = loopback_runner(
-        &scratch,
-        "production-manifest-authority-skipped-sources",
-        false,
-    )?;
+    let runner = loopback_runner(&scratch, "production-manifest-authority-skipped-sources")?;
 
     // Every configured source is outside 0..=0. Before the uniform fence, the source loop skipped
     // them all and the marker was silently adopted because no Live suffix had been recorded.
@@ -663,11 +1281,15 @@ async fn manifest_authority_fence_applies_when_all_sources_start_after_redo() ->
     assert_eq!(error.kind(), phase_runner::error::ErrorKind::DataIntegrity);
     assert_eq!(
         error.to_string(),
-        "raw-data presence check failed for interpret redo on chain \
+        format!(
+            "raw-data presence check failed for interpret redo on chain \
 manifest-authority-skipped-sources: the manifest authority changed since blocks 0..=0 were \
-loaded; complete the documented mandatory historical fetch for any widened range \
+loaded; invalidation token {generation}; complete the documented mandatory historical fetch for any widened range \
 (docs/manifests.md § mandatory historical fetch after watch-plan widening), or confirm that the \
-change widened nothing; then re-run with --attest-watch-set-coverage; see issue #376"
+change widened nothing; then re-run with --attest-watch-set-coverage {generation} (or \
+--attest-watch-set-coverage manifest-authority-skipped-sources={generation} in a multi-chain \
+redo); see issue #376"
+        )
     );
 
     scratch.cleanup().await
@@ -682,11 +1304,8 @@ async fn watch_set_coverage_attestation_without_an_authority_marker_is_rejected(
     publish(scratch.pool(), chain, 1, 0, 0, 0).await?;
     seed_completed_spine(scratch.pool(), chain, 0, &block_hash(1, 0)).await?;
     seed_empty_watch_manifest(scratch.pool(), chain).await?;
-    let runner = loopback_runner(
-        &scratch,
-        "production-attestation-without-authority-marker",
-        true,
-    )?;
+    let runner = loopback_runner(&scratch, "production-attestation-without-authority-marker")?
+        .with_watch_set_coverage_attestation(chain, "unused-generation");
 
     let error = runner
         .redo(
@@ -700,8 +1319,9 @@ async fn watch_set_coverage_attestation_without_an_authority_marker_is_rejected(
     assert_eq!(error.kind(), phase_runner::error::ErrorKind::Configuration);
     assert_eq!(
         error.to_string(),
-        "--attest-watch-set-coverage is only valid when an interpret redo on chain \
-attestation-without-authority-marker is discharging a manifest-authority marker"
+        "--attest-watch-set-coverage supplied invalidation token unused-generation for chain \
+attestation-without-authority-marker, but its Interpret redo is not discharging a \
+manifest-authority marker"
     );
 
     scratch.cleanup().await
@@ -715,19 +1335,18 @@ async fn watch_set_coverage_attestation_requires_a_recorded_interpret_extent() -
     PhaseStore::new(scratch.pool().clone())
         .initialize_chain(chain)
         .await?;
+    let generation = "no-extent-generation";
     sqlx::query(
         "UPDATE chain_phase_state
-         SET input_content_hash = 'manifest-authority:no-extent'
+         SET input_content_hash = $2
          WHERE chain_id = $1 AND phase_name = 'interpret'",
     )
     .bind(chain)
+    .bind(manifest_authority_marker(generation))
     .execute(scratch.pool())
     .await?;
-    let runner = loopback_runner(
-        &scratch,
-        "production-attestation-without-interpret-extent",
-        true,
-    )?;
+    let runner = loopback_runner(&scratch, "production-attestation-without-interpret-extent")?
+        .with_watch_set_coverage_attestation(chain, generation);
 
     let error = runner
         .redo(
@@ -771,7 +1390,7 @@ async fn invalid_all_phase_attestation_is_rejected_before_ingest_runs() -> Resul
         "production-all-attestation-preflight",
         fast_timing(),
     )?
-    .with_watch_set_coverage_attestation(true);
+    .with_watch_set_coverage_attestation(chain, "unused-generation");
 
     let error = runner
         .redo(
@@ -785,8 +1404,9 @@ async fn invalid_all_phase_attestation_is_rejected_before_ingest_runs() -> Resul
     assert_eq!(error.kind(), phase_runner::error::ErrorKind::Configuration);
     assert_eq!(
         error.to_string(),
-        "--attest-watch-set-coverage is only valid when an interpret redo on chain \
-all-attestation-without-authority-marker is discharging a manifest-authority marker"
+        "--attest-watch-set-coverage supplied invalidation token unused-generation for chain \
+all-attestation-without-authority-marker, but its Interpret redo is not discharging a \
+manifest-authority marker"
     );
 
     scratch.cleanup().await
@@ -2467,11 +3087,7 @@ fn live_chain(chain: &str, endpoint: &str) -> phase_runner::error::RunnerResult<
     )
 }
 
-fn loopback_runner(
-    scratch: &ScratchDatabase,
-    instance_id: &str,
-    attest_watch_set_coverage: bool,
-) -> Result<PhaseRunner> {
+fn loopback_runner(scratch: &ScratchDatabase, instance_id: &str) -> Result<PhaseRunner> {
     let phases = PhaseSet::with_ingest_interpret_project_and_live(
         Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
         Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
@@ -2485,8 +3101,20 @@ fn loopback_runner(
         CapacityGuard::system(CapacityConfig::default()),
         instance_id,
         fast_timing(),
-    )?
-    .with_watch_set_coverage_attestation(attest_watch_set_coverage))
+    )?)
+}
+
+fn manifest_authority_marker(generation_token: &str) -> String {
+    format!("manifest-authority:{TEST_AUTHORITY_FINGERPRINT}:{generation_token}")
+}
+
+fn manifest_authority_parts(marker: &str) -> Result<(&str, &str)> {
+    let encoded = marker
+        .strip_prefix("manifest-authority:")
+        .ok_or_else(|| anyhow::anyhow!("marker has no manifest-authority prefix: {marker}"))?;
+    encoded
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("marker has no invalidation generation: {marker}"))
 }
 
 fn production_runner(

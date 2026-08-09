@@ -285,8 +285,18 @@ redo that would discharge that marker fails closed. If the manifest widened the
 watch plan, run the [mandatory historical fetch for the affected
 range](manifests.md#mandatory-historical-fetch-after-watch-plan-widening);
 otherwise confirm that it widened nothing. Re-run the redo with
-`--attest-watch-set-coverage`. The flag is the
-operator's attestation, and the runner logs the chain, phase, range, and marker.
+`--attest-watch-set-coverage <token>`, using the invalidation token printed by
+the fence error. For a multi-chain redo, repeat
+`--attest-watch-set-coverage <chain>=<token>` for each affected chain. The
+locked redo begin rejects stale tokens, including a token from an earlier
+transition to the same authority. The flag is the operator's attestation. The
+same transaction that begins the redo appends one immutable audit row with the
+chain, Interpret phase, range, authority fingerprint, token, runner instance
+ID, and attestation time. The runner emits error-level telemetry from that row
+after commit and re-emits it on restart only after the locked begin matches and
+commits the same interrupted redo.
+The same token-valued command may resume that exact active, audited redo; the
+token remains invalid everywhere else.
 The system cannot verify the fetch or the no-widening review. This conservative
 step applies to every manifest-authority change, including ranges fully covered
 by finite ingest cursors, until issue #376 binds watch-plan evidence to the

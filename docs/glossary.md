@@ -639,15 +639,18 @@ transfer powers before the later wrapper expiry.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L820 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L825 @ ens_v1@91c966f)
 
-**Manifest-authority marker** — a `manifest-authority:<hash>` value that
+**Manifest-authority marker** — a
+`manifest-authority:<authority-fingerprint>:<invalidation-token>` value that
 manifest synchronization records in a derived phase's input-hash field when
-the active manifest authority changes. It poisons ordinary hash adoption until
-the required full redo begins. The marker proves that authority changed; it
-does not prove that facts required by a widened watch plan were fetched. When
-Interpret would discharge the marker, the operator must complete the manifest
-widening procedure or confirm that nothing widened, then explicitly attest that
-review. Finite cursors and readable lineage both prove only the watch plan
-active when facts were loaded.
+the active manifest authority changes. The fingerprint identifies the desired
+manifest set. The database mints a new invalidation token for every transition,
+including a later return to the same desired set. The marker poisons ordinary
+hash adoption until the required full redo begins. It proves that authority
+changed; it does not prove that facts required by a widened watch plan were
+fetched. When Interpret would discharge the marker, the operator must complete
+the manifest widening procedure or confirm that nothing widened, then attest
+with the current token. Finite cursors and readable lineage both prove only the
+watch plan active when facts were loaded.
 
 **Non-name form** — a string a route puts in a name-typed field for a label
 bigname cannot state as a name. Registry events prove a child node and its

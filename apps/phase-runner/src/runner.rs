@@ -1,4 +1,7 @@
-use std::sync::{Arc, OnceLock};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, OnceLock},
+};
 
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -63,7 +66,8 @@ pub struct PhaseRunner {
     capacity: CapacityGuard,
     instance_id: Arc<str>,
     timing: TimingConfig,
-    attest_watch_set_coverage: bool,
+    watch_set_coverage_attestations: BTreeMap<String, String>,
+    manifest_authority_audit_before_emit: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl PhaseRunner {
@@ -90,12 +94,26 @@ impl PhaseRunner {
             capacity,
             instance_id: Arc::from(instance_id),
             timing,
-            attest_watch_set_coverage: false,
+            watch_set_coverage_attestations: BTreeMap::new(),
+            manifest_authority_audit_before_emit: None,
         })
     }
 
-    pub fn with_watch_set_coverage_attestation(mut self, attest: bool) -> Self {
-        self.attest_watch_set_coverage = attest;
+    pub fn with_watch_set_coverage_attestations(
+        mut self,
+        attestations: BTreeMap<String, String>,
+    ) -> Self {
+        self.watch_set_coverage_attestations = attestations;
+        self
+    }
+
+    pub fn with_watch_set_coverage_attestation(
+        mut self,
+        chain_id: impl Into<String>,
+        generation_token: impl Into<String>,
+    ) -> Self {
+        self.watch_set_coverage_attestations
+            .insert(chain_id.into(), generation_token.into());
         self
     }
 
@@ -285,8 +303,8 @@ impl PhaseRunner {
         phase_lock: &mut PhaseLock,
     ) -> RunnerResult<()> {
         let phase_name = phase.name();
-        let expected_manifest_authority_marker = (phase_name == PhaseName::Interpret)
-            .then(|| self.expected_manifest_attestation_marker(&chain.chain_id))
+        let supplied_manifest_authority_generation = (phase_name == PhaseName::Interpret)
+            .then(|| self.supplied_manifest_attestation_generation(&chain.chain_id))
             .flatten();
         let redo_session = if mode.is_redo() {
             let session = self
@@ -296,11 +314,15 @@ impl PhaseRunner {
                     phase_name,
                     &mode,
                     chain.sources.as_ref(),
-                    expected_manifest_authority_marker.as_deref(),
+                    supplied_manifest_authority_generation.as_deref(),
+                    &self.instance_id,
                 )
                 .await?;
-            if phase_name == PhaseName::Interpret {
-                self.clear_manifest_attestation_marker(&chain.chain_id);
+            if phase_name == PhaseName::Interpret
+                && let Some(audit) = session.manifest_authority_audit.as_ref()
+            {
+                self.before_manifest_authority_audit_emit();
+                audit.emit();
             }
             Some(session)
         } else {

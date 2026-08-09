@@ -27,12 +27,12 @@ impl PhaseRunner {
         range: BlockRange,
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
-        let marker = self
+        let generation_token = self
             .preflight_watch_set_coverage_attestation(chain, selection)
             .await?;
         self.scope_manifest_attestation(
             &chain.chain_id,
-            marker,
+            generation_token,
             self.redo_after_attestation_preflight(chain, selection, range, cancellation),
         )
         .await
@@ -389,24 +389,24 @@ impl PhaseRunner {
         cancellation: CancellationToken,
     ) -> RunnerResult<SupervisorReport> {
         let mut report = SupervisorReport::default();
-        let mut markers = Vec::with_capacity(chains.len());
+        let mut generation_tokens = Vec::with_capacity(chains.len());
         for chain in chains {
             match self
                 .preflight_watch_set_coverage_attestation(chain, selection)
                 .await
             {
-                Ok(marker) => markers.push(marker),
+                Ok(generation_token) => generation_tokens.push(generation_token),
                 Err(error) => report.stopped_chains.push((chain.chain_id.clone(), error)),
             }
         }
         if !report.stopped_chains.is_empty() {
             return Ok(report);
         }
-        for (chain, marker) in chains.iter().zip(markers) {
+        for (chain, generation_token) in chains.iter().zip(generation_tokens) {
             let result = self
                 .scope_manifest_attestation(
                     &chain.chain_id,
-                    marker,
+                    generation_token,
                     self.redo_after_attestation_preflight(
                         chain,
                         selection,

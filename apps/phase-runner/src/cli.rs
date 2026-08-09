@@ -22,6 +22,8 @@ use crate::{
 mod inspect_resolution;
 #[path = "cli_label_preimages.rs"]
 mod label_preimages;
+#[path = "cli_attestation.rs"]
+mod watch_set_attestation;
 
 #[cfg(test)]
 #[path = "cli/tests.rs"]
@@ -217,9 +219,11 @@ struct RedoArgs {
 
     #[arg(
         long,
+        value_name = "TOKEN|CHAIN=TOKEN",
+        action = clap::ArgAction::Append,
         help = "attest manifest-authority coverage after the required historical fetch or a no-widening review"
     )]
-    attest_watch_set_coverage: bool,
+    attest_watch_set_coverage: Vec<String>,
 
     #[arg(
         long = "source",
@@ -274,7 +278,7 @@ pub enum ResolvedCommand {
         timing: TimingConfig,
         phase: RedoPhase,
         range: BlockRange,
-        attest_watch_set_coverage: bool,
+        watch_set_coverage_attestations: BTreeMap<String, String>,
         hydration_rpc_urls: bigname_lookup::ChainRpcUrls,
     },
     Rewind {
@@ -366,6 +370,11 @@ fn resolve_run(args: RunArgs) -> RunnerResult<ResolvedCommand> {
 fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
     let phase = parse_redo_phase(&args.phase)?;
     let range = BlockRange::new(args.from_block, args.to_block)?;
+    let watch_set_coverage_attestations = watch_set_attestation::resolve(
+        &args.attest_watch_set_coverage,
+        args.all_chains,
+        &args.chains,
+    )?;
     let sources = args
         .sources
         .iter()
@@ -402,7 +411,7 @@ fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
         timing: resolve_timing(args.timing)?,
         phase,
         range,
-        attest_watch_set_coverage: args.attest_watch_set_coverage,
+        watch_set_coverage_attestations,
         hydration_rpc_urls: resolve_hydration_rpc_urls(&args.hydration_rpc_urls)?,
     })
 }
@@ -526,6 +535,13 @@ pub async fn resolve_all_redo_chains(
         ));
     }
     resolve_explicit_redo_chains(chain_ids, sources, require_sources)
+}
+
+pub fn validate_redo_attestation_chains(
+    attestations: &BTreeMap<String, String>,
+    chains: &[ChainConfig],
+) -> RunnerResult<()> {
+    watch_set_attestation::validate_resolved_chains(attestations, chains)
 }
 
 fn parse_source(specification: &str) -> RunnerResult<SourceConfig> {

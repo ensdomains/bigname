@@ -187,12 +187,23 @@ neither proves facts added by a later watch plan. Manifest synchronization
 records a [manifest-authority marker](glossary.md#manifest-authority-marker)
 when that authority changes. Every Interpret redo that would discharge the
 marker fails closed unless the operator passes
-`--attest-watch-set-coverage`. Before passing it, the operator must run the
+`--attest-watch-set-coverage <token>` with the invalidation token printed by the
+fence error. Before passing it, the operator must run the
 [mandatory historical fetch for any widened
 range](manifests.md#mandatory-historical-fetch-after-watch-plan-widening), or
-confirm that the change widened nothing. The runner logs an error-level
-structured event with the chain, phase, redo range, and marker for every
-attested discharge.
+confirm that the change widened nothing. A multi-chain redo takes repeated
+`--attest-watch-set-coverage <chain>=<token>` values. The locked redo begin
+rejects a token that no longer matches the current marker.
+
+Each attested discharge appends one immutable
+`manifest_authority_attestations` row in the same transaction that begins the
+redo and adopts the new interpreter hash. It records the chain, Interpret
+phase, redo range, authority fingerprint, invalidation token, runner instance
+ID, and attestation time, with one row allowed per chain, phase, and generation.
+The runner emits error-level structured telemetry from that row after commit;
+if it stops before emission completes, a restart re-emits the row only after
+the locked begin matches and commits the same interrupted redo. The same token may resume that exact active,
+audited redo, but it is invalid after completion or for any other redo.
 
 The system cannot verify the fetch or the no-widening review; the attestation is
 the operator's responsibility. The guard cannot distinguish widening from
