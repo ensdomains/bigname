@@ -313,18 +313,45 @@ fn checked_in_lockfile_covers_the_decode_crate_set() {
         decode_crate_fingerprints(&workspace_root()).expect("checked-in lockfile must parse");
     let names: BTreeSet<&str> = fingerprints
         .iter()
-        .map(|(name, _, _)| name.as_str())
+        .map(|(name, _, _, _)| name.as_str())
         .collect();
     assert_eq!(
         names, expected,
         "a renamed or dropped decode crate must fail here, not empty the fingerprint"
     );
-    for (name, version, checksum) in &fingerprints {
+    for (name, version, source, checksum) in &fingerprints {
         assert!(
-            !version.is_empty() && !checksum.is_empty(),
-            "decode crate {name} needs a complete version+checksum fingerprint"
+            !version.is_empty() && !source.is_empty() && !checksum.is_empty(),
+            "decode crate {name} needs a complete version+source+checksum fingerprint"
         );
     }
+}
+
+#[test]
+fn decode_crate_git_revisions_rotate_the_hash() {
+    // A git-patched decode crate has no checksum; the revision pinned in `source` is the only
+    // byte that distinguishes two builds of the same version.
+    let stanza = |revision: &str| {
+        format!(
+            "[[package]]\nname = \"alloy-sol-types\"\nversion = \"1.5.7\"\nsource = \
+             \"git+https://github.com/example/alloy?rev={revision}#{revision}\"\n"
+        )
+    };
+    let document = |revision: &str| {
+        let mut packages = sample_lockfile_packages();
+        packages.retain(|(name, _, _)| *name != "alloy-sol-types");
+        format!("{}{}", lockfile_document(&packages), stanza(revision))
+    };
+
+    let tree = SampleTree::new();
+    tree.write("Cargo.lock", &document("aaaa1111"));
+    let first = interpreter_content_hash(tree.path()).expect("first revision must hash");
+    tree.write("Cargo.lock", &document("bbbb2222"));
+    let second = interpreter_content_hash(tree.path()).expect("second revision must hash");
+    assert_ne!(
+        first, second,
+        "two git revisions of one decode-crate version must fingerprint differently"
+    );
 }
 
 #[test]
