@@ -217,6 +217,105 @@ async fn v2_get_history_scope_filters_name_registration_and_both() -> Result<()>
 }
 
 #[tokio::test]
+async fn v2_address_history_ignores_masked_owner_tail_but_keeps_valid_authority_history(
+) -> Result<()> {
+    const MATCHED_ADDRESS: &str = "0x00000000000000000000000000000000000000cc";
+
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_name(
+        &database,
+        "ens:masked-tail.eth",
+        "Masked-Tail.eth",
+        "node:masked-tail.eth",
+        80,
+        Uuid::from_u128(0x7400),
+        Uuid::from_u128(0x8400),
+        Uuid::from_u128(0x9400),
+    )
+    .await?;
+    seed_v2_history_name(
+        &database,
+        "ens:valid-owner.eth",
+        "Valid-Owner.eth",
+        "node:valid-owner.eth",
+        81,
+        Uuid::from_u128(0x7401),
+        Uuid::from_u128(0x8401),
+        Uuid::from_u128(0x9401),
+    )
+    .await?;
+    seed_v2_history_blocks(&database, 121..=123).await?;
+
+    let mut masked = v2_history_event(
+        "masked-owner-authority",
+        Some("ens:masked-tail.eth"),
+        None,
+        "AuthorityTransferred",
+        121,
+    );
+    masked.after_state = json!({
+        "owner": MATCHED_ADDRESS,
+        "owner_word_unmasked": true,
+        "owner_word_raw":
+            "0x0102030405060708090a0b0c00000000000000000000000000000000000000cc",
+    });
+    let valid = v2_history_event(
+        "valid-owner-authority",
+        Some("ens:valid-owner.eth"),
+        None,
+        "AuthorityTransferred",
+        122,
+    );
+    let masked_name_event = v2_history_event(
+        "masked-owner-name-event",
+        Some("ens:masked-tail.eth"),
+        None,
+        "RecordChanged",
+        123,
+    );
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[masked, valid, masked_name_event],
+    )
+    .await?;
+
+    let address_payload = v2_history_payload_for_database(
+        &database,
+        &format!(
+            "/v2/addresses/{MATCHED_ADDRESS}/history?relation=manager&page_size=20"
+        ),
+    )
+    .await?;
+    let address_rows = address_payload["data"]
+        .as_array()
+        .expect("address history data");
+    assert_eq!(address_rows.len(), 1);
+    assert_eq!(address_rows[0]["name"], json!("valid-owner.eth"));
+    assert_eq!(address_rows[0]["transaction_hash"], json!("0xtx122"));
+    assert!(
+        address_rows
+            .iter()
+            .all(|row| row["name"] != json!("masked-tail.eth")),
+        "the masked owner tail must not add its logical name to the address anchor set"
+    );
+
+    let name_payload = v2_history_payload_for_database(
+        &database,
+        "/v2/names/masked-tail.eth/history?scope=name&page_size=20",
+    )
+    .await?;
+    let name_rows = name_payload["data"].as_array().expect("name history data");
+    assert_eq!(name_rows.len(), 2);
+    assert!(name_rows.iter().any(|row| {
+        row["name"] == json!("masked-tail.eth")
+            && row["transaction_hash"] == json!("0xtx121")
+            && row["type"] == json!("authority")
+    }));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_history_keeps_prior_registration_resources_after_rebinding() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_fixture(&database).await?;

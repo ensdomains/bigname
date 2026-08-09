@@ -288,6 +288,7 @@ fn push_registry_owner_match_filter<'a>(
         r#"
             )
             AND ne.event_kind = 'AuthorityTransferred'
+            AND (ne.after_state ->> 'owner_word_unmasked' = 'true') IS NOT TRUE
             AND LOWER(COALESCE(ne.after_state ->> 'owner', '')) =
         "#,
     );

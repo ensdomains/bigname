@@ -7,8 +7,11 @@ use super::super::{
     BindingClosureDraft, BindingDraft, EventDraft, Interpreted, ResourceDraft, ensure_declared,
     permissions::{v1_grant_states, v1_revoke_states},
 };
-use super::support::events;
-use crate::evm_abi::{address_hex, decode_event_log, hex_string};
+use super::{support::events, unmasked_word};
+use crate::evm_abi::{
+    address_hex, decode_event_log_tolerant_address_word, decode_event_log_tolerant_uint64_word,
+    hex_string,
+};
 use crate::schema_v2::{
     catalog::Selected,
     common::{event_time, stable_uuid},
@@ -35,43 +38,65 @@ pub(super) fn interpret(
     raw: &RawLogInput,
     state: &mut State,
 ) -> anyhow::Result<Interpreted> {
+    // Only ens_v1_registry_l1 has an LLL-era emitter whose address and uint64 words can be
+    // unmasked (#361); basenames_base_registry shares this adapter but keeps the strict decode.
+    let tolerate_unmasked_words = selected.source.source_family == "ens_v1_registry_l1";
     let (mut kinds, mut after, affected_node) = match selected.event.name.as_str() {
         "NewOwner" => {
-            let event =
-                decode_event_log::<NewOwner>(&raw.topics, &raw.data, "NewOwner log is malformed")?;
-            let child = child_node(event.node, event.label);
-            (
-                vec!["SubregistryChanged"],
-                json!({"source_event":"NewOwner","node":hex_string(event.node),"child_node":child,"labelhash":hex_string(event.label),"owner":address_hex(event.owner)}),
-                child,
-            )
+            let decoded = unmasked_word::decode_registry_event::<NewOwner>(
+                tolerate_unmasked_words,
+                &raw.topics,
+                &raw.data,
+                "NewOwner log is malformed",
+                decode_event_log_tolerant_address_word::<NewOwner>,
+            )?;
+            let child = child_node(decoded.event.node, decoded.event.label);
+            let mut body = json!({"source_event":"NewOwner","node":hex_string(decoded.event.node),"child_node":child,"labelhash":hex_string(decoded.event.label),"owner":address_hex(decoded.event.owner)});
+            if let Some(word) = decoded.unmasked_word.as_ref() {
+                unmasked_word::mark_unmasked_word(&mut body, "owner", word);
+            }
+            (vec!["SubregistryChanged"], body, child)
         }
         "Transfer" => {
-            let event = decode_event_log::<transfer::Transfer>(
+            let decoded = unmasked_word::decode_registry_event::<transfer::Transfer>(
+                tolerate_unmasked_words,
                 &raw.topics,
                 &raw.data,
                 "registry Transfer log is malformed",
+                decode_event_log_tolerant_address_word::<transfer::Transfer>,
             )?;
-            (
-                vec![],
-                json!({"source_event":"Transfer","node":hex_string(event.node),"owner":address_hex(event.owner)}),
-                hex_string(event.node),
-            )
+            let mut body = json!({"source_event":"Transfer","node":hex_string(decoded.event.node),"owner":address_hex(decoded.event.owner)});
+            if let Some(word) = decoded.unmasked_word.as_ref() {
+                unmasked_word::mark_unmasked_word(&mut body, "owner", word);
+            }
+            (vec![], body, hex_string(decoded.event.node))
         }
         "NewResolver" => {
-            let event = decode_event_log::<NewResolver>(
+            let decoded = unmasked_word::decode_registry_event::<NewResolver>(
+                tolerate_unmasked_words,
                 &raw.topics,
                 &raw.data,
                 "NewResolver log is malformed",
+                decode_event_log_tolerant_address_word::<NewResolver>,
             )?;
+            let mut body = json!({"source_event":"NewResolver","node":hex_string(decoded.event.node),"resolver":address_hex(decoded.event.resolver)});
+            if let Some(word) = decoded.unmasked_word.as_ref() {
+                unmasked_word::mark_unmasked_word(&mut body, "resolver", word);
+            }
             (
                 vec!["ResolverChanged"],
-                json!({"source_event":"NewResolver","node":hex_string(event.node),"resolver":address_hex(event.resolver)}),
-                hex_string(event.node),
+                body,
+                hex_string(decoded.event.node),
             )
         }
         "NewTTL" => {
-            decode_event_log::<NewTTL>(&raw.topics, &raw.data, "NewTTL log is malformed")?;
+            unmasked_word::decode_registry_event::<NewTTL>(
+                tolerate_unmasked_words,
+                &raw.topics,
+                &raw.data,
+                "NewTTL log is malformed",
+                decode_event_log_tolerant_uint64_word::<NewTTL>,
+            )?;
             return Ok(Interpreted::new());
         }
         name => bail!("unsupported registry event {name}"),
@@ -100,85 +125,95 @@ pub(super) fn interpret(
     let previous_registry_owner = owner
         .as_ref()
         .and_then(|_| state.v1_registry_owner(&selected.source.namespace, &affected_node));
-    if let Some(owner) = owner.as_ref() {
-        state.set_v1_registry_owner(&selected.source.namespace, &affected_node, owner.clone());
-        if previous_registry_owner
-            .as_deref()
-            .is_none_or(|previous| !previous.eq_ignore_ascii_case(owner))
-        {
-            kinds.push("AuthorityTransferred");
-        }
-    }
-    let registry_authority = owner
-        .as_deref()
-        .filter(|owner| !owner.eq_ignore_ascii_case(ZERO_ADDRESS))
-        .map(|owner| {
-            let resource_id = stable_uuid(&format!(
-                "resource:registry-only:{}:{affected_node}",
-                raw.chain_id
-            ));
-            let authority = V1NameState {
-                logical_name_id: format!("{}:{affected_node}", selected.source.namespace),
-                surface_known: previous.as_ref().is_some_and(|state| state.surface_known),
-                resource_id,
-                token_lineage_id: None,
-                authority_source_family: selected.source.source_family.clone(),
-                source_manifest_id: Some(selected.source.manifest_id),
-                labelhash: after
-                    .get("labelhash")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                expiry: None,
-                owner: Some(owner.to_owned()),
-                authority_key: Some(format!("registry-only:{}:{affected_node}", raw.chain_id)),
-            };
-            state.remember_v1_registry_authority(
-                &selected.source.namespace,
-                &affected_node,
-                authority.clone(),
-            );
-            authority
-        });
-    let linked = match owner.as_deref() {
-        Some(owner) if owner.eq_ignore_ascii_case(ZERO_ADDRESS) => {
-            if previous
-                .as_ref()
-                .is_some_and(|authority| authority.token_lineage_id.is_none())
+    let linked = if unmasked_word::body_has_unmasked_owner_word(&after) {
+        kinds.push("AuthorityTransferred");
+        unmasked_word::close_authority_for_unmasked_owner(
+            state,
+            &selected.source.namespace,
+            &affected_node,
+            previous.as_ref(),
+        )
+    } else {
+        if let Some(owner) = owner.as_ref() {
+            state.set_v1_registry_owner(&selected.source.namespace, &affected_node, owner.clone());
+            if previous_registry_owner
+                .as_deref()
+                .is_none_or(|previous| !previous.eq_ignore_ascii_case(owner))
             {
-                state.activate_v1_authority(&selected.source.namespace, &affected_node, None);
-                None
-            } else {
-                previous.clone()
+                kinds.push("AuthorityTransferred");
             }
         }
-        Some(_)
-            if previous.as_ref().is_some_and(|authority| {
-                authority.authority_source_family == "ens_v1_wrapper_l1"
-            }) =>
-        {
-            previous.clone()
-        }
-        Some(owner) => {
-            if let Some(registrar) = state.reactivate_v1_registrar_for_owner(
-                &selected.source.namespace,
-                &affected_node,
-                owner,
-                raw.block_timestamp.unix_timestamp(),
-            ) {
-                Some(registrar)
-            } else {
-                let authority = registry_authority
-                    .clone()
-                    .expect("nonzero registry owner has a registry authority");
-                state.activate_v1_authority(
+        let registry_authority = owner
+            .as_deref()
+            .filter(|owner| !owner.eq_ignore_ascii_case(ZERO_ADDRESS))
+            .map(|owner| {
+                let resource_id = stable_uuid(&format!(
+                    "resource:registry-only:{}:{affected_node}",
+                    raw.chain_id
+                ));
+                let authority = V1NameState {
+                    logical_name_id: format!("{}:{affected_node}", selected.source.namespace),
+                    surface_known: previous.as_ref().is_some_and(|state| state.surface_known),
+                    resource_id,
+                    token_lineage_id: None,
+                    authority_source_family: selected.source.source_family.clone(),
+                    source_manifest_id: Some(selected.source.manifest_id),
+                    labelhash: after
+                        .get("labelhash")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    expiry: None,
+                    owner: Some(owner.to_owned()),
+                    authority_key: Some(format!("registry-only:{}:{affected_node}", raw.chain_id)),
+                };
+                state.remember_v1_registry_authority(
                     &selected.source.namespace,
                     &affected_node,
-                    Some(authority.clone()),
+                    authority.clone(),
                 );
-                Some(authority)
+                authority
+            });
+        match owner.as_deref() {
+            Some(owner) if owner.eq_ignore_ascii_case(ZERO_ADDRESS) => {
+                if previous
+                    .as_ref()
+                    .is_some_and(|authority| authority.token_lineage_id.is_none())
+                {
+                    state.activate_v1_authority(&selected.source.namespace, &affected_node, None);
+                    None
+                } else {
+                    previous.clone()
+                }
             }
+            Some(_)
+                if previous.as_ref().is_some_and(|authority| {
+                    authority.authority_source_family == "ens_v1_wrapper_l1"
+                }) =>
+            {
+                previous.clone()
+            }
+            Some(owner) => {
+                if let Some(registrar) = state.reactivate_v1_registrar_for_owner(
+                    &selected.source.namespace,
+                    &affected_node,
+                    owner,
+                    raw.block_timestamp.unix_timestamp(),
+                ) {
+                    Some(registrar)
+                } else {
+                    let authority = registry_authority
+                        .clone()
+                        .expect("nonzero registry owner has a registry authority");
+                    state.activate_v1_authority(
+                        &selected.source.namespace,
+                        &affected_node,
+                        Some(authority.clone()),
+                    );
+                    Some(authority)
+                }
+            }
+            None => previous.clone(),
         }
-        None => previous.clone(),
     };
     ensure_declared(selected, &kinds)?;
     if owner.is_some() {

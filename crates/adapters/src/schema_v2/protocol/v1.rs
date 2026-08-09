@@ -4,6 +4,7 @@ mod registry;
 mod resolver;
 mod reverse;
 mod support;
+pub(in crate::schema_v2) mod unmasked_word;
 mod upgrade;
 mod wrapper;
 

@@ -25,6 +25,20 @@ authoritative_for = [
   "ENSv1 reverse-claim and primary-name semantics in docs/api-v1.md and docs/storage.md",
 ]
 
+# The pin is upstream's `mainnet` tag (2017-04-30), the era's release tag: its
+# contracts/ENS.lll is identical to the file's last pre-deployment edit
+# (5c2167b, a pure directory move), the tag's committed contracts/ENS.lll.bin
+# runtime is byte-identical to the code deployed at
+# 0x314159265dd8dbb310642f98f50c066173c1259b, and the only later ENS.lll
+# change is a 2019 deprecation comment.
+[refs.ens_v1_lll]
+repo = "https://github.com/ensdomains/ens"
+commit = "7e377df83f733a4213f123602239fad073bdbaa7"
+purpose = "Historical evidence for the 2017 LLL ENS registry at 0x314159265dd8dbb310642f98f50c066173c1259b only."
+authoritative_for = [
+  "ENS.lll storage, authorization, and logging semantics cited by the ens_v1_registry_l1 unmasked-word rules in docs/architecture.md and docs/upstream.md",
+]
+
 [refs.ens_v2]
 repo = "https://github.com/ensdomains/contracts-v2"
 commit = "ccaeb58b0d7526e3b54b4b1fdca45ef0554e6b92"

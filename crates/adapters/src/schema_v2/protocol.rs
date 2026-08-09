@@ -1,5 +1,5 @@
 pub(super) mod permissions;
-mod v1;
+pub(super) mod v1;
 
 #[cfg(test)]
 pub(super) fn reconcile_same_transaction_setups_for_test(output: &mut super::model::BatchOutput) {

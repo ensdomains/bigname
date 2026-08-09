@@ -198,7 +198,14 @@ declarations, and the named semantic dependencies those sources call to decide
 a persisted row — ENS normalization, plus the resolver-call encode/decode,
 record-selector vocabulary, batched record and reverse-name read helpers, and
 the JSON-RPC envelope interpretation deciding which provider response those
-helpers accept as an answer. Interpret's persistence stage is covered on the
+helpers accept as an answer. The lockfile fingerprints (version and checksum)
+of the decode-semantic crates the adapters compile against — alloy-sol-types,
+alloy-sol-macro and its expander and input crates, alloy-sol-type-parser,
+alloy-dyn-abi, and alloy-primitives — are covered on the same rule: a release
+of any of them can change how a raw log word decodes into a persisted event
+body without touching a watched source file. The rest of the lockfile stays
+outside, so an unrelated dependency bump does not force a re-derivation.
+Interpret's persistence stage is covered on the
 same rule: which interpreted row wins a conflict, how a redo range reopens and
 reanchors bindings, and which surfaces a normalizer-version recompute
 activates all decide which identity, discovery, and label-preimage rows the

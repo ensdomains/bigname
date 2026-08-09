@@ -1803,10 +1803,13 @@ dependencies = [
 name = "bigname-project"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bigname-domain",
  "bigname-lookup",
+ "bigname-test-support",
  "serde_json",
  "sqlx",
+ "tokio",
 ]
 
 [[package]]

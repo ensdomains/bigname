@@ -243,6 +243,15 @@ impl State {
             .insert(v1_key(namespace, namehash), owner)
     }
 
+    /// Forgets the registry owner of record and any remembered registry-direct authority for
+    /// a node whose logged owner word was unmasked: the word names no authenticatable owner,
+    /// and the on-chain write ended the previous registry-direct authority with it.
+    pub(super) fn forget_v1_registry_owner(&mut self, namespace: &str, namehash: &str) {
+        let key = v1_key(namespace, namehash);
+        self.v1_registry_owners.remove(&key);
+        self.v1_registry_authorities.remove(&key);
+    }
+
     pub(super) fn v1_registry_owner(&self, namespace: &str, namehash: &str) -> Option<String> {
         self.v1_registry_owners
             .get(&v1_key(namespace, namehash))

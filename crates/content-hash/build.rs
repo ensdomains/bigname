@@ -5,6 +5,8 @@ const E2E_MANIFEST_PROFILE_PREFIX: &str = ".bigname-e2e-runtime-profile-";
 
 #[path = "src/compute.rs"]
 mod compute;
+#[path = "src/lockfile.rs"]
+mod lockfile;
 #[path = "src/source_paths.rs"]
 mod source_paths;
 
@@ -18,6 +20,10 @@ fn main() {
     println!(
         "cargo:rerun-if-changed={}",
         manifest_dir.join("src/compute.rs").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("src/lockfile.rs").display()
     );
     println!(
         "cargo:rerun-if-changed={}",
