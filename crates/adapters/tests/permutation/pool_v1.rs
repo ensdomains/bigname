@@ -8,7 +8,7 @@ use super::{
     },
     names::{child_node, dns_encode, labelhash, namehash, reverse_labels},
     scenario::{
-        Action, AuthorityShape, Dimensions, ExpiryWindow, Perturbation, RecordState,
+        Action, AuthorityShape, BurstPhase, Dimensions, ExpiryWindow, Perturbation, RecordState,
         RegistrationPath, SubnameShape, WrapState, action, emission, stage,
     },
     world::Wiring,
@@ -71,7 +71,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
             _ => owner,
         };
 
-        actions.push(registration(
+        let mut onboarding = registration(
             &wires,
             dimensions.registration_path,
             label,
@@ -81,7 +81,23 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
             wrapper_address,
             expires,
             stage::REGISTER,
-        ));
+        );
+        if dimensions.pre_registration_burst {
+            burst_around_registration(&mut onboarding, &wires, node, successor, operator);
+            // The same selector written after registration: whether the rewrite lands in the burst
+            // block or a later one is the layout's seeded choice, and both placements matter.
+            let mut rewrite = emission(
+                wires.resolver,
+                V1Resolver::AddrChanged { node, a: successor }.encode_log_data(),
+            );
+            rewrite.burst = Some(BurstPhase::PostRegistrationRewrite);
+            actions.push(action(
+                format!("{label}:rewrite-after-registration"),
+                stage::WRITE,
+                vec![rewrite],
+            ));
+        }
+        actions.push(onboarding);
 
         if dimensions.registration_path != RegistrationPath::Wrapped {
             actions.push(action(
@@ -408,6 +424,43 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
         }
     }
     actions
+}
+
+/// The burst shape the stage ordering otherwise keeps unreachable: resolver record writes for a
+/// node inside its registration's own transaction, log-ordered before the controller's
+/// `NameRegistered`. Upstream-legal on both legs: the resolver authorises record writes on the
+/// registry's owner of the node, never on the registrar's lease, so an expired name whose registry
+/// record still names the previous registrant emits record events before any registration the
+/// interpreter has seen (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L114-L129
+/// @ ens_v1@91c966f); and the controller itself runs resolver writes inside `register` before its
+/// own event (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L301-L341
+/// @ ens_v1@91c966f). Stays one action — and therefore one transaction — at stage::REGISTER, so
+/// the repair still orders it before everything the registration enables.
+fn burst_around_registration(
+    onboarding: &mut Action,
+    wires: &Wires<'_>,
+    node: B256,
+    first: Address,
+    second: Address,
+) {
+    let burst = |a: Address, phase: BurstPhase| {
+        let mut emission = emission(
+            wires.resolver,
+            V1Resolver::AddrChanged { node, a }.encode_log_data(),
+        );
+        emission.burst = Some(phase);
+        emission
+    };
+    // The controller's event is the last emission of every registration path, so popping and
+    // re-pushing it keeps the registry setup between the two burst writes.
+    let controller = onboarding.emissions.pop().expect("registration emits");
+    onboarding
+        .emissions
+        .insert(0, burst(first, BurstPhase::PreOwnership));
+    onboarding
+        .emissions
+        .push(burst(second, BurstPhase::RetargetWindow));
+    onboarding.emissions.push(controller);
 }
 
 #[allow(clippy::too_many_arguments)]

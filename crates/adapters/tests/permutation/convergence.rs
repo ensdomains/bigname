@@ -83,6 +83,7 @@ impl std::fmt::Display for BatchBoundaryArtifacts {
     }
 }
 
+#[derive(Clone)]
 struct Row {
     key: String,
     body: String,
@@ -92,11 +93,20 @@ struct Row {
 /// Which emission of a repeated key survives the upsert. Most families keep the first writer;
 /// `label_preimages` overwrites whenever the incoming source priority is at least the stored one
 /// (`crates/interpret/src/write/identity_names.rs`), and the adapter writes one priority, so the
-/// last emission wins there.
+/// last emission wins there. `Every` compares the full per-key multiset instead of a survivor: the
+/// families using it repeat a key only with an identical body — an exact replay, or a
+/// re-observation carrying the same row content under a new anchor — so a successor emission whose
+/// body disagrees is a divergence the kept-row comparison would discard unseen. The comparison
+/// asserts that premise — a pass repeating a key with differing bodies fails before the multisets
+/// are compared. The default corpus repeats contract_addresses keys only as same-body
+/// re-observations, so both the multiset and the premise run over real repeats today, while a
+/// differing-body repeat stays an unexercised failure path — the same honest-reach caveat
+/// `EXPECTED_ARTIFACTS` carries for classes the corpus does not reach.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Keeps {
     First,
     Last,
+    Every,
 }
 
 /// Reconciliation can drop a superseded resource row whose only in-batch reference moved to a later
@@ -190,7 +200,8 @@ fn assert_event_stream(
 }
 
 /// Identity rows are upserts keyed by their primary key, so batching changes how many times a row
-/// is replayed but never which rows exist. Only the emission the upsert keeps is compared.
+/// is replayed but never which rows exist. `First`/`Last` families compare only the emission the
+/// upsert keeps; `Every` families compare every emission.
 fn assert_identity_family(
     context: &str,
     family: &'static str,
@@ -199,6 +210,9 @@ fn assert_identity_family(
     split: &[Row],
     known: &mut BatchBoundaryArtifacts,
 ) -> Result<()> {
+    if keeps == Keeps::Every {
+        return assert_emission_multiset(context, family, whole, split);
+    }
     let whole_first = kept_by_key(whole, keeps);
     let split_first = kept_by_key(split, keeps);
     let whole_keys = whole_first.keys().cloned().collect::<BTreeSet<_>>();
@@ -232,6 +246,84 @@ fn assert_identity_family(
         }
     }
     Ok(())
+}
+
+/// A family whose repeated keys are meant to be identical replays has no survivor to model, so
+/// model the repetitions: per key, the order-normalized list of every emission's body and anchor
+/// must match exactly. A successor emission the split replay derives with a different body or
+/// anchor, or a repeat count that differs, is a divergence `Keeps::First` discarded before
+/// comparing. No rebase allowance: these families are not in `ANCHOR_REBASE_FAMILIES`, so any
+/// anchor difference fails rather than counting.
+fn assert_emission_multiset(
+    context: &str,
+    family: &'static str,
+    whole: &[Row],
+    split: &[Row],
+) -> Result<()> {
+    let whole = group_by_key(whole);
+    let split = group_by_key(split);
+    // A repeated key is only sound to compare order-insensitively when every emission's body is
+    // identical: the survivor's body depends on the order the writer sees the emissions in — the
+    // discovered-address writer SETs source_manifest_id and provenance on every repeat, and the
+    // discovery-edge writer keeps the first in-order repeat (crates/interpret/src/write/
+    // discovery.rs) — so two distinct bodies under one key leave a survivor that depends on their
+    // order, which the multiset cannot see. Anchors are exempt: a re-observation legitimately
+    // re-emits a key under a new anchor — the ENSv2 pool's repeated ResolverUpdated re-admits the
+    // same resolver address once per event — the active_from half merges by earliest block, and
+    // the overwritten provenance goes to whichever emission is processed last, which is the
+    // chain-latest one (the adapter emits a batch's rows in chain order and the harness processes
+    // batches in commit order), the same element in both passes. If a family ever legitimately
+    // emits distinct bodies for one key within a pass, that family needs an order-sensitive
+    // comparison — weaken this check to admit it and the hidden-survivor corner reopens.
+    for (pass, grouped) in [("whole-sequence pass", &whole), ("split replay", &split)] {
+        for (key, emissions) in grouped {
+            if emissions.iter().any(|(body, _)| *body != emissions[0].0) {
+                bail!(
+                    "{context}: {pass} emits {family} key {key} with differing bodies \
+                     {emissions:?}: a repeated key is sound only when every emission carries the \
+                     same row content"
+                );
+            }
+        }
+    }
+    if whole == split {
+        return Ok(());
+    }
+    let render = |emissions: Option<&Vec<(&str, &str)>>| {
+        emissions.map_or_else(|| "<none>".to_owned(), |list| format!("{list:?}"))
+    };
+    let mut report = Vec::new();
+    for key in whole.keys().chain(split.keys()).collect::<BTreeSet<_>>() {
+        let (whole, split) = (whole.get(key), split.get(key));
+        if whole != split {
+            report.push(format!(
+                "{key}\n      whole={}\n   replayed={}",
+                render(whole),
+                render(split)
+            ));
+        }
+    }
+    bail!(
+        "{context}: split replay's {family} emissions diverge from the whole-sequence pass beyond \
+         the kept row:\n  {}",
+        report.join("\n  ")
+    );
+}
+
+/// Per key, the order-normalized list of every emission's body and anchor. Sorting rather than
+/// set-collecting so a repeated identical emission counts twice, as it must.
+fn group_by_key(rows: &[Row]) -> BTreeMap<&str, Vec<(&str, &str)>> {
+    let mut grouped: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
+    for row in rows {
+        grouped
+            .entry(row.key.as_str())
+            .or_default()
+            .push((row.body.as_str(), row.anchor.as_str()));
+    }
+    for emissions in grouped.values_mut() {
+        emissions.sort_unstable();
+    }
+    grouped
 }
 
 /// The resource upsert refuses any re-emission whose lineage is not null-safe-equal to the stored
@@ -403,6 +495,8 @@ fn kept_by_key(rows: &[Row], keeps: Keeps) -> BTreeMap<String, &Row> {
             Keeps::Last => {
                 kept.insert(row.key.clone(), row);
             }
+            // Handled by `assert_emission_multiset`, which never reduces to a kept row.
+            Keeps::Every => unreachable!("Every compares the full emission multiset"),
         }
     }
     kept
@@ -502,13 +596,13 @@ fn families(
         ),
         (
             "contract_addresses",
-            Keeps::First,
+            Keeps::Every,
             contract_addresses(fresh),
             contract_addresses(replayed),
         ),
         (
             "discovery_edges",
-            Keeps::First,
+            Keeps::Every,
             discovery_edges(fresh),
             discovery_edges(replayed),
         ),
@@ -599,10 +693,11 @@ fn surface_bindings(output: &BatchOutput) -> Vec<Row> {
         .map(|row| Row {
             key: row.surface_binding_id.to_string(),
             body: format!(
-                "{}:{}:{}:{}:{}",
+                "{}:{}:{}:{}:{}:{}",
                 row.logical_name_id,
                 row.resource_id,
                 row.binding_kind,
+                row.chain_id,
                 row.active_from,
                 row.canonicality_state
             ),
@@ -711,4 +806,52 @@ fn discovery_edge_closures(output: &BatchOutput) -> Vec<Row> {
             anchor: String::new(),
         })
         .collect()
+}
+
+/// The corpus repeats only contract_addresses keys today, always as same-body re-observations, so
+/// the failure directions only exist here: a uniformly divergent replay body fails, a different
+/// repeat count fails, a within-pass body change fails on either pass, and anchor order alone does
+/// not.
+#[test]
+fn emission_multiset_and_its_repeat_premise_fail_on_each_divergence_shape() {
+    let row = |key: &str, body: &str, anchor: &str| Row {
+        key: key.to_owned(),
+        body: body.to_owned(),
+        anchor: anchor.to_owned(),
+    };
+    // The corpus's repeat shape: one body re-observed under a new anchor per emission.
+    let whole = vec![
+        row("k", "kept-body", "a2"),
+        row("k", "kept-body", "a9"),
+        row("other", "x", "a3"),
+    ];
+    // Both passes repeat the key with one body each, so the within-key premise holds; the replay's
+    // repeated body uniformly diverges, so the multisets differ (a kept-row comparison would catch
+    // this shape too).
+    let divergent_replay = vec![
+        row("k", "divergent", "a2"),
+        row("k", "divergent", "a9"),
+        row("other", "x", "a3"),
+    ];
+    assert!(assert_emission_multiset("test", "family", &whole, &divergent_replay).is_err());
+    // The kept-row miss: an identical first emission and key set, only the repeat count differs.
+    let fewer_repeats = vec![row("k", "kept-body", "a2"), row("other", "x", "a3")];
+    assert!(assert_emission_multiset("test", "family", &whole, &fewer_repeats).is_err());
+    let mut reobserved = whole.clone();
+    reobserved.swap(0, 1);
+    assert!(assert_emission_multiset("test", "family", &whole, &reobserved).is_ok());
+    // The corner order-insensitivity cannot see: one key emitted with distinct bodies in each
+    // pass, in opposite orders, so the multisets are equal while the discovered-address writer's
+    // per-emission overwrite would keep a different survivor. The within-key premise must reject
+    // it before the multisets compare.
+    let distinct_bodies = vec![
+        row("k", "first-body", "a1"),
+        row("k", "second-body", "a2"),
+        row("other", "x", "a3"),
+    ];
+    let mut reversed = distinct_bodies.clone();
+    reversed.swap(0, 1);
+    assert!(assert_emission_multiset("test", "family", &distinct_bodies, &reversed).is_err());
+    // The premise's split-replay arm: the whole pass is internally consistent, the replay is not.
+    assert!(assert_emission_multiset("test", "family", &whole, &distinct_bodies).is_err());
 }

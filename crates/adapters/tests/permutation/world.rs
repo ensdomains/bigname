@@ -18,6 +18,8 @@ use bigname_manifests::{LoadedManifest, RolloutStatus, load_repository};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use super::scenario::BurstPhase;
+
 /// One checked-in manifest file admitted into a generated scenario.
 pub struct SourceSlot {
     pub family: &'static str,
@@ -314,6 +316,8 @@ pub struct GeneratedLog {
     pub emitter: String,
     pub topics: Vec<String>,
     pub data: Vec<u8>,
+    /// Carries `Emission::burst` through layout; see `scenario::Emission`.
+    pub burst: Option<BurstPhase>,
 }
 
 fn find_checked_in<'a>(
