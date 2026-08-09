@@ -133,7 +133,7 @@ impl Catalog {
                         && candidate.deployment_label == source.deployment_label
                         && candidate.source_family == target_family
                 }) {
-                    push_candidates(
+                    self.push_candidates(
                         &mut candidates,
                         rank,
                         inferred,
@@ -144,7 +144,7 @@ impl Catalog {
                     );
                 }
             } else {
-                push_candidates(
+                self.push_candidates(
                     &mut candidates,
                     rank,
                     source,
@@ -169,6 +169,7 @@ impl Catalog {
                     .unwrap_or_else(|| contract_id(&raw.chain_id, &raw.emitting_address));
                 candidates.push((
                     3,
+                    0,
                     Selected {
                         source: source.clone(),
                         event: event.clone(),
@@ -278,6 +279,50 @@ impl Catalog {
             _ => false,
         }
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_candidates(
+        &self,
+        output: &mut Vec<(u8, u8, Selected)>,
+        rank: u8,
+        source: &ManifestSource,
+        topic0: &str,
+        role: Option<&str>,
+        discovery_kind: Option<&str>,
+        instance: Uuid,
+    ) {
+        for event in source.events.iter().filter(|event| {
+            event.topic0.eq_ignore_ascii_case(topic0)
+                && (event.emitter_roles.is_empty()
+                    || discovery_kind == Some("registry_announcement")
+                    || role.is_some_and(|role| event.emitter_roles.iter().any(|item| item == role)))
+        }) {
+            let required_rule = required_discovery_rule(source, event);
+            let discovery_authority_rank =
+                u8::from(required_rule.is_some_and(|edge_kind| {
+                    self.rule(source.manifest_id, edge_kind, role).is_none()
+                }));
+            let emitter_role = if event.emitter_roles.is_empty() && required_rule.is_none() {
+                // Events without manifest-declared `emitter_roles` do not use the row's
+                // role. Clearing it makes equivalent rows select the same adapter
+                // regardless of database order.
+                None
+            } else {
+                role.map(str::to_owned)
+            };
+            output.push((
+                rank,
+                discovery_authority_rank,
+                Selected {
+                    source: source.clone(),
+                    event: event.clone(),
+                    contract_instance_id: instance,
+                    emitter_role,
+                    match_all: false,
+                },
+            ));
+        }
+    }
 }
 
 fn applies(admission: &AddressAdmissionInput, raw: &RawLogInput) -> bool {
@@ -292,31 +337,12 @@ fn applies(admission: &AddressAdmissionInput, raw: &RawLogInput) -> bool {
             .is_none_or(|to| raw.block_number <= to)
 }
 
-fn push_candidates(
-    output: &mut Vec<(u8, Selected)>,
-    rank: u8,
-    source: &ManifestSource,
-    topic0: &str,
-    role: Option<&str>,
-    discovery_kind: Option<&str>,
-    instance: Uuid,
-) {
-    for event in source.events.iter().filter(|event| {
-        event.topic0.eq_ignore_ascii_case(topic0)
-            && (event.emitter_roles.is_empty()
-                || discovery_kind == Some("registry_announcement")
-                || role.is_some_and(|role| event.emitter_roles.iter().any(|item| item == role)))
-    }) {
-        output.push((
-            rank,
-            Selected {
-                source: source.clone(),
-                event: event.clone(),
-                contract_instance_id: instance,
-                emitter_role: role.map(str::to_owned),
-                match_all: false,
-            },
-        ));
+fn required_discovery_rule(source: &ManifestSource, event: &ManifestEvent) -> Option<&'static str> {
+    match (source.source_family.as_str(), event.name.as_str()) {
+        ("ens_v2_registry_l1", "RegistryCreated") => Some("registry_announcement"),
+        ("ens_v2_registry_l1" | "ens_v2_root_l1", "SubregistryUpdated") => Some("subregistry"),
+        ("ens_v2_registry_l1" | "ens_v2_root_l1", "ResolverUpdated") => Some("resolver"),
+        _ => None,
     }
 }
 
@@ -331,27 +357,37 @@ fn inferred_family(source_family: &str, edge_kind: Option<&str>) -> Option<&'sta
 
 fn select_unambiguous(
     raw: &RawLogInput,
-    mut candidates: Vec<(u8, Selected)>,
+    mut candidates: Vec<(u8, u8, Selected)>,
 ) -> anyhow::Result<Option<Selected>> {
     let Some(rank) = candidates.iter().map(|candidate| candidate.0).min() else {
         return Ok(None);
     };
     candidates.retain(|candidate| candidate.0 == rank);
-    candidates.sort_by(|left, right| {
-        (left.1.source.manifest_id, &left.1.event.signature)
-            .cmp(&(right.1.source.manifest_id, &right.1.event.signature))
-    });
+    let discovery_authority_rank = candidates
+        .iter()
+        .map(|candidate| candidate.1)
+        .min()
+        .expect("at least one candidate remains at the selected rank");
+    candidates.retain(|candidate| candidate.1 == discovery_authority_rank);
+    candidates
+        .sort_by(|left, right| candidate_identity(&left.2).cmp(&candidate_identity(&right.2)));
     candidates.dedup_by(|left, right| {
-        left.1.source.manifest_id == right.1.source.manifest_id
-            && left.1.event.signature == right.1.event.signature
+        left.2.source.manifest_id == right.2.source.manifest_id
+            && left.2.event.signature == right.2.event.signature
+            && left.2.contract_instance_id == right.2.contract_instance_id
+            && left.2.emitter_role == right.2.emitter_role
+            && left.2.match_all == right.2.match_all
     });
     if candidates.len() > 1 {
         let sources = candidates
             .iter()
             .map(|candidate| {
                 format!(
-                    "{}:{}",
-                    candidate.1.source.source_family, candidate.1.event.signature
+                    "{}:{} (role={}, instance={})",
+                    candidate.2.source.source_family,
+                    candidate.2.event.signature,
+                    candidate.2.emitter_role.as_deref().unwrap_or("none"),
+                    candidate.2.contract_instance_id,
                 )
             })
             .collect::<BTreeSet<_>>()
@@ -364,5 +400,15 @@ fn select_unambiguous(
             raw.log_index
         );
     }
-    Ok(candidates.pop().map(|candidate| candidate.1))
+    Ok(candidates.pop().map(|candidate| candidate.2))
+}
+
+fn candidate_identity(selected: &Selected) -> (i64, &str, Uuid, Option<&str>, bool) {
+    (
+        selected.source.manifest_id,
+        selected.event.signature.as_str(),
+        selected.contract_instance_id,
+        selected.emitter_role.as_deref(),
+        selected.match_all,
+    )
 }

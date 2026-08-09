@@ -1123,15 +1123,21 @@ fn process_log_tail(log_path: &Path) -> String {
 
 #[cfg(test)]
 async fn stop_supervised_child(child: Child, what: &str, log_path: &Path) -> Result<()> {
-    stop_supervised_child_with_pre_kill_delay(child, what, log_path, None).await
+    stop_supervised_child_with_pre_kill_action(child, what, log_path, None).await
 }
 
 #[cfg(test)]
-async fn stop_supervised_child_with_pre_kill_delay(
+enum PreKillAction {
+    #[cfg(target_os = "linux")]
+    CloseStdinAndAwaitExitedUnreaped,
+}
+
+#[cfg(test)]
+async fn stop_supervised_child_with_pre_kill_action(
     mut child: Child,
     what: &str,
     log_path: &Path,
-    pre_kill_delay: Option<Duration>,
+    pre_kill_action: Option<PreKillAction>,
 ) -> Result<()> {
     if let Some(status) = child.try_wait()? {
         bail!(
@@ -1140,9 +1146,30 @@ async fn stop_supervised_child_with_pre_kill_delay(
         );
     }
 
-    if let Some(delay) = pre_kill_delay {
-        tokio::time::sleep(delay).await;
+    #[cfg(target_os = "linux")]
+    if let Some(PreKillAction::CloseStdinAndAwaitExitedUnreaped) = pre_kill_action {
+        let child_id = child
+            .id()
+            .context("test child has no process ID after its status check")?;
+        drop(
+            child
+                .stdin
+                .take()
+                .context("test child has no piped stdin to close after its status check")?,
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if process_is_zombie(child_id)? {
+                    return Ok::<(), anyhow::Error>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .context("test child did not exit after stdin closed")??;
     }
+    #[cfg(not(target_os = "linux"))]
+    let _ = pre_kill_action;
     if let Err(kill_error) = child.start_kill() {
         let status = child
             .wait()
@@ -1164,6 +1191,17 @@ async fn stop_supervised_child_with_pre_kill_delay(
         );
     }
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn process_is_zombie(process_id: u32) -> Result<bool> {
+    let stat_path = format!("/proc/{process_id}/stat");
+    let stat = std::fs::read_to_string(&stat_path)
+        .with_context(|| format!("read test child status from {stat_path}"))?;
+    let (_, fields) = stat
+        .rsplit_once(") ")
+        .context("test child status has no process-name boundary")?;
+    Ok(fields.starts_with("Z "))
 }
 
 #[cfg(test)]
@@ -2276,26 +2314,25 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn stop_reports_a_child_that_crashes_between_status_check_and_kill() -> Result<()> {
         let log_path =
             std::env::temp_dir().join(format!("bigname-e2e-stop-race-{}.log", std::process::id()));
         let log_file = std::fs::File::create(&log_path)?;
         let child = Command::new("sh")
-            .args([
-                "-c",
-                "sleep 0.2; echo deliberate-stop-race-crash >&2; exit 17",
-            ])
+            .args(["-c", "read -r _; echo deliberate-stop-race-crash >&2; exit 17"])
             .kill_on_drop(true)
+            .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::from(log_file.try_clone()?))
             .stderr(std::process::Stdio::from(log_file))
             .spawn()?;
 
-        let error = stop_supervised_child_with_pre_kill_delay(
+        let error = stop_supervised_child_with_pre_kill_action(
             child,
             "test child",
             &log_path,
-            Some(Duration::from_millis(500)),
+            Some(PreKillAction::CloseStdinAndAwaitExitedUnreaped),
         )
         .await
         .expect_err("a child crash racing with stop must not be accepted as a requested kill");

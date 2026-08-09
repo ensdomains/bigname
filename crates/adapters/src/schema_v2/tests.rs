@@ -2633,6 +2633,164 @@ fn registry_created_emits_the_ruled_self_edge() -> anyhow::Result<()> {
 }
 
 #[test]
+fn registry_created_selects_the_rule_role_independent_of_admission_order() -> anyhow::Result<()> {
+    let root = admission(2, "ETHRegistry");
+    let registry = admission(2, "registry");
+    for admissions in [vec![root.clone(), registry.clone()], vec![registry, root]] {
+        let output = interpret_test_batch(BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![manifest(
+                2,
+                "ens_v2_registry_l1",
+                "RegistryCreated",
+                "event RegistryCreated()",
+                &[],
+                &["RegistryCreated"],
+            )],
+            discovery_rules: vec![DiscoveryRuleInput {
+                manifest_id: 2,
+                edge_kind: "registry_announcement".to_owned(),
+                from_role: Some("registry".to_owned()),
+                admission: "reachable_from_root".to_owned(),
+            }],
+            admissions,
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: vec![raw(RegistryCreated {}.encode_log_data())],
+        })?;
+
+        assert_eq!(output.discovery_edges.len(), 1);
+    }
+    Ok(())
+}
+
+#[test]
+fn role_free_discovery_event_does_not_widen_a_role_specific_rule() -> anyhow::Result<()> {
+    let error = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            2,
+            "ens_v2_registry_l1",
+            "SubregistryUpdated",
+            "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)",
+            &[],
+            &["SubregistryChanged"],
+        )],
+        discovery_rules: vec![DiscoveryRuleInput {
+            manifest_id: 2,
+            edge_kind: "subregistry".to_owned(),
+            from_role: Some("registry".to_owned()),
+            admission: "reachable_from_root".to_owned(),
+        }],
+        admissions: vec![admission(2, "ETHRegistry")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw(
+            v2_registry::SubregistryUpdated {
+                tokenId: U256::from(1),
+                subregistry: "0x0000000000000000000000000000000000000043".parse()?,
+                sender: CONTRACT.parse()?,
+            }
+            .encode_log_data(),
+        )],
+    })
+    .expect_err("a non-registry role must not satisfy the subregistry discovery rule");
+
+    assert_eq!(
+        error.to_string(),
+        "SubregistryUpdated is not admitted by a subregistry manifest rule"
+    );
+    Ok(())
+}
+
+#[test]
+fn mainnet_double_declarations_select_the_event_role_in_either_order() -> anyhow::Result<()> {
+    const MAINNET_REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
+    const MAINNET_REGISTRAR: &str = "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85";
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests/mainnet");
+    let repository = bigname_manifests::load_repository(root)?;
+    let cases = [
+        (
+            91,
+            "ens_v1_registry_l1",
+            v1_registry::NewOwner {
+                node: B256::ZERO,
+                label: keccak256(b"deterministic"),
+                owner: CONTRACT.parse()?,
+            }
+            .encode_log_data(),
+            MAINNET_REGISTRY,
+            "ENSRegistry",
+            "registry",
+        ),
+        (
+            92,
+            "ens_v1_registrar_l1",
+            v1_registrar::Transfer {
+                from: CONTRACT.parse()?,
+                to: "0x0000000000000000000000000000000000000043".parse()?,
+                tokenId: U256::from(1),
+            }
+            .encode_log_data(),
+            MAINNET_REGISTRAR,
+            "ETHRegistrar",
+            "registrar",
+        ),
+    ];
+
+    for (manifest_id, source_family, encoded, address, root_role, event_role) in cases {
+        let loaded = repository
+            .manifests()
+            .iter()
+            .find(|loaded| {
+                loaded.manifest.source_family == source_family
+                    && loaded.manifest.rollout_status.is_active()
+            })
+            .with_context(|| format!("mainnet manifest is missing {source_family}"))?;
+        let source = &loaded.manifest;
+        assert!(
+            source.roots.iter().any(|root| {
+                root.name == root_role && root.address.eq_ignore_ascii_case(address)
+            })
+        );
+        assert!(source.contracts.iter().any(|contract| {
+            contract.role == event_role && contract.address.eq_ignore_ascii_case(address)
+        }));
+        let manifest = ManifestInput {
+            manifest_id,
+            manifest_version: i64::try_from(source.manifest_version)?,
+            namespace: source.namespace.clone(),
+            source_family: source.source_family.clone(),
+            chain_id: source.chain.clone(),
+            deployment_label: source.deployment_epoch.clone(),
+            normalizer_version: source.normalizer_version.clone(),
+            payload_json: serde_json::to_string(source)?,
+        };
+        let mut root_admission = admission(manifest_id, root_role);
+        root_admission.address = address.to_owned();
+        let mut contract = admission(manifest_id, event_role);
+        contract.address = address.to_owned();
+        for admissions in [
+            vec![root_admission.clone(), contract.clone()],
+            vec![contract.clone(), root_admission.clone()],
+        ] {
+            let catalog =
+                super::catalog::Catalog::new(vec![manifest.clone()], Vec::new(), admissions)?;
+            let selected = catalog
+                .select(&raw_at(encoded.clone(), 1, 0, address))?
+                .with_context(|| {
+                    format!("double-declared mainnet {source_family} emitter must be admitted")
+                })?;
+            assert_eq!(selected.emitter_role.as_deref(), Some(event_role));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn announced_registry_prefers_a_same_namespace_declaring_manifest() -> anyhow::Result<()> {
     let event = (
         "RegistryCreated",
@@ -4646,6 +4804,8 @@ fn migrated_v1_node_ignores_later_old_registry_updates_across_batches() -> anyho
     );
     let mut current = admission(58, "registry");
     current.address = CURRENT.to_owned();
+    let mut current_root = current.clone();
+    current_root.role = Some("ENSRegistry".to_owned());
     let mut old = admission(58, "registry_old");
     old.address = OLD.to_owned();
     old.contract_instance_id = Uuid::from_u128(580);
@@ -4653,7 +4813,7 @@ fn migrated_v1_node_ignores_later_old_registry_updates_across_batches() -> anyho
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest.clone()],
         discovery_rules: Vec::new(),
-        admissions: vec![current.clone(), old.clone()],
+        admissions: vec![current_root.clone(), current.clone(), old.clone()],
         prior_events: Vec::new(),
         blocks: Vec::new(),
         raw_logs: vec![raw_at(
@@ -4668,6 +4828,10 @@ fn migrated_v1_node_ignores_later_old_registry_updates_across_batches() -> anyho
             CURRENT,
         )],
     })?;
+    assert!(first.normalized_events.iter().any(|event| {
+        event.after_state["source_event"] == "NewOwner"
+            && event.after_state["emitter_role"] == "registry"
+    }));
     let child = {
         let mut input = [0u8; 64];
         input[..32].copy_from_slice(parent.as_slice());
@@ -4678,7 +4842,7 @@ fn migrated_v1_node_ignores_later_old_registry_updates_across_batches() -> anyho
         chain_id: CHAIN.to_owned(),
         manifests: vec![manifest],
         discovery_rules: Vec::new(),
-        admissions: vec![current, old],
+        admissions: vec![current_root, current, old],
         prior_events: first.normalized_events.iter().map(prior_event).collect(),
         blocks: Vec::new(),
         raw_logs: vec![
