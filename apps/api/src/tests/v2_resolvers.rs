@@ -245,6 +245,30 @@ fn v2_resolver_alias_summary_preserves_null_targets_for_removed_and_unknown() {
 async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
+    let updated = sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = declared_summary || $1::jsonb
+         WHERE raw_name = 'alpha.eth'",
+    )
+    .bind(json!({
+        "wrapper_state": "locked",
+        "wrapper_fuses": {
+            "fuses": 65_537,
+            "cannot_unwrap": true,
+            "cannot_burn_fuses": false,
+            "cannot_transfer": false,
+            "cannot_set_resolver": false,
+            "cannot_set_ttl": false,
+            "cannot_create_subdomain": false,
+            "cannot_approve": false,
+            "parent_cannot_control": true,
+            "is_dot_eth": false,
+            "can_extend_expiry": false
+        }
+    }))
+    .execute(&database.pool)
+    .await?;
+    assert_eq!(updated.rows_affected(), 1);
     upsert_test_resolver_current_rows(
         &database,
         &[resolver_current_row_with_writer_alias(
@@ -310,6 +334,23 @@ async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()
     assert_eq!(bound_names["data"][0]["registered_at"], json!("2024-01-02T00:00:00Z"));
     assert_eq!(bound_names["data"][0]["created_at"], json!("2023-01-02T00:00:00Z"));
     assert_eq!(bound_names["data"][0]["expires_at"], json!("2027-01-02T00:00:00Z"));
+    assert_eq!(bound_names["data"][0]["wrapper_state"], json!("locked"));
+    assert_eq!(
+        bound_names["data"][0]["wrapper_fuses"],
+        json!({
+            "fuses": 65_537,
+            "cannot_unwrap": true,
+            "cannot_burn_fuses": false,
+            "cannot_transfer": false,
+            "cannot_set_resolver": false,
+            "cannot_set_ttl": false,
+            "cannot_create_subdomain": false,
+            "cannot_approve": false,
+            "parent_cannot_control": true,
+            "is_dot_eth": false,
+            "can_extend_expiry": false
+        })
+    );
     assert_eq!(
         bound_names["data"][0]["resolver"],
         json!({

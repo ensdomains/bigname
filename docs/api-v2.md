@@ -47,7 +47,9 @@ step-3-gate vocabulary needed by the route schemas:
 | `registered_at` | current registration start, RFC 3339 | `registration_date` |
 | `created_at` | first observation of the name, RFC 3339 | `created_at` (now defined and distinguished from `registered_at`) |
 | `registration_status` | registration/control lifecycle label: `active`, `wrapped`, `registered`, `released`, or `unregistered` | `ControlVector.status`, role-summary `status` |
-| `wrapper_state` | current ENSv1 NameWrapper lifecycle value: [`wrapped`](glossary.md#wrapped-namewrapper-state), [`emancipated`](glossary.md#emancipated-namewrapper-state), or [`locked`](glossary.md#locked-namewrapper-state); omitted when the current name is not in one of those states (upstream: .refs/ens_v1/contracts/wrapper/README.md:L32 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/README.md:L34 @ ens_v1@91c966f) | raw NameWrapper fuse bitmap |
+| `wrapper_state` | bigname's current ENSv1 NameWrapper lifecycle value: [`wrapped`](glossary.md#wrapped-namewrapper-state), [`emancipated`](glossary.md#emancipated-namewrapper-state), or [`locked`](glossary.md#locked-namewrapper-state); omitted when the current name is not in one of those states | raw NameWrapper fuse bitmap |
+| `wrapper_fuses` | typed summary of the current [expiry-effective NameWrapper fuse word](glossary.md#expiry-effective-namewrapper-fuse-word); present exactly when `wrapper_state` is present | raw NameWrapper fuse bitmap |
+| `fuses` | uint32 fuse word nested in `wrapper_fuses`; it is zero after wrapper expiry even though normalized events retain their expiry-unadjusted interpreted word | raw NameWrapper fuse bitmap |
 | `primary_name` | primary name selected or claimed for an address/coin tuple | `claimed_primary_name`, `verified_primary_name` when surfaced as the selected name |
 | `primary_address` | primary/default address value for a name | `primary_address` (unchanged) |
 | `is_primary` | whether an address-name row is the selected primary answer for that address/coin tuple | `is_primary` (unchanged) |
@@ -123,6 +125,56 @@ address-name response `partial`, lists `role_summary` in
 permission rows remain visible, but an empty or populated expansion is not
 authoritative when that metadata is present. Missing summary metadata takes
 precedence over the known wrapper limitation when both occur on one page.
+
+`wrapper_fuses` has one stable shape on name detail, resolver `bound_names`,
+and permission rows:
+
+```json
+{
+  "fuses": 196609,
+  "cannot_unwrap": true,
+  "cannot_burn_fuses": false,
+  "cannot_transfer": false,
+  "cannot_set_resolver": false,
+  "cannot_set_ttl": false,
+  "cannot_create_subdomain": false,
+  "cannot_approve": false,
+  "parent_cannot_control": true,
+  "is_dot_eth": true,
+  "can_extend_expiry": false
+}
+```
+
+The booleans name the ten fuse bits declared by NameWrapper; mask constants and
+the zero sentinel are not fuse booleans.
+(upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L10 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L24 @ ens_v1@91c966f)
+The word and booleans use the served block timestamp: when wrapper expiry is
+earlier, `fuses` and every boolean are cleared. An expired plain wrapped name
+keeps `wrapper_state="wrapped"` with the cleared summary; expired emancipated
+and locked names expose neither wrapper field because NameWrapper also clears
+their owner.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L856 @ ens_v1@91c966f)
+Each returned item either has both `wrapper_state` and `wrapper_fuses` or has
+neither. Collection completeness remains request-relative: wrapper metadata on
+returned permission rows does not make zero-row wrapper-holder enumeration
+complete, so the existing `meta.completeness` and wrapper unsupported-reason
+rules still apply.
+
+During `.eth` registrar grace, bigname keeps the existing approve-only policy
+interpretation for projected wrapper-holder powers: it removes owner
+modification and transfer powers except `approve` and `approve_wrapper`, then
+still applies `CANNOT_APPROVE`. Upstream's `canModifyName` rejects owner/operator
+modification during grace, while per-token `approve` routes through the
+ERC-1155-fuse owner/operator authorization path rather than that helper. This
+approve exception is bigname policy, not an upstream lifecycle state.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L214 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L222 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L37 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L47 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L127 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L135 @ ens_v1@91c966f)
 
 Rules:
 

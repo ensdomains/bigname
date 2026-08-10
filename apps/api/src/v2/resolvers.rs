@@ -208,11 +208,12 @@ pub(crate) async fn get_resolver(
         .as_ref()
         .map(|cursor| encode(&bound_names_cursor_payload(cursor, &cursor_binding)));
     let has_more = next_cursor.is_some();
+    let bound_name_records = bound_name_rows
+        .iter()
+        .map(|row| build_bound_name_record(row, numeric_chain_id))
+        .collect::<V2Result<Vec<_>>>()?;
     let bound_names = BoundNames {
-        data: bound_name_rows
-            .iter()
-            .map(|row| build_bound_name_record(row, numeric_chain_id))
-            .collect(),
+        data: bound_name_records,
         page: Page {
             cursor: params.cursor.clone(),
             next_cursor,
@@ -290,7 +291,10 @@ pub(crate) fn build_resolver_overview(
     })
 }
 
-pub(crate) fn build_bound_name_record(row: &NameCurrentListRow, chain_id: u64) -> NameRecord {
+pub(crate) fn build_bound_name_record(
+    row: &NameCurrentListRow,
+    chain_id: u64,
+) -> V2Result<NameRecord> {
     build_name_record(&row.row, None, Some(chain_id), Status::Ok)
 }
 

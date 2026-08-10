@@ -220,14 +220,14 @@ Field ownership:
   the same object when backed. An ENSv1 wrapper-backed row also carries
   `wrapper_state` with the current [`wrapped`](glossary.md#wrapped-namewrapper-state),
   [`emancipated`](glossary.md#emancipated-namewrapper-state), or
-  [`locked`](glossary.md#locked-namewrapper-state) lifecycle value. The field
-  follows the upstream NameWrapper lifecycle names.
-  (upstream: .refs/ens_v1/contracts/wrapper/README.md:L32 @ ens_v1@91c966f)
-  (upstream: .refs/ens_v1/contracts/wrapper/README.md:L34 @ ens_v1@91c966f)
-  The field
-  is omitted after an emancipated or locked wrapper position expires; a plain
-  wrapped position remains `wrapped` because expiry clears its fuses without
-  clearing its owner. (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
+  [`locked`](glossary.md#locked-namewrapper-state) lifecycle value and the typed
+  `wrapper_fuses` object defined in [`api-v2.md`](api-v2.md#naming-dictionary).
+  The tristate is bigname vocabulary derived from the enforcing NameWrapper
+  guards, not an upstream enum. Both fields are omitted after an emancipated or
+  locked wrapper position expires; a plain wrapped position remains `wrapped`
+  with `wrapper_fuses.fuses=0` and every named boolean false because expiry
+  clears its fuses without clearing its owner.
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L848 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L849 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L852 @ ens_v1@91c966f)
@@ -258,7 +258,7 @@ Field ownership:
   verified path as `/v2/names/{name}/records`; indexed resolver-record values
   are not substituted into those fields. The registration and identity summary
   fields (`registration_id`, `token_id`, `owner`, `manager`, `registrant`, dates,
-  `registration_status`, `wrapper_state`, `name`, `display_name`, `namespace`, `namehash`,
+  `registration_status`, `wrapper_state`, `wrapper_fuses`, `name`, `display_name`, `namespace`, `namehash`,
   `resolver`, `primary_name`, `chain_id`, and `network`) remain indexed
   projection values because they are not resolver records. Verified responses
   include `meta.as_of`/`meta.as_of_token` for the positions used by the fresh
@@ -452,7 +452,13 @@ Field ownership:
   `page_size`, and optional `finality=latest`. `at` and historical `finality`
   values are rejected by the shared latest-state collection rule.
 - Response shape: `data` is an array of permission rows
-  `{address, grant_scope, powers, registration_id, name}`. `include=lineage`
+  `{address, grant_scope, powers, registration_id, name, wrapper_state?,
+  wrapper_fuses?}`. The two wrapper fields use the same atomic,
+  [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word)
+  contract as name detail and appear only for a returned current ENSv1 wrapper
+  registration. Their presence does not widen wrapper-holder enumeration;
+  request-relative completeness metadata below remains authoritative.
+  `include=lineage`
   adds route-local `lineage` per row:
   `{grant, revocation?, inheritance_path?, transfer_behavior?}`. Product lineage
   is a bounded summary; deep provenance stays on diagnostics authority/events
@@ -726,6 +732,9 @@ Field ownership:
 - Response shape: `data` is a resolver overview in product vocabulary. The
   route includes route-local `bound_names: {data, page}`, a nested collection
   of record-shaped name rows that replaces resolver-based name filtering.
+  Those rows use the same optional, atomic `wrapper_state` and `wrapper_fuses`
+  contract as exact-name detail; the fields are present only for a current
+  ENSv1 NameWrapper registration at the served projection timestamp.
   `include=aliases` exposes binding rows as `{namespace, name, display_name,
   namehash}` and resolver alias rows as `{namespace, from_name, to_name,
   from_display_name?, to_display_name?, state, resolver: {chain_id, address},

@@ -111,19 +111,23 @@ pub(super) async fn build(
                        END
                    )
                ) || CASE
-                   WHEN wrapper.wrapper_state = 'wrapped'
-                       THEN jsonb_build_object('wrapper_state', 'wrapped')
-                   WHEN wrapper.wrapper_state IN ('emancipated', 'locked')
-                    AND wrapper_expiry.expiry_seconds IS NOT NULL
-                    AND wrapper_expiry.expiry_seconds >= (
-                        SELECT extract(epoch FROM lineage.block_timestamp)
-                        FROM chain_lineage lineage
-                        WHERE lineage.chain_id = $1
-                          AND lineage.block_number = $2
-                          AND lineage.block_hash = $3
-                    ) THEN jsonb_build_object(
-                        'wrapper_state', wrapper.wrapper_state
-                    )
+                   WHEN effective_wrapper.wrapper_state IS NOT NULL
+                       THEN jsonb_build_object(
+                           'wrapper_state', effective_wrapper.wrapper_state,
+                           'wrapper_fuses', jsonb_build_object(
+                               'fuses', effective_wrapper.fuses,
+                               'cannot_unwrap', (effective_wrapper.fuses & 1) <> 0,
+                               'cannot_burn_fuses', (effective_wrapper.fuses & 2) <> 0,
+                               'cannot_transfer', (effective_wrapper.fuses & 4) <> 0,
+                               'cannot_set_resolver', (effective_wrapper.fuses & 8) <> 0,
+                               'cannot_set_ttl', (effective_wrapper.fuses & 16) <> 0,
+                               'cannot_create_subdomain', (effective_wrapper.fuses & 32) <> 0,
+                               'cannot_approve', (effective_wrapper.fuses & 64) <> 0,
+                               'parent_cannot_control', (effective_wrapper.fuses & 65536) <> 0,
+                               'is_dot_eth', (effective_wrapper.fuses & 131072) <> 0,
+                               'can_extend_expiry', (effective_wrapper.fuses & 262144) <> 0
+                           )
+                       )
                    ELSE '{}'::jsonb
                END,
                support.support_status,
@@ -293,7 +297,13 @@ pub(super) async fn build(
                        WHEN 'wrapped' THEN 'wrapped'
                        WHEN 'emancipated' THEN 'emancipated'
                        WHEN 'locked' THEN 'locked'
-                   END AS wrapper_state
+                   END AS wrapper_state,
+                   CASE
+                       WHEN jsonb_typeof(event.after_state -> 'fuses') = 'number'
+                        AND (event.after_state ->> 'fuses')::numeric >= 0
+                        AND (event.after_state ->> 'fuses')::numeric <= 4294967295
+                           THEN (event.after_state ->> 'fuses')::bigint
+                   END AS fuses
             FROM project_events event
             WHERE event.resource_id = binding.resource_id
               AND event.event_kind = 'PermissionScopeChanged'
@@ -329,6 +339,31 @@ pub(super) async fn build(
                      event.normalized_event_id DESC
             LIMIT 1
         ) wrapper_expiry ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT extract(epoch FROM lineage.block_timestamp) AS epoch_seconds
+            FROM chain_lineage lineage
+            WHERE lineage.chain_id = $1
+              AND lineage.block_number = $2
+              AND lineage.block_hash = $3
+        ) target_time ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT CASE
+                       WHEN wrapper.wrapper_state IS NULL
+                         OR wrapper.fuses IS NULL
+                         OR wrapper_expiry.expiry_seconds IS NULL
+                         OR target_time.epoch_seconds IS NULL THEN NULL
+                       WHEN wrapper_expiry.expiry_seconds < target_time.epoch_seconds
+                        AND wrapper.wrapper_state IN ('emancipated', 'locked') THEN NULL
+                       ELSE wrapper.wrapper_state
+                   END AS wrapper_state,
+                   CASE
+                       WHEN wrapper.fuses IS NULL
+                         OR wrapper_expiry.expiry_seconds IS NULL
+                         OR target_time.epoch_seconds IS NULL THEN NULL
+                       WHEN wrapper_expiry.expiry_seconds < target_time.epoch_seconds THEN 0
+                       ELSE wrapper.fuses
+                   END AS fuses
+        ) effective_wrapper ON TRUE
         LEFT JOIN LATERAL (
             SELECT lineage.block_timestamp
             FROM project_events event

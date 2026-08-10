@@ -1656,12 +1656,38 @@ async fn parent_preimage_incrementally_publishes_an_existing_child_edge() -> Res
     scratch.cleanup().await
 }
 
+fn expected_wrapper_fuses(fuses: u32) -> Value {
+    json!({
+        "fuses": fuses,
+        "cannot_unwrap": fuses & 1 != 0,
+        "cannot_burn_fuses": fuses & 2 != 0,
+        "cannot_transfer": fuses & 4 != 0,
+        "cannot_set_resolver": fuses & 8 != 0,
+        "cannot_set_ttl": fuses & 16 != 0,
+        "cannot_create_subdomain": fuses & 32 != 0,
+        "cannot_approve": fuses & 64 != 0,
+        "parent_cannot_control": fuses & 65_536 != 0,
+        "is_dot_eth": fuses & 131_072 != 0,
+        "can_extend_expiry": fuses & 262_144 != 0,
+    })
+}
+
 #[tokio::test]
 async fn wrapper_states_and_expiry_gate_permissions_and_controller_relations() -> Result<()> {
     let cases = [
         (
             "wrapped_expired",
             0,
+            "wrapped",
+            2,
+            Some("wrapped"),
+            9,
+            true,
+            true,
+        ),
+        (
+            "wrapped_expired_parent_fuse",
+            262_144,
             "wrapped",
             2,
             Some("wrapped"),
@@ -1779,6 +1805,16 @@ async fn wrapper_states_and_expiry_gate_permissions_and_controller_relations() -
             false,
             true,
         ),
+        (
+            "can_extend_expiry",
+            327_681,
+            "locked",
+            3,
+            Some("locked"),
+            7,
+            false,
+            true,
+        ),
         ("locked_expired", 65_537, "locked", 2, None, 0, false, false),
     ];
 
@@ -1851,6 +1887,20 @@ async fn wrapper_states_and_expiry_gate_permissions_and_controller_relations() -
         .fetch_one(scratch.pool())
         .await?;
         assert_eq!(projected_state.as_deref(), expected_state, "{label}");
+        let projected_fuses: Option<Value> = sqlx::query_scalar(
+            "SELECT declared_summary -> 'wrapper_fuses' FROM name_current
+             WHERE logical_name_id = 'ens:0xalice'",
+        )
+        .fetch_one(scratch.pool())
+        .await?;
+        let expected_effective_fuses = expected_state.map(|_| {
+            expected_wrapper_fuses(if expiry < 3 {
+                0
+            } else {
+                u32::try_from(fuses).expect("fixture fuses fit uint32")
+            })
+        });
+        assert_eq!(projected_fuses, expected_effective_fuses, "{label}");
         let effective_powers: Option<Value> = sqlx::query_scalar(
             "SELECT effective_powers FROM permissions_current WHERE resource_id = $1",
         )

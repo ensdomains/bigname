@@ -61,6 +61,7 @@ pub(super) async fn build(
                                (event.after_state ->> 'fuses')::bigint
                                    & wrapper_constants.is_dot_eth
                            ) <> 0
+                           AND expiry.expiry_seconds >= target_time.epoch_seconds
                            AND expiry.expiry_seconds
                                - wrapper_constants.grace_period_seconds
                                < target_time.epoch_seconds

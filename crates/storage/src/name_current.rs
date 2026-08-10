@@ -288,21 +288,40 @@ pub async fn load_name_current_by_logical_name_ids(
 /// Load the canonical representative current name for each resource (registration).
 ///
 /// `name_current.resource_id` is 1:many; this picks one representative per resource using the
-/// `canonical_display_name ASC` tie-break the rest of v2 uses, and returns that picked row's
-/// `normalized_name`.
+/// `canonical_display_name ASC` tie-break the rest of v2 uses and returns the picked exact-name
+/// row, including its declared wrapper summary.
 pub async fn load_current_names_by_resource_ids(
     pool: &PgPool,
     resource_ids: &[Uuid],
-) -> Result<BTreeMap<Uuid, String>> {
+) -> Result<BTreeMap<Uuid, NameCurrentRow>> {
     if resource_ids.is_empty() {
         return Ok(BTreeMap::new());
     }
 
-    let rows = sqlx::query_as::<_, (Uuid, String)>(&format!(
+    let rows = sqlx::query(&format!(
         r#"
         SELECT DISTINCT ON (nc.resource_id)
+            nc.logical_name_id,
+            nc.namespace,
+            nc.raw_name AS canonical_display_name,
+            lower(nc.raw_name) AS normalized_name,
+            nc.namehash,
+            nc.surface_binding_id,
             nc.resource_id,
-            lower(nc.raw_name)
+            nc.token_lineage_id,
+            nc.binding_kind,
+            nc.declared_summary,
+            nc.provenance,
+            CASE WHEN nc.support_status = 'supported'
+                 THEN jsonb_build_object('status', 'projected', 'exhaustiveness', 'not_asserted')
+                 ELSE jsonb_build_object(
+                     'status', 'unsupported', 'exhaustiveness', 'not_asserted',
+                     'unsupported_reason', nc.unsupported_reason
+                 ) END AS coverage,
+            nc.chain_positions,
+            nc.canonicality_summary,
+            nc.manifest_version,
+            nc.last_recomputed_at
         FROM bigname_phase.name_current nc
         JOIN bigname_phase.name_surfaces surface
           ON surface.logical_name_id = nc.logical_name_id
@@ -328,5 +347,13 @@ pub async fn load_current_names_by_resource_ids(
         )
     })?;
 
-    Ok(rows.into_iter().collect())
+    rows.into_iter()
+        .map(|row| {
+            let row = decode_name_current_row(row)?;
+            let resource_id = row
+                .resource_id
+                .context("resource-filtered name_current row is missing resource_id")?;
+            Ok((resource_id, row))
+        })
+        .collect()
 }

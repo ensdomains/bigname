@@ -9,6 +9,7 @@ use sqlx::types::Uuid;
 use crate::AppState;
 
 use super::cursor::{cursor_value, invalid_cursor_error};
+use super::name_record::wrapper_metadata;
 use super::permission_support::{
     apply_permissions_collection_support_meta, permission_support_for_resources,
 };
@@ -17,6 +18,7 @@ use super::{
     AddressNameGrant, CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, QueryParams,
     StrictQueryParams, V2Error, V2Result, decode, encode, permission_powers_value,
     permission_scope_value, validate_latest_collection_selectors,
+    vocab::{WrapperFuses, WrapperState},
 };
 
 #[path = "permissions/lineage.rs"]
@@ -61,6 +63,10 @@ pub(crate) struct PermissionRow {
     pub(crate) registration_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) wrapper_state: Option<WrapperState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) wrapper_fuses: Option<WrapperFuses>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) lineage: Option<PermissionLineage>,
 }
@@ -163,7 +169,15 @@ pub(crate) async fn get_permissions(
     let data = storage_page
         .rows
         .iter()
-        .map(|row| build_permission_row(row, current_names.get(&row.resource_id), include_lineage))
+        .map(|row| {
+            let current_name = current_names.get(&row.resource_id);
+            build_permission_row(
+                row,
+                current_name.map(|name| name.normalized_name.as_str()),
+                current_name.map(|name| &name.declared_summary),
+                include_lineage,
+            )
+        })
         .collect::<V2Result<Vec<_>>>()?;
     let mut meta = Meta::default();
     let permission_support =
@@ -302,9 +316,15 @@ fn normalized_name_filter(params: &QueryParams) -> V2Result<Option<NormalizedNam
 
 pub(crate) fn build_permission_row(
     row: &PermissionsCurrentRow,
-    name: Option<&String>,
+    name: Option<&str>,
+    declared_summary: Option<&Value>,
     include_lineage: bool,
 ) -> V2Result<PermissionRow> {
+    let (wrapper_state, wrapper_fuses) = declared_summary
+        .map(wrapper_metadata)
+        .transpose()?
+        .flatten()
+        .map_or((None, None), |(state, fuses)| (Some(state), Some(fuses)));
     Ok(PermissionRow {
         address: row.subject.clone(),
         grant: AddressNameGrant {
@@ -312,7 +332,9 @@ pub(crate) fn build_permission_row(
             powers: permission_powers_value(&row.effective_powers)?,
         },
         registration_id: row.resource_id.to_string(),
-        name: name.cloned(),
+        name: name.map(str::to_owned),
+        wrapper_state,
+        wrapper_fuses,
         lineage: include_lineage
             .then(|| permission_lineage(row))
             .transpose()?,
@@ -500,8 +522,8 @@ mod tests {
             Value::Null,
         );
         let name = "alice.eth".to_owned();
-        let mapped =
-            build_permission_row(&row, Some(&name), true).expect("known storage chain id must map");
+        let mapped = build_permission_row(&row, Some(&name), None, true)
+            .expect("known storage chain id must map");
 
         assert_eq!(mapped.address, ADDRESS);
         assert_eq!(mapped.registration_id, REGISTRATION_ID);
@@ -543,7 +565,7 @@ mod tests {
         let mut row = sample_permissions_row(json!([]), Value::Null);
         row.revocation_source = None;
         let mapped =
-            build_permission_row(&row, None, true).expect("known storage chain id must map");
+            build_permission_row(&row, None, None, true).expect("known storage chain id must map");
         let lineage = mapped.lineage.expect("lineage must be present");
 
         assert_eq!(mapped.name, None);

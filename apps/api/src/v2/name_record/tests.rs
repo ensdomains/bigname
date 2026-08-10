@@ -97,18 +97,48 @@ fn resolver_omits_unknown_chain_id_instead_of_guessing_mainnet() {
 }
 
 #[test]
-fn wrapper_state_accepts_only_contract_values() {
-    assert_eq!(
-        wrapper_state(&json!({"wrapper_state": "wrapped"})),
-        Some(WrapperState::Wrapped)
+fn wrapper_metadata_is_atomic_and_validates_named_fuses() {
+    let summary = json!({
+        "wrapper_state": "locked",
+        "wrapper_fuses": {
+            "fuses": 196_609,
+            "cannot_unwrap": true,
+            "cannot_burn_fuses": false,
+            "cannot_transfer": false,
+            "cannot_set_resolver": false,
+            "cannot_set_ttl": false,
+            "cannot_create_subdomain": false,
+            "cannot_approve": false,
+            "parent_cannot_control": true,
+            "is_dot_eth": true,
+            "can_extend_expiry": false
+        }
+    });
+    let (state, fuses) = wrapper_metadata(&summary)
+        .expect("wrapper metadata must parse")
+        .expect("valid wrapper summary");
+    assert_eq!(state, WrapperState::Locked);
+    assert_eq!(fuses.fuses, 196_609);
+    assert!(fuses.cannot_unwrap);
+    assert!(fuses.parent_cannot_control);
+    assert!(fuses.is_dot_eth);
+
+    assert!(wrapper_metadata(&json!({"wrapper_state": "locked"})).is_err());
+    assert!(
+        wrapper_metadata(&json!({
+            "wrapper_state": "unknown",
+            "wrapper_fuses": summary["wrapper_fuses"]
+        }))
+        .is_err()
     );
-    assert_eq!(
-        wrapper_state(&json!({"wrapper_state": "emancipated"})),
-        Some(WrapperState::Emancipated)
+    assert!(
+        wrapper_metadata(&json!({
+            "wrapper_state": "wrapped",
+            "wrapper_fuses": summary["wrapper_fuses"]
+        }))
+        .is_err()
     );
-    assert_eq!(
-        wrapper_state(&json!({"wrapper_state": "locked"})),
-        Some(WrapperState::Locked)
-    );
-    assert_eq!(wrapper_state(&json!({"wrapper_state": "unknown"})), None);
+    let mut inconsistent = summary;
+    inconsistent["wrapper_fuses"]["cannot_unwrap"] = json!(false);
+    assert!(wrapper_metadata(&inconsistent).is_err());
 }

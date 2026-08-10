@@ -169,6 +169,57 @@ async fn v2_get_permissions_maps_rows_and_lineage() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_get_permissions_exposes_atomic_wrapper_state_and_fuses() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    let resource_id = v2_permissions_current_resource_id();
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = declared_summary || $2::jsonb
+         WHERE resource_id = $1",
+    )
+    .bind(resource_id)
+    .bind(json!({
+        "wrapper_state": "locked",
+        "wrapper_fuses": {
+            "fuses": 196_609,
+            "cannot_unwrap": true,
+            "cannot_burn_fuses": false,
+            "cannot_transfer": false,
+            "cannot_set_resolver": false,
+            "cannot_set_ttl": false,
+            "cannot_create_subdomain": false,
+            "cannot_approve": false,
+            "parent_cannot_control": true,
+            "is_dot_eth": true,
+            "can_extend_expiry": false
+        }
+    }))
+    .execute(&database.pool)
+    .await?;
+
+    let payload = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v2/permissions?registration_id={resource_id}"),
+    )
+    .await?;
+    let rows = payload["data"].as_array().expect("permissions rows");
+    assert!(!rows.is_empty());
+    assert!(rows.iter().all(|row| row["wrapper_state"] == "locked"));
+    assert!(
+        rows.iter()
+            .all(|row| row["wrapper_fuses"]["fuses"] == 196_609)
+    );
+    assert!(
+        rows.iter()
+            .all(|row| row["wrapper_fuses"]["cannot_unwrap"].as_bool() == Some(true))
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result<()> {
     let (database, by_name) = v2_permissions_payload("/v2/permissions?name=Perms.eth").await?;
     let current_resource_id = v2_permissions_current_resource_id();

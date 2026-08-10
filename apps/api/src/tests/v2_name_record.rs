@@ -81,13 +81,75 @@ async fn v2_get_name_returns_flat_name_record_envelope() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_get_name_exposes_projected_wrapper_state() -> Result<()> {
+async fn v2_get_name_exposes_projected_wrapper_state_and_fuses() -> Result<()> {
     let payload = v2_name_record_payload_with_row("/v2/names/Alice.eth", |row| {
         row.declared_summary["wrapper_state"] = json!("locked");
+        row.declared_summary["wrapper_fuses"] = json!({
+            "fuses": 196_609,
+            "cannot_unwrap": true,
+            "cannot_burn_fuses": false,
+            "cannot_transfer": false,
+            "cannot_set_resolver": false,
+            "cannot_set_ttl": false,
+            "cannot_create_subdomain": false,
+            "cannot_approve": false,
+            "parent_cannot_control": true,
+            "is_dot_eth": true,
+            "can_extend_expiry": false
+        });
     })
     .await?;
 
     assert_eq!(payload["data"]["wrapper_state"], json!("locked"));
+    assert_eq!(payload["data"]["wrapper_fuses"]["fuses"], json!(196_609));
+    assert_eq!(payload["data"]["wrapper_fuses"]["cannot_unwrap"], json!(true));
+    assert_eq!(
+        payload["data"]["wrapper_fuses"]["parent_cannot_control"],
+        json!(true)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_name_rejects_unknown_wrapper_fuse_fields() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    seed_v2_alice_name_record_fixture(
+        &database,
+        |row| {
+            row.declared_summary["wrapper_state"] = json!("locked");
+            row.declared_summary["wrapper_fuses"] = json!({
+                "fuses": 65_537,
+                "cannot_unwrap": true,
+                "cannot_burn_fuses": false,
+                "cannot_transfer": false,
+                "cannot_set_resolver": false,
+                "cannot_set_ttl": false,
+                "cannot_create_subdomain": false,
+                "cannot_approve": false,
+                "parent_cannot_control": true,
+                "is_dot_eth": false,
+                "can_extend_expiry": false,
+                "unknown_future_fuse": true
+            });
+        },
+        |_, _, _| {},
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/names/Alice.eth")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{payload}");
+    assert_eq!(payload["error"]["code"], json!("internal_error"));
+
+    database.cleanup().await?;
     Ok(())
 }
 

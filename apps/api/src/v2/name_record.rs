@@ -18,7 +18,7 @@ use super::{
     Envelope, QueryParamAllowlist, RequestSource, SnapshotReadResource, StrictQueryParams, V2Error,
     V2Result, api_error_to_v2_for_resource, resolve_v2_snapshot_for, snapshot_meta,
     v2_exact_name_snapshot_scope_with_resolution_auxiliary,
-    vocab::{RegistrationStatus, Resolver, Source, Status, WrapperState},
+    vocab::{RegistrationStatus, Resolver, Source, Status, WrapperFuses, WrapperState},
 };
 
 #[path = "name_record/inventory.rs"]
@@ -27,6 +27,8 @@ mod inventory;
 mod values;
 #[path = "name_record/verified.rs"]
 mod verified;
+#[path = "name_record/wrapper.rs"]
+mod wrapper;
 
 use inventory::load_name_record_inventory;
 pub(super) use values::{
@@ -37,6 +39,7 @@ use values::{
     json_address_at_paths, json_chain_id, json_timestamp_at_paths, json_value_present, network,
     object_field, response_chain_id,
 };
+pub(crate) use wrapper::wrapper_metadata;
 
 pub(crate) struct NameRecordQueryParams;
 
@@ -67,6 +70,8 @@ pub(crate) struct NameRecord {
     pub(crate) registration_status: RegistrationStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) wrapper_state: Option<WrapperState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) wrapper_fuses: Option<WrapperFuses>,
     pub(crate) name: String,
     pub(crate) display_name: String,
     pub(crate) namespace: String,
@@ -184,7 +189,7 @@ pub(crate) fn build_name_record(
     record_inventory: Option<&RecordInventoryCurrentRow>,
     chain_id: Option<u64>,
     status: Status,
-) -> NameRecord {
+) -> V2Result<NameRecord> {
     let registration = name_registration_fields(Some(row), &row.namespace);
     let unsupported_fields = unsupported_fields(record_inventory);
     let field_supported = |field: &str| {
@@ -205,8 +210,10 @@ pub(crate) fn build_name_record(
                 .and_then(|addresses| addresses.get("60").cloned())
         })
         .flatten();
+    let (wrapper_state, wrapper_fuses) = wrapper_metadata(&row.declared_summary)?
+        .map_or((None, None), |(state, fuses)| (Some(state), Some(fuses)));
 
-    NameRecord {
+    Ok(NameRecord {
         registration_id: row.resource_id.map(|value| value.to_string()),
         token_id: declared_token_id(row),
         owner: registration.owner.clone(),
@@ -216,7 +223,8 @@ pub(crate) fn build_name_record(
         created_at: registration.created_at,
         expires_at: registration.expires_at,
         registration_status: registration.registration_status,
-        wrapper_state: wrapper_state(&row.declared_summary),
+        wrapper_state,
+        wrapper_fuses,
         name: row.normalized_name.clone(),
         display_name: row.canonical_display_name.clone(),
         namespace: row.namespace.clone(),
@@ -240,14 +248,7 @@ pub(crate) fn build_name_record(
         unsupported_reason: None,
         failure_reason: None,
         unsupported_fields,
-    }
-}
-
-pub(crate) fn wrapper_state(declared_summary: &Value) -> Option<WrapperState> {
-    declared_summary
-        .get("wrapper_state")
-        .and_then(Value::as_str)
-        .and_then(WrapperState::from_wire)
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
