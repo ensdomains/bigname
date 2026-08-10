@@ -161,7 +161,21 @@ pub(crate) async fn revalidate_public_namespace_set(
     state: &AppState,
     expected: &PublicNamespaceSet,
 ) -> ApiResult<()> {
-    let current = derive_public_namespace_set(state).await?;
+    let current = if state.public_namespaces_override().is_some() {
+        derive_public_namespace_set(state).await?
+    } else {
+        let manifest_tokens = load_public_namespace_manifest_tokens(&state.pool).await?;
+        if expected.manifest_tokens.as_ref() != manifest_tokens.as_slice() {
+            return Err(public_namespace_manifest_conflict());
+        }
+        let current =
+            derive_public_namespace_set_from_manifests(state, manifest_tokens.clone()).await?;
+        let reloaded_manifest_tokens = load_public_namespace_manifest_tokens(&state.pool).await?;
+        if manifest_tokens != reloaded_manifest_tokens {
+            return Err(public_namespace_manifest_conflict());
+        }
+        current
+    };
     if expected.shares_read_view(&current) {
         return Ok(());
     }

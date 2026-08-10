@@ -294,6 +294,54 @@ async fn v2_search_rejects_manifest_change_between_derivation_and_row_read() -> 
 }
 
 #[tokio::test]
+async fn v2_search_manifest_change_that_breaks_derivation_returns_conflict() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    seed_v2_search_public_authority(&database).await?;
+    let (_guard, control) =
+        crate::v2::search_public_namespace_read_test_hooks::install(&database.lookup_pool).await?;
+    let state = AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v2/search?q=alpha")
+                    .body(Body::empty())
+                    .expect("search request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    database
+        .insert_manifest(
+            "ens",
+            "ens_v2_registry_l1",
+            "ethereum-sepolia",
+            "ens_v2_sepolia_post_audit",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("search derivation-breaking request task panicked")?
+        .context("search derivation-breaking request failed")?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("conflict"));
+    assert!(payload.get("data").is_none(), "no partial page may be served");
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_search_bare_cursor_fails_closed_when_the_served_namespace_set_changes() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_search_fixture(&database).await?;
