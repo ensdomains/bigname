@@ -120,7 +120,8 @@ async fn v2_lookup_empty_public_namespace_set_takes_precedence_over_bound_cursor
 }
 
 #[tokio::test]
-async fn v2_lookup_name_only_inputs_bypass_public_namespace_derivation() -> Result<()> {
+async fn v2_lookup_name_only_inputs_bypass_public_derivation_and_interpret_redo_fence()
+-> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_lookup_base_head(&database).await?;
     for (chain, deployment) in [
@@ -144,6 +145,9 @@ async fn v2_lookup_name_only_inputs_bypass_public_namespace_derivation() -> Resu
         bigname_lookup::ChainRpcUrls::default(),
     );
     assert!(crate::v2::support::derive_public_namespace_set(&state).await.is_err());
+    database
+        .simulate_interpret_redo_begin("base-mainnet", "recompute_flags")
+        .await?;
 
     let response = app_router(state)
         .oneshot(

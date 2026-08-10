@@ -114,35 +114,10 @@ pub(crate) async fn load_selected_project_generations(
     pool: &PgPool,
     selected: &SelectedSnapshot,
 ) -> V2Result<BTreeMap<String, String>> {
-    let mut generations = BTreeMap::new();
-    for position in selected.chain_positions.as_map().values() {
-        let generation = sqlx::query_scalar::<_, String>(
-            r#"
-            SELECT project.xmin::TEXT
-            FROM chain_heads head
-            JOIN chain_phase_state project
-              ON project.chain_id = head.chain_id
-             AND project.phase_name = 'project'
-             AND project.phase_status = 'completed'
-             AND project.current_block_number = head.latest_block_number
-             AND project.current_block_hash = head.latest_block_hash
-             AND project.input_content_hash = $4
-            WHERE head.chain_id = $1
-              AND head.latest_block_number = $2
-              AND head.latest_block_hash = $3
-            "#,
-        )
-        .bind(&position.chain_id)
-        .bind(position.block_number)
-        .bind(&position.block_hash)
-        .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
-        .fetch_optional(pool)
+    crate::v2::support::load_selected_project_generations_for_read(pool, selected, false)
         .await
         .map_err(|_| V2Error::internal_error("failed to validate lookup data"))?
-        .ok_or_else(|| V2Error::stale("served data is not available at the selected snapshot"))?;
-        generations.insert(position.chain_id.clone(), generation);
-    }
-    Ok(generations)
+        .ok_or_else(|| V2Error::stale("served data is not available at the selected snapshot"))
 }
 
 async fn served_head_absent_for_single_scope(

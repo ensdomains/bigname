@@ -299,6 +299,16 @@ async fn load_public_namespace_project_generations(
     pool: &PgPool,
     selected: &SelectedSnapshot,
 ) -> ApiResult<Option<BTreeMap<String, String>>> {
+    load_selected_project_generations_for_read(pool, selected, true)
+        .await
+        .map_err(|_| ApiError::internal_error("failed to validate public namespace data"))
+}
+
+pub(crate) async fn load_selected_project_generations_for_read(
+    pool: &PgPool,
+    selected: &SelectedSnapshot,
+    require_interpret_not_redo: bool,
+) -> std::result::Result<Option<BTreeMap<String, String>>, sqlx::Error> {
     let mut generations = BTreeMap::new();
     for position in selected.chain_positions.as_map().values() {
         // Do not compare interpret.xmin: normal forward batches update it. History-rewriting redos
@@ -307,8 +317,6 @@ async fn load_public_namespace_project_generations(
             r#"
             SELECT project.xmin::TEXT
             FROM chain_heads head
-            JOIN chain_phase_state interpret ON interpret.chain_id = head.chain_id
-             AND interpret.phase_name = 'interpret' AND interpret.redo_in_progress = false
             JOIN chain_phase_state project
               ON project.chain_id = head.chain_id
              AND project.phase_name = 'project'
@@ -319,15 +327,25 @@ async fn load_public_namespace_project_generations(
             WHERE head.chain_id = $1
               AND head.latest_block_number = $2
               AND head.latest_block_hash = $3
+              AND (
+                  NOT $5
+                  OR EXISTS (
+                      SELECT 1
+                      FROM chain_phase_state interpret
+                      WHERE interpret.chain_id = head.chain_id
+                        AND interpret.phase_name = 'interpret'
+                        AND interpret.redo_in_progress = false
+                  )
+              )
             "#,
         )
         .bind(&position.chain_id)
         .bind(position.block_number)
         .bind(&position.block_hash)
         .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+        .bind(require_interpret_not_redo)
         .fetch_optional(pool)
-        .await
-        .map_err(|_| ApiError::internal_error("failed to validate public namespace data"))?;
+        .await?;
         let Some(generation) = generation else {
             return Ok(None);
         };
