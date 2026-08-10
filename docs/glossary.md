@@ -290,11 +290,28 @@ nothing to claim
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L212 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L224 @ ens_v2@ccaeb58).
 Nothing about it is cross-chain; see [`upstream.md`](upstream.md#known-divergences)
-for the stale upstream comment that says otherwise. **No bigname source family
-is admitted for any of this yet** — the terms below describe the upstream
-mechanism an adapter would have to handle, not implemented behavior. Distinct
-from bigname's own *schema-migration* history; see the note at the top of this
-file.
+for the stale upstream comment that says otherwise. The
+`ens_v2_migration_l1` [source family](#source-family) admits the fixed
+contracts and event shapes described in
+[`manifests.md`](manifests.md#ensv2-migration-family-admission); public
+mixed-history ownership is capability-gated separately. Distinct from
+bigname's own *schema-migration* history; see the note at the top of this file.
+
+**Migration boundary** (ENSv1→ENSv2 authority boundary) — the canonical
+`MigrationApplied` normalized event at which one logical name stops taking
+current registration and control from ENSv1 and starts taking them from its
+ENSv2 resource. The boundary is derived only from an admitted successful
+ENSv1→ENSv2 migration transaction shape, never from the fact that both source
+families appear in history. It closes the name's current ENSv1 binding without
+deleting that history; descendants keep their own authority until they reach
+their own boundary. The unlocked path transfers the ENSv1 position to the
+Graveyard before registering the reserved ENSv2 label, while the locked
+receiver moves the wrapper token to the Graveyard and injects the ENSv2
+registration.
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58).
 
 **Premigration reservation** — the pre-launch step that writes every existing
 `.eth` second-level name into the new ENSv2 `.eth` registry as a placeholder

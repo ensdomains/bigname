@@ -131,8 +131,12 @@ Field ownership:
   `invalid_name`. Reverse misses return `status=ok` with an empty `records`
   array for the input. Lookup record-level reason values are mapped to product
   vocabulary before serialization; current values include `read_failed`,
-  `exact_name_profile_not_supported`, `mixed_exact_name_corpus`, and
-  `unsupported_reason_missing`. An address lookup returns `409 conflict` when
+  `exact_name_profile_not_supported`, `conflicting_current_ens_authority`,
+  `independent_ens_deployments_overlap`, and `unsupported_reason_missing`.
+  Historical ENSv1 and ENSv2 facts do not by themselves make a migrated
+  Mainnet name unsupported; the current authority rule is documented in
+  [`architecture.md`](architecture.md#ensv1ensv2-current-authority). An
+  address lookup returns `409 conflict` when
   the deployment has no ready public namespace.
 - Snapshot behavior: lookup selects the current schema-v2 phase head and reads
   `bigname_phase` name, inventory, and address-name projections published for

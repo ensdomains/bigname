@@ -39,6 +39,42 @@ it does not preserve the deleted v1 DTOs.
 | Namespace metadata | `GET /v2/namespaces/{namespace}` | Product-facing namespace and capability metadata. |
 | Pipeline diagnostics | `/v2/diagnostics/*` | Explicit diagnostic tier, separate from product reads. |
 
+## ENSv1→ENSv2 mixed-history ownership
+
+Exact-name, direct-subname, history, address-name, and permission reads use
+the per-name current-authority rule in
+[`architecture.md`](architecture.md#ensv1ensv2-current-authority). A migrated
+Mainnet name keeps both eras in history while current registration, control,
+resolver, expiry, address relations, and permissions come only from its
+ENSv2 resource. Retained ENSv1 facts remain history and provenance; they do
+not make the current read unsupported and cannot become current again after
+an ENSv2 release.
+
+Direct-subname ownership is evaluated per child. A child that has not
+migrated can remain ENSv1-authoritative below a migrated parent. Once that
+child migrates or otherwise obtains a current ENSv2 registration, the ENSv2
+parent-child arm replaces the ENSv1 arm. A Mainnet pair left current in both
+arms after applying those boundaries is explicit unsupported anomaly data,
+not a tie to resolve by event recency. Sepolia overlap is instead an expected
+property of independent test deployments and remains unsupported under its
+own reason until a caller or deployment profile selects one system.
+
+## ENSv1→ENSv2 delivery slices
+
+Each slice includes its behavior tests and fixture provenance. Counts are
+estimated hand-written production files; test fixtures, test-only harness
+files, and docs are not included.
+
+| Slice | Coherent capability | Estimated production files |
+| --- | --- | ---: |
+| 1. Migration intake and replay | Admit fixed migration contracts, ratify migration-registry discovery, interpret every catalog event shape into identity, discovery, and normalized events, including Graveyard claims and v1-renewal bridge events. No projection or API write path changes. | 12 (2 manifest TOML, up to 10 adapter/manifest Rust files) |
+| 2. Exact-name current authority | Consume `MigrationApplied` to publish one current binding, registration, expiry, resolver, control, address relation, permission summary, and exact-name coverage result while preserving both eras in history. | 6 (up to 4 project builders and 2 API reason/read modules) |
+| 3. Direct-subname authority | Replace the recency tie-break with per-child authority, retain legitimate unmigrated ENSv1 children, surface double-current Mainnet pairs as anomalies, and cover same-transaction parent/child migration through the public subnames behavior. | 4 (up to 3 project scope/builder files and 1 API mapping module) |
+
+Slice 1 is bounded to adapters, manifests, and their fixtures and requires no
+schema-migration. Slices 2 and 3 are separate consumer capabilities rather
+than hidden prerequisites of source admission.
+
 The GraphQL compatibility operations read the schema-v2 current projections
 and preserve the committed Manager response contract. Name inputs are ENS-normalized and
 matched by namehash within the `ens`
