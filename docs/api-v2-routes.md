@@ -138,14 +138,22 @@ Field ownership:
   `bigname_phase` name, inventory, and address-name projections published for
   one completed projection-phase generation. Public reverse lookup with no
   explicit namespace derives its snapshot scope from the namespaces served by
-  the deployment. Because projection publication is incremental, an unchanged
+  the deployment, excluding a namespace while its selected authority chain has
+  Interpret `redo_in_progress=true`, regardless of redo mode. A running
+  Interpret redo rewrites previously served identity history batch by batch, so
+  a page read during the redo can be incomplete even while Project still
+  reports its prior completed head. Because projection publication is
+  incremental, an unchanged
   row target may precede the selected head; it may not be ahead, and a
   same-height target must match the selected hash. Lookup revalidates both
   `chain_heads` and that generation after the read. Before that check, public
-  reverse lookup also reloads the active manifest declarations captured during
-  namespace derivation; an active manifest declaration change returns `409
-  conflict`. An invalid target, phase lag, readiness change, or other
-  mid-request head/projection change returns `409 stale`.
+  reverse lookup also reloads the active manifest declarations and Interpret
+  redo state captured during namespace derivation. An active manifest
+  declaration change returns `409 conflict`. A redo that begins mid-request, an
+  invalid target, phase lag, readiness change, or other mid-request
+  head/projection change returns the existing retryable `409 stale`, never a
+  partial page. Name-only lookup does not use public namespace derivation and is
+  unaffected.
 - Replaces (v1): `POST /v1/identity:lookup`.
 
 ### `GET /v2/status`
@@ -697,14 +705,19 @@ Field ownership:
   `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
   validity claim. True as-of search enumeration is deferred to the
   revision-bound storage follow-up. Bare search reloads the active manifest
-  declarations, selected authority chain heads, and project generations after
-  reading its page; a change returns `409 conflict`.
+  declarations, selected authority chain heads, project generations, and
+  Interpret redo state after reading its page; a redo that begins mid-request
+  or another captured-state change returns the existing retryable `409 conflict`,
+  never a partial page.
 - Status semantics: no matches returns `200` with empty `data`. `q` is
   required; a missing or empty `q` returns `400 invalid_input`. An explicit
   recognized namespace bypasses public namespace derivation and reads its
-  current rows without a deployment-readiness gate. Bare search returns `409
-  conflict` when no public namespace is ready or when its captured deployment
-  state changes during the read.
+  current rows without a deployment-readiness gate, including the Interpret
+  redo check, preserving the existing behavior. Bare search excludes a
+  namespace while its selected authority chain has Interpret
+  `redo_in_progress=true`, regardless of redo mode, and returns `409 conflict`
+  when no public namespace is ready or when its captured deployment state
+  changes during the read.
 - Replaces (v1): search, suggestion, and exact-name-filter uses of
   `GET /v1/names`; exact name profiles move to `GET /v2/names/{name}`.
 

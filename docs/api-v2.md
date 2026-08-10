@@ -384,22 +384,33 @@ Common parameter rules:
 For a cross-namespace read with no explicit `namespace`, the API derives the
 namespace set at request time from recognized public namespaces whose active
 [source manifests](manifests.md) have a completed projection publication at the
-current head of the namespace's authority chain in the selected deployment.
+current head of the namespace's authority chain in the selected deployment. It
+excludes a namespace while its selected authority chain has Interpret
+`redo_in_progress=true`, regardless of redo mode. An Interpret redo rewrites
+previously served identity history batch by batch, so a page read during the
+redo can be incomplete even while Project still reports its prior completed
+head.
 Bare search and public reverse lookup filter current rows and counts to exactly
 that set, and public reverse lookup builds its snapshot scope from the same
 authority chains. After reading a bare search page, the API reloads the active
 manifest declarations, selected authority chain heads, and completed projection
-publication generations captured during derivation; any change returns `409
-conflict` instead of serving a response assembled across deployment states.
+publication generations captured during derivation, and confirms that no
+selected authority chain began an Interpret redo. Any change returns the
+existing retryable `409 conflict` instead of serving a response assembled
+across deployment states.
 Public reverse lookup reloads its captured active manifest declarations before
-the route's existing head and projection-publication check: a manifest change
-returns `409 conflict`, while a head or publication change returns `409 stale`.
+the route's existing head and projection-publication check, including the same
+Interpret redo check: a manifest change returns `409 conflict`, while a redo,
+head, or publication change returns the existing retryable `409 stale`. A redo
+that begins after derivation therefore never exposes a partial page through
+either route.
 Their namespace-omitted cursors bind that derived set and fail closed if it
 changes. Search with an explicit recognized `namespace` bypasses public
 namespace derivation and reads that namespace's current rows without a
-deployment-readiness gate, preserving the pre-derivation behavior. Name-only
-lookup likewise keeps its existing name snapshot selection and does not derive
-the public set; only address inputs invoke public reverse derivation.
+deployment-readiness gate, including the Interpret redo check, preserving the
+pre-derivation behavior. Name-only lookup likewise keeps its existing name
+snapshot selection and does not derive the public set; only address inputs
+invoke public reverse derivation.
 Completeness metadata is relative to the effective request set, so omitting a
 namespace does not make a response partial merely because the deployment does
 not serve another public namespace. A bare cross-namespace read returns `409

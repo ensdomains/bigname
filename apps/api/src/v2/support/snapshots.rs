@@ -301,10 +301,14 @@ async fn load_public_namespace_project_generations(
 ) -> ApiResult<Option<BTreeMap<String, String>>> {
     let mut generations = BTreeMap::new();
     for position in selected.chain_positions.as_map().values() {
+        // Do not compare interpret.xmin: normal forward batches update it. History-rewriting redos
+        // hold this flag until Project is stamped; canonical-head orphaning stamps both phases.
         let generation = sqlx::query_scalar::<_, String>(
             r#"
             SELECT project.xmin::TEXT
             FROM chain_heads head
+            JOIN chain_phase_state interpret ON interpret.chain_id = head.chain_id
+             AND interpret.phase_name = 'interpret' AND interpret.redo_in_progress = false
             JOIN chain_phase_state project
               ON project.chain_id = head.chain_id
              AND project.phase_name = 'project'
