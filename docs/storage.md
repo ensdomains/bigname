@@ -197,21 +197,28 @@ rejects a token that no longer matches the current marker.
 
 Each attested discharge appends one immutable
 `manifest_authority_attestations` row in the same transaction that begins the
-redo and adopts the new interpreter hash. It records the chain, Interpret
+redo and adopts the new [interpreter content
+hash](glossary.md#interpreter-content-hash). It records the chain, Interpret
 phase, redo range, authority fingerprint, invalidation token, runner instance
 ID, and attestation time, with one row allowed per chain, phase, and generation.
 The runner emits error-level structured telemetry from that row after commit;
 if it stops before emission completes, a restart re-emits the row only after
-the locked begin matches and commits the same interrupted redo. The same token may resume that exact active,
-audited redo, but it is invalid after completion or for any other redo.
+the locked begin matches and commits the same interrupted redo. The same token
+may resume that exact active, audited redo, but it is invalid after completion
+or for any other redo. If the interpreter content hash changes while that redo
+is interrupted, the same token and exact range preserve the audit
+association while the redo cursor is cleared. Interpret walks the audited range
+again from its beginning under the new hash; later interruptions under that
+hash resume normally.
 
 The system cannot verify the fetch or the no-widening review; the attestation is
 the operator's responsibility. The guard cannot distinguish widening from
 another manifest-authority change, so every such change is fenced regardless of
 finite-cursor or Live-lineage coverage until issue #376 binds watch-plan
-evidence to loaded facts. Plain code-hash rotations remain flagless. A missing
-lineage height, an ambiguous readable height, or an uncovered part of a
-source's finite target remains a fatal presence failure.
+evidence to loaded facts. An interpreter content hash rotation with neither a
+current manifest-authority marker nor an active audited redo remains flagless.
+A missing lineage height, an ambiguous readable height, or an uncovered part of
+a source's finite target remains a fatal presence failure.
 
 The interpret engine loads the prior identity state required by the range,
 folds physical batches without changing semantic order, and revalidates the
@@ -282,16 +289,21 @@ rather than by a rotation:
 Treat a change to any of them as a re-derivation decision and follow the
 [planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary).
 
-A hash rotation requires a planned full-history interpretation and projection
-walk; the system refuses to mix generations from different hashes. Interpret
-accepts the full finite-ingest range and extends its execution through its
-recorded live-followed head. Its downstream Project redo carries that effective
-range clipped to Project's own recorded head — identical unless a crash between
-the two phases' live-cycle advances left Project one block behind — and Project
-adopts the new hash only when the redo covers its entire recorded head. An interrupted redo retains that same effective range;
-recovery cannot narrow back to the finite ingest handoff. Moving a covered
-semantic source without updating the covered set fails the build rather than
-silently narrowing the fingerprint.
+An interpreter content hash rotation requires a planned full-history
+interpretation and projection walk; the system refuses to mix generations from
+different hashes. Interpret accepts the full finite-ingest range and extends
+its execution through its recorded live-followed head. Its downstream Project
+redo carries that effective range clipped to Project's own recorded head —
+identical unless a crash between the two phases' live-cycle advances left
+Project one block behind — and Project adopts the new hash only when the redo
+covers its entire recorded head. An
+interrupted redo retains that same effective range; recovery cannot narrow back
+to the finite ingest handoff. If an interrupted attested Interpret redo spans
+the hash rotation, its token remains valid only for that exact range. The new
+binary clears the redo cursor written under the prior interpreter content hash
+and walks the range from its beginning while retaining the durable audit
+association. Moving a covered semantic source without updating the covered set
+fails the build rather than silently narrowing the fingerprint.
 
 ## Projection publication
 

@@ -4,15 +4,17 @@ use crate::{
     error::{ErrorKind, RunnerError, RunnerResult},
     phase::{BlockRange, PhaseName},
     redo_manifest_attestation::AttestedManifestAuthority,
+    transitions::PhaseStateRow,
 };
 
 type AuditRow = (String, String, String, String, i64, i64, String, String);
 
 // PostgreSQL `now()` is the transaction timestamp, so `audit.attested_at` equals
 // `phase.started_at` because the audit insert and redo begin share one transaction.
-// No writer may change `started_at` while `redo_in_progress` remains true. If that
-// changes, resume can skip the token gate and replay telemetry; the raw-data coverage
-// check still runs.
+// No writer may change `started_at` while `redo_in_progress` remains true, including an
+// interpreter content hash rotation (docs/glossary.md#interpreter-content-hash) that
+// resets redo progress. If that changes, resume can skip the token gate and replay
+// telemetry; the raw-data coverage check still runs.
 const PENDING_GENERATION_QUERY: &str = "SELECT audit.generation_token
      FROM manifest_authority_attestations audit
      JOIN chain_phase_state phase
@@ -25,6 +27,17 @@ const PENDING_GENERATION_QUERY: &str = "SELECT audit.generation_token
      WHERE audit.chain_id = $1
      ORDER BY audit.attested_at DESC, audit.generation_token
      LIMIT 1";
+
+pub(crate) fn matches_active_redo(
+    previous: &PhaseStateRow,
+    redo_mode: &str,
+    range: BlockRange,
+) -> bool {
+    previous.redo_in_progress
+        && previous.redo_mode.as_deref() == Some(redo_mode)
+        && previous.redo_from_block_number == Some(range.from)
+        && previous.redo_to_block_number == Some(range.to)
+}
 
 pub(crate) struct ManifestAuthorityAttestationAudit {
     chain_id: String,
@@ -39,6 +52,10 @@ pub(crate) struct ManifestAuthorityAttestationAudit {
 }
 
 impl ManifestAuthorityAttestationAudit {
+    pub(crate) const fn replayed(&self) -> bool {
+        self.replayed
+    }
+
     pub(crate) fn emit(&self) {
         tracing::error!(
             event = "manifest_authority_watch_set_coverage_attested",
@@ -96,7 +113,7 @@ pub(crate) async fn record_or_resume(
     chain_id: &str,
     attestation: Option<AttestedManifestAuthority>,
     requested_range: BlockRange,
-    resume_same_redo: bool,
+    same_active_redo: bool,
     supplied_generation: Option<&str>,
     attested_by: &str,
 ) -> RunnerResult<Option<ManifestAuthorityAttestationAudit>> {
@@ -116,7 +133,7 @@ pub(crate) async fn record_or_resume(
                  disappeared during locked redo begin"
             ))
         })?;
-    if !resume_same_redo {
+    if !same_active_redo {
         return Err(RunnerError::new(
             ErrorKind::Configuration,
             format!(

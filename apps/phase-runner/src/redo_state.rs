@@ -4,6 +4,7 @@ use crate::{
     config::SourceConfig,
     error::{RunnerError, RunnerResult},
     phase::{BlockRange, PhaseName, PhaseProgress, RunMode},
+    redo_manifest_audit::{ManifestAuthorityAttestationAudit, matches_active_redo},
     state::PhaseStatus,
     transitions::{
         PhaseStateRow, invalid_transition, lock_chain_phase_state, redo_rerun_instruction,
@@ -17,8 +18,7 @@ pub(crate) struct RedoSession {
     range: BlockRange,
     recompute_flags: bool,
     stage_project_refresh_on_completion: bool,
-    pub(crate) manifest_authority_audit:
-        Option<crate::redo_manifest_audit::ManifestAuthorityAttestationAudit>,
+    pub(crate) manifest_authority_audit: Option<ManifestAuthorityAttestationAudit>,
 }
 pub(crate) enum RedoOutcome<'a> {
     Completed(&'a PhaseProgress),
@@ -112,21 +112,23 @@ pub(crate) async fn begin(
         ));
     }
     let redo_mode = redo_mode(mode)?;
-    let resume_same_redo = previous.redo_in_progress
-        && previous.redo_mode.as_deref() == Some(redo_mode)
-        && previous.redo_from_block_number == Some(execution_range.from)
-        && previous.redo_to_block_number == Some(execution_range.to)
-        && (!phase.writes_derived_data() || recorded_hash == Some(current_interpreter_hash));
-    let manifest_authority_audit = crate::redo_manifest_audit::record_or_resume(
+    let same_active_redo = matches_active_redo(&previous, redo_mode, execution_range);
+    let attestation_audit = crate::redo_manifest_audit::record_or_resume(
         &mut transaction,
         chain_id,
         manifest_attestation,
         execution_range,
-        resume_same_redo,
+        same_active_redo,
         supplied_manifest_authority_generation,
         attested_by,
     )
     .await?;
+    let same_active_audit = attestation_audit
+        .as_ref()
+        .is_some_and(ManifestAuthorityAttestationAudit::replayed);
+    let resume_same_epoch = same_active_redo
+        && (!phase.writes_derived_data() || recorded_hash == Some(current_interpreter_hash));
+    let preserve_started_at = resume_same_epoch || same_active_audit;
     sqlx::query(
         "
         UPDATE chain_phase_state
@@ -155,13 +157,13 @@ pub(crate) async fn begin(
             redo_current_block_hash = CASE WHEN $6 THEN redo_current_block_hash END,
             redo_target_block_number = CASE WHEN $6 THEN redo_target_block_number END,
             redo_target_block_hash = CASE WHEN $6 THEN redo_target_block_hash END,
-            input_content_hash = CASE WHEN $7 THEN $8 ELSE input_content_hash END,
+            input_content_hash = CASE WHEN $8 THEN $9 ELSE input_content_hash END,
             last_error = CASE
-                WHEN last_error LIKE $9
-                    THEN $10 || substring(last_error FROM char_length($11) + 1)
+                WHEN last_error LIKE $10
+                    THEN $11 || substring(last_error FROM char_length($12) + 1)
                 WHEN redo_in_progress THEN last_error
             END,
-            started_at = CASE WHEN $6 THEN started_at ELSE now() END,
+            started_at = CASE WHEN $7 THEN started_at ELSE now() END,
             finished_at = NULL,
             updated_at = now()
         WHERE chain_id = $1
@@ -173,7 +175,8 @@ pub(crate) async fn begin(
     .bind(redo_mode)
     .bind(execution_range.from)
     .bind(execution_range.to)
-    .bind(resume_same_redo)
+    .bind(resume_same_epoch)
+    .bind(preserve_started_at)
     .bind(phase.writes_derived_data())
     .bind(current_interpreter_hash)
     .bind(format!("{}%", crate::redo_stamp::REQUIRED_REDO_PREFIX))
@@ -199,7 +202,7 @@ pub(crate) async fn begin(
         range: execution_range,
         recompute_flags: matches!(mode, RunMode::RecomputeFlags(_)),
         stage_project_refresh_on_completion,
-        manifest_authority_audit,
+        manifest_authority_audit: attestation_audit,
     })
 }
 

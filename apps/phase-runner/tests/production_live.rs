@@ -31,8 +31,8 @@ use phase_runner::{
     interpret_phase::InterpretPhase,
     live_phase::LivePhase,
     phase::{
-        BlockRange, LoopbackPhase, Phase, PhaseContext, PhaseFuture, PhaseName, PhaseResume,
-        PhaseSet, RunMode,
+        BlockRange, LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName,
+        PhaseProgress, PhaseResume, PhaseSet, RunMode,
     },
     project_phase::ProjectPhase,
     rewind::rewind_to_ancestor,
@@ -125,6 +125,96 @@ impl Phase for PanickingInterpretPhase {
 
     fn run_batch(&self, _context: PhaseContext) -> PhaseFuture<'_> {
         Box::pin(async { panic!("forced second crash after audited redo restart") })
+    }
+}
+
+struct ProgressThenFailInterpretPhase {
+    attempts: AtomicUsize,
+}
+
+impl ProgressThenFailInterpretPhase {
+    const fn new() -> Self {
+        Self {
+            attempts: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Phase for ProgressThenFailInterpretPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Interpret
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            if attempt > 0 {
+                return Err(RunnerError::data_integrity(
+                    "forced interruption after interpreted redo progress",
+                ));
+            }
+            let range = context.mode.range().expect("fixture requires redo mode");
+            let current_number = range
+                .from
+                .checked_add(1)
+                .expect("fixture block number must not overflow");
+            let current = BlockMarker::new(current_number, block_hash(1, current_number))?;
+            let target = context
+                .available_heads
+                .expect("fixture requires readable redo heads")
+                .latest;
+            Ok(PhaseBatchOutcome::Continue(PhaseProgress {
+                current: Some(current),
+                target: Some(target),
+                ..PhaseProgress::default()
+            }))
+        })
+    }
+}
+
+struct PanicAfterObservingRedoResume {
+    observed: Arc<Mutex<Vec<Option<i64>>>>,
+}
+
+impl Phase for PanicAfterObservingRedoResume {
+    fn name(&self) -> PhaseName {
+        PhaseName::Interpret
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        self.observed
+            .lock()
+            .expect("resume observation lock must not be poisoned")
+            .push(context.resume.current.map(|marker| marker.number));
+        Box::pin(async { panic!("forced crash during interpreter content hash rotation restart") })
+    }
+}
+
+struct ObserveRedoResumeInterpretPhase {
+    observed: Arc<Mutex<Vec<Option<i64>>>>,
+    loopback: LoopbackPhase,
+}
+
+impl ObserveRedoResumeInterpretPhase {
+    fn new(observed: Arc<Mutex<Vec<Option<i64>>>>) -> Self {
+        Self {
+            observed,
+            loopback: LoopbackPhase::new(PhaseName::Interpret),
+        }
+    }
+}
+
+impl Phase for ObserveRedoResumeInterpretPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Interpret
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        self.observed
+            .lock()
+            .expect("resume observation lock must not be poisoned")
+            .push(context.resume.current.as_ref().map(|marker| marker.number));
+        self.loopback.run_batch(context)
     }
 }
 
@@ -1005,6 +1095,245 @@ async fn attestation_audit_survives_a_crash_before_telemetry_and_reemits_on_rest
         completed_token_error
             .to_string()
             .contains("is not discharging a manifest-authority marker")
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn attested_redo_restart_resets_progress_after_interpreter_hash_rotation() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_attested_redo_cross_hash_restart").await?;
+    let chain = "attested-redo-interpreter-content-hash-restart";
+    let generation = "interpreter-content-hash-restart-generation";
+    seed_branch(scratch.pool(), chain, 1, 2, None).await?;
+    publish(scratch.pool(), chain, 1, 2, 0, 0).await?;
+    seed_completed_spine(scratch.pool(), chain, 2, &block_hash(1, 2)).await?;
+    seed_empty_watch_manifest(scratch.pool(), chain).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET current_block_number = 1, current_block_hash = $2,
+             target_block_number = 1, target_block_hash = $2,
+             live_handoff_block_number = 1, live_handoff_block_hash = $2
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain)
+    .bind(block_hash(1, 1))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE ingest_cursors
+         SET next_block_number = 2, target_block_number = 1,
+             last_processed_block_number = 1, last_processed_block_hash = $2
+         WHERE chain_id = $1 AND source_key = 'rpc'",
+    )
+    .bind(chain)
+    .bind(block_hash(1, 1))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET input_content_hash = $2
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .bind(manifest_authority_marker(generation))
+    .execute(scratch.pool())
+    .await?;
+
+    // The operator requests the finite-ingest range 0..=1. Interpret extends the effective
+    // audited range through the readable Live lineage and recorded Interpret head at block 2.
+    let interrupted = runner_with_interpret_phase(
+        &scratch,
+        "production-attested-redo-before-hash-rotation",
+        Arc::new(ProgressThenFailInterpretPhase::new()),
+    )?
+    .with_watch_set_coverage_attestation(chain, generation)
+    .redo(
+        &live_chain(chain, "http://unused.invalid")?,
+        RedoPhase::Phase(PhaseName::Interpret),
+        BlockRange::new(0, 1)?,
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("the fixture must interrupt after committing redo progress");
+    assert!(
+        interrupted
+            .to_string()
+            .contains("forced interruption after interpreted redo progress")
+    );
+    let h1_progress: (Option<i64>, Option<String>, bool) = sqlx::query_as(
+        "SELECT redo_current_block_number, input_content_hash, redo_in_progress
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(h1_progress.0, Some(1));
+    assert_eq!(h1_progress.1.as_deref(), Some(INTERPRETER_CONTENT_HASH));
+    assert!(h1_progress.2);
+
+    // Model an interpreter content hash rotation (docs/glossary.md#interpreter-content-hash)
+    // from H1 to this binary's H2 after the audited redo committed a prefix. The durable audit
+    // has no hash field, while phase state records the prior interpreter content hash.
+    let simulated_h1 = "keccak256:simulated-interpreter-h1";
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET input_content_hash = $2
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
+    )
+    .bind(chain)
+    .bind(simulated_h1)
+    .execute(scratch.pool())
+    .await?;
+
+    let tokenless_error = loopback_runner(&scratch, "production-content-hash-tokenless")?
+        .redo(
+            &live_chain(chain, "http://unused.invalid")?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 2)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a restart after an interpreter content hash rotation must require its token");
+    assert!(tokenless_error.to_string().contains(generation));
+
+    let wrong_generation = "wrong-interpreter-content-hash-generation";
+    let wrong_token_error = loopback_runner(&scratch, "production-content-hash-wrong-token")?
+        .with_watch_set_coverage_attestation(chain, wrong_generation)
+        .redo(
+            &live_chain(chain, "http://unused.invalid")?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 2)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("an interpreter content hash rotation restart must reject another generation");
+    assert!(wrong_token_error.to_string().contains(wrong_generation));
+    assert!(wrong_token_error.to_string().contains(generation));
+
+    let changed_range_error = loopback_runner(&scratch, "production-content-hash-wrong-range")?
+        .with_watch_set_coverage_attestation(chain, generation)
+        .redo(
+            &live_chain(chain, "http://unused.invalid")?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(1, 2)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("an interpreter content hash rotation restart must reject a changed range");
+    assert_eq!(
+        changed_range_error.kind(),
+        phase_runner::error::ErrorKind::ContentHashMismatch
+    );
+    assert!(changed_range_error.to_string().contains("full range 0..=2"));
+
+    let reset_resume = Arc::new(Mutex::new(Vec::new()));
+    let crashing_restart = runner_with_interpret_phase(
+        &scratch,
+        "production-attested-redo-content-hash-crash",
+        Arc::new(PanicAfterObservingRedoResume {
+            observed: Arc::clone(&reset_resume),
+        }),
+    )?
+    .with_watch_set_coverage_attestation(chain, generation);
+    let restart_chain = live_chain(chain, "http://unused.invalid")?;
+    let crashed = tokio::spawn(async move {
+        crashing_restart
+            .redo(
+                &restart_chain,
+                RedoPhase::Phase(PhaseName::Interpret),
+                BlockRange::new(0, 2).expect("valid audited restart range"),
+                CancellationToken::new(),
+            )
+            .await
+    })
+    .await
+    .expect_err("the matching interpreter content hash restart must reach the crashing phase");
+    assert!(crashed.is_panic());
+    assert_eq!(
+        *reset_resume
+            .lock()
+            .expect("resume observation lock must not be poisoned"),
+        vec![None],
+        "the new hash must restart the audited range without the H1 redo cursor"
+    );
+    let reset_state: (Option<i64>, Option<i64>, Option<String>, bool) = sqlx::query_as(
+        "SELECT phase.redo_current_block_number, phase.redo_target_block_number,
+                phase.input_content_hash, phase.started_at = audit.attested_at
+         FROM chain_phase_state phase
+         JOIN manifest_authority_attestations audit
+           ON audit.chain_id = phase.chain_id
+          AND audit.phase_name = phase.phase_name
+          AND audit.generation_token = $2
+         WHERE phase.chain_id = $1 AND phase.phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .bind(generation)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        reset_state,
+        (None, None, Some(INTERPRETER_CONTENT_HASH.to_owned()), true),
+        "interpreter content hash rotation must clear redo progress, adopt H2, and retain the audit join"
+    );
+
+    let completion_resume = Arc::new(Mutex::new(Vec::new()));
+    runner_with_interpret_phase(
+        &scratch,
+        "production-attested-redo-content-hash-complete",
+        Arc::new(ObserveRedoResumeInterpretPhase::new(Arc::clone(
+            &completion_resume,
+        ))),
+    )?
+    .with_watch_set_coverage_attestation(chain, generation)
+    .redo(
+        &live_chain(chain, "http://unused.invalid")?,
+        RedoPhase::Phase(PhaseName::Interpret),
+        BlockRange::new(0, 2)?,
+        CancellationToken::new(),
+    )
+    .await?;
+    assert_eq!(
+        *completion_resume
+            .lock()
+            .expect("resume observation lock must not be poisoned"),
+        vec![None],
+        "a crash before H2 progress must still restart from the audited range beginning"
+    );
+    let completed: (Option<String>, Option<String>, bool, bool, i64, i64, i64) = sqlx::query_as(
+        "SELECT interpret.input_content_hash, project.input_content_hash,
+                interpret.redo_in_progress, project.redo_in_progress,
+                audit.redo_from_block_number, audit.redo_to_block_number,
+                (SELECT count(*)
+                 FROM manifest_authority_attestations counted
+                 WHERE counted.chain_id = $1 AND counted.generation_token = $2)
+         FROM chain_phase_state interpret
+         JOIN chain_phase_state project
+           ON project.chain_id = interpret.chain_id
+          AND project.phase_name = 'project'
+         JOIN manifest_authority_attestations audit
+           ON audit.chain_id = interpret.chain_id
+          AND audit.phase_name = interpret.phase_name
+          AND audit.generation_token = $2
+         WHERE interpret.chain_id = $1 AND interpret.phase_name = 'interpret'",
+    )
+    .bind(chain)
+    .bind(generation)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        completed,
+        (
+            Some(INTERPRETER_CONTENT_HASH.to_owned()),
+            Some(INTERPRETER_CONTENT_HASH.to_owned()),
+            false,
+            false,
+            0,
+            2,
+            1,
+        ),
+        "the completed full walk must stamp H2 and the full audited range exactly once"
     );
 
     scratch.cleanup().await
@@ -3090,6 +3419,27 @@ fn live_chain(chain: &str, endpoint: &str) -> phase_runner::error::RunnerResult<
         )?],
         false,
     )
+}
+
+fn runner_with_interpret_phase(
+    scratch: &ScratchDatabase,
+    instance_id: &str,
+    interpret: Arc<dyn Phase>,
+) -> Result<PhaseRunner> {
+    let phases = PhaseSet::with_ingest_interpret_project_and_live(
+        Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+        interpret,
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(LoopbackPhase::new(PhaseName::Verify)),
+        Arc::new(LoopbackPhase::new(PhaseName::Live)),
+    )?;
+    Ok(PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        instance_id,
+        fast_timing(),
+    )?)
 }
 
 fn loopback_runner(scratch: &ScratchDatabase, instance_id: &str) -> Result<PhaseRunner> {

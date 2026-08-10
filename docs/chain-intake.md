@@ -75,10 +75,11 @@ entering live follow. A mismatch is non-retryable and stops only that chain.
 
 Manifest synchronization uses the schema-v2 repository and checks the selected
 [deployment profile](glossary.md#deployment-profile) fingerprint against the
-interpreter content hash before a phase runs. Manifest declarations and current
-discovery edges determine admission and the watch filter. Discovery does not
-infer missing historical facts: a newly admitted source must return to `ingest`
-for its required range before `interpret` can derive it.
+[interpreter content hash](glossary.md#interpreter-content-hash) before a phase
+runs. Manifest declarations and current discovery edges determine admission and
+the watch filter. Discovery does not infer missing historical facts: a newly
+admitted source must return to `ingest` for its required range before
+`interpret` can derive it.
 
 ## Sources and range progress
 
@@ -296,18 +297,22 @@ ID, and attestation time. The runner emits error-level telemetry from that row
 after commit and re-emits it on restart only after the locked begin matches and
 commits the same interrupted redo.
 The same token-valued command may resume that exact active, audited redo; the
-token remains invalid everywhere else.
+token remains invalid everywhere else. If the interpreter content hash changes
+while the redo is interrupted, the same token preserves the audit association,
+but the new binary clears the redo cursor written under the prior interpreter
+content hash and walks the exact audited range again from its beginning.
 The system cannot verify the fetch or the no-widening review. This conservative
 step applies to every manifest-authority change, including ranges fully covered
 by finite ingest cursors, until issue #376 binds watch-plan evidence to the
 loaded facts. Cursors and readable lineage prove only the facts selected by the
-watch plan active when each block was loaded. Plain code-hash rotations remain
-flagless. Verify redo uses the same scanner as normal verification,
-rechecks the requested finalized range, and persists the level reported by the
-phase. A partial redo retains the level for the full recorded extent; a
-full-extent redo can report the level fixed by the reference source. Its source
-and Base seam preflight happens before redo state is created. A mismatch retains
-the resumable redo marker and its diagnosis;
+watch plan active when each block was loaded. Interpreter content hash rotations
+remain flagless only when neither a current manifest-authority marker nor an
+active audited redo exists. Verify redo uses the same scanner as normal
+verification, rechecks the requested finalized range, and persists the level
+reported by the phase. A partial redo retains the level for the full recorded
+extent; a full-extent redo can report the level fixed by the reference source.
+Its source and Base seam preflight happens before redo state is created. A
+mismatch retains the resumable redo marker and its diagnosis;
 rerunning the same command after wipe-and-resync repair resumes the attempt.
 The range end must already be `canonical`, `safe`, or `finalized`; an
 `observed` staging row is rejected before a redo session is claimed.

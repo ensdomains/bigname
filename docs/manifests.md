@@ -351,20 +351,26 @@ and makes an earlier attestation stale.
 The redo-begin transaction appends one immutable audit row for the chain,
 Interpret phase, invalidation token, authority fingerprint, redo range, runner
 instance ID, and attestation time. That transaction also adopts the new
-interpreter hash, so the marker cannot be discharged without its audit row.
+[interpreter content hash](glossary.md#interpreter-content-hash), so the marker
+cannot be discharged without its audit row.
 The error-level structured telemetry is emitted from the durable row after
 commit. If the runner stops before that emission completes, the next redo
 attempt re-emits the row only after the locked begin matches the same active
 redo and commits. The same token-valued command is valid for that exact active,
 audited redo; once the redo completes, passing the token again is a hard error.
+If a binary upgrade changes the interpreter content hash while the redo is
+interrupted, re-run that exact range with the same token. The new binary retains
+the audit association but clears progress written under the prior hash and
+walks the range again from its beginning.
 
 The system cannot verify that the historical fetch or the no-widening review
 happened. Supplying the current token records the operator's responsibility for
 that check until issue #376 binds the watch-plan fingerprint to coverage
 evidence. Every
 authority-marked Interpret redo requires the flag, whether its range is covered
-by finite cursors, readable lineage, or both. Plain code-hash rotations remain
-flagless.
+by finite cursors, readable lineage, or both. An interpreter content hash
+rotation with neither a current manifest-authority marker nor an active audited
+redo remains flagless.
 
 ## Manifest change propagation
 

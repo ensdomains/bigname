@@ -207,21 +207,32 @@ attestation time. The audit row is committed in the same transaction that
 begins the marker-discharging redo and is unique for that chain, phase, and
 invalidation generation. A restart re-emits it only after the locked begin
 matches and commits the same active redo; rerunning the same token-valued
-command is valid only for that exact active, audited redo. The locked begin rejects a stale token,
-including one from an earlier transition to the same authority. The system
-cannot verify that the fetch or no-widening review happened; the attestation is the operator's
-responsibility. Do not edit cursors. The same conservative gate applies to
+command is valid only for that exact active, audited redo. If a binary upgrade
+changes the [interpreter content hash](glossary.md#interpreter-content-hash)
+while that redo is interrupted, use the same token and exact audited range. The
+locked begin keeps the audit association but discards progress written under
+the prior hash, so Interpret restarts the range from its beginning under the
+new hash. Later interruptions under the new hash resume normally. The locked
+begin rejects a stale token, including one from an earlier transition to the
+same authority. The system cannot verify that the fetch or no-widening review
+happened; the attestation is the operator's responsibility. Do not edit cursors.
+The same conservative gate applies to
 non-widening changes and to ranges fully covered by finite cursors until issue
-#376 binds watch-plan evidence to loaded facts. Plain code-hash rotations remain
-flagless. When a
-full-history Interpret redo for a content-hash rotation starts at
-the finite ingest bounds after Live has advanced, the runner extends Interpret
+#376 binds watch-plan evidence to loaded facts. An interpreter content hash
+rotation with neither a current manifest-authority marker nor an active audited
+redo remains flagless. When a full-history Interpret redo for an interpreter
+content hash rotation starts at the finite ingest bounds after Live has
+advanced, the runner extends Interpret
 through its recorded head and stamps the range onto Project clipped to
 Project's own recorded head — the same range unless a crash between the two
 phases' live-cycle advances left Project one block behind. Run or resume
 the stamped Project range exactly as recorded. Project hash adoption uses its
 recorded head rather than narrowing the stamp to the older ingest handoff, and
-an interrupted attempt keeps the live-extended range.
+an interrupted attempt keeps the live-extended range. When that interruption
+belongs to an attested Interpret redo from the prior interpreter content hash,
+restart the same audited range with its token; the range restarts from its
+beginning rather than resuming the cursor written under the prior interpreter
+content hash.
 `recompute-flags` recalculates label and name-surface normalization metadata
 under the current normalizer and refreshes the scoped primary-name projection.
 Names that remain active or remain shadow complete without replay. Names that
@@ -410,10 +421,10 @@ export/import mechanism rather than this replacement procedure.
 
 The project-at-head guard also binds the API's compiled interpreter content
 hash. `bigname-api` and `phase-runner` must therefore come from the same commit.
-After any interpreter-hash rotation, deploy the new phase runner and finish its
-required re-walk before deploying the matching API; deploying the API first
-makes all v2 snapshot-selected reads return `409 stale` until the new project
-generation is published. This includes indexed reads because snapshot
+After any interpreter content hash rotation, deploy the new phase runner and
+finish its required re-walk before deploying the matching API; deploying the
+API first makes all v2 snapshot-selected reads return `409 stale` until the new
+project generation is published. This includes indexed reads because snapshot
 selection itself requires the matching project publication before any
 projection row is admitted.
 

@@ -594,6 +594,15 @@ request.
 used by the old runtime's raw-log mutation fence and replay caches. Its Rust
 writer and consumers were deleted before the legacy schema was dropped.
 
+**Interpreter content hash** — the build-time identifier for checked-in inputs
+that can change Interpret or Project output. Derived phase state records this
+hash, and a binary with a different value must re-walk the complete retained
+range before normal derived writes continue. It covers interpreter, projection,
+manifest, ABI, normalization, provider-response decoding, and selected
+dependency inputs as detailed under [interpretation
+replay](storage.md#interpretation-replay). It is not an Ethereum contract
+bytecode hash.
+
 **Block-revision evidence floor** — the schema-migration-era lower bound used by the
 old runtime's raw-log revision evidence. Its tables remain historical; the
 Stage B runtime no longer computes or consumes this floor.
