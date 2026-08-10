@@ -387,14 +387,23 @@ namespace set at request time from recognized public namespaces whose active
 current head of the namespace's authority chain in the selected deployment.
 Bare search and public reverse lookup filter current rows and counts to exactly
 that set, and public reverse lookup builds its snapshot scope from the same
-authority chains. Their
-namespace-omitted cursors bind that derived set and fail closed if it changes.
-An explicit recognized namespace keeps its existing behavior, including `409
-conflict` when the deployment cannot serve its required chain. Completeness
-metadata is relative to the effective request set, so omitting a namespace does
-not make a response partial merely because the deployment does not serve
-another public namespace. A bare cross-namespace read returns `409 conflict`
-when that effective set is empty.
+authority chains. After reading a bare search page, the API reloads the active
+manifest declarations, selected authority chain heads, and completed projection
+publication generations captured during derivation; any change returns `409
+conflict` instead of serving a response assembled across deployment states.
+Public reverse lookup reloads its captured active manifest declarations before
+the route's existing head and projection-publication check: a manifest change
+returns `409 conflict`, while a head or publication change returns `409 stale`.
+Their namespace-omitted cursors bind that derived set and fail closed if it
+changes. Search with an explicit recognized `namespace` bypasses public
+namespace derivation and reads that namespace's current rows without a
+deployment-readiness gate, preserving the pre-derivation behavior. Name-only
+lookup likewise keeps its existing name snapshot selection and does not derive
+the public set; only address inputs invoke public reverse derivation.
+Completeness metadata is relative to the effective request set, so omitting a
+namespace does not make a response partial merely because the deployment does
+not serve another public namespace. A bare cross-namespace read returns `409
+conflict` when that effective set is empty.
 
 Unknown or undocumented query parameters are rejected with `400 invalid_input`
 on every `v2` route. As a documented temporary exception, latest-state

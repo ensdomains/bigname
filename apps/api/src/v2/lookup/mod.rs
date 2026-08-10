@@ -47,7 +47,7 @@ use parse::{
     ensure_lookup_batch_limit, parse_address_input, parse_lookup_json_body, parse_lookup_namespace,
     parse_lookup_profile, parse_name_input,
 };
-use scope::{lookup_public_namespaces, lookup_snapshot_scope};
+use scope::{lookup_public_namespaces, lookup_snapshot_scope, revalidate_lookup_public_namespaces};
 
 const EXACT_RELATION_SCAN_MULTIPLIER: u64 = 10;
 
@@ -131,6 +131,9 @@ pub(crate) async fn get_lookup(
         &mut results,
     )
     .await?;
+    #[cfg(test)]
+    head::served_head_revalidation_test_hooks::run(&state.pool).await?;
+    revalidate_lookup_public_namespaces(&state, public_namespaces.as_ref()).await?;
     if let Some(served_head) = served_head.as_ref() {
         revalidate_served_head(&state.pool, served_head).await?;
     }

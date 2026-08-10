@@ -148,15 +148,145 @@ async fn v2_search_bare_scope_matches_the_served_deployment_namespaces() -> Resu
     assert_eq!(ens_only["meta"], json!({}));
     assert!(ens_only["meta"].get("completeness").is_none());
 
-    let explicit_unserved = v2_search_response_for_database_with_public_namespaces(
+    let explicit_basenames = v2_search_payload_for_database_with_public_namespaces(
         &database,
         "/v2/search?q=alpha&namespace=basenames",
         &["ens"],
     )
     .await?;
-    assert_eq!(explicit_unserved.status(), StatusCode::CONFLICT);
     assert_eq!(
-        read_json::<Value>(explicit_unserved).await?["error"]["code"],
+        v2_search_names(
+            explicit_basenames["data"]
+                .as_array()
+                .expect("explicit Basenames data")
+        ),
+        vec!["alpha.base.eth"]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_search_explicit_namespace_bypasses_broken_public_derivation() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    for (chain, deployment) in [
+        ("ethereum-mainnet", "ens_v1"),
+        ("ethereum-sepolia", "ens_v2_sepolia_post_audit"),
+    ] {
+        database
+            .insert_manifest(
+                "ens",
+                "ens_registry",
+                chain,
+                deployment,
+                1,
+                "active",
+                "ensip15@ens-normalize-0.1.1",
+            )
+            .await?;
+    }
+    let state = AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    assert!(crate::v2::support::derive_public_namespace_set(&state).await.is_err());
+
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/v2/search?q=alpha&namespace=basenames")
+                .body(Body::empty())
+                .expect("search request must build"),
+        )
+        .await?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {payload:#}");
+    assert_eq!(
+        v2_search_names(payload["data"].as_array().expect("explicit search data")),
+        vec!["alpha.base.eth"]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_search_rejects_manifest_change_between_derivation_and_row_read() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    database
+        .insert_manifest(
+            "ens",
+            "ens_v1_registry_l1",
+            "ethereum-mainnet",
+            "ens_v1",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    database
+        .insert_manifest(
+            "basenames",
+            "basenames_base_registry",
+            "base-mainnet",
+            "basenames_v1",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 208,
+                "block_hash": "0xsearch-coherence-ethereum",
+                "timestamp": "2026-08-10T00:03:28Z"
+            },
+            "base": {
+                "chain_id": "base-mainnet",
+                "block_number": 209,
+                "block_hash": "0xsearch-coherence-base",
+                "timestamp": "2026-08-10T00:03:29Z"
+            }
+        }))
+        .await?;
+    let (_guard, control) =
+        crate::v2::search_public_namespace_read_test_hooks::install(&database.lookup_pool).await?;
+    let state = AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v2/search?q=alpha")
+                    .body(Body::empty())
+                    .expect("search request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    sqlx::query(
+        "UPDATE bigname_phase.manifest_versions
+         SET rollout_status = 'deprecated'
+         WHERE namespace = 'basenames' AND rollout_status = 'active'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("search coherence request task panicked")?
+        .context("search coherence request failed")?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        read_json::<Value>(response).await?["error"]["code"],
         json!("conflict")
     );
 
@@ -419,6 +549,170 @@ async fn v2_search_paginates_without_overlap_or_gap() -> Result<()> {
     );
     assert_eq!(page["page"]["has_more"], json!(false));
     assert_eq!(page["page"]["next_cursor"], Value::Null);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_search_rejects_project_republication_during_public_read() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    database
+        .insert_manifest(
+            "ens",
+            "ens_v1_registry_l1",
+            "ethereum-mainnet",
+            "ens_v1",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    database
+        .insert_manifest(
+            "basenames",
+            "basenames_base_registry",
+            "base-mainnet",
+            "basenames_v1",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 208,
+                "block_hash": "0xsearch-generation-ethereum",
+                "timestamp": "2026-08-10T00:03:28Z"
+            },
+            "base": {
+                "chain_id": "base-mainnet",
+                "block_number": 209,
+                "block_hash": "0xsearch-generation-base",
+                "timestamp": "2026-08-10T00:03:29Z"
+            }
+        }))
+        .await?;
+    let (_guard, control) =
+        crate::v2::search_public_namespace_read_test_hooks::install(&database.lookup_pool).await?;
+    let state = AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v2/search?q=alpha")
+                    .body(Body::empty())
+                    .expect("search request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    sqlx::query(
+        "UPDATE bigname_phase.chain_phase_state
+         SET updated_at = updated_at
+         WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("search generation-change request task panicked")?
+        .context("search generation-change request failed")?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        read_json::<Value>(response).await?["error"]["code"],
+        json!("conflict")
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_search_allows_manifest_freshness_change_without_authority_change() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    database
+        .insert_manifest(
+            "ens",
+            "ens_v1_registry_l1",
+            "ethereum-mainnet",
+            "ens_v1",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    database
+        .insert_manifest(
+            "basenames",
+            "basenames_base_registry",
+            "base-mainnet",
+            "basenames_v1",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 208,
+                "block_hash": "0xsearch-refresh-ethereum",
+                "timestamp": "2026-08-10T00:03:28Z"
+            },
+            "base": {
+                "chain_id": "base-mainnet",
+                "block_number": 209,
+                "block_hash": "0xsearch-refresh-base",
+                "timestamp": "2026-08-10T00:03:29Z"
+            }
+        }))
+        .await?;
+    let (_guard, control) =
+        crate::v2::search_public_namespace_read_test_hooks::install(&database.lookup_pool).await?;
+    let state = AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v2/search?q=alpha")
+                    .body(Body::empty())
+                    .expect("search request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    sqlx::query(
+        "UPDATE bigname_phase.manifest_versions
+         SET loaded_at = loaded_at + INTERVAL '1 second'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("search manifest-refresh request task panicked")?
+        .context("search manifest-refresh request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        v2_search_names(payload["data"].as_array().expect("search data")),
+        vec!["alpha.base.eth", "alpha.eth"]
+    );
 
     database.cleanup().await
 }

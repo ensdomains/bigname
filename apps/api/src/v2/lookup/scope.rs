@@ -5,11 +5,13 @@ use tracing::error;
 
 use crate::{
     AppState,
-    v2::support::{PublicNamespaceSet, derive_public_namespace_set},
+    v2::support::{
+        PublicNamespaceSet, derive_public_namespace_set, revalidate_lookup_public_namespace_set,
+    },
 };
 
 use super::{super::chains::deployment_profile_for_slug, parse::ParsedNameLookup};
-use crate::v2::{V2Error, V2Result, v2_exact_name_snapshot_scope};
+use crate::v2::{V2Error, V2Result, api_error_to_v2, v2_exact_name_snapshot_scope};
 
 pub(super) async fn lookup_snapshot_scope(
     state: &AppState,
@@ -83,6 +85,18 @@ pub(super) async fn lookup_public_namespaces(state: &AppState) -> V2Result<Publi
             V2Error::internal_error("failed to select lookup namespaces")
         })?;
     Ok(namespaces)
+}
+
+pub(super) async fn revalidate_lookup_public_namespaces(
+    state: &AppState,
+    namespaces: Option<&PublicNamespaceSet>,
+) -> V2Result<()> {
+    if let Some(namespaces) = namespaces {
+        revalidate_lookup_public_namespace_set(state, namespaces)
+            .await
+            .map_err(api_error_to_v2)?;
+    }
+    Ok(())
 }
 
 async fn lookup_public_union_snapshot_scope(

@@ -141,8 +141,11 @@ Field ownership:
   the deployment. Because projection publication is incremental, an unchanged
   row target may precede the selected head; it may not be ahead, and a
   same-height target must match the selected hash. Lookup revalidates both
-  `chain_heads` and that generation after the read. An invalid target, phase
-  lag, or mid-request head/projection change returns `409 stale`.
+  `chain_heads` and that generation after the read. Before that check, public
+  reverse lookup also reloads the active manifest declarations captured during
+  namespace derivation; an active manifest declaration change returns `409
+  conflict`. An invalid target, phase lag, readiness change, or other
+  mid-request head/projection change returns `409 stale`.
 - Replaces (v1): `POST /v1/identity:lookup`.
 
 ### `GET /v2/status`
@@ -693,12 +696,15 @@ Field ownership:
 - Snapshot behavior: search rows come from current state. The response omits
   `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
   validity claim. True as-of search enumeration is deferred to the
-  revision-bound storage follow-up.
+  revision-bound storage follow-up. Bare search reloads the active manifest
+  declarations, selected authority chain heads, and project generations after
+  reading its page; a change returns `409 conflict`.
 - Status semantics: no matches returns `200` with empty `data`. `q` is
   required; a missing or empty `q` returns `400 invalid_input`. An explicit
-  recognized namespace that the deployment does not serve returns `409
-  conflict`; bare search returns the same error when no public namespace is
-  ready.
+  recognized namespace bypasses public namespace derivation and reads its
+  current rows without a deployment-readiness gate. Bare search returns `409
+  conflict` when no public namespace is ready or when its captured deployment
+  state changes during the read.
 - Replaces (v1): search, suggestion, and exact-name-filter uses of
   `GET /v1/names`; exact name profiles move to `GET /v2/names/{name}`.
 

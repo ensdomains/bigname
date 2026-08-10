@@ -1,12 +1,26 @@
 use super::*;
 use std::sync::Arc;
 
-use bigname_manifests::load_namespace_manifest_snapshot;
+use bigname_manifests::{ActiveManifestVersion, load_namespace_manifest_snapshot};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PublicNamespaceReadToken {
+    selected: SelectedSnapshot,
+    project_generations: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PublicNamespaceManifestToken {
+    namespace: String,
+    manifests: Vec<ActiveManifestVersion>,
+    declaration_revisions: Vec<Option<String>>,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct PublicNamespaceDeployment {
     namespace: String,
     scope: SnapshotSelectionScope,
+    read_token: Option<PublicNamespaceReadToken>,
 }
 
 impl PublicNamespaceDeployment {
@@ -18,17 +32,22 @@ impl PublicNamespaceDeployment {
 #[derive(Clone, Debug)]
 pub(crate) struct PublicNamespaceSet {
     deployments: Arc<[PublicNamespaceDeployment]>,
+    manifest_tokens: Arc<[PublicNamespaceManifestToken]>,
     names: Arc<[String]>,
 }
 
 impl PublicNamespaceSet {
-    fn new(deployments: Vec<PublicNamespaceDeployment>) -> Self {
+    fn new(
+        deployments: Vec<PublicNamespaceDeployment>,
+        manifest_tokens: Vec<PublicNamespaceManifestToken>,
+    ) -> Self {
         let names = deployments
             .iter()
             .map(|deployment| deployment.namespace.clone())
             .collect::<Vec<_>>();
         Self {
             deployments: Arc::from(deployments),
+            manifest_tokens: Arc::from(manifest_tokens),
             names: Arc::from(names),
         }
     }
@@ -50,6 +69,19 @@ impl PublicNamespaceSet {
             .iter()
             .any(|deployment| deployment.namespace == namespace)
     }
+
+    fn shares_read_view(&self, other: &Self) -> bool {
+        self.manifest_tokens == other.manifest_tokens
+            && self.deployments.len() == other.deployments.len()
+            && self
+                .deployments
+                .iter()
+                .zip(other.deployments.iter())
+                .all(|(expected, current)| {
+                    expected.namespace == current.namespace
+                        && expected.read_token == current.read_token
+                })
+    }
 }
 
 pub(crate) async fn derive_public_namespace_set(state: &AppState) -> ApiResult<PublicNamespaceSet> {
@@ -67,34 +99,52 @@ pub(crate) async fn derive_public_namespace_set(state: &AppState) -> ApiResult<P
                 deployments.push(PublicNamespaceDeployment {
                     namespace: namespace.clone(),
                     scope,
+                    read_token: None,
                 });
             }
         }
-        return Ok(PublicNamespaceSet::new(deployments));
+        return Ok(PublicNamespaceSet::new(deployments, Vec::new()));
     }
 
+    let manifest_tokens = load_public_namespace_manifest_tokens(&state.pool).await?;
+    derive_public_namespace_set_from_manifests(state, manifest_tokens).await
+}
+
+async fn derive_public_namespace_set_from_manifests(
+    state: &AppState,
+    manifest_tokens: Vec<PublicNamespaceManifestToken>,
+) -> ApiResult<PublicNamespaceSet> {
     let mut deployments = Vec::new();
-    for namespace in [BASENAMES_NAMESPACE, "ens"] {
-        let snapshot = load_namespace_manifest_snapshot(&state.pool, namespace)
-            .await
-            .map_err(|_| ApiError::internal_error("failed to load public namespace manifests"))?;
-        let active_chains = snapshot
+    for manifest_token in &manifest_tokens {
+        let active_chains = manifest_token
             .manifests
             .iter()
             .map(|manifest| manifest.chain.as_str())
             .collect::<BTreeSet<_>>();
         let Some(scope) =
-            public_namespace_snapshot_scope(&state.pool, namespace, &active_chains).await?
+            public_namespace_snapshot_scope(&state.pool, &manifest_token.namespace, &active_chains)
+                .await?
         else {
             continue;
         };
         let input = SnapshotSelectorInput::new(None, None, SnapshotConsistency::Head)
             .map_err(snapshot_selection_api_error)?;
         match resolve_exact_name_snapshot_selection(&state.pool, &scope, &input).await {
-            Ok(_) => deployments.push(PublicNamespaceDeployment {
-                namespace: namespace.to_owned(),
-                scope,
-            }),
+            Ok(selected) => {
+                let Some(project_generations) =
+                    load_public_namespace_project_generations(&state.pool, &selected).await?
+                else {
+                    continue;
+                };
+                deployments.push(PublicNamespaceDeployment {
+                    namespace: manifest_token.namespace.clone(),
+                    scope,
+                    read_token: Some(PublicNamespaceReadToken {
+                        selected,
+                        project_generations,
+                    }),
+                });
+            }
             Err(error)
                 if matches!(
                     error.kind(),
@@ -104,7 +154,182 @@ pub(crate) async fn derive_public_namespace_set(state: &AppState) -> ApiResult<P
         }
     }
 
-    Ok(PublicNamespaceSet::new(deployments))
+    Ok(PublicNamespaceSet::new(deployments, manifest_tokens))
+}
+
+pub(crate) async fn revalidate_public_namespace_set(
+    state: &AppState,
+    expected: &PublicNamespaceSet,
+) -> ApiResult<()> {
+    let current = derive_public_namespace_set(state).await?;
+    if expected.shares_read_view(&current) {
+        return Ok(());
+    }
+
+    Err(ApiError {
+        status: StatusCode::CONFLICT,
+        code: "conflict",
+        message: "public namespace authority changed while the request was being read".to_owned(),
+    })
+}
+
+pub(crate) async fn revalidate_lookup_public_namespace_set(
+    state: &AppState,
+    expected: &PublicNamespaceSet,
+) -> ApiResult<()> {
+    if state.public_namespaces_override().is_some() {
+        let current = derive_public_namespace_set(state).await?;
+        return require_same_public_namespace_names(expected, &current);
+    }
+
+    let manifest_tokens = load_public_namespace_manifest_tokens(&state.pool).await?;
+    if expected.manifest_tokens.as_ref() != manifest_tokens.as_slice() {
+        return Err(public_namespace_manifest_conflict());
+    }
+    let current =
+        derive_public_namespace_set_from_manifests(state, manifest_tokens.clone()).await?;
+    let reloaded_manifest_tokens = load_public_namespace_manifest_tokens(&state.pool).await?;
+    if manifest_tokens != reloaded_manifest_tokens {
+        return Err(public_namespace_manifest_conflict());
+    }
+    require_same_public_namespace_names(expected, &current)
+}
+
+fn require_same_public_namespace_names(
+    expected: &PublicNamespaceSet,
+    current: &PublicNamespaceSet,
+) -> ApiResult<()> {
+    if expected.names == current.names {
+        return Ok(());
+    }
+
+    Err(ApiError {
+        status: StatusCode::CONFLICT,
+        code: "stale",
+        message: "public namespace readiness changed while the request was being read".to_owned(),
+    })
+}
+
+fn public_namespace_manifest_conflict() -> ApiError {
+    ApiError {
+        status: StatusCode::CONFLICT,
+        code: "conflict",
+        message: "active public namespace manifests changed while the request was being read"
+            .to_owned(),
+    }
+}
+
+async fn load_public_namespace_manifest_tokens(
+    pool: &PgPool,
+) -> ApiResult<Vec<PublicNamespaceManifestToken>> {
+    let mut tokens = Vec::new();
+    for namespace in [BASENAMES_NAMESPACE, "ens"] {
+        let snapshot = load_namespace_manifest_snapshot(pool, namespace)
+            .await
+            .map_err(|_| ApiError::internal_error("failed to load public namespace manifests"))?;
+        if !snapshot.manifests.is_empty() {
+            let revision_rows = sqlx::query_as::<_, (String, String, String, String, String)>(
+                r#"
+                SELECT DISTINCT ON (
+                    source_family,
+                    chain_id,
+                    manifest_version,
+                    raw_fact_ref ->> 'deployment_epoch'
+                )
+                    source_family,
+                    chain_id,
+                    manifest_version::TEXT,
+                    raw_fact_ref ->> 'deployment_epoch',
+                    event_identity
+                FROM bigname_phase.normalized_events
+                WHERE namespace = $1
+                  AND event_kind = 'SourceManifestUpdated'
+                  AND derivation_kind = 'manifest_sync'
+                  AND canonicality_state = 'finalized'
+                ORDER BY
+                    source_family,
+                    chain_id,
+                    manifest_version,
+                    raw_fact_ref ->> 'deployment_epoch',
+                    normalized_event_id DESC
+                "#,
+            )
+            .bind(namespace)
+            .fetch_all(pool)
+            .await
+            .map_err(|_| {
+                ApiError::internal_error("failed to load public namespace declaration revisions")
+            })?;
+            let revisions = revision_rows
+                .into_iter()
+                .map(
+                    |(source_family, chain, version, deployment_epoch, event_identity)| {
+                        (
+                            (source_family, chain, version, deployment_epoch),
+                            event_identity,
+                        )
+                    },
+                )
+                .collect::<BTreeMap<_, _>>();
+            let declaration_revisions = snapshot
+                .manifests
+                .iter()
+                .map(|manifest| {
+                    revisions
+                        .get(&(
+                            manifest.source_family.clone(),
+                            manifest.chain.clone(),
+                            manifest.manifest_version.to_string(),
+                            manifest.deployment_epoch.clone(),
+                        ))
+                        .cloned()
+                })
+                .collect();
+            tokens.push(PublicNamespaceManifestToken {
+                namespace: namespace.to_owned(),
+                manifests: snapshot.manifests,
+                declaration_revisions,
+            });
+        }
+    }
+    Ok(tokens)
+}
+
+async fn load_public_namespace_project_generations(
+    pool: &PgPool,
+    selected: &SelectedSnapshot,
+) -> ApiResult<Option<BTreeMap<String, String>>> {
+    let mut generations = BTreeMap::new();
+    for position in selected.chain_positions.as_map().values() {
+        let generation = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT project.xmin::TEXT
+            FROM chain_heads head
+            JOIN chain_phase_state project
+              ON project.chain_id = head.chain_id
+             AND project.phase_name = 'project'
+             AND project.phase_status = 'completed'
+             AND project.current_block_number = head.latest_block_number
+             AND project.current_block_hash = head.latest_block_hash
+             AND project.input_content_hash = $4
+            WHERE head.chain_id = $1
+              AND head.latest_block_number = $2
+              AND head.latest_block_hash = $3
+            "#,
+        )
+        .bind(&position.chain_id)
+        .bind(position.block_number)
+        .bind(&position.block_hash)
+        .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ApiError::internal_error("failed to validate public namespace data"))?;
+        let Some(generation) = generation else {
+            return Ok(None);
+        };
+        generations.insert(position.chain_id.clone(), generation);
+    }
+    Ok(Some(generations))
 }
 
 async fn public_namespace_snapshot_scope(
