@@ -474,6 +474,106 @@ async fn public_namespace_derivation_tracks_manifest_authority_and_ready_checkpo
 }
 
 #[tokio::test]
+async fn v2_search_bare_request_narrows_when_a_publication_is_not_ready() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    seed_v2_search_public_authority(&database).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.chain_phase_state
+         SET input_content_hash = 'manifest-authority:test'
+         WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let response = app_router(AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    ))
+    .oneshot(
+        Request::builder()
+            .uri("/v2/search?q=alpha")
+            .body(Body::empty())
+            .expect("search request must build"),
+    )
+    .await?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {payload:#}");
+    assert_eq!(
+        v2_search_names(payload["data"].as_array().expect("search data")),
+        vec!["alpha.eth"]
+    );
+    assert_eq!(payload["meta"], json!({}));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_search_bare_request_recovers_when_publication_becomes_ready() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    seed_v2_search_public_authority(&database).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.chain_phase_state
+         SET input_content_hash = 'manifest-authority:test'
+         WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let state = AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    let narrowed = app_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/search?q=alpha")
+                .body(Body::empty())
+                .expect("search request must build"),
+        )
+        .await?;
+    assert_eq!(narrowed.status(), StatusCode::OK);
+    assert_eq!(
+        v2_search_names(
+            read_json::<Value>(narrowed).await?["data"]
+                .as_array()
+                .expect("narrowed search data")
+        ),
+        vec!["alpha.eth"]
+    );
+
+    sqlx::query(
+        "UPDATE bigname_phase.chain_phase_state
+         SET input_content_hash = $1
+         WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
+    )
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let recovered = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/v2/search?q=alpha")
+                .body(Body::empty())
+                .expect("search request must build"),
+        )
+        .await?;
+    let status = recovered.status();
+    let payload: Value = read_json(recovered).await?;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {payload:#}");
+    assert_eq!(
+        v2_search_names(payload["data"].as_array().expect("search data")),
+        vec!["alpha.base.eth", "alpha.eth"]
+    );
+    assert_eq!(payload["meta"], json!({}));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_search_derivation_excludes_interpret_redo_but_explicit_namespace_bypasses()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
