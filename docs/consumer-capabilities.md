@@ -25,17 +25,17 @@ it does not preserve the deleted v1 DTOs.
 | --- | --- | --- |
 | Batched forward and reverse lookup | `POST /v2/lookup` | `profile=feed` is the field-budgeted path; `profile=detail` returns the documented full record shape. |
 | Indexing readiness | `GET /v2/status` | Per-chain projection progress, stored head, indexing-process liveness, and network-head readiness. |
-| Exact name profile | `GET /v2/names/{name}` | Indexed or verified name and record fields, subject to the route's source rules. |
+| Exact name profile | `GET /v2/names/{name}` | Indexed or verified name and record fields, plus [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) ENSv1 NameWrapper lifecycle and fuse data when backed, subject to the route's source rules. |
 | Resolver records | `GET /v2/names/{name}/records` | Key-selected record reads plus inventory metadata. |
 | Direct subnames | `GET /v2/names/{name}/subnames` | Latest-state direct-subname collection. |
 | Name history | `GET /v2/names/{name}/history` | Name, registration, or combined history scope. |
 | Names by address | `GET /v2/addresses/{address}/names` | Owner, manager, and registrant relations with optional expansions. |
 | Primary name | `GET /v2/addresses/{address}/primary-name` | Indexed tuples and verified ENS coin-type 60 lookup as documented. |
 | Address history | `GET /v2/addresses/{address}/history` | Latest-state address-anchored event history. |
-| Permission holders | `GET /v2/permissions` | Current resource-anchored permission rows. |
+| Permission holders | `GET /v2/permissions` | Current resource-anchored permission rows; returned current ENSv1 wrapper registrations carry [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) lifecycle and fuse data without claiming exhaustive wrapper-holder enumeration. |
 | Search | `GET /v2/search` | Name search only; no registration, pricing, or availability workflow. |
 | Events | `GET /v2/events` | Product event collection. |
-| Resolver overview | `GET /v2/resolvers/{chain_id}/{address}` | Resolver metadata and bounded name expansion. |
+| Resolver overview | `GET /v2/resolvers/{chain_id}/{address}` | Resolver metadata and bounded, record-shaped name expansion, including [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) ENSv1 NameWrapper metadata when backed. |
 | Namespace metadata | `GET /v2/namespaces/{namespace}` | Product-facing namespace and capability metadata. |
 | Pipeline diagnostics | `/v2/diagnostics/*` | Explicit diagnostic tier, separate from product reads. |
 

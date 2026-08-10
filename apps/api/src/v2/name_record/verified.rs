@@ -30,7 +30,7 @@ pub(super) async fn build_name_record_for_source(
 ) -> V2Result<VerifiedNameRecord> {
     match source {
         Source::Indexed => Ok(VerifiedNameRecord {
-            record: build_name_record(row, record_inventory, chain_id, Status::Ok),
+            record: build_name_record(row, record_inventory, chain_id, Status::Ok)?,
         }),
         Source::Verified => {
             build_verified_name_record(state, row, record_inventory, chain_id, selected_snapshot)
@@ -68,7 +68,7 @@ async fn build_verified_name_record(
         .as_ref()
         .expect("verified profile requested records must produce an answer map");
 
-    let mut record = build_name_record(row, record_inventory, chain_id, Status::Ok);
+    let mut record = build_name_record(row, record_inventory, chain_id, Status::Ok)?;
     let addresses = std::mem::take(&mut verified_records.addresses);
     let text_records = std::mem::take(&mut verified_records.text_records);
     let content_hash = verified_records.content_hash.take();

@@ -260,8 +260,27 @@ pub(super) async fn build(
         LEFT JOIN wrapper_expiries wrapper_expiry USING (resource_id)
         LEFT JOIN target_time ON TRUE
         CROSS JOIN wrapper_constants
+        CROSS JOIN LATERAL (
+            SELECT CASE
+                       WHEN modifier.fuses IS NULL
+                         OR modifier.wrapper_state IS NULL
+                         OR wrapper_expiry.expiry_seconds IS NULL
+                         OR target_time.epoch_seconds IS NULL THEN NULL
+                       WHEN wrapper_expiry.expiry_seconds < target_time.epoch_seconds THEN 0
+                       ELSE modifier.fuses
+                   END AS fuses,
+                   CASE
+                       WHEN modifier.fuses IS NULL
+                         OR modifier.wrapper_state IS NULL
+                         OR wrapper_expiry.expiry_seconds IS NULL
+                         OR target_time.epoch_seconds IS NULL THEN NULL
+                       WHEN wrapper_expiry.expiry_seconds < target_time.epoch_seconds
+                        AND modifier.wrapper_state IN ('emancipated', 'locked') THEN NULL
+                       ELSE modifier.wrapper_state
+                   END AS wrapper_state
+        ) effective_wrapper
         CROSS JOIN LATERAL (SELECT COALESCE(
-                       (modifier.fuses & wrapper_constants.is_dot_eth) <> 0
+                       (effective_wrapper.fuses & wrapper_constants.is_dot_eth) <> 0
                        AND wrapper_expiry.expiry_seconds - wrapper_constants.grace_period_seconds
                            < target_time.epoch_seconds,
                        false
@@ -271,15 +290,9 @@ pub(super) async fn build(
             SELECT CASE
                 WHEN modifier.normalized_event_id IS NULL
                     THEN event.after_state -> 'effective_powers'
-                WHEN modifier.fuses IS NULL
-                  OR modifier.wrapper_state IS NULL
-                  OR wrapper_expiry.expiry_seconds IS NULL
+                WHEN effective_wrapper.fuses IS NULL
+                  OR effective_wrapper.wrapper_state IS NULL
                     THEN '[]'::jsonb
-                WHEN wrapper_expiry.expiry_seconds < target_time.epoch_seconds
-                 AND modifier.wrapper_state IN ('emancipated', 'locked')
-                    THEN '[]'::jsonb
-                WHEN wrapper_expiry.expiry_seconds < target_time.epoch_seconds
-                    THEN event.after_state -> 'effective_powers'
                 ELSE COALESCE((
                     SELECT jsonb_agg(to_jsonb(power.value) ORDER BY power.ordinality)
                     FROM jsonb_array_elements_text(event.after_state -> 'effective_powers')
@@ -287,29 +300,29 @@ pub(super) async fn build(
                     WHERE (NOT grace.in_grace OR power.value IN ('approve', 'approve_wrapper'))
                       AND NOT CASE power.value
                         WHEN 'resource_control' THEN
-                            modifier.wrapper_state = 'locked'
+                            effective_wrapper.wrapper_state = 'locked'
                         WHEN 'resolver_control' THEN
-                            (modifier.fuses & 8) <> 0
+                            (effective_wrapper.fuses & 8) <> 0
                         WHEN 'set_resolver' THEN
-                            (modifier.fuses & 8) <> 0
+                            (effective_wrapper.fuses & 8) <> 0
                         WHEN 'set_ttl' THEN
-                            (modifier.fuses & 16) <> 0
+                            (effective_wrapper.fuses & 16) <> 0
                         WHEN 'create_subnames' THEN
-                            (modifier.fuses & 32) <> 0
+                            (effective_wrapper.fuses & 32) <> 0
                         WHEN 'create_subdomain' THEN
-                            (modifier.fuses & 32) <> 0
+                            (effective_wrapper.fuses & 32) <> 0
                         WHEN 'transfer' THEN
-                            (modifier.fuses & 4) <> 0
+                            (effective_wrapper.fuses & 4) <> 0
                         WHEN 'transfer_name' THEN
-                            (modifier.fuses & 4) <> 0
+                            (effective_wrapper.fuses & 4) <> 0
                         WHEN 'unwrap' THEN
-                            (modifier.fuses & 1) <> 0
+                            (effective_wrapper.fuses & 1) <> 0
                         WHEN 'burn_fuses' THEN
-                            (modifier.fuses & 2) <> 0
+                            (effective_wrapper.fuses & 2) <> 0
                         WHEN 'approve' THEN
-                            (modifier.fuses & 64) <> 0
+                            (effective_wrapper.fuses & 64) <> 0
                         WHEN 'approve_wrapper' THEN
-                            (modifier.fuses & 64) <> 0
+                            (effective_wrapper.fuses & 64) <> 0
                         ELSE false
                     END
                 ), '[]'::jsonb)

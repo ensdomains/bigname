@@ -220,12 +220,18 @@ for the finite `(source_family, event)` list documented in
 events outside that list must declare `emitter_roles`, except for the documented ENSv2 registry
 announcement case.
 
-**Emancipated NameWrapper state** — the ENSv1 NameWrapper lifecycle state in
-which `PARENT_CANNOT_CONTROL` is burned and `CANNOT_UNWRAP` is not. The parent
-can no longer replace or modify the wrapped child, while the wrapped owner can
-still unwrap it. (upstream: .refs/ens_v1/contracts/wrapper/README.md:L73 @ ens_v1@91c966f)
+**Emancipated NameWrapper state** — bigname's ENSv1 NameWrapper lifecycle label
+for a currently wrapped name where `PARENT_CANNOT_CONTROL` is burned and
+`CANNOT_UNWRAP` is not. The parent can no longer replace or modify the wrapped
+child, while the wrapped owner can still unwrap it. NameWrapper rejects parent
+replacement while `PARENT_CANNOT_CONTROL` is effective and rejects later
+parent fuse changes after that bit is burned.
 (upstream: .refs/ens_v1/contracts/wrapper/README.md:L75 @ ens_v1@91c966f)
-(upstream: .refs/ens_v1/contracts/wrapper/README.md:L85 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/README.md:L81 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L726 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L730 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L547 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L553 @ ens_v1@91c966f)
 The API exposes this as `wrapper_state="emancipated"` only while the wrapper
 expiry is not earlier than the served block timestamp. After that boundary,
 NameWrapper reads the fuses and owner as zero, so `wrapper_state` is omitted.
@@ -244,6 +250,29 @@ remains separately governed by `CANNOT_APPROVE` until wrapper expiry.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L825 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L127 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L132 @ ens_v1@91c966f)
+
+**Expiry-effective NameWrapper fuse word** — the uint32 fuse value that
+NameWrapper's `getData` read returns at the served block timestamp, rather than
+the expiry-unadjusted value retained in normalized events. That normalized value
+is interpreted state: on an unexpired rewrap, it includes the retained
+parent-controlled bits as well as the emitted fuse argument.
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L235 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L248 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L901 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L902 @ ens_v1@91c966f)
+When wrapper expiry is earlier than the served timestamp, NameWrapper clears
+every effective fuse. It also clears the owner when `PARENT_CANNOT_CONTROL` was
+burned, which removes an expired
+[emancipated](#emancipated-namewrapper-state) or
+[locked](#locked-namewrapper-state) lifecycle value; a plain
+[wrapped](#wrapped-namewrapper-state) value remains because its owner is not
+cleared. The [projection](#projection) rebuild applies this serving convention
+to current summaries at its target timestamp and does not rewrite the
+normalized value.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L143 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L153 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L856 @ ens_v1@91c966f)
 
 **ENSv1→ENSv2 migration** — the on-chain move of an existing ENS name from the
 ENSv1 contracts to the ENSv2 registries. It happens entirely on one chain, it
@@ -633,12 +662,16 @@ that increases whenever head publication moves previously readable blocks to
 lineage checks; a changed value requires every retained prior-state block
 anchor to be checked again.
 
-**Locked NameWrapper state** — the ENSv1 NameWrapper lifecycle state selected
-by the `CANNOT_UNWRAP` fuse. Locking requires emancipation and allows further
-owner-controlled permissions to be revoked. (upstream: .refs/ens_v1/contracts/wrapper/README.md:L87 @ ens_v1@91c966f)
-(upstream: .refs/ens_v1/contracts/wrapper/README.md:L91 @ ens_v1@91c966f)
-(upstream: .refs/ens_v1/contracts/wrapper/README.md:L93 @ ens_v1@91c966f)
-(upstream: .refs/ens_v1/contracts/wrapper/README.md:L95 @ ens_v1@91c966f)
+**Locked NameWrapper state** — bigname's ENSv1 NameWrapper lifecycle label for
+a currently wrapped name where `CANNOT_UNWRAP` is burned. NameWrapper rejects
+unwrap when that fuse is effective. Burning an owner-controlled fuse requires
+`PARENT_CANNOT_CONTROL` and `CANNOT_UNWRAP` together, so locked implies
+[emancipated](#emancipated-namewrapper-state); locking then allows further
+owner-controlled permissions to be revoked.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1025 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1058 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1067 @ ens_v1@91c966f)
 The API exposes this as `wrapper_state="locked"` only while the wrapper expiry
 is not earlier than the served block timestamp; after that boundary the
 NameWrapper reads both owner and fuses as zero and `wrapper_state` is omitted.
@@ -883,12 +916,16 @@ including ENSv2 subregistry edges, do not add targets. A *watched tuple* is one
 such entry; its *watched window* is the active block range. Addresses are
 derived watch targets, never the durable identity.
 
-**Wrapped NameWrapper state** — the ENSv1 NameWrapper lifecycle state in which
-the wrapper manages the name and issues its ERC-1155 token, but neither
-`PARENT_CANNOT_CONTROL` nor `CANNOT_UNWRAP` provides protection. The parent can
-still modify or reclaim the name, and the wrapped owner can unwrap it.
+**Wrapped NameWrapper state** — bigname's ENSv1 NameWrapper lifecycle label for
+a name whose wrapper token has a nonzero owner and whose registry owner is the
+NameWrapper, while neither `PARENT_CANNOT_CONTROL` nor `CANNOT_UNWRAP` provides
+protection. The parent can still modify or reclaim the name, and the wrapped
+owner can unwrap it. NameWrapper uses the same token-owner and registry-owner
+conditions for its internal wrapped guard.
 (upstream: .refs/ens_v1/contracts/wrapper/README.md:L65 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/README.md:L67 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1080 @ ens_v1@91c966f)
 The API exposes this as `wrapper_state="wrapped"`. Passing the stored wrapper
 expiry clears effective fuses but does not remove a plain wrapped name or this
 state. (upstream: .refs/ens_v1/contracts/wrapper/README.md:L99 @ ens_v1@91c966f)

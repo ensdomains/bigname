@@ -336,6 +336,15 @@ The projection families used by the API include:
 - `record_inventory_current`; and
 - `primary_names_current`.
 
+`name_current.declared_summary` carries the current ENSv1 NameWrapper lifecycle
+label and [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word)
+fuse summary together. The underlying normalized
+`PermissionScopeChanged` event keeps its expiry-unadjusted interpreted fuse word
+unchanged; Project
+clears only the rebuildable current summary when the served projection timestamp
+passes wrapper expiry. Permission reads join this current summary by
+`resource_id` rather than persisting a second copy in `permissions_current`.
+
 Coverage wording is not an exhaustiveness claim. `support_status` and
 `unsupported_reason` carry admission separately from projection completeness.
 Readers fail closed on unknown or inconsistent vocabulary.

@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{V2Error, V2Result};
 
+#[path = "vocab/wrapper_fuses.rs"]
+mod wrapper_fuses;
+pub(crate) use wrapper_fuses::WrapperFuses;
 #[path = "vocab/wrapper_state.rs"]
 mod wrapper_state;
 pub(crate) use wrapper_state::WrapperState;

@@ -84,7 +84,9 @@ ENSv1 wrapper lifecycle and fuse effects are projected from canonical wrapper
 facts. During registrar grace, the holder and lifecycle state remain visible,
 while owner modification, transfer, and effective-controller membership stop at
 grace start.[^v1-wrapper-grace-expiry][^v1-wrapper-grace-authority] Expired
-wrapper state contributes no effective holder powers.[^v1-wrapper-expired]
+wrapper fuses are projected as zero, matching NameWrapper `getData`; an expired
+emancipated or locked position also contributes no lifecycle value or effective
+holder powers because that read clears its owner.[^v1-wrapper-expired]
 
 For the ENSv2 post-audit Sepolia deployment profile, declared exact-name rows
 come from the admitted registry and registrar families. Out-of-profile resolver,
@@ -140,7 +142,11 @@ partial permission support.
 
 For ENSv1 wrapper-backed resources, fuse state alone does not manufacture a
 holder grant. A separately observed compatible holder grant is masked by the
-current lifecycle and fuse rules. For ENSv2, permissions remain keyed by the
+current lifecycle and [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word)
+fuse rules. Returned permission rows
+join the same wrapper lifecycle and fuse summary as exact-name reads; this does
+not change the companion resource summary's unsupported wrapper-holder
+enumeration status. For ENSv2, permissions remain keyed by the
 upstream resource linked to bigname `resource_id`, not by token ID.[^v2-iperm-l57][^v2-pr-l261][^v2-pr-l351]
 
 Unknown or inconsistent summary vocabulary is a storage error. Product routes
