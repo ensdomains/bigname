@@ -79,6 +79,8 @@ pub(crate) use resolvers::{
     build_resolver_overview, resolver_overview_include,
 };
 pub(crate) use search::get_search;
+#[cfg(test)]
+pub(crate) use search::public_namespace_read_test_hooks as search_public_namespace_read_test_hooks;
 pub(crate) use snapshots::{
     SnapshotReadResource, api_error_to_v2, api_error_to_v2_for_resource, decode_at_token,
     encode_at_token, resolve_v2_snapshot_for, sanitized_snapshot_internal_error, snapshot_meta,

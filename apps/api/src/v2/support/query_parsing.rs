@@ -102,7 +102,7 @@ fn normalize_standard_evm_address(value: &str) -> Option<String> {
 }
 
 pub(crate) fn ensure_public_namespace(namespace: &str) -> ApiResult<()> {
-    if PUBLIC_NAMESPACES.contains(&namespace) {
+    if crate::state::is_recognized_public_namespace(namespace) {
         Ok(())
     } else {
         Err(ApiError {

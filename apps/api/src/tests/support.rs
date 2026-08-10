@@ -1047,7 +1047,8 @@ impl TestDatabase {
         Ok(AppState::new_with_rpc_urls(
             self.lookup_pool.clone(),
             chain_rpc_urls,
-        ))
+        )
+        .with_public_namespaces_for_test(["ens", "basenames"]))
     }
 
     fn app_state(&self) -> AppState {
@@ -1055,6 +1056,15 @@ impl TestDatabase {
             self.lookup_pool.clone(),
             bigname_lookup::ChainRpcUrls::default(),
         )
+        .with_public_namespaces_for_test(["ens", "basenames"])
+    }
+
+    fn app_state_with_public_namespaces(&self, namespaces: &[&str]) -> AppState {
+        AppState::new_with_rpc_urls(
+            self.lookup_pool.clone(),
+            bigname_lookup::ChainRpcUrls::default(),
+        )
+        .with_public_namespaces_for_test(namespaces.iter().copied())
     }
 
     fn database_config(&self, max_connections: u32) -> Result<bigname_storage::DatabaseConfig> {
@@ -1437,7 +1447,9 @@ impl TestDatabase {
                     started_at,
                     finished_at
                 )
-                VALUES ($1, 'project', 'completed', $2, $3, $2, $3, $4, now(), now())
+                VALUES
+                    ($1, 'interpret', 'completed', $2, $3, $2, $3, $4, now(), now()),
+                    ($1, 'project', 'completed', $2, $3, $2, $3, $4, now(), now())
                 ON CONFLICT (chain_id, phase_name) DO UPDATE SET
                     phase_status = EXCLUDED.phase_status,
                     current_block_number = EXCLUDED.current_block_number,
@@ -1456,10 +1468,78 @@ impl TestDatabase {
             .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
             .execute(&self.lookup_pool)
             .await
-            .with_context(|| format!("failed to seed project phase state for {chain_id}"))?;
+            .with_context(|| {
+                format!("failed to seed interpretation and project phase state for {chain_id}")
+            })?;
 
         }
 
+        Ok(())
+    }
+
+    async fn phase_state_fingerprint(
+        &self,
+        chain_id: &str,
+        phase_name: &str,
+    ) -> Result<(String, String, Option<i64>, Option<String>, String)> {
+        sqlx::query_as(
+            "SELECT xmin::TEXT, phase_status, current_block_number, current_block_hash,
+                    updated_at::TEXT
+             FROM bigname_phase.chain_phase_state
+             WHERE chain_id = $1 AND phase_name = $2",
+        )
+        .bind(chain_id)
+        .bind(phase_name)
+        .fetch_one(&self.lookup_pool)
+        .await
+        .with_context(|| format!("failed to fingerprint {chain_id} {phase_name} phase state"))
+    }
+
+    async fn simulate_interpret_redo_begin(&self, chain_id: &str, redo_mode: &str) -> Result<()> {
+        let result = sqlx::query(
+            "UPDATE bigname_phase.chain_phase_state
+             SET phase_status = 'running',
+                 redo_in_progress = true,
+                 redo_mode = $2,
+                 redo_previous_phase_status = phase_status,
+                 redo_previous_last_error = last_error,
+                 redo_previous_started_at = started_at,
+                 redo_previous_finished_at = finished_at,
+                 redo_from_block_number = 0,
+                 redo_to_block_number = current_block_number,
+                 started_at = now(),
+                 finished_at = NULL,
+                 updated_at = now()
+             WHERE chain_id = $1 AND phase_name = 'interpret'",
+        )
+        .bind(chain_id)
+        .bind(redo_mode)
+        .execute(&self.lookup_pool)
+        .await
+        .with_context(|| format!("failed to simulate Interpret redo begin for {chain_id}"))?;
+        anyhow::ensure!(
+            result.rows_affected() == 1,
+            "missing Interpret phase state for {chain_id}"
+        );
+        Ok(())
+    }
+
+    async fn touch_interpret_phase_state(&self, chain_id: &str) -> Result<()> {
+        let result = sqlx::query(
+            "UPDATE bigname_phase.chain_phase_state
+             SET updated_at = updated_at + INTERVAL '1 second'
+             WHERE chain_id = $1
+               AND phase_name = 'interpret'
+               AND redo_in_progress = false",
+        )
+        .bind(chain_id)
+        .execute(&self.lookup_pool)
+        .await
+        .with_context(|| format!("failed to advance Interpret row version for {chain_id}"))?;
+        anyhow::ensure!(
+            result.rows_affected() == 1,
+            "missing idle Interpret phase state for {chain_id}"
+        );
         Ok(())
     }
 

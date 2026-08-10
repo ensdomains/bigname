@@ -433,6 +433,41 @@ Common parameter rules:
 | `sort`, `order` | paginated routes that declare a sort set | route-documented field set plus `asc`/`desc` |
 | `cursor`, `page_size` | every paginated route | opaque cursor; default 50, max 200 |
 
+For a cross-namespace read with no explicit `namespace`, the API derives the
+namespace set at request time from recognized public namespaces whose active
+[source manifests](manifests.md) have a completed projection publication at the
+current head of the namespace's authority chain in the selected deployment. It
+excludes a namespace while its selected authority chain has Interpret
+`redo_in_progress=true`, regardless of redo mode. An Interpret redo rewrites
+previously served identity history batch by batch, so a page read during the
+redo can be incomplete even while Project still reports its prior completed
+head.
+Bare search and public reverse lookup filter current rows and counts to exactly
+that set, and public reverse lookup builds its snapshot scope from the same
+authority chains. After reading a bare search page, the API reloads the active
+manifest declarations, selected authority chain heads, and completed projection
+publication generations captured during derivation, and confirms that no
+selected authority chain began an Interpret redo. Any change returns the
+existing retryable `409 conflict` instead of serving a response assembled
+across deployment states.
+Public reverse lookup reloads its captured active manifest declarations before
+the route's existing head and projection-publication check, including the same
+Interpret redo check: a manifest change returns `409 conflict`, while a redo,
+head, or publication change returns the existing retryable `409 stale`. A redo
+that begins after derivation therefore never exposes a partial page through
+either route.
+Their namespace-omitted cursors bind that derived set and fail closed if it
+changes. Search with an explicit recognized `namespace` bypasses public
+namespace derivation and reads that namespace's current rows without a
+deployment-readiness gate, including the Interpret redo check, preserving the
+pre-derivation behavior. Name-only lookup likewise keeps its existing name
+snapshot selection and does not derive the public set; only address inputs
+invoke public reverse derivation.
+Completeness metadata is relative to the effective request set, so omitting a
+namespace does not make a response partial merely because the deployment does
+not serve another public namespace. A bare cross-namespace read returns `409
+conflict` when that effective set is empty.
+
 Unknown or undocumented query parameters are rejected with `400 invalid_input`
 on every `v2` route. As a documented temporary exception, latest-state
 collection routes recognize `at`, `finality=safe`, and `finality=finalized` so
@@ -539,10 +574,12 @@ The `chain_positions` query parameter from `v1` does not exist in `v2`.
 Cursors are opaque and versioned. They are not bound to the route path string,
 so route evolution does not invalidate outstanding cursors. Top-level
 collection cursors bind the collection anchor, namespace, filters, and sort,
-but not a snapshot. They preserve keyset position across requests without
-claiming that the mutable dataset is frozen. A legacy collection cursor's
-snapshot component is ignored. Snapshot-bound cursor semantics remain on
-single-resource responses with nested pagination where documented.
+but not a snapshot. A bare search cursor uses the request's derived namespace
+set as its namespace anchor and fails closed if that set has changed. Cursors
+preserve keyset position across requests without claiming that the mutable
+dataset is frozen. A legacy collection cursor's snapshot component is ignored.
+Snapshot-bound cursor semantics remain on single-resource responses with nested
+pagination where documented.
 
 Every collection uses `cursor`, `next_cursor`, `page_size`, nullable
 `total_count`, and `has_more`. Default `page_size` is 50; maximum is 200.

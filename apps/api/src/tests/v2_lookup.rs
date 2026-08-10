@@ -57,6 +57,85 @@ async fn v2_lookup_rejects_invalid_request_shapes() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_lookup_validates_reverse_inputs_before_deployment_readiness() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let response = v2_lookup_response_for_database_with_public_namespaces(
+        &database,
+        "/v2/lookup",
+        json!({"inputs": [{"address": "not-an-address"}]}),
+        &[],
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("invalid_input"));
+
+    let response = v2_lookup_response_for_database_with_public_namespaces(
+        &database,
+        "/v2/lookup",
+        json!({"inputs": [{"address": "0x0000000000000000000000000000000000000abc"}]}),
+        &[],
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("conflict"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_lookup_name_only_inputs_bypass_public_namespace_derivation() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_lookup_base_head(&database).await?;
+    for (chain, deployment) in [
+        ("ethereum-mainnet", "ens_v1"),
+        ("ethereum-sepolia", "ens_v2_sepolia_post_audit"),
+    ] {
+        database
+            .insert_manifest(
+                "ens",
+                "ens_registry",
+                chain,
+                deployment,
+                1,
+                "active",
+                "ensip15@ens-normalize-0.1.1",
+            )
+            .await?;
+    }
+    let state = AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    assert!(crate::v2::support::derive_public_namespace_set(&state).await.is_err());
+
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v2/lookup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "namespace": "basenames",
+                        "inputs": [{"name": "missing.base.eth"}]
+                    }))
+                    .expect("body must serialize"),
+                ))
+                .expect("lookup request must build"),
+        )
+        .await?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {payload:#}");
+    assert_eq!(payload["data"][0]["status"], json!("not_found"));
+    assert!(payload["meta"]["as_of"].get("8453").is_some());
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_lookup_forward_results_are_in_order_with_head_meta() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
@@ -1263,6 +1342,538 @@ async fn v2_lookup_rejects_union_scope_with_missing_phase_head() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_lookup_public_reverse_scope_uses_the_served_namespace_set() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    seed_identity_name(
+        &database,
+        "basenames:stale.base.eth",
+        "stale.base.eth",
+        "stale.base.eth",
+        "namehash:stale.base.eth",
+        Uuid::from_u128(0x5a0221),
+        Uuid::from_u128(0x5a0222),
+        Uuid::from_u128(0x5a0223),
+        address,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        43,
+    )
+    .await?;
+
+    let response = v2_lookup_response_for_database_with_public_namespaces(
+        &database,
+        "/v2/lookup",
+        json!({"inputs": [{"address": address}]}),
+        &["ens"],
+    )
+    .await?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {payload:#}");
+    assert!(payload["meta"]["as_of"].get("1").is_some());
+    assert!(payload["meta"]["as_of"].get("8453").is_none());
+    assert!(payload["meta"].get("completeness").is_none());
+    assert_eq!(lookup_record_names(&payload), vec!["alice.eth", "bob.eth"]);
+    assert_eq!(payload["data"][0]["page"]["total_count"], json!(2));
+    assert_eq!(payload["data"][0]["page"]["has_more"], json!(false));
+
+    let codeployed_page = v2_lookup_response_for_database_with_public_namespaces(
+        &database,
+        "/v2/lookup",
+        json!({"inputs": [{"address": address, "page_size": 1}]}),
+        &["ens", "basenames"],
+    )
+    .await?;
+    assert_eq!(codeployed_page.status(), StatusCode::OK);
+    let codeployed_payload: Value = read_json(codeployed_page).await?;
+    let cursor = codeployed_payload["data"][0]["page"]["next_cursor"]
+        .as_str()
+        .expect("co-deployed reverse page must include a cursor");
+    let changed_set = v2_lookup_response_for_database_with_public_namespaces(
+        &database,
+        "/v2/lookup",
+        json!({"inputs": [{"address": address, "page_size": 1, "cursor": cursor}]}),
+        &["ens"],
+    )
+    .await?;
+    assert_eq!(changed_set.status(), StatusCode::BAD_REQUEST);
+    let changed_payload: Value = read_json(changed_set).await?;
+    assert_eq!(changed_payload["error"]["code"], json!("invalid_input"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_lookup_production_derivation_uses_the_sepolia_authority_chain() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .insert_manifest(
+            "ens",
+            "ens_v2_registry_l1",
+            "ethereum-sepolia",
+            "ens_v2_sepolia_post_audit",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum-sepolia": {
+                "chain_id": "ethereum-sepolia",
+                "block_number": 107,
+                "block_hash": "0xlookup-sepolia",
+                "timestamp": "2026-08-10T00:01:47Z"
+            }
+        }))
+        .await?;
+    let state = AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v2/lookup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "inputs": [{
+                            "address": "0x0000000000000000000000000000000000000abc"
+                        }]
+                    }))
+                    .expect("body must serialize"),
+                ))
+                .expect("lookup request must build"),
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["data"][0]["records"], json!([]));
+    assert!(payload["meta"]["as_of"].get("11155111").is_some());
+    assert!(payload["meta"]["as_of"].get("1").is_none());
+    assert!(payload["meta"]["as_of"].get("8453").is_none());
+    assert!(payload["meta"].get("completeness").is_none());
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_lookup_rejects_manifest_declaration_change_during_public_reverse_read() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    database
+        .insert_manifest(
+            "ens",
+            "ens_v1_registry_l1",
+            "ethereum-mainnet",
+            "ens_v1",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    database
+        .insert_manifest(
+            "basenames",
+            "basenames_base_registry",
+            "base-mainnet",
+            "basenames_v1",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    let (_guard, control) =
+        crate::v2::lookup_served_head_revalidation_test_hooks::install(&database.lookup_pool)
+            .await?;
+    let state = AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v2/lookup")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
+                            .expect("body must serialize"),
+                    ))
+                    .expect("lookup request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    sqlx::query(
+        "UPDATE bigname_phase.manifest_versions
+         SET manifest_payload = jsonb_set(
+             manifest_payload,
+             '{roots}',
+             '[{
+                 \"name\": \"ChangedRoot\",
+                 \"address\": \"0x0000000000000000000000000000000000000001\"
+             }]'::jsonb
+         )
+         WHERE namespace = 'basenames' AND rollout_status = 'active'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO bigname_phase.normalized_events (
+             event_identity,
+             namespace,
+             event_kind,
+             source_family,
+             manifest_version,
+             chain_id,
+             raw_fact_ref,
+             derivation_kind,
+             canonicality_state,
+             before_state,
+             after_state
+         ) VALUES (
+             'manifest_sync:test-roots-change',
+             'basenames',
+             'SourceManifestUpdated',
+             'basenames_base_registry',
+             1,
+             'base-mainnet',
+             '{\"deployment_epoch\": \"basenames_v1\"}'::jsonb,
+             'manifest_sync',
+             'finalized',
+             '{}'::jsonb,
+             '{\"manifest_payload\": {\"roots\": [{\"name\": \"ChangedRoot\"}]}}'::jsonb
+         )",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.chain_phase_state
+         SET input_content_hash = 'manifest-authority:test'
+         WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("lookup manifest-change request task panicked")?
+        .context("lookup manifest-change request failed")?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        read_json::<Value>(response).await?["error"]["code"],
+        json!("conflict")
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_lookup_rejects_interpret_redo_during_public_reverse_read() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    seed_v2_lookup_public_authority(&database).await?;
+    let project_before = database
+        .phase_state_fingerprint("ethereum-mainnet", "project")
+        .await?;
+    let (_guard, control) =
+        crate::v2::lookup_served_head_initial_validation_test_hooks::install(&database.lookup_pool)
+            .await?;
+    let state = AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v2/lookup")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
+                            .expect("body must serialize"),
+                    ))
+                    .expect("lookup request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    database
+        .simulate_interpret_redo_begin("ethereum-mainnet", "recompute_flags")
+        .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_surfaces
+         SET canonicality_state = 'orphaned'
+         WHERE chain_id = 'ethereum-mainnet'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    assert_eq!(
+        database
+            .phase_state_fingerprint("ethereum-mainnet", "project")
+            .await?,
+        project_before,
+        "the simulated Interpret redo must not update Project"
+    );
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("lookup Interpret-redo request task panicked")?
+        .context("lookup Interpret-redo request failed")?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("stale"));
+    assert!(payload.get("data").is_none(), "no partial page may be served");
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_lookup_allows_interpret_live_progress_during_public_reverse_read() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    seed_v2_lookup_public_authority(&database).await?;
+    let interpret_before = database
+        .phase_state_fingerprint("ethereum-mainnet", "interpret")
+        .await?;
+    let (_guard, control) =
+        crate::v2::lookup_served_head_initial_validation_test_hooks::install(&database.lookup_pool)
+            .await?;
+    let state = AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v2/lookup")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
+                            .expect("body must serialize"),
+                    ))
+                    .expect("lookup request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    database
+        .touch_interpret_phase_state("ethereum-mainnet")
+        .await?;
+    let interpret_after = database
+        .phase_state_fingerprint("ethereum-mainnet", "interpret")
+        .await?;
+    assert_ne!(interpret_after.0, interpret_before.0);
+    assert_ne!(interpret_after.4, interpret_before.4);
+    assert_eq!(interpret_after.1, "completed");
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("lookup Interpret-progress request task panicked")?
+        .context("lookup Interpret-progress request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(lookup_record_names(&payload), vec!["alice.eth", "bob.eth"]);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_lookup_rejects_public_namespace_becoming_ready_during_reverse_read() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    database
+        .insert_manifest(
+            "ens",
+            "ens_v1_registry_l1",
+            "ethereum-mainnet",
+            "ens_v1",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    database
+        .insert_manifest(
+            "basenames",
+            "basenames_base_registry",
+            "base-mainnet",
+            "basenames_v1",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.chain_phase_state
+         SET input_content_hash = 'public-namespace:test-unready'
+         WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let (_guard, control) =
+        crate::v2::lookup_served_head_revalidation_test_hooks::install(&database.lookup_pool)
+            .await?;
+    let state = AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v2/lookup")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
+                            .expect("body must serialize"),
+                    ))
+                    .expect("lookup request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    sqlx::query(
+        "UPDATE bigname_phase.chain_phase_state
+         SET input_content_hash = $1
+         WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
+    )
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .execute(&database.lookup_pool)
+    .await?;
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("lookup readiness-change request task panicked")?
+        .context("lookup readiness-change request failed")?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        read_json::<Value>(response).await?["error"]["code"],
+        json!("stale")
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_lookup_allows_manifest_freshness_change_without_authority_change() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    database
+        .insert_manifest(
+            "ens",
+            "ens_v1_registry_l1",
+            "ethereum-mainnet",
+            "ens_v1",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    database
+        .insert_manifest(
+            "basenames",
+            "basenames_base_registry",
+            "base-mainnet",
+            "basenames_v1",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    let (_guard, control) =
+        crate::v2::lookup_served_head_revalidation_test_hooks::install(&database.lookup_pool)
+            .await?;
+    let state = AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v2/lookup")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({"inputs": [{"address": address}]}))
+                            .expect("body must serialize"),
+                    ))
+                    .expect("lookup request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    sqlx::query(
+        "UPDATE bigname_phase.manifest_versions
+         SET loaded_at = loaded_at + INTERVAL '1 second'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("lookup manifest-refresh request task panicked")?
+        .context("lookup manifest-refresh request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_lookup_mixed_reverse_and_unserved_forward_namespace_fails_closed() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    sqlx::query("DELETE FROM bigname_phase.chain_heads WHERE chain_id = 'base-mainnet'")
+        .execute(&database.lookup_pool)
+        .await?;
+
+    let response = v2_lookup_response_for_database_with_public_namespaces(
+        &database,
+        "/v2/lookup",
+        json!({
+            "inputs": [
+                {"id": "reverse", "address": address},
+                {"id": "basenames-miss", "name": "missing.base.eth"}
+            ]
+        }),
+        &["ens"],
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("conflict"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_lookup_rejects_single_scope_with_incompatible_project_generation() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database
@@ -1850,6 +2461,32 @@ async fn seed_v2_lookup_reverse_fixture(database: &TestDatabase, address: &str) 
     Ok(())
 }
 
+async fn seed_v2_lookup_public_authority(database: &TestDatabase) -> Result<()> {
+    database
+        .insert_manifest(
+            "ens",
+            "ens_v1_registry_l1",
+            "ethereum-mainnet",
+            "ens_v1",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    database
+        .insert_manifest(
+            "basenames",
+            "basenames_base_registry",
+            "base-mainnet",
+            "basenames_v1",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    Ok(())
+}
+
 async fn seed_v2_lookup_base_head(database: &TestDatabase) -> Result<()> {
     database
         .seed_snapshot_selector_chain_positions(&json!({
@@ -2166,6 +2803,27 @@ async fn v2_lookup_response_for_database(
     body: Value,
 ) -> Result<Response> {
     app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&body).expect("body must serialize"),
+                ))
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 lookup request failed")
+}
+
+async fn v2_lookup_response_for_database_with_public_namespaces(
+    database: &TestDatabase,
+    uri: &str,
+    body: Value,
+    public_namespaces: &[&str],
+) -> Result<Response> {
+    app_router(database.app_state_with_public_namespaces(public_namespaces))
         .oneshot(
             Request::builder()
                 .method("POST")
