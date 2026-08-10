@@ -40,6 +40,13 @@ const fn lifecycle_matches_fuses(state: WrapperState, fuses: WrapperFuses) -> bo
     if fuses.fuses & NON_PARENT_CONTROLLED_FUSES != 0 && !has_locked_pair {
         return false;
     }
+    // .eth second-level wrapping always burns PARENT_CANNOT_CONTROL with
+    // IS_DOT_ETH, and IS_DOT_ETH is excluded from user-settable fuses.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1013 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L24 @ ens_v1@91c966f)
+    if fuses.is_dot_eth && !fuses.parent_cannot_control {
+        return false;
+    }
 
     match state {
         WrapperState::Wrapped => !fuses.cannot_unwrap && !fuses.parent_cannot_control,

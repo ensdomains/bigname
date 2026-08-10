@@ -176,6 +176,38 @@ fn wrapper_metadata_accepts_parent_controlled_high_fuse_without_locked_pair() {
     assert!(fuses.can_extend_expiry);
 }
 
+#[test]
+fn wrapper_metadata_rejects_is_dot_eth_without_parent_cannot_control() {
+    let summary = wrapper_summary("wrapped", 1 << 17);
+
+    assert!(wrapper_metadata(&summary).is_err());
+}
+
+#[test]
+fn wrapper_metadata_accepts_emancipated_is_dot_eth_with_parent_cannot_control() {
+    let summary = wrapper_summary("emancipated", (1 << 16) | (1 << 17));
+
+    let (state, fuses) = wrapper_metadata(&summary)
+        .expect("emancipated .eth metadata must parse")
+        .expect("emancipated .eth summary must remain present");
+    assert_eq!(state, WrapperState::Emancipated);
+    assert!(fuses.parent_cannot_control);
+    assert!(fuses.is_dot_eth);
+}
+
+#[test]
+fn wrapper_metadata_accepts_locked_is_dot_eth_with_parent_cannot_control() {
+    let summary = wrapper_summary("locked", 1 | (1 << 16) | (1 << 17));
+
+    let (state, fuses) = wrapper_metadata(&summary)
+        .expect("locked .eth metadata must parse")
+        .expect("locked .eth summary must remain present");
+    assert_eq!(state, WrapperState::Locked);
+    assert!(fuses.cannot_unwrap);
+    assert!(fuses.parent_cannot_control);
+    assert!(fuses.is_dot_eth);
+}
+
 fn wrapper_summary(state: &str, fuses: u32) -> serde_json::Value {
     json!({
         "wrapper_state": state,
