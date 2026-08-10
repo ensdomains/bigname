@@ -102,7 +102,7 @@ Two layers separate public names from backing authority:
 
 - `surface_binding_id`, `logical_name_id`, `resource_id`, `binding_kind`, `active_from`, `active_to`, provenance, [canonicality](glossary.md) state.
 
-Binding kinds: `declared_registry_path`, `linked_subregistry_path`, `resolver_alias_path`, `observed_wildcard_path`, `migration_rebind`, `observed_only`.
+Binding kinds: `declared_registry_path`, `linked_subregistry_path`, `resolver_alias_path`, `observed_wildcard_path`, `observed_only`.
 
 Resolver-family normalized events attach `logical_name_id` and `resource_id` only when their node has a materialized active or deactivated-shadow `NameSurface`. Without that row, both identity fields remain null and only `raw_fact_ref.interpreter_state_key` relates successive state for the same record.
 
@@ -325,7 +325,7 @@ Permissions and control are anchored to `resource_id`, never to surface text. Th
 
 Identity, preimage, discovery: `PreimageObserved`, `NameClassified`, `SurfaceBound`, `SurfaceUnbound`, `ContractDiscovered`, `MetadataChanged`, `SourceManifestUpdated`.
 
-Registration and authority: `RegistrationReserved`, `RegistrationGranted`, `RegistrarNameRegistered`, `RegistrationRenewed`, `RegistrationReleased`, `ExpiryChanged`, `AuthorityTransferred`, `AuthorityEpochChanged`, `MigrationApplied`, `PricingPolicyChanged`.
+Registration and authority: `RegistrationReserved`, `RegistrationGranted`, `RegistrarNameRegistered`, `RegistrationRenewed`, `RegistrationReleased`, `ExpiryChanged`, `AuthorityTransferred`, `AuthorityEpochChanged`, `PricingPolicyChanged`.
 
 Lineage and control: `TokenResourceLinked`, `TokenRegenerated`, `TokenControlTransferred`, `ResolutionEpochChanged`.
 
@@ -487,9 +487,7 @@ restored agreement may clear the matching active row.
 
 ## Permissions
 
-Permissions are first-class projections and explain views. Track grants by scope (root, registry, resource, resolver, record manager/operator, migration-derived, transport-derived). Each grant records source, revocation source, inheritance path, transfer behavior, scope, and effective powers.
-
-`migration_derived` and `transport_derived` are [reserved surface](glossary.md#reserved-surface): the scope kinds are accepted by the schema and rendered by the API, but no adapter writes either one. `transport_derived` is a remnant of an abandoned cross-chain ENSv2 design in which a name's authority could move between chains. ENSv2 is an Ethereum L1 system and its migration from ENSv1 is single-chain (see [`upstream.md`](upstream.md#known-divergences) § Known divergences for the citations and for the stale upstream comment that says otherwise), so no bigname source family can ever produce a `transport_derived` grant; it is retained only because removing a projection scope kind requires a schema migration. Do not treat it as a supported scope or add exemplars presenting it as expected output; guards that pin the absence of a producer, or that the retained reader still decodes a stored row carrying the value, are the exception.
+Permissions are first-class projections and explain views. Track grants by scope (root, registry, resource, resolver, record manager/operator). Each grant records source, revocation source, inheritance path, transfer behavior, scope, and effective powers.
 
 Public reads expose effective powers directly so callers do not reconstruct
 authority from raw role bitmaps. `GET /v2/permissions` is the current

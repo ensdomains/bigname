@@ -92,7 +92,17 @@ This table records partner-1's requested product coverage and wording. It is not
 | ENSv2 names with onchain records | Yes | partner-1 requests coverage for ENSv2 records on Ethereum L1 once those source families are admitted. |
 | Basenames | Yes | partner-1 requests Base Mainnet coverage. |
 
-The original ask named "ENSv2 L2 destination chains" as a second ENSv2 coverage target. That target does not exist: ENSv2 is an Ethereum L1 system and its migration from ENSv1 is single-chain, so there is no ENSv2 deployment on another chain to index. (bigname does admit ENSv2 today, on Sepolia: four source families, with the registrar's exact-name profile flagged supported for that deployment profile. What is unbuilt is the ENSv2 on-chain-record surface this ask is about — absent on Mainnet, where ENSv2 has not launched, and facts-only on Sepolia, whose resolver family declares no supported capability. So this is a missing record surface, not missing ENSv2 coverage as such.) Base Mainnet coverage is Basenames, a separate namespace that is unaffected. See [`upstream.md`](../upstream.md#known-divergences) for why upstream source still carries stale wording about a second chain.
+The original partner input also named "ENSv2 L2 destination chains." That is
+retained here only as historical request provenance, not as a coverage target:
+the final mechanism deploys a `WrapperRegistry` and injects it directly into
+the parent registry on the same chain
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L149 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58),
+and binds it through `SubregistryUpdated`
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L472 @ ens_v2@ccaeb58).
+The table therefore records ENSv2 on Ethereum L1 only. See the pinned-source
+[divergence note](../upstream.md#known-divergences) for the vestigial upstream
+"namechain" wording.
 
 The caller should not need to fan out by namespace. A single API call should be able to span L1 ENS, ENSv2, and Basenames where applicable.
 

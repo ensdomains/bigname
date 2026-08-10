@@ -25,19 +25,19 @@ discovery_rules = []
 # DataChanged and NamedDataResource are intentionally outside record and permission
 # normalization. PublicResolverV2 can be discovery-watched for configured generic record events but is not an admitted resolver profile; projection publishes no record values, retains only a current-emitter pending version boundary, and excludes non-current emitters.
 # Locked migration can select PublicResolverV2 before the registry emits ResolverUpdated:
-# (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L4 @ ens_v2@48b3e2d)
-# (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L23 @ ens_v2@48b3e2d)
-# (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L179 @ ens_v2@48b3e2d)
-# (upstream: .refs/ens_v2/contracts/deployments/sepolia/PublicResolverV2.json:L429 @ ens_v2@48b3e2d)
-# (upstream: .refs/ens_v2/contracts/deployments/sepolia/PublicResolverV2.json:L598 @ ens_v2@48b3e2d)
-# (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L139 @ ens_v2@48b3e2d)
-# (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L474 @ ens_v2@48b3e2d).
+# (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L4 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L23 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L179 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/PublicResolverV2.json:L429 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/PublicResolverV2.json:L598 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L139 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L474 @ ens_v2@ccaeb58).
 # PermissionedResolver imports ENS resolver profile interfaces:
-# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L4 @ ens_v2@48b3e2d)
-# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L6 @ ens_v2@48b3e2d)
-# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L8 @ ens_v2@48b3e2d)
-# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L9 @ ens_v2@48b3e2d)
-# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L13 @ ens_v2@48b3e2d).
+# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L4 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L6 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L8 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L9 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L13 @ ens_v2@ccaeb58).
 # AddressChanged: (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L6 @ ens_v1@91c966f).
 [[abi.events]]
 name = "AddressChanged"
@@ -68,31 +68,31 @@ name = "VersionChanged"
 fragment = "event VersionChanged(bytes32 indexed node, uint64 newVersion)"
 normalized_events = ["RecordVersionChanged"]
 
-# AliasChanged: (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L19 @ ens_v2@48b3e2d).
+# AliasChanged: (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L19 @ ens_v2@ccaeb58).
 [[abi.events]]
 name = "AliasChanged"
 fragment = "event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName)"
 normalized_events = ["AliasChanged", "PreimageObserved"]
 
-# NamedResource: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L142 @ ens_v2@48b3e2d).
+# NamedResource: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L142 @ ens_v2@ccaeb58).
 [[abi.events]]
 name = "NamedResource"
 fragment = "event NamedResource(uint256 indexed resource, bytes name)"
 normalized_events = ["PreimageObserved"]
 
-# NamedTextResource: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L149 @ ens_v2@48b3e2d).
+# NamedTextResource: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L149 @ ens_v2@ccaeb58).
 [[abi.events]]
 name = "NamedTextResource"
 fragment = "event NamedTextResource(uint256 indexed resource, bytes name, bytes32 indexed keyHash, string key)"
 normalized_events = ["PreimageObserved"]
 
-# NamedAddrResource: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L172 @ ens_v2@48b3e2d).
+# NamedAddrResource: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L172 @ ens_v2@ccaeb58).
 [[abi.events]]
 name = "NamedAddrResource"
 fragment = "event NamedAddrResource(uint256 indexed resource, bytes name, uint256 indexed coinType)"
 normalized_events = ["PreimageObserved"]
 
-# EACRolesChanged: (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L22 @ ens_v2@48b3e2d).
+# EACRolesChanged: (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L22 @ ens_v2@ccaeb58).
 [[abi.events]]
 name = "EACRolesChanged"
 fragment = "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)"

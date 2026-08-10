@@ -28,8 +28,6 @@ pub(super) async fn build(
                        WHEN 'resource' THEN 'resource'
                        WHEN 'resolver' THEN 'resolver'
                        WHEN 'record_manager' THEN 'record_manager'
-                       WHEN 'migration_derived' THEN 'migration_derived'
-                       WHEN 'transport_derived' THEN 'transport_derived'
                    END AS scope_kind,
                    CASE event.after_state -> 'scope' ->> 'kind'
                        WHEN 'root' THEN 'root'
@@ -47,14 +45,6 @@ pub(super) async fn build(
                            event.after_state -> 'scope' ->> 'chain_id',
                            ':',
                            lower(event.after_state -> 'scope' ->> 'manager_address')
-                       )
-                       WHEN 'migration_derived' THEN concat(
-                           'migration_derived:',
-                           event.after_state -> 'scope' ->> 'predecessor_resource_id'
-                       )
-                       WHEN 'transport_derived' THEN concat(
-                           'transport_derived:',
-                           event.after_state -> 'scope' ->> 'transport'
                        )
                    END AS scope
             FROM project_events event

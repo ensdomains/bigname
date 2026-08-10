@@ -2,7 +2,8 @@
 
 PostgreSQL is the durable indexing and serving store. Current runtime objects
 live in `bigname_phase`; the append-only SQLx history in `migrations/` records
-the retired `public` schema and ends with a schema-qualified deletion migration.
+the retired `public` schema, its schema-qualified deletion, and reviewed
+in-place schema-migrations for initialized `bigname_phase` databases.
 
 ## Invariants
 
@@ -21,8 +22,9 @@ the retired `public` schema and ends with a schema-qualified deletion migration.
 
 `phase-runner init-schema` installs the fresh baseline into an empty
 `bigname_phase` namespace and refuses a nonempty target. The phase runner and
-API use that namespace in one database. A reviewed replacement procedure is
-required when the baseline cannot be upgraded in place.
+API use that namespace in one database. Reviewed versioned schema-migrations
+upgrade an initialized namespace in place when the change can preserve its
+durable state; the reviewed replacement procedure is required otherwise.
 
 The physical layers are:
 
@@ -389,23 +391,24 @@ routes and do not mutate raw facts, canonicality, manifests, or projections.
 There is no worker inspection surface for backfill jobs, replay staging,
 manifest drift, watch plans, or execution traces.
 
-## Migration rules
+## Schema-migration rules
 
-- SQLx migrations are append-only and versioned. Applied files are never
+- SQLx schema-migrations are append-only and versioned. Applied files are never
   rewritten.
-- Every destructive migration names the target schema explicitly. This is
+- Every destructive schema-migration names the target schema explicitly. This is
   mandatory where retired `public` table names collide with `bigname_phase`
   names.
 - Schema-v2 baseline changes require either a reviewed in-place upgrade or the
   documented offline namespace replacement and full pipeline walk.
-- A migration that changes identity, manifest authority, canonicality,
+- A schema-migration that changes identity, manifest authority, canonicality,
   projection meaning, or replay behavior updates the corresponding contract
   docs in the same change.
-- The generic worker migration entrypoint has been deleted. Deployment
-  automation applies reviewed versioned migrations at a planned boundary.
+- The generic worker schema-migration entrypoint has been deleted. Deployment
+  automation applies reviewed versioned schema-migrations at a planned boundary.
 
-The legacy deletion migration removes only schema-qualified `public` objects.
-It preserves the SQLx migration ledger and extension-owned objects.
+The legacy deletion schema-migration removes only schema-qualified `public`
+objects. It preserves the SQLx schema-migration ledger and extension-owned
+objects.
 
 ## Repository ownership
 

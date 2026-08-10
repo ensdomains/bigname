@@ -61,7 +61,6 @@ pub enum SurfaceBindingKind {
     LinkedSubregistryPath,
     ResolverAliasPath,
     ObservedWildcardPath,
-    MigrationRebind,
     ObservedOnly,
 }
 
@@ -72,7 +71,6 @@ impl SurfaceBindingKind {
             Self::LinkedSubregistryPath => "linked_subregistry_path",
             Self::ResolverAliasPath => "resolver_alias_path",
             Self::ObservedWildcardPath => "observed_wildcard_path",
-            Self::MigrationRebind => "migration_rebind",
             Self::ObservedOnly => "observed_only",
         }
     }
@@ -83,7 +81,6 @@ impl SurfaceBindingKind {
             "linked_subregistry_path" => Ok(Self::LinkedSubregistryPath),
             "resolver_alias_path" => Ok(Self::ResolverAliasPath),
             "observed_wildcard_path" => Ok(Self::ObservedWildcardPath),
-            "migration_rebind" => Ok(Self::MigrationRebind),
             "observed_only" => Ok(Self::ObservedOnly),
             _ => bail!("unknown surface binding kind {value}"),
         }

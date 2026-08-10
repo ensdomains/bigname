@@ -58,7 +58,6 @@ CREATE TABLE IF NOT EXISTS name_current (
                 'linked_subregistry_path',
                 'resolver_alias_path',
                 'observed_wildcard_path',
-                'migration_rebind',
                 'observed_only'
             )
         ),
@@ -182,9 +181,7 @@ CREATE TABLE IF NOT EXISTS permissions_current (
                 'registry',
                 'resource',
                 'resolver',
-                'record_manager',
-                'migration_derived',
-                'transport_derived'
+                'record_manager'
             )
         ),
     CHECK (jsonb_typeof(scope_detail) = 'object'),
@@ -364,7 +361,6 @@ CREATE TABLE IF NOT EXISTS address_names_current (
                 'linked_subregistry_path',
                 'resolver_alias_path',
                 'observed_wildcard_path',
-                'migration_rebind',
                 'observed_only'
             )
         ),

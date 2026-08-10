@@ -22,14 +22,6 @@ pub(crate) fn permission_scope_value(scope: &PermissionScope) -> V2Result<Value>
             "chain_id": permission_scope_chain_id(chain_id)?,
             "manager": manager_address.to_ascii_lowercase(),
         }),
-        PermissionScope::MigrationDerived {
-            predecessor_resource_id,
-        } => json!({
-            "predecessor_registration_id": predecessor_resource_id.to_string(),
-        }),
-        PermissionScope::TransportDerived { transport } => json!({
-            "transport": transport,
-        }),
     };
     let kind = match scope {
         PermissionScope::Resource => "registration",

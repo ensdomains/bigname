@@ -64,10 +64,9 @@ async fn v2_get_permissions_maps_rows_and_lineage() -> Result<()> {
     let rows = payload["data"]
         .as_array()
         .expect("permissions data must be an array");
-    assert_eq!(rows.len(), 4);
+    assert_eq!(rows.len(), 3);
     let resolver = permission_row_by_scope_kind(rows, "resolver");
     let record_manager = permission_row_by_scope_kind(rows, "record_manager");
-    let migration_derived = permission_row_by_scope_kind(rows, "migration_derived");
     let stale = permission_row_by_registration(rows, stale_resource_id);
 
     assert_eq!(resolver["address"], json!(V2_PERMISSIONS_SUBJECT));
@@ -126,16 +125,6 @@ async fn v2_get_permissions_maps_rows_and_lineage() -> Result<()> {
             }
         })
     );
-    assert_eq!(
-        migration_derived["grant_scope"],
-        json!({
-            "kind": "migration_derived",
-            "detail": {
-                "predecessor_registration_id": v2_permissions_predecessor_resource_id().to_string()
-            }
-        })
-    );
-
     assert_eq!(
         stale["registration_id"],
         json!(stale_resource_id.to_string())
@@ -227,7 +216,7 @@ async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result
     let name_rows = by_name["data"]
         .as_array()
         .expect("name-filtered permissions data");
-    assert_eq!(name_rows.len(), 4);
+    assert_eq!(name_rows.len(), 3);
     assert!(
         name_rows
             .iter()
@@ -243,7 +232,7 @@ async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result
     let registration_rows = by_registration["data"]
         .as_array()
         .expect("registration-filtered permissions data");
-    assert_eq!(registration_rows.len(), 4);
+    assert_eq!(registration_rows.len(), 3);
     assert!(
         registration_rows
             .iter()
@@ -313,7 +302,7 @@ async fn v2_get_permissions_name_filter_uses_current_registration_without_snapsh
     let rows = payload["data"]
         .as_array()
         .expect("name-filtered permissions data");
-    assert_eq!(rows.len(), 4);
+    assert_eq!(rows.len(), 3);
     assert!(
         rows
             .iter()
@@ -488,56 +477,6 @@ async fn v2_permissions_empty_resource_fails_closed_from_typed_support_summary()
     database.cleanup().await
 }
 
-/// `transport_derived` is a reserved permission scope: no adapter emits it
-/// (guarded in `crates/adapters`), so a projection rebuild never produces this
-/// row. The schema value and the typed reader are retained rather than deleted —
-/// `docs/glossary.md` § Reserved surface and `docs/architecture.md` § Permissions
-/// carry the reasoning.
-///
-/// This pins that the retained read path still works: a stored row carrying the
-/// reserved kind decodes and serves instead of failing the page. That makes
-/// removing the `transport_derived` arm of `PermissionScope::parse`, or the
-/// schema's CHECK value, visible as the breaking change it would be for any row
-/// carrying the kind.
-///
-/// It asserts neither that the scope is supported output nor that bigname has
-/// ever written such a row — no adapter has ever emitted one. Malformed rows are
-/// out of scope: a row whose detail does not match its kind fails the page for
-/// every scope kind, reserved or not.
-#[tokio::test]
-async fn v2_get_permissions_decodes_and_serves_a_stored_reserved_scope() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_v2_permissions_fixture(&database).await?;
-
-    let mut residual_row = permission_current_row(
-        v2_permissions_current_resource_id(),
-        V2_PERMISSIONS_SUBJECT,
-        PermissionScope::TransportDerived {
-            transport: "retired".to_owned(),
-        },
-        12,
-        113,
-    );
-    apply_raw_log_permission_lineage(&mut residual_row, "set_resolver", 113);
-    upsert_phase_permissions_current_rows(&database.pool, &[residual_row]).await?;
-
-    let response = v2_permissions_response_for_database(
-        &database,
-        &format!("/v2/permissions?address={V2_PERMISSIONS_SUBJECT}"),
-    )
-    .await?;
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let payload: Value = read_json(response).await?;
-    let rows = payload["data"]
-        .as_array()
-        .expect("permissions data must be an array");
-    let residual = permission_row_by_scope_kind(rows, "transport_derived");
-    assert_eq!(residual["grant_scope"]["detail"]["transport"], json!("retired"));
-
-    database.cleanup().await
-}
-
 #[tokio::test]
 async fn v2_permissions_serve_unprojected_authority_resources_as_partial() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -562,7 +501,7 @@ async fn v2_permissions_serve_unprojected_authority_resources_as_partial() -> Re
                 .as_array()
                 .expect("permissions data must be an array")
                 .len(),
-            4
+            3
         );
         assert_eq!(payload["meta"]["completeness"], json!("partial"));
         assert_eq!(
@@ -756,23 +695,11 @@ async fn seed_v2_permissions_fixture(database: &TestDatabase) -> Result<()> {
         111,
     );
     apply_raw_log_permission_lineage(&mut record_manager_row, "set_records", 111);
-    let mut migration_derived_row = permission_current_row(
-        current_resource_id,
-        V2_PERMISSIONS_SUBJECT,
-        PermissionScope::MigrationDerived {
-            predecessor_resource_id: v2_permissions_predecessor_resource_id(),
-        },
-        11,
-        112,
-    );
-    apply_raw_log_permission_lineage(&mut migration_derived_row, "set_records", 112);
-
     upsert_phase_permissions_current_rows(
         &database.pool,
         &[
             current_row,
             record_manager_row,
-            migration_derived_row,
             stale_row,
             permission_current_row(
                 current_resource_id,
@@ -832,8 +759,4 @@ fn v2_permissions_current_resource_id() -> Uuid {
 
 fn v2_permissions_stale_resource_id() -> Uuid {
     Uuid::from_u128(0xe200)
-}
-
-fn v2_permissions_predecessor_resource_id() -> Uuid {
-    Uuid::from_u128(0xe300)
 }
