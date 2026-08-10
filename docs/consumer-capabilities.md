@@ -50,8 +50,8 @@ come only from its ENSv2 resource. Retained ENSv1 facts remain history and
 provenance; they do not make the current read unsupported and cannot become
 current again after an ENSv2 release. Address-name and permission collections
 consume that selected current registration for a supported migrated name, but
-they do not acquire a new row-local mixed-authority status vocabulary; callers
-inspect the exact-name or lookup result for coverage. An explicit
+they acquire no row-local coverage status or unsupported-reason vocabulary;
+callers inspect the exact-name or lookup result for coverage. An explicit
 `registration_id` permission query may inspect a superseded ENSv1 registration
 as historical/audit data. Once slice 2 is activated, every permission row
 carries `authority_context`. `current_for_name` means a `name` filter selected
