@@ -21,6 +21,7 @@ const EXPECTED_TABLES: &[&str] = &[
     "label_preimages",
     "manifest_contract_instances",
     "manifest_discovery_rules",
+    "manifest_authority_attestations",
     "manifest_versions",
     "name_current",
     "name_surfaces",
@@ -80,6 +81,10 @@ const BASELINE: &[(&str, &str)] = &[
     (
         "phase state",
         include_str!("../../../schema-v2/baseline/10_phase_state.sql"),
+    ),
+    (
+        "manifest authority attestations",
+        include_str!("../../../schema-v2/baseline/11_manifest_authority_attestations.sql"),
     ),
 ];
 

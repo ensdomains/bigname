@@ -110,9 +110,18 @@ GRANT SELECT ON ALL TABLES IN SCHEMA bigname_phase TO bigname_verify;
 
 The role provisioning is an operational database grant, not schema-v2
 migration authority. Reapply and revalidate the SELECT grant after every
-approved phase-schema rebuild. Do not reuse the writer credential in the
-verification URL: setting a writer session's default transaction to read-only
-does not remove that role's write authority, and startup rejects it.
+approved phase-schema rebuild or additive schema-migration that creates a
+table. In particular, after applying the attestation-audit schema-migration for
+the [manifest-authority marker](glossary.md#manifest-authority-marker), run the
+`GRANT SELECT ON ALL TABLES` statement again before
+starting the runner. Stop every old phase-runner and one-shot redo process
+before applying this schema-migration, and keep them stopped until the new
+binary is ready. An old binary recognizes the marker prefix but does not bind
+its boolean attestation to the new generation token or write the durable audit
+row. PostgreSQL does not extend an earlier all-tables grant to tables created
+later. Do not reuse the writer credential in the verification URL:
+setting a writer session's default transaction to read-only does not remove
+that role's write authority, and startup rejects it.
 
 Each `BIGNAME_PHASE_RUNNER_SOURCES` entry has the form
 `CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV`; the named environment variable
@@ -172,6 +181,58 @@ level, while a redo covering the full retained extent can report the level
 fixed by its source kind. An interrupted attempt keeps the normal resumable
 redo marker and must be rerun with the same range.
 Historical `live` redo is rejected because live follows only the current head.
+Live does not advance the finite per-source ingest cursors. Interpret redo
+checks each source only through its persisted finite target and separately
+requires readable lineage at every height through the effective redo end. That
+cursor coverage and lineage prove only the facts selected by the [watch
+plan](glossary.md#watch-plan--watched-tuple) active when each block was loaded,
+not facts required by a later watch plan.
+
+Manifest synchronization records a [manifest-authority
+marker](glossary.md#manifest-authority-marker) when its authority changes. Every
+Interpret redo that would discharge that marker uses this operator flow:
+
+1. If the change widened the watch plan, complete the [mandatory historical
+   fetch for the affected
+   range](manifests.md#mandatory-historical-fetch-after-watch-plan-widening).
+   Otherwise, confirm that the change widened nothing.
+2. Copy the invalidation token printed by the fence error and re-run the redo
+   with `--attest-watch-set-coverage <token>`. For a multi-chain redo, repeat
+   `--attest-watch-set-coverage <chain>=<token>` for each affected chain.
+
+Without the flag, the redo fails closed. With it, the runner logs an error-level
+structured event from an immutable audit row containing the chain, phase, redo
+range, authority fingerprint, invalidation token, runner instance ID, and
+attestation time. The audit row is committed in the same transaction that
+begins the marker-discharging redo and is unique for that chain, phase, and
+invalidation generation. A restart re-emits it only after the locked begin
+matches and commits the same active redo; rerunning the same token-valued
+command is valid only for that exact active, audited redo. If a binary upgrade
+changes the [interpreter content hash](glossary.md#interpreter-content-hash)
+while that redo is interrupted, use the same token and exact audited range. The
+locked begin keeps the audit association but discards progress written under
+the prior hash, so Interpret restarts the range from its beginning under the
+new hash. Later interruptions under the new hash resume normally. The locked
+begin rejects a stale token, including one from an earlier transition to the
+same authority. The system cannot verify that the fetch or no-widening review
+happened; the attestation is the operator's responsibility. Do not edit cursors.
+The same conservative gate applies to
+non-widening changes and to ranges fully covered by finite cursors until issue
+#376 binds watch-plan evidence to loaded facts. An interpreter content hash
+rotation with neither a current manifest-authority marker nor an active audited
+redo remains flagless. When a full-history Interpret redo for an interpreter
+content hash rotation starts at the finite ingest bounds after Live has
+advanced, the runner extends Interpret
+through its recorded head and stamps the range onto Project clipped to
+Project's own recorded head — the same range unless a crash between the two
+phases' live-cycle advances left Project one block behind. Run or resume
+the stamped Project range exactly as recorded. Project hash adoption uses its
+recorded head rather than narrowing the stamp to the older ingest handoff, and
+an interrupted attempt keeps the live-extended range. When that interruption
+belongs to an attested Interpret redo from the prior interpreter content hash,
+restart the same audited range with its token; the range restarts from its
+beginning rather than resuming the cursor written under the prior interpreter
+content hash.
 `recompute-flags` recalculates label and name-surface normalization metadata
 under the current normalizer and refreshes the scoped primary-name projection.
 Names that remain active or remain shadow complete without replay. Names that
@@ -360,10 +421,10 @@ export/import mechanism rather than this replacement procedure.
 
 The project-at-head guard also binds the API's compiled interpreter content
 hash. `bigname-api` and `phase-runner` must therefore come from the same commit.
-After any interpreter-hash rotation, deploy the new phase runner and finish its
-required re-walk before deploying the matching API; deploying the API first
-makes all v2 snapshot-selected reads return `409 stale` until the new project
-generation is published. This includes indexed reads because snapshot
+After any interpreter content hash rotation, deploy the new phase runner and
+finish its required re-walk before deploying the matching API; deploying the
+API first makes all v2 snapshot-selected reads return `409 stale` until the new
+project generation is published. This includes indexed reads because snapshot
 selection itself requires the matching project publication before any
 projection row is admitted.
 

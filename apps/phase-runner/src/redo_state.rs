@@ -4,6 +4,7 @@ use crate::{
     config::SourceConfig,
     error::{RunnerError, RunnerResult},
     phase::{BlockRange, PhaseName, PhaseProgress, RunMode},
+    redo_manifest_audit::{ManifestAuthorityAttestationAudit, matches_active_redo},
     state::PhaseStatus,
     transitions::{
         PhaseStateRow, invalid_transition, lock_chain_phase_state, redo_rerun_instruction,
@@ -17,19 +18,20 @@ pub(crate) struct RedoSession {
     range: BlockRange,
     recompute_flags: bool,
     stage_project_refresh_on_completion: bool,
+    pub(crate) manifest_authority_audit: Option<ManifestAuthorityAttestationAudit>,
 }
-
 pub(crate) enum RedoOutcome<'a> {
     Completed(&'a PhaseProgress),
     Failed(&'a RunnerError),
 }
-
 pub(crate) async fn begin(
     pool: &PgPool,
     chain_id: &str,
     phase: PhaseName,
     mode: &RunMode,
     sources: &[SourceConfig],
+    supplied_manifest_authority_generation: Option<&str>,
+    attested_by: &str,
 ) -> RunnerResult<RedoSession> {
     let mut transaction = pool.begin().await.map_err(|error| {
         RunnerError::database(
@@ -49,7 +51,7 @@ pub(crate) async fn begin(
             .last_error
             .as_deref()
             .is_some_and(crate::redo_recompute::owns_project_refresh);
-    restore_previous_lifecycle(&mut previous)?;
+    crate::redo_completion::restore_previous_lifecycle(&mut previous)?;
     let status = previous.status()?;
     let current_interpreter_hash = bigname_content_hash::INTERPRETER_CONTENT_HASH;
     let recorded_hash = previous.input_content_hash.as_deref();
@@ -59,7 +61,15 @@ pub(crate) async fn begin(
     let adopts_new_hash =
         matches!(phase, PhaseName::Interpret | PhaseName::Project) && hash_requires_full_redo;
     if adopts_new_hash {
-        require_full_hash_redo(&mut transaction, chain_id, phase, mode).await?;
+        require_full_hash_redo(
+            &mut transaction,
+            chain_id,
+            phase,
+            mode,
+            previous.current_block_number,
+            previous.redo_in_progress,
+        )
+        .await?;
     }
     let range = mode.range().ok_or_else(|| {
         RunnerError::data_integrity("explicit redo transition is missing its block range")
@@ -74,19 +84,24 @@ pub(crate) async fn begin(
     )
     .await?;
     let execution_range = if phase == PhaseName::Interpret && matches!(mode, RunMode::Redo(_)) {
-        interpret_replay_range(&previous, range)?
+        crate::redo_presence::interpret_replay_range(&previous, range)?
     } else {
         range
     };
-    if phase == PhaseName::Interpret && matches!(mode, RunMode::Redo(_)) {
+    let manifest_attestation = if phase == PhaseName::Interpret && matches!(mode, RunMode::Redo(_))
+    {
         crate::redo_presence::require_interpret_raw_data(
             &mut transaction,
             chain_id,
             sources,
             execution_range,
+            previous.input_content_hash.as_deref(),
+            supplied_manifest_authority_generation,
         )
-        .await?;
-    }
+        .await?
+    } else {
+        None
+    };
     require_interrupted_redo_coverage(chain_id, phase, mode, &previous, execution_range)?;
     if !status.can_transition_to(PhaseStatus::Running, true) {
         return Err(invalid_transition(
@@ -97,11 +112,23 @@ pub(crate) async fn begin(
         ));
     }
     let redo_mode = redo_mode(mode)?;
-    let resume_same_redo = previous.redo_in_progress
-        && previous.redo_mode.as_deref() == Some(redo_mode)
-        && previous.redo_from_block_number == Some(execution_range.from)
-        && previous.redo_to_block_number == Some(execution_range.to)
+    let same_active_redo = matches_active_redo(&previous, redo_mode, execution_range);
+    let attestation_audit = crate::redo_manifest_audit::record_or_resume(
+        &mut transaction,
+        chain_id,
+        manifest_attestation,
+        execution_range,
+        same_active_redo,
+        supplied_manifest_authority_generation,
+        attested_by,
+    )
+    .await?;
+    let same_active_audit = attestation_audit
+        .as_ref()
+        .is_some_and(ManifestAuthorityAttestationAudit::replayed);
+    let resume_same_epoch = same_active_redo
         && (!phase.writes_derived_data() || recorded_hash == Some(current_interpreter_hash));
+    let preserve_started_at = resume_same_epoch || same_active_audit;
     sqlx::query(
         "
         UPDATE chain_phase_state
@@ -130,13 +157,13 @@ pub(crate) async fn begin(
             redo_current_block_hash = CASE WHEN $6 THEN redo_current_block_hash END,
             redo_target_block_number = CASE WHEN $6 THEN redo_target_block_number END,
             redo_target_block_hash = CASE WHEN $6 THEN redo_target_block_hash END,
-            input_content_hash = CASE WHEN $7 THEN $8 ELSE input_content_hash END,
+            input_content_hash = CASE WHEN $8 THEN $9 ELSE input_content_hash END,
             last_error = CASE
-                WHEN last_error LIKE $9
-                    THEN $10 || substring(last_error FROM char_length($11) + 1)
+                WHEN last_error LIKE $10
+                    THEN $11 || substring(last_error FROM char_length($12) + 1)
                 WHEN redo_in_progress THEN last_error
             END,
-            started_at = now(),
+            started_at = CASE WHEN $7 THEN started_at ELSE now() END,
             finished_at = NULL,
             updated_at = now()
         WHERE chain_id = $1
@@ -148,7 +175,8 @@ pub(crate) async fn begin(
     .bind(redo_mode)
     .bind(execution_range.from)
     .bind(execution_range.to)
-    .bind(resume_same_redo)
+    .bind(resume_same_epoch)
+    .bind(preserve_started_at)
     .bind(phase.writes_derived_data())
     .bind(current_interpreter_hash)
     .bind(format!("{}%", crate::redo_stamp::REQUIRED_REDO_PREFIX))
@@ -174,30 +202,8 @@ pub(crate) async fn begin(
         range: execution_range,
         recompute_flags: matches!(mode, RunMode::RecomputeFlags(_)),
         stage_project_refresh_on_completion,
+        manifest_authority_audit: attestation_audit,
     })
-}
-
-fn interpret_replay_range(
-    previous: &PhaseStateRow,
-    requested: BlockRange,
-) -> RunnerResult<BlockRange> {
-    let to = previous.current_block_number.ok_or_else(|| {
-        RunnerError::data_integrity("interpret redo cannot determine the recorded interpreted head")
-    })?;
-    BlockRange::new(requested.from, to)
-}
-
-fn restore_previous_lifecycle(previous: &mut PhaseStateRow) -> RunnerResult<()> {
-    if !previous.redo_in_progress {
-        return Ok(());
-    }
-    previous.phase_status = previous.redo_previous_phase_status.take().ok_or_else(|| {
-        RunnerError::data_integrity("active redo is missing its previous phase status")
-    })?;
-    previous.last_error = previous.redo_previous_last_error.take();
-    previous.started_at = previous.redo_previous_started_at.take();
-    previous.finished_at = previous.redo_previous_finished_at.take();
-    Ok(())
 }
 
 fn redo_mode(mode: &RunMode) -> RunnerResult<&'static str> {
@@ -288,6 +294,8 @@ async fn require_full_hash_redo(
     chain_id: &str,
     phase: PhaseName,
     mode: &RunMode,
+    recorded_head: Option<i64>,
+    interrupted_redo: bool,
 ) -> RunnerResult<()> {
     let bounds: (Option<i64>, Option<i64>) = sqlx::query_as(
         "
@@ -311,7 +319,7 @@ async fn require_full_hash_redo(
             error,
         )
     })?;
-    let (Some(from), Some(to)) = bounds else {
+    let (Some(from), Some(mut to)) = bounds else {
         return Err(RunnerError::new(
             crate::error::ErrorKind::ContentHashMismatch,
             format!(
@@ -320,6 +328,9 @@ async fn require_full_hash_redo(
             ),
         ));
     };
+    if phase == PhaseName::Project || interrupted_redo {
+        to = to.max(recorded_head.unwrap_or(to));
+    }
     let Some(range) = mode.range() else {
         return Err(RunnerError::data_integrity(
             "hash adoption requires an explicit redo range",
@@ -408,6 +419,7 @@ pub(crate) async fn finish(
         range,
         recompute_flags,
         stage_project_refresh_on_completion,
+        ..
     } = session;
     let content_hash = if phase.writes_derived_data() {
         Some(bigname_content_hash::INTERPRETER_CONTENT_HASH)

@@ -601,6 +601,15 @@ request.
 used by the old runtime's raw-log mutation fence and replay caches. Its Rust
 writer and consumers were deleted before the legacy schema was dropped.
 
+**Interpreter content hash** — the build-time identifier for checked-in inputs
+that can change Interpret or Project output. Derived phase state records this
+hash, and a binary with a different value must re-walk the complete retained
+range before normal derived writes continue. It covers interpreter, projection,
+manifest, ABI, normalization, provider-response decoding, and selected
+dependency inputs as detailed under [interpretation
+replay](storage.md#interpretation-replay). It is not an Ethereum contract
+bytecode hash.
+
 **Block-revision evidence floor** — the schema-migration-era lower bound used by the
 old runtime's raw-log revision evidence. Its tables remain historical; the
 Stage B runtime no longer computes or consumes this floor.
@@ -645,6 +654,19 @@ transfer powers before the later wrapper expiry.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L221 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L820 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L825 @ ens_v1@91c966f)
+
+**Manifest-authority marker** — a
+`manifest-authority:<authority-fingerprint>:<invalidation-token>` value that
+manifest synchronization records in a derived phase's input-hash field when
+the active manifest authority changes. The fingerprint identifies the desired
+manifest set. The database mints a new invalidation token for every transition,
+including a later return to the same desired set. The marker poisons ordinary
+hash adoption until the required full redo begins. It proves that authority
+changed; it does not prove that facts required by a widened watch plan were
+fetched. When Interpret would discharge the marker, the operator must complete
+the manifest widening procedure or confirm that nothing widened, then attest
+with the current token. Finite cursors and readable lineage both prove only the
+watch plan active when facts were loaded.
 
 **Non-name form** — a string a route puts in a name-typed field for a label
 bigname cannot state as a name. Registry events prove a child node and its

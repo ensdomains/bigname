@@ -218,8 +218,19 @@ impl PhaseStore {
         phase: PhaseName,
         mode: &RunMode,
         sources: &[SourceConfig],
+        supplied_manifest_authority_generation: Option<&str>,
+        attested_by: &str,
     ) -> RunnerResult<RedoSession> {
-        redo_state::begin(&self.pool, chain_id, phase, mode, sources).await
+        redo_state::begin(
+            &self.pool,
+            chain_id,
+            phase,
+            mode,
+            sources,
+            supplied_manifest_authority_generation,
+            attested_by,
+        )
+        .await
     }
 
     pub(crate) async fn finish_redo(

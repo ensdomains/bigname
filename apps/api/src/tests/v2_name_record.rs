@@ -536,7 +536,7 @@ async fn v2_verified_records_return_conflict_when_project_generation_changes_dur
         .context("verified lookup did not reach its provider call")?;
     sqlx::query(
         "UPDATE chain_phase_state
-         SET input_content_hash = 'manifest-authority:api-concurrency-test'
+         SET input_content_hash = 'manifest-authority:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:api-concurrency-test'
          WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
     )
     .execute(&lookup_pool)

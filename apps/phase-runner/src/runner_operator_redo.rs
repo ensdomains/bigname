@@ -27,6 +27,24 @@ impl PhaseRunner {
         range: BlockRange,
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
+        let generation_token = self
+            .preflight_watch_set_coverage_attestation(chain, selection)
+            .await?;
+        self.scope_manifest_attestation(
+            &chain.chain_id,
+            generation_token,
+            self.redo_after_attestation_preflight(chain, selection, range, cancellation),
+        )
+        .await
+    }
+
+    async fn redo_after_attestation_preflight(
+        &self,
+        chain: &ChainConfig,
+        selection: RedoPhase,
+        range: BlockRange,
+        cancellation: CancellationToken,
+    ) -> RunnerResult<()> {
         match selection {
             RedoPhase::RecomputeFlags => {
                 self.redo_recompute_flags(chain, range, cancellation).await
@@ -371,11 +389,33 @@ impl PhaseRunner {
         cancellation: CancellationToken,
     ) -> RunnerResult<SupervisorReport> {
         let mut report = SupervisorReport::default();
+        let mut generation_tokens = Vec::with_capacity(chains.len());
         for chain in chains {
-            if let Err(error) = self
-                .redo(chain, selection, range, cancellation.clone())
+            match self
+                .preflight_watch_set_coverage_attestation(chain, selection)
                 .await
             {
+                Ok(generation_token) => generation_tokens.push(generation_token),
+                Err(error) => report.stopped_chains.push((chain.chain_id.clone(), error)),
+            }
+        }
+        if !report.stopped_chains.is_empty() {
+            return Ok(report);
+        }
+        for (chain, generation_token) in chains.iter().zip(generation_tokens) {
+            let result = self
+                .scope_manifest_attestation(
+                    &chain.chain_id,
+                    generation_token,
+                    self.redo_after_attestation_preflight(
+                        chain,
+                        selection,
+                        range,
+                        cancellation.clone(),
+                    ),
+                )
+                .await;
+            if let Err(error) = result {
                 report.stopped_chains.push((chain.chain_id.clone(), error));
             }
             if cancellation.is_cancelled() {

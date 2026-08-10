@@ -5,6 +5,112 @@ use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use phase_runner::{database::RunnerDatabase, schema::initialize_schema_v2};
 
 #[tokio::test]
+async fn schema_migrations_apply_to_an_empty_database_before_the_phase_baseline() -> Result<()> {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("phase_runner_empty_migrations_then_baseline")
+            .pool_max_connections(2)
+            .parse_context("failed to parse empty schema-migration test database URL")
+            .admin_connect_context("failed to connect empty schema-migration test admin pool")
+            .pool_connect_context("failed to connect empty schema-migration test pool"),
+    )
+    .await?;
+
+    bigname_storage::MIGRATOR.run(database.pool()).await?;
+    let audit_before_baseline: bool = sqlx::query_scalar(
+        "SELECT to_regclass('bigname_phase.manifest_authority_attestations') IS NOT NULL",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(!audit_before_baseline);
+
+    initialize_schema_v2(database.pool()).await?;
+    let audit_after_baseline: bool = sqlx::query_scalar(
+        "SELECT to_regclass('bigname_phase.manifest_authority_attestations') IS NOT NULL",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(audit_after_baseline);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn audit_schema_migration_applies_on_top_of_the_pre_audit_phase_baseline() -> Result<()> {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("phase_runner_pre_audit_baseline_migration")
+            .pool_max_connections(2)
+            .parse_context("failed to parse baseline schema-migration test database URL")
+            .admin_connect_context("failed to connect baseline schema-migration test admin pool")
+            .pool_connect_context("failed to connect baseline schema-migration test pool"),
+    )
+    .await?;
+    let mut transaction = database.pool().begin().await?;
+    sqlx::query("CREATE SCHEMA bigname_phase")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("SET LOCAL search_path TO bigname_phase, public")
+        .execute(&mut *transaction)
+        .await?;
+    for sql in [
+        include_str!("../../../schema-v2/baseline/01_chain.sql"),
+        include_str!("../../../schema-v2/baseline/02_raw_facts.sql"),
+        include_str!("../../../schema-v2/baseline/03_identity.sql"),
+        include_str!("../../../schema-v2/baseline/04_manifests.sql"),
+        include_str!("../../../schema-v2/baseline/05_normalized_events.sql"),
+        include_str!("../../../schema-v2/baseline/06_projections.sql"),
+        include_str!("../../../schema-v2/baseline/07_labels.sql"),
+        include_str!("../../../schema-v2/baseline/08_heartbeats.sql"),
+        include_str!("../../../schema-v2/baseline/09_divergence.sql"),
+        include_str!("../../../schema-v2/baseline/10_phase_state.sql"),
+    ] {
+        sqlx::raw_sql(sql).execute(&mut *transaction).await?;
+    }
+    transaction.commit().await?;
+
+    let legacy_fingerprint = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let legacy_marker = format!("manifest-authority:{legacy_fingerprint}");
+    sqlx::query(
+        "INSERT INTO bigname_phase.chain_phase_state (
+             chain_id, phase_name, input_content_hash
+         ) VALUES
+             ('legacy-authority-marker', 'interpret', $1),
+             ('legacy-authority-marker', 'project', $1)",
+    )
+    .bind(&legacy_marker)
+    .execute(database.pool())
+    .await?;
+
+    bigname_storage::MIGRATOR.run(database.pool()).await?;
+    let audit_table_exists: bool = sqlx::query_scalar(
+        "SELECT to_regclass('bigname_phase.manifest_authority_attestations') IS NOT NULL",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(audit_table_exists);
+    let upgraded_markers: Vec<String> = sqlx::query_scalar(
+        "SELECT input_content_hash
+         FROM bigname_phase.chain_phase_state
+         WHERE chain_id = 'legacy-authority-marker'
+         ORDER BY phase_name",
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(upgraded_markers.len(), 2);
+    let expected_prefix = format!("{legacy_marker}:");
+    assert!(
+        upgraded_markers
+            .iter()
+            .all(|marker| marker.starts_with(&expected_prefix))
+    );
+    assert_eq!(
+        upgraded_markers[0], upgraded_markers[1],
+        "matching legacy markers on one chain must receive one upgrade generation"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn bootstrap_after_legacy_schema_drop_reaches_manifest_sync() -> Result<()> {
     let database = TestDatabase::create(
         TestDatabaseConfig::new("phase_runner_supported_bootstrap")
@@ -124,6 +230,12 @@ async fn bootstrap_after_legacy_schema_drop_reaches_manifest_sync() -> Result<()
     .await?;
     assert!(!legacy_table_exists);
     assert!(phase_table_exists);
+    let audit_table_exists: bool = sqlx::query_scalar(
+        "SELECT to_regclass('bigname_phase.manifest_authority_attestations') IS NOT NULL",
+    )
+    .fetch_one(runner.pool())
+    .await?;
+    assert!(audit_table_exists);
     let active_schema: String = sqlx::query_scalar("SELECT current_schema()")
         .fetch_one(runner.pool())
         .await?;

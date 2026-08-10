@@ -16,6 +16,8 @@ pub mod phase;
 pub mod phase_lock;
 pub mod project_phase;
 mod redo_completion;
+mod redo_manifest_attestation;
+mod redo_manifest_audit;
 mod redo_presence;
 mod redo_recompute;
 mod redo_stamp;

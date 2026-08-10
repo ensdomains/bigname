@@ -332,8 +332,9 @@ current watch plan.
 Schema-v2 manifest synchronization retires manifest-declared address ranges and
 updates manifest-declared proxy edges. It does not run a full-source
 reconciliation over event-driven edges. An authority change invalidates the
-interpret and project phase content hashes; explicit redo then re-derives the
-affected discovery rows from retained facts under the new manifest authority.
+interpret and project phase content hashes. Complete the [mandatory historical
+fetch and attested redo](#mandatory-historical-fetch-after-watch-plan-widening)
+before re-deriving affected discovery rows under the new manifest authority.
 The Base project phase also consumes Ethereum Mainnet `basenames_execution`
 authority for Basenames support and provenance. Changing that family therefore
 invalidates the `base-mainnet` project epoch as well, without invalidating its
@@ -345,6 +346,68 @@ Schema-v2 interpretation processes retained `RegistryCreated`,
 interpreter. The deleted indexer no longer synthesizes
 `orphaned_discovery_edge` tombstones; branch replacement is handled through
 lineage selection plus an explicit derived-range redo.
+
+### Mandatory historical fetch after watch-plan widening
+
+A manifest change widens the [watch
+plan](glossary.md#watch-plan--watched-tuple) when it adds an address, event
+signature, or active block range whose facts were not selected when older
+blocks were loaded. Manifest synchronization records a
+[manifest-authority marker](glossary.md#manifest-authority-marker) on Interpret
+and Project, but it does not fetch the newly watched history. Before rebuilding
+derived state, run an ingest redo over every affected historical range with the
+new manifest profile and the chain's configured sources. For example:
+
+```sh
+phase-runner redo \
+  --chain <chain> \
+  --phase ingest \
+  --from-block <first-affected-block> \
+  --to-block <last-affected-block> \
+  --source <CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV>
+```
+
+An ingest redo fetches and retains the newly selected facts, but intentionally
+does not advance the finite `ingest_cursors` used by the initial spine. Finite
+cursors prove that a source reached its target, and readable lineage proves
+which blocks were loaded, but both cover only the facts selected by the watch
+plan active at load time. Neither proves that a later widening's facts were
+fetched.
+
+The fence error prints the invalidation token from the current marker. After
+the fetch, re-run the required full Interpret redo with
+`--attest-watch-set-coverage <token>`. If review establishes that the authority
+change widened no watch-plan range, the same token-valued flag attests that
+conclusion without a fetch. For a multi-chain redo, repeat
+`--attest-watch-set-coverage <chain>=<token>` for each affected chain; one token
+cannot attest multiple chains. The runner compares each supplied token with
+the current marker again while holding the phase-state lock. A later manifest
+sync, including a return to the same desired authority, mints a different token
+and makes an earlier attestation stale.
+
+The redo-begin transaction appends one immutable audit row for the chain,
+Interpret phase, invalidation token, authority fingerprint, redo range, runner
+instance ID, and attestation time. That transaction also adopts the new
+[interpreter content hash](glossary.md#interpreter-content-hash), so the marker
+cannot be discharged without its audit row.
+The error-level structured telemetry is emitted from the durable row after
+commit. If the runner stops before that emission completes, the next redo
+attempt re-emits the row only after the locked begin matches the same active
+redo and commits. The same token-valued command is valid for that exact active,
+audited redo; once the redo completes, passing the token again is a hard error.
+If a binary upgrade changes the interpreter content hash while the redo is
+interrupted, re-run that exact range with the same token. The new binary retains
+the audit association but clears progress written under the prior hash and
+walks the range again from its beginning.
+
+The system cannot verify that the historical fetch or the no-widening review
+happened. Supplying the current token records the operator's responsibility for
+that check until issue #376 binds the watch-plan fingerprint to coverage
+evidence. Every
+authority-marked Interpret redo requires the flag, whether its range is covered
+by finite cursors, readable lineage, or both. An interpreter content hash
+rotation with neither a current manifest-authority marker nor an active audited
+redo remains flagless.
 
 ## Manifest change propagation
 

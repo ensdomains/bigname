@@ -232,6 +232,71 @@ async fn schema_v2_manifest_authority_change_requires_derived_redo() -> Result<(
 }
 
 #[tokio::test]
+async fn returning_to_the_same_manifest_authority_mints_a_new_generation() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_sync_generation_aba").await?;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests/mainnet");
+    let full_repository = load_repository(&root)?;
+    let base_repository = load_repository(root.join("base"))?;
+    sync_schema_v2_repository(scratch.pool(), &full_repository).await?;
+
+    let chain_id = "ethereum-mainnet";
+    PhaseStore::new(scratch.pool().clone())
+        .initialize_chain(chain_id)
+        .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'completed',
+             input_content_hash = $2,
+             started_at = now(),
+             finished_at = now()
+         WHERE chain_id = $1
+           AND phase_name IN ('interpret', 'project')",
+    )
+    .bind(chain_id)
+    .bind(INTERPRETER_CONTENT_HASH)
+    .execute(scratch.pool())
+    .await?;
+    seed_chain_head(scratch.pool(), chain_id, 30_000_000).await?;
+
+    sync_schema_v2_repository(scratch.pool(), &base_repository).await?;
+    let first_marker: String = sqlx::query_scalar(
+        "SELECT input_content_hash
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+
+    sync_schema_v2_repository(scratch.pool(), &full_repository).await?;
+    advance_chain_head(scratch.pool(), chain_id, 30_000_001).await?;
+    sync_schema_v2_repository(scratch.pool(), &base_repository).await?;
+    let second_marker: String = sqlx::query_scalar(
+        "SELECT input_content_hash
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+
+    let (first_fingerprint, first_generation) = manifest_marker_parts(&first_marker)?;
+    let (second_fingerprint, second_generation) = manifest_marker_parts(&second_marker)?;
+    assert_eq!(
+        second_fingerprint, first_fingerprint,
+        "returning to the same desired manifests must preserve the authority fingerprint"
+    );
+    assert_ne!(
+        second_generation, first_generation,
+        "each distinct invalidation must mint a new generation token"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn basenames_execution_retirement_invalidates_the_base_project_epoch() -> Result<()> {
     let scratch = ScratchDatabase::create("production_manifest_sync_basenames_dependency").await?;
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -381,4 +446,38 @@ async fn seed_chain_head(pool: &sqlx::PgPool, chain_id: &str, number: i64) -> Re
     .execute(pool)
     .await?;
     Ok(())
+}
+
+async fn advance_chain_head(pool: &sqlx::PgPool, chain_id: &str, number: i64) -> Result<()> {
+    let hash = format!("{chain_id}-manifest-sync-head-{number}");
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state
+         ) VALUES ($1, $2, $3, to_timestamp($3), 'canonical')",
+    )
+    .bind(chain_id)
+    .bind(&hash)
+    .bind(number)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE chain_heads
+         SET latest_block_hash = $2, latest_block_number = $3
+         WHERE chain_id = $1",
+    )
+    .bind(chain_id)
+    .bind(hash)
+    .bind(number)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+fn manifest_marker_parts(marker: &str) -> Result<(&str, &str)> {
+    let encoded = marker
+        .strip_prefix("manifest-authority:")
+        .ok_or_else(|| anyhow::anyhow!("marker has no manifest-authority prefix: {marker}"))?;
+    encoded
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("marker has no invalidation generation: {marker}"))
 }
