@@ -157,10 +157,86 @@ pub(crate) mod test_hooks {
     }
 }
 
+#[cfg(test)]
+pub(crate) mod primary_coherence_test_hooks {
+    use std::sync::Arc;
+
+    use anyhow::Result;
+    use bigname_test_support::{
+        ScopedTestHookGuard, ScopedTestHookRegistry, current_test_database,
+    };
+    use sqlx::PgPool;
+    use tokio::sync::{Barrier, Notify};
+
+    #[derive(Clone)]
+    pub(crate) struct PrimaryCoherenceHook {
+        candidate_read: Arc<Notify>,
+        reached: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    }
+
+    pub(crate) struct PrimaryCoherenceControl {
+        reached: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    }
+
+    impl PrimaryCoherenceControl {
+        pub(crate) async fn wait_until_reached(&self) {
+            self.reached.wait().await;
+        }
+
+        pub(crate) async fn resume(&self) {
+            self.resume.wait().await;
+        }
+    }
+
+    static HOOKS: ScopedTestHookRegistry<String, PrimaryCoherenceHook> =
+        ScopedTestHookRegistry::new();
+
+    pub(crate) async fn install(
+        pool: &PgPool,
+    ) -> Result<(
+        ScopedTestHookGuard<String, PrimaryCoherenceHook>,
+        PrimaryCoherenceControl,
+    )> {
+        let database = current_test_database(pool).await?;
+        let reached = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let guard = HOOKS.install(
+            database,
+            PrimaryCoherenceHook {
+                candidate_read: Arc::new(Notify::new()),
+                reached: Arc::clone(&reached),
+                resume: Arc::clone(&resume),
+            },
+        );
+        Ok((guard, PrimaryCoherenceControl { reached, resume }))
+    }
+
+    pub(super) async fn candidate_read_complete(pool: &PgPool) -> Result<()> {
+        let database = current_test_database(pool).await?;
+        if let Some(hook) = HOOKS.get_cloned(&database) {
+            hook.candidate_read.notify_one();
+        }
+        Ok(())
+    }
+
+    pub(super) async fn pause_after_candidate_read(pool: &PgPool) -> Result<()> {
+        let database = current_test_database(pool).await?;
+        if let Some(hook) = HOOKS.get_cloned(&database) {
+            hook.candidate_read.notified().await;
+            hook.reached.wait().await;
+            hook.resume.wait().await;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 struct ReverseIdentityPageRow {
     input_index: usize,
     logical_name_id: String,
+    primary_name: Option<IdentityPrimaryNameSnapshot>,
 }
 
 pub(crate) async fn load_reverse_identity_records_live(
@@ -234,11 +310,8 @@ async fn load_reverse_identity_records_live_with_count_mode(
             ReverseCountMode::Omit => Ok(None),
         }
     };
-    let ((page_rows, name_records), primary_names, total_counts) = tokio::try_join!(
-        page_records_future,
-        load_identity_primary_name_snapshots(pool, inputs, public_namespaces),
-        total_counts_future,
-    )?;
+    let ((page_rows, name_records), total_counts) =
+        tokio::try_join!(page_records_future, total_counts_future)?;
 
     let rows_by_input = page_rows.into_iter().fold(
         BTreeMap::<usize, Vec<ReverseIdentityPageRow>>::new(),
@@ -257,9 +330,7 @@ async fn load_reverse_identity_records_live_with_count_mode(
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
-                .filter_map(|row| {
-                    reverse_identity_record(&name_records, &primary_names, input, row)
-                })
+                .filter_map(|row| reverse_identity_record(&name_records, input, row))
                 .collect::<Vec<_>>();
             let total_count = total_counts.as_ref().map(|counts| {
                 *counts
@@ -286,18 +357,11 @@ async fn load_reverse_identity_records_live_with_count_mode(
 
 fn reverse_identity_record(
     name_records: &BTreeMap<String, IdentityNameRecordRow>,
-    primary_names: &BTreeMap<(String, String, String), IdentityPrimaryNameSnapshot>,
     input: &ReverseIdentityStorageInput,
     row: ReverseIdentityPageRow,
 ) -> Option<ReverseIdentityRecordRow> {
     let name_record = name_records.get(&row.logical_name_id)?.clone();
-    let primary_name = primary_names
-        .get(&(
-            input.address.clone(),
-            name_record.row.namespace.clone(),
-            input.coin_type.clone(),
-        ))
-        .cloned();
+    let primary_name = row.primary_name;
     let mut relation_facets = name_record
         .relations
         .iter()
@@ -318,97 +382,6 @@ fn reverse_identity_record(
         primary_name,
         requested_coin_type: input.coin_type.clone(),
     })
-}
-
-/// Pairs with `page::load_normalized_primary_names`, which decides the same claim for the ordering
-/// and keyset. Both admit on chain id plus target block hash — `chain_lineage` is keyed on that
-/// pair, so the block number the provenance also carries is redundant here and reading it would
-/// only add a way for the two to disagree. They only stay in step if they are changed together.
-async fn load_identity_primary_name_snapshots(
-    pool: &PgPool,
-    inputs: &[ReverseIdentityStorageInput],
-    public_namespaces: &[String],
-) -> Result<BTreeMap<(String, String, String), IdentityPrimaryNameSnapshot>> {
-    let addresses = dedupe_in_order(inputs.iter().map(|input| input.address.clone()));
-    let coin_types = dedupe_in_order(inputs.iter().map(|input| input.coin_type.clone()));
-    if addresses.is_empty() || coin_types.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-
-    let rows = sqlx::query(
-        r#"
-        SELECT primary_name.address, primary_name.namespace, primary_name.coin_type,
-               primary_name.claim_status, primary_name.raw_claim_name,
-               primary_name.claim_name_is_normalized,
-               CASE
-                   WHEN lineage.block_hash IS NULL THEN NULL
-                   ELSE jsonb_build_object(
-                       CASE primary_name.claim_provenance ->> 'chain_id'
-                           WHEN 'ethereum-mainnet' THEN 'ethereum'
-                           WHEN 'ethereum-sepolia' THEN 'ethereum-sepolia'
-                           WHEN 'base-mainnet' THEN 'base'
-                           WHEN 'base-sepolia' THEN 'base-sepolia'
-                           ELSE primary_name.claim_provenance ->> 'chain_id'
-                       END,
-                       jsonb_build_object(
-                           'chain_id', lineage.chain_id,
-                           'block_number', lineage.block_number,
-                           'block_hash', lineage.block_hash,
-                           'timestamp', to_char(
-                               lineage.block_timestamp AT TIME ZONE 'UTC',
-                               'YYYY-MM-DD"T"HH24:MI:SS"Z"'
-                           )
-                       )
-                   )
-               END AS chain_positions
-        FROM bigname_phase.primary_names_current primary_name
-        JOIN bigname_phase.chain_lineage lineage
-          ON lineage.chain_id = primary_name.claim_provenance ->> 'chain_id'
-         AND lineage.block_hash = primary_name.claim_provenance ->> 'target_block_hash'
-         AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-        WHERE primary_name.address = ANY($1::TEXT[])
-          AND primary_name.coin_type = ANY($2::TEXT[])
-          AND primary_name.namespace = ANY($3::TEXT[])
-        ORDER BY primary_name.address, primary_name.namespace, primary_name.coin_type
-        "#,
-    )
-    .bind(&addresses)
-    .bind(&coin_types)
-    .bind(public_namespaces)
-    .fetch_all(pool)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to batch load primary_names_current snapshots for {} addresses and {} coin types",
-            addresses.len(),
-            coin_types.len()
-        )
-    })?;
-
-    rows.into_iter()
-        .map(|row| {
-            let address = row.try_get::<String, _>("address")?.to_ascii_lowercase();
-            let namespace = row.try_get::<String, _>("namespace")?;
-            let coin_type = row.try_get::<String, _>("coin_type")?;
-            let claim_status =
-                parse_primary_name_claim_status(&row.try_get::<String, _>("claim_status")?)?;
-            let raw_claim_name: Option<String> = row.try_get("raw_claim_name")?;
-            let normalized_claim_name = bigname_storage::normalized_claim_name(
-                claim_status,
-                row.try_get("claim_name_is_normalized")?,
-                raw_claim_name.as_deref(),
-            );
-            let snapshot = IdentityPrimaryNameSnapshot {
-                address: address.clone(),
-                namespace: namespace.clone(),
-                coin_type: coin_type.clone(),
-                claim_status,
-                normalized_claim_name,
-                chain_positions: row.try_get("chain_positions")?,
-            };
-            Ok(((address, namespace, coin_type), snapshot))
-        })
-        .collect()
 }
 
 async fn load_reverse_identity_total_counts_live(
@@ -478,7 +451,7 @@ async fn load_reverse_identity_total_counts_live(
         .collect()
 }
 
-fn parse_primary_name_claim_status(value: &str) -> Result<PrimaryNameClaimStatus> {
+pub(super) fn parse_primary_name_claim_status(value: &str) -> Result<PrimaryNameClaimStatus> {
     match value {
         "success" => Ok(PrimaryNameClaimStatus::Success),
         "not_found" => Ok(PrimaryNameClaimStatus::NotFound),

@@ -1126,6 +1126,70 @@ async fn v2_lookup_reverse_orders_pages_by_the_is_primary_it_returns() -> Result
 }
 
 #[tokio::test]
+async fn v2_lookup_reverse_keeps_primary_order_and_flag_coherent_across_projection_rewrite()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    let (_guard, control) =
+        crate::v2::support::identity_facade_primary_coherence_test_hooks::install(
+            &database.lookup_pool,
+        )
+        .await?;
+    let state = database.app_state();
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v2/lookup")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "profile": "detail",
+                            "inputs": [{"address": address, "page_size": 1}]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("lookup request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    seed_phase_primary_name_snapshot(
+        &database,
+        address,
+        "ens",
+        "60",
+        bigname_storage::PrimaryNameClaimStatus::Success,
+        Some("bob.eth"),
+        true,
+    )
+    .await?;
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("reverse lookup request task panicked")?
+        .context("reverse lookup request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    let records = payload["data"][0]["records"]
+        .as_array()
+        .expect("reverse lookup records must be an array");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["name"], json!("alice.eth"));
+    assert_eq!(
+        records[0]["is_primary"],
+        json!(true),
+        "the page must emit the same primary-name generation that ordered it"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_lookup_reverse_pages_a_case_unstable_primary_name_without_repeating_rows() -> Result<()>
 {
     let database = TestDatabase::new_migrated().await?;

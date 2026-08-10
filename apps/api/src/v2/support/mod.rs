@@ -43,6 +43,8 @@ mod snapshots;
 pub(crate) mod status_freshness;
 
 #[cfg(test)]
+pub(crate) use identity_facade::primary_coherence_test_hooks as identity_facade_primary_coherence_test_hooks;
+#[cfg(test)]
 pub(crate) use identity_facade::test_hooks as identity_facade_count_test_hooks;
 pub(crate) use identity_facade::*;
 pub(crate) use json::*;
