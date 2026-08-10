@@ -85,7 +85,43 @@ async fn v2_lookup_validates_reverse_inputs_before_deployment_readiness() -> Res
 }
 
 #[tokio::test]
-async fn v2_lookup_name_only_inputs_bypass_public_namespace_derivation() -> Result<()> {
+async fn v2_lookup_empty_public_namespace_set_takes_precedence_over_bound_cursor() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+
+    let first = v2_lookup_response_for_database_with_public_namespaces(
+        &database,
+        "/v2/lookup",
+        json!({"inputs": [{"address": address, "page_size": 1}]}),
+        &["ens", "basenames"],
+    )
+    .await?;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_payload: Value = read_json(first).await?;
+    let cursor = first_payload["data"][0]["page"]["next_cursor"]
+        .as_str()
+        .expect("co-deployed reverse page must include a cursor");
+
+    let response = v2_lookup_response_for_database_with_public_namespaces(
+        &database,
+        "/v2/lookup",
+        json!({"inputs": [{"address": address, "page_size": 1, "cursor": cursor}]}),
+        &[],
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        read_json::<Value>(response).await?["error"]["code"],
+        json!("conflict")
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_lookup_name_only_inputs_bypass_public_derivation_and_interpret_redo_fence()
+-> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_lookup_base_head(&database).await?;
     for (chain, deployment) in [
@@ -109,6 +145,9 @@ async fn v2_lookup_name_only_inputs_bypass_public_namespace_derivation() -> Resu
         bigname_lookup::ChainRpcUrls::default(),
     );
     assert!(crate::v2::support::derive_public_namespace_set(&state).await.is_err());
+    database
+        .simulate_interpret_redo_begin("base-mainnet", "recompute_flags")
+        .await?;
 
     let response = app_router(state)
         .oneshot(

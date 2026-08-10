@@ -87,13 +87,13 @@ pub(crate) async fn get_lookup(
         None
     };
     if let Some(public_namespaces) = public_namespaces.as_ref() {
-        for input in &mut address_inputs {
-            bind_address_cursor(input, public_namespaces.names())?;
-        }
         if public_namespaces.is_empty() {
             return Err(V2Error::conflict(
                 "the deployment does not serve a public namespace",
             ));
+        }
+        for input in &mut address_inputs {
+            bind_address_cursor(input, public_namespaces.names())?;
         }
     }
     let snapshot_scope = lookup_snapshot_scope(

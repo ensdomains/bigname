@@ -56,19 +56,10 @@ pub(super) async fn lookup_snapshot_scope(
             .map(Some);
     }
 
-    let namespaces = if namespaces.is_empty() {
-        return lookup_public_snapshot_scope(state).await.map(Some);
-    } else {
-        namespaces.into_iter().collect()
-    };
+    let namespaces = namespaces.into_iter().collect();
     lookup_union_snapshot_scope(state, namespaces)
         .await
         .map(Some)
-}
-
-async fn lookup_public_snapshot_scope(state: &AppState) -> V2Result<SnapshotSelectionScope> {
-    let namespaces = lookup_public_namespaces(state).await?;
-    lookup_public_union_snapshot_scope(state, &namespaces, &BTreeSet::new()).await
 }
 
 pub(super) async fn lookup_public_namespaces(state: &AppState) -> V2Result<PublicNamespaceSet> {
