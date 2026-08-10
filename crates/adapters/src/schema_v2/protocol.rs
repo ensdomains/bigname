@@ -12,7 +12,31 @@ use anyhow::bail;
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::{catalog::Selected, manifest::ManifestSource, model::RawLogInput, state::State};
+use super::{
+    catalog::Selected,
+    manifest::{ManifestEvent, ManifestSource},
+    model::{DiscoveryRuleInput, RawLogInput},
+    state::State,
+};
+
+pub(super) fn role_insensitivity_justification(
+    source_family: &str,
+    event: &str,
+) -> Option<&'static str> {
+    bigname_manifests::role_insensitivity_justification(source_family, event)
+}
+
+pub(super) fn event_allows_empty_emitter_roles(
+    source_family: &str,
+    event: &str,
+    has_registry_announcement_rule: bool,
+) -> bool {
+    bigname_manifests::event_allows_empty_emitter_roles(
+        source_family,
+        event,
+        has_registry_announcement_rule,
+    )
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct Interpreted {
@@ -274,7 +298,10 @@ fn state_scope(selected: &Selected, raw: &RawLogInput, event: &EventDraft) -> St
     )
 }
 
-pub(super) fn validate_manifest(source: &ManifestSource) -> anyhow::Result<()> {
+pub(super) fn validate_manifest(
+    source: &ManifestSource,
+    rules: &[DiscoveryRuleInput],
+) -> anyhow::Result<()> {
     for event in &source.events {
         if !supports_signature(&source.source_family, &event.signature) {
             bail!(
@@ -283,8 +310,43 @@ pub(super) fn validate_manifest(source: &ManifestSource) -> anyhow::Result<()> {
                 event.signature
             );
         }
+        let has_registry_announcement_rule = rules.iter().any(|rule| {
+            rule.manifest_id == source.manifest_id && rule.edge_kind == "registry_announcement"
+        });
+        if event.emitter_roles.is_empty()
+            && !event_allows_empty_emitter_roles(
+                &source.source_family,
+                &event.name,
+                has_registry_announcement_rule,
+            )
+        {
+            bail!(
+                "manifest {} source family {} event {} has empty emitter_roles; declare emitter_roles, or add the (source_family, event) pair to bigname_manifests::ROLE_INSENSITIVE_EVENTS with a justification that the adapter does not consume Selected.emitter_role",
+                source.manifest_id,
+                source.source_family,
+                event.name,
+            );
+        }
     }
     Ok(())
+}
+
+pub(super) fn is_match_all(
+    source: &ManifestSource,
+    event: &ManifestEvent,
+    rules: &[DiscoveryRuleInput],
+) -> bool {
+    match source.source_family.as_str() {
+        "ens_v1_resolver_l1" | "basenames_base_resolver" => true,
+        "ens_v2_registry_l1" if event.name == "RegistryCreated" => rules.iter().any(|rule| {
+            rule.manifest_id == source.manifest_id && rule.edge_kind == "registry_announcement"
+        }),
+        "ens_v2_resolver_l1" => matches!(
+            event.name.as_str(),
+            "AliasChanged" | "NamedResource" | "NamedTextResource" | "NamedAddrResource"
+        ),
+        _ => false,
+    }
 }
 
 fn supports_signature(source_family: &str, signature: &str) -> bool {

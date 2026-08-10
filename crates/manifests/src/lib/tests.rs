@@ -249,6 +249,34 @@ fn repository_loader_rejects_invalid_single_manifest_declarations() -> Result<()
 }
 
 #[test]
+fn repository_loader_rejects_role_free_role_sensitive_event() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let contents = manifest_contents()
+        .replacen(
+            "source_family = \"ens_v2_registry_l1\"",
+            "source_family = \"ens_v1_registry_l1\"",
+            1,
+        )
+        .replacen("name = \"SubregistryUpdated\"", "name = \"NewOwner\"", 1)
+        .replacen(
+            "event SubregistryUpdated(uint256 indexed node, address registry, address sender)",
+            "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+            1,
+        )
+        .replacen("emitter_roles = [\"registry\"]\n", "", 1);
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &contents)?;
+
+    let error = load_repository(&test_dir.path)
+        .expect_err("role-free NewOwner must fail repository validation");
+    let message = error.to_string();
+    assert!(message.contains("manifest ABI event NewOwner"));
+    assert!(message.contains(
+        "has empty emitter_roles; declare emitter_roles, or add the (source_family, event) pair to bigname_manifests::ROLE_INSENSITIVE_EVENTS with a justification that the adapter does not consume Selected.emitter_role"
+    ));
+    Ok(())
+}
+
+#[test]
 fn repository_loader_rejects_chain_directory_mismatch() -> Result<()> {
     let test_dir = TestDir::new()?;
     test_dir.write_manifest_for_chain_combo(
