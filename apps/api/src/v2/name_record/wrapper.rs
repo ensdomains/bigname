@@ -5,6 +5,8 @@ use super::super::{
     vocab::{WrapperFuses, WrapperState},
 };
 
+const NON_PARENT_CONTROLLED_FUSES: u32 = 0x0000_FFFF;
+
 pub(crate) fn wrapper_metadata(
     declared_summary: &Value,
 ) -> V2Result<Option<(WrapperState, WrapperFuses)>> {
@@ -30,10 +32,19 @@ pub(crate) fn wrapper_metadata(
 }
 
 const fn lifecycle_matches_fuses(state: WrapperState, fuses: WrapperFuses) -> bool {
+    let has_locked_pair = fuses.cannot_unwrap && fuses.parent_cannot_control;
+    // Any non-parent-controlled fuse requires both PARENT_CANNOT_CONTROL and
+    // CANNOT_UNWRAP, including unnamed low-word bits.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1058-L1066 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L22 @ ens_v1@91c966f)
+    if fuses.fuses & NON_PARENT_CONTROLLED_FUSES != 0 && !has_locked_pair {
+        return false;
+    }
+
     match state {
         WrapperState::Wrapped => !fuses.cannot_unwrap && !fuses.parent_cannot_control,
         WrapperState::Emancipated => !fuses.cannot_unwrap && fuses.parent_cannot_control,
-        WrapperState::Locked => fuses.cannot_unwrap && fuses.parent_cannot_control,
+        WrapperState::Locked => has_locked_pair,
     }
 }
 
