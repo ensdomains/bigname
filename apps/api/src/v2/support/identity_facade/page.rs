@@ -8,6 +8,7 @@ use super::{READABLE_REVERSE_IDENTITY_CTES, ReverseIdentityPageRow, roles_storag
 pub(super) async fn load_reverse_identity_page_rows(
     pool: &PgPool,
     inputs: &[ReverseIdentityStorageInput],
+    public_namespaces: &[String],
 ) -> Result<Vec<ReverseIdentityPageRow>> {
     if inputs.is_empty() {
         return Ok(Vec::new());
@@ -25,7 +26,7 @@ pub(super) async fn load_reverse_identity_page_rows(
         .iter()
         .map(|input| roles_storage_value(input.roles).to_owned())
         .collect::<Vec<_>>();
-    let primary_names = load_normalized_primary_names(pool, inputs).await?;
+    let primary_names = load_normalized_primary_names(pool, inputs, public_namespaces).await?;
     let page_sizes = inputs
         .iter()
         .map(|input| input.page_size.max(0))
@@ -94,6 +95,7 @@ pub(super) async fn load_reverse_identity_page_rows(
                 JOIN readable_names identity_nc
                   ON identity_nc.logical_name_id = anc.logical_name_id
                 WHERE lower(anc.address) = lower(requested.address)
+                  AND anc.namespace = ANY($13::TEXT[])
                   AND (
                       requested.roles = 'both'
                       OR (requested.roles = 'owned'
@@ -139,6 +141,7 @@ pub(super) async fn load_reverse_identity_page_rows(
         .bind(&cursor_normalized_names)
         .bind(&cursor_namespaces)
         .bind(&cursor_namehashes)
+        .bind(public_namespaces)
         .fetch_all(pool)
         .await
         .with_context(|| {
@@ -164,6 +167,7 @@ pub(super) async fn load_reverse_identity_page_rows(
 async fn load_normalized_primary_names(
     pool: &PgPool,
     inputs: &[ReverseIdentityStorageInput],
+    public_namespaces: &[String],
 ) -> Result<Vec<Value>> {
     let addresses = inputs
         .iter()
@@ -183,8 +187,9 @@ async fn load_normalized_primary_names(
                primary_name.raw_claim_name, primary_name.claim_name_is_normalized
         FROM requested
         JOIN bigname_phase.primary_names_current primary_name
-          ON lower(primary_name.address) = lower(requested.address)
+         ON lower(primary_name.address) = lower(requested.address)
          AND primary_name.coin_type = requested.coin_type
+         AND primary_name.namespace = ANY($4::TEXT[])
          AND primary_name.claim_status = 'success'
          AND EXISTS (
              SELECT 1
@@ -203,6 +208,7 @@ async fn load_normalized_primary_names(
     .bind((0..inputs.len() as i32).collect::<Vec<_>>())
     .bind(addresses)
     .bind(coin_types)
+    .bind(public_namespaces)
     .fetch_all(pool)
     .await
     .context("failed to load phase primary names for reverse pagination")?;

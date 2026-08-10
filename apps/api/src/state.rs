@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use sqlx::PgPool;
 
 use crate::v2::support::status_freshness::{StatusFreshness, StatusFreshnessConfig};
@@ -30,6 +32,7 @@ pub(crate) struct AppState {
     pub(crate) lookup_chain_rpc_urls: bigname_lookup::ChainRpcUrls,
     pub(crate) phase_heartbeat_max_age_secs: i64,
     pub(crate) status_freshness: StatusFreshness,
+    public_namespaces_override: Option<Arc<[String]>>,
 }
 
 impl AppState {
@@ -47,7 +50,24 @@ impl AppState {
             lookup_chain_rpc_urls,
             phase_heartbeat_max_age_secs: DEFAULT_PHASE_HEARTBEAT_MAX_AGE_SECS,
             status_freshness: StatusFreshness::new(StatusFreshnessConfig::default()),
+            public_namespaces_override: None,
         }
+    }
+
+    pub(crate) fn public_namespaces_override(&self) -> Option<Arc<[String]>> {
+        self.public_namespaces_override.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_public_namespaces_for_test(
+        mut self,
+        namespaces: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let mut namespaces = namespaces.into_iter().map(Into::into).collect::<Vec<_>>();
+        namespaces.sort();
+        namespaces.dedup();
+        self.public_namespaces_override = Some(Arc::from(namespaces));
+        self
     }
 
     pub(crate) fn with_phase_heartbeat_max_age_secs(
@@ -65,4 +85,8 @@ impl AppState {
         self.status_freshness = StatusFreshness::new(status_freshness_config);
         self
     }
+}
+
+pub(crate) fn is_recognized_public_namespace(namespace: &str) -> bool {
+    matches!(namespace, "ens" | "basenames")
 }

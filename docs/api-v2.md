@@ -381,6 +381,21 @@ Common parameter rules:
 | `sort`, `order` | paginated routes that declare a sort set | route-documented field set plus `asc`/`desc` |
 | `cursor`, `page_size` | every paginated route | opaque cursor; default 50, max 200 |
 
+For a cross-namespace read with no explicit `namespace`, the API derives the
+namespace set at request time from recognized public namespaces whose active
+[source manifests](manifests.md) have a completed projection publication at the
+current head of the namespace's authority chain in the selected deployment.
+Bare search and public reverse lookup filter current rows and counts to exactly
+that set, and public reverse lookup builds its snapshot scope from the same
+authority chains. Their
+namespace-omitted cursors bind that derived set and fail closed if it changes.
+An explicit recognized namespace keeps its existing behavior, including `409
+conflict` when the deployment cannot serve its required chain. Completeness
+metadata is relative to the effective request set, so omitting a namespace does
+not make a response partial merely because the deployment does not serve
+another public namespace. A bare cross-namespace read returns `409 conflict`
+when that effective set is empty.
+
 Unknown or undocumented query parameters are rejected with `400 invalid_input`
 on every `v2` route. As a documented temporary exception, latest-state
 collection routes recognize `at`, `finality=safe`, and `finality=finalized` so
@@ -487,10 +502,12 @@ The `chain_positions` query parameter from `v1` does not exist in `v2`.
 Cursors are opaque and versioned. They are not bound to the route path string,
 so route evolution does not invalidate outstanding cursors. Top-level
 collection cursors bind the collection anchor, namespace, filters, and sort,
-but not a snapshot. They preserve keyset position across requests without
-claiming that the mutable dataset is frozen. A legacy collection cursor's
-snapshot component is ignored. Snapshot-bound cursor semantics remain on
-single-resource responses with nested pagination where documented.
+but not a snapshot. A bare search cursor uses the request's derived namespace
+set as its namespace anchor and fails closed if that set has changed. Cursors
+preserve keyset position across requests without claiming that the mutable
+dataset is frozen. A legacy collection cursor's snapshot component is ignored.
+Snapshot-bound cursor semantics remain on single-resource responses with nested
+pagination where documented.
 
 Every collection uses `cursor`, `next_cursor`, `page_size`, nullable
 `total_count`, and `has_more`. Default `page_size` is 50; maximum is 200.

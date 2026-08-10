@@ -12,6 +12,7 @@ const NONE_FILTER_VALUE: &str = "any";
 const ADDRESS_FILTER: &str = "address";
 const COIN_TYPE_FILTER: &str = "coin_type";
 const RELATION_FILTER: &str = "relation";
+const PUBLIC_NAMESPACES_FILTER: &str = "public_namespaces";
 
 const IS_PRIMARY_CURSOR: &str = "is_primary";
 const ROLE_RANK_CURSOR: &str = "role_rank";
@@ -24,6 +25,7 @@ pub(super) struct LookupReverseCursorBinding<'a> {
     pub(super) address: &'a str,
     pub(super) coin_type: u64,
     pub(super) relation: Option<&'a RelationSet>,
+    pub(super) public_namespaces: &'a [String],
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -199,7 +201,7 @@ fn reverse_identity_cursor_item(record: &ReverseIdentityRecordRow) -> BTreeMap<S
 }
 
 fn cursor_filters(binding: &LookupReverseCursorBinding<'_>) -> BTreeMap<String, String> {
-    BTreeMap::from([
+    let mut filters = BTreeMap::from([
         (ADDRESS_FILTER.to_owned(), binding.address.to_owned()),
         (COIN_TYPE_FILTER.to_owned(), binding.coin_type.to_string()),
         (
@@ -209,7 +211,20 @@ fn cursor_filters(binding: &LookupReverseCursorBinding<'_>) -> BTreeMap<String, 
                 .map(RelationSet::canonical_value)
                 .unwrap_or_else(|| NONE_FILTER_VALUE.to_owned()),
         ),
-    ])
+    ]);
+    if !is_codeployed_public_namespace_set(binding.public_namespaces) {
+        filters.insert(
+            PUBLIC_NAMESPACES_FILTER.to_owned(),
+            binding.public_namespaces.join(","),
+        );
+    }
+    filters
+}
+
+fn is_codeployed_public_namespace_set(namespaces: &[String]) -> bool {
+    namespaces.len() == 2
+        && namespaces.iter().any(|namespace| namespace == "ens")
+        && namespaces.iter().any(|namespace| namespace == "basenames")
 }
 
 fn cursor_value(payload: &CursorPayload, key: &str) -> V2Result<String> {
@@ -233,10 +248,12 @@ mod tests {
 
     #[test]
     fn lookup_reverse_cursor_binds_query_filters_without_snapshot() {
+        let public_namespaces = vec!["basenames".to_owned(), "ens".to_owned()];
         let binding = LookupReverseCursorBinding {
             address: "0x0000000000000000000000000000000000000abc",
             coin_type: 60,
             relation: Some(&RelationSet::from(Relation::Owner)),
+            public_namespaces: &public_namespaces,
         };
         let mut payload = CursorPayload::new(
             SORT,
@@ -269,6 +286,13 @@ mod tests {
         let encoded = encode(&minted);
         let decoded = decode(&encoded).expect("cursor payload must decode");
         assert!(decoded.snapshot.is_none());
+
+        let ens_only = vec!["ens".to_owned()];
+        let ens_only_binding = LookupReverseCursorBinding {
+            public_namespaces: &ens_only,
+            ..binding
+        };
+        assert!(lookup_reverse_storage_cursor(&decoded, &ens_only_binding).is_err());
     }
 
     fn reverse_record() -> ReverseIdentityRecordRow {

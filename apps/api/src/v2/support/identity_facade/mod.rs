@@ -166,16 +166,29 @@ struct ReverseIdentityPageRow {
 pub(crate) async fn load_reverse_identity_records_live(
     pool: &PgPool,
     inputs: &[ReverseIdentityStorageInput],
+    public_namespaces: &[String],
 ) -> Result<Vec<ReverseIdentityGroup>> {
-    load_reverse_identity_records_live_with_count_mode(pool, inputs, ReverseCountMode::Include)
-        .await
+    load_reverse_identity_records_live_with_count_mode(
+        pool,
+        inputs,
+        public_namespaces,
+        ReverseCountMode::Include,
+    )
+    .await
 }
 
 pub(crate) async fn load_reverse_identity_records_page_live(
     pool: &PgPool,
     inputs: &[ReverseIdentityStorageInput],
+    public_namespaces: &[String],
 ) -> Result<Vec<ReverseIdentityGroup>> {
-    load_reverse_identity_records_live_with_count_mode(pool, inputs, ReverseCountMode::Omit).await
+    load_reverse_identity_records_live_with_count_mode(
+        pool,
+        inputs,
+        public_namespaces,
+        ReverseCountMode::Omit,
+    )
+    .await
 }
 
 #[derive(Clone, Copy)]
@@ -187,6 +200,7 @@ enum ReverseCountMode {
 async fn load_reverse_identity_records_live_with_count_mode(
     pool: &PgPool,
     inputs: &[ReverseIdentityStorageInput],
+    public_namespaces: &[String],
     count_mode: ReverseCountMode,
 ) -> Result<Vec<ReverseIdentityGroup>> {
     if inputs.is_empty() {
@@ -197,7 +211,8 @@ async fn load_reverse_identity_records_live_with_count_mode(
         .iter()
         .all(|input| input.page_size == 1 && input.cursor.is_none());
     let page_records_future = async {
-        let page_rows = page::load_reverse_identity_page_rows(pool, inputs).await?;
+        let page_rows =
+            page::load_reverse_identity_page_rows(pool, inputs, public_namespaces).await?;
         let logical_name_ids =
             dedupe_in_order(page_rows.iter().map(|row| row.logical_name_id.clone()));
         let name_records =
@@ -211,15 +226,17 @@ async fn load_reverse_identity_records_live_with_count_mode(
 
     let total_counts_future = async {
         match count_mode {
-            ReverseCountMode::Include => load_reverse_identity_total_counts_live(pool, inputs)
-                .await
-                .map(Some),
+            ReverseCountMode::Include => {
+                load_reverse_identity_total_counts_live(pool, inputs, public_namespaces)
+                    .await
+                    .map(Some)
+            }
             ReverseCountMode::Omit => Ok(None),
         }
     };
     let ((page_rows, name_records), primary_names, total_counts) = tokio::try_join!(
         page_records_future,
-        load_identity_primary_name_snapshots(pool, inputs),
+        load_identity_primary_name_snapshots(pool, inputs, public_namespaces),
         total_counts_future,
     )?;
 
@@ -310,6 +327,7 @@ fn reverse_identity_record(
 async fn load_identity_primary_name_snapshots(
     pool: &PgPool,
     inputs: &[ReverseIdentityStorageInput],
+    public_namespaces: &[String],
 ) -> Result<BTreeMap<(String, String, String), IdentityPrimaryNameSnapshot>> {
     let addresses = dedupe_in_order(inputs.iter().map(|input| input.address.clone()));
     let coin_types = dedupe_in_order(inputs.iter().map(|input| input.coin_type.clone()));
@@ -350,11 +368,13 @@ async fn load_identity_primary_name_snapshots(
          AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
         WHERE primary_name.address = ANY($1::TEXT[])
           AND primary_name.coin_type = ANY($2::TEXT[])
+          AND primary_name.namespace = ANY($3::TEXT[])
         ORDER BY primary_name.address, primary_name.namespace, primary_name.coin_type
         "#,
     )
     .bind(&addresses)
     .bind(&coin_types)
+    .bind(public_namespaces)
     .fetch_all(pool)
     .await
     .with_context(|| {
@@ -394,6 +414,7 @@ async fn load_identity_primary_name_snapshots(
 async fn load_reverse_identity_total_counts_live(
     pool: &PgPool,
     inputs: &[ReverseIdentityStorageInput],
+    public_namespaces: &[String],
 ) -> Result<BTreeMap<(String, ReverseIdentityRoles), u64>> {
     #[cfg(test)]
     test_hooks::record(pool).await?;
@@ -424,6 +445,7 @@ async fn load_reverse_identity_total_counts_live(
         FROM requested
         LEFT JOIN readable_relations anc
           ON anc.address = requested.address
+         AND anc.namespace = ANY($3::TEXT[])
          AND (
              requested.roles = 'both'
              OR (requested.roles = 'owned' AND anc.relation IN ('registrant', 'token_holder'))
@@ -436,6 +458,7 @@ async fn load_reverse_identity_total_counts_live(
     let rows = sqlx::query(&query)
         .bind(&addresses)
         .bind(&roles)
+        .bind(public_namespaces)
         .fetch_all(pool)
         .await
         .with_context(|| {

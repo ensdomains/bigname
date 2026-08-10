@@ -1047,7 +1047,8 @@ impl TestDatabase {
         Ok(AppState::new_with_rpc_urls(
             self.lookup_pool.clone(),
             chain_rpc_urls,
-        ))
+        )
+        .with_public_namespaces_for_test(["ens", "basenames"]))
     }
 
     fn app_state(&self) -> AppState {
@@ -1055,6 +1056,15 @@ impl TestDatabase {
             self.lookup_pool.clone(),
             bigname_lookup::ChainRpcUrls::default(),
         )
+        .with_public_namespaces_for_test(["ens", "basenames"])
+    }
+
+    fn app_state_with_public_namespaces(&self, namespaces: &[&str]) -> AppState {
+        AppState::new_with_rpc_urls(
+            self.lookup_pool.clone(),
+            bigname_lookup::ChainRpcUrls::default(),
+        )
+        .with_public_namespaces_for_test(namespaces.iter().copied())
     }
 
     fn database_config(&self, max_connections: u32) -> Result<bigname_storage::DatabaseConfig> {

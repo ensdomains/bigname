@@ -43,11 +43,11 @@ use dto::{LookupInput, LookupKind, LookupRecord, LookupRequest, LookupResult};
 use head::{load_served_head, revalidate_served_head};
 use page::ReverseLookupPage;
 use parse::{
-    LookupProfile, ParsedAddressLookup, ParsedNameLookup, ensure_lookup_batch_limit,
-    parse_address_input, parse_lookup_json_body, parse_lookup_namespace, parse_lookup_profile,
-    parse_name_input,
+    LookupProfile, ParsedAddressLookup, ParsedNameLookup, bind_address_cursor,
+    ensure_lookup_batch_limit, parse_address_input, parse_lookup_json_body, parse_lookup_namespace,
+    parse_lookup_profile, parse_name_input,
 };
-use scope::lookup_snapshot_scope;
+use scope::{lookup_public_namespaces, lookup_snapshot_scope};
 
 const EXACT_RELATION_SCAN_MULTIPLIER: u64 = 10;
 
@@ -60,7 +60,15 @@ pub(crate) async fn get_lookup(
     ensure_lookup_batch_limit(body.inputs.len())?;
     let profile = parse_lookup_profile(body.profile.as_deref())?;
     let namespace = parse_lookup_namespace(body.namespace.as_deref())?;
-
+    let has_address_inputs = body
+        .inputs
+        .iter()
+        .any(|input| matches!(input, LookupInput::Address(_)));
+    if namespace.is_some() && has_address_inputs {
+        return Err(V2Error::invalid_input(
+            "namespace is not supported for address lookup inputs",
+        ));
+    }
     let mut name_inputs = Vec::new();
     let mut address_inputs = Vec::new();
     for (index, item) in body.inputs.iter().enumerate() {
@@ -69,17 +77,33 @@ pub(crate) async fn get_lookup(
                 name_inputs.push(parse_name_input(index, input, namespace)?);
             }
             LookupInput::Address(input) => {
-                if namespace.is_some() {
-                    return Err(V2Error::invalid_input(
-                        "namespace is not supported for address lookup inputs",
-                    ));
-                }
                 address_inputs.push(parse_address_input(index, input)?);
             }
         }
     }
-    let snapshot_scope =
-        lookup_snapshot_scope(&state, namespace, &name_inputs, !address_inputs.is_empty()).await?;
+    let public_namespaces = if has_address_inputs {
+        Some(lookup_public_namespaces(&state).await?)
+    } else {
+        None
+    };
+    if let Some(public_namespaces) = public_namespaces.as_ref() {
+        for input in &mut address_inputs {
+            bind_address_cursor(input, public_namespaces.names())?;
+        }
+        if public_namespaces.is_empty() {
+            return Err(V2Error::conflict(
+                "the deployment does not serve a public namespace",
+            ));
+        }
+    }
+    let snapshot_scope = lookup_snapshot_scope(
+        &state,
+        namespace,
+        &name_inputs,
+        !address_inputs.is_empty(),
+        public_namespaces.as_ref(),
+    )
+    .await?;
     let served_head = match snapshot_scope.as_ref() {
         Some(scope) => load_served_head(&state.pool, scope).await?,
         None => None,
@@ -100,6 +124,10 @@ pub(crate) async fn get_lookup(
         profile,
         &address_inputs,
         selected_snapshot,
+        public_namespaces
+            .as_ref()
+            .map(|namespaces| namespaces.names())
+            .unwrap_or_default(),
         &mut results,
     )
     .await?;
@@ -211,15 +239,25 @@ async fn render_reverse_lookup_results(
     profile: LookupProfile,
     inputs: &[ParsedAddressLookup],
     selected_snapshot: Option<&SelectedSnapshot>,
+    public_namespaces: &[String],
     results: &mut [Option<LookupResult>],
 ) -> V2Result<()> {
-    render_storage_exact_reverse_lookup_results(state, profile, inputs, selected_snapshot, results)
-        .await?;
+    render_storage_exact_reverse_lookup_results(
+        state,
+        profile,
+        inputs,
+        selected_snapshot,
+        public_namespaces,
+        results,
+    )
+    .await?;
     for input in inputs
         .iter()
         .filter(|input| requires_relation_post_filter(input.relation.as_ref()))
     {
-        let page = load_exact_relation_reverse_page(state, input, selected_snapshot).await?;
+        let page =
+            load_exact_relation_reverse_page(state, input, selected_snapshot, public_namespaces)
+                .await?;
         render_reverse_input_result(profile, input, page, results)?;
     }
     Ok(())
@@ -230,6 +268,7 @@ async fn render_storage_exact_reverse_lookup_results(
     profile: LookupProfile,
     inputs: &[ParsedAddressLookup],
     selected_snapshot: Option<&SelectedSnapshot>,
+    public_namespaces: &[String],
     results: &mut [Option<LookupResult>],
 ) -> V2Result<()> {
     let storage_exact_inputs = inputs
@@ -237,20 +276,21 @@ async fn render_storage_exact_reverse_lookup_results(
         .filter(|input| !requires_relation_post_filter(input.relation.as_ref()))
         .collect::<Vec<_>>();
     let storage_inputs = deduped_reverse_storage_inputs(storage_exact_inputs.iter().copied());
-    let groups = load_reverse_identity_records_live(&state.pool, &storage_inputs)
-        .await
-        .map_err(|load_error| {
-            error!(
-                service = "api",
-                input_count = inputs.len(),
-                error = ?load_error,
-                "failed to load v2 lookup reverse detail records"
-            );
-            V2Error::internal_error("failed to load lookup reverse detail records")
-        })?
-        .into_iter()
-        .map(|group| (reverse_group_key(&group), group))
-        .collect::<BTreeMap<_, _>>();
+    let groups =
+        load_reverse_identity_records_live(&state.pool, &storage_inputs, public_namespaces)
+            .await
+            .map_err(|load_error| {
+                error!(
+                    service = "api",
+                    input_count = inputs.len(),
+                    error = ?load_error,
+                    "failed to load v2 lookup reverse detail records"
+                );
+                V2Error::internal_error("failed to load lookup reverse detail records")
+            })?
+            .into_iter()
+            .map(|group| (reverse_group_key(&group), group))
+            .collect::<BTreeMap<_, _>>();
 
     for input in storage_exact_inputs {
         let key = ReverseStorageKey::from(input);
@@ -271,6 +311,7 @@ async fn render_storage_exact_reverse_lookup_results(
             address: &input.address,
             coin_type: input.coin_type,
             relation: input.relation.as_ref(),
+            public_namespaces,
         };
         let next_cursor = if has_more {
             entries
@@ -295,6 +336,7 @@ async fn load_exact_relation_reverse_page(
     state: &AppState,
     input: &ParsedAddressLookup,
     selected_snapshot: Option<&SelectedSnapshot>,
+    public_namespaces: &[String],
 ) -> V2Result<ReverseLookupPage> {
     let target_len = input.page_size as usize;
     let scan_size = input.page_size.max(50);
@@ -317,6 +359,7 @@ async fn load_exact_relation_reverse_page(
         let mut groups = load_reverse_identity_records_page_live(
             &state.pool,
             std::slice::from_ref(&storage_input),
+            public_namespaces,
         )
         .await
         .map_err(|load_error| {
@@ -377,6 +420,7 @@ async fn load_exact_relation_reverse_page(
         address: &input.address,
         coin_type: input.coin_type,
         relation: input.relation.as_ref(),
+        public_namespaces,
     };
     let next_cursor_record = if has_more {
         entries.truncate(target_len);

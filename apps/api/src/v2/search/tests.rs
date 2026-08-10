@@ -8,12 +8,18 @@ fn cursor_binding<'a>(
     q: &'a str,
     match_mode: SearchMatch,
     namespace: Option<&'a str>,
+    public_namespaces: &'a [String],
 ) -> SearchCursorBinding<'a> {
     SearchCursorBinding {
         q,
         match_mode,
         namespace,
+        public_namespaces,
     }
+}
+
+fn codeployed_public_namespaces() -> Vec<String> {
+    vec!["basenames".to_owned(), "ens".to_owned()]
 }
 
 fn name_cursor() -> NameCurrentListCursor {
@@ -28,7 +34,8 @@ fn name_cursor() -> NameCurrentListCursor {
 #[test]
 fn search_cursor_payload_round_trips_name_cursor() {
     let cursor = name_cursor();
-    let binding = cursor_binding("al", SearchMatch::Prefix, Some("ens"));
+    let public_namespaces = codeployed_public_namespaces();
+    let binding = cursor_binding("al", SearchMatch::Prefix, Some("ens"), &public_namespaces);
     let payload = search_cursor_payload(&cursor, &binding).expect("name cursor must encode");
 
     assert_eq!(
@@ -45,7 +52,8 @@ fn search_cursor_payload_round_trips_name_cursor() {
 #[test]
 fn search_cursor_rejects_cross_filter_match_namespace_or_sort() {
     let cursor = name_cursor();
-    let binding = cursor_binding("al", SearchMatch::Prefix, Some("ens"));
+    let public_namespaces = codeployed_public_namespaces();
+    let binding = cursor_binding("al", SearchMatch::Prefix, Some("ens"), &public_namespaces);
 
     let mut payload = search_cursor_payload(&cursor, &binding).expect("name cursor must encode");
     payload
@@ -73,7 +81,8 @@ fn search_cursor_rejects_cross_filter_match_namespace_or_sort() {
 #[test]
 fn search_cursor_ignores_legacy_snapshot_component() {
     let cursor = name_cursor();
-    let binding = cursor_binding("al", SearchMatch::Prefix, Some("ens"));
+    let public_namespaces = codeployed_public_namespaces();
+    let binding = cursor_binding("al", SearchMatch::Prefix, Some("ens"), &public_namespaces);
     let mut payload = search_cursor_payload(&cursor, &binding).expect("name cursor must encode");
     payload.snapshot = Some("legacy-snapshot".to_owned());
 
@@ -90,12 +99,29 @@ fn search_cursor_payload_rejects_non_name_storage_cursor() {
         sort_value: NameCurrentListCursorValue::Timestamp(None),
         ..name_cursor()
     };
-    let binding = cursor_binding("al", SearchMatch::Prefix, Some("ens"));
+    let public_namespaces = codeployed_public_namespaces();
+    let binding = cursor_binding("al", SearchMatch::Prefix, Some("ens"), &public_namespaces);
 
     let error =
         search_cursor_payload(&cursor, &binding).expect_err("non-name cursor must not encode");
 
     assert_eq!(error.code(), ErrorCode::InternalError);
+}
+
+#[test]
+fn bare_search_cursor_preserves_codeployed_encoding_and_binds_the_namespace_set() {
+    let cursor = name_cursor();
+    let codeployed = codeployed_public_namespaces();
+    let codeployed_binding = cursor_binding("al", SearchMatch::Prefix, None, &codeployed);
+    let payload =
+        search_cursor_payload(&cursor, &codeployed_binding).expect("name cursor must encode");
+
+    assert_eq!(payload.filters.len(), 3);
+    assert_eq!(payload.filters[NAMESPACE_FILTER_KEY], NONE_FILTER_VALUE);
+
+    let ens_only = vec!["ens".to_owned()];
+    let ens_only_binding = cursor_binding("al", SearchMatch::Prefix, None, &ens_only);
+    assert!(search_storage_cursor(&payload, &ens_only_binding).is_err());
 }
 
 #[test]

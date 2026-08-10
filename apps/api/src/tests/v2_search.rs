@@ -124,6 +124,226 @@ async fn v2_search_lowercases_q_and_filters_namespace() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_search_bare_scope_matches_the_served_deployment_namespaces() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+
+    let codeployed = v2_search_payload_for_database(&database, "/v2/search?q=alpha").await?;
+    assert_eq!(
+        v2_search_names(codeployed["data"].as_array().expect("codeployed data")),
+        vec!["alpha.base.eth", "alpha.eth"]
+    );
+    assert_eq!(codeployed["meta"], json!({}));
+
+    let ens_only = v2_search_payload_for_database_with_public_namespaces(
+        &database,
+        "/v2/search?q=alpha",
+        &["ens"],
+    )
+    .await?;
+    assert_eq!(
+        v2_search_names(ens_only["data"].as_array().expect("ENS-only data")),
+        vec!["alpha.eth"]
+    );
+    assert_eq!(ens_only["meta"], json!({}));
+    assert!(ens_only["meta"].get("completeness").is_none());
+
+    let explicit_unserved = v2_search_response_for_database_with_public_namespaces(
+        &database,
+        "/v2/search?q=alpha&namespace=basenames",
+        &["ens"],
+    )
+    .await?;
+    assert_eq!(explicit_unserved.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        read_json::<Value>(explicit_unserved).await?["error"]["code"],
+        json!("conflict")
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_search_bare_cursor_fails_closed_when_the_served_namespace_set_changes() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    let first = v2_search_payload_for_database(&database, "/v2/search?q=al&page_size=1").await?;
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .expect("codeployed first page must include a cursor");
+
+    let response = v2_search_response_for_database_with_public_namespaces(
+        &database,
+        &format!("/v2/search?q=al&page_size=1&cursor={cursor}"),
+        &["ens"],
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        read_json::<Value>(response).await?["error"]["code"],
+        json!("invalid_input")
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_search_validates_cursor_before_deployment_readiness() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+
+    let malformed = v2_search_response_for_database_with_public_namespaces(
+        &database,
+        "/v2/search?q=alpha&cursor=not-a-cursor",
+        &[],
+    )
+    .await?;
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        read_json::<Value>(malformed).await?["error"]["code"],
+        json!("invalid_input")
+    );
+
+    let valid = v2_search_response_for_database_with_public_namespaces(
+        &database,
+        "/v2/search?q=alpha",
+        &[],
+    )
+    .await?;
+    assert_eq!(valid.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        read_json::<Value>(valid).await?["error"]["code"],
+        json!("conflict")
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn public_namespace_derivation_tracks_manifest_authority_and_ready_checkpoints() -> Result<()>
+{
+    let sepolia = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&sepolia).await?;
+    sepolia
+        .insert_manifest(
+            "ens",
+            "ens_v2_registry_l1",
+            "ethereum-sepolia",
+            "ens_v2_sepolia_post_audit",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    sepolia
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum-sepolia": {
+                "chain_id": "ethereum-sepolia",
+                "block_number": 107,
+                "block_hash": "0xnamespace-sepolia",
+                "timestamp": "2026-08-10T00:01:47Z"
+            }
+        }))
+        .await?;
+    let sepolia_state = AppState::new_with_rpc_urls(
+        sepolia.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    assert_eq!(
+        crate::v2::support::derive_public_namespace_set(&sepolia_state)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?
+            .names(),
+        ["ens"]
+    );
+
+    let response = app_router(sepolia_state)
+        .oneshot(
+            Request::builder()
+                .uri("/v2/search?q=alpha")
+                .body(Body::empty())
+                .expect("search request must build"),
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        v2_search_names(payload["data"].as_array().expect("search data")),
+        vec!["alpha.eth"]
+    );
+    assert_eq!(payload["meta"], json!({}));
+    sepolia.cleanup().await?;
+
+    let codeployed = TestDatabase::new_migrated().await?;
+    codeployed
+        .insert_manifest(
+            "ens",
+            "ens_v1_registry_l1",
+            "ethereum-mainnet",
+            "ens_v1",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    codeployed
+        .insert_manifest(
+            "basenames",
+            "basenames_base_registry",
+            "base-mainnet",
+            "basenames_v1",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    codeployed
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 108,
+                "block_hash": "0xnamespace-mainnet",
+                "timestamp": "2026-08-10T00:01:48Z"
+            },
+            "base": {
+                "chain_id": "base-mainnet",
+                "block_number": 109,
+                "block_hash": "0xnamespace-base",
+                "timestamp": "2026-08-10T00:01:49Z"
+            }
+        }))
+        .await?;
+    let codeployed_state = AppState::new_with_rpc_urls(
+        codeployed.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    assert_eq!(
+        crate::v2::support::derive_public_namespace_set(&codeployed_state)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?
+            .names(),
+        ["basenames", "ens"]
+    );
+
+    sqlx::query(
+        "UPDATE bigname_phase.chain_phase_state
+         SET input_content_hash = 'manifest-authority:test'
+         WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
+    )
+    .execute(&codeployed.lookup_pool)
+    .await?;
+    assert_eq!(
+        crate::v2::support::derive_public_namespace_set(&codeployed_state)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?
+            .names(),
+        ["ens"]
+    );
+
+    codeployed.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_search_escapes_like_metacharacters() -> Result<()> {
     // `_under.eth` and `bunder.eth` both match the unescaped LIKE pattern `_und%`.
     let (database, underscore) = v2_search_payload("/v2/search?q=_und&namespace=ens").await?;
@@ -318,6 +538,37 @@ async fn v2_search_payload_for_database(database: &TestDatabase, uri: &str) -> R
 
 async fn v2_search_response_for_database(database: &TestDatabase, uri: &str) -> Result<Response> {
     app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .body(Body::empty())
+                .expect("search request must build"),
+        )
+        .await
+        .context("v2 search request failed")
+}
+
+async fn v2_search_payload_for_database_with_public_namespaces(
+    database: &TestDatabase,
+    uri: &str,
+    public_namespaces: &[&str],
+) -> Result<Value> {
+    let response = v2_search_response_for_database_with_public_namespaces(
+        database,
+        uri,
+        public_namespaces,
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    read_json(response).await
+}
+
+async fn v2_search_response_for_database_with_public_namespaces(
+    database: &TestDatabase,
+    uri: &str,
+    public_namespaces: &[&str],
+) -> Result<Response> {
+    app_router(database.app_state_with_public_namespaces(public_namespaces))
         .oneshot(
             Request::builder()
                 .uri(uri)

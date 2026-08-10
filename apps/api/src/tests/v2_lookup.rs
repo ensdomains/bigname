@@ -57,6 +57,34 @@ async fn v2_lookup_rejects_invalid_request_shapes() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_lookup_validates_reverse_inputs_before_deployment_readiness() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let response = v2_lookup_response_for_database_with_public_namespaces(
+        &database,
+        "/v2/lookup",
+        json!({"inputs": [{"address": "not-an-address"}]}),
+        &[],
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("invalid_input"));
+
+    let response = v2_lookup_response_for_database_with_public_namespaces(
+        &database,
+        "/v2/lookup",
+        json!({"inputs": [{"address": "0x0000000000000000000000000000000000000abc"}]}),
+        &[],
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("conflict"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_lookup_forward_results_are_in_order_with_head_meta() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
@@ -1263,6 +1291,154 @@ async fn v2_lookup_rejects_union_scope_with_missing_phase_head() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_lookup_public_reverse_scope_uses_the_served_namespace_set() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    seed_identity_name(
+        &database,
+        "basenames:stale.base.eth",
+        "stale.base.eth",
+        "stale.base.eth",
+        "namehash:stale.base.eth",
+        Uuid::from_u128(0x5a0221),
+        Uuid::from_u128(0x5a0222),
+        Uuid::from_u128(0x5a0223),
+        address,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        43,
+    )
+    .await?;
+
+    let response = v2_lookup_response_for_database_with_public_namespaces(
+        &database,
+        "/v2/lookup",
+        json!({"inputs": [{"address": address}]}),
+        &["ens"],
+    )
+    .await?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {payload:#}");
+    assert!(payload["meta"]["as_of"].get("1").is_some());
+    assert!(payload["meta"]["as_of"].get("8453").is_none());
+    assert!(payload["meta"].get("completeness").is_none());
+    assert_eq!(lookup_record_names(&payload), vec!["alice.eth", "bob.eth"]);
+    assert_eq!(payload["data"][0]["page"]["total_count"], json!(2));
+    assert_eq!(payload["data"][0]["page"]["has_more"], json!(false));
+
+    let codeployed_page = v2_lookup_response_for_database_with_public_namespaces(
+        &database,
+        "/v2/lookup",
+        json!({"inputs": [{"address": address, "page_size": 1}]}),
+        &["ens", "basenames"],
+    )
+    .await?;
+    assert_eq!(codeployed_page.status(), StatusCode::OK);
+    let codeployed_payload: Value = read_json(codeployed_page).await?;
+    let cursor = codeployed_payload["data"][0]["page"]["next_cursor"]
+        .as_str()
+        .expect("co-deployed reverse page must include a cursor");
+    let changed_set = v2_lookup_response_for_database_with_public_namespaces(
+        &database,
+        "/v2/lookup",
+        json!({"inputs": [{"address": address, "page_size": 1, "cursor": cursor}]}),
+        &["ens"],
+    )
+    .await?;
+    assert_eq!(changed_set.status(), StatusCode::BAD_REQUEST);
+    let changed_payload: Value = read_json(changed_set).await?;
+    assert_eq!(changed_payload["error"]["code"], json!("invalid_input"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_lookup_production_derivation_uses_the_sepolia_authority_chain() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .insert_manifest(
+            "ens",
+            "ens_v2_registry_l1",
+            "ethereum-sepolia",
+            "ens_v2_sepolia_post_audit",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum-sepolia": {
+                "chain_id": "ethereum-sepolia",
+                "block_number": 107,
+                "block_hash": "0xlookup-sepolia",
+                "timestamp": "2026-08-10T00:01:47Z"
+            }
+        }))
+        .await?;
+    let state = AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v2/lookup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "inputs": [{
+                            "address": "0x0000000000000000000000000000000000000abc"
+                        }]
+                    }))
+                    .expect("body must serialize"),
+                ))
+                .expect("lookup request must build"),
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["data"][0]["records"], json!([]));
+    assert!(payload["meta"]["as_of"].get("11155111").is_some());
+    assert!(payload["meta"]["as_of"].get("1").is_none());
+    assert!(payload["meta"]["as_of"].get("8453").is_none());
+    assert!(payload["meta"].get("completeness").is_none());
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_lookup_mixed_reverse_and_unserved_forward_namespace_fails_closed() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    sqlx::query("DELETE FROM bigname_phase.chain_heads WHERE chain_id = 'base-mainnet'")
+        .execute(&database.lookup_pool)
+        .await?;
+
+    let response = v2_lookup_response_for_database_with_public_namespaces(
+        &database,
+        "/v2/lookup",
+        json!({
+            "inputs": [
+                {"id": "reverse", "address": address},
+                {"id": "basenames-miss", "name": "missing.base.eth"}
+            ]
+        }),
+        &["ens"],
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("conflict"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_lookup_rejects_single_scope_with_incompatible_project_generation() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database
@@ -2166,6 +2342,27 @@ async fn v2_lookup_response_for_database(
     body: Value,
 ) -> Result<Response> {
     app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&body).expect("body must serialize"),
+                ))
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 lookup request failed")
+}
+
+async fn v2_lookup_response_for_database_with_public_namespaces(
+    database: &TestDatabase,
+    uri: &str,
+    body: Value,
+    public_namespaces: &[&str],
+) -> Result<Response> {
+    app_router(database.app_state_with_public_namespaces(public_namespaces))
         .oneshot(
             Request::builder()
                 .method("POST")

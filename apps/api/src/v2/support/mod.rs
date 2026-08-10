@@ -20,7 +20,6 @@ use tracing::{error, warn};
 use crate::{
     errors::{ApiError, ApiResult},
     state::AppState,
-    *,
 };
 
 pub(crate) const BASENAMES_NAMESPACE: &str = bigname_storage::BASENAMES_NAMESPACE;

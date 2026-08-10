@@ -1,4 +1,145 @@
 use super::*;
+use std::sync::Arc;
+
+use bigname_manifests::load_namespace_manifest_snapshot;
+
+#[derive(Clone, Debug)]
+pub(crate) struct PublicNamespaceDeployment {
+    namespace: String,
+    scope: SnapshotSelectionScope,
+}
+
+impl PublicNamespaceDeployment {
+    pub(crate) fn scope(&self) -> &SnapshotSelectionScope {
+        &self.scope
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PublicNamespaceSet {
+    deployments: Arc<[PublicNamespaceDeployment]>,
+    names: Arc<[String]>,
+}
+
+impl PublicNamespaceSet {
+    fn new(deployments: Vec<PublicNamespaceDeployment>) -> Self {
+        let names = deployments
+            .iter()
+            .map(|deployment| deployment.namespace.clone())
+            .collect::<Vec<_>>();
+        Self {
+            deployments: Arc::from(deployments),
+            names: Arc::from(names),
+        }
+    }
+
+    pub(crate) fn deployments(&self) -> &[PublicNamespaceDeployment] {
+        &self.deployments
+    }
+
+    pub(crate) fn names(&self) -> &[String] {
+        &self.names
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.deployments.is_empty()
+    }
+
+    pub(crate) fn contains(&self, namespace: &str) -> bool {
+        self.deployments
+            .iter()
+            .any(|deployment| deployment.namespace == namespace)
+    }
+}
+
+pub(crate) async fn derive_public_namespace_set(state: &AppState) -> ApiResult<PublicNamespaceSet> {
+    if let Some(namespaces) = state.public_namespaces_override() {
+        let mut deployments = Vec::new();
+        for namespace in namespaces.iter() {
+            let active_chains = match namespace.as_str() {
+                "ens" => BTreeSet::from(["ethereum-mainnet"]),
+                BASENAMES_NAMESPACE => BTreeSet::from([BASENAMES_COMPAT_SOURCE_CHAIN_ID]),
+                _ => BTreeSet::new(),
+            };
+            if let Some(scope) =
+                public_namespace_snapshot_scope(&state.pool, namespace, &active_chains).await?
+            {
+                deployments.push(PublicNamespaceDeployment {
+                    namespace: namespace.clone(),
+                    scope,
+                });
+            }
+        }
+        return Ok(PublicNamespaceSet::new(deployments));
+    }
+
+    let mut deployments = Vec::new();
+    for namespace in [BASENAMES_NAMESPACE, "ens"] {
+        let snapshot = load_namespace_manifest_snapshot(&state.pool, namespace)
+            .await
+            .map_err(|_| ApiError::internal_error("failed to load public namespace manifests"))?;
+        let active_chains = snapshot
+            .manifests
+            .iter()
+            .map(|manifest| manifest.chain.as_str())
+            .collect::<BTreeSet<_>>();
+        let Some(scope) =
+            public_namespace_snapshot_scope(&state.pool, namespace, &active_chains).await?
+        else {
+            continue;
+        };
+        let input = SnapshotSelectorInput::new(None, None, SnapshotConsistency::Head)
+            .map_err(snapshot_selection_api_error)?;
+        match resolve_exact_name_snapshot_selection(&state.pool, &scope, &input).await {
+            Ok(_) => deployments.push(PublicNamespaceDeployment {
+                namespace: namespace.to_owned(),
+                scope,
+            }),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    SnapshotSelectionErrorKind::Conflict | SnapshotSelectionErrorKind::Stale
+                ) => {}
+            Err(error) => return Err(snapshot_selection_api_error(error)),
+        }
+    }
+
+    Ok(PublicNamespaceSet::new(deployments))
+}
+
+async fn public_namespace_snapshot_scope(
+    pool: &PgPool,
+    namespace: &str,
+    active_chains: &BTreeSet<&str>,
+) -> ApiResult<Option<SnapshotSelectionScope>> {
+    let selector = match namespace {
+        "ens" => {
+            let chains = active_chains
+                .iter()
+                .copied()
+                .filter(|chain_id| matches!(*chain_id, "ethereum-mainnet" | "ethereum-sepolia"))
+                .collect::<Vec<_>>();
+            match chains.as_slice() {
+                [] => return Ok(None),
+                [chain_id] => ExactNameSnapshotSelector::from_at(chain_id),
+                _ => {
+                    return Err(ApiError::internal_error(
+                        "ENS manifests span multiple deployment profiles",
+                    ));
+                }
+            }
+        }
+        BASENAMES_NAMESPACE if active_chains.contains(BASENAMES_COMPAT_SOURCE_CHAIN_ID) => {
+            ExactNameSnapshotSelector::default()
+        }
+        BASENAMES_NAMESPACE => return Ok(None),
+        _ => return Ok(None),
+    };
+
+    exact_name_snapshot_scope(pool, namespace, selector, false)
+        .await
+        .map(Some)
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ExactNameSnapshotSelector<'a> {

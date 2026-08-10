@@ -119,26 +119,30 @@ Field ownership:
 - Pagination behavior: top-level `page` is absent. Reverse inputs use the
   standard `page` object inside each result. Detail and feed use identical
   pagination semantics; feed only reduces returned fields. Reverse inputs
-  default `page_size` to 50 and use the common max of 200. Relation filters
-  that cannot be satisfied by one storage role (including exact `owner`, exact
-  `registrant`, and partial relation sets such as `owner,manager`) may return
-  an as-filled page with `has_more=true` when the API reaches its bounded
-  post-filter scan cap; clients continue with the returned `next_cursor`.
+  default `page_size` to 50 and use the common max of 200. A reverse cursor
+  binds the deployment-derived public namespace set and is rejected if that
+  set changes. Relation filters that cannot be satisfied by one storage role
+  (including exact `owner`, exact `registrant`, and partial relation sets such
+  as `owner,manager`) may return an as-filled page with `has_more=true` when the
+  API reaches its bounded post-filter scan cap; clients continue with the
+  returned `next_cursor`.
 - Status semantics: per-result `status` uses the common result vocabulary.
   Name misses are in-band `not_found`; invalid names are in-band
   `invalid_name`. Reverse misses return `status=ok` with an empty `records`
   array for the input. Lookup record-level reason values are mapped to product
   vocabulary before serialization; current values include `read_failed`,
   `exact_name_profile_not_supported`, `mixed_exact_name_corpus`, and
-  `unsupported_reason_missing`.
+  `unsupported_reason_missing`. An address lookup returns `409 conflict` when
+  the deployment has no ready public namespace.
 - Snapshot behavior: lookup selects the current schema-v2 phase head and reads
   `bigname_phase` name, inventory, and address-name projections published for
-  one completed projection-phase generation. Because projection publication is
-  incremental, an unchanged row target may precede the selected head; it may
-  not be ahead, and a same-height target must match the selected hash. Lookup
-  revalidates both `chain_heads` and that generation after the read. An
-  invalid target, phase lag, or mid-request head/projection change returns `409
-  stale`.
+  one completed projection-phase generation. Public reverse lookup with no
+  explicit namespace derives its snapshot scope from the namespaces served by
+  the deployment. Because projection publication is incremental, an unchanged
+  row target may precede the selected head; it may not be ahead, and a
+  same-height target must match the selected hash. Lookup revalidates both
+  `chain_heads` and that generation after the read. An invalid target, phase
+  lag, or mid-request head/projection change returns `409 stale`.
 - Replaces (v1): `POST /v1/identity:lookup`.
 
 ### `GET /v2/status`
@@ -683,13 +687,18 @@ Field ownership:
   collection rule.
 - Response shape: `data` is an array of record-shaped name search results in
   dictionary vocabulary.
-- Pagination behavior: standard collection pagination.
+- Pagination behavior: standard collection pagination. Without an explicit
+  namespace, the cursor binds the deployment-derived namespace set and is
+  rejected if that set changes.
 - Snapshot behavior: search rows come from current state. The response omits
   `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
   validity claim. True as-of search enumeration is deferred to the
   revision-bound storage follow-up.
 - Status semantics: no matches returns `200` with empty `data`. `q` is
-  required; a missing or empty `q` returns `400 invalid_input`.
+  required; a missing or empty `q` returns `400 invalid_input`. An explicit
+  recognized namespace that the deployment does not serve returns `409
+  conflict`; bare search returns the same error when no public namespace is
+  ready.
 - Replaces (v1): search, suggestion, and exact-name-filter uses of
   `GET /v1/names`; exact name profiles move to `GET /v2/names/{name}`.
 

@@ -10,14 +10,15 @@ use bigname_storage::{
     NameCurrentListRow, NameCurrentListSort,
 };
 use serde::{Deserialize, Serialize};
+use tracing::error;
 
-use crate::{AppState, PUBLIC_NAMESPACES};
+use crate::{AppState, state::is_recognized_public_namespace};
 
 use super::cursor::{cursor_value, invalid_cursor_error};
 use super::{
     AtSelector, CursorPayload, Envelope, Finality, Meta, Page, QueryParams, RawQueryParams,
     RegistrationStatus, V2Error, V2Result, decode, encode, name_record::name_registration_fields,
-    validate_latest_collection_selectors,
+    support::derive_public_namespace_set, validate_latest_collection_selectors,
 };
 
 const SEARCH_SORT: &str = "name_asc";
@@ -147,21 +148,44 @@ pub(crate) async fn get_search(
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<Vec<SearchName>>>> {
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
+    let cursor_payload = params.cursor.as_deref().map(decode).transpose()?;
+    let public_namespace_set = derive_public_namespace_set(&state)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                status = %load_error.status,
+                code = load_error.code,
+                message = %load_error.message,
+                "failed to derive the public namespace set"
+            );
+            V2Error::internal_error("failed to select search namespaces")
+        })?;
+    if public_namespace_set.is_empty() {
+        return Err(V2Error::conflict(
+            "the deployment does not serve a public namespace",
+        ));
+    }
+    let public_namespaces = public_namespace_set.names();
+    if let Some(namespace) = params.namespace.as_deref()
+        && !public_namespaces.iter().any(|served| served == namespace)
+    {
+        return Err(V2Error::conflict(format!(
+            "namespace {namespace} is not served by this deployment"
+        )));
+    }
     let cursor_binding = SearchCursorBinding {
         q: &params.q,
         match_mode: params.match_mode,
         namespace: params.namespace.as_deref(),
+        public_namespaces,
     };
-    let storage_cursor = params
-        .cursor
-        .as_deref()
-        .map(|cursor| {
-            let payload = decode(cursor)?;
-            search_storage_cursor(&payload, &cursor_binding)
-        })
+    let storage_cursor = cursor_payload
+        .as_ref()
+        .map(|payload| search_storage_cursor(payload, &cursor_binding))
         .transpose()?;
 
-    let filter = search_filter(&params);
+    let filter = search_filter(&params, public_namespaces);
     let storage_page =
         load_search_storage_page(&state, &filter, storage_cursor.as_ref(), params.page_size)
             .await?;
@@ -262,17 +286,19 @@ pub(crate) struct SearchCursorBinding<'a> {
     pub(crate) q: &'a str,
     pub(crate) match_mode: SearchMatch,
     pub(crate) namespace: Option<&'a str>,
+    pub(crate) public_namespaces: &'a [String],
 }
 
-fn search_filter(params: &SearchQueryParams) -> NameCurrentListFilter {
+fn search_filter(
+    params: &SearchQueryParams,
+    public_namespaces: &[String],
+) -> NameCurrentListFilter {
     let mut filter = NameCurrentListFilter {
         namespace: params.namespace.clone(),
-        namespaces: params.namespace.is_none().then(|| {
-            PUBLIC_NAMESPACES
-                .iter()
-                .map(|namespace| (*namespace).to_owned())
-                .collect()
-        }),
+        namespaces: params
+            .namespace
+            .is_none()
+            .then(|| public_namespaces.to_vec()),
         ..NameCurrentListFilter::default()
     };
 
@@ -312,9 +338,30 @@ fn cursor_filters(binding: &SearchCursorBinding<'_>) -> BTreeMap<String, String>
         ),
         (
             NAMESPACE_FILTER_KEY.to_owned(),
-            binding.namespace.unwrap_or(NONE_FILTER_VALUE).to_owned(),
+            namespace_cursor_anchor(binding),
         ),
     ])
+}
+
+fn namespace_cursor_anchor(binding: &SearchCursorBinding<'_>) -> String {
+    if let Some(namespace) = binding.namespace {
+        return namespace.to_owned();
+    }
+
+    if binding.public_namespaces.len() == 2
+        && binding
+            .public_namespaces
+            .iter()
+            .any(|namespace| namespace == "ens")
+        && binding
+            .public_namespaces
+            .iter()
+            .any(|namespace| namespace == "basenames")
+    {
+        return NONE_FILTER_VALUE.to_owned();
+    }
+
+    format!("public:{}", binding.public_namespaces.join(","))
 }
 
 fn parse_q(value: Option<String>) -> V2Result<String> {
@@ -334,7 +381,7 @@ fn parse_match(value: Option<&str>) -> V2Result<SearchMatch> {
 }
 
 fn validate_namespace(namespace: &str) -> V2Result<()> {
-    if PUBLIC_NAMESPACES.contains(&namespace) {
+    if is_recognized_public_namespace(namespace) {
         Ok(())
     } else {
         Err(V2Error::invalid_input("namespace is invalid"))

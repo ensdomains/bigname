@@ -110,12 +110,7 @@ pub(super) fn parse_address_input(
     let relation = parse_relation_set_param(input.relation.as_deref())?;
     let roles = relation_to_storage_roles(relation.as_ref());
     let page_size = parse_page_size(input.page_size)?;
-    let (page_cursor, page_cursor_token) = parse_reverse_cursor(
-        input.cursor.as_deref(),
-        &address,
-        coin_type,
-        relation.as_ref(),
-    )?;
+    validate_reverse_cursor_encoding(input.cursor.as_deref())?;
 
     Ok(ParsedAddressLookup {
         index,
@@ -133,9 +128,32 @@ pub(super) fn parse_address_input(
         relation,
         roles,
         page_size,
-        page_cursor,
-        page_cursor_token,
+        page_cursor: None,
+        page_cursor_token: None,
     })
+}
+
+pub(super) fn bind_address_cursor(
+    input: &mut ParsedAddressLookup,
+    public_namespaces: &[String],
+) -> V2Result<()> {
+    let (page_cursor, page_cursor_token) = parse_reverse_cursor(
+        input.input.cursor.as_deref(),
+        &input.address,
+        input.coin_type,
+        input.relation.as_ref(),
+        public_namespaces,
+    )?;
+    input.page_cursor = page_cursor;
+    input.page_cursor_token = page_cursor_token;
+    Ok(())
+}
+
+fn validate_reverse_cursor_encoding(cursor: Option<&str>) -> V2Result<()> {
+    if let Some(cursor) = cursor.map(str::trim).filter(|cursor| !cursor.is_empty()) {
+        decode(cursor)?;
+    }
+    Ok(())
 }
 
 pub(super) fn parse_lookup_json_body(
@@ -187,6 +205,7 @@ fn parse_reverse_cursor(
     address: &str,
     coin_type: u64,
     relation: Option<&RelationSet>,
+    public_namespaces: &[String],
 ) -> V2Result<(
     Option<bigname_storage::ReverseIdentityCursor>,
     Option<String>,
@@ -198,6 +217,7 @@ fn parse_reverse_cursor(
         address,
         coin_type,
         relation,
+        public_namespaces,
     };
     let payload = decode(cursor)?;
     let storage_cursor = lookup_reverse_storage_cursor(&payload, &binding)?;
