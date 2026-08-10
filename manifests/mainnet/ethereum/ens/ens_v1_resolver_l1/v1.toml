@@ -61,9 +61,9 @@ address = "0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63"
 proxy_kind = "none"
 # Historical resolver-event bootstrap follows ENSNode's pinned mainnet
 # DefaultPublicResolver4 start block.
-# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L374 @ ensnode@9b8f590)
-# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L376 @ ensnode@9b8f590)
-# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L377 @ ensnode@9b8f590).
+# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L374 @ ensnode@2017ae6)
+# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L376 @ ensnode@2017ae6)
+# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L377 @ ensnode@2017ae6).
 start_block = 16925619
 
 [[contracts]]
@@ -78,9 +78,9 @@ address = "0x4976fb03C32e5B8cfe2b6cCB31c09Ba78EBaBa41"
 proxy_kind = "none"
 # Historical resolver-event bootstrap follows ENSNode's pinned mainnet
 # DefaultPublicResolver3 start block.
-# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L365 @ ensnode@9b8f590)
-# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L367 @ ensnode@9b8f590)
-# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L368 @ ensnode@9b8f590).
+# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L365 @ ensnode@2017ae6)
+# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L367 @ ensnode@2017ae6)
+# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L368 @ ensnode@2017ae6).
 start_block = 9412610
 
 [[contracts]]
@@ -110,9 +110,9 @@ address = "0x226159d592E2b063810a10Ebf6dcbADA94Ed68b8"
 proxy_kind = "none"
 # Historical resolver-event bootstrap follows ENSNode's pinned mainnet
 # DefaultPublicResolver2 start block.
-# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L357 @ ensnode@9b8f590)
-# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L359 @ ensnode@9b8f590)
-# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L360 @ ensnode@9b8f590).
+# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L357 @ ensnode@2017ae6)
+# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L359 @ ensnode@2017ae6)
+# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L360 @ ensnode@2017ae6).
 start_block = 8659893
 
 [[contracts]]
@@ -126,9 +126,9 @@ address = "0x5FfC014343cd971B7eb70732021E26C35B744cc4"
 proxy_kind = "none"
 # Historical resolver-event bootstrap follows ENSNode's pinned mainnet
 # DefaultPublicResolver1 start block.
-# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L350 @ ensnode@9b8f590)
-# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L352 @ ensnode@9b8f590)
-# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L353 @ ensnode@9b8f590).
+# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L350 @ ensnode@2017ae6)
+# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L352 @ ensnode@2017ae6)
+# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L353 @ ensnode@2017ae6).
 start_block = 3733668
 
 [[contracts]]
@@ -143,9 +143,9 @@ address = "0x1da022710dF5002339274AaDEe8D58218e9D6AB5"
 proxy_kind = "none"
 # Historical resolver-event bootstrap follows ENSNode's pinned mainnet
 # DefaultPublicResolver0 start block.
-# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L343 @ ensnode@9b8f590)
-# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L345 @ ensnode@9b8f590)
-# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L346 @ ensnode@9b8f590).
+# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L343 @ ensnode@2017ae6)
+# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L345 @ ensnode@2017ae6)
+# (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L346 @ ensnode@2017ae6).
 start_block = 3648359
 
 # Resolver event ABI fragments consumed by manifest-derived authority topic
@@ -166,8 +166,22 @@ start_block = 3648359
 # (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L5 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L5 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v1/contracts/resolvers/profiles/IVersionableResolver.sol:L5 @ ens_v1@91c966f).
-# Legacy TextChanged without value follows pinned ENS subgraph admission:
-# (upstream: .refs/ens_subgraph/subgraph.yaml:L109 @ ens_subgraph@723f1b6).
+# Legacy TextChanged without value retains the indexed-key fragment used by the
+# pinned ENS subgraph for topic0 selection:
+# (upstream: .refs/ens_subgraph/subgraph.yaml:L109-L110 @ ens_subgraph@723f1b6).
+# Event parameter indexing does not change topic0, and the #382 production raw-store census from
+# the manifest-declared 2019 PublicResolver at 0x226159d5... contain the deployed
+# unindexed-key shape: two topics, followed by the duplicated key strings in
+# event data. That mainnet observation is first-party raw-store evidence, not a
+# claim that the pinned goerli artifact is the mainnet deployment source. The
+# goerli LegacyPublicResolver deployment ABI independently records the same
+# unindexed-key layout:
+# (upstream: .refs/ens_v1/deployments/goerli/LegacyPublicResolver.json:L508-L532 @ ens_v1@91c966f).
+# The vendored legacy emit site supplies the same key as both string arguments:
+# (upstream: .refs/ens_v1/deployments/mainnet/solcInputs/08371ea78d6ca0259dbc9b2f768cf73e.json:L71 @ ens_v1@91c966f).
+# The adapter therefore accepts the emitted two-topic layout only when those
+# strings are byte-equal, while this single fragment continues to own the shared
+# topic0 and the existing three-topic layout.
 [[abi.events]]
 name = "ABIChanged"
 fragment = "event ABIChanged(bytes32 indexed node, uint256 indexed contentType)"
