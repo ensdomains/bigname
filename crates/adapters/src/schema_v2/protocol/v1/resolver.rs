@@ -15,7 +15,16 @@ use crate::schema_v2::{
 
 mod text_without_value {
     use super::*;
-    sol! { event RawTextChanged(bytes32 indexed node, bytes32 indexed indexedKey, bytes key); }
+    sol! {
+        event RawTextChanged(bytes32 indexed node, bytes32 indexed indexedKey, bytes key);
+        // The #382 mainnet raw-log fixture shows this unindexed-key layout from the
+        // manifest-declared old PublicResolver. Independently, a pinned legacy deployment ABI
+        // declares `indexedKey` unindexed, and the vendored emit site duplicates the key in both
+        // string arguments.
+        // (upstream: .refs/ens_v1/deployments/goerli/LegacyPublicResolver.json:L508-L532 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/deployments/mainnet/solcInputs/08371ea78d6ca0259dbc9b2f768cf73e.json:L71 @ ens_v1@91c966f)
+        event RawUnindexedTextChanged(bytes32 indexed node, bytes indexedKey, bytes key);
+    }
 }
 
 mod raw_strings {
@@ -152,31 +161,60 @@ pub(super) fn interpret(
             selector.retain_raw_selector(&mut after);
             ("RecordChanged", after, vec![])
         }
-        "TextChanged" => {
-            let event = decode_event_log_data_as::<text_without_value::RawTextChanged>(
-                &raw.topics,
-                &raw.data,
-                &selected.event.topic0,
-                "TextChanged log is malformed",
-            )?;
-            if !event_string_has_content(&event.key) || event.indexedKey != keccak256(&event.key) {
-                return Ok(Interpreted::new());
+        "TextChanged" => match raw.topics.len() {
+            2 => {
+                let event = decode_event_log_data_as::<text_without_value::RawUnindexedTextChanged>(
+                    &raw.topics,
+                    &raw.data,
+                    &selected.event.topic0,
+                    "TextChanged log is malformed",
+                )?;
+                if !event_string_has_content(&event.key) || event.indexedKey != event.key {
+                    return Ok(Interpreted::new());
+                }
+                let selector = event_string_selector("text", &event.key);
+                let mut after = record_after(
+                    selected,
+                    raw,
+                    "TextChanged",
+                    hex_string(event.node),
+                    selector.record_key.clone(),
+                    &selector.record_family,
+                    Some(selector.selector_key.clone()),
+                    None,
+                    None,
+                );
+                selector.retain_raw_selector(&mut after);
+                ("RecordChanged", after, vec![])
             }
-            let selector = event_string_selector("text", &event.key);
-            let mut after = record_after(
-                selected,
-                raw,
-                "TextChanged",
-                hex_string(event.node),
-                selector.record_key.clone(),
-                &selector.record_family,
-                Some(selector.selector_key.clone()),
-                None,
-                None,
-            );
-            selector.retain_raw_selector(&mut after);
-            ("RecordChanged", after, vec![])
-        }
+            _ => {
+                let event = decode_event_log_data_as::<text_without_value::RawTextChanged>(
+                    &raw.topics,
+                    &raw.data,
+                    &selected.event.topic0,
+                    "TextChanged log is malformed",
+                )?;
+                if !event_string_has_content(&event.key)
+                    || event.indexedKey != keccak256(&event.key)
+                {
+                    return Ok(Interpreted::new());
+                }
+                let selector = event_string_selector("text", &event.key);
+                let mut after = record_after(
+                    selected,
+                    raw,
+                    "TextChanged",
+                    hex_string(event.node),
+                    selector.record_key.clone(),
+                    &selector.record_family,
+                    Some(selector.selector_key.clone()),
+                    None,
+                    None,
+                );
+                selector.retain_raw_selector(&mut after);
+                ("RecordChanged", after, vec![])
+            }
+        },
         "VersionChanged" => {
             let event = decode_event_log::<VersionChanged>(
                 &raw.topics,

@@ -132,6 +132,14 @@ mod legacy_text_without_value {
     }
 }
 
+mod legacy_unindexed_text_without_value {
+    use alloy_sol_types::sol;
+
+    sol! {
+        event TextChanged(bytes32 indexed node, string indexedKey, string key);
+    }
+}
+
 mod v1_registry {
     use alloy_sol_types::sol;
 
@@ -8763,6 +8771,142 @@ fn legacy_text_changed_without_value_uses_its_three_argument_decoder() -> anyhow
     assert_eq!(event.after_state["record_key"], "text:avatar");
     assert_eq!(event.after_state["selector_key"], "avatar");
     assert!(event.after_state.get("value").is_none());
+    Ok(())
+}
+
+#[test]
+fn admitted_old_public_resolver_unindexed_text_changed_matches_indexed_output() -> anyhow::Result<()>
+{
+    const MAINNET: &str = "ethereum-mainnet";
+    const RESOLVER: &str = "0x226159d592e2b063810a10ebf6dcbada94ed68b8";
+    const NODE: &str = "0x2d76384bbe48eafe3426abf5f285d74b5c2f6db8f1104afb03ca326cfc11300a";
+    const BLOCK_HASH: &str = "0xdaf328a6e3ac42a14efabd1455664bd9176dc9848558ddaa8902cb3c40ceabaf";
+    const TRANSACTION_HASH: &str =
+        "0x6e56cea53c44bf7756a3f6c2313b537a20d890c82dec6eb2273590c6842df78b";
+    const TOPIC0: &str = "0xd8c9334b1a9c2f9da342a0a2b32629c1a229b6445dad78947f674b44444a7550";
+    const MANIFEST_ID: i64 = 84;
+
+    let data = hex::decode(concat!(
+        "0000000000000000000000000000000000000000000000000000000000000040",
+        "0000000000000000000000000000000000000000000000000000000000000080",
+        "0000000000000000000000000000000000000000000000000000000000000005",
+        "656d61696c000000000000000000000000000000000000000000000000000000",
+        "0000000000000000000000000000000000000000000000000000000000000005",
+        "656d61696c000000000000000000000000000000000000000000000000000000",
+    ))?;
+    let fixture = RawLogInput {
+        chain_id: MAINNET.to_owned(),
+        block_hash: BLOCK_HASH.to_owned(),
+        block_number: 8_711_672,
+        block_timestamp: OffsetDateTime::UNIX_EPOCH,
+        canonicality_state: "canonical".to_owned(),
+        transaction_hash: TRANSACTION_HASH.to_owned(),
+        transaction_index: 184,
+        log_index: 129,
+        emitting_address: RESOLVER.to_owned(),
+        topics: vec![TOPIC0.to_owned(), NODE.to_owned()],
+        data,
+    };
+    let mut text_manifest = manifest(
+        MANIFEST_ID,
+        "ens_v1_resolver_l1",
+        "TextChanged",
+        "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key)",
+        &[],
+        &["RecordChanged"],
+    );
+    text_manifest.chain_id = MAINNET.to_owned();
+    let mut resolver_admission = admission(MANIFEST_ID, "public_resolver_226159d5");
+    resolver_admission.address = RESOLVER.to_owned();
+
+    let output = interpret_test_batch(BatchInput {
+        chain_id: MAINNET.to_owned(),
+        manifests: vec![text_manifest.clone()],
+        discovery_rules: Vec::new(),
+        admissions: vec![resolver_admission.clone()],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![fixture.clone()],
+    })?;
+    let event = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "RecordChanged")
+        .expect("real legacy text transition");
+    assert_eq!(event.block_number, Some(8_711_672));
+    assert_eq!(event.block_hash.as_deref(), Some(BLOCK_HASH));
+    assert_eq!(event.transaction_hash.as_deref(), Some(TRANSACTION_HASH));
+    assert_eq!(event.transaction_index, Some(184));
+    assert_eq!(event.log_index, Some(129));
+    assert_eq!(event.before_state, json!({}));
+    assert_eq!(
+        event.after_state,
+        json!({
+            "source_event": "TextChanged",
+            "resolver": RESOLVER,
+            "resolver_contract_instance_id": Uuid::from_u128(MANIFEST_ID as u128).to_string(),
+            "node": NODE,
+            "record_key": "text:email",
+            "record_family": "text",
+            "selector_key": "email",
+            "value_retained": false,
+        })
+    );
+
+    let indexed = legacy_text_without_value::TextChanged {
+        node: NODE.parse()?,
+        indexedKey: keccak256(b"email"),
+        key: "email".to_owned(),
+    }
+    .encode_log_data();
+    let mut indexed_fixture = raw_at(indexed, 8_711_672, 129, RESOLVER);
+    indexed_fixture.chain_id = MAINNET.to_owned();
+    indexed_fixture.block_hash = BLOCK_HASH.to_owned();
+    indexed_fixture.block_timestamp = fixture.block_timestamp;
+    indexed_fixture.transaction_hash = TRANSACTION_HASH.to_owned();
+    indexed_fixture.transaction_index = 184;
+    let indexed_output = interpret_test_batch(BatchInput {
+        chain_id: MAINNET.to_owned(),
+        manifests: vec![text_manifest],
+        discovery_rules: Vec::new(),
+        admissions: vec![resolver_admission],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![indexed_fixture],
+    })?;
+    assert_eq!(
+        indexed_output.normalized_events[0].after_state,
+        event.after_state
+    );
+    Ok(())
+}
+
+#[test]
+fn legacy_unindexed_text_changed_with_unequal_strings_is_skipped() -> anyhow::Result<()> {
+    let encoded = legacy_unindexed_text_without_value::TextChanged {
+        node: B256::repeat_byte(0x33),
+        indexedKey: "email".to_owned(),
+        key: "url".to_owned(),
+    }
+    .encode_log_data();
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            85,
+            "ens_v1_resolver_l1",
+            "TextChanged",
+            "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key)",
+            &[],
+            &["RecordChanged"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: Vec::new(),
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![raw(encoded)],
+    })?;
+
+    assert!(output.normalized_events.is_empty());
     Ok(())
 }
 
