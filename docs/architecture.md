@@ -145,43 +145,81 @@ For ENSv2, admitted registry, registrar, and resolver name-bearing events produc
 ### ENSv1→ENSv2 current authority
 
 Canonical ENS history may contain both ENSv1 and ENSv2 facts for one logical
-name. That history is not itself a conflict. On Ethereum Mainnet, a canonical
+name. That history is not itself a conflict. On a deployment profile that
+admits the planned
+[ENSv2 migration source family](glossary.md#source-family), a canonical
 [ENSv1→ENSv2 migration boundary](glossary.md#migration-boundary) changes the
-name's `authority_epoch` from `ens_v1` to `ens_v2`. Interpret closes the
-current ENSv1 binding for that logical name at the boundary and binds the
-ENSv2 resource without deleting the ENSv1 history. Later ENSv1 facts for the
-same migrated name remain canonical history but cannot reopen current
-authority, and an ENSv2 release or unregister does not fall back to the
+name's `authority_epoch` from `ens_v1` to `ens_v2`. The contracted migration
+interpretation closes the current ENSv1 binding for that logical name at the
+boundary and binds the ENSv2 resource without deleting the ENSv1 history.
+Later ENSv1 facts for the same migrated name remain canonical history but
+cannot reopen current authority, and an ENSv2 release or unregister does not
+fall back to the
 [ENSv1 husk](glossary.md#ensv1-husk). The unlocked controller transfers the
 ENSv1 registry position and registrar token to the Graveyard before claiming
 the reserved ENSv2 registration; the locked path instead parks the wrapper
 token in the Graveyard and registers the name in ENSv2 while NameWrapper can
-remain the ENSv1 registry owner. (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L135 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
+remain the ENSv1 registry owner. (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58)
 
-Authority is selected per logical name, not once for an entire subtree. An
-unmigrated child can remain ENSv1-authoritative below an ENSv2-authoritative
-parent; the migration registry returns the ENSv1 fallback resolver for a
+For a second-level `.eth` name, both claim paths request an expiry of zero,
+which tells the ENSv2 registry to retain the
+[premigration reservation's](glossary.md#premigration-reservation)
+expiry. (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L164 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L109 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L444 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L445 @ ens_v2@ccaeb58) At the boundary, the selected current `expires_at` therefore changes
+from the ENSv1 expiry to the stored ENSv2 reservation expiry. Interpretation
+must use the emitted value rather than reconstructing a fixed delta: the
+pinned premigration tool converts a configurable whole-day value to seconds,
+defaults it to 62 days, and adds that value to the ENSv1 expiry.
+(upstream: .refs/ens_v2/contracts/script/preMigration.ts:L973 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/script/preMigration.ts:L1035 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/script/preMigration.ts:L1265 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/script/preMigration.ts:L1267 @ ens_v2@ccaeb58) The separate renewal-bridge constructor receives the
+62-day-and-1-second grace-period difference, so that constant is not evidence
+for the stored reservation value. (upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L216 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L217 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L218 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L219 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deploy/03_ETHRenewerV1.ts:L38 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deploy/03_ETHRenewerV1.ts:L39 @ ens_v2@ccaeb58) This remains an authority change, not an arithmetic reconciliation
+rule: after the boundary, only expiry facts from the current ENSv2 resource can
+replace current `expires_at`; later ENSv1 husk expiry or renewal facts remain
+history.
+
+The replacement authority contract selects authority per logical name, not
+once for an entire subtree. An unmigrated child can remain
+ENSv1-authoritative below an ENSv2-authoritative
+parent; the [migration registry](glossary.md#migration-registry-wrapperregistry)
+returns the ENSv1 fallback resolver for a
 protected child until that child migrates. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L183 @ ens_v2@ccaeb58) When a child obtains a current ENSv2 registration, its
 ENSv2 parent-child row is current and the retained ENSv1 row for the same
-parent and child is historical residue. The children projection therefore
-selects the arm established by the child's current authority boundary; it
-does not rank the two arms by latest block or use ENSv2 as a same-position
-tie-break. Two current arms for one Mainnet parent-child pair are an indexing
-anomaly and make that pair explicitly unsupported rather than choosing one
-silently.
+parent and child is historical residue. Consumer slice 3 activates this rule
+in the children projection: it selects the parent-child binding established by
+the child's current authority rather than ranking the ENSv1 and ENSv2 bindings
+by latest block or using ENSv2 as a same-position tie-break. Both bindings
+remaining current for one Mainnet parent-child pair is then a
+projection-blocking indexing anomaly rather than a product row: the
+[Project phase](glossary.md#projection) must fail that generation instead of
+choosing or omitting either binding. Until
+that slice is activated, the existing projection
+behavior remains in force and this paragraph is the contract for its
+replacement.
 
-Exact-name coverage follows the same ownership rule. A Mainnet name with a
-canonical migration boundary is not unsupported merely because its history
-contains both ENSv1 and ENSv2 source families. It is supported when the
-selected current authority's capability is supported. A mixed corpus with no
-provable boundary, or with conflicting current authority after applying the
-boundary, is explicit `unsupported` with
-`conflicting_current_ens_authority`. Sepolia is not subject to the Mainnet
-anomaly assertion: its ENSv1 and ENSv2 test deployments are independent even
-though they share the `ens` namespace. An overlapping Sepolia corpus without
-a migration boundary remains explicit `unsupported` with
+Consumer slice 2 activates the same ownership rule for exact-name coverage. A
+name with a canonical migration boundary, or a current ENSv2 child
+registration in an admitted migration registry below a proven migrated parent,
+is then not unsupported merely because its history contains both ENSv1 and
+ENSv2 source families. The second case does not require a child
+`MigrationApplied`: the registry permits a registration when the child is not
+protected as migratable, and a prior positive ENSv2 expiry makes ENSv2 the
+child authority. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L290 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58) The name is supported when the selected current authority's capability is
+supported. That first ENSv2 registration supersedes the retained ENSv1 child
+binding for subsequent current-state selection; releasing it leaves the child
+unregistered in ENSv2 and does not reactivate the ENSv1 residue. This rule does
+not invent a `MigrationApplied` event for the child. Failure to select one
+current authority after applying a proven boundary
+blocks Project publication rather than producing an ambiguous row. A mixed
+Mainnet corpus with no provable boundary is explicit `unsupported` with
+`conflicting_current_ens_authority`. A proven Sepolia migration boundary
+follows the same per-name authority rule. Sepolia is not otherwise subject to
+the Mainnet anomaly assertion: its ENSv1 and ENSv2 test deployments are
+independent even though they share the `ens` namespace. An overlapping Sepolia
+corpus without a migration boundary is explicit `unsupported` with
 `independent_ens_deployments_overlap`; it is not evidence of a missed
-ENSv1→ENSv2 migration.
+ENSv1→ENSv2 migration. Until slice 2 is activated, a corpus containing both
+families retains the existing `mixed_exact_name_corpus` product reason. The
+per-name rule and its two new reasons are the contracted replacement for that
+blanket refusal, not behavior claimed by migration-family intake alone.
 
 ## Source families
 
@@ -198,7 +236,7 @@ ENS:
 - `ens_v2_registry_l1`
 - `ens_v2_registrar_l1`
 - `ens_v2_resolver_l1`
-- `ens_v2_migration_l1`
+- `ens_v2_migration_l1` (planned; not currently admitted)
 - `ens_execution`
 
 Basenames:
@@ -219,15 +257,18 @@ Family ownership is fixed:
 - `ens_v1_resolver_l1` owns the declared Mainnet PublicResolver address list. The schema-v2 project phase classifies an emitter as supported only when its exact address is in the active manifest; that classification permits projection of retained canonical normalized observations but does not prove complete history, authorization semantics, or event-to-call parity. Unlisted emitters are unsupported.[^v1-publicresolver-deploy][^v1-pres-l5][^v1-pres-l13][^v1-pres-l20][^v1-pres-l66][^v1-pres-l114]
 - ENS verified resolution belongs to `ens_execution` at the official Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`,[^ens-docs-univ] not to `ens_v1_registry_l1`. The pinned implementation artifact is recorded under `.refs/`.[^v1-ur-deploy][^v1-ursol-l8] (See [`upstream.md`](upstream.md) for the proxy-vs-implementation divergence.)
 - ENS reverse-claim intake belongs to `ens_v1_reverse_l1` at `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`.[^v1-revreg-deploy][^v1-revreg-l15][^v1-revreg-l19]
-- `ens_v2_migration_l1` owns fixed migration-controller, Graveyard,
+- The planned `ens_v2_migration_l1` family owns fixed migration-controller, Graveyard,
   `ETHRenewerV1`, `VerifiableFactory`, `BatchRegistrar`, and helper admission.
+  It also owns launch-bounded correlation of Sepolia BaseRegistrar Graveyard
+  claims, bridge renewals, and controller-permission changes; ordinary ENSv1
+  registrar authority remains outside this family. (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L158 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L134 @ ens_v2@ccaeb58)
   Migration-created registries remain owned by `ens_v2_registry_l1` through
   its existing registry-announcement discovery rule; the migration family
   does not create a second registry authority.
 - ENSv1 `.eth` registrar label intake belongs to `ens_v1_registrar_l1`. BaseRegistrar is the tokenized authority; legacy, wrapped, and current registrar-controller contracts are admitted within the same family for label-bearing registration and renewal observations.[^subgraph-l145][^subgraph-l170][^subgraph-l226][^v1-ethrc-l116][^v1-ethrc-l133] A renewal from the admitted `wrapped_registrar_controller` additionally derives a wrapper-resource expiry observation in this registrar family because that controller calls `NameWrapper.renew`, which stores registrar expiry plus grace without emitting `ExpiryExtended`. (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L318 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L333 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L337 @ ens_v1@91c966f) Label preimage intake is shared storage support rather than a new authority source family: proof-checked on-chain preimage observations, retained name surfaces, and optional rainbow-table imports may resolve labelhashes for projection readability, but they do not create exact-name authority, ownership, resolver, record, or primary-name truth.
 - ENSv1 `NewResolver(node, resolver)` changes only the node-to-resolver binding; it creates no resolver contract instance or discovery edge.[^v1-ens-l12][^v1-ensreg-l89][^v1-ensreg-l174] Resolver-local logs come from the manifest-declared match-all resolver signature set, but schema-v2 support classification uses only exact addresses in the active resolver manifest. Code-hash observations are not a classification input. Current record visibility still follows the node's resolver pointer.
 - `ENSRegistryOld` is admitted as migration-aware input under `ens_v1_registry_l1`. Old- and current-registry logs are not unioned by latest block: a current-registry `NewOwner` marks a node migrated; later old-registry updates for that node are suppressed except for the root resolver.[^subgraph-l15][^subgraph-l39][^subgraph-l44][^subgraph-ts-l134][^subgraph-ts-l230][^subgraph-ts-l238][^subgraph-ts-l246] The 2017 deployment behind `ENSRegistryOld` emitted 33 mainnet logs (30 `NewResolver`, 2 `NewOwner`, 1 `NewTTL`; blocks 3,800,374–7,460,548, censused from the retained [raw facts](glossary.md#raw-fact) and a chain-wide archive-node log sweep for issue #361) whose data holds a full 32-byte word in the declared address or uint64 slot instead of a zero-padded value — in the first of them the caller passed the node itself as the resolver argument. The current Solidity registry cannot produce such a log because it stores and emits typed `address` and `uint64` values.[^v1-ensreg-l93][^v1-ensreg-l94][^v1-ensreg-l104][^v1-ensreg-l105] The 2017 deployment's own source — the LLL registry pinned under `ens_v1_lll` — shows the setters storing the raw calldata word without masking it to the declared slot width: `setOwner` loads `new-owner` straight from calldata and stores it whole through an unmasked `sstore`,[^v1lll-enslll-l194][^v1lll-enslll-l200][^v1lll-enslll-l73][^v1lll-enslll-l74] and the subnode-owner, resolver, and TTL setters share the same load-then-`sstore` shape.[^v1lll-enslll-l82][^v1lll-enslll-l97][^v1lll-enslll-l112] For `ens_v1_registry_l1`'s `NewOwner`, `NewResolver`, and `Transfer` events with exactly-32-byte data, bigname decodes the address as the word's low 20 bytes, and for `NewTTL` with exactly-32-byte data it validates the TTL as the word's low 8 bytes (`NewTTL` decode is validation only and yields no normalized events): the values on-chain readers receive through the fallback registry's typed reads,[^v1-ensregfallback-l20][^v1-ensregfallback-l31][^v1-ensregfallback-l42] because the deployed fallback bytecode masks the delegated return word to the declared slot width rather than reverting (verified by executing it over an archive node), and the values reference indexers decode for such a log.[^graphnode-eventext-l17][^subgraph-ts-l168] On a strict failure, a retry is attempted only for exactly-32-byte data; the retry succeeds iff the same strict decoder accepts the same topics with the bytes above the declared slot width zeroed; all other inputs preserve the strict decoder's existing result. An owner word that needed the retry names no authenticatable owner: registry authorization checks the caller against the registry's own stored owner record,[^v1-ensreg-l17] and the 2017 source makes the comparison exact: the owner gate loads the stored word whole and jumps to an invalid location whenever the 20-byte caller differs from it,[^v1lll-enslll-l65][^v1lll-enslll-l66][^v1lll-enslll-l119][^v1lll-enslll-l120][^v1lll-enslll-l121][^v1lll-enslll-l30] so an unmasked stored word equals no caller address — corroborating archive-node execution of the deployed bytecode shows owner-gated calls from the low-20 value reverting on the 2017 deployment. A masked `NewOwner`/`Transfer` normalized event therefore records the low-20 value in `owner` with explicit `owner_word_unmasked` and `owner_word_raw` markers. The masked tail never appears in interpreter state, permission grants, effective-controller relations, or `name_current` control, and a prior registry-direct authority closes as it does on a transfer to the zero address. It remains visible in the child row's owner display field and in resolver addresses, exactly as fallback-registry delegated reads return it; the source normalized event always carries the corresponding marker fields. A masked `NewResolver` value keeps its low-20 serving semantics with the same marker pair (`resolver_word_unmasked`, `resolver_word_raw`). `basenames_base_registry` shares the adapter source, but the tolerance is scoped to `ens_v1_registry_l1` and Basenames keeps the strict decode. The 2017 registry's original LLL source is pinned as `ens_v1_lll` (`.refs/ens_v1_lll`) at upstream's `mainnet` tag, and the tag's committed `contracts/ENS.lll.bin` runtime is byte-for-byte identical to the code deployed at `0x314159265dd8dbb310642f98f50c066173c1259b` (verified against archive-node `eth_getCode`), so the cited source is the deployed contract.
-- ENSv2 post-audit Sepolia admits four families: `ens_v2_root_l1` (`RootRegistry`), `ens_v2_registry_l1` (`ETHRegistry` plus discovered `UserRegistry`), `ens_v2_registrar_l1` (`ETHRegistrar`), and `ens_v2_resolver_l1` (discovered or explicitly admitted `PermissionedResolver` instances). `PermissionedResolverImpl` is implementation metadata, not a watched root or contract.[^v2-deploy-root][^v2-deploy-ethreg][^v2-deploy-ethrc][^v2-deploy-pres][^v2-userreg-l15][^v2-ethrc-l30][^v2-ethrc-l151] No other current Sepolia deployment artifact is admitted until a doc-first update.
+- ENSv2 post-audit Sepolia currently admits four families: `ens_v2_root_l1` (`RootRegistry`), `ens_v2_registry_l1` (`ETHRegistry` plus discovered `UserRegistry`), `ens_v2_registrar_l1` (`ETHRegistrar`), and `ens_v2_resolver_l1` (discovered or explicitly admitted `PermissionedResolver` instances). The planned fifth family is `ens_v2_migration_l1`, whose fixed sources and schema prerequisite are specified in [manifest authority](manifests.md#ensv2-migration-family-admission-plan). `PermissionedResolverImpl` is implementation metadata, not a watched root or contract.[^v2-deploy-root][^v2-deploy-ethreg][^v2-deploy-ethrc][^v2-deploy-pres][^v2-userreg-l15][^v2-ethrc-l30][^v2-ethrc-l151] No other current Sepolia deployment artifact is admitted until a doc-first update.
 - ENSv2 exact-name profile support is only promoted — a [capability promotion](glossary.md) — in the post-audit Sepolia deployment profile when `ens_v2_registrar_l1` declares `exact_name_profile = "supported"`. Other deployment profiles or capability states stay unsupported or shadow.
 - Basenames mainnet authority splits across `basenames_base_registry` (`registry` at `0xb94704422c2a1e396835a571837aa5ae53285a95`), `basenames_base_registrar` (`registrar` at `0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a`, with `legacy_registrar_controller` at `0x4cCb0BB02FCABA27e82a56646E81d8c5bC4119a5` and `upgradeable_registrar_controller` proxy at `0xa7d2607c6BD39Ae9521e514026CBB078405Ab322` admitted for label-bearing registration and renewal observations), and `basenames_base_resolver` (`resolver` at `0xC6d566A56A1aFf6508b41f6c90ff131615583BCD`).[^bn-readme-l28][^bn-readme-l29][^bn-readme-l30][^bn-readme-l34][^bn-readme-l37][^bn-registry-l10][^bn-baseregistrar-l15][^bn-registrar-controller-l180][^bn-registrar-controller-l187][^bn-upgradeable-registrar-controller-l191][^bn-upgradeable-registrar-controller-l198][^bn-l2resolver-l22] `basenames_base_primary` uses the ENSv1 Base `L2ReverseRegistrar` at `0x0000000000D8e504002cC26E3Ec46D81971C1664` for declared primary-name value intake at Base coin type `2147492101`; the Basenames `ReverseRegistrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282` is not the primary-name value authority.[^v1-l2rev-base-deploy][^v1-l2rev-base-args][^v1-l2rev-event][^v1-l2rev-nameforaddr][^bn-readme-l33][^bn-revreg-l12][^bn-revreg-l150] `basenames_l1_compat` and `basenames_execution` both reference the L1 Resolver at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` for transport and execution respectively.[^bn-readme-l22][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
 - Basenames `NewResolver` changes only the node-to-resolver binding; it creates no resolver contract instance or discovery edge.[^bn-registry-l19][^bn-registry-l132][^bn-registry-l223] The Base resolver signature set selects resolver-local logs across all emitters, while schema-v2 support classification requires the emitter's exact address in the active `basenames_base_resolver` manifest. Code-hash observations are not a classification input.[^bn-l2resolver-l4][^bn-l2resolver-l16][^bn-l2resolver-l29][^bn-l2resolver-l182][^bn-l2resolver-l193][^bn-l2resolver-l209][^bn-l2resolver-l225]
@@ -386,10 +427,11 @@ Execution and coverage: `VerifiedResolutionObserved`, `VerifiedResolutionInvalid
 
 ENSv2 mappings:
 
-- `MigrationApplied` marks the canonical [ENSv1→ENSv2 migration
-  boundary](glossary.md#migration-boundary). It is derived from the admitted
-  transaction shape at the successful ENSv2 `LabelRegistered` position, not
-  from the mere coexistence of ENSv1 and ENSv2 history. For a `.eth`
+- The planned `MigrationApplied` kind will mark the canonical [ENSv1→ENSv2
+  migration boundary](glossary.md#migration-boundary). Once the schema
+  vocabulary and migration family are activated, it will be derived from the
+  admitted transaction shape at the successful ENSv2 `LabelRegistered`
+  position, not from the mere coexistence of ENSv1 and ENSv2 history. For a `.eth`
   second-level name, the declared unlocked or locked migration controller
   claims an existing reservation through `register(..., expiry = 0)`.
   (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L152 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L164 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L89 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L110 @ ens_v2@ccaeb58) For a child, the already-discovered migration registry receives the

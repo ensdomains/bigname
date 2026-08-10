@@ -131,13 +131,24 @@ Field ownership:
   `invalid_name`. Reverse misses return `status=ok` with an empty `records`
   array for the input. Lookup record-level reason values are mapped to product
   vocabulary before serialization; current values include `read_failed`,
-  `exact_name_profile_not_supported`, `conflicting_current_ens_authority`,
-  `independent_ens_deployments_overlap`, and `unsupported_reason_missing`.
-  Historical ENSv1 and ENSv2 facts do not by themselves make a migrated
-  Mainnet name unsupported; the current authority rule is documented in
-  [`architecture.md`](architecture.md#ensv1ensv2-current-authority). An
-  address lookup returns `409 conflict` when
-  the deployment has no ready public namespace.
+  `exact_name_profile_not_supported`, `mixed_exact_name_corpus`, and
+  `unsupported_reason_missing`. The contracted per-name authority replacement
+  is documented in
+  [`architecture.md`](architecture.md#ensv1ensv2-current-authority). When its
+  exact-name consumer slice is activated, `conflicting_current_ens_authority`
+  covers Mainnet overlap without a provable boundary.
+  `independent_ens_deployments_overlap` covers
+  Sepolia overlap without a proven migration boundary; a proven Sepolia
+  boundary follows the same per-name authority rule. These values replace the
+  blanket mixed-corpus reason; intake from the planned [ENSv2 migration source
+  family](glossary.md#source-family) alone does not add them. An address lookup
+  returns `409 conflict` when the deployment has no ready public namespace.
+  After the authority replacement is activated, an unsupported mixed-history
+  name result retains `input`, `kind`, and a `record` containing only `name`,
+  `display_name`, `namespace`, `namehash`, `status`, and
+  `unsupported_reason`. It omits registration, control, lifecycle, resolver,
+  record, relation, permission, and primary-name fields from both source
+  families rather than presenting either binding as current.
 - Snapshot behavior: lookup selects the current schema-v2 phase head and reads
   `bigname_phase` name, inventory, and address-name projections published for
   one completed projection-phase generation. Public reverse lookup with no
@@ -290,11 +301,21 @@ Field ownership:
   connection-reset, and other transport failures abort the whole request with
   `500 internal_error`; they are not flat-record `status=stale` results. On a
   `200` name-profile response,
-  `status` is the flat-record result: `ok` for clean indexed reads; `failed`,
-  `stale`, or `unsupported` may appear only when `source=verified` cannot serve
-  the verified sections, with `failure_reason` or `unsupported_reason` carrying
-  the product reason when available;
-  `not_found` and `invalid_name` are unreachable in-record.
+  `status` is the flat-record result: `ok` for clean indexed reads; `failed`
+  and `stale` may appear only when `source=verified` cannot serve the verified
+  sections. `unsupported` currently has the same verified-only scope. Once the
+  exact-name authority slice is activated, an indexed mixed-history read with
+  no provable current authority also returns `200` with `status=unsupported` and the
+  same `conflicting_current_ens_authority` or
+  `independent_ens_deployments_overlap` reason used by batch lookup. A proven
+  migration boundary returns the selected ENSv2 registration and `status=ok`;
+  it does not expose the retained ENSv1 registration as current. `failure_reason`
+  or `unsupported_reason` carries the product reason when available;
+  `not_found` and `invalid_name` are unreachable in-record. The unsupported
+  mixed-history object retains only `name`, `display_name`, `namespace`,
+  `namehash`, `status`, and `unsupported_reason`; registration, control,
+  lifecycle, resolver, record, relation, permission, and primary-name fields
+  from both source families are omitted.
 - Pagination behavior: none.
 - Status semantics: valid names with no name-profile data return `404 not_found`.
   Invalid path names return `400 invalid_input`.
@@ -370,7 +391,13 @@ Field ownership:
 - Status semantics: a missing name returns `404 not_found`. Missing, unset, or
   unsupported requested record values are reported with the common result
   `status` vocabulary inside the record answer rather than by changing the
-  envelope.
+  envelope. Once exact-name authority is activated, a proven migration uses
+  only the selected ENSv2 resolver; the retained ENSv1 resolver is historical.
+  A mixed-history name with no provable current authority exposes no resolver
+  values and reports each requested or inventory-derived key as
+  `status=unsupported` with `conflicting_current_ens_authority` or
+  `independent_ens_deployments_overlap`. Verified execution does not choose a
+  resolver for that unsupported name.
 - Replaces (v1): `GET /v1/names/{namespace}/{name}/records` and record
   sections of `GET /v1/profiles/names/{name}`.
 
@@ -418,7 +445,14 @@ Field ownership:
   carries no snapshot validity claim. True as-of child enumeration is deferred
   to the revision-bound storage follow-up.
 - Status semantics: no direct subnames returns `200` with empty `data`.
-  Missing parent names return `404 not_found`.
+  Missing parent names return `404 not_found`. Once the direct-subname authority
+  slice is activated, each child appears at most once from its selected current
+  binding. An unmigrated protected child can remain ENSv1-backed; a migrated or
+  otherwise currently registered ENSv2 child is ENSv2-backed. Both an ENSv1 and
+  ENSv2 binding remaining current for a Mainnet pair blocks Project publication
+  for that generation, so this route
+  never chooses one by recency, emits two rows for one logical child, or adds a
+  row-local unsupported shape.
 - Replaces (v1): `GET /v1/names/{namespace}/{name}/children`.
 
 ### `GET /v2/names/{name}/history`
@@ -438,7 +472,10 @@ Field ownership:
   `type` vocabulary: `registration`, `renewal`, `release`, `expiry`,
   `transfer`, `authority`, `resolver`, `record`, `primary_name`, `permission`.
   Raw upstream or pipeline event kinds are diagnostics-only and are not emitted
-  by this product route.
+  by this product route. After the planned ENSv2 migration family is activated,
+  the per-source-log mapping specified for [`GET /v2/events`](#get-v2events)
+  also applies here when a mapped event is associated with the requested name
+  or registration. This is an activation contract, not current behavior.
 - Pagination behavior: standard newest-first collection pagination by chain
   position. The cursor is bound to the resolved namespace, parent name, scope,
   and sort. Product event-type filtering is applied after loading the storage
@@ -515,7 +552,13 @@ Field ownership:
   zero-row wrapper registrations are absent from the permission-row fan-out; a
   missing or partial summary for a returned registration changes the reason to
   `permission_support_unknown`. Projected rows are not suppressed by these
-  classifications.
+  classifications. Once exact-name authority is activated, a `name` filter
+  resolves only the selected current registration: a migrated name returns its
+  ENSv2 permission rows, while an explicit `registration_id` can still select a
+  retained historical ENSv1 registration. This collection adds no
+  mixed-authority row status; when exact-name authority is unsupported and no
+  current registration anchor is published, the existing `200` empty result
+  applies and callers use name detail or batch lookup for the explicit reason.
 - Replaces (v1): `GET /v1/resources/{resource_id}/permissions`,
   `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles`, and
   `GET /v1/resources/lookup`.
@@ -584,6 +627,12 @@ Field ownership:
   grants remain in `role_summary`, but the expansion is non-authoritative;
   therefore an empty wrapper summary is not a proven empty permission set.
   Missing summary metadata takes precedence when a page contains both cases.
+  Once exact-name authority is activated, current address relations and
+  `role_summary` are built only from the selected registration. A migrated
+  name therefore stops relating its superseded ENSv1 holder or controller to
+  the current name row. This collection adds no row-local mixed-authority
+  status; a name for which no current authority can be proven is absent, and callers
+  use name detail or batch lookup when they need its explicit coverage reason.
 - Replaces (v1): `GET /v1/addresses/{address}/names` and address-relation
   uses of `GET /v1/names`.
 
@@ -664,7 +713,12 @@ Field ownership:
   retries. Malformed addresses return `400 invalid_input`.
   `source=indexed` does not enter verified-execution rate or concurrency
   admission; omitted `source` and `source=verified` do because they run the
-  fresh lookup.
+  fresh lookup. Once exact-name authority is activated, forward verification
+  of a claimed mixed-history name with no provable current authority returns a
+  verified `status=unsupported` answer with
+  `conflicting_current_ens_authority` or
+  `independent_ens_deployments_overlap`; it does not verify against an
+  arbitrarily selected resolver.
 - Replaces (v1): `GET /v1/primary-names/{address}`.
 
 ### `GET /v2/addresses/{address}/history`
@@ -700,7 +754,13 @@ Field ownership:
   historical `finality` values are rejected by the shared latest-state
   collection rule.
 - Response shape: `data` is an array of record-shaped name search results in
-  dictionary vocabulary.
+  dictionary vocabulary. Once exact-name authority is activated, each result
+  is built only from the selected current registration. A migrated name uses
+  its ENSv2 owner, registrant, status, and expiry; a mixed-history name with no
+  provable current authority is omitted rather than exposing an arbitrary
+  registration. Search adds no row-local mixed-authority status, so callers use
+  name detail or batch lookup when they need an omitted name's explicit
+  coverage reason.
 - Pagination behavior: standard collection pagination. Without an explicit
   namespace, the cursor binds the deployment-derived namespace set and is
   rejected if that set changes.
@@ -737,7 +797,16 @@ Field ownership:
   and `namespace` is omitted, namespace is inferred from the name; `namespace`
   defaults to `ens` only when there is no name filter.
 - Response shape: `data` is an array of compact event rows with friendly
-  `type` vocabulary. Raw upstream event kinds are diagnostics-only.
+  `type` vocabulary. Raw upstream event kinds are diagnostics-only. The
+  activation contract for the planned `ens_v2_migration_l1` family maps its
+  renewal-bridge and correlated registrar normalized rows to `renewal` and
+  `expiry`, Graveyard claims to `release`, and controller membership changes
+  to `permission`. Mapping is per normalized source event, not per transaction:
+  one synchronized renewal transaction can therefore contain three `renewal`
+  rows and two `expiry` rows. The planned `MigrationApplied` and
+  `ContractDiscovered` kinds have no product event type. None of this paragraph
+  is current behavior until the schema vocabulary and family are activated.
+  (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L84 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L91 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L92 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L93 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L214 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L228 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L229 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L132 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L134 @ ens_v2@ccaeb58) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L158 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L161 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L163 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L170 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRenewer.sol:L21 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRenewer.sol:L28 @ ens_v2@ccaeb58)
 - Pagination behavior: standard collection pagination.
 - Snapshot behavior: event rows come from current state. The response omits
   `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
@@ -760,6 +829,13 @@ Field ownership:
   Those rows use the same optional, atomic `wrapper_state` and `wrapper_fuses`
   contract as exact-name detail; the fields are present only for a current
   ENSv1 NameWrapper registration at the served projection timestamp.
+  Once exact-name authority is activated, `bound_names` includes a logical
+  name only under the resolver selected by its current registration. A
+  migrated name is absent from its superseded ENSv1 resolver's listing; a
+  mixed-history name with no provable current authority is omitted from all
+  resolver listings rather than forced to `ok`. This nested collection adds no
+  row-local mixed-authority status, so callers use name detail or batch lookup
+  for the explicit coverage reason.
   `include=aliases` exposes binding rows as `{namespace, name, display_name,
   namehash}` and resolver alias rows as `{namespace, from_name, to_name,
   from_display_name?, to_display_name?, state, resolver: {chain_id, address},

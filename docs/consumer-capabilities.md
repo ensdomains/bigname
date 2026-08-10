@@ -41,23 +41,40 @@ it does not preserve the deleted v1 DTOs.
 
 ## ENSv1→ENSv2 mixed-history ownership
 
-Exact-name, direct-subname, history, address-name, and permission reads use
+The replacement contract for exact-name and direct-subname current reads is
 the per-name current-authority rule in
-[`architecture.md`](architecture.md#ensv1ensv2-current-authority). A migrated
-Mainnet name keeps both eras in history while current registration, control,
-resolver, expiry, address relations, and permissions come only from its
-ENSv2 resource. Retained ENSv1 facts remain history and provenance; they do
-not make the current read unsupported and cannot become current again after
-an ENSv2 release.
+[`architecture.md`](architecture.md#ensv1ensv2-current-authority). Under that
+rule, a migrated name keeps both eras in history while current
+registration, control, resolver, expiry, address relations, and permissions
+come only from its ENSv2 resource. Retained ENSv1 facts remain history and
+provenance; they do not make the current read unsupported and cannot become
+current again after an ENSv2 release. Address-name and permission collections
+consume that selected current registration for a supported migrated name, but
+they do not acquire a new row-local mixed-authority status vocabulary; callers
+inspect the exact-name or lookup result for coverage.
 
-Direct-subname ownership is evaluated per child. A child that has not
+Slice 1 will admit the facts and record the interpreter-owned authority boundary;
+it will not activate that replacement in public projections or API reason
+mapping. Until slice 2 is activated, exact-name reads over a corpus containing
+both families retain the existing `mixed_exact_name_corpus` public reason.
+Slice 2 replaces that blanket refusal with the per-name exact-name rule.
+
+Slice 3 activates direct-subname ownership per child. A child that has not
 migrated can remain ENSv1-authoritative below a migrated parent. Once that
 child migrates or otherwise obtains a current ENSv2 registration, the ENSv2
-parent-child arm replaces the ENSv1 arm. A Mainnet pair left current in both
-arms after applying those boundaries is explicit unsupported anomaly data,
-not a tie to resolve by event recency. Sepolia overlap is instead an expected
-property of independent test deployments and remains unsupported under its
-own reason until a caller or deployment profile selects one system.
+parent-child binding replaces the ENSv1 binding. A later release leaves the
+child unregistered on the ENSv2 side rather than restoring the retained ENSv1
+binding. A Mainnet pair whose ENSv1 and ENSv2 bindings both remain current
+after applying those boundaries blocks [Project phase](glossary.md#projection)
+publication for that
+generation; it is not a tie to resolve by event recency or an ambiguous product
+row. A proven Sepolia boundary, or a current
+child registration in the admitted migration registry below a proven migrated
+parent, follows the same per-name or per-child selection rule. Sepolia overlap
+without either proof is instead an expected property of independent test
+deployments and remains unsupported under its own reason until a caller or
+[deployment profile](glossary.md#deployment-profile) selects one system. Until slice 3 is activated, existing
+direct-child projection behavior remains in force.
 
 ## ENSv1→ENSv2 delivery slices
 
@@ -67,13 +84,23 @@ files, and docs are not included.
 
 | Slice | Coherent capability | Estimated production files |
 | --- | --- | ---: |
-| 1. Migration intake and replay | Admit fixed migration contracts, ratify migration-registry discovery, interpret every catalog event shape into identity, discovery, and normalized events, including Graveyard claims and v1-renewal bridge events. No projection or API write path changes. | 12 (2 manifest TOML, up to 10 adapter/manifest Rust files) |
-| 2. Exact-name current authority | Consume `MigrationApplied` to publish one current binding, registration, expiry, resolver, control, address relation, permission summary, and exact-name coverage result while preserving both eras in history. | 6 (up to 4 project builders and 2 API reason/read modules) |
-| 3. Direct-subname authority | Replace the recency tie-break with per-child authority, retain legitimate unmigrated ENSv1 children, surface double-current Mainnet pairs as anomalies, and cover same-transaction parent/child migration through the public subnames behavior. | 4 (up to 3 project scope/builder files and 1 API mapping module) |
+| 1. Schema vocabulary, migration intake, and replay | Extend the closed schema-v2 event/derivation vocabulary through a reviewed upgrade or full-rebuild path; admit fixed migration contracts; ratify [migration-registry](glossary.md#migration-registry-wrapperregistry) discovery; interpret every catalog event shape into identity, discovery, and normalized events, including Graveyard claims and v1-renewal bridge events. No projection or API write path changes. | At least 17 (3 manifest TOML, up to 11 adapter/manifest Rust files, 2 schema contract/check files, and at least 1 reviewed upgrade or rebuild mechanism file) |
+| 2. Exact-name current authority | Consume `MigrationApplied`, plus a current child registration in an admitted migration registry below a proven migrated parent, to publish one current binding, registration, expiry, resolver, control, address relation, permission summary, and exact-name coverage result while preserving both eras in history. Name detail, lookup, resolver-record, and verified-primary paths expose explicit unsupported reasons; address-name, permission, search, and resolver-bound-name collections publish only the selected registration and omit a name whose authority cannot be proven. The child-registration path does not invent a migration boundary. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L290 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58) | 10 (up to 4 project builders and 6 API reason/read modules) |
+| 3. Direct-subname authority | Replace the recency tie-break with per-child authority, retain legitimate unmigrated ENSv1 children, fail Project publication when both ENSv1 and ENSv2 bindings remain current for one Mainnet pair, and cover same-transaction parent/child migration through the public subnames behavior. | 4 (up to 3 project scope/builder files and 1 API mapping module) |
 
-Slice 1 is bounded to adapters, manifests, and their fixtures and requires no
-schema-migration. Slices 2 and 3 are separate consumer capabilities rather
-than hidden prerequisites of source admission.
+Catalog-derived slice-1 fixtures preserve each decoded expiry instead of
+reconstructing a fixed premigration delta. They also require ENSv1 registry
+resolver- or TTL-clear events only when the cleared value actually changed:
+`setRecord` delegates to a helper that compares both stored values before it
+emits either event. (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L39 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L40 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L179 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L181 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L184 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L186 @ ens_v1@91c966f)
+
+Slice 1 still fits the approximate production-file budget and does not require
+project or API write-path plumbing, but it does require a schema-migration or a
+reviewed full schema rebuild: `MigrationApplied`, `ContractDiscovered`, and
+`ens_v2_migration` are outside the current closed schema-v2 constraints. That
+requirement is the stop condition for implementation in this change. Slices 2
+and 3 remain separate consumer capabilities rather than hidden prerequisites
+of source admission.
 
 The GraphQL compatibility operations read the schema-v2 current projections
 and preserve the committed Manager response contract. Name inputs are ENS-normalized and

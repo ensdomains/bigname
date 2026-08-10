@@ -290,21 +290,24 @@ nothing to claim
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L212 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L224 @ ens_v2@ccaeb58).
 Nothing about it is cross-chain; see [`upstream.md`](upstream.md#known-divergences)
-for the stale upstream comment that says otherwise. The
-`ens_v2_migration_l1` [source family](#source-family) admits the fixed
-contracts and event shapes described in
-[`manifests.md`](manifests.md#ensv2-migration-family-admission); public
-mixed-history ownership is capability-gated separately. Distinct from
+for the stale upstream comment that says otherwise. The planned
+`ens_v2_migration_l1` [source family](#source-family) will admit
+the fixed contracts and event shapes described in
+[`manifests.md`](manifests.md#ensv2-migration-family-admission-plan); public
+mixed-history ownership remains capability-gated separately. Distinct from
 bigname's own *schema-migration* history; see the note at the top of this file.
 
-**Migration boundary** (ENSv1→ENSv2 authority boundary) — the canonical
-`MigrationApplied` normalized event at which one logical name stops taking
-current registration and control from ENSv1 and starts taking them from its
-ENSv2 resource. The boundary is derived only from an admitted successful
-ENSv1→ENSv2 migration transaction shape, never from the fact that both source
-families appear in history. It closes the name's current ENSv1 binding without
-deleting that history; descendants keep their own authority until they reach
-their own boundary. The unlocked path transfers the ENSv1 position to the
+**Migration boundary** (ENSv1→ENSv2 authority boundary) — the planned
+`MigrationApplied` normalized event will mark the position at which one logical
+name stops taking current registration and control from ENSv1 and starts taking
+them from its ENSv2 resource. Once activated, the boundary will be derived only
+from an admitted successful ENSv1→ENSv2 migration transaction shape, never from
+the fact that both source families appear in history. It will close the name's
+current ENSv1 binding without deleting that history. Descendants keep their own
+authority until they reach their own boundary or obtain a current registration
+in the admitted migration registry below that migrated parent; the latter does
+not invent a child boundary. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L290 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58) The unlocked path transfers the
+ENSv1 position to the
 Graveyard before registering the reserved ENSv2 label, while the locked
 receiver moves the wrapper token to the Graveyard and injects the ENSv2
 registration.
@@ -323,19 +326,23 @@ which makes the entry `RESERVED`: it has an expiry, a subregistry, and a
 resolver, but no ERC-1155 token and no roles, and it emits `LabelReserved`
 rather than `LabelRegistered`
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L462 @ ens_v2@ccaeb58).
-The reserved expiry is the ENSv1 registrar expiry plus a bonus period of 62 days
-and 1 second — the difference between ENSv1's 90-day grace and ENSv2's 28-day
-grace, plus a second
+The reserved expiry is an explicit BatchRegistrar input, not a value the
+registry derives. (upstream: .refs/ens_v2/contracts/src/registrar/BatchRegistrar.sol:L52 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/BatchRegistrar.sol:L65 @ ens_v2@ccaeb58) The pinned premigration tool converts a configurable whole-day
+bonus to seconds, defaults it to 62 days, and writes the ENSv1 registrar expiry
+plus that value. (upstream: .refs/ens_v2/contracts/script/preMigration.ts:L973 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/script/preMigration.ts:L1035 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/script/preMigration.ts:L1265 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/script/preMigration.ts:L1267 @ ens_v2@ccaeb58) Separately, the deployment passes `ETHRenewerV1` a
+62-day-and-1-second bonus computed from the two grace periods.
 (upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L216 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L217 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L218 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L219 @ ens_v2@ccaeb58);
-`ETHRenewerV1` recovers the ENSv1 expiry by subtracting that bonus back off the
-reservation
-(upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L119 @ ens_v2@ccaeb58),
-so the `RESERVED` entry lasts through the first 62 days and 1 second of the
-90-day ENSv1 grace period, not through all of it. At its stored expiry the
-entry becomes `AVAILABLE`, and registry resolver reads return zero
+(upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L219 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/deploy/03_ETHRenewerV1.ts:L38 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/deploy/03_ETHRenewerV1.ts:L39 @ ens_v2@ccaeb58).
+Those defaults differ by one second. Bigname therefore preserves the emitted
+reservation expiry and never reconstructs it from the renewal-bridge constant;
+any deployment or test reservation with another explicit expiry retains that
+value.
+At its stored expiry the entry becomes `AVAILABLE`, and registry resolver reads
+return zero
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L259 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L626 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L653 @ ens_v2@ccaeb58).
