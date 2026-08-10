@@ -169,10 +169,10 @@ start_block = 3648359
 # Legacy TextChanged without value retains the indexed-key fragment used by the
 # pinned ENS subgraph for topic0 selection:
 # (upstream: .refs/ens_subgraph/subgraph.yaml:L109-L110 @ ens_subgraph@723f1b6).
-# Event parameter indexing does not change topic0, and the #382 production raw-store census from
+# Event parameter indexing does not change topic0, and the #382 census of stored raw mainnet logs from
 # the manifest-declared 2019 PublicResolver at 0x226159d5... contain the deployed
 # unindexed-key shape: two topics, followed by the duplicated key strings in
-# event data. That mainnet observation is first-party raw-store evidence, not a
+# event data. That mainnet observation is first-party stored-log evidence, not a
 # claim that the pinned goerli artifact is the mainnet deployment source. The
 # goerli LegacyPublicResolver deployment ABI independently records the same
 # unindexed-key layout:
