@@ -218,7 +218,7 @@ async fn load_primary_names(
                END AS chain_positions
         FROM requested
         JOIN bigname_phase.primary_names_current primary_name
-         ON lower(primary_name.address) = lower(requested.address)
+         ON primary_name.address = requested.address
          AND primary_name.coin_type = requested.coin_type
          AND primary_name.namespace = ANY($4::TEXT[])
         JOIN bigname_phase.chain_lineage lineage
