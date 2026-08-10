@@ -51,7 +51,20 @@ provenance; they do not make the current read unsupported and cannot become
 current again after an ENSv2 release. Address-name and permission collections
 consume that selected current registration for a supported migrated name, but
 they do not acquire a new row-local mixed-authority status vocabulary; callers
-inspect the exact-name or lookup result for coverage.
+inspect the exact-name or lookup result for coverage. An explicit
+`registration_id` permission query may inspect a superseded ENSv1 registration
+as historical/audit data. Once slice 2 is activated, every permission row
+carries `authority_context`. `current_for_name` means a `name` filter selected
+the row's current registration for that requested name. A row admitted without
+a `name` filter, including an explicit-`registration_id` or address-filtered
+resource read, is `resource_audit` and makes no current-name claim; an optional
+display name does not change that classification. Rows carrying
+`resource_audit` remain queryable. The marker changes only how that permission
+response may be interpreted; the per-name ownership rule independently decides
+which registration contributes current authority, address relations, and role
+summaries. A superseded ENSv1 registration is therefore never selected, while a
+current registration queried by resource can still contribute in a separate
+name-scoped view.
 
 Slice 1 will admit the facts and record the interpreter-owned authority boundary;
 it will not activate that replacement in public projections or API reason
@@ -85,7 +98,7 @@ files, and docs are not included.
 | Slice | Coherent capability | Estimated production files |
 | --- | --- | ---: |
 | 1. Schema vocabulary, migration intake, and replay | Extend the closed schema-v2 event/derivation vocabulary through a reviewed upgrade or full-rebuild path; admit fixed migration contracts; ratify [migration-registry](glossary.md#migration-registry-wrapperregistry) discovery; interpret every catalog event shape into identity, discovery, and normalized events, including Graveyard claims and v1-renewal bridge events. No projection or API write path changes. | At least 17 (3 manifest TOML, up to 11 adapter/manifest Rust files, 2 schema contract/check files, and at least 1 reviewed upgrade or rebuild mechanism file) |
-| 2. Exact-name current authority | Consume `MigrationApplied`, plus a current child registration in an admitted migration registry below a proven migrated parent, to publish one current binding, registration, expiry, resolver, control, address relation, permission summary, and exact-name coverage result while preserving both eras in history. Name detail, lookup, resolver-record, and verified-primary paths expose explicit unsupported reasons; address-name, permission, search, and resolver-bound-name collections publish only the selected registration and omit a name whose authority cannot be proven. The child-registration path does not invent a migration boundary. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L290 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58) | 10 (up to 4 project builders and 6 API reason/read modules) |
+| 2. Exact-name current authority | Consume `MigrationApplied`, plus a current child registration in an admitted migration registry below a proven migrated parent, to publish one current binding, registration, expiry, resolver, control, address relation, permission summary, and exact-name coverage result while preserving both eras in history. Name detail, lookup, resolver-record, and verified-primary paths expose explicit unsupported reasons; address-name, search, and resolver-bound-name collections, plus name-filtered permission reads, publish only the selected registration and omit a name whose authority cannot be proven. Explicit-`registration_id` and address-filtered permission reads remain resource-centric audit views and carry `authority_context=resource_audit`. The child-registration path does not invent a migration boundary. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L290 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58) | 10 (up to 4 project builders and 6 API reason/read modules) |
 | 3. Direct-subname authority | Replace the recency tie-break with per-child authority, retain legitimate unmigrated ENSv1 children, fail Project publication when both ENSv1 and ENSv2 bindings remain current for one Mainnet pair, and cover same-transaction parent/child migration through the public subnames behavior. | 4 (up to 3 project scope/builder files and 1 API mapping module) |
 
 Catalog-derived slice-1 fixtures preserve each decoded expiry instead of

@@ -508,12 +508,15 @@ Field ownership:
   `page_size`, and optional `finality=latest`. `at` and historical `finality`
   values are rejected by the shared latest-state collection rule.
 - Response shape: `data` is an array of permission rows
-  `{address, grant_scope, powers, registration_id, name, wrapper_state?,
+  `{address, grant_scope, powers, registration_id, name?, wrapper_state?,
   wrapper_fuses?}`. The two wrapper fields use the same atomic,
   [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word)
   contract as name detail and appear only for a returned current ENSv1 wrapper
   registration. Their presence does not widen wrapper-holder enumeration;
   request-relative completeness metadata below remains authoritative.
+  Once the planned exact-name authority rule is activated, the row object is
+  `{address, grant_scope, powers, registration_id, name?, authority_context,
+  wrapper_state?, wrapper_fuses?}` and `authority_context` is required.
   `include=lineage`
   adds route-local `lineage` per row:
   `{grant, revocation?, inheritance_path?, transfer_behavior?}`. Product lineage
@@ -555,10 +558,25 @@ Field ownership:
   classifications. Once exact-name authority is activated, a `name` filter
   resolves only the selected current registration: a migrated name returns its
   ENSv2 permission rows, while an explicit `registration_id` can still select a
-  retained historical ENSv1 registration. This collection adds no
-  mixed-authority row status; when exact-name authority is unsupported and no
-  current registration anchor is published, the existing `200` empty result
-  applies and callers use name detail or batch lookup for the explicit reason.
+  retained historical ENSv1 registration for audit. At that activation, every
+  permission row additionally carries the required `authority_context` field.
+  `current_for_name` means a `name` filter selected the row's current
+  registration for that requested name. A row admitted without a `name` filter,
+  including an explicit-`registration_id` or address-filtered resource read, is
+  `resource_audit` and makes no current-name claim even when it has an optional
+  display `name`. Combining `name` with `registration_id` returns rows only when
+  that registration is the selected current registration; a superseded pair is
+  empty. Rows carrying `resource_audit` remain available in this collection.
+  The marker changes only how that response may be interpreted; it does not
+  change the registration's eligibility in a separate name-scoped view. The
+  per-name ownership rule independently decides which registration contributes
+  current authority, address relations, and role summaries, so a superseded
+  ENSv1 registration is never selected while a current registration queried by
+  resource can still contribute elsewhere. The collection adds no row-local
+  coverage status or unsupported-reason vocabulary; when exact-name authority
+  is unsupported and no current registration anchor is published, the existing
+  `200` empty result applies and callers use name detail or batch lookup for the
+  explicit reason.
 - Replaces (v1): `GET /v1/resources/{resource_id}/permissions`,
   `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles`, and
   `GET /v1/resources/lookup`.
@@ -631,8 +649,11 @@ Field ownership:
   `role_summary` are built only from the selected registration. A migrated
   name therefore stops relating its superseded ENSv1 holder or controller to
   the current name row. This collection adds no row-local mixed-authority
-  status; a name for which no current authority can be proven is absent, and callers
-  use name detail or batch lookup when they need its explicit coverage reason.
+  status. When a current address relation is provable, the standing exception
+  in [`api-v2.md`](api-v2.md#cursors-and-pagination) still lists the row even if other name
+  coverage is unsupported. When no current authority can be proven, no current
+  address relation can be established and the name is structurally absent;
+  callers use name detail or batch lookup for its explicit coverage reason.
 - Replaces (v1): `GET /v1/addresses/{address}/names` and address-relation
   uses of `GET /v1/names`.
 
