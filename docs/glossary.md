@@ -298,7 +298,8 @@ file.
 
 **Premigration reservation** — the pre-launch step that writes every existing
 `.eth` second-level name into the new ENSv2 `.eth` registry as a placeholder
-before anyone migrates. A batch tool registers each label with owner
+before anyone migrates. In ENSv1→ENSv2 migration discussions, an **ENSv2
+reservation** means this placeholder. A batch tool registers each label with owner
 `address(0)`
 (upstream: .refs/ens_v2/contracts/src/registrar/BatchRegistrar.sol:L65 @ ens_v2@ccaeb58),
 which makes the entry `RESERVED`: it has an expiry, a subregistry, and a
@@ -315,10 +316,20 @@ grace, plus a second
 `ETHRenewerV1` recovers the ENSv1 expiry by subtracting that bonus back off the
 reservation
 (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L119 @ ens_v2@ccaeb58),
-so the ENSv2 reservation outlives the whole ENSv1 lifetime including grace. The
-consequence for an indexer: a name can carry ENSv2 expiry and resolver facts,
-and no owner, while ENSv1 is still the authority for it. Reserved entries are
-not registrations.
+so the `RESERVED` entry lasts through the first 62 days and 1 second of the
+90-day ENSv1 grace period, not through all of it. At its stored expiry the
+entry becomes `AVAILABLE`, and registry resolver reads return zero
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L259 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L626 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L653 @ ens_v2@ccaeb58).
+During the remaining ENSv2 28-day grace window, the status is `AVAILABLE` but
+the registrar still treats the entry as in grace, and `ETHRenewerV1` can still
+renew it
+(upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L290 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L145 @ ens_v2@ccaeb58).
+The consequence for an indexer: before that expiry, a name can carry ENSv2
+expiry and resolver facts, and no owner, while ENSv1 is still the authority for
+it. Reserved entries are not registrations.
 
 **Migration controller** — an ENSv2 contract that accepts a transferred ENSv1
 token and performs that name's migration. There are two, split by whether the
@@ -492,12 +503,9 @@ Anything else reverts
 Reading the no-deploy rule as covering every helper-positive child is the
 mistake this three-way split exists to prevent.
 
-The unmigrated state is a legitimate steady state,
-not a transient one: a name tree can have a parent whose registration is
-ENSv2-authoritative and a child whose control and records stay
-ENSv1-authoritative, and nothing terminates that split automatically — it ends
-only when the child itself migrates, or when it is abandoned. Note the test is
-on fuses, not on being currently wrapped, and NameWrapper deliberately keeps
+The unmigrated state is a legitimate [mixed-authority
+tree](#mixed-authority-tree), not a transient one. Note the test is on fuses,
+not on being currently wrapped, and NameWrapper deliberately keeps
 fuses and expiry when it burns a token
 (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L276 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L277 @ ens_v1@91c966f),
@@ -508,7 +516,52 @@ owner is zeroed — condition 3 above failing — which is what releases the
 label
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58).
 
-**Graveyard** — the ENSv2 contract that ends up holding the dead ENSv1 side of
+**Mixed-authority tree** — a name tree in which an ancestor registration is
+authoritative in ENSv2 while an unmigrated child's control and records remain
+authoritative in ENSv1. This is a durable state, not an incomplete transaction:
+the parent's migration registry blocks ordinary ENSv2 registration for the
+child and returns the v1 fallback resolver instead
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L183 @ ens_v2@ccaeb58).
+An expired ENSv2 ancestor returns no subregistry, so the fallback path is no
+longer reachable
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L253 @ ens_v2@ccaeb58).
+While the ENSv2 ancestor remains active and reachable, the split ends only if
+the child migrates or its ENSv1 registry owner becomes zero, which releases the
+protection
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58).
+
+**ENSv1 husk** — the residual ENSv1 registry and token state left after the
+corresponding ENSv2 registration becomes authoritative. It is not a second live
+registration. An unwrapped `.eth` name leaves the ENSv1 registry and registrar
+token with the [Graveyard](#graveyard)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58),
+while a locked wrapped name keeps NameWrapper as the ENSv1 registry owner and
+moves only its ERC-1155 token to the Graveyard
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L135 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58).
+See [Graveyard state](#graveyard-state) for those terminal shapes.
+
+**Graveyard state** — an [ENSv1 husk](#ensv1-husk) whose terminal token or
+registry position is held by the [Graveyard](#graveyard). This bigname term is
+not the `Graveyard.State` implementation enum
+(upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L31 @ ens_v2@ccaeb58).
+An unwrapped or unlocked-wrapped `.eth` 2LD path leaves both ENSv1 registry
+ownership and the registrar ERC-721 with the Graveyard
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L147 @ ens_v2@ccaeb58).
+An emancipated non-locked child instead transfers its ENSv1 registry position
+to the Graveyard during unwrap, then enters ENSv2 without a registrar ERC-721
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L178 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L186 @ ens_v2@ccaeb58).
+The locked path transfers the wrapper ERC-1155 while NameWrapper remains the
+registry owner
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58).
+
+**Graveyard** — the ENSv2 contract that holds the [ENSv1 husk](#ensv1-husk) of
 every migrated name. **What it receives, and what is left behind, differs by
 migration path**, and an ENSv1 adapter that assumes one shape will expect the
 wrong events and the wrong terminal state:
@@ -785,21 +838,13 @@ reverse address results are one such route
 **Reserved surface** — a schema value, enum variant, or documented field that
 the system accepts and can render but that no code path ever produces. It
 exists because some earlier design allocated it, and removing it would cost a
-schema migration or an API-contract change for no behavioral gain. Reserved
+schema-migration or an API-contract change for no behavioral gain. Reserved
 surface is not deferred work and not a partially built feature: absent a named
 producer, it will never appear in a response. Current examples are the
-[`migration` discovery edge](#migration-edge-migration) and the
-`migration_derived` and `transport_derived` permission scopes. Anything
-reserved should say so where it is documented, so a reader does not mistake it
-for coverage. Don't add new fixtures or exemplars that make reserved surface
-look produced; existing `migration_derived` exemplars are retained deliberately
-because that scope has a real mechanism it may yet bind to, while
-`transport_derived` does not. A test that pins the *read* path is not an
-exemplar in that sense: proving a stored row carrying a reserved value still
-decodes asserts that the retained surface keeps working, not that anything
-produces it. Guarding the absence of a producer, and guarding that the retained
-reader still accepts the value, are both fair game — publishing the value as
-expected output is not.
+[`migration` discovery edge](#migration-edge-migration). Anything reserved
+should say so where it is documented, so a reader does not mistake it for
+coverage. Don't add fixtures or exemplars that make reserved surface look
+produced.
 
 **Resolver profile** — a declared resolver classification. ENSv1 and
 Basenames use an exact resolver-address declaration; ENSv2 requires the
@@ -893,11 +938,9 @@ answering `base.eth` directly
 (upstream: .refs/basenames/src/L1/L1Resolver.sol:L167 @ basenames@1809bbc)
 and reverting `OffchainLookup` for anything below it
 (upstream: .refs/basenames/src/L1/L1Resolver.sol:L173 @ basenames@1809bbc).
-Do not confuse this with two unrelated uses of the same word: network transport
-failures (a provider's DNS, TLS, or connection error, which abort a request
-before persistence), and the `transport_derived` permission scope, which is
-[reserved surface](#reserved-surface) from an abandoned cross-chain ENSv2
-design and has no producer. There is no `transport` discovery edge kind.
+Do not confuse this with network transport failures: a provider's DNS, TLS, or
+connection error aborts a request before persistence. There is no `transport`
+discovery edge kind.
 
 **Verified lookup** — request-scoped resolution or primary-name verification
 that calls admitted contracts at the selected block identity. It creates no

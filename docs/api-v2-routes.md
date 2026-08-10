@@ -472,14 +472,7 @@ Field ownership:
   `grant_scope` is `{kind, detail}`. Detail is `{}` for `root`, `registry`,
   and `registration`;
   `{resolver: {chain_id, address}}` for `resolver` with numeric `chain_id`;
-  `{chain_id, manager}` for `record_manager`; `{predecessor_registration_id}`
-  for `migration_derived`; and `{transport}` for `transport_derived`.
-  `migration_derived` and `transport_derived` are
-  [reserved surface](glossary.md#reserved-surface) with no producer: the shapes
-  are documented so the enum stays exhaustive, but no admitted source family
-  emits either kind, so neither appears in a response today.
-  `transport_derived` describes an abandoned cross-chain ENSv2 design and never
-  will.
+  and `{chain_id, manager}` for `record_manager`.
 - Pagination behavior: standard collection pagination.
 - Snapshot behavior: a `name` filter resolves its current registration anchor,
   and permission rows come from current state. The response omits `meta.as_of`

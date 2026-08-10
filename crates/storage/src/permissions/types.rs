@@ -305,23 +305,6 @@ pub enum PermissionScope {
         chain_id: String,
         manager_address: String,
     },
-    /// Reserved: no adapter emits this scope, so no production projection row
-    /// carries it. Retained because the ENSv1→ENSv2 protocol migration may yet
-    /// bind to it.
-    MigrationDerived {
-        predecessor_resource_id: Uuid,
-    },
-    /// Reserved and dead: a remnant of a cancelled cross-chain ENSv2 design, so
-    /// nothing can ever emit it. Kept only until a coordinated schema-migration
-    /// and interpreter rotation can drop the value; removing it earlier would
-    /// cost a schema migration and an interpreter content-hash change for no
-    /// behavioral gain. See `docs/glossary.md` § Reserved surface and
-    /// `docs/architecture.md` § Permissions. A guard in `crates/adapters` fails
-    /// if either scope is named in adapter source, which is where a producer
-    /// would have to appear.
-    TransportDerived {
-        transport: String,
-    },
 }
 
 impl PermissionScope {
@@ -332,8 +315,6 @@ impl PermissionScope {
             Self::Resource => "resource",
             Self::Resolver { .. } => "resolver",
             Self::RecordManager { .. } => "record_manager",
-            Self::MigrationDerived { .. } => "migration_derived",
-            Self::TransportDerived { .. } => "transport_derived",
         }
     }
 
@@ -356,10 +337,6 @@ impl PermissionScope {
                 "record_manager:{chain_id}:{}",
                 manager_address.to_ascii_lowercase()
             ),
-            Self::MigrationDerived {
-                predecessor_resource_id,
-            } => format!("migration_derived:{predecessor_resource_id}"),
-            Self::TransportDerived { transport } => format!("transport_derived:{transport}"),
         }
     }
 
@@ -379,14 +356,6 @@ impl PermissionScope {
             } => json!({
                 "chain_id": chain_id,
                 "manager_address": manager_address.to_ascii_lowercase(),
-            }),
-            Self::MigrationDerived {
-                predecessor_resource_id,
-            } => json!({
-                "predecessor_resource_id": predecessor_resource_id,
-            }),
-            Self::TransportDerived { transport } => json!({
-                "transport": transport,
             }),
         }
     }
@@ -412,21 +381,6 @@ impl PermissionScope {
                     manager_address: manager_address.to_ascii_lowercase(),
                 })
             }
-            "migration_derived" => {
-                let predecessor_resource_id = Uuid::parse_str(&json_text_field(
-                    scope_detail,
-                    "predecessor_resource_id",
-                )?)
-                .context(
-                    "permissions_current scope_detail.predecessor_resource_id must be a UUID",
-                )?;
-                Ok(Self::MigrationDerived {
-                    predecessor_resource_id,
-                })
-            }
-            "transport_derived" => Ok(Self::TransportDerived {
-                transport: json_text_field(scope_detail, "transport")?,
-            }),
             _ => bail!("unknown permissions_current scope_kind {scope_kind}"),
         }
     }

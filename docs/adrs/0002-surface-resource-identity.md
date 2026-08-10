@@ -55,7 +55,7 @@ ENSv1 authority-anchor rules:
 - registrar-backed and wrapper-backed ENSv1 anchors each carry their own `token_lineage_id`
 - keep the active `token_lineage_id` while the same tokenized ENSv1 anchor stays authoritative; rotate it when authority moves to a different tokenized anchor
 - if authority returns to the exact prior tokenized anchor, reuse its prior `token_lineage_id`; exact prior-anchor reuse does not resurrect token lineage after release or across mismatched holder / controller authority
-- ordinary ENSv1 registry-only control, registrar registration, wrap, unwrap, expiry / grace, transfer, and re-registration all use `SurfaceBinding.binding_kind = declared_registry_path`; those lifecycle changes do not require `migration_rebind`
+- ordinary ENSv1 registry-only control, registrar registration, wrap, unwrap, expiry / grace, transfer, and re-registration all use `SurfaceBinding.binding_kind = declared_registry_path`
 - a standalone registry-owner observation for a node without a materialized name surface creates the node-scoped direct-registry `resource_id` but no name surface or `SurfaceBinding`; an observation attributed to a live registrar lease, including ownership setup reconciled within the registration transaction, remains retained interpreter state without a separate direct-registry resource, surface, or binding, and if that lease later releases while the retained owner is nonzero, the direct-registry `resource_id` and replacement `SurfaceBinding` must be materialized together at the release boundary
 - registrar release is a block-boundary transition because upstream availability compares stored expiry plus the 90-day grace period with `block.timestamp`, rather than emitting a lease-expiry log (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L100 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L103 @ ens_v1@91c966f); the retained registry owner survives release because ENS stores it independently until another registry ownership write replaces it (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L7 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L13 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L170 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L171 @ ens_v1@91c966f)
 
@@ -64,11 +64,9 @@ Resource-centric convenience rule:
 - when a resource view needs a single display surface, rank bindings in this order:
   `declared_registry_path`
   `linked_subregistry_path`
-  `migration_rebind`
   `resolver_alias_path`
   `observed_wildcard_path`
   `observed_only`
-- `migration_rebind` ranks after direct declared paths and before alias- or observation-derived paths
 - ties break by earliest active binding, then lexical `normalized_name`
 
 ## Consequences

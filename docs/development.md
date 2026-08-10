@@ -26,12 +26,13 @@ API requires an initialized, current `bigname_phase` schema for indexed and
 verified reads; no local indexing occurs without the phase runner.
 
 `phase-runner init-schema` installs only into an empty `bigname_phase` schema;
-it refuses every nonempty target until a reviewed schema-v2 upgrade or rebuild
-path exists. The API reads phase projections and may invoke the guarded
-resolution-divergence write. The checked-in SQLx migration history remains
-append-only, but the deleted worker migration command is no longer a runtime
-entrypoint; deployment automation applies reviewed versioned migrations at the
-planned boundary.
+it refuses every nonempty target. Reviewed versioned schema-migrations can
+upgrade an initialized namespace in place when their preconditions pass; other
+changes require the reviewed replacement procedure. The API reads phase
+projections and may invoke the guarded resolution-divergence write. The
+checked-in SQLx schema-migration history remains append-only, but the deleted
+worker schema-migration command is no longer a runtime entrypoint; deployment
+automation applies reviewed versioned schema-migrations at the planned boundary.
 
 ## Database-backed tests
 

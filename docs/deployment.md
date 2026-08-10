@@ -22,15 +22,18 @@ docker run --rm ghcr.io/ensdomains/bigname:latest phases
 
 The one-time `phases-migrate` command invokes `phase-runner init-schema` and
 requires an empty `bigname_phase` schema. It refuses every nonempty phase schema
-until a reviewed upgrade or rebuild mechanism exists. `phases` then invokes
+because initialized-schema upgrades are applied separately through reviewed
+versioned schema-migrations, or through the replacement procedure when an
+in-place change cannot preserve durable state. `phases` then invokes
 `phase-runner run` with `bigname_phase` as its search path. It can
 persist ingest-through-project output and continuously follow provider heads,
 including reorg-driven downstream redo and canonical-head hydration. Its
 read-only verification phase compares Base's Coinbase-loaded range with dRPC
 through the `48,428,000` ingest seam and compares Ethereum with local reth only
 through the finalized head. V2, GraphQL, and operational paths consume its
-phase projections and lookup output. Apply append-only SQLx migrations through
-deployment automation; there is no application migration command in the image.
+phase projections and lookup output. Apply append-only SQLx schema-migrations
+through deployment automation; there is no application schema-migration command
+in the image.
 
 ## Server Compose
 
@@ -41,18 +44,22 @@ cp .env.server.example .env.server
 docker compose --env-file .env.server -f docker-compose.server.yml up -d
 ```
 
-Before the full `up`, apply reviewed versioned migrations with the migration
-runner — `sqlx migrate run --source migrations` from the deployed commit, named
+Before the full `up`, apply reviewed versioned schema-migrations with the
+schema-migration runner — `sqlx migrate run --source migrations` from the
+deployed commit, named
 step by step in
 [`runbooks/production-docker.md`](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
-— initialize or replace `bigname_phase` as described below, then provision the
-non-owner `bigname_api` login. Set `BIGNAME_API_DATABASE_URL` to that login;
-Compose deliberately does not fall back to `BIGNAME_DATABASE_URL` for the API.
-The phase runner and migration automation use the writer URL.
+— then initialize `bigname_phase` only for a fresh database. Retain an existing
+namespace when its in-place schema-migrations pass; replace it as described
+below only when a reviewed schema-migration cannot preserve its durable state.
+Then provision the non-owner `bigname_api` login. Set
+`BIGNAME_API_DATABASE_URL` to that login; Compose deliberately does not fall
+back to `BIGNAME_DATABASE_URL` for the API. The phase runner and
+schema-migration automation use the writer URL.
 
 Preflight every release with `sqlx migrate info --source migrations` against
 the writer URL and confirm no version is pending. Neither the API nor the
-phase runner reports the applied schema version, so a forgotten migration
+phase runner reports the applied schema version, so a forgotten schema-migration
 surfaces only as a runtime query failure.
 
 The API binds to the configured `BIGNAME_API_HOST` and
@@ -109,7 +116,7 @@ GRANT SELECT ON ALL TABLES IN SCHEMA bigname_phase TO bigname_verify;
 ```
 
 The role provisioning is an operational database grant, not schema-v2
-migration authority. Reapply and revalidate the SELECT grant after every
+schema-migration authority. Reapply and revalidate the SELECT grant after every
 approved phase-schema rebuild or additive schema-migration that creates a
 table. In particular, after applying the attestation-audit schema-migration for
 the [manifest-authority marker](glossary.md#manifest-authority-marker), run the
@@ -381,9 +388,9 @@ or schema-wide write grants as a shortcut.
 
 ### Replacing an initialized phase schema
 
-The current installer cannot upgrade a nonempty `bigname_phase` schema. For an
-existing initialized database, this cutover therefore requires an offline
-replacement and full pipeline walk:
+The current installer cannot upgrade a nonempty `bigname_phase` schema. When a
+reviewed versioned schema-migration cannot preserve an existing initialized
+database, the cutover requires an offline replacement and full pipeline walk:
 
 1. Build `phase-runner` and `bigname-api` from the same commit. Stop the
    phase runner and every API process that can open the phase schema, and retain
@@ -416,7 +423,7 @@ both schemas. The v2 lookup writer is not admitted before this cutover, so the
 old [resolution divergence ledger](glossary.md#resolution-divergence-ledger) is
 expected to contain no rows and nothing from it is copied. After cutover,
 ledger rows are not reconstructable from raw facts: once any row exists, a
-future schema upgrade must use a separately reviewed migration or lossless
+future schema upgrade must use a separately reviewed schema-migration or lossless
 export/import mechanism rather than this replacement procedure.
 
 The project-at-head guard also binds the API's compiled interpreter content

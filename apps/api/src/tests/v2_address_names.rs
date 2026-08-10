@@ -643,15 +643,6 @@ async fn v2_get_address_names_include_role_summary_groups_permissions_by_address
                 "grants": [
                     {
                         "grant_scope": {
-                            "kind": "migration_derived",
-                            "detail": {
-                                "predecessor_registration_id": v2_address_names_predecessor_resource_id().to_string()
-                            }
-                        },
-                        "powers": ["set_resolver", "set_records"]
-                    },
-                    {
-                        "grant_scope": {
                             "kind": "record_manager",
                             "detail": {
                                 "chain_id": 1,
@@ -1298,15 +1289,6 @@ async fn seed_v2_address_name_permissions(
                 10,
                 110,
             ),
-            permission_current_row(
-                alpha_resource_id,
-                V2_PERMISSION_OTHER_SUBJECT,
-                PermissionScope::MigrationDerived {
-                    predecessor_resource_id: v2_address_names_predecessor_resource_id(),
-                },
-                11,
-                111,
-            ),
         ],
     )
     .await?;
@@ -1322,10 +1304,6 @@ async fn seed_v2_address_name_permissions(
         .await?;
     }
     Ok(())
-}
-
-fn v2_address_names_predecessor_resource_id() -> Uuid {
-    Uuid::from_u128(0xa300)
 }
 
 fn v2_address_name_specs() -> Vec<V2AddressNameSpec> {

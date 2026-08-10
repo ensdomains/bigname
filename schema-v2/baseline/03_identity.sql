@@ -275,7 +275,6 @@ CREATE TABLE IF NOT EXISTS surface_bindings (
                 'linked_subregistry_path',
                 'resolver_alias_path',
                 'observed_wildcard_path',
-                'migration_rebind',
                 'observed_only'
             )
         ),

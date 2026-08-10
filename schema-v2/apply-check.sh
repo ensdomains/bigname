@@ -117,6 +117,143 @@ apply_baseline() {
 apply_baseline
 apply_baseline
 
+# Exercise the initialized-schema upgrade against the preceding closed
+# vocabularies. Rewrite only the qualified schema name so the checked-in
+# schema-migration runs against this isolated scratch namespace.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+ALTER TABLE surface_bindings
+    DROP CONSTRAINT surface_bindings_binding_kind_check,
+    ADD CONSTRAINT surface_bindings_binding_kind_check
+        CHECK (
+            binding_kind IN (
+                'declared_registry_path',
+                'linked_subregistry_path',
+                'resolver_alias_path',
+                'observed_wildcard_path',
+                'migration_rebind',
+                'observed_only'
+            )
+        );
+ALTER TABLE name_current
+    DROP CONSTRAINT name_current_binding_kind_check,
+    ADD CONSTRAINT name_current_binding_kind_check
+        CHECK (
+            binding_kind IS NULL
+            OR binding_kind IN (
+                'declared_registry_path',
+                'linked_subregistry_path',
+                'resolver_alias_path',
+                'observed_wildcard_path',
+                'migration_rebind',
+                'observed_only'
+            )
+        );
+ALTER TABLE address_names_current
+    DROP CONSTRAINT address_names_current_binding_kind_check,
+    ADD CONSTRAINT address_names_current_binding_kind_check
+        CHECK (
+            binding_kind IN (
+                'declared_registry_path',
+                'linked_subregistry_path',
+                'resolver_alias_path',
+                'observed_wildcard_path',
+                'migration_rebind',
+                'observed_only'
+            )
+        );
+ALTER TABLE permissions_current
+    DROP CONSTRAINT permissions_current_scope_kind_check,
+    ADD CONSTRAINT permissions_current_scope_kind_check
+        CHECK (
+            scope_kind IN (
+                'root',
+                'registry',
+                'resource',
+                'resolver',
+                'record_manager',
+                'migration_derived',
+                'transport_derived'
+            )
+        );
+INSERT INTO normalized_events (
+    event_identity,
+    namespace,
+    event_kind,
+    source_family,
+    manifest_version,
+    chain_id,
+    derivation_kind,
+    after_state
+)
+VALUES (
+    'removed-permission-scope-upgrade-check',
+    'schema-v2-check',
+    'PermissionChanged',
+    'schema-check',
+    1,
+    'schema-v2-check',
+    'ens_v2_permissions',
+    '{"scope":{"kind":"migration_derived"}}'::jsonb
+);
+SQL
+} | run_psql
+
+if migration_error="$({
+    sed "s/bigname_phase/$scratch_schema/g" \
+        "$ROOT/migrations/20260810120000_remove_l2_migration_remnants.sql"
+} | run_psql 2>&1)"; then
+    printf '%s\n' \
+        'schema-v2 upgrade check failed: removed normalized-event scope was accepted' >&2
+    exit 1
+fi
+if [[ "$migration_error" != *"normalized events still use removed values"* ]]; then
+    printf '%s\n%s\n' \
+        'schema-v2 upgrade check failed for an unexpected reason:' \
+        "$migration_error" >&2
+    exit 1
+fi
+
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "DELETE FROM normalized_events WHERE event_identity = 'removed-permission-scope-upgrade-check';"
+    sed "s/bigname_phase/$scratch_schema/g" \
+        "$ROOT/migrations/20260810120000_remove_l2_migration_remnants.sql"
+    cat <<'SQL'
+DO $$
+DECLARE
+    removed_vocabulary_count bigint;
+BEGIN
+    SELECT count(*)
+    INTO removed_vocabulary_count
+    FROM pg_constraint constraint_row
+    WHERE constraint_row.conname IN (
+        'surface_bindings_binding_kind_check',
+        'name_current_binding_kind_check',
+        'address_names_current_binding_kind_check',
+        'permissions_current_scope_kind_check'
+    )
+      AND constraint_row.conrelid IN (
+          'surface_bindings'::regclass,
+          'name_current'::regclass,
+          'address_names_current'::regclass,
+          'permissions_current'::regclass
+      )
+      AND pg_get_constraintdef(constraint_row.oid) ~
+          '(migration_rebind|migration_derived|transport_derived)';
+
+    IF removed_vocabulary_count <> 0 THEN
+        RAISE EXCEPTION
+            'initialized-schema upgrade retained removed vocabulary in % constraints',
+            removed_vocabulary_count;
+    END IF;
+END
+$$;
+SQL
+} | run_psql
+
 # The production functions intentionally bind their SECURITY DEFINER lookups
 # to bigname_phase. Prove that contract before rebinding only this scratch
 # schema's copies so the remainder of this isolated harness can exercise them.
