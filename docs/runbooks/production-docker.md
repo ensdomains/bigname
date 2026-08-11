@@ -82,8 +82,13 @@ checks, publication, and Verify phase succeed.
    bigname_phase` after the additive schema-migration, before starting any
    one-shot or long-running runner process;
 5. keep the long-running phase-runner supervisor stopped and use the new
-   artifact's one-shot `phase-runner redo --phase ingest` command over every
-   widened address/topic range in the generated watch plan;
+   artifact's one-shot Ingest redo over every widened address/topic range in
+   the generated watch plan — the command requires the full argument set or it
+   is rejected before fetching anything:
+   `phase-runner redo --chain <chain-id> --phase ingest --from-block <from>
+   --to-block <to> --source <source>` (at least one `--source`; the CLI
+   refuses an ingest redo without one, and every redo requires the explicit
+   block range);
 6. after the Ingest redo succeeds, invoke the exact required full-history
    Interpret redo once to obtain the manifest-authority fence's invalidation
    token, then rerun that same chain and block range with
@@ -94,8 +99,11 @@ checks, publication, and Verify phase succeed.
 8. start the long-running phase runner only after those one-shot redos succeed,
    let the production Verify phase complete for every affected chain, and require
    its reviewed reference path rather than omitting or bypassing Verify;
-9. confirm `/v2/status` reports current phase state, successful Verify, and no
-   pending redo;
+9. confirm `/v2/status` reports current phase state and no pending redo
+   (the route reads the Project row's lifecycle, redo, and heartbeat state;
+   it does not expose Verify), and confirm Verify success directly from
+   phase-runner state — the `verify` row in `chain_phase_state` for each
+   affected chain and the supervisor's Verify completion output;
 10. start the API built from the same commit; and
 11. run the release smoke and public-edge checks before undraining traffic.
 
