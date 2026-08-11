@@ -173,6 +173,18 @@ fn loads_manifest_declarations_abi_and_start_blocks() -> Result<()> {
 }
 
 #[test]
+fn resolver_implementation_validation_preserves_alloy_address_grammar() -> Result<()> {
+    let unprefixed = manifest_contents().replacen(
+        "0x00000000000000000000000000000000000000CC",
+        "00000000000000000000000000000000000000CC",
+        1,
+    );
+    let repository = load_one(&unprefixed)?;
+    assert_eq!(repository.summary().status, ManifestLoadStatus::Loaded);
+    Ok(())
+}
+
+#[test]
 fn repository_loader_rejects_invalid_single_manifest_declarations() -> Result<()> {
     let base = manifest_contents();
     let duplicate_role = format!(

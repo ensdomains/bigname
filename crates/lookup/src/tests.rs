@@ -807,6 +807,36 @@ async fn out_of_class_projected_topology_is_not_executed() -> AnyResult<()> {
 }
 
 #[tokio::test]
+async fn unsupported_basenames_topology_precedes_position_and_manifest_reads() -> AnyResult<()> {
+    let fixture = setup_fixture(FixtureKind::Basenames, INDEXED_VALUE).await?;
+    sqlx::query(
+        r#"UPDATE name_current
+           SET declared_summary = jsonb_set(
+               declared_summary,
+               '{topology,alias}',
+               '{"final_target":{"logical_name_id":"basenames:alias"},
+                 "hops":[{"logical_name_id":"basenames:alias"}]}'::jsonb
+           )"#,
+    )
+    .execute(fixture.pool())
+    .await?;
+    sqlx::query("DELETE FROM chain_heads")
+        .execute(fixture.pool())
+        .await?;
+    sqlx::query("DELETE FROM manifest_versions")
+        .execute(fixture.pool())
+        .await?;
+
+    let error = lookup_engine(fixture.pool(), "http://127.0.0.1:1")?
+        .lookup(lookup_request(&fixture.logical_name_id)?)
+        .await
+        .expect_err("unsupported topology must be rejected before snapshot dependencies");
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+    fixture.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn wildcard_lookup_executes_without_an_indexed_record_row() -> AnyResult<()> {
     let (rpc_url, rpc_handle) =
         spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;

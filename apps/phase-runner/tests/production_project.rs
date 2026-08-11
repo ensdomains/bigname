@@ -1262,6 +1262,10 @@ async fn basenames_projection_retains_execution_admission_and_both_chain_positio
     }));
 
     let declared_summary: Value = projected.try_get("declared_summary")?;
+    assert_eq!(
+        declared_summary["topology"]["transport"]["contract_address"], BASENAMES_L1_RESOLVER,
+        "Project must publish the domain serializer's lowercase transport address"
+    );
     let row = NameCurrentRow {
         logical_name_id: "basenames:0xalice-base".into(),
         namespace: "basenames".into(),

@@ -127,7 +127,13 @@ ABI entries use Alloy-parseable human-readable Solidity fragments, not handwritt
 
 ABI fragments should cite upstream in nearby manifest comments or in the public doc section that admits the source family. If an adapter still has an in-code selector or `sol!` definition for a manifest-declared fragment, that code is a compatibility bridge until the adapter consumes the manifest ABI directly.
 
-`normalizer_version` is currently `ensip15@ens-normalize-0.1.1` for all admitted ENS, ENSv2, and Basenames source families. Runtime code treats this as one shared normalization boundary, not a per-source-family choice.
+`normalizer_version` is currently `ensip15@ens-normalize-0.1.1` for all admitted
+ENS, ENSv2, and Basenames source families. Runtime code treats this as one
+shared normalization boundary, not a per-source-family choice. Manifest
+validation reads the same
+`bigname_domain::normalization::ENS_NORMALIZER_VERSION` export that name
+interpretation stamps on stored rows; it does not carry a second
+normalizer-version literal.
 
 ## Example shape
 
@@ -452,9 +458,9 @@ Basenames mainnet admits six families:[^bn-readme-l22][^bn-readme-l28][^bn-readm
 - `basenames_l1_compat` — `l1_resolver` at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` (Ethereum). L1 compatibility transport for the `base.eth` domain.[^bn-l1resolver-l13]
 - `basenames_execution` — `l1_resolver` at the same Ethereum address with `verified_resolution = "supported"` for the exact-surface transport-assisted direct-path class only. Execution entrypoint that initiates `OffchainLookup` and completes through `resolveWithProof`.[^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
 
-The L1 Resolver address appears in both `basenames_l1_compat` and `basenames_execution`. Transport ownership stays with `basenames_l1_compat`; execution entrypoint and verified-resolution routing stay with `basenames_execution`.
+The L1 Resolver address appears in both `basenames_l1_compat` and `basenames_execution`. Transport ownership stays with `basenames_l1_compat`; execution entrypoint and verified-resolution routing stay with `basenames_execution`. Manifest declarations retain their authored checksummed address spelling; the projected topology serializes typed EVM addresses in lowercase.
 
-`basenames_execution` v2 capability-promotes only the [path class](glossary.md) where `resolver_path[0].logical_name_id` equals the route surface, `wildcard.source = null`, `alias.final_target = null`, `subregistry_path = []`, `transport.source_chain_id = "base-mainnet"`, `transport.target_chain_id = "ethereum-mainnet"`, and `transport.contract_address = "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31"`. Alias-participating, wildcard-derived, linked-subregistry, transport-free, and offchain-gateway classes return selector-local `unsupported`.[^bn-readme-l71]
+`basenames_execution` v2 capability-promotes only the [path class](glossary.md) where `resolver_path[0].logical_name_id` equals the route surface, `wildcard.source = null`, `alias.final_target = null`, `subregistry_path = []`, `transport.source_chain_id = "base-mainnet"`, `transport.target_chain_id = "ethereum-mainnet"`, and `transport.contract_address = "0xde9049636f4a1dfe0a64d1bfe3155c0a14c54f31"`. Alias-participating, wildcard-derived, linked-subregistry, transport-free, and offchain-gateway classes return selector-local `unsupported`.[^bn-readme-l71]
 
 `basenames_execution` does not admit verified primary-name lookup. The current
 verified primary-name product path is limited to ENS coin type `60`.

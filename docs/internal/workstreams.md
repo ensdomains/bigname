@@ -26,7 +26,7 @@ Internal reference for splitting implementation work. `AGENTS.md` is the process
 | `apps/phase-runner`, `crates/ingest`, `crates/interpret`, `crates/adapters`, `docs/chain-intake.md` | Intake and Adapters | Phase orchestration, raw intake, and schema-v2 interpretation behavior |
 | `crates/project`, phase projection modules, `docs/projections.md` | Projections and API | Projection publication, current read models, and redo behavior |
 | `crates/storage`, `migrations`, `docs/storage.md` | Storage and Domain | Schema, canonicality, snapshot selection, reusable row reads, database invariants, schema-migrations |
-| `crates/domain` | Storage and Domain | Narrow normalization helpers only; persisted identity types live in `crates/storage/src/identity/types.rs` |
+| `crates/domain` | Storage and Domain | Narrow normalization helpers, the projected resolution-topology model and classifier, and their closed wire vocabularies; persisted identity types live in `crates/storage/src/identity/types.rs` |
 | `crates/manifests`, `manifests/**`, `docs/manifests.md` | Manifests and Discovery | Source authority, discovery, capability flags, watch-plan inputs |
 | `crates/lookup`, `docs/execution.md` | Verified Lookup | Request-scoped resolution/primary lookup and guarded divergence observations |
 | `docs/consumer-capabilities.md` | Conformance and Fixtures | Replacement meaning, rollout/rollback evidence |

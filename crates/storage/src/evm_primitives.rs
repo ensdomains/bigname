@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
-use alloy_primitives::{Address, B256, hex, keccak256};
+use alloy_primitives::{B256, hex, keccak256};
+use bigname_domain::vocabulary::canonicalize_prefixed_evm_address_or_ascii_lowercase;
 
 /// Derive an ENS namehash from raw labels in left-to-right name order.
 pub fn ens_namehash_label_bytes(labels: &[&[u8]]) -> B256 {
@@ -20,7 +21,7 @@ pub fn logical_name_id_for_name(namespace: &str, name: &str) -> String {
 }
 
 pub fn normalize_evm_address(value: &str) -> String {
-    normalize_standard_address(value).unwrap_or_else(|| value.to_ascii_lowercase())
+    canonicalize_prefixed_evm_address_or_ascii_lowercase(value)
 }
 
 pub fn normalize_evm_b256(value: &str) -> String {
@@ -29,15 +30,6 @@ pub fn normalize_evm_b256(value: &str) -> String {
 
 pub(crate) fn normalize_evm_hex_bytes(value: &str) -> String {
     normalize_prefixed_hex_bytes(value).unwrap_or_else(|| value.to_ascii_lowercase())
-}
-
-fn normalize_standard_address(value: &str) -> Option<String> {
-    if !is_prefixed_hex_len(value, 40) {
-        return None;
-    }
-
-    let address = Address::from_str(value).ok()?;
-    Some(format_prefixed_hex(address.as_slice()))
 }
 
 fn normalize_standard_b256(value: &str) -> Option<String> {

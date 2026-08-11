@@ -4,15 +4,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use alloy_primitives::{Address, hex};
 use anyhow::{Context, Result, bail};
+use bigname_domain::{
+    normalization::ENS_NORMALIZER_VERSION,
+    vocabulary::{canonicalize_prefixed_evm_address_or_ascii_lowercase, parse_alloy_evm_address},
+};
 
 use crate::attribution::validate_block_derived_preimage_attribution;
 use crate::model::RawSourceManifest;
 use crate::{LoadedManifest, ManifestAbi, ManifestLoadStatus, ManifestLoadSummary};
 use crate::{ManifestRepository, SourceManifest, event_allows_empty_emitter_roles};
-
-const SUPPORTED_NORMALIZER_VERSION: &str = "ensip15@ens-normalize-0.1.1";
 
 pub fn load_repository(root: impl AsRef<Path>) -> Result<ManifestRepository> {
     let root = root.as_ref();
@@ -274,12 +275,12 @@ fn validate_manifest_metadata(
         );
     }
 
-    if manifest.normalizer_version != SUPPORTED_NORMALIZER_VERSION {
+    if manifest.normalizer_version != ENS_NORMALIZER_VERSION {
         bail!(
             "manifest {} declares unsupported normalizer_version {}; expected {}",
             path.display(),
             manifest.normalizer_version,
-            SUPPORTED_NORMALIZER_VERSION
+            ENS_NORMALIZER_VERSION
         );
     }
 
@@ -295,7 +296,7 @@ fn validate_manifest_metadata(
                 path.display()
             );
         }
-        if implementation.address.parse::<Address>().is_err() {
+        if parse_alloy_evm_address(&implementation.address).is_err() {
             bail!(
                 "manifest resolver implementation {} in {} has invalid address {}",
                 implementation.role,
@@ -504,18 +505,5 @@ fn canonicalize_for_logging(root: &Path) -> PathBuf {
 }
 
 pub(crate) fn normalize_address(value: &str) -> String {
-    normalize_alloy_address(value).unwrap_or_else(|| value.to_ascii_lowercase())
-}
-
-fn normalize_alloy_address(value: &str) -> Option<String> {
-    if value.len() != 42 || (!value.starts_with("0x") && !value.starts_with("0X")) {
-        return None;
-    }
-
-    let address = value.parse::<Address>().ok()?;
-    Some(format_prefixed_hex(address.as_slice()))
-}
-
-fn format_prefixed_hex(bytes: impl AsRef<[u8]>) -> String {
-    format!("0x{}", hex::encode(bytes))
+    canonicalize_prefixed_evm_address_or_ascii_lowercase(value)
 }
