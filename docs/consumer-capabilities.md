@@ -132,10 +132,15 @@ and every DTO field for `name_current`, `children_current`,
 resolver and record reads, primary-name and search reads, `/v2/events`, and
 name- and address-history reads, plus every GraphQL compatibility operation.
 The comparison covers ordered pages, page membership, every REST and Manager
-DTO field, summary/count fields, `has_more`, and cursor payloads as well as point
-responses. Raw facts, candidate normalized events, diagnostic event
-associations and identity/discovery effects, manifest metadata, internal
-provenance, and content hashes are expected to change; product behavior is not.
+DTO field, summary/count fields, `has_more`, and point responses. Cursor
+payloads are compared by continuation behavior, not bytes: history and event
+cursors embed the internal normalized-event row identity, which a re-walk
+reassigns, so each generation's `next_cursor` must resume its own pagination
+at the same product row with identical remaining pages, while the payload
+bytes are expected to differ. Raw facts, candidate normalized events,
+diagnostic event associations and identity/discovery effects, manifest
+metadata, internal provenance, cursor-embedded row identities, and content
+hashes are expected to change; product behavior is not.
 The comparison runs over the complete planned re-walk, so a unit fixture that
 filters only `ens_v2_migration_l1` cannot satisfy this gate.
 

@@ -351,7 +351,9 @@ Source-family ownership does not break the visibility barrier. When
 exist only because of an ENSv1→ENSv2 migration correlation group, the normalized
 events and candidate effect rows keep that group's `migration_correlation_ids`
 and `consumer_visibility` even though they interpret under
-`ens_v2_registry_l1`. Candidate effects do not update ordinary identity or
+`ens_v2_registry_l1`; these carry the
+[`migration_registry_creation`](glossary.md#migration-correlation-group)
+correlation kind. Candidate effects do not update ordinary identity or
 discovery rows.
 
 Independent admission takes precedence. An existing-family normalized event
