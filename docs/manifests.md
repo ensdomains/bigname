@@ -265,16 +265,20 @@ The family cannot be activated by manifest and adapter changes alone. The
 schema-v2 normalized-event table has closed event-kind and derivation-kind
 constraints. The planned `MigrationApplied` boundary, factory
 `ContractDiscovered` observation, and `ens_v2_migration` derivation identifier
-are not admitted today. Slice 1 therefore requires a reviewed schema upgrade
-or a reviewed full schema rebuild that changes the baseline and its apply
-checks; a normal interpretation re-derivation does not alter an existing
-constraint. This is the schema-migration stop condition for the implementation
-phase of this issue. The same reviewed contract must admit the stable
+are not admitted today. Slice 1 therefore requires a reviewed in-place,
+versioned schema-migration that changes the baseline and its apply checks; a
+normal interpretation re-derivation does not alter an existing constraint. An
+empty-schema replacement is excluded from this boundary because current event
+identities include sequence-assigned manifest IDs and therefore cannot resume
+outstanding cursors after a replacement. This is the schema-migration stop
+condition for the implementation phase of this issue. The same reviewed
+contract must admit the stable
 `migration_correlation_ids` and `consumer_visibility` fields used by
 correlation-dependent normalized events, the separate
-`migration_event_associations` rows for independently admitted events, and the
-candidate identity/discovery effect rows; source family alone is not a valid
-visibility key.
+`migration_event_associations` rows for independently admitted events, the
+`migration_discovery_associations` rows attached to independently admitted
+registry-announcement edges, and the candidate identity/discovery effect rows;
+source family alone is not a valid visibility key.
 
 The following fixed contracts become direct declarations under
 `ens_v2_migration_l1`:
@@ -339,29 +343,40 @@ do not use a new discovery rule. Each proxy's initializer emits
 `RegistryCreated()` before `ParentUpdated` and role events. The existing
 `ens_v2_registry_l1` match-all `registry_announcement` rule admits that
 emitting address at the exact log position; subsequent logs in the same
-transaction are then interpreted under the registry family. Rule ownership and
-consumer visibility are separate axes here: because these announcements and
-their same-transaction effects exist only through a migration correlation
-group, in slice 1 they follow the candidate path below — recorded as
-diagnostics-visible candidate identity/discovery effects, not as ordinary
-discovery rows — while the rule's operation for non-migration registry
-announcements is unchanged. Slice 2 activation is what makes a
-migration-created registry consumer-visible. A later
+transaction are then interpreted under the registry family. Rule ownership,
+intake, and consumer visibility are separate axes. Rule ownership remains with
+`registry_announcement`. Its independently admitted normalized
+`RegistryCreated` event and indexability edge remain ordinary and unchanged; the
+watch plan traverses the edge from the announcement position, and the
+`migration_registry_creation` candidate association attaches separately to the
+event and edge. That association does not make the edge candidate. The edge
+records only indexability: it creates no suffix, parent relation, name binding,
+or current authority. Correlation-dependent identity, parent, role,
+registration, renewal, topology, and normalized-event effects from the registry
+inherit `consumer_visibility=candidate` until slice 2 activation, including
+effects in later transactions or blocks. The association alone cannot
+reclassify an effect: a `ParentUpdated`, role, registration, renewal, topology,
+or normalized-event output that `ens_v2_registry_l1` derives from the ordinary
+edge and raw event without migration correlation remains ordinary and
+byte-for-byte unchanged. Only the additional meaning that depends on the
+correlation is candidate. A later
 `SubregistryUpdated` remains the bidirectional parent-child topology edge and
 does not itself admit the target. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L128 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L130 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L131 @ ens_v2@ccaeb58) The implementation at
 `0xcf9f4863a1b44216cfc0be65f4e47b2b9a043924`, starting at block `11163410`,
 is implementation metadata, not a root or a registry admission. Under the plan it remains a declared
 address in the family-wide watch plan. (upstream: .refs/ens_v2/contracts/deployments/sepolia/WrapperRegistryImpl.json:L2 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/WrapperRegistryImpl.json:L3700 @ ens_v2@ccaeb58)
 
-Source-family ownership does not break the visibility barrier. When
-`RegistryCreated`, `ParentUpdated`, role events, or identity/discovery effects
-exist only because of an ENSv1→ENSv2 migration correlation group, the normalized
-events and candidate effect rows keep that group's `migration_correlation_ids`
-and `consumer_visibility` even though they interpret under
-`ens_v2_registry_l1`; these carry the
+Source-family ownership does not break the visibility barrier. The ordinary
+`RegistryCreated` event and `registry_announcement` indexability edge retain
+their existing-family admission, while the attached diagnostic associations
+carry the
 [`migration_registry_creation`](glossary.md#migration-correlation-group)
-correlation kind. Candidate effects do not update ordinary identity or
-discovery rows.
+correlation kind. Every correlation-dependent downstream effect keeps that
+group's `migration_correlation_ids` and `consumer_visibility` even though it
+interprets under `ens_v2_registry_l1`. Candidate effects do not update ordinary
+identity, topology, or consumer state; the ordinary indexability edge is the
+explicit exception because the watch plan consumes it rather than Project or a
+product route.
 
 Independent admission takes precedence. An existing-family normalized event
 that the active manifest and discovery rules already produce without the
@@ -373,8 +388,24 @@ and never consume `migration_event_associations` or the diagnostic identity and
 discovery effect tables. Unrelated existing-family facts in the same transaction
 remain normally eligible. Slice 2 materializes candidate-only normalized,
 identity, and discovery effects as activated ordinary output in one
-re-derivation generation; event associations may become activated diagnostics
+re-derivation pass; event associations may become activated diagnostics
 but never become consumer input.
+
+Slice 1 requires a restart boundary fixture, not only a same-transaction ordering
+test. At block N, a migration-created proxy emits `RegistryCreated`; after an
+Ingest and Interpret restart, a later transaction or block emits at least one
+registry, role, registration, renewal, or topology event from that proxy. Both a
+full historical replay lane and a live-follow lane must prove that the ordinary
+announcement admission keeps the proxy watched, the later raw fact is retained,
+its correlation-dependent augmentation remains candidate, and any output the
+existing registry family derives independently remains ordinary and matches the
+control test run. After restart, the generated watch plan must contain the
+proxy through its persisted ordinary edge before either the retained-raw-log
+announcement preload or the same-window announcement query adds it; otherwise
+those intake paths could mask a broken edge path.
+Every product row and DTO remains unchanged. A same-transaction initializer
+fixture cannot satisfy this gate because it does not prove the proxy remains
+watched after restart.
 
 The current watch planner uses each active manifest's complete ABI topic set
 for every address declared by that manifest; `emitter_roles` constrains
@@ -385,11 +416,26 @@ start block. The
 manifest content-hash rotation invalidates interpretation and projection
 output. Deployment must inspect the actual generated watch plan, fetch complete
 history for every widened address/topic range, then run Interpret and
-[Project phase](glossary.md#projection) redo at the planned re-derivation
-boundary. Manifest presence and completed
-backfill do not capability-promote mixed-history reads. Slice 1 publishes no
-consumer-visible semantic delta from that re-walk; the acceptance comparison in
-the consumer contract is a release gate, not an optional fixture check.
+[Project phase](glossary.md#projection) redo at the planned [re-derivation
+boundary](glossary.md#re-derivation-boundary). Manifest presence and completed
+backfill do not capability-promote mixed-history reads. In the test environment,
+the slice-1 acceptance publication has no consumer-visible semantic delta
+from that re-walk; the comparison in the consumer contract is a release gate,
+not an optional fixture check.
+
+The separately reviewed and separately merged slice-1 and slice-2 implementation
+PRs deploy together at this same planned [re-derivation
+boundary](glossary.md#re-derivation-boundary), which also
+carries [PR #391](https://github.com/ensdomains/bigname/pull/391). They use one
+[interpreter content hash](glossary.md#interpreter-content-hash), one full
+source re-walk, and one Project publication
+decision for `ethereum-sepolia`. Other chains retain
+independent publication decisions. That Project publication remains unready and
+traffic-drained until the production Verify phase's reviewed
+`ethereum-sepolia` reference path passes. There is no production interval serving candidate-only data:
+candidate-versus-activated behavior is exercised in the test environment against
+the boundary fixture corpus. The ordinary announcement edge above remains a
+watch-plan input and ensures this one-boundary plan creates no ingest gap.
 
 Other current Sepolia artifacts — including universal/reverse resolution,
 other wrapper surfaces, oracle, resolver-set administration, and mock-payment
@@ -477,7 +523,15 @@ For ENSv2, `RegistryCreated()` admits the emitting registry with a [`registry_an
 
 The active match-all sets widen retained live facts from this change forward. Historical Base resolver events, ENSv2 `RegistryCreated` events, and ERC-1967 `Upgraded` events that predate the widening require the mandatory one-time historical fetch before a derived-state rebuild. That fetch is an ingest operation, not discovery inference.
 
-At cutover, these interpretation changes are applied through a fresh-schema rebuild. The cutover carries raw facts, chain lineage, and label preimages, but it does not carry normalized events, identity rows, or projections from the transitional schema. This change therefore has no supported in-place replay over previously derived ENSv2 rows; the one-time historical fetch completes the raw input before the fresh interpretation run.
+The initial schema-v2 cutover that introduced these match-all interpretations
+used a fresh-schema rebuild. That historical cutover carried raw facts, chain
+lineage, and label preimages, but did not carry normalized events, identity
+rows, or projections from the transitional schema; it had no supported in-place
+replay over those transitional derived rows. This rule describes that initial
+cutover, not later versioned schema upgrades. The planned ENSv1→ENSv2 boundary
+above instead requires a reviewed in-place schema-migration so outstanding
+public cursors can continue across its full re-walk. Its historical fetch still
+must complete the widened raw input before interpretation begins.
 
 Each admitted edge stores `from_contract_instance_id`, `to_contract_instance_id`, source manifest version, edge kind, discovery source, active range, and provenance.
 

@@ -64,14 +64,40 @@ the hash as surely as changing its production code. Do not mix new
 interpretation output with rows published under the old hash. For such a
 release:
 
+A planned [re-derivation boundary](../glossary.md#re-derivation-boundary) may
+combine separately reviewed and separately merged PRs. Before merging the first
+one, the release record must list the complete artifact set, intended per-chain
+product and diagnostic deltas, generated watch-plan widening, historical-fetch
+range, combined content hash, acceptance corpus, and rollback point. Do not
+deploy any subset. In the test environment, run the slice-isolation gates and a
+combined-artifact comparison that permits only the recorded deltas. Production
+publication and readiness remain per chain rather than cross-chain atomic; keep
+traffic drained for each affected chain until its own full re-walk, acceptance
+checks, publication, and Verify phase succeed.
+
 1. stop the API and phase runner;
 2. take and verify a database backup;
-3. apply the reviewed versioned migration;
-4. start the new phase runner and complete the required full-history
-   interpretation and projection walk for every admitted chain;
-5. confirm `/v2/status` reports current phase generations and no pending redo;
-6. start the API built from the same commit; and
-7. run the release smoke and public-edge checks before undraining traffic.
+3. apply the reviewed versioned schema-migration;
+4. reapply and validate the verifier's `GRANT SELECT ON ALL TABLES IN SCHEMA
+   bigname_phase` after the additive schema-migration, before starting any
+   one-shot or long-running runner process;
+5. keep the long-running phase-runner supervisor stopped and use the new
+   artifact's one-shot `phase-runner redo --phase ingest` command over every
+   widened address/topic range in the generated watch plan;
+6. after the Ingest redo succeeds, invoke the exact required full-history
+   Interpret redo once to obtain the manifest-authority fence's invalidation
+   token, then rerun that same chain and block range with
+   `--attest-watch-set-coverage <token>`; do not use the unattended `run` path
+   for this attestation;
+7. complete the matching full-history Project redo while the supervisor remains
+   stopped;
+8. start the long-running phase runner only after those one-shot redos succeed,
+   let the production Verify phase complete for every affected chain, and require
+   its reviewed reference path rather than omitting or bypassing Verify;
+9. confirm `/v2/status` reports current phase state, successful Verify, and no
+   pending redo;
+10. start the API built from the same commit; and
+11. run the release smoke and public-edge checks before undraining traffic.
 
 If the phase schema itself must be replaced, follow
 [`deployment.md`](../deployment.md#replacing-an-initialized-phase-schema). Do

@@ -49,6 +49,40 @@ Issue #188 option 1 remains the storage follow-up: revision-bound cursors with
 explicit cursor-expired semantics. These restrictions lift when that storage
 contract exists.
 
+At the planned ENSv1→ENSv2 [re-derivation
+boundary](glossary.md#re-derivation-boundary), slices 1 and 2 deploy
+together with [PR #391](https://github.com/ensdomains/bigname/pull/391) under one
+[interpreter content hash](glossary.md#interpreter-content-hash), one full
+source re-walk, and one
+[Project publication](glossary.md#projection) decision for
+`ethereum-sepolia`. Production makes only that activated Project publication;
+candidate-versus-activated behavior remains a replay and
+acceptance-test distinction, not a production serving interval. Other chains
+retain their ordinary independent publication decisions.
+
+In the test environment, the slice-1 acceptance gate saves each normalized-
+event-backed route's `next_cursor` at a fixed readable chain head, performs and
+publishes the full Interpret and Project re-walk, and submits that old cursor to
+the post-re-walk test publication. The control and candidate test runs hold
+every other shared-boundary input constant, including PR #391's topology
+serializer. For
+`/v2/events`, name history, address history, and every other product cursor
+surface backed by normalized-event row identity, it must
+resume from the same normalized-event keyset anchor with identical remaining
+product rows, pages, fields, `has_more`, and summary behavior. Because that
+anchor may be an unmapped event absent from the response, the corpus places an
+unmapped normalized event at a product-page boundary and proves no visible row
+is skipped or duplicated. `/v2/diagnostics/events` must accept its old cursor
+and continue from the same stable normalized-event anchor, but its remaining
+rows and fields may include the expected new candidate diagnostics.
+The numeric `normalized_event_id` of a pre-existing diagnostic row may change
+across the re-walk; its `event_identity` and pre-existing semantic fields remain
+stable, apart from the explicitly allowed candidate diagnostic additions.
+Implementations may preserve numeric normalized-event IDs or resolve the old
+token through stable `event_identity` plus its stored sort tuple; these are
+alternative storage strategies. Freshly issued cursor bytes may differ. The
+gate separately verifies fresh post-re-walk cursors on every covered route.
+
 Field ownership:
 
 - Shared record, lookup, primary-name, event, and count concepts are dictionary
@@ -1075,6 +1109,10 @@ so there is no persisted artifact to explain. See
   fields. An independently admitted ordinary row reports top-level
   `consumer_visibility=activated` and an empty ID set; its separate candidate or
   activated correlation relationships appear only in `migration_associations`.
+  A full re-walk may assign a different numeric `normalized_event_id` to a
+  pre-existing row. Its `event_identity` and pre-existing semantic fields remain
+  stable; the numeric ID change and the planned candidate fields are explicit
+  diagnostic-only deltas.
 - Pagination behavior: standard collection pagination.
 - Snapshot behavior: diagnostic event rows come from current state. The
   response omits `meta.as_of` and `meta.as_of_token`, and its cursor carries no

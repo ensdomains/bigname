@@ -582,6 +582,28 @@ dataset is frozen. A legacy collection cursor's snapshot component is ignored.
 Snapshot-bound cursor semantics remain on single-resource responses with nested
 pagination where documented.
 
+A full Interpret and Project re-walk that must not change product behavior at a
+fixed readable chain head does not invalidate an outstanding collection cursor
+merely because an internal normalized-event row ID changes. On `/v2/events`,
+name history, address history, and every other product cursor surface backed by
+normalized-event row identity, a cursor issued before the re-walk must resume
+after publication from the same underlying normalized-event keyset anchor, with
+identical remaining product rows, pages, fields, `has_more`, and summary
+behavior. The anchor need not itself map to a product row. The acceptance corpus
+therefore includes an unmapped normalized event interleaved at a page boundary
+and proves that no visible row is skipped or duplicated. The diagnostic-events
+route must also accept its pre-re-walk cursor and continue from the same stable
+normalized-event anchor, but its remaining diagnostic rows and fields may
+reflect newly admitted candidate data. A pre-existing diagnostic row's numeric
+`normalized_event_id` may change, while its `event_identity` and pre-existing
+semantic fields remain stable apart from those allowed candidate additions.
+Implementations may preserve numeric
+normalized-event IDs or resolve an old token through stable `event_identity`
+plus its stored sort tuple; these are alternative storage strategies. Freshly
+issued cursor bytes may differ. The boundary acceptance gate exercises both the
+product and diagnostic continuation contracts, then separately verifies fresh
+post-re-walk cursors.
+
 Every collection uses `cursor`, `next_cursor`, `page_size`, nullable
 `total_count`, and `has_more`. Default `page_size` is 50; maximum is 200.
 For reverse address inputs to `POST /v2/lookup` whose relation set maps directly

@@ -201,7 +201,12 @@ describes the schema-v2 baseline rather than every row that has ever existed.
 edge created when a contract emits `RegistryCreated()`. It makes the emitting
 registry indexable from that event position. It does not assert parent-child
 reachability or attach the registry to a name. `SubregistryUpdated` supplies
-that separate relationship. (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@ccaeb58)
+that separate relationship. For a registry created through the [planned
+ENSv1→ENSv2 migration family](manifests.md#ensv2-migration-family-admission-plan), the
+edge remains ordinary and the watch plan traverses it while a separate
+`migration_registry_creation` candidate association carries consumer-visibility
+provenance. The association never turns indexability itself into name authority.
+(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@ccaeb58)
 
 **Event-silent** — a contract that changes relevant state without emitting a
 usable event (for example a legacy reverse resolver whose `name` value changes
@@ -351,14 +356,29 @@ Independent admission has precedence: an ordinary normalized event that the
 existing manifest and discovery rules produce without this correlation remains
 byte-for-byte `activated` and product-visible. Slice 1 records its candidate
 relationship separately in `migration_event_associations`; correlation never
-duplicates, suppresses, or reclassifies the ordinary event. Candidate-only
-normalized events and the separate diagnostic event-association,
-identity-effect, and discovery-effect rows are invisible to Project and product
-history but available to diagnostics. Slice 2 re-derives the same groups with
-`consumer_visibility=activated`; independently admitted event rows remain
-unchanged. Replay under a fixed manifest set and [interpreter content
-hash](#interpreter-content-hash) produces the same group IDs, event identities,
-and payloads.
+duplicates, suppresses, or reclassifies the ordinary event. The same precedence
+keeps an independently admitted `registry_announcement` edge ordinary and makes
+it a watch-plan input; `migration_discovery_associations` attaches the candidate
+relationship without changing that edge. Correlation-dependent downstream
+normalized, identity, topology, permission, registration, and renewal effects
+remain candidate and are invisible to Project and product history but available
+to diagnostics. The association alone cannot reclassify output that the existing
+registry family derives from the ordinary edge and raw event without migration
+correlation; that output remains ordinary. Slice 2 re-derives the same groups with
+`consumer_visibility=activated`; independently admitted event and announcement
+rows remain unchanged. Replay under a fixed manifest set and [interpreter
+content hash](#interpreter-content-hash) produces the same group IDs, event
+identities, and payloads.
+
+The separately reviewed slice-1 and slice-2 implementations deploy together
+with [PR #391](https://github.com/ensdomains/bigname/pull/391) at one planned
+[re-derivation boundary](#re-derivation-boundary). That boundary adopts one
+interpreter content hash,
+performs one full source re-walk, and makes one Project publication decision for
+`ethereum-sepolia`. Candidate and activated states remain distinct replay and
+acceptance-test inputs, but production makes only that activated Project
+publication. Other chains retain independent
+publication decisions.
 
 **Premigration reservation** — the pre-launch step that writes every existing
 `.eth` second-level name into the new ENSv2 `.eth` registry as a placeholder
@@ -783,6 +803,12 @@ that increases whenever head publication moves previously readable blocks to
 lineage checks; a changed value requires every retained prior-state block
 anchor to be checked again.
 
+**Logical discovery-edge identity** (`logical_edge_identity`) — the
+rebuild-stable Keccak-256 identity of one fact-derived discovery-edge epoch. It
+uses semantic manifest and edge fields plus the observation position, never a
+sequence-assigned database ID. The exact tuple, encoding, domain separator, and
+rendering are defined in [ADR 0002](adrs/0002-surface-resource-identity.md#discovery-edge-observation-identity).
+
 **Locked NameWrapper state** — bigname's ENSv1 NameWrapper lifecycle label for
 a currently wrapped name where `CANNOT_UNWRAP` is burned. NameWrapper rejects
 unwrap when that fuse is effective. Burning an owner-controlled fuse requires
@@ -902,6 +928,18 @@ about support: a readable row may still carry an unsupported support status,
 and routes that additionally require supported rows say so. `POST /v2/lookup`
 reverse address results are one such route
 ([api-v2.md](api-v2.md#cursors-and-pagination)).
+
+**Re-derivation boundary** — a coordinated deployment point for changes that
+alter interpreted or projected content. The boundary adopts one interpreter
+content hash, performs the mandatory historical Ingest fetch for every range
+added by the generated watch plan, runs Interpret from the earliest affected
+source position through the fixed readable head, runs Project through that same
+head, and makes one publication decision for that target chain. The boundary is
+not a cross-chain transaction: a multi-chain deployment retains one independent
+decision and readiness result per chain. A *full source re-walk* in this contract
+means that complete Ingest, Interpret, and Project sequence; it is not an
+Interpret-only replay. Production Verify follows Project publication and gates
+readiness and traffic, not the already committed Project rows.
 
 **Reserved surface** — a schema value, enum variant, or documented field that
 the system accepts and can render but that no code path ever produces. It
