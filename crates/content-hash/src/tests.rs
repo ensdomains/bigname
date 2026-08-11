@@ -511,7 +511,6 @@ fn request_scoped_lookup_sources_do_not_change_hash() {
         // construction, timeouts, and endpoint configuration abort a request rather than decide
         // which response counts as an answer, and its head-block read is serving-only.
         "crates/lookup/src/rpc.rs",
-        "crates/domain/src/block_interval.rs",
     ] {
         tree.write(relative_path, "fn serving_only_change() {}\n");
     }

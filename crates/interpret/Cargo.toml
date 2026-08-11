@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-bigname-adapters = { path = "../adapters", default-features = false, features = ["schema-v2"] }
+bigname-adapters.workspace = true
 bigname-domain.workspace = true
 serde_json = "1.0.149"
 sqlx = { workspace = true, features = ["time"] }

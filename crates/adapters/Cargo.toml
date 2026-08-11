@@ -5,43 +5,18 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-[[test]]
-name = "schema_v2_interpreter_fixtures"
-required-features = ["schema-v2"]
-
-[[test]]
-name = "schema_v2_permutation_lane"
-required-features = ["schema-v2"]
-
-[features]
-default = ["schema-v2"]
-schema-v2 = [
-    "dep:alloy-json-abi",
-    "dep:alloy-primitives",
-    "dep:alloy-sol-types",
-    "dep:anyhow",
-    "dep:bigname-domain",
-    "dep:bigname-manifests",
-    "dep:imbl",
-    "dep:serde",
-    "dep:serde_json",
-    "dep:time",
-    "dep:uuid",
-]
-
 [dependencies]
-alloy-json-abi = { workspace = true, optional = true }
-alloy-primitives = { workspace = true, optional = true }
-alloy-sol-types = { workspace = true, optional = true }
-anyhow = { workspace = true, optional = true }
-bigname-domain = { workspace = true, optional = true }
-bigname-manifests = { workspace = true, optional = true }
-imbl = { version = "7.0.0", optional = true }
-serde = { workspace = true, optional = true }
-serde_json = { version = "1.0.145", features = ["raw_value"], optional = true }
-time = { version = "0.3.47", features = ["serde"], optional = true }
-uuid = { workspace = true, optional = true }
+alloy-json-abi.workspace = true
+alloy-primitives.workspace = true
+alloy-sol-types.workspace = true
+anyhow.workspace = true
+bigname-domain.workspace = true
+bigname-manifests.workspace = true
+imbl = "7.0.0"
+serde.workspace = true
+serde_json = { version = "1.0.145", features = ["raw_value"] }
+time = { version = "0.3.47", features = ["serde"] }
+uuid.workspace = true
 
 [dev-dependencies]
 syn = { version = "2.0.117", features = ["full", "visit"] }
-uuid.workspace = true

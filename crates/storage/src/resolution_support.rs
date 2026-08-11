@@ -16,8 +16,8 @@ pub use record_keys::{
     supported_resolution_verified_readback_records, supports_resolution_verified_lookup_record,
 };
 pub use support_classes::{
-    BASE_MAINNET_CHAIN_ID, BASENAMES_L1_RESOLVER_ADDRESS, BASENAMES_NAMESPACE, ENS_NAMESPACE,
-    ETHEREUM_MAINNET_CHAIN_ID, VerifiedResolutionPathClass, VerifiedResolutionRecord,
+    BASE_MAINNET_CHAIN_ID, BASENAMES_NAMESPACE, ENS_NAMESPACE, ETHEREUM_MAINNET_CHAIN_ID,
+    VerifiedResolutionPathClass, VerifiedResolutionRecord,
     VerifiedResolutionRequestedChainPosition, VerifiedResolutionSupportBoundary,
 };
 pub use topology::{
