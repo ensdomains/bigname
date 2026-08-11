@@ -339,7 +339,14 @@ do not use a new discovery rule. Each proxy's initializer emits
 `RegistryCreated()` before `ParentUpdated` and role events. The existing
 `ens_v2_registry_l1` match-all `registry_announcement` rule admits that
 emitting address at the exact log position; subsequent logs in the same
-transaction are then interpreted under the registry family. A later
+transaction are then interpreted under the registry family. Rule ownership and
+consumer visibility are separate axes here: because these announcements and
+their same-transaction effects exist only through a migration correlation
+group, in slice 1 they follow the candidate path below — recorded as
+diagnostics-visible candidate identity/discovery effects, not as ordinary
+discovery rows — while the rule's operation for non-migration registry
+announcements is unchanged. Slice 2 activation is what makes a
+migration-created registry consumer-visible. A later
 `SubregistryUpdated` remains the bidirectional parent-child topology edge and
 does not itself admit the target. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L128 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L130 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L131 @ ens_v2@ccaeb58) The implementation at
 `0xcf9f4863a1b44216cfc0be65f4e47b2b9a043924`, starting at block `11163410`,
