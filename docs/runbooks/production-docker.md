@@ -99,12 +99,14 @@ checks, publication, and Verify phase succeed.
 8. start the long-running phase runner only after those one-shot redos succeed,
    let the production Verify phase complete for every affected chain, and require
    its reviewed reference path rather than omitting or bypassing Verify;
-9. confirm `/v2/status` reports current phase state and no pending redo
-   (the route reads the Project row's lifecycle, redo, and heartbeat state;
-   it does not expose Verify), and confirm Verify success directly from
-   phase-runner state — the `verify` row in `chain_phase_state` for each
-   affected chain and the supervisor's Verify completion output;
-10. start the API built from the same commit; and
+9. confirm the phase state directly in the database while the API is still
+   stopped — the `project` row in `chain_phase_state` current with no pending
+   redo, and Verify success from the `verify` row for each affected chain plus
+   the supervisor's Verify completion output (`/v2/status` cannot be used
+   here: the API is stopped, and the route reads only the Project row's
+   lifecycle, redo, and heartbeat state — it does not expose Verify);
+10. start the API built from the same commit and confirm `/v2/status` reports
+    current phase state and no pending redo; and
 11. run the release smoke and public-edge checks before undraining traffic.
 
 If the phase schema itself must be replaced, follow
