@@ -39,8 +39,11 @@ The physical layers are:
 5. current projections — name, relation, child, permission, resolver, record,
    and primary-name read models.
 
-The first four layers are inputs to Project. Current projections can be rebuilt
-from canonical identity and normalized events. Canonical-head
+The first four layers are inputs to Project, but ENSv1→ENSv2
+migration-correlated contributions marked `consumer_visibility=candidate` are
+diagnostic input only until their contracted consumer activation. Current
+projections can be rebuilt from canonical consumer-visible identity and
+normalized events. Canonical-head
 [hydration](glossary.md#hydration) is execution-derived enrichment applied by
 Project to the documented record and primary-name surfaces after event-derived
 publication.
@@ -73,13 +76,66 @@ state; it is never identity.
 | `label_preimages` | Interpret and `phase-runner label-preimages import-ens-rainbow` | Verified labelhash-to-label observations from chain events and the proof-checked rainbow import. |
 | `ens_names` | operator rainbow load | Unverified rainbow-table candidates consumed by the import command. |
 | `normalized_events` | Interpret | Protocol events normalized transactionally with identity output. |
+| `migration_event_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` (planned) | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events or materialize consumer-authoritative identity or discovery rows. |
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
 | `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner | Phase progress, repair work, and runtime liveness. |
+| `project_generation_failures` (planned) | phase runner after Project rollback | Append-only audit evidence for a projection-blocking invariant failure; never a product projection. |
 | `resolution_divergences` | guarded lookup functions | Active live/indexed resolver disagreements; diagnostic only. |
 
 Adapters provide interpretation behavior. They do not write projections. API
 code reads projections and lookup output only, except for the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) write.
+
+### ENSv1→ENSv2 correlation visibility
+
+The planned ENSv1→ENSv2 intake persists the
+[migration correlation group](glossary.md#migration-correlation-group) without
+making it consumer-authoritative. A normalized event whose existence depends on
+that correlation stores top-level `migration_correlation_ids` and
+`consumer_visibility`. Ordinary events default to an empty ID set and
+`activated`; a correlation-dependent event has a sorted, duplicate-free,
+nonempty ID set and is `candidate` in slice 1 or `activated` in slice 2.
+`MigrationApplied` has exactly one ID. A shared correlation-dependent event
+keeps one event identity and lists every participating per-name ID; a
+name-independent registrar controller event has one stable
+`controller_configuration` derivation-group ID.
+
+Independent admission takes precedence over correlation visibility. If an
+existing manifest and discovery path already produces a normalized event without
+the ENSv1→ENSv2 correlation, Interpret reproduces that ordinary event
+byte-for-byte: its event identity, payload, provenance, and `activated`
+visibility do not change. Interpret records the candidate relationship in a
+separate `migration_event_associations` row keyed to the ordinary event identity,
+with the sorted correlation ID set, `correlation_kind`, evidence references,
+chain positions, canonicality, and `consumer_visibility=candidate`. Correlation
+never duplicates, suppresses, or reclassifies the independently admitted event.
+Project and product history readers ignore the association row; diagnostics may
+join it to the ordinary event.
+
+Slice 1 applies the same precedence to identity and discovery. It does not merge
+candidate values into ordinary materialized rows. It writes correlation-versioned
+`migration_candidate_identity_effects` and
+`migration_candidate_discovery_effects` rows containing the proposed stable
+identity or edge key, complete proposed value/range delta, sorted correlation ID
+set, `correlation_kind`, evidence references, chain positions, canonicality, and
+`consumer_visibility=candidate`. Those diagnostic rows are not Project input
+and cannot update an ordinary row's columns, provenance, `active_from`, or
+`active_to`. An independently activated ordinary identity or discovery row is
+therefore byte-for-byte unchanged by candidate evidence. Slice 1 also writes no
+ENSv1→ENSv2 migration-driven predecessor close or successor open to
+`surface_bindings`.
+
+Consumer activation is a re-derivation semantic, not an in-place serving flag.
+Slice 2 rotates the interpreter content hash and performs the planned full
+Interpret walk, reproducing stable correlation IDs and event identities while
+replacing candidate normalized events and diagnostic effect rows with activated
+normalized events and ordinary materialized identity/discovery output. It
+re-derives `migration_event_associations` as activated diagnostics without
+rewriting their independently admitted normalized events. Only an
+`authority_transition` group derives the deferred `SurfaceBinding` transition;
+other group kinds cannot change a binding or authority epoch. The downstream
+full Project walk adopts only that one hash and publishes one coherent
+generation. A partial candidate and activated mixture is invalid.
 
 ## Raw facts and payload retention
 
@@ -177,6 +233,12 @@ Interpretation is deterministic for a fixed manifest set, interpreter content
 hash, canonical raw facts, and requested block range. A bounded Interpret redo
 may replace only derived identity, discovery, and normalized-event output in
 that range. Raw facts are never edited by replay.
+
+The ENSv1→ENSv2 `consumer_visibility` rule is included in the interpreter
+content hash. Replaying one fixed hash reproduces the same correlation sets,
+visibility, event identities, and payloads. Changing candidate groups to
+activated groups therefore invalidates the full interpreted range and downstream
+Project range; it is never a row-local patch or API-only configuration change.
 
 Interpret redo proves raw-data presence without pretending that Live extended
 each finite ingest source. Each `ingest_cursors` row proves that the source
@@ -314,6 +376,20 @@ canonical interpreted input, stages rows in connection-local tables, and
 publishes the affected projection set transactionally. It has no legacy claim
 queue, durable replay stage tables, apply cursors, dead-letter queue, database
 session version stamp, or worker heartbeat.
+
+Consumer slice 2 adds one diagnostic exception to durable staging, not to
+projection ownership. A post-reconciliation dual-current invariant makes the
+Project transaction return a structured failure before `publish::swap`; that
+transaction rolls back completely. The phase runner then appends one
+`project_generation_failures` audit row in a separate transaction. The row is
+keyed by chain, target block number/hash, interpreter content hash, and failure
+kind, and stores both binding/resource identities, the activated boundary event
+identity, every relevant block/transaction/log position, and the canonicality
+observed at failure. It marks the target generation not ready. A later reorg or
+successful generation never deletes the audit row: its recorded block hashes
+remain resolvable through lineage as canonical or orphaned, and a later success
+is a separate generation. Operator diagnostics may read this table; product
+routes may not.
 
 Projection rows carry:
 

@@ -472,10 +472,20 @@ Field ownership:
   `type` vocabulary: `registration`, `renewal`, `release`, `expiry`,
   `transfer`, `authority`, `resolver`, `record`, `primary_name`, `permission`.
   Raw upstream or pipeline event kinds are diagnostics-only and are not emitted
-  by this product route. After the planned ENSv2 migration family is activated,
-  the per-source-log mapping specified for [`GET /v2/events`](#get-v2events)
-  also applies here when a mapped event is associated with the requested name
-  or registration. This is an activation contract, not current behavior.
+  by this product route. Slice 1 excludes every correlation-dependent normalized
+  row with `consumer_visibility=candidate`, including a familiar event kind whose
+  existence depends on correlation under an existing source family; diagnostics
+  may expose those rows. An existing-family event admitted independently of the
+  correlation remains byte-for-byte activated and product-visible. Its separate
+  candidate association is diagnostics-only and cannot suppress, duplicate, or
+  reclassify that ordinary row. Only slice 2 consumer activation enables the
+  per-source-log mapping specified for [`GET /v2/events`](#get-v2events) when an
+  activated event is associated with the requested name or registration.
+  Manifest or schema-vocabulary activation alone changes no name-history
+  response. Candidate visibility is filtered in
+  storage before summary calculation, keyset pagination, page-size limiting,
+  cursor construction, or the later product-type mapping; candidate rows cannot
+  consume a page slot or move an existing cursor.
 - Pagination behavior: standard newest-first collection pagination by chain
   position. The cursor is bound to the resolved namespace, parent name, scope,
   and sort. Product event-type filtering is applied after loading the storage
@@ -755,7 +765,15 @@ Field ownership:
   comma-separated set of `owner`, `manager`, and `registrant`; `any`
   normalizes to all three values. Rows match when any listed relation matches.
 - Response shape: `data` is an array of compact event rows using the shared
-  friendly `type` vocabulary.
+  friendly `type` vocabulary. The correlation-scoped candidate visibility rule
+  from name history also applies here: slice 1 changes no address-history row,
+  and slice 2 consumer activation admits correlation-dependent rows. An
+  independently admitted ordinary row remains visible while its candidate
+  association remains diagnostics-only. Storage applies
+  the visibility predicate before deriving address anchors from ownership or
+  control events, constructing selectors, validating cursors, calculating
+  summaries, or selecting and paginating final rows. A candidate row therefore
+  cannot expose an older activated row by broadening the anchor set.
 - Pagination behavior: standard collection pagination.
 - Snapshot behavior: address-history rows come from current state. The response
   omits `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
@@ -819,14 +837,26 @@ Field ownership:
   defaults to `ens` only when there is no name filter.
 - Response shape: `data` is an array of compact event rows with friendly
   `type` vocabulary. Raw upstream event kinds are diagnostics-only. The
-  activation contract for the planned `ens_v2_migration_l1` family maps its
+  slice-2 consumer activation contract maps each
+  [migration correlation group's](glossary.md#migration-correlation-group)
   renewal-bridge and correlated registrar normalized rows to `renewal` and
   `expiry`, Graveyard claims to `release`, and controller membership changes
-  to `permission`. Mapping is per normalized source event, not per transaction:
-  one synchronized renewal transaction can therefore contain three `renewal`
-  rows and two `expiry` rows. The planned `MigrationApplied` and
-  `ContractDiscovered` kinds have no product event type. None of this paragraph
-  is current behavior until the schema vocabulary and family are activated.
+  to `permission`. Mapping is per normalized source event and resource anchor,
+  not per transaction: one synchronized renewal transaction can therefore
+  contain three `renewal` rows and two `expiry` rows; no synthetic collapsed
+  renewal is created. The planned `MigrationApplied` and `ContractDiscovered`
+  kinds have no product event type. During slice 1, every
+  correlation-dependent row carrying `consumer_visibility=candidate` is excluded
+  even if its familiar event kind would otherwise map above or its source family
+  is `ens_v2_registry_l1`. An event admitted independently by an existing family
+  stays byte-for-byte activated and product-visible; its candidate
+  `migration_event_associations` row is diagnostics-only and never changes the
+  ordinary event's inclusion or multiplicity. Diagnostics may expose candidate
+  rows and associations immediately. Schema-vocabulary,
+  manifest-family, backfill, and interpretation activation alone change no
+  `/v2/events` or product-history response; only slice 2 changes visibility.
+  The shared visibility predicate runs before keyset pagination, page-size
+  limiting, cursor construction, and product-type mapping.
   (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L84 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L91 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L92 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L93 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L214 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L228 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L229 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L132 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L134 @ ens_v2@ccaeb58) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L20 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L158 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L161 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L163 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/Graveyard.sol:L170 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRenewer.sol:L21 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRenewer.sol:L28 @ ens_v2@ccaeb58)
 - Pagination behavior: standard collection pagination.
 - Snapshot behavior: event rows come from current state. The response omits
@@ -1036,7 +1066,15 @@ so there is no persisted artifact to explain. See
   `{normalized_event_id, event_identity, namespace, name?, registration_id?,
   event_kind, source_family, manifest_version?, source_manifest_id?,
   chain_position, transaction_hash, log_index, raw_fact_ref, derivation_kind,
-  canonicality_state, before_state?, after_state?, provenance, coverage}`.
+  canonicality_state, before_state?, after_state?, provenance, coverage}`. The
+  planned slice-1 diagnostics extension adds `consumer_visibility`,
+  `migration_correlation_ids`, and `migration_associations?`; each
+  `migration_associations` entry is
+  `{migration_correlation_ids, correlation_kind, consumer_visibility}`. A
+  correlation-dependent normalized row reports its marker in the top-level
+  fields. An independently admitted ordinary row reports top-level
+  `consumer_visibility=activated` and an empty ID set; its separate candidate or
+  activated correlation relationships appear only in `migration_associations`.
 - Pagination behavior: standard collection pagination.
 - Snapshot behavior: diagnostic event rows come from current state. The
   response omits `meta.as_of` and `meta.as_of_token`, and its cursor carries no

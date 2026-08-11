@@ -298,15 +298,20 @@ mixed-history ownership remains capability-gated separately. Distinct from
 bigname's own *schema-migration* history; see the note at the top of this file.
 
 **Migration boundary** (ENSv1→ENSv2 authority boundary) — the planned
-`MigrationApplied` normalized event will mark the position at which one logical
-name stops taking current registration and control from ENSv1 and starts taking
-them from its ENSv2 resource. Once activated, the boundary will be derived only
-from an admitted successful ENSv1→ENSv2 migration transaction shape, never from
-the fact that both source families appear in history. It will close the name's
-current ENSv1 binding without deleting that history. Descendants keep their own
-authority until they reach their own boundary or obtain a current registration
-in the admitted migration registry below that migrated parent; the latter does
-not invent a child boundary. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L290 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58) The unlocked path transfers the
+`MigrationApplied` normalized event records the position at which one logical
+name can stop taking current registration and control from ENSv1 and start
+taking them from its ENSv2 resource. Slice 1 records that position as a
+candidate with `consumer_visibility=candidate`; it does not close the current
+ENSv1 `SurfaceBinding` or make the ENSv2 binding eligible for current
+selection. Slice 2 re-derives the candidate with
+`consumer_visibility=activated` and performs that deferred binding transition
+at the recorded position without deleting ENSv1 history. A candidate or
+activated boundary is derived only from the complete admitted successful
+ENSv1→ENSv2 migration shape for that name, never from family coexistence or a
+transaction hash alone. Descendants keep their own authority until they reach
+their own activated boundary or obtain a current registration in the admitted
+migration registry below that migrated parent; the latter does not invent a
+child boundary. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L290 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58) The unlocked path transfers the
 ENSv1 position to the
 Graveyard before registering the reserved ENSv2 label, while the locked
 receiver moves the wrapper token to the Graveyard and injects the ENSv2
@@ -315,6 +320,45 @@ registration.
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58).
+
+**Migration correlation group** — a deterministic set of raw evidence and
+derived effects for one operation admitted through the ENSv1→ENSv2 migration
+family. Per-name `correlation_kind` values are `authority_transition`,
+`synchronized_renewal`, `graveyard_cleanup`, and
+`migration_registry_creation`; the name-independent
+`controller_configuration` kind covers a launch-bounded registrar controller
+change that cannot be assigned to a name. Only an `authority_transition` group
+with the complete ENSv1→ENSv2 migration shape can produce a candidate
+[migration boundary](#migration-boundary); a renewal or cleanup group never
+does. The stable correlation ID is derived from `correlation_kind`, logical
+name when applicable, anchor position, and complete evidence set, never from the
+transaction hash alone. A `controller_configuration` ID instead uses the
+registrar emitter, controller account, and event kind in place of a logical
+name. A later operation has a different ID.
+
+Every dependent effect whose existence relies on the correlation carries a
+sorted, duplicate-free `migration_correlation_ids` set and
+`consumer_visibility`, including effects emitted under an existing source
+family after ENSv1→ENSv2 migration-created registry discovery. A per-name effect
+has one ID. One shared correlation-dependent event, such as a newly admitted
+controller change surrounding several bridge labels, is stored once with every
+participating synchronized-renewal ID and stays `candidate` until every
+referenced group is activated. A name-independent controller event has one
+`controller_configuration` ID. No event is duplicated or arbitrarily assigned
+to one name. Unrelated facts in the same transaction do not join the set.
+
+Independent admission has precedence: an ordinary normalized event that the
+existing manifest and discovery rules produce without this correlation remains
+byte-for-byte `activated` and product-visible. Slice 1 records its candidate
+relationship separately in `migration_event_associations`; correlation never
+duplicates, suppresses, or reclassifies the ordinary event. Candidate-only
+normalized events and the separate diagnostic event-association,
+identity-effect, and discovery-effect rows are invisible to Project and product
+history but available to diagnostics. Slice 2 re-derives the same groups with
+`consumer_visibility=activated`; independently admitted event rows remain
+unchanged. Replay under a fixed manifest set and [interpreter content
+hash](#interpreter-content-hash) produces the same group IDs, event identities,
+and payloads.
 
 **Premigration reservation** — the pre-launch step that writes every existing
 `.eth` second-level name into the new ENSv2 `.eth` registry as a placeholder

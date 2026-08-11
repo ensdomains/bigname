@@ -50,6 +50,13 @@ outcomes, or durable traces.
   facts, adapter internals, provider data, or a newer projection.
 - Resource-keyed projections consume an event only when its `resource_id`
   resolves to a readable identity row.
+- Project stages only ordinary or `consumer_visibility=activated` interpreted
+  input. It excludes candidate normalized events and never reads the planned
+  `migration_event_associations` or candidate identity/discovery effect tables.
+  Candidate effects therefore cannot change the materialized identity rows that
+  builders join. An independently admitted ordinary event remains activated and
+  byte-for-byte unchanged when an ENSv1→ENSv2 correlation references it; only
+  the ignored association row carries the candidate relationship.
 - Coverage and support are explicit. They are never inferred from row presence
   or a historical ingest range.
 - Verified provider answers are request-scoped lookup output, not projection
@@ -128,10 +135,19 @@ there.[^v1-registry-l45][^v1-registry-l82][^v2-events-l49][^v2-events-l75]
 
 ## History
 
-History routes read normalized events, not a current projection cache. Surface,
-resource, and address scopes are filters over the same canonical event set.
-Projection rows may supply readable names for result decoration, but the API
-does not synthesize history from current state.
+History routes read normalized events, not a current projection cache. Product
+surface, resource, and address scopes filter the same canonical,
+consumer-visible event set: ordinary rows and
+`consumer_visibility=activated` rows only. Candidate rows and
+`migration_event_associations` remain available to diagnostics. An association
+never removes or duplicates the independently admitted ordinary event it
+references. The
+visibility predicate is applied in storage selection before
+address-anchor derivation, selector construction, cursor validation, summary
+calculation, type filtering, keyset pagination, page-size limiting, or cursor
+construction, so candidate admission cannot broaden, shorten, or reorder a
+product page. Projection rows may supply readable names for result decoration,
+but the API does not synthesize history from current state.
 
 ## Permissions
 
