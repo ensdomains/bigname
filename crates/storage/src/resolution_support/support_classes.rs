@@ -4,6 +4,7 @@ pub const ENS_NAMESPACE: &str = "ens";
 pub const BASENAMES_NAMESPACE: &str = "basenames";
 pub const BASE_MAINNET_CHAIN_ID: &str = "base-mainnet";
 pub const ETHEREUM_MAINNET_CHAIN_ID: &str = "ethereum-mainnet";
+pub const BASENAMES_L1_RESOLVER_ADDRESS: &str = "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31";
 
 pub trait VerifiedResolutionRecord {
     fn record_key(&self) -> &str;

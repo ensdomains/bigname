@@ -4,8 +4,8 @@ use serde_json::Value;
 use crate::name_current::NameCurrentRow;
 
 use super::support_classes::{
-    BASE_MAINNET_CHAIN_ID, BASENAMES_NAMESPACE, ETHEREUM_MAINNET_CHAIN_ID,
-    VerifiedResolutionPathClass, json_field, json_string_field,
+    BASE_MAINNET_CHAIN_ID, BASENAMES_L1_RESOLVER_ADDRESS, BASENAMES_NAMESPACE,
+    ETHEREUM_MAINNET_CHAIN_ID, VerifiedResolutionPathClass, json_field, json_string_field,
     resolution_projection_chain_position_from_value, summary_is_unsupported,
 };
 
@@ -253,7 +253,6 @@ fn resolution_topology_transport_matches_basenames_supported_class(topology: &Va
         .is_some_and(|value| value == BASE_MAINNET_CHAIN_ID)
         && json_string_field(transport.get("target_chain_id"))
             .is_some_and(|value| value == ETHEREUM_MAINNET_CHAIN_ID)
-        && json_string_field(transport.get("contract_address")).is_some_and(|value| {
-            value.eq_ignore_ascii_case("0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31")
-        })
+        && json_string_field(transport.get("contract_address"))
+            .is_some_and(|value| value.eq_ignore_ascii_case(BASENAMES_L1_RESOLVER_ADDRESS))
 }

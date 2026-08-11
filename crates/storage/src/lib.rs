@@ -128,10 +128,11 @@ pub use record_inventory::{
     record_version_boundary_storage_key,
 };
 pub use resolution_support::{
-    BASE_MAINNET_CHAIN_ID, BASENAMES_NAMESPACE, ENS_NAMESPACE, ETHEREUM_MAINNET_CHAIN_ID,
-    SupportedVerifiedResolutionRecordKey, VerifiedResolutionPathClass, VerifiedResolutionRecord,
-    VerifiedResolutionRequestedChainPosition, VerifiedResolutionSupportBoundary,
-    canonical_addr_coin_type, classify_supported_resolution_topology, is_resolution_avatar_record,
+    BASE_MAINNET_CHAIN_ID, BASENAMES_L1_RESOLVER_ADDRESS, BASENAMES_NAMESPACE, ENS_NAMESPACE,
+    ETHEREUM_MAINNET_CHAIN_ID, SupportedVerifiedResolutionRecordKey, VerifiedResolutionPathClass,
+    VerifiedResolutionRecord, VerifiedResolutionRequestedChainPosition,
+    VerifiedResolutionSupportBoundary, canonical_addr_coin_type,
+    classify_supported_resolution_topology, is_resolution_avatar_record,
     parse_supported_verified_resolution_record_key, projected_resolution_boundaries_from_topology,
     projected_resolution_topology, record_version_boundary_has_pointer,
     resolution_record_inventory_lookup_key, resolution_record_inventory_lookup_key_any_chain,
