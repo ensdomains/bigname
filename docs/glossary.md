@@ -201,7 +201,12 @@ describes the schema-v2 baseline rather than every row that has ever existed.
 edge created when a contract emits `RegistryCreated()`. It makes the emitting
 registry indexable from that event position. It does not assert parent-child
 reachability or attach the registry to a name. `SubregistryUpdated` supplies
-that separate relationship. (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@ccaeb58)
+that separate relationship. For a registry created through the [planned
+ENSv1→ENSv2 migration family](manifests.md#ensv2-migration-family-admission-plan), the
+edge remains ordinary and the watch plan traverses it while a separate
+`migration_registry_creation` candidate association carries consumer-visibility
+provenance. The association never turns indexability itself into name authority.
+(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@ccaeb58)
 
 **Event-silent** — a contract that changes relevant state without emitting a
 usable event (for example a legacy reverse resolver whose `name` value changes
@@ -290,11 +295,90 @@ nothing to claim
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L212 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L224 @ ens_v2@ccaeb58).
 Nothing about it is cross-chain; see [`upstream.md`](upstream.md#known-divergences)
-for the stale upstream comment that says otherwise. **No bigname source family
-is admitted for any of this yet** — the terms below describe the upstream
-mechanism an adapter would have to handle, not implemented behavior. Distinct
-from bigname's own *schema-migration* history; see the note at the top of this
-file.
+for the stale upstream comment that says otherwise. The planned
+`ens_v2_migration_l1` [source family](#source-family) will admit
+the fixed contracts and event shapes described in
+[`manifests.md`](manifests.md#ensv2-migration-family-admission-plan); public
+mixed-history ownership remains capability-gated separately. Distinct from
+bigname's own *schema-migration* history; see the note at the top of this file.
+
+**Migration boundary** (ENSv1→ENSv2 authority boundary) — the planned
+`MigrationApplied` normalized event records the position at which one logical
+name can stop taking current registration and control from ENSv1 and start
+taking them from its ENSv2 resource. Slice 1 records that position as a
+candidate with `consumer_visibility=candidate`; it does not close the current
+ENSv1 `SurfaceBinding` or make the ENSv2 binding eligible for current
+selection. Slice 2 re-derives the candidate with
+`consumer_visibility=activated` and performs that deferred binding transition
+at the recorded position without deleting ENSv1 history. A candidate or
+activated boundary is derived only from the complete admitted successful
+ENSv1→ENSv2 migration shape for that name, never from family coexistence or a
+transaction hash alone. Descendants keep their own authority until they reach
+their own activated boundary or obtain a current registration in the admitted
+migration registry below that migrated parent; the latter does not invent a
+child boundary. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L169 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L290 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L303 @ ens_v2@ccaeb58) The unlocked path transfers the
+ENSv1 position to the
+Graveyard before registering the reserved ENSv2 label, while the locked
+receiver moves the wrapper token to the Graveyard and injects the ENSv2
+registration.
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L118 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L144 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L168 @ ens_v2@ccaeb58).
+
+**Migration correlation group** — a deterministic set of raw evidence and
+derived effects for one operation admitted through the ENSv1→ENSv2 migration
+family. Per-name `correlation_kind` values are `authority_transition`,
+`synchronized_renewal`, `graveyard_cleanup`, and
+`migration_registry_creation`; the name-independent
+`controller_configuration` kind covers a launch-bounded registrar controller
+change that cannot be assigned to a name. Only an `authority_transition` group
+with the complete ENSv1→ENSv2 migration shape can produce a candidate
+[migration boundary](#migration-boundary); a renewal or cleanup group never
+does. The stable correlation ID is derived from `correlation_kind`, logical
+name when applicable, anchor position, and complete evidence set, never from the
+transaction hash alone. A `controller_configuration` ID instead uses the
+registrar emitter, controller account, and event kind in place of a logical
+name. A later operation has a different ID.
+
+Every dependent effect whose existence relies on the correlation carries a
+sorted, duplicate-free `migration_correlation_ids` set and
+`consumer_visibility`, including effects emitted under an existing source
+family after ENSv1→ENSv2 migration-created registry discovery. A per-name effect
+has one ID. One shared correlation-dependent event, such as a newly admitted
+controller change surrounding several bridge labels, is stored once with every
+participating synchronized-renewal ID and stays `candidate` until every
+referenced group is activated. A name-independent controller event has one
+`controller_configuration` ID. No event is duplicated or arbitrarily assigned
+to one name. Unrelated facts in the same transaction do not join the set.
+
+Independent admission has precedence: an ordinary normalized event that the
+existing manifest and discovery rules produce without this correlation remains
+byte-for-byte `activated` and product-visible. Slice 1 records its candidate
+relationship separately in `migration_event_associations`; correlation never
+duplicates, suppresses, or reclassifies the ordinary event. The same precedence
+keeps an independently admitted `registry_announcement` edge ordinary and makes
+it a watch-plan input; `migration_discovery_associations` attaches the candidate
+relationship without changing that edge. Correlation-dependent downstream
+normalized, identity, topology, permission, registration, and renewal effects
+remain candidate and are invisible to Project and product history but available
+to diagnostics. The association alone cannot reclassify output that the existing
+registry family derives from the ordinary edge and raw event without migration
+correlation; that output remains ordinary. Slice 2 re-derives the same groups with
+`consumer_visibility=activated`; independently admitted event and announcement
+rows remain unchanged. Replay under a fixed manifest set and [interpreter
+content hash](#interpreter-content-hash) produces the same group IDs, event
+identities, and payloads.
+
+The separately reviewed slice-1 and slice-2 implementations deploy together
+with [PR #391](https://github.com/ensdomains/bigname/pull/391) at one planned
+[re-derivation boundary](#re-derivation-boundary). That boundary adopts one
+interpreter content hash,
+performs one full source re-walk, and makes one Project publication decision for
+`ethereum-sepolia`. Candidate and activated states remain distinct replay and
+acceptance-test inputs, but production makes only that activated Project
+publication. Other chains retain independent
+publication decisions.
 
 **Premigration reservation** — the pre-launch step that writes every existing
 `.eth` second-level name into the new ENSv2 `.eth` registry as a placeholder
@@ -306,19 +390,23 @@ which makes the entry `RESERVED`: it has an expiry, a subregistry, and a
 resolver, but no ERC-1155 token and no roles, and it emits `LabelReserved`
 rather than `LabelRegistered`
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L462 @ ens_v2@ccaeb58).
-The reserved expiry is the ENSv1 registrar expiry plus a bonus period of 62 days
-and 1 second — the difference between ENSv1's 90-day grace and ENSv2's 28-day
-grace, plus a second
+The reserved expiry is an explicit BatchRegistrar input, not a value the
+registry derives. (upstream: .refs/ens_v2/contracts/src/registrar/BatchRegistrar.sol:L52 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/BatchRegistrar.sol:L65 @ ens_v2@ccaeb58) The pinned premigration tool converts a configurable whole-day
+bonus to seconds, defaults it to 62 days, and writes the ENSv1 registrar expiry
+plus that value. (upstream: .refs/ens_v2/contracts/script/preMigration.ts:L973 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/script/preMigration.ts:L1035 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/script/preMigration.ts:L1265 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/script/preMigration.ts:L1267 @ ens_v2@ccaeb58) Separately, the deployment passes `ETHRenewerV1` a
+62-day-and-1-second bonus computed from the two grace periods.
 (upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L216 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L217 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L218 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L219 @ ens_v2@ccaeb58);
-`ETHRenewerV1` recovers the ENSv1 expiry by subtracting that bonus back off the
-reservation
-(upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L119 @ ens_v2@ccaeb58),
-so the `RESERVED` entry lasts through the first 62 days and 1 second of the
-90-day ENSv1 grace period, not through all of it. At its stored expiry the
-entry becomes `AVAILABLE`, and registry resolver reads return zero
+(upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L219 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/deploy/03_ETHRenewerV1.ts:L38 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/deploy/03_ETHRenewerV1.ts:L39 @ ens_v2@ccaeb58).
+Those defaults differ by one second. Bigname therefore preserves the emitted
+reservation expiry and never reconstructs it from the renewal-bridge constant;
+any deployment or test reservation with another explicit expiry retains that
+value.
+At its stored expiry the entry becomes `AVAILABLE`, and registry resolver reads
+return zero
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L259 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L626 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L653 @ ens_v2@ccaeb58).
@@ -715,6 +803,12 @@ that increases whenever head publication moves previously readable blocks to
 lineage checks; a changed value requires every retained prior-state block
 anchor to be checked again.
 
+**Logical discovery-edge identity** (`logical_edge_identity`) — the
+rebuild-stable Keccak-256 identity of one fact-derived discovery-edge epoch. It
+uses semantic manifest and edge fields plus the observation position, never a
+sequence-assigned database ID. The exact tuple, encoding, domain separator, and
+rendering are defined in [ADR 0002](adrs/0002-surface-resource-identity.md#discovery-edge-observation-identity).
+
 **Locked NameWrapper state** — bigname's ENSv1 NameWrapper lifecycle label for
 a currently wrapped name where `CANNOT_UNWRAP` is burned. NameWrapper rejects
 unwrap when that fuse is effective. Burning an owner-controlled fuse requires
@@ -834,6 +928,18 @@ about support: a readable row may still carry an unsupported support status,
 and routes that additionally require supported rows say so. `POST /v2/lookup`
 reverse address results are one such route
 ([api-v2.md](api-v2.md#cursors-and-pagination)).
+
+**Re-derivation boundary** — a coordinated deployment point for changes that
+alter interpreted or projected content. The boundary adopts one interpreter
+content hash, performs the mandatory historical Ingest fetch for every range
+added by the generated watch plan, runs Interpret from the earliest affected
+source position through the fixed readable head, runs Project through that same
+head, and makes one publication decision for that target chain. The boundary is
+not a cross-chain transaction: a multi-chain deployment retains one independent
+decision and readiness result per chain. A *full source re-walk* in this contract
+means that complete Ingest, Interpret, and Project sequence; it is not an
+Interpret-only replay. Production Verify follows Project publication and gates
+readiness and traffic, not the already committed Project rows.
 
 **Reserved surface** — a schema value, enum variant, or documented field that
 the system accepts and can render but that no code path ever produces. It

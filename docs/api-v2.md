@@ -92,6 +92,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `subname_count` | count of direct subnames when requested | `subname_count` (unchanged; now the only count name for child rows) |
 | `record_count` | count of known record keys when requested | `record_count` (unchanged) |
 | `role_summary` | grouped permission powers for dashboard-style name rows | `role_summary` (unchanged; rewritten to dictionary field names inside) |
+| `authority_context` | planned with the [per-name ownership rule](consumer-capabilities.md#ensv1ensv2-mixed-history-ownership); `current_for_name` means a `name` filter selected the current registration, while `resource_audit` makes no current-name claim | new in v2 after activation |
 | `capabilities` | product-facing summary of supported namespace capabilities | capability flag summaries when exposed to product routes |
 | `type` | product event category label | `event_kind`, compact event `type` aliases |
 | `by_type` | map of product event `type` values to counts | event summary `by_kind` maps keyed by raw event kind |
@@ -581,6 +582,28 @@ dataset is frozen. A legacy collection cursor's snapshot component is ignored.
 Snapshot-bound cursor semantics remain on single-resource responses with nested
 pagination where documented.
 
+A full Interpret and Project re-walk that must not change product behavior at a
+fixed readable chain head does not invalidate an outstanding collection cursor
+merely because an internal normalized-event row ID changes. On `/v2/events`,
+name history, address history, and every other product cursor surface backed by
+normalized-event row identity, a cursor issued before the re-walk must resume
+after publication from the same underlying normalized-event keyset anchor, with
+identical remaining product rows, pages, fields, `has_more`, and summary
+behavior. The anchor need not itself map to a product row. The acceptance corpus
+therefore includes an unmapped normalized event interleaved at a page boundary
+and proves that no visible row is skipped or duplicated. The diagnostic-events
+route must also accept its pre-re-walk cursor and continue from the same stable
+normalized-event anchor, but its remaining diagnostic rows and fields may
+reflect newly admitted candidate data. A pre-existing diagnostic row's numeric
+`normalized_event_id` may change, while its `event_identity` and pre-existing
+semantic fields remain stable apart from those allowed candidate additions.
+Implementations may preserve numeric
+normalized-event IDs or resolve an old token through stable `event_identity`
+plus its stored sort tuple; these are alternative storage strategies. Freshly
+issued cursor bytes may differ. The boundary acceptance gate exercises both the
+product and diagnostic continuation contracts, then separately verifies fresh
+post-re-walk cursors.
+
 Every collection uses `cursor`, `next_cursor`, `page_size`, nullable
 `total_count`, and `has_more`. Default `page_size` is 50; maximum is 200.
 For reverse address inputs to `POST /v2/lookup` whose relation set maps directly
@@ -604,8 +627,13 @@ results therefore answer which supported names an address holds. This
 deliberately narrows earlier behavior, which listed unsupported names and left
 the caller to read the reason; per-name unsupported detail now lives on the
 name-shaped routes and diagnostics, which read the row directly.
-`GET /v2/addresses/{address}/names` is the exception and is unchanged: it lists
-unsupported rows. It does not carry a per-row reason; read the reason from the
+`GET /v2/addresses/{address}/names` is the exception: it lists an unsupported
+row when the matching current address relation is provable but other coverage
+for that name is unsupported. Once the [per-name ownership
+rule](consumer-capabilities.md#ensv1ensv2-mixed-history-ownership) is activated,
+a name with no provable current authority has no provable current address
+relation and is therefore structurally absent from this collection.
+Listed unsupported rows do not carry a per-row reason; read the reason from the
 name-shaped routes or diagnostics for the name in question.
 
 ## Error Model

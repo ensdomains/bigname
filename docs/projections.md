@@ -50,6 +50,17 @@ outcomes, or durable traces.
   facts, adapter internals, provider data, or a newer projection.
 - Resource-keyed projections consume an event only when its `resource_id`
   resolves to a readable identity row.
+- Project stages only ordinary or `consumer_visibility=activated` interpreted
+  input. It excludes candidate normalized events and never reads the planned
+  `migration_event_associations` or candidate identity/discovery effect tables.
+  Candidate effects therefore cannot change the materialized identity rows that
+  builders join. An independently admitted ordinary event remains activated and
+  byte-for-byte unchanged when an ENSv1→ENSv2 correlation references it; only
+  the ignored association row carries the candidate relationship.
+- The independently admitted `registry_announcement` edge for an ENSv1→ENSv2
+  migration-created registry remains ordinary because it drives the watch plan,
+  not a product projection. Project still ignores its
+  `migration_discovery_associations` row and every candidate downstream effect.
 - Coverage and support are explicit. They are never inferred from row presence
   or a historical ingest range.
 - Verified provider answers are request-scoped lookup output, not projection
@@ -128,10 +139,47 @@ there.[^v1-registry-l45][^v1-registry-l82][^v2-events-l49][^v2-events-l75]
 
 ## History
 
-History routes read normalized events, not a current projection cache. Surface,
-resource, and address scopes are filters over the same canonical event set.
-Projection rows may supply readable names for result decoration, but the API
-does not synthesize history from current state.
+History routes read normalized events, not a current projection cache. Product
+surface, resource, and address scopes filter the same canonical,
+consumer-visible event set: ordinary rows and
+`consumer_visibility=activated` rows only. Candidate rows and
+`migration_event_associations` remain available to diagnostics. An association
+never removes or duplicates the independently admitted ordinary event it
+references. The
+visibility predicate is applied in storage selection before
+address-anchor derivation, selector construction, cursor validation, summary
+calculation, type filtering, keyset pagination, page-size limiting, or cursor
+construction, so candidate admission cannot broaden, shorten, or reorder a
+product page. Projection rows may supply readable names for result decoration,
+but the API does not synthesize history from current state.
+
+For a slice-1 test re-walk that must not change product behavior at a fixed
+readable chain head, an outstanding product cursor backed by normalized-event
+identity must continue against the post-re-walk test publication. It resumes at
+the same
+normalized-event keyset anchor and preserves all remaining product rows, pages,
+fields, `has_more`, and summary behavior. The anchor may be an unmapped event,
+so an interleaved non-product event at a page boundary must not skip or duplicate
+visible rows. A diagnostic-events cursor must remain valid and continue from the
+same stable normalized-event anchor, but its subsequent diagnostic rows and
+fields may reflect candidate admission. A pre-existing diagnostic row's numeric
+`normalized_event_id` may change while its `event_identity` and pre-existing
+semantic fields remain stable. Storage may preserve the numeric
+normalized-event ID or resolve the old token through stable `event_identity` and
+its stored sort tuple; these are alternative strategies. Fresh post-re-walk
+cursor bytes may differ, and fresh cursors must also continue normally. The
+control and candidate test runs hold every other shared-boundary input
+constant, including PR #391's topology serializer.
+
+Slices 1 and 2 deploy together with
+[PR #391](https://github.com/ensdomains/bigname/pull/391) at one planned
+[re-derivation boundary](glossary.md#re-derivation-boundary) under one
+[interpreter content
+hash](glossary.md#interpreter-content-hash), one full source
+re-walk, and one Project publication decision for `ethereum-sepolia`. The
+candidate filters above are exercised by replay and acceptance tests;
+production makes only the activated Project publication. Other
+chains retain independent publication decisions.
 
 ## Permissions
 

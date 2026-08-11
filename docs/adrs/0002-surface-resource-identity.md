@@ -33,6 +33,32 @@ Contract-instance rules:
 - represent continuity between distinct contract instances with `migration` edges in the manifest/discovery graph
 - resolve discovery and watch-plan lookup from `(chain, address, point in time)` to `contract_instance_id`; raw addresses are attributes used for lookup, not graph identity
 
+### Discovery-edge observation identity
+
+- [`logical_edge_identity`](../glossary.md#logical-discovery-edge-identity) is
+  the rebuild-stable identity of one fact-derived discovery-edge epoch. A
+  sequence-assigned database `discovery_edge_id` is only
+  a local join key and never enters this identity.
+- For `registry_announcement`, encode the following ordered text fields:
+  `chain_id`, `edge_kind`, canonical lower-case hyphenated
+  `from_contract_instance_id`, canonical lower-case hyphenated
+  `to_contract_instance_id`, `discovery_source`, `admission_basis`, the source
+  manifest's `namespace`, `source_family`, `chain_id`, `deployment_label`, and
+  decimal `manifest_version`, followed by `observation_key` and decimal
+  `active_from_block_number`, lower-case `active_from_block_hash`, decimal
+  transaction index, and decimal log index. Decimal integers have no leading
+  zero except the value zero itself.
+- Serialize each field as its four-byte unsigned big-endian UTF-8 byte length
+  followed by those UTF-8 bytes. Prefix the concatenation with the ASCII domain
+  separator `bigname:discovery-edge:v1\0`, hash it with Keccak-256, and render
+  the result as lower-case `0x`-prefixed 32-byte hex. This value is
+  `logical_edge_identity`.
+- The five-field source-manifest tuple is the schema's unique semantic manifest
+  key. Using it rather than sequence-assigned `source_manifest_id` makes the
+  manifest component stable across an empty-schema rebuild. A replay of the same
+  edge observation therefore reproduces the same logical identity even when its
+  local database IDs change.
+
 Public identity rules:
 
 - exact lookup is surface-first and keyed by `logical_name_id`

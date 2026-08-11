@@ -39,8 +39,11 @@ The physical layers are:
 5. current projections — name, relation, child, permission, resolver, record,
    and primary-name read models.
 
-The first four layers are inputs to Project. Current projections can be rebuilt
-from canonical identity and normalized events. Canonical-head
+The first four layers are inputs to Project, but ENSv1→ENSv2
+migration-correlated contributions marked `consumer_visibility=candidate` are
+diagnostic input only until their contracted consumer activation. Current
+projections can be rebuilt from canonical consumer-visible identity and
+normalized events. Canonical-head
 [hydration](glossary.md#hydration) is execution-derived enrichment applied by
 Project to the documented record and primary-name surfaces after event-derived
 publication.
@@ -73,13 +76,131 @@ state; it is never identity.
 | `label_preimages` | Interpret and `phase-runner label-preimages import-ens-rainbow` | Verified labelhash-to-label observations from chain events and the proof-checked rainbow import. |
 | `ens_names` | operator rainbow load | Unverified rainbow-table candidates consumed by the import command. |
 | `normalized_events` | Interpret | Protocol events normalized transactionally with identity output. |
+| `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` (planned) | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or discovery edges. The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
 | `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner | Phase progress, repair work, and runtime liveness. |
+| `project_generation_failures` (planned) | phase runner after Project rollback | Append-only audit evidence for a projection-blocking invariant failure; never a product projection. |
 | `resolution_divergences` | guarded lookup functions | Active live/indexed resolver disagreements; diagnostic only. |
 
 Adapters provide interpretation behavior. They do not write projections. API
 code reads projections and lookup output only, except for the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) write.
+
+### ENSv1→ENSv2 correlation visibility
+
+The planned ENSv1→ENSv2 intake persists the
+[migration correlation group](glossary.md#migration-correlation-group) without
+making it consumer-authoritative. A normalized event whose existence depends on
+that correlation stores top-level `migration_correlation_ids` and
+`consumer_visibility`. Ordinary events default to an empty ID set and
+`activated`; a correlation-dependent event has a sorted, duplicate-free,
+nonempty ID set and is `candidate` in slice 1 or `activated` in slice 2.
+`MigrationApplied` has exactly one ID. A shared correlation-dependent event
+keeps one event identity and lists every participating per-name ID; a
+name-independent registrar controller event has one stable
+`controller_configuration` derivation-group ID.
+
+Independent admission takes precedence over correlation visibility. If an
+existing manifest and discovery path already produces a normalized event without
+the ENSv1→ENSv2 correlation, Interpret reproduces that ordinary event
+byte-for-byte: its event identity, payload, provenance, and `activated`
+visibility do not change. Interpret records the candidate relationship in a
+separate `migration_event_associations` row keyed to the ordinary event identity,
+with the sorted correlation ID set, `correlation_kind`, evidence references,
+chain positions, canonicality, and `consumer_visibility=candidate`. Correlation
+never duplicates, suppresses, or reclassifies the independently admitted event.
+Project and product history readers ignore the association row; diagnostics may
+join it to the ordinary event.
+
+Slice 1 applies the same precedence to identity and discovery, with one explicit
+intake carveout. A migration-created registry's independently admitted
+`registry_announcement` edge remains an ordinary discovery row, active from the
+announcement position, because it records indexability only and the watch plan
+traverses it. Interpret attaches the `migration_registry_creation` candidate
+relationship in `migration_discovery_associations`, keyed to that ordinary edge;
+the association does not change the edge's columns or active range and is never
+Project input. Correlation-dependent parent, topology, identity, role,
+registration, renewal, and normalized-event effects from the watched registry
+remain candidate until activation. Association with the migration group is not
+sufficient to reclassify an effect that the ordinary edge and raw event produce
+without that association; independently derivable existing-family output remains
+ordinary.
+
+Each `migration_discovery_associations` row keys identity by the tuple
+([`logical_edge_identity`](glossary.md#logical-discovery-edge-identity),
+`migration_correlation_id`), never by the sequence-
+assigned `discovery_edge_id`. `logical_edge_identity` uses the exact canonical
+tuple, length-prefix encoding, domain separator, and Keccak-256 representation
+in [ADR 0002](adrs/0002-surface-resource-identity.md#discovery-edge-observation-identity). The row may
+retain the current numeric edge ID as a foreign-key join accelerator, but a full
+schema rebuild rebinds that value without changing association identity. The row stores
+`correlation_kind=migration_registry_creation`, the announcement position,
+complete evidence references, canonicality anchors, `consumer_visibility`, and
+the interpreter content hash. A reorg retains the association as diagnostic
+evidence under its original lineage but excludes it from current correlation
+state when either the ordinary edge or cited evidence is unreadable. On an
+Interpret restart, the input loader restores readable associations for active
+ordinary announcement edges before folding later facts from those registries.
+Full replay restages the association before its downstream effects; replaying
+the same evidence produces the same key and payload, with candidate or activated
+visibility derived under the current interpreter content hash.
+
+Other candidate identity or discovery values do not merge into ordinary
+materialized rows. Interpret writes correlation-versioned
+`migration_candidate_identity_effects` and
+`migration_candidate_discovery_effects` rows containing the proposed stable
+identity or edge key, complete proposed value/range delta, sorted correlation ID
+set, `correlation_kind`, evidence references, chain positions, canonicality, and
+`consumer_visibility=candidate`. Those diagnostic rows are not Project input
+and cannot update an ordinary row's columns, provenance, `active_from`, or
+`active_to`. An independently activated ordinary identity or discovery row is
+therefore byte-for-byte unchanged by candidate evidence. Slice 1 also writes no
+ENSv1→ENSv2 migration-driven predecessor close or successor open to
+`surface_bindings`.
+
+Consumer activation is a re-derivation semantic, not an in-place serving flag.
+Slice 2 rotates the interpreter content hash and performs the planned full
+Interpret walk, reproducing stable correlation IDs and event identities while
+replacing candidate normalized events and diagnostic effect rows with activated
+normalized events and ordinary materialized identity/discovery output. It
+re-derives `migration_event_associations` and
+`migration_discovery_associations` as activated diagnostics without rewriting
+their independently admitted normalized events or ordinary registry-announcement
+edges. Only an
+`authority_transition` group derives the deferred `SurfaceBinding` transition;
+other group kinds cannot change a binding or authority epoch. The downstream
+full Project walk adopts only that one hash and publishes one coherent Project
+result. A partial candidate and activated mixture is invalid.
+
+The separately reviewed and separately merged slice-1 and slice-2 implementation
+PRs deploy together at one planned [re-derivation
+boundary](glossary.md#re-derivation-boundary), alongside
+[PR #391](https://github.com/ensdomains/bigname/pull/391). The deployment adopts
+one interpreter content hash, performs one full source re-walk, and makes one
+Project publication decision for `ethereum-sepolia`.
+Other chains retain independent publication decisions. Candidate
+and activated forms remain distinct replay and acceptance-test inputs, but there
+is no production interval that serves candidate-only data on the migration
+target chain for ENSv1→ENSv2 migration. The ordinary announcement edge prevents
+an intake gap in the restart, historical-replay, and live-follow boundary
+fixtures.
+
+For normalized-event-backed product collections, the slice-1 test re-walk must
+also preserve outstanding cursor continuation at a fixed readable chain head.
+A cursor issued before the re-walk must resume after publication at the same
+normalized-event keyset anchor and preserve every remaining product row, page,
+field, `has_more`, and summary result. The anchor may be an unmapped event, so an
+interleaved non-product event at a page boundary must not skip or duplicate a
+visible row. A diagnostic-events cursor must also remain valid and continue from
+the same stable normalized-event anchor, although its remaining rows and fields
+may reflect candidate admission. A pre-existing diagnostic row's numeric
+`normalized_event_id` may change while its `event_identity` and pre-existing
+semantic fields remain stable. Storage may preserve the numeric normalized-
+event ID or resolve the old token through stable `event_identity` plus its stored
+sort tuple; these are alternative strategies. Newly issued cursor bytes need
+not match their earlier values.
+The control and candidate test runs hold every other shared-boundary input
+constant, including PR #391's topology serialization.
 
 ## Raw facts and payload retention
 
@@ -177,6 +298,12 @@ Interpretation is deterministic for a fixed manifest set, interpreter content
 hash, canonical raw facts, and requested block range. A bounded Interpret redo
 may replace only derived identity, discovery, and normalized-event output in
 that range. Raw facts are never edited by replay.
+
+The ENSv1→ENSv2 `consumer_visibility` rule is included in the interpreter
+content hash. Replaying one fixed hash reproduces the same correlation sets,
+visibility, event identities, and payloads. Changing candidate groups to
+activated groups therefore invalidates the full interpreted range and downstream
+Project range; it is never a row-local patch or API-only configuration change.
 
 Interpret redo proves raw-data presence without pretending that Live extended
 each finite ingest source. Each `ingest_cursors` row proves that the source
@@ -314,6 +441,20 @@ canonical interpreted input, stages rows in connection-local tables, and
 publishes the affected projection set transactionally. It has no legacy claim
 queue, durable replay stage tables, apply cursors, dead-letter queue, database
 session version stamp, or worker heartbeat.
+
+Consumer slice 2 adds one diagnostic exception to durable staging, not to
+projection ownership. A post-reconciliation dual-current invariant makes the
+Project transaction return a structured failure before `publish::swap`; that
+transaction rolls back completely. The phase runner then appends one
+`project_generation_failures` audit row in a separate transaction. The row is
+keyed by chain, target block number/hash, interpreter content hash, and failure
+kind, and stores both binding/resource identities, the activated boundary event
+identity, every relevant block/transaction/log position, and the canonicality
+observed at failure. It marks the target generation not ready. A later reorg or
+successful generation never deletes the audit row: its recorded block hashes
+remain resolvable through lineage as canonical or orphaned, and a later success
+is a separate generation. Operator diagnostics may read this table; product
+routes may not.
 
 Projection rows carry:
 
