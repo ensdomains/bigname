@@ -2,10 +2,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_graphql::dataloader::Loader;
-use bigname_storage::{PhaseGraphqlRecordInventoryRow, load_phase_graphql_record_inventory_batch};
 use serde_json::Value;
 use sqlx::PgPool;
 use sqlx::types::Uuid;
+
+use super::record_inventory_query::{
+    PhaseGraphqlRecordInventoryRow, load_phase_graphql_record_inventory_batch,
+};
 
 /// DataLoader key for a resource's `record_inventory_current` row. A declared JSON version
 /// boundary is serialized when available to disambiguate multiple projected inventories.

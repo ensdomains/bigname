@@ -1,5 +1,4 @@
 use async_graphql::Result;
-use bigname_storage::{PhaseGraphqlNameCount, PhaseGraphqlNameListRow};
 
 use crate::{
     AppState,
@@ -13,6 +12,7 @@ use crate::{
 };
 
 use super::error::internal_error;
+use super::name_queries::{PhaseGraphqlNameCount, PhaseGraphqlNameListRow};
 
 const NAMESPACE: &str = "ens";
 

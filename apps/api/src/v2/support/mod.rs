@@ -26,7 +26,6 @@ pub(crate) const BASENAMES_NAMESPACE: &str = bigname_storage::BASENAMES_NAMESPAC
 const BASENAMES_COMPAT_SOURCE_CHAIN_ID: &str = bigname_storage::BASE_MAINNET_CHAIN_ID;
 const BASENAMES_COMPAT_TARGET_CHAIN_ID: &str = bigname_storage::ETHEREUM_MAINNET_CHAIN_ID;
 
-mod identity_facade;
 mod json;
 mod primary_name_live;
 mod primary_name_lookup;
@@ -39,14 +38,10 @@ mod record_keys;
 mod records;
 mod resolution_lookup;
 mod resolution_verified;
+mod reverse_identity;
 mod snapshots;
 pub(crate) mod status_freshness;
 
-#[cfg(test)]
-pub(crate) use identity_facade::primary_coherence_test_hooks as identity_facade_primary_coherence_test_hooks;
-#[cfg(test)]
-pub(crate) use identity_facade::test_hooks as identity_facade_count_test_hooks;
-pub(crate) use identity_facade::*;
 pub(crate) use json::*;
 pub(crate) use primary_name_live::*;
 pub(crate) use primary_name_lookup::*;
@@ -59,6 +54,11 @@ pub(crate) use record_keys::*;
 pub(crate) use records::*;
 pub(crate) use resolution_lookup::*;
 pub(crate) use resolution_verified::*;
+#[cfg(test)]
+pub(crate) use reverse_identity::primary_coherence_test_hooks as identity_facade_primary_coherence_test_hooks;
+#[cfg(test)]
+pub(crate) use reverse_identity::test_hooks as identity_facade_count_test_hooks;
+pub(crate) use reverse_identity::*;
 pub(crate) use snapshots::*;
 
 use super::format_timestamp;

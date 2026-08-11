@@ -1013,7 +1013,7 @@ async fn graphql_connection_count_snapshot_metadata_is_bounded() -> Result<()> {
     .execute(&database.lookup_pool)
     .await?;
 
-    let count = bigname_storage::count_phase_graphql_name_list(
+    let count = crate::graphql::count_phase_graphql_name_list(
         &database.lookup_pool,
         &bigname_storage::NameCurrentListFilter {
             namespace: Some("ens".to_owned()),

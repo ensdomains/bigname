@@ -2,8 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use sqlx::{PgPool, Row};
-use uuid::Uuid;
+use sqlx::{PgPool, Row, types::Uuid};
 
 pub type PhaseGraphqlRecordInventoryKey = (Uuid, Option<Value>);
 
@@ -33,6 +32,8 @@ pub async fn load_phase_graphql_record_inventory_batch(
         return Ok(Vec::new());
     }
 
+    // Keep this route SQL intact: its predicate order differs from the reusable storage fragment,
+    // so sharing that fragment would change the query text.
     let rows = sqlx::query(
         r#"
         SELECT ric.resource_id, ric.record_version_boundary, ric.selectors, ric.entries,

@@ -12,11 +12,15 @@ mod error;
 mod http;
 mod inputs;
 mod loader;
+mod name_queries;
 mod objects;
 mod query;
+mod record_inventory_query;
 mod schema;
 mod snapshot;
 
+#[cfg(test)]
+pub(crate) use name_queries::count_phase_graphql_name_list;
 pub(crate) use schema::graphql_routes;
 #[cfg(test)]
 pub(crate) use schema::subgraph_sdl;

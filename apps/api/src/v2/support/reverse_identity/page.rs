@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
-use bigname_storage::{IdentityPrimaryNameSnapshot, ReverseIdentityStorageInput};
+use bigname_storage::{
+    IdentityPrimaryNameSnapshot, READABLE_REVERSE_IDENTITY_CTES, ReverseIdentityStorageInput,
+};
 use serde_json::{Map, Value};
 use sqlx::{PgPool, Row};
 
-use super::{READABLE_REVERSE_IDENTITY_CTES, ReverseIdentityPageRow, roles_storage_value};
+use super::{ReverseIdentityPageRow, roles_storage_value};
 
 pub(super) async fn load_reverse_identity_page_rows(
     pool: &PgPool,

@@ -1,8 +1,9 @@
-use bigname_storage::{NameCurrentListRow, PhaseGraphqlRecordInventoryRow};
+use bigname_storage::NameCurrentListRow;
 use serde_json::Value;
 use sqlx::types::time::OffsetDateTime;
 
 use super::objects::{AddressRecord, Domain, Resolver};
+use super::record_inventory_query::PhaseGraphqlRecordInventoryRow;
 
 /// Non-null `owner` fallback for ownerless names (all-zero address).
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";

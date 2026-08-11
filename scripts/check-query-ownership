@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+storage_graphql_paths="$(
+  find crates/storage/src -type f -name 'graphql_*.rs' -print | sort
+)"
+storage_graphql_modules="$(
+  rg -n \
+    '^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?mod[[:space:]]+graphql_[[:alnum:]_]+[[:space:]]*;' \
+    crates/storage/src --glob '*.rs' || true
+)"
+
+# API modules whose names match this storage-owned read pattern claim the wrong boundary.
+# `snapshots` is intentionally not part of the pattern: API helpers there confirm one request reads
+# against an unchanged selected chain position.
+api_storage_read_paths="$(
+  find apps/api/src -type f -print \
+    | rg '/(canonicality|database_invariants|identity_facade|[[:alnum:]_]+_reads)(\.rs|/mod\.rs)$' \
+    | sort || true
+)"
+api_storage_read_modules="$(
+  rg -n \
+    '^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?mod[[:space:]]+(canonicality|database_invariants|identity_facade|[[:alnum:]_]+_reads)[[:space:]]*;' \
+    apps/api/src --glob '*.rs' || true
+)"
+
+if [[ -n "$storage_graphql_paths" || -n "$storage_graphql_modules" \
+   || -n "$api_storage_read_paths" || -n "$api_storage_read_modules" ]]; then
+  printf '%s\n' 'query ownership check failed:' >&2
+  if [[ -n "$storage_graphql_paths" ]]; then
+    printf '%s\n%s\n' 'GraphQL-named files belong in apps/api:' "$storage_graphql_paths" >&2
+  fi
+  if [[ -n "$storage_graphql_modules" ]]; then
+    printf '%s\n%s\n' 'GraphQL-named storage module declarations are forbidden:' \
+      "$storage_graphql_modules" >&2
+  fi
+  if [[ -n "$api_storage_read_paths" ]]; then
+    printf '%s\n%s\n' 'Storage-owned read-pattern paths are forbidden in apps/api:' \
+      "$api_storage_read_paths" >&2
+  fi
+  if [[ -n "$api_storage_read_modules" ]]; then
+    printf '%s\n%s\n' 'Storage-owned read-pattern module declarations are forbidden in apps/api:' \
+      "$api_storage_read_modules" >&2
+  fi
+  exit 1
+fi
+
+printf '%s\n' 'query ownership check passed'

@@ -63,6 +63,9 @@ jobs:
             ./scripts/check-rust-file-size
           fi
 
+      - name: API/storage query ownership
+        run: ./scripts/check-query-ownership
+
       - name: Migration version guard
         run: ./scripts/check-migration-versions
 
