@@ -107,6 +107,7 @@ fn v2_resolver_include_controls_overview_sections_and_rejects_unknown() {
             }
         ])
     );
+    // One resolver-scoped permission row grants both powers, so its row count is one.
     assert_eq!(
         value["roles"],
         json!([

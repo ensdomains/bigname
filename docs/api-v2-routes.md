@@ -934,10 +934,14 @@ Field ownership:
   current alias-event rows and preserve each group’s stable order, and
   role-holder samples sort by address.
   `include=roles` items are `{address, registration_count, permission_count,
-  powers}`; the former embedded `registration_ids` list is omitted because it
-  was itself unbounded, and permission rows remain queryable through
-  `GET /v2/permissions` using the returned addresses. The resolver arrays are
-  not independently pageable. This bounded-sample contract is
+  powers}`. `registration_count` is the number of distinct registrations with
+  resolver-scoped permission rows for the role address. `permission_count` is
+  the number of those permission rows, not the number of powers expanded from
+  them; a row granting multiple powers counts once. The former embedded
+  `registration_ids` list is omitted because it was itself unbounded, and
+  permission rows remain queryable through `GET /v2/permissions` using the
+  returned addresses. The resolver arrays are not independently pageable. This
+  bounded-sample contract is
   the consumer-visible resolver-overview shape change delivered with
   [issue #401](https://github.com/ensdomains/bigname/issues/401); clients must
   not interpret an included array as exhaustive when its total count is
