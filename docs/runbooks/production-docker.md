@@ -205,9 +205,10 @@ Route from the first confirmed symptom:
 - rollback requires an older binary, deleted schema, or restored data ->
   [follow the rollback boundary](#rollback).
 
-Use the exact Compose file set deployed on the host for every recovery command.
-Replace `<compose-files>` below with one of these sets, retaining every active
-overlay:
+Use the exact Compose file set deployed on the host for every recovery command,
+retaining every active overlay. Replace `<compose-files>` below with that exact
+set. The tracked baselines look like these; append any host-local overlays in
+their deployed order:
 
 - internal: `-f docker-compose.server.yml`;
 - public: `-f docker-compose.server.yml -f docker-compose.public.yml`;
@@ -289,14 +290,21 @@ error while another chain continues running.
    Interpret head. Keep the long-running phase runner stopped. Interpret treats
    later rows as potentially dependent on earlier rows, so it replays from
    `<from>` through the recorded head and stamps the matching Project repair.
-   Pin the one-shot container to `<recovery-image>`:
+   Pin the one-shot container to `<recovery-image>`. Copy every source
+   descriptor for the affected chain exactly from the deployed configuration
+   and repeat `--source` once for each descriptor. Each descriptor has the
+   `CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV` form. The explicit arguments
+   override the multi-chain `BIGNAME_PHASE_RUNNER_SOURCES` value for this
+   one-off redo:
 
    ```sh
    BIGNAME_IMAGE=<recovery-image> \
      docker compose --env-file .env.server \
      <compose-files> run --rm --pull never phase-runner \
      phase-runner redo --chain <chain-id> --phase interpret \
-     --from-block <from> --to-block <recorded-interpret-head>
+     --from-block <from> --to-block <recorded-interpret-head> \
+     --source <affected-chain-source> \
+     [--source <additional-affected-chain-source> ...]
    ```
 
 7. If the mismatch reproduces during the redo, keep the phase runner stopped
