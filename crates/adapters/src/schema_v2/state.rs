@@ -1,8 +1,8 @@
 use imbl::{ordmap::OrdMap, ordset::OrdSet};
-use serde_json::{Value, json};
+use serde_json::Value;
 use uuid::Uuid;
 
-use super::state_key::interpreter_state_key;
+use super::state_residency::{StateCacheCapacity, StateResidency};
 
 #[path = "state_topology.rs"]
 mod topology;
@@ -62,7 +62,8 @@ pub(super) struct V1Release {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct State {
-    values: OrdMap<String, Value>,
+    pub(super) values: StateResidency,
+    pub(super) provisional_values: OrdMap<String, Value>,
     v1_names: OrdMap<String, V1NameState>,
     v1_wrapper_data: OrdMap<String, V1WrapperData>,
     v1_registrars: OrdMap<String, V1NameState>,
@@ -532,7 +533,6 @@ impl State {
         }
         releases
     }
-
     fn update_v1_expiry_index(
         &mut self,
         registrar_key: &str,
@@ -549,39 +549,6 @@ impl State {
         if let Some(current) = current {
             self.v1_expiries.insert((current, registrar_key.to_owned()));
         }
-    }
-
-    /// Per-state-key `after_state` tails of the retained event stream, used to seed the
-    /// post-reconciliation before-state re-thread.
-    pub(super) fn value_tails(&self) -> &OrdMap<String, Value> {
-        &self.values
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn transition(
-        &mut self,
-        namespace: &str,
-        logical_name_id: Option<&str>,
-        resource_id: Option<Uuid>,
-        event_kind: &str,
-        source_family: &str,
-        state_scope: &str,
-        explicit_before: Option<Value>,
-        after: Value,
-    ) -> Value {
-        let key = interpreter_state_key(
-            namespace,
-            logical_name_id,
-            resource_id,
-            event_kind,
-            source_family,
-            state_scope,
-        );
-        let before = explicit_before
-            .or_else(|| self.values.get(&key).cloned())
-            .unwrap_or_else(|| json!({}));
-        self.values.insert(key, after);
-        before
     }
 }
 

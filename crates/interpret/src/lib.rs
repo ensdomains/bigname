@@ -6,7 +6,9 @@ mod load;
 mod recompute;
 mod write;
 
-pub use engine::{BatchOutcome, BatchRequest, Engine, Marker, RunMode};
+pub use engine::{
+    BatchOutcome, BatchRequest, DEFAULT_INTERPRETER_STATE_CACHE_ENTRIES, Engine, Marker, RunMode,
+};
 pub use error::{ErrorKind, InterpretError, Result};
 pub use recompute::{RecomputeSummary, finalize_recompute_flags};
 

@@ -1,9 +1,11 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use anyhow::{Context, bail};
 use serde_json::{Value, json};
 
 use super::{
     BatchInput, BatchOutput, RawLogInput, catalog::Catalog, seam::INTERPRETER_STATE_KEY,
-    state::State,
+    state::State, state_residency::StateCacheCapacity,
 };
 
 /// Opaque retained adapter state that can be moved into the next batch for the same chain.
@@ -11,6 +13,117 @@ use super::{
 pub struct AdapterSession {
     chain_id: String,
     state: State,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InterpreterStateValue {
+    pub state_key: String,
+    pub after_state: Value,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InterpreterStateRequest {
+    pub state_key: String,
+}
+
+pub struct PreparedAdapterBatch {
+    chain_id: String,
+    blocks: Vec<super::RawBlockInput>,
+    output: BatchOutput,
+    committed_state: State,
+    prior_tails: BTreeMap<String, Value>,
+    state_value_requests: Vec<InterpreterStateRequest>,
+}
+
+pub struct AdapterSessionRestore {
+    chain_id: String,
+    state: State,
+}
+
+impl AdapterSessionRestore {
+    pub fn apply_prior_events(
+        &mut self,
+        events: Vec<super::PriorEventInput>,
+    ) -> anyhow::Result<()> {
+        if let Some(event) = events.iter().find(|event| event.chain_id != self.chain_id) {
+            bail!(
+                "restored event for chain {} cannot enter adapter session for chain {}",
+                event.chain_id,
+                self.chain_id
+            );
+        }
+        self.state.restore_prior_event_chunk(events);
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> AdapterSession {
+        self.state.finish_prior_event_restore();
+        AdapterSession {
+            chain_id: self.chain_id,
+            state: self.state,
+        }
+    }
+}
+
+pub fn begin_schema_v2_adapter_restore(
+    chain_id: String,
+    manifests: Vec<super::ManifestInput>,
+    discovery_rules: Vec<super::DiscoveryRuleInput>,
+    admissions: Vec<super::AddressAdmissionInput>,
+    cache_capacity: StateCacheCapacity,
+) -> anyhow::Result<AdapterSessionRestore> {
+    let catalog = Catalog::new(manifests, discovery_rules, admissions)?;
+    Ok(AdapterSessionRestore {
+        chain_id,
+        state: State::with_cache_capacity(Vec::new(), catalog.v2_suffix_anchors(), cache_capacity),
+    })
+}
+
+impl PreparedAdapterBatch {
+    pub fn state_value_requests(&self) -> &[InterpreterStateRequest] {
+        &self.state_value_requests
+    }
+
+    pub fn finish(
+        mut self,
+        loaded: Vec<InterpreterStateValue>,
+    ) -> anyhow::Result<(BatchOutput, AdapterSession)> {
+        let expected = self
+            .state_value_requests
+            .iter()
+            .map(|request| request.state_key.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut supplied = BTreeSet::new();
+        for value in loaded {
+            if !expected.contains(value.state_key.as_str()) {
+                bail!(
+                    "loaded interpreter state key {} was not requested by the adapter",
+                    value.state_key
+                );
+            }
+            if !supplied.insert(value.state_key.clone()) {
+                bail!(
+                    "loaded interpreter state key {} more than once",
+                    value.state_key
+                );
+            }
+            self.prior_tails.insert(value.state_key, value.after_state);
+        }
+        rethread_before_states(&mut self.output, self.prior_tails);
+        let delta = super::seam::fold_prior_events(
+            Vec::new(),
+            &self.output.normalized_events,
+            &self.blocks,
+        )?;
+        self.committed_state.apply_prior_event_delta(delta);
+        Ok((
+            self.output,
+            AdapterSession {
+                chain_id: self.chain_id,
+                state: self.committed_state,
+            },
+        ))
+    }
 }
 
 pub fn interpret_schema_v2_batch(input: BatchInput) -> anyhow::Result<BatchOutput> {
@@ -46,7 +159,15 @@ fn interpret_fresh(input: BatchInput) -> anyhow::Result<BatchOutput> {
     } = input;
     let mut catalog = Catalog::new(manifests, discovery_rules, admissions)?;
     let mut state = State::new(prior_events, catalog.v2_suffix_anchors());
-    interpret_loaded(&mut catalog, &blocks, raw_logs, &mut state)
+    let mut output = interpret_loaded(&mut catalog, &blocks, raw_logs, &mut state)?;
+    let (prior_tails, missing) = required_prior_tails(&mut state, &output);
+    debug_assert!(
+        missing
+            .iter()
+            .all(|request| !prior_tails.contains_key(&request.state_key))
+    );
+    rethread_before_states(&mut output, prior_tails);
+    Ok(output)
 }
 
 /// Interprets one batch and returns the retained state to move into the next batch.
@@ -57,6 +178,16 @@ pub fn interpret_schema_v2_batch_incremental(
     input: BatchInput,
     session: Option<AdapterSession>,
 ) -> anyhow::Result<(BatchOutput, AdapterSession)> {
+    let prepared =
+        prepare_schema_v2_batch_incremental(input, session, StateCacheCapacity::Unlimited)?;
+    prepared.finish(Vec::new())
+}
+
+pub fn prepare_schema_v2_batch_incremental(
+    input: BatchInput,
+    session: Option<AdapterSession>,
+    cache_capacity: StateCacheCapacity,
+) -> anyhow::Result<PreparedAdapterBatch> {
     super::validate_order(&input)?;
     let BatchInput {
         chain_id,
@@ -84,21 +215,21 @@ pub fn interpret_schema_v2_batch_incremental(
             state.replace_v2_suffix_anchors(suffix_anchors);
             state
         }
-        None => State::new(prior_events, suffix_anchors),
+        None => State::with_cache_capacity(prior_events, suffix_anchors, cache_capacity),
     };
     // Reconciliation can discard provisional transitions. Interpret on a structurally shared
     // branch, then advance the retained state with only the normalized events that survived.
     let mut state = committed_state.clone();
     let output = interpret_loaded(&mut catalog, &blocks, raw_logs, &mut state)?;
-    let delta = super::seam::fold_prior_events(Vec::new(), &output.normalized_events, &blocks)?;
-    committed_state.apply_prior_event_delta(delta);
-    Ok((
+    let (prior_tails, state_value_requests) = required_prior_tails(&mut committed_state, &output);
+    Ok(PreparedAdapterBatch {
+        chain_id,
+        blocks,
         output,
-        AdapterSession {
-            chain_id,
-            state: committed_state,
-        },
-    ))
+        committed_state,
+        prior_tails,
+        state_value_requests,
+    })
 }
 
 fn interpret_loaded(
@@ -110,7 +241,7 @@ fn interpret_loaded(
     let mut output = BatchOutput::default();
     let mut migration_observations = Vec::new();
     let mut raw_logs = raw_logs.into_iter().peekable();
-    let prior_tails = state.value_tails().clone();
+    state.clear_provisional_values();
     for block in blocks {
         super::settle_block_boundary(catalog, block, state, &mut output)?;
         while raw_logs.peek().is_some_and(|raw| {
@@ -137,8 +268,36 @@ fn interpret_loaded(
     }
     super::protocol::reconcile_batch(&mut output);
     super::migration::correlate(catalog, migration_observations, &mut output)?;
-    rethread_before_states(&mut output, prior_tails);
     Ok(output)
+}
+
+fn required_prior_tails(
+    state: &mut State,
+    output: &BatchOutput,
+) -> (BTreeMap<String, Value>, Vec<InterpreterStateRequest>) {
+    let mut seen = BTreeSet::new();
+    let mut tails = BTreeMap::new();
+    let mut requests = Vec::new();
+    for event in &output.normalized_events {
+        let Some(state_key) = event
+            .raw_fact_ref
+            .get(INTERPRETER_STATE_KEY)
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        if !seen.insert(state_key.to_owned()) || event.before_state_explicit {
+            continue;
+        }
+        if let Some(value) = state.value_tail(state_key) {
+            tails.insert(state_key.to_owned(), value);
+        } else {
+            requests.push(InterpreterStateRequest {
+                state_key: state_key.to_owned(),
+            });
+        }
+    }
+    (tails, requests)
 }
 
 // Reconciliation can drop events or rewrite their interpreter state keys after in-memory
@@ -146,7 +305,7 @@ fn interpret_loaded(
 // stream-chained before_state from the surviving rows so the emitted stream — and nothing else —
 // determines what each event observes, keeping the output independent of where batch boundaries
 // fall.
-fn rethread_before_states(output: &mut BatchOutput, prior_tails: imbl::OrdMap<String, Value>) {
+fn rethread_before_states(output: &mut BatchOutput, prior_tails: BTreeMap<String, Value>) {
     let mut tails = prior_tails;
     for event in &mut output.normalized_events {
         let Some(state_key) = event
