@@ -162,6 +162,23 @@ pub async fn load_watch_filter(
     from_block: i64,
     to_block: i64,
 ) -> Result<WatchFilter> {
+    let mut filter = load_persisted_watch_filter(pool, chain_id, from_block, to_block).await?;
+    if let Some(announcement_topic0) = filter.registry_announcement_topic0().map(str::to_owned) {
+        let announcements =
+            announcements::canonical(pool, chain_id, to_block, &announcement_topic0).await?;
+        filter.admit_registry_announcements(announcements, from_block, to_block);
+    }
+    Ok(filter)
+}
+
+/// Loads manifest declarations and persisted discovery edges without supplementing the result
+/// from retained announcement logs in the requested window.
+pub async fn load_persisted_watch_filter(
+    pool: &PgPool,
+    chain_id: &str,
+    from_block: i64,
+    to_block: i64,
+) -> Result<WatchFilter> {
     let payloads: Vec<(i64, String)> = sqlx::query_as(
         "
         SELECT manifest_id, manifest_payload::text
@@ -419,16 +436,11 @@ pub async fn load_watch_filter(
             })
         })
         .collect();
-    let mut filter = WatchFilter {
+    let filter = WatchFilter {
         address_ranges,
         all_emitter_ranges,
         registry_announcements,
     };
-    if filter.registry_announcements.is_some() {
-        let announcements =
-            announcements::canonical(pool, chain_id, to_block, &announcement_topic0).await?;
-        filter.admit_registry_announcements(announcements, from_block, to_block);
-    }
     Ok(filter)
 }
 

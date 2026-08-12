@@ -114,8 +114,29 @@ apply_baseline() {
     done
 }
 
+# A schema-migration database can exist before phase-runner installs the phase
+# baseline. Every slice-1 migration must be a no-op on that empty path.
+for migration_file in \
+    "$ROOT/migrations/20260811120000_ens_v2_migration_slice_1.sql" \
+    "$ROOT/migrations/20260811120100_ens_v2_migration_slice_1_validate.sql" \
+    "$ROOT/migrations/20260811120200_ens_v2_migration_slice_1_constraints.sql"
+do
+    sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
+done
+
 apply_baseline
 apply_baseline
+
+# TestDatabase installs the current baseline before SQLx applies reviewed
+# migrations. The same three files must be idempotent on that baseline-first
+# path, including the validation and metadata-swap steps.
+for migration_file in \
+    "$ROOT/migrations/20260811120000_ens_v2_migration_slice_1.sql" \
+    "$ROOT/migrations/20260811120100_ens_v2_migration_slice_1_validate.sql" \
+    "$ROOT/migrations/20260811120200_ens_v2_migration_slice_1_constraints.sql"
+do
+    sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
+done
 
 # Exercise the initialized-schema upgrade against the preceding closed
 # vocabularies. Rewrite only the qualified schema name so the checked-in
@@ -254,6 +275,81 @@ $$;
 SQL
 } | run_psql
 
+# Exercise the ENSv1-to-ENSv2 vocabulary upgrade from the exact preceding
+# normalized-event shape. This catches deployed-schema drift independently of
+# the idempotent fresh-install baseline check above.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+DROP TABLE migration_candidate_discovery_effects;
+DROP TABLE migration_candidate_identity_effects;
+DROP TABLE migration_discovery_associations;
+DROP TABLE migration_event_associations;
+ALTER TABLE normalized_events
+    DROP CONSTRAINT normalized_events_event_kind_check,
+    DROP CONSTRAINT normalized_events_derivation_kind_check,
+    DROP CONSTRAINT normalized_events_migration_correlation_ids_check,
+    DROP CONSTRAINT normalized_events_consumer_visibility_check,
+    DROP CONSTRAINT normalized_events_candidate_correlation_check,
+    DROP COLUMN migration_correlation_ids,
+    DROP COLUMN consumer_visibility,
+    ADD CONSTRAINT normalized_events_event_kind_check
+        CHECK (
+            event_kind IN (
+                'AliasChanged',
+                'AuthorityEpochChanged',
+                'AuthorityTransferred',
+                'ExpiryChanged',
+                'ParentChanged',
+                'PermissionChanged',
+                'PermissionScopeChanged',
+                'PreimageObserved',
+                'RecordChanged',
+                'RecordVersionChanged',
+                'RegistrarNameRegistered',
+                'RegistrationGranted',
+                'RegistrationReleased',
+                'RegistrationRenewed',
+                'RegistrationReserved',
+                'RegistryCreated',
+                'ResolverChanged',
+                'ReverseChanged',
+                'RootPermissionChanged',
+                'SourceManifestUpdated',
+                'SubregistryChanged',
+                'SurfaceBound',
+                'SurfaceUnbound',
+                'TokenControlTransferred',
+                'TokenRegenerated',
+                'TokenResourceLinked',
+                'Upgraded'
+            )
+        ),
+    ADD CONSTRAINT normalized_events_derivation_kind_check
+        CHECK (
+            derivation_kind IN (
+                'ens_v1_reverse_claim',
+                'ens_v1_unwrapped_authority',
+                'ens_v2_permissions',
+                'ens_v2_registrar',
+                'ens_v2_registry_resource_surface',
+                'ens_v2_resolver',
+                'manifest_sync',
+                'proxy_upgrade',
+                'raw_log_preimage_observation'
+            )
+        );
+DROP FUNCTION migration_correlation_ids_valid(text[]);
+SQL
+    for migration_file in \
+        "$ROOT/migrations/20260811120000_ens_v2_migration_slice_1.sql" \
+        "$ROOT/migrations/20260811120100_ens_v2_migration_slice_1_validate.sql" \
+        "$ROOT/migrations/20260811120200_ens_v2_migration_slice_1_constraints.sql"
+    do
+        sed "s/bigname_phase/$scratch_schema/g" "$migration_file"
+    done
+} | run_psql
+
 # The production functions intentionally bind their SECURITY DEFINER lookups
 # to bigname_phase. Prove that contract before rebinding only this scratch
 # schema's copies so the remainder of this isolated harness can exercise them.
@@ -326,6 +422,10 @@ BEGIN
             ('manifest_discovery_rules'),
             ('manifest_authority_attestations'),
             ('manifest_versions'),
+            ('migration_candidate_discovery_effects'),
+            ('migration_candidate_identity_effects'),
+            ('migration_discovery_associations'),
+            ('migration_event_associations'),
             ('name_current'),
             ('name_surfaces'),
             ('normalized_events'),
@@ -374,6 +474,10 @@ BEGIN
             ('manifest_discovery_rules'),
             ('manifest_authority_attestations'),
             ('manifest_versions'),
+            ('migration_candidate_discovery_effects'),
+            ('migration_candidate_identity_effects'),
+            ('migration_discovery_associations'),
+            ('migration_event_associations'),
             ('name_current'),
             ('name_surfaces'),
             ('normalized_events'),
@@ -634,6 +738,16 @@ BEGIN
             )
         UNION ALL
         SELECT
+            'migration event associations retain missing normalized-event parents',
+            NOT EXISTS (
+                SELECT 1
+                FROM pg_constraint
+                WHERE conrelid = 'migration_event_associations'::regclass
+                  AND confrelid = 'normalized_events'::regclass
+                  AND contype = 'f'
+            )
+        UNION ALL
+        SELECT
             'receipt transaction positions match their transactions',
             EXISTS (
                 SELECT 1
@@ -736,6 +850,18 @@ BEGIN
                 (
                     'normalized_events',
                     'normalized_events_derivation_kind_check'
+                ),
+                (
+                    'normalized_events',
+                    'normalized_events_migration_correlation_ids_check'
+                ),
+                (
+                    'normalized_events',
+                    'normalized_events_consumer_visibility_check'
+                ),
+                (
+                    'normalized_events',
+                    'normalized_events_candidate_correlation_check'
                 ),
                 (
                     'permissions_current',
@@ -3573,6 +3699,31 @@ BEGIN
         source_family,
         manifest_version,
         chain_id,
+        derivation_kind,
+        migration_correlation_ids,
+        consumer_visibility
+    )
+    SELECT
+        'valid-migration-event-kind-' || event_kind,
+        'schema-v2-check',
+        event_kind,
+        'ens_v2_migration_l1',
+        1,
+        'schema-v2-check',
+        'ens_v2_migration',
+        ARRAY['migration-correlation-check'],
+        'candidate'
+    FROM unnest(
+        ARRAY['ContractDiscovered', 'MigrationApplied']
+    ) AS admitted(event_kind);
+
+    INSERT INTO normalized_events (
+        event_identity,
+        namespace,
+        event_kind,
+        source_family,
+        manifest_version,
+        chain_id,
         derivation_kind
     )
     SELECT
@@ -3587,6 +3738,7 @@ BEGIN
         ARRAY[
             'ens_v1_reverse_claim',
             'ens_v1_unwrapped_authority',
+            'ens_v2_migration',
             'ens_v2_permissions',
             'ens_v2_registrar',
             'ens_v2_registry_resource_surface',

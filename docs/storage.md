@@ -91,7 +91,7 @@ state; it is never identity.
 | `label_preimages` | Interpret and `phase-runner label-preimages import-ens-rainbow` | Verified labelhash-to-label observations from chain events and the proof-checked rainbow import. |
 | `ens_names` | operator rainbow load | Unverified rainbow-table candidates consumed by the import command. |
 | `normalized_events` | Interpret | Protocol events normalized transactionally with identity output. |
-| `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` (planned) | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or discovery edges. The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
+| `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or discovery edges. The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
 | `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner | Phase progress, repair work, and runtime liveness. |
 | `project_generation_failures` (planned) | phase runner after Project rollback | Append-only audit evidence for a projection-blocking invariant failure; never a product projection. |
@@ -103,7 +103,7 @@ code reads projections and lookup output only, except for the guarded
 
 ### ENSv1→ENSv2 correlation visibility
 
-The planned ENSv1→ENSv2 intake persists the
+The slice-1 ENSv1→ENSv2 intake persists the
 [migration correlation group](glossary.md#migration-correlation-group) without
 making it consumer-authoritative. A normalized event whose existence depends on
 that correlation stores top-level `migration_correlation_ids` and
@@ -124,8 +124,13 @@ separate `migration_event_associations` row keyed to the ordinary event identity
 with the sorted correlation ID set, `correlation_kind`, evidence references,
 chain positions, canonicality, and `consumer_visibility=candidate`. Correlation
 never duplicates, suppresses, or reclassifies the independently admitted event.
-Project and product history readers ignore the association row; diagnostics may
-join it to the ordinary event.
+The event identity is a plain value rather than a foreign key. A redo deletes
+normalized events in its range before replay, but retains association rows whose
+lineage is already orphaned as fork evidence; such a row may therefore have no
+normalized-event parent. Replay re-creates the canonical-path event under the
+same identity. Project and product history readers ignore association rows;
+diagnostic readers treat the normalized-event join as optional and can read a
+retained association from its own position and `chain_lineage` anchor.
 
 Slice 1 applies the same precedence to identity and discovery, with one explicit
 intake carveout. A migration-created registry's independently admitted

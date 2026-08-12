@@ -4,12 +4,24 @@ pub(super) fn push_history_source(
     builder: &mut QueryBuilder<'_, Postgres>,
     include_cursor_row: bool,
 ) {
+    push_history_source_with_visibility(builder, include_cursor_row, false);
+}
+
+pub(super) fn push_history_source_with_visibility(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    include_cursor_row: bool,
+    include_candidates: bool,
+) {
     builder.push(" FROM normalized_events ne ");
     if include_cursor_row {
         builder.push(" CROSS JOIN history_cursor_row cursor_row ");
     }
     push_history_lineage_join(builder);
-    builder.push(" WHERE TRUE ");
+    if include_candidates {
+        builder.push(" WHERE TRUE ");
+    } else {
+        builder.push(" WHERE ne.consumer_visibility = 'activated' ");
+    }
 }
 
 pub(super) fn push_history_lineage_join(builder: &mut QueryBuilder<'_, Postgres>) {

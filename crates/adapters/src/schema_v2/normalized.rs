@@ -81,6 +81,8 @@ pub(super) fn materialize(
             canonicality_state: raw.canonicality_state.clone(),
             before_state,
             after_state: draft.after_state,
+            migration_correlation_ids: Vec::new(),
+            consumer_visibility: "activated".to_owned(),
             before_state_explicit,
         });
     }
@@ -145,6 +147,8 @@ pub(super) fn materialize_boundary(
             canonicality_state: block.canonicality_state.clone(),
             before_state,
             after_state: draft.after_state,
+            migration_correlation_ids: Vec::new(),
+            consumer_visibility: "activated".to_owned(),
             before_state_explicit,
         });
     }
@@ -227,6 +231,8 @@ pub(super) fn preimage_event(
         canonicality_state: raw.canonicality_state.clone(),
         before_state: json!({}),
         after_state,
+        migration_correlation_ids: Vec::new(),
+        consumer_visibility: "activated".to_owned(),
         // Preimage observations never enter the interpreter state stream; their empty before is
         // fixed, so the re-thread must leave it alone.
         before_state_explicit: true,

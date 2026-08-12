@@ -9,6 +9,7 @@ mod common;
 mod discovery;
 mod identity;
 mod manifest;
+mod migration;
 mod model;
 mod normalized;
 mod protocol;

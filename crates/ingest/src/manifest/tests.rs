@@ -163,6 +163,63 @@ fn only_existing_generic_resolver_topics_are_selected_without_addresses() {
 }
 
 #[tokio::test]
+async fn persisted_registry_announcement_is_watched_before_window_supplement() -> AnyResult<()> {
+    let database = range_database("ingest_persisted_migration_registry_restart").await?;
+    let chain_id = "migration-registry-restart-chain";
+    let proxy = "0x00000000000000000000000000000000000000cc";
+    let from_id = insert_contract_instance(database.pool(), chain_id).await?;
+    let proxy_id = insert_contract_instance(database.pool(), chain_id).await?;
+    let manifest_id = insert_registry_watch_manifest(database.pool(), chain_id).await?;
+    sqlx::query(
+        "INSERT INTO contract_instance_addresses (
+             contract_instance_id, chain_id, address, active_from_block_number,
+             source_manifest_id, provenance
+         ) VALUES ($1, $2, $3, 10, $4, '{}'::jsonb)",
+    )
+    .bind(proxy_id)
+    .bind(chain_id)
+    .bind(proxy)
+    .bind(manifest_id)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO discovery_edges (
+             chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id,
+             discovery_source, admission_basis, source_manifest_id,
+             active_from_block_number, active_from_block_hash, canonicality_state,
+             provenance
+         ) VALUES (
+             $1, 'registry_announcement', $2, $3, 'RegistryCreated',
+             'reachable_from_root', $4, 10, $5, 'finalized',
+             '{\"transaction_index\":0,\"log_index\":4}'::jsonb
+         )",
+    )
+    .bind(chain_id)
+    .bind(from_id)
+    .bind(proxy_id)
+    .bind(manifest_id)
+    .bind(format!("0x{}", "33".repeat(32)))
+    .execute(database.pool())
+    .await?;
+
+    // This is the filter loaded at restart, before Ingest sees the new window and before the
+    // same-window announcement supplement can contribute an address.
+    let filter = load_persisted_watch_filter(database.pool(), chain_id, 11, 20).await?;
+    let parent_updated = format!(
+        "{}",
+        alloy_primitives::keccak256("ParentUpdated(address,string,address)".as_bytes())
+    );
+    assert!(filter.includes(proxy, &parent_updated, 11));
+    assert!(filter.queries().iter().any(|query| {
+        query.from_block == 11
+            && query.to_block == 20
+            && query.addresses == [proxy]
+            && query.topic0s.contains(&parent_updated)
+    }));
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn planner_rejects_inverted_declared_bounds_with_manifest_name() -> AnyResult<()> {
     let database = range_database("ingest_inverted_manifest_range").await?;
     let chain_id = "inverted-range-chain";
@@ -459,6 +516,7 @@ async fn range_database(name: &str) -> AnyResult<TestDatabase> {
     let database = TestDatabase::create(TestDatabaseConfig::new(name)).await?;
     for schema in [
         include_str!("../../../../schema-v2/baseline/01_chain.sql"),
+        include_str!("../../../../schema-v2/baseline/02_raw_facts.sql"),
         include_str!("../../../../schema-v2/baseline/03_identity.sql"),
         include_str!("../../../../schema-v2/baseline/04_manifests.sql"),
     ] {
@@ -527,6 +585,60 @@ async fn insert_manifest(
     )
     .bind(chain_id)
     .bind(file_path)
+    .bind(payload)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn insert_registry_watch_manifest(pool: &PgPool, chain_id: &str) -> AnyResult<i64> {
+    let payload = json!({
+        "manifest_version": 1,
+        "namespace": "ens",
+        "source_family": ENS_V2_REGISTRY_SOURCE_FAMILY,
+        "chain": chain_id,
+        "deployment_epoch": "migration-restart-fixture",
+        "rollout_status": "active",
+        "normalizer_version": "ensip15@ens-normalize-0.1.1",
+        "resolver_implementations": [],
+        "capability_flags": {},
+        "roots": [],
+        "contracts": [],
+        "discovery_rules": [{
+            "edge_kind": "registry_announcement",
+            "from_role": "registry",
+            "event": "RegistryCreated",
+            "admission": "reachable_from_root"
+        }],
+        "abi": {
+            "events": [
+                {
+                    "name": "RegistryCreated",
+                    "fragment": "event RegistryCreated()",
+                    "emitter_roles": [],
+                    "normalized_events": ["RegistryCreated"]
+                },
+                {
+                    "name": "ParentUpdated",
+                    "fragment": "event ParentUpdated(address indexed parent, string label, address indexed sender)",
+                    "emitter_roles": ["registry"],
+                    "normalized_events": ["ParentChanged"]
+                }
+            ],
+            "calls": []
+        }
+    });
+    Ok(sqlx::query_scalar(
+        "INSERT INTO manifest_versions (
+             manifest_version, namespace, source_family, chain_id,
+             deployment_label, rollout_status, normalizer_version,
+             file_path, manifest_payload
+         ) VALUES (
+             1, 'ens', $1, $2, 'migration-restart-fixture', 'active',
+             'ensip15@ens-normalize-0.1.1', 'tests/migration-restart.toml', $3
+         ) RETURNING manifest_id",
+    )
+    .bind(ENS_V2_REGISTRY_SOURCE_FAMILY)
+    .bind(chain_id)
     .bind(payload)
     .fetch_one(pool)
     .await?)

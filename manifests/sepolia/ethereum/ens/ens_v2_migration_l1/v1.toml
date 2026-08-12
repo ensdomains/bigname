@@ -1,0 +1,147 @@
+# ENSv1→ENSv2 migration facts for the post-audit Sepolia deployment.
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v2_migration_l1"
+chain = "ethereum-sepolia"
+deployment_epoch = "ens_v2_sepolia_post_audit"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+capability_flags = {}
+roots = []
+discovery_rules = []
+
+# Constructor argument 7 of the declared ETHRenewerV1 fixes the ENSv1
+# NameWrapper whose temporary BaseRegistrar controller envelope is correlated.
+# This is correlation metadata, not a declared/watch-active contract input.
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRenewerV1.json:L894 @ ens_v2@ccaeb58)
+[correlation_addresses]
+ens_v1_name_wrapper = "0x0635513f179d50a207757e05759cbd106d7dfce8"
+
+[[contracts]]
+role = "unlocked_migration_controller"
+address = "0xd021a69db7f9e276a59cbbccf06e7f1e5434215c"
+proxy_kind = "none"
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/UnlockedMigrationController.json:L2 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/UnlockedMigrationController.json:L631 @ ens_v2@ccaeb58)
+start_block = 11163401
+
+[[contracts]]
+role = "locked_migration_controller"
+address = "0x681802eff57b83edce99d688c023ab1284495176"
+proxy_kind = "none"
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/LockedMigrationController.json:L2 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/LockedMigrationController.json:L751 @ ens_v2@ccaeb58)
+start_block = 11163413
+
+[[contracts]]
+role = "graveyard"
+address = "0x6f4bf58ac55e0018589b2d9734ed8bb82740124d"
+proxy_kind = "none"
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/Graveyard.json:L2 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/Graveyard.json:L438 @ ens_v2@ccaeb58)
+start_block = 11163400
+
+[[contracts]]
+role = "ens_v1_renewal_bridge"
+address = "0x1be516ae1b72765ae55bd5e9ca628c9058a1c622"
+proxy_kind = "none"
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRenewerV1.json:L2 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRenewerV1.json:L902 @ ens_v2@ccaeb58)
+start_block = 11163404
+
+[[contracts]]
+role = "verifiable_factory"
+address = "0x118bc31a50d559f7015a8da26d54b3b030cdb70f"
+proxy_kind = "none"
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/VerifiableFactory.json:L2 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/VerifiableFactory.json:L194 @ ens_v2@ccaeb58)
+start_block = 11163324
+
+[[contracts]]
+role = "batch_registrar"
+address = "0xfe2aab6df1cbff84534ce65d9e4a755ba02d6795"
+proxy_kind = "none"
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/BatchRegistrar.json:L2 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/BatchRegistrar.json:L279 @ ens_v2@ccaeb58)
+start_block = 11163411
+
+[[contracts]]
+role = "migration_helper"
+address = "0xd54a53c1567b26f9653c8565dccc39bceb6ab327"
+proxy_kind = "none"
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/MigrationHelper.json:L2 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/MigrationHelper.json:L542 @ ens_v2@ccaeb58)
+start_block = 11163415
+
+[[contracts]]
+role = "wrapper_registry_implementation"
+address = "0xcf9f4863a1b44216cfc0be65f4e47b2b9a043924"
+proxy_kind = "none"
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/WrapperRegistryImpl.json:L2 @ ens_v2@ccaeb58)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/WrapperRegistryImpl.json:L3700 @ ens_v2@ccaeb58)
+start_block = 11163410
+
+[[contracts]]
+role = "ens_v1_base_registrar"
+address = "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85"
+proxy_kind = "none"
+# The scoped correlation range begins with the Graveyard deployment, not the
+# registrar's original deployment.
+# (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L2 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/Graveyard.json:L438 @ ens_v2@ccaeb58)
+start_block = 11163400
+
+# Factory observation only; registry indexability remains owned by the existing
+# ens_v2_registry_l1 RegistryCreated announcement rule.
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/VerifiableFactory.json:L48 @ ens_v2@ccaeb58)
+[[abi.events]]
+name = "ProxyDeployed"
+fragment = "event ProxyDeployed(address indexed sender, address indexed proxyAddress, uint256 salt, address implementation)"
+emitter_roles = ["verifiable_factory"]
+normalized_events = ["ContractDiscovered"]
+
+# (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRenewer.sol:L21 @ ens_v2@ccaeb58)
+[[abi.events]]
+name = "NameRenewed"
+fragment = "event NameRenewed(uint256 indexed tokenId, string label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 indexed referrer, uint256 amount)"
+emitter_roles = ["ens_v1_renewal_bridge"]
+normalized_events = ["RegistrationRenewed", "PreimageObserved"]
+
+# (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f)
+[[abi.events]]
+name = "ControllerAdded"
+fragment = "event ControllerAdded(address indexed controller)"
+emitter_roles = ["ens_v1_base_registrar"]
+normalized_events = ["PermissionChanged"]
+
+# (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f)
+[[abi.events]]
+name = "ControllerRemoved"
+fragment = "event ControllerRemoved(address indexed controller)"
+emitter_roles = ["ens_v1_base_registrar"]
+normalized_events = ["PermissionChanged"]
+
+# (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L15 @ ens_v1@91c966f)
+[[abi.events]]
+name = "NameRegistered"
+fragment = "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)"
+emitter_roles = ["ens_v1_base_registrar"]
+normalized_events = ["RegistrationReleased"]
+
+# (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L20 @ ens_v1@91c966f)
+[[abi.events]]
+name = "NameRenewed"
+fragment = "event NameRenewed(uint256 indexed id, uint256 expires)"
+emitter_roles = ["ens_v1_base_registrar"]
+normalized_events = ["RegistrationRenewed", "ExpiryChanged"]
+
+# Transfer is correlation evidence and has no ENSv1→ENSv2 migration-family normalized row.
+# (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L188 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L194 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L200 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L206 @ ens_v1@91c966f)
+[[abi.events]]
+name = "Transfer"
+fragment = "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)"
+emitter_roles = ["ens_v1_base_registrar"]
+normalized_events = []

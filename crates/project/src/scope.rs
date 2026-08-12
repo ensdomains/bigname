@@ -67,6 +67,7 @@ async fn stage_changed_events(
          SELECT event.*
          FROM normalized_events event
          WHERE event.chain_id = $1
+           AND event.consumer_visibility = 'activated'
            AND event.block_number BETWEEN $2 AND $3",
     )
     .bind(chain_id)

@@ -284,6 +284,21 @@ fn validate_manifest_metadata(
         );
     }
 
+    for (name, address) in &manifest.correlation_addresses {
+        if name.trim().is_empty() {
+            bail!(
+                "manifest {} has an empty correlation address name",
+                path.display()
+            );
+        }
+        if address.parse::<Address>().is_err() {
+            bail!(
+                "manifest correlation address {name} in {} has invalid address {address}",
+                path.display()
+            );
+        }
+    }
+
     for root in &manifest.roots {
         validate_start_block_fits_i64(root.start_block, "root", &root.name, path)?;
     }

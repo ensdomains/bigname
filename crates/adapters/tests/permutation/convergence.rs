@@ -550,6 +550,10 @@ fn families(
         contract_addresses: _,
         discovery_edges: _,
         discovery_edge_closures: _,
+        migration_event_associations: _,
+        migration_discovery_associations: _,
+        migration_candidate_identity_effects: _,
+        migration_candidate_discovery_effects: _,
     } = fresh;
     vec![
         (
@@ -612,7 +616,108 @@ fn families(
             discovery_edge_closures(fresh),
             discovery_edge_closures(replayed),
         ),
+        (
+            "migration_event_associations",
+            Keeps::Every,
+            migration_event_associations(fresh),
+            migration_event_associations(replayed),
+        ),
+        (
+            "migration_discovery_associations",
+            Keeps::Every,
+            migration_discovery_associations(fresh),
+            migration_discovery_associations(replayed),
+        ),
+        (
+            "migration_candidate_identity_effects",
+            Keeps::Every,
+            migration_candidate_effects(&fresh.migration_candidate_identity_effects),
+            migration_candidate_effects(&replayed.migration_candidate_identity_effects),
+        ),
+        (
+            "migration_candidate_discovery_effects",
+            Keeps::Every,
+            migration_candidate_effects(&fresh.migration_candidate_discovery_effects),
+            migration_candidate_effects(&replayed.migration_candidate_discovery_effects),
+        ),
     ]
+}
+
+fn migration_event_associations(output: &BatchOutput) -> Vec<Row> {
+    output
+        .migration_event_associations
+        .iter()
+        .map(|row| Row {
+            key: format!("{}:{}", row.event_identity, row.migration_correlation_id),
+            body: format!(
+                "{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                row.correlation_kind,
+                row.evidence_refs,
+                row.chain_id,
+                row.block_hash,
+                row.transaction_hash,
+                row.transaction_index,
+                row.log_index,
+                row.canonicality_state,
+                row.consumer_visibility,
+            ),
+            anchor: row.block_number.to_string(),
+        })
+        .collect()
+}
+
+fn migration_discovery_associations(output: &BatchOutput) -> Vec<Row> {
+    output
+        .migration_discovery_associations
+        .iter()
+        .map(|row| Row {
+            key: format!(
+                "{}:{}",
+                row.logical_edge_identity, row.migration_correlation_id
+            ),
+            body: format!(
+                "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                row.registry_contract_instance_id,
+                row.registry_address,
+                row.source_manifest_id,
+                row.evidence_refs,
+                row.chain_id,
+                row.block_hash,
+                row.transaction_hash,
+                row.transaction_index,
+                row.log_index,
+                row.canonicality_state,
+                row.consumer_visibility,
+            ),
+            anchor: row.block_number.to_string(),
+        })
+        .collect()
+}
+
+fn migration_candidate_effects(
+    rows: &[bigname_adapters::schema_v2::MigrationCandidateEffect],
+) -> Vec<Row> {
+    rows.iter()
+        .map(|row| Row {
+            key: row.effect_identity.clone(),
+            body: format!(
+                "{:?}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                row.migration_correlation_ids,
+                row.correlation_kind,
+                row.effect_kind,
+                row.proposed_effect,
+                row.evidence_refs,
+                row.chain_id,
+                row.block_hash,
+                row.transaction_hash,
+                row.transaction_index,
+                row.log_index,
+                row.canonicality_state,
+                row.consumer_visibility,
+            ),
+            anchor: row.block_number.to_string(),
+        })
+        .collect()
 }
 
 fn label_preimages(output: &BatchOutput) -> Vec<Row> {

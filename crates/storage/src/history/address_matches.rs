@@ -133,7 +133,7 @@ async fn load_historical_address_history_matches(
         "#,
     );
     push_history_lineage_join(&mut builder);
-    builder.push(" WHERE ne.derivation_kind IN (");
+    builder.push(" WHERE ne.consumer_visibility = 'activated' AND ne.derivation_kind IN (");
     let mut separated = builder.separated(", ");
     for derivation_kind in ADDRESS_HISTORY_MATCH_DERIVATION_KINDS {
         separated.push_bind(*derivation_kind);

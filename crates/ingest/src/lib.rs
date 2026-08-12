@@ -14,7 +14,7 @@ pub use engine::{
     SourceCursor, SourceDescriptor, SourceProgress,
 };
 pub use error::{ErrorKind, IngestError, Result};
-pub use manifest::{WatchFilter, WatchQuery, load_watch_filter};
+pub use manifest::{WatchFilter, WatchQuery, load_persisted_watch_filter, load_watch_filter};
 pub use plan::BASE_COINBASE_SEAM_BLOCK;
 pub use verification::{
     VerificationBatch, VerificationLog, VerificationMarker, VerificationProvider,

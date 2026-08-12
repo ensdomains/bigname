@@ -423,6 +423,39 @@ fn checked_in_manifest_trees_pass_repository_validation() -> Result<()> {
 }
 
 #[test]
+fn sepolia_migration_family_has_the_ratified_launch_bounded_inputs() -> Result<()> {
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    let migration = repository
+        .manifests()
+        .iter()
+        .find(|loaded| loaded.manifest.source_family == "ens_v2_migration_l1")
+        .expect("Sepolia migration family");
+    let roles = migration
+        .manifest
+        .contracts
+        .iter()
+        .map(|contract| (contract.role.as_str(), contract.start_block))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(roles.len(), 9);
+    assert_eq!(roles["unlocked_migration_controller"], Some(11_163_401));
+    assert_eq!(roles["locked_migration_controller"], Some(11_163_413));
+    assert_eq!(roles["graveyard"], Some(11_163_400));
+    assert_eq!(roles["ens_v1_renewal_bridge"], Some(11_163_404));
+    assert_eq!(roles["verifiable_factory"], Some(11_163_324));
+    assert_eq!(roles["batch_registrar"], Some(11_163_411));
+    assert_eq!(roles["migration_helper"], Some(11_163_415));
+    assert_eq!(roles["wrapper_registry_implementation"], Some(11_163_410));
+    assert_eq!(roles["ens_v1_base_registrar"], Some(11_163_400));
+    assert_eq!(
+        migration.manifest.correlation_addresses["ens_v1_name_wrapper"],
+        "0x0635513f179d50a207757e05759cbd106d7dfce8"
+    );
+    assert!(migration.manifest.capability_flags.is_empty());
+    assert!(migration.manifest.discovery_rules.is_empty());
+    Ok(())
+}
+
+#[test]
 fn normalize_address_preserves_legacy_fallbacks() {
     assert_eq!(
         normalize_address("0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E"),

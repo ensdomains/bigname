@@ -18,8 +18,10 @@ pub const TRANSACTION_INDEX_KEY: &str = "transaction_index";
 pub const LOG_INDEX_KEY: &str = "log_index";
 pub const PROVENANCE_KIND_KEY: &str = "kind";
 pub const RAW_BLOCK_PROVENANCE_KIND: &str = "raw_block";
+pub const MIGRATION_REGISTRY_ASSOCIATION_KIND: &str = "migration_registry_creation";
+pub const REGISTRY_ANNOUNCEMENT_EDGE_KIND: &str = "registry_announcement";
 
-pub const ADMISSION_DISCOVERY_EDGE_KINDS: &[&str] = &["resolver", "registry_announcement"];
+pub const ADMISSION_DISCOVERY_EDGE_KINDS: &[&str] = &["resolver", REGISTRY_ANNOUNCEMENT_EDGE_KIND];
 
 pub const EVENT_CLOSE_TIME_SQL: &str = "lineage.block_timestamp + make_interval(\
     secs => COALESCE(event.log_index, 0)::double precision / 1000000.0\
