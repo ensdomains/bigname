@@ -19,7 +19,10 @@ use bigname_interpret::{
     RunMode as InterpretRunMode,
 };
 use bigname_manifests::{load_repository, sync_schema_v2_repository};
-use bigname_storage::{AddressNameRelation, HistoryScope, load_address_history};
+use bigname_storage::{
+    AddressNameRelation, EventHistoryAddressFilter, EventHistoryFilter, HistoryScope,
+    HistorySummaryMode, load_address_history, load_event_history_page,
+};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
@@ -82,10 +85,66 @@ async fn migration_registry_restart_retains_later_facts_in_replay_and_live_follo
 
 #[tokio::test]
 async fn candidate_address_relation_cannot_create_a_product_history_selector() -> Result<()> {
-    const ADDRESS: &str = "0x00000000000000000000000000000000000000cc";
-    const LOGICAL_NAME: &str = "ens:candidate-history-anchor";
+    let scratch = seed_candidate_address_history("migration_candidate_address_product").await?;
+    let rows = load_address_history(
+        scratch.pool(),
+        CANDIDATE_ADDRESS,
+        Some("ens"),
+        Some(AddressNameRelation::EffectiveController),
+        HistoryScope::Surface,
+        true,
+    )
+    .await?;
+    assert!(
+        rows.is_empty(),
+        "candidate authority evidence must be filtered before it can select activated history"
+    );
 
-    let scratch = ScratchDatabase::create("migration_candidate_address_history").await?;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn candidate_address_relation_creates_a_diagnostic_history_selector() -> Result<()> {
+    let scratch = seed_candidate_address_history("migration_candidate_address_diagnostic").await?;
+    let page = load_event_history_page(
+        scratch.pool(),
+        EventHistoryFilter {
+            namespace: Some("ens".to_owned()),
+            address: Some(EventHistoryAddressFilter {
+                address: CANDIDATE_ADDRESS.to_owned(),
+                relation: Some(AddressNameRelation::EffectiveController),
+            }),
+            ..EventHistoryFilter::default()
+        },
+        true,
+        None,
+        20,
+        HistorySummaryMode::None,
+        true,
+    )
+    .await?;
+    assert_eq!(
+        page.rows
+            .iter()
+            .map(|row| (
+                row.event_identity.as_str(),
+                row.consumer_visibility.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("activated-same-name-history", "activated"),
+            ("candidate-address-anchor", "candidate"),
+        ]
+    );
+
+    scratch.cleanup().await
+}
+
+const CANDIDATE_ADDRESS: &str = "0x00000000000000000000000000000000000000cc";
+const CANDIDATE_LOGICAL_NAME: &str = "ens:candidate-history-anchor";
+
+async fn seed_candidate_address_history(name: &str) -> Result<ScratchDatabase> {
+    let scratch = ScratchDatabase::create(name).await?;
     for (number, hash) in [(1_i64, "candidate-anchor-1"), (2, "candidate-anchor-2")] {
         sqlx::query(
             "INSERT INTO chain_lineage (
@@ -109,7 +168,7 @@ async fn candidate_address_relation_cannot_create_a_product_history_selector() -
              'test', 'active', $2, 'candidate-anchor-1', 1, 'canonical'
          )",
     )
-    .bind(LOGICAL_NAME)
+    .bind(CANDIDATE_LOGICAL_NAME)
     .bind(CHAIN)
     .execute(scratch.pool())
     .await?;
@@ -129,27 +188,12 @@ async fn candidate_address_relation_cannot_create_a_product_history_selector() -
               0, 0, 'ens_v1_unwrapped_authority', 'canonical',
               '{}'::jsonb, ARRAY[]::text[], 'activated')",
     )
-    .bind(LOGICAL_NAME)
+    .bind(CANDIDATE_LOGICAL_NAME)
     .bind(CHAIN)
-    .bind(ADDRESS)
+    .bind(CANDIDATE_ADDRESS)
     .execute(scratch.pool())
     .await?;
-
-    let rows = load_address_history(
-        scratch.pool(),
-        ADDRESS,
-        Some("ens"),
-        Some(AddressNameRelation::EffectiveController),
-        HistoryScope::Surface,
-        true,
-    )
-    .await?;
-    assert!(
-        rows.is_empty(),
-        "candidate authority evidence must be filtered before it can select activated history"
-    );
-
-    scratch.cleanup().await
+    Ok(scratch)
 }
 
 async fn run_lane(lane: RestartLane) -> Result<LaneSnapshot> {

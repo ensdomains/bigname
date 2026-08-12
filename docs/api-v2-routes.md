@@ -1109,6 +1109,9 @@ so there is no persisted artifact to explain. See
   fields. An independently admitted ordinary row reports top-level
   `consumer_visibility=activated` and an empty ID set; its separate candidate or
   activated correlation relationships appear only in `migration_associations`.
+  When `address` is present, diagnostics derives its name/resource anchor set
+  from both activated and candidate address-relation evidence. Candidate
+  evidence never contributes anchors to `/v2/events` or product history routes.
   A full re-walk may assign a different numeric `normalized_event_id` to a
   pre-existing row. Its `event_identity` and pre-existing semantic fields remain
   stable; the numeric ID change and the candidate fields are explicit
