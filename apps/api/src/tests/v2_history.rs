@@ -338,6 +338,23 @@ async fn candidate_migration_rows_are_diagnostic_only() -> Result<()> {
         rows.iter().any(|row| row["event_identity"] == "candidate-address-registration")
     }));
 
+    let candidate_address_diagnostics = v2_history_payload_for_database(
+        &database,
+        &format!("/v2/diagnostics/events?address={ADDRESS}&page_size=20"),
+    )
+    .await?;
+    let candidate_address_rows = candidate_address_diagnostics["data"]
+        .as_array()
+        .expect("candidate address diagnostic rows");
+    assert!(candidate_address_rows.iter().any(|row| {
+        row["event_identity"] == "candidate-address-registration"
+            && row["consumer_visibility"] == "candidate"
+    }));
+    assert!(candidate_address_rows.iter().any(|row| {
+        row["event_identity"] == "candidate-only-ordinary-renewal"
+            && row["consumer_visibility"] == "activated"
+    }));
+
     database.cleanup().await
 }
 

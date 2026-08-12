@@ -44,6 +44,7 @@ pub(super) async fn load_address_history_selector(
     relations: Option<&[AddressNameRelation]>,
     scope: HistoryScope,
     canonical_only: bool,
+    include_candidates: bool,
 ) -> Result<HistorySelector> {
     let current_rows = if canonical_only {
         load_address_names_current_for_relations(pool, address, namespace, relations).await
@@ -89,6 +90,7 @@ pub(super) async fn load_address_history_selector(
         namespace,
         relations,
         canonical_only,
+        include_candidates,
     )
     .await?;
     for anchor in historical_matches {
@@ -118,6 +120,7 @@ async fn load_historical_address_history_matches(
     namespace: Option<&str>,
     relations: Option<&[AddressNameRelation]>,
     canonical_only: bool,
+    include_candidates: bool,
 ) -> Result<Vec<AddressHistoryAnchor>> {
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
@@ -133,7 +136,11 @@ async fn load_historical_address_history_matches(
         "#,
     );
     push_history_lineage_join(&mut builder);
-    builder.push(" WHERE ne.consumer_visibility = 'activated' AND ne.derivation_kind IN (");
+    if include_candidates {
+        builder.push(" WHERE ne.derivation_kind IN (");
+    } else {
+        builder.push(" WHERE ne.consumer_visibility = 'activated' AND ne.derivation_kind IN (");
+    }
     let mut separated = builder.separated(", ");
     for derivation_kind in ADDRESS_HISTORY_MATCH_DERIVATION_KINDS {
         separated.push_bind(*derivation_kind);
