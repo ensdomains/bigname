@@ -291,7 +291,7 @@ fn validate_manifest_metadata(
                 path.display()
             );
         }
-        if address.parse::<Address>().is_err() {
+        if parse_alloy_evm_address(address).is_err() {
             bail!(
                 "manifest correlation address {name} in {} has invalid address {address}",
                 path.display()
