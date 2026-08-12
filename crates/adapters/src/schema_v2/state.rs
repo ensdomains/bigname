@@ -10,6 +10,10 @@ mod topology;
 #[path = "state_incremental.rs"]
 mod incremental;
 
+#[cfg(test)]
+#[path = "state_tests.rs"]
+mod tests;
+
 #[path = "state_wrapper.rs"]
 mod wrapper;
 
@@ -62,6 +66,7 @@ pub(super) struct State {
     v1_names: OrdMap<String, V1NameState>,
     v1_wrapper_data: OrdMap<String, V1WrapperData>,
     v1_registrars: OrdMap<String, V1NameState>,
+    v1_expiries: OrdSet<(i64, String)>,
     v1_registry_authorities: OrdMap<String, V1NameState>,
     v1_registry_owners: OrdMap<String, String>,
     v1_resolvers: OrdMap<String, String>,
@@ -169,7 +174,11 @@ impl State {
             authority_key,
         };
         let key = v1_key(namespace, namehash);
-        self.v1_registrars.insert(key.clone(), value.clone());
+        let previous_expiry = self
+            .v1_registrars
+            .insert(key.clone(), value.clone())
+            .and_then(|state| state.expiry);
+        self.update_v1_expiry_index(&key, previous_expiry, expiry);
         if let Some(registry) = self.v1_registry_authorities.get_mut(&key) {
             registry.logical_name_id = value.logical_name_id.clone();
             registry.surface_known = surface_known;
@@ -442,6 +451,11 @@ impl State {
     pub(super) fn restore_v1_registration_release(&mut self, namespace: &str, namehash: &str) {
         let key = v1_key(namespace, namehash);
         let registrar = self.v1_registrars.remove(&key);
+        self.update_v1_expiry_index(
+            &key,
+            registrar.as_ref().and_then(|state| state.expiry),
+            None,
+        );
         let should_release_active = self.v1_names.get(&key).is_some_and(|active| {
             registrar
                 .as_ref()
@@ -465,14 +479,21 @@ impl State {
     }
 
     pub(super) fn settle_v1_releases(&mut self, at_unix_timestamp: i64) -> Vec<V1Release> {
-        let due = self
-            .v1_registrars
-            .iter()
-            .filter_map(|(key, registrar)| {
-                let expiry = registrar.expiry?;
-                (!v1_registration_is_live(Some(expiry), at_unix_timestamp)).then(|| key.clone())
-            })
-            .collect::<Vec<_>>();
+        let mut due = Vec::new();
+        while let Some((expiry, _)) = self.v1_expiries.get_max() {
+            if expiry.checked_add(ENS_GRACE_PERIOD_SECS).is_some() {
+                break;
+            }
+            due.push(self.v1_expiries.remove_max().unwrap().1);
+        }
+        while let Some((expiry, _)) = self.v1_expiries.get_min() {
+            if v1_registration_is_live(Some(*expiry), at_unix_timestamp) {
+                break;
+            }
+            due.push(self.v1_expiries.remove_min().unwrap().1);
+        }
+        // Preserve the prior OrdMap registrar-key order for deterministic, output-identical releases.
+        due.sort();
         let mut releases = Vec::new();
         for key in due {
             let Some(registrar) = self.v1_registrars.remove(&key) else {
@@ -510,6 +531,24 @@ impl State {
             });
         }
         releases
+    }
+
+    fn update_v1_expiry_index(
+        &mut self,
+        registrar_key: &str,
+        previous: Option<i64>,
+        current: Option<i64>,
+    ) {
+        if previous == current {
+            return;
+        }
+        if let Some(previous) = previous {
+            self.v1_expiries
+                .remove(&(previous, registrar_key.to_owned()));
+        }
+        if let Some(current) = current {
+            self.v1_expiries.insert((current, registrar_key.to_owned()));
+        }
     }
 
     /// Per-state-key `after_state` tails of the retained event stream, used to seed the
