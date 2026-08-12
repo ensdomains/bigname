@@ -7,7 +7,7 @@ use super::{
     InvalidHistoryCursor,
     decoders::decode_history_event,
     selectors::HistorySelector,
-    source::{push_history_canonicality_filter, push_history_source},
+    source::{push_history_canonicality_filter, push_history_source_with_visibility},
     summary::load_history_summary,
 };
 use crate::projection_helpers::{
@@ -64,6 +64,7 @@ pub(super) async fn load_history_page(
     cursor: Option<&HistoryCursor>,
     page_size: u64,
     summary_mode: HistorySummaryMode,
+    include_candidates: bool,
 ) -> Result<HistoryPage> {
     let mut transaction = pool
         .begin()
@@ -75,7 +76,14 @@ pub(super) async fn load_history_page(
         .context("failed to configure normalized-event history page transaction")?;
 
     if let Some(cursor) = cursor {
-        ensure_history_cursor_exists(&mut transaction, &filter, canonical_only, cursor).await?;
+        ensure_history_cursor_exists(
+            &mut transaction,
+            &filter,
+            canonical_only,
+            cursor,
+            include_candidates,
+        )
+        .await?;
     }
 
     let summary =
@@ -112,7 +120,7 @@ pub(super) async fn load_history_page(
     if let Some(cursor) = cursor {
         push_history_cursor_cte(&mut builder, cursor);
     }
-    push_history_select(&mut builder, cursor.is_some());
+    push_history_select(&mut builder, cursor.is_some(), include_candidates);
     push_history_filters(&mut builder, &filter, canonical_only);
 
     if cursor.is_some() {
@@ -162,7 +170,7 @@ async fn load_history_internal(
     }
 
     let mut builder = QueryBuilder::<Postgres>::new("");
-    push_history_select(&mut builder, false);
+    push_history_select(&mut builder, false, false);
     push_history_filters(&mut builder, &filter, canonical_only);
     push_history_order(&mut builder);
 
@@ -179,7 +187,11 @@ async fn load_history_internal(
     rows.into_iter().map(decode_history_event).collect()
 }
 
-fn push_history_select(builder: &mut QueryBuilder<'_, Postgres>, include_cursor_row: bool) {
+fn push_history_select(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    include_cursor_row: bool,
+    include_candidates: bool,
+) {
     builder.push(
         r#"
         SELECT
@@ -203,6 +215,44 @@ fn push_history_select(builder: &mut QueryBuilder<'_, Postgres>, include_cursor_
             ne.canonicality_state::TEXT AS canonicality_state,
             ne.before_state,
             ne.after_state,
+        "#,
+    );
+    if include_candidates {
+        builder.push(
+            r#"
+            ne.migration_correlation_ids,
+            ne.consumer_visibility,
+            COALESCE(
+                (
+                    SELECT jsonb_agg(
+                        jsonb_build_object(
+                            'migration_correlation_ids',
+                            ARRAY[association.migration_correlation_id],
+                            'correlation_kind', association.correlation_kind,
+                            'consumer_visibility', association.consumer_visibility
+                        )
+                        ORDER BY association.migration_correlation_id,
+                                 association.correlation_kind,
+                                 association.consumer_visibility
+                    )
+                    FROM migration_event_associations AS association
+                    WHERE association.event_identity = ne.event_identity
+                ),
+                '[]'::jsonb
+            ) AS migration_associations,
+            "#,
+        );
+    } else {
+        builder.push(
+            r#"
+            ARRAY[]::text[] AS migration_correlation_ids,
+            'activated'::text AS consumer_visibility,
+            '[]'::jsonb AS migration_associations,
+            "#,
+        );
+    }
+    builder.push(
+        r#"
             COALESCE(
                 CASE
                     WHEN jsonb_typeof(ne.after_state -> 'provenance') = 'object'
@@ -227,7 +277,7 @@ fn push_history_select(builder: &mut QueryBuilder<'_, Postgres>, include_cursor_
             ) AS coverage
         "#,
     );
-    push_history_source(builder, include_cursor_row);
+    push_history_source_with_visibility(builder, include_cursor_row, include_candidates);
 }
 
 pub(super) fn push_history_filters<'a>(
@@ -286,6 +336,7 @@ async fn ensure_history_cursor_exists(
     filter: &EventHistoryReadFilter,
     canonical_only: bool,
     cursor: &HistoryCursor,
+    include_candidates: bool,
 ) -> Result<()> {
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
@@ -293,10 +344,8 @@ async fn ensure_history_cursor_exists(
             SELECT 1
         "#,
     );
-    push_history_source(&mut builder, false);
+    push_history_source_with_visibility(&mut builder, false, include_candidates);
     push_history_filters(&mut builder, filter, canonical_only);
-    builder.push(" AND ne.normalized_event_id = ");
-    builder.push_bind(cursor.normalized_event_id);
     builder.push(" AND ne.event_identity = ");
     builder.push_bind(&cursor.event_identity);
     builder.push(" LIMIT 1)");
@@ -329,11 +378,9 @@ fn push_history_cursor_cte<'a>(
                 log_index,
                 event_identity
             FROM normalized_events
-            WHERE normalized_event_id =
+            WHERE event_identity =
         "#,
     );
-    builder.push_bind(cursor.normalized_event_id);
-    builder.push(" AND event_identity = ");
     builder.push_bind(&cursor.event_identity);
     builder.push(") ");
 }
