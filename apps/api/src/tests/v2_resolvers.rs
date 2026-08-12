@@ -75,6 +75,7 @@ fn v2_resolver_include_controls_overview_sections_and_rejects_unknown() {
         resolver_current_row_with_writer_alias("ethereum-mainnet", V2_RESOLVER_ADDRESS);
     resolver_row.declared_summary["role_holders"]["items"][0]["effective_powers"] =
         json!(["resource_control", "set_resolver"]);
+    resolver_row.declared_summary["role_holders"]["items"][0]["permission_row_count"] = json!(2);
     let overview = crate::v2::build_resolver_overview(
         resolver_row,
         1,
@@ -113,8 +114,7 @@ fn v2_resolver_include_controls_overview_sections_and_rejects_unknown() {
                 "address": "0x0000000000000000000000000000000000000abc",
                 "registration_count": 1,
                 "permission_count": 1,
-                "powers": ["registration_control", "set_resolver"],
-                "registration_ids": ["00000000-0000-0000-0000-00000000b100"]
+                "powers": ["registration_control", "set_resolver"]
             }
         ])
     );
@@ -123,6 +123,7 @@ fn v2_resolver_include_controls_overview_sections_and_rejects_unknown() {
     assert!(value["roles"][0].get("permission_row_count").is_none());
     assert!(value["roles"][0].get("effective_powers").is_none());
     assert!(value["roles"][0].get("resource_ids").is_none());
+    assert!(value["roles"][0].get("registration_ids").is_none());
     assert_eq!(
         value["events"],
         json!({
@@ -366,6 +367,93 @@ async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()
     .await?;
     assert_eq!(second_page["data"]["bound_names"]["data"][0]["name"], json!("beta.eth"));
     assert_eq!(second_page["data"]["bound_names"]["page"]["has_more"], json!(false));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_resolver_serves_total_counts_with_bounded_samples() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let mut resolver = resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
+    let nodes = (0..100)
+        .map(|ordinal| {
+            json!({
+                "logical_name_id": format!("ens:sample-{ordinal:03}.eth"),
+                "normalized_name": format!("sample-{ordinal:03}.eth"),
+                "namehash": format!("namehash:sample-{ordinal:03}.eth"),
+            })
+        })
+        .collect::<Vec<_>>();
+    let aliases = nodes.clone();
+    let roles = (0..100)
+        .map(|ordinal| {
+            json!({
+                "subject": format!("0x{ordinal:040x}"),
+                "resource_count": 1,
+                "permission_row_count": 1,
+                "effective_powers": ["set_resolver"],
+                "resource_ids": [format!(
+                    "00000000-0000-0000-0000-{ordinal:012}"
+                )],
+            })
+        })
+        .collect::<Vec<_>>();
+    resolver.declared_summary["bindings"] = json!({
+        "status": "supported",
+        "count": 101,
+        "total_count": 101,
+        "sample_limit": 100,
+        "sample_count": 100,
+        "truncated": true,
+        "items": nodes,
+    });
+    resolver.declared_summary["aliases"] = json!({
+        "status": "supported",
+        "count": 101,
+        "total_count": 101,
+        "sample_limit": 100,
+        "sample_count": 100,
+        "truncated": true,
+        "items": aliases,
+    });
+    resolver.declared_summary["role_holders"] = json!({
+        "status": "supported",
+        "count": 101,
+        "total_count": 101,
+        "sample_limit": 100,
+        "sample_count": 100,
+        "truncated": true,
+        "items": roles,
+    });
+    database
+        .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
+        .await?;
+    upsert_test_resolver_current_rows(&database, &[resolver]).await?;
+
+    let payload = v2_resolver_payload_for_database(
+        &database,
+        &format!(
+            "/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes,aliases,roles"
+        ),
+    )
+    .await?;
+
+    assert_eq!(payload["data"]["counts"]["nodes"], 101);
+    assert_eq!(payload["data"]["counts"]["aliases"], 101);
+    assert_eq!(payload["data"]["counts"]["role_holders"], 101);
+    for section in ["nodes", "aliases", "roles"] {
+        assert_eq!(
+            payload["data"][section].as_array().map(Vec::len),
+            Some(100),
+            "{section}"
+        );
+    }
+    assert!(payload["data"]["roles"].as_array().is_some_and(|items| {
+        items.iter().all(|item| {
+            item.get("resource_ids").is_none() && item.get("registration_ids").is_none()
+        })
+    }));
 
     database.cleanup().await?;
     Ok(())

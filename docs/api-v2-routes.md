@@ -921,6 +921,27 @@ Field ownership:
   resolver listings rather than forced to `ok`. This nested collection adds no
   row-local mixed-authority status, so callers use name detail or batch lookup
   for the explicit coverage reason.
+  `counts.nodes`, `counts.aliases`, and `counts.role_holders` are total counts,
+  while the corresponding `include=nodes`, `include=aliases`, and
+  `include=roles` arrays are deterministic samples of at most 100 items. A
+  count greater than the returned array length means that sample is truncated;
+  omitted binding rows remain available through paginated name-side routes,
+  and omitted permission rows remain available through permission routes.
+  Resolver alias-event mappings have no exhaustive product collection: when
+  their sample is truncated, the total count reports the omitted mappings but
+  clients cannot page through them on this route. Binding samples sort by name
+  and stable identity, alias samples place current binding aliases before
+  current alias-event rows and preserve each group’s stable order, and
+  role-holder samples sort by address.
+  `include=roles` items are `{address, registration_count, permission_count,
+  powers}`; the former embedded `registration_ids` list is omitted because it
+  was itself unbounded, and permission rows remain queryable through
+  `GET /v2/permissions` using the returned addresses. The resolver arrays are
+  not independently pageable. This bounded-sample contract is
+  the consumer-visible resolver-overview shape change delivered with
+  [issue #401](https://github.com/ensdomains/bigname/issues/401); clients must
+  not interpret an included array as exhaustive when its total count is
+  larger.
   `include=aliases` exposes binding rows as `{namespace, name, display_name,
   namehash}` and resolver alias rows as `{namespace, from_name, to_name,
   from_display_name?, to_display_name?, state, resolver: {chain_id, address},

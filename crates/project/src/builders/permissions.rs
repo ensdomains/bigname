@@ -55,16 +55,35 @@ pub(super) async fn build(
               AND jsonb_typeof(event.after_state -> 'scope') = 'object'
               AND jsonb_typeof(event.after_state -> 'effective_powers') = 'array'
         ),
-        latest AS (
-            SELECT DISTINCT ON (event.resource_id, event.subject, event.scope)
-                   event.*
+        ranked AS (
+            SELECT event.*,
+                   row_number() OVER (
+                       PARTITION BY event.resource_id, event.subject, event.scope
+                       ORDER BY event.block_number DESC NULLS LAST,
+                                event.transaction_index DESC NULLS LAST,
+                                event.log_index DESC NULLS LAST,
+                                event.normalized_event_id DESC
+                   ) AS latest_rank,
+                   jsonb_agg(to_jsonb(event.normalized_event_id)) OVER evidence AS event_ids,
+                   jsonb_agg(event.raw_fact_ref) OVER evidence AS raw_fact_refs,
+                   jsonb_agg(jsonb_build_object(
+                       'source_manifest_id', event.source_manifest_id,
+                       'source_family', event.source_family,
+                       'manifest_version', event.manifest_version
+                   )) OVER evidence AS manifest_versions,
+                   max(event.manifest_version) OVER (
+                       PARTITION BY event.resource_id, event.subject, event.scope
+                   ) AS evidence_manifest_version
             FROM decoded event
             WHERE event.scope IS NOT NULL AND btrim(event.scope) <> ''
-            ORDER BY event.resource_id, event.subject, event.scope,
-                     event.block_number DESC NULLS LAST,
-                     event.transaction_index DESC NULLS LAST,
-                     event.log_index DESC NULLS LAST,
-                     event.normalized_event_id DESC
+            WINDOW evidence AS (
+                PARTITION BY event.resource_id, event.subject, event.scope
+                ORDER BY event.normalized_event_id
+                ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+            )
+        ),
+        latest AS (
+            SELECT * FROM ranked WHERE latest_rank = 1
         ),
         modifiers AS (
             SELECT DISTINCT ON (event.resource_id)
@@ -151,7 +170,7 @@ pub(super) async fn build(
                    )
                END,
                jsonb_build_object(
-                   'normalized_event_ids', evidence.event_ids || CASE
+                   'normalized_event_ids', event.event_ids || CASE
                        WHEN modifier.normalized_event_id IS NOT NULL
                         AND masked.effective_powers IS DISTINCT FROM
                             event.after_state -> 'effective_powers'
@@ -164,7 +183,7 @@ pub(super) async fn build(
                            THEN jsonb_build_array(wrapper_expiry.normalized_event_id)
                        ELSE '[]'::jsonb
                    END,
-                   'raw_fact_refs', evidence.raw_fact_refs || CASE
+                   'raw_fact_refs', event.raw_fact_refs || CASE
                        WHEN modifier.normalized_event_id IS NOT NULL
                         AND masked.effective_powers IS DISTINCT FROM
                             event.after_state -> 'effective_powers'
@@ -177,7 +196,7 @@ pub(super) async fn build(
                            THEN jsonb_build_array(wrapper_expiry.raw_fact_ref)
                        ELSE '[]'::jsonb
                    END,
-                   'manifest_versions', evidence.manifest_versions || CASE
+                   'manifest_versions', event.manifest_versions || CASE
                        WHEN modifier.normalized_event_id IS NOT NULL
                         AND masked.effective_powers IS DISTINCT FROM
                             event.after_state -> 'effective_powers'
@@ -232,7 +251,7 @@ pub(super) async fn build(
                    'target_block_hash', $3
                ),
                GREATEST(
-                   evidence.manifest_version,
+                   event.evidence_manifest_version,
                    CASE
                        WHEN masked.effective_powers IS DISTINCT FROM
                             event.after_state -> 'effective_powers'
@@ -318,30 +337,6 @@ pub(super) async fn build(
                 ), '[]'::jsonb)
             END AS effective_powers
         ) masked
-        LEFT JOIN LATERAL (
-            SELECT COALESCE(
-                       jsonb_agg(to_jsonb(prior.normalized_event_id)
-                                 ORDER BY prior.normalized_event_id),
-                       '[]'::jsonb
-                   ) AS event_ids,
-                   COALESCE(
-                       jsonb_agg(prior.raw_fact_ref ORDER BY prior.normalized_event_id),
-                       '[]'::jsonb
-                   ) AS raw_fact_refs,
-                   COALESCE(
-                       jsonb_agg(jsonb_build_object(
-                           'source_manifest_id', prior.source_manifest_id,
-                           'source_family', prior.source_family,
-                           'manifest_version', prior.manifest_version
-                       ) ORDER BY prior.normalized_event_id),
-                       '[]'::jsonb
-                   ) AS manifest_versions,
-                   max(prior.manifest_version) AS manifest_version
-            FROM decoded prior
-            WHERE prior.resource_id = event.resource_id
-              AND prior.subject = event.subject
-              AND prior.scope = event.scope
-        ) evidence ON TRUE
         WHERE jsonb_array_length(masked.effective_powers) > 0
         ORDER BY event.resource_id, event.subject, event.scope
         "#,
@@ -355,11 +350,85 @@ pub(super) async fn build(
 
     sqlx::query(
         r#"
-        WITH resource_authority AS (
+        WITH resource_event_candidates AS (
+            SELECT event.resource_id,
+                   candidate.summary_kind,
+                   candidate.authority_kind,
+                   candidate.raw_fact_ref,
+                   candidate.block_number,
+                   candidate.block_hash,
+                   candidate.manifest_version,
+                   row_number() OVER (
+                       PARTITION BY event.resource_id, candidate.summary_kind
+                       ORDER BY event.block_number DESC NULLS LAST,
+                                event.transaction_index DESC NULLS LAST,
+                                event.log_index DESC NULLS LAST,
+                                event.normalized_event_id DESC
+                   ) AS latest_rank
+            FROM project_events event
+            CROSS JOIN LATERAL (VALUES
+                (
+                    CASE WHEN event.after_state ->> 'authority_kind' IS NOT NULL
+                         THEN 'direct' END,
+                    event.after_state ->> 'authority_kind',
+                    NULL::jsonb, NULL::bigint, NULL::text, NULL::bigint
+                ),
+                (
+                    CASE WHEN event.after_state -> 'scope' ->> 'kind' = 'resource'
+                           AND COALESCE(
+                               event.after_state -> 'grant_source' ->> 'authority_kind',
+                               event.after_state -> 'revocation_source' ->> 'authority_kind'
+                           ) IS NOT NULL
+                         THEN 'scoped' END,
+                    COALESCE(
+                        event.after_state -> 'grant_source' ->> 'authority_kind',
+                        event.after_state -> 'revocation_source' ->> 'authority_kind'
+                    ),
+                    NULL::jsonb, NULL::bigint, NULL::text, NULL::bigint
+                ),
+                (
+                    CASE WHEN event.event_kind IN (
+                        'AuthorityEpochChanged', 'RegistrationGranted',
+                        'PermissionChanged', 'RootPermissionChanged'
+                    ) THEN 'latest' END,
+                    NULL::text, event.raw_fact_ref, event.block_number,
+                    event.block_hash, event.manifest_version
+                )
+            ) candidate(
+                summary_kind, authority_kind, raw_fact_ref, block_number,
+                block_hash, manifest_version
+            )
+            WHERE event.resource_id IS NOT NULL
+              AND candidate.summary_kind IS NOT NULL
+        ),
+        resource_event_summaries AS (
+            SELECT resource_id,
+                   max(authority_kind) FILTER (
+                       WHERE summary_kind = 'direct' AND latest_rank = 1
+                   ) AS direct_authority_kind,
+                   max(authority_kind) FILTER (
+                       WHERE summary_kind = 'scoped' AND latest_rank = 1
+                   ) AS scoped_authority_kind,
+                   (array_agg(raw_fact_ref) FILTER (
+                       WHERE summary_kind = 'latest' AND latest_rank = 1
+                   ))[1] AS raw_fact_ref,
+                   max(block_number) FILTER (
+                       WHERE summary_kind = 'latest' AND latest_rank = 1
+                   ) AS authority_block_number,
+                   max(block_hash) FILTER (
+                       WHERE summary_kind = 'latest' AND latest_rank = 1
+                   ) AS authority_block_hash,
+                   max(manifest_version) FILTER (
+                       WHERE summary_kind = 'latest' AND latest_rank = 1
+                   ) AS authority_manifest_version
+            FROM resource_event_candidates
+            GROUP BY resource_id
+        ),
+        resource_authority AS (
             SELECT resource.*,
                    CASE COALESCE(
-                       direct.authority_kind,
-                       scoped.authority_kind,
+                       summary.direct_authority_kind,
+                       summary.scoped_authority_kind,
                        resource.provenance ->> 'authority_kind',
                        CASE
                            WHEN COALESCE(
@@ -371,8 +440,8 @@ pub(super) async fn build(
                    )
                        WHEN 'name_wrapper' THEN 'wrapper'
                        ELSE COALESCE(
-                           direct.authority_kind,
-                           scoped.authority_kind,
+                           summary.direct_authority_kind,
+                           summary.scoped_authority_kind,
                            resource.provenance ->> 'authority_kind',
                            CASE
                                WHEN COALESCE(
@@ -383,57 +452,12 @@ pub(super) async fn build(
                            END
                        )
                    END AS authority_kind,
-                   latest.raw_fact_ref,
-                   latest.block_number AS authority_block_number,
-                   latest.block_hash AS authority_block_hash,
-                   latest.manifest_version AS authority_manifest_version
+                   summary.raw_fact_ref,
+                   summary.authority_block_number,
+                   summary.authority_block_hash,
+                   summary.authority_manifest_version
             FROM project_resources resource
-            LEFT JOIN LATERAL (
-                SELECT event.after_state ->> 'authority_kind' AS authority_kind
-                FROM project_events event
-                WHERE event.resource_id = resource.resource_id
-                  AND event.after_state ->> 'authority_kind' IS NOT NULL
-                ORDER BY event.block_number DESC NULLS LAST,
-                         event.transaction_index DESC NULLS LAST,
-                         event.log_index DESC NULLS LAST,
-                         event.normalized_event_id DESC
-                LIMIT 1
-            ) direct ON TRUE
-            LEFT JOIN LATERAL (
-                SELECT COALESCE(
-                           event.after_state -> 'grant_source' ->> 'authority_kind',
-                           event.after_state -> 'revocation_source' ->> 'authority_kind'
-                       ) AS authority_kind
-                FROM project_events event
-                WHERE event.resource_id = resource.resource_id
-                  AND event.after_state -> 'scope' ->> 'kind' = 'resource'
-                  AND COALESCE(
-                      event.after_state -> 'grant_source' ->> 'authority_kind',
-                      event.after_state -> 'revocation_source' ->> 'authority_kind'
-                  ) IS NOT NULL
-                ORDER BY event.block_number DESC NULLS LAST,
-                         event.transaction_index DESC NULLS LAST,
-                         event.log_index DESC NULLS LAST,
-                         event.normalized_event_id DESC
-                LIMIT 1
-            ) scoped ON TRUE
-            LEFT JOIN LATERAL (
-                SELECT event.raw_fact_ref,
-                       event.block_number,
-                       event.block_hash,
-                       event.manifest_version
-                FROM project_events event
-                WHERE event.resource_id = resource.resource_id
-                  AND event.event_kind IN (
-                      'AuthorityEpochChanged', 'RegistrationGranted',
-                      'PermissionChanged', 'RootPermissionChanged'
-                  )
-                ORDER BY event.block_number DESC NULLS LAST,
-                         event.transaction_index DESC NULLS LAST,
-                         event.log_index DESC NULLS LAST,
-                         event.normalized_event_id DESC
-                LIMIT 1
-            ) latest ON TRUE
+            LEFT JOIN resource_event_summaries summary USING (resource_id)
         )
         INSERT INTO project_stage_permissions_current_resource_summary (
             resource_id, authority_kind, root_resource_id, support_status,

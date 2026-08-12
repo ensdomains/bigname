@@ -35,7 +35,7 @@ it does not preserve the deleted v1 DTOs.
 | Permission holders | `GET /v2/permissions` | Current resource-anchored permission rows; returned current ENSv1 wrapper registrations carry [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) lifecycle and fuse data without claiming exhaustive wrapper-holder enumeration. |
 | Search | `GET /v2/search` | Name search only; no registration, pricing, or availability workflow. |
 | Events | `GET /v2/events` | Product event collection. |
-| Resolver overview | `GET /v2/resolvers/{chain_id}/{address}` | Resolver metadata and bounded, record-shaped name expansion, including [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) ENSv1 NameWrapper metadata when backed. |
+| Resolver overview | `GET /v2/resolvers/{chain_id}/{address}` | Resolver metadata, total section counts with deterministic samples capped at 100 items, and a separately paginated record-shaped bound-name collection, including [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) ENSv1 NameWrapper metadata when backed. |
 | Namespace metadata | `GET /v2/namespaces/{namespace}` | Product-facing namespace and capability metadata. |
 | Pipeline diagnostics | `/v2/diagnostics/*` | Explicit diagnostic tier, separate from product reads. |
 
