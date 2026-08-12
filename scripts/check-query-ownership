@@ -36,7 +36,7 @@ storage_graphql_paths="$(
 )"
 storage_graphql_modules="$(
   run_rg -n \
-    '^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?mod[[:space:]]+graphql[[:alnum:]_]*[[:space:]]*;' \
+    '^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?mod[[:space:]]+graphql[[:alnum:]_]*[[:space:]]*[;{]' \
     crates/storage/src --glob '*.rs'
 )"
 
@@ -72,7 +72,7 @@ api_storage_read_paths="$(
 )"
 api_storage_read_modules="$(
   run_rg -n \
-    '^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?mod[[:space:]]+(canonicality|database_invariants|identity_facade|[[:alnum:]_]+_reads)[[:space:]]*;' \
+    '^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?mod[[:space:]]+(canonicality|database_invariants|identity_facade|[[:alnum:]_]+_reads)[[:space:]]*[;{]' \
     apps/api/src --glob '*.rs'
 )"
 

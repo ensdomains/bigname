@@ -92,10 +92,20 @@ expect_probe_rejected \
   'mod graphql_query_ownership_probe;' \
   'mod graphql_query_ownership_probe;'
 expect_probe_rejected \
+  'inline GraphQL storage module' \
+  'crates/storage/src/query_ownership_inline_module_probe.rs' \
+  'mod graphql {' \
+  'mod graphql {'
+expect_probe_rejected \
   'forbidden API read directory child' \
   'apps/api/src/v2/ownership_probe_reads/child_file.rs' \
   '// query ownership probe' \
   'apps/api/src/v2/ownership_probe_reads/child_file.rs'
+expect_probe_rejected \
+  'inline forbidden API read module' \
+  'apps/api/src/v2/query_ownership_inline_module_probe.rs' \
+  'mod ownership_probe_reads {' \
+  'mod ownership_probe_reads {'
 expect_probe_rejected \
   'new snapshot-prefixed API file' \
   'apps/api/src/v2/snapshots_query_ownership_probe.rs' \
