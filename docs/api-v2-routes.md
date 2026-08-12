@@ -878,8 +878,8 @@ Field ownership:
   to `permission`. Mapping is per normalized source event and resource anchor,
   not per transaction: one synchronized renewal transaction can therefore
   contain three `renewal` rows and two `expiry` rows; no synthetic collapsed
-  renewal is created. The planned `MigrationApplied` and `ContractDiscovered`
-  kinds have no product event type. During slice 1, every
+  renewal is created. The candidate `MigrationApplied` and
+  `ContractDiscovered` kinds have no product event type. During slice 1, every
   correlation-dependent row carrying `consumer_visibility=candidate` is excluded
   even if its familiar event kind would otherwise map above or its source family
   is `ens_v2_registry_l1`. An event admitted independently by an existing family
@@ -1126,7 +1126,7 @@ so there is no persisted artifact to explain. See
   event_kind, source_family, manifest_version?, source_manifest_id?,
   chain_position, transaction_hash, log_index, raw_fact_ref, derivation_kind,
   canonicality_state, before_state?, after_state?, provenance, coverage}`. The
-  planned slice-1 diagnostics extension adds `consumer_visibility`,
+  slice-1 diagnostics extension adds `consumer_visibility`,
   `migration_correlation_ids`, and `migration_associations?`; each
   `migration_associations` entry is
   `{migration_correlation_ids, correlation_kind, consumer_visibility}`. A
@@ -1136,7 +1136,7 @@ so there is no persisted artifact to explain. See
   activated correlation relationships appear only in `migration_associations`.
   A full re-walk may assign a different numeric `normalized_event_id` to a
   pre-existing row. Its `event_identity` and pre-existing semantic fields remain
-  stable; the numeric ID change and the planned candidate fields are explicit
+  stable; the numeric ID change and the candidate fields are explicit
   diagnostic-only deltas.
 - Pagination behavior: standard collection pagination.
 - Snapshot behavior: diagnostic event rows come from current state. The
