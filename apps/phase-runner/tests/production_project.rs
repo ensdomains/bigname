@@ -2825,6 +2825,126 @@ async fn incremental_project_revisits_wrapper_timestamp_boundaries() -> Result<(
 }
 
 #[tokio::test]
+async fn incremental_resolver_builder_stages_only_the_scoped_discovered_resolver() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_resolver_candidate_scope").await?;
+    seed_project_fixture(scratch.pool()).await?;
+
+    let resolver_manifest: i64 = sqlx::query_scalar(
+        "SELECT source_manifest_id
+         FROM normalized_events
+         WHERE chain_id = $1
+           AND event_kind = 'SourceManifestUpdated'
+           AND source_family = 'ens_v1_resolver_l1'",
+    )
+    .bind(CHAIN)
+    .fetch_one(scratch.pool())
+    .await?;
+    let source_instance = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO contract_instances (
+             contract_instance_id, chain_id, contract_kind
+         ) VALUES ($1, $2, 'contract')",
+    )
+    .bind(source_instance)
+    .bind(CHAIN)
+    .execute(scratch.pool())
+    .await?;
+    for address in [
+        "0x00000000000000000000000000000000000000B1",
+        "0x00000000000000000000000000000000000000C2",
+    ] {
+        let resolver_instance = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO contract_instances (
+                 contract_instance_id, chain_id, contract_kind
+             ) VALUES ($1, $2, 'contract')",
+        )
+        .bind(resolver_instance)
+        .bind(CHAIN)
+        .execute(scratch.pool())
+        .await?;
+        sqlx::query(
+            "INSERT INTO contract_instance_addresses (
+                 contract_instance_id, chain_id, address,
+                 active_from_block_number, active_from_block_hash,
+                 source_manifest_id
+             ) VALUES ($1, $2, $3, 1, $4, $5)",
+        )
+        .bind(resolver_instance)
+        .bind(CHAIN)
+        .bind(address)
+        .bind(block_hash(CHAIN, 1))
+        .bind(resolver_manifest)
+        .execute(scratch.pool())
+        .await?;
+        sqlx::query(
+            "INSERT INTO discovery_edges (
+                 chain_id, edge_kind, from_contract_instance_id,
+                 to_contract_instance_id, discovery_source, admission_basis,
+                 source_manifest_id, active_from_block_number,
+                 active_from_block_hash, canonicality_state
+             ) VALUES (
+                 $1, 'resolver', $2, $3, 'fixture', 'reachable_from_root',
+                 $4, 1, $5, 'canonical'
+             )",
+        )
+        .bind(CHAIN)
+        .bind(source_instance)
+        .bind(resolver_instance)
+        .bind(resolver_manifest)
+        .bind(block_hash(CHAIN, 1))
+        .execute(scratch.pool())
+        .await?;
+    }
+
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    insert_lineage_block(scratch.pool(), CHAIN, 4).await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        4,
+        None,
+        None,
+        "RecordChanged",
+        "ens_v1_resolver_l1",
+        json!({"selector":"text:url","value":"https://example.test"}),
+        json!({"emitting_address":RESOLVER}),
+    )
+    .await?;
+
+    sqlx::query("CREATE SEQUENCE resolver_stage_candidate_count")
+        .execute(scratch.pool())
+        .await?;
+    sqlx::query(
+        "ALTER TABLE resolver_current
+         ALTER COLUMN last_recomputed_at SET DEFAULT
+             to_timestamp(nextval('resolver_stage_candidate_count')::double precision)",
+    )
+    .execute(scratch.pool())
+    .await?;
+
+    run_project(
+        scratch.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Normal,
+        4,
+        4,
+    )
+    .await?;
+
+    let staged_candidates: i64 =
+        sqlx::query_scalar("SELECT last_value FROM resolver_stage_candidate_count")
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(staged_candidates, 1);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn unwrapped_registration_ignores_the_prior_wrapper_grace_expiry() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_unwrapped_registrar_expiry").await?;
     seed_project_fixture(scratch.pool()).await?;

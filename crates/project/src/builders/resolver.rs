@@ -112,21 +112,26 @@ pub(super) async fn build(
             SELECT * FROM resolver_event_candidates
         ),
         candidates AS (
-            SELECT DISTINCT ON (resolver_address)
-                   resolver_address, source_family, classification_role
+            SELECT DISTINCT ON (combined.resolver_address)
+                   combined.resolver_address,
+                   combined.source_family,
+                   combined.classification_role
             FROM (
                 SELECT * FROM discovered WHERE source_family IS NOT NULL
                 UNION ALL SELECT * FROM observed
             ) combined
-            WHERE resolver_address <>
+            WHERE combined.resolver_address <>
                   '0x0000000000000000000000000000000000000000'
               AND (
                   $4 OR EXISTS (
                       SELECT 1 FROM project_scope_resolvers scope
-                      WHERE lower(scope.resolver_address) = resolver_address
+                      WHERE lower(scope.resolver_address) =
+                            lower(combined.resolver_address)
                   )
               )
-            ORDER BY resolver_address, priority, source_family
+            ORDER BY combined.resolver_address,
+                     combined.priority,
+                     combined.source_family
         ),
         upgrade_ranked AS (
             SELECT event.*,
