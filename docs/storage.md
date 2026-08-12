@@ -39,6 +39,21 @@ The physical layers are:
 5. current projections — name, relation, child, permission, resolver, record,
    and primary-name read models.
 
+## Query ownership
+
+`crates/storage` owns [canonicality](glossary.md#canonicality), snapshot selection,
+reusable row reads, and database invariants. These rules are shared across callers and remain
+below route code even when a route composes them into a larger query.
+
+`apps/api` owns route-specific joins, pagination, wire shaping, and GraphQL compatibility.
+GraphQL compatibility queries therefore live with the API surface, while their reusable
+canonicality predicates come from storage. API helpers that confirm one request reads against an
+unchanged selected chain position also remain in `apps/api`; they are not reusable database reads.
+
+This documented boundary is authoritative. `scripts/check-query-ownership` is a tripwire for
+known naming patterns, not a complete classification of SQL ownership. Review for every new
+direct-SQL module in `apps/api` must state whether storage or the API owns its query behavior.
+
 The first four layers are inputs to Project, but ENSv1→ENSv2
 migration-correlated contributions marked `consumer_visibility=candidate` are
 diagnostic input only until their contracted consumer activation. Current

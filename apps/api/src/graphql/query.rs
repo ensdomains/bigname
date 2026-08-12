@@ -2,8 +2,6 @@ use async_graphql::{Context, Object, Result};
 use bigname_storage::{
     AddressNameRelation, NameCurrentAddressFilter, NameCurrentAddressRelationFilter,
     NameCurrentListFilter, NameCurrentListOrder, NameCurrentListSort,
-    count_phase_graphql_name_list, load_phase_graphql_name_list_page_offset,
-    load_phase_graphql_name_row_by_name, load_phase_graphql_name_row_by_namehash,
 };
 
 use crate::state::AppState;
@@ -11,6 +9,10 @@ use crate::state::AppState;
 use super::enums::{DomainOrderBy, OrderDirection};
 use super::error::internal_error;
 use super::inputs::{DomainFilter, RegistrationFilter};
+use super::name_queries::{
+    count_phase_graphql_name_list, load_phase_graphql_name_list_page_offset,
+    load_phase_graphql_name_row_by_name, load_phase_graphql_name_row_by_namehash,
+};
 use super::objects::{Domain, DomainConnection, RegistrationConnection};
 use super::snapshot::{
     graphql_snapshot_chain_ids, load_graphql_head, require_count_at_head, require_rows_at_head,

@@ -1,16 +1,13 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
-use uuid::Uuid;
+use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow, types::Uuid};
 
-use crate::{
-    NameCurrentAddressRelationFilter, NameCurrentListFilter, NameCurrentListOrder,
-    NameCurrentListRow, NameCurrentListSort, NameCurrentRow, SurfaceBindingKind,
-    name_current::{
-        DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER, DEFAULT_NAME_CURRENT_LINEAGE_JOINS,
-        DEFAULT_NAME_CURRENT_READ_FILTER,
-    },
+use bigname_storage::{
+    DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER, DEFAULT_NAME_CURRENT_LINEAGE_JOINS,
+    DEFAULT_NAME_CURRENT_READ_FILTER, NameCurrentAddressRelationFilter, NameCurrentListFilter,
+    NameCurrentListOrder, NameCurrentListRow, NameCurrentListSort, NameCurrentRow,
+    SurfaceBindingKind,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -329,7 +326,7 @@ fn push_filtered_names<'a>(
     push_filters(builder, filter);
     if let Some(namehash) = namehash {
         builder.push(" AND nc.namehash = ");
-        builder.push_bind(crate::normalize_evm_b256(namehash));
+        builder.push_bind(bigname_storage::normalize_evm_b256(namehash));
     }
     builder.push(")");
 }
@@ -377,7 +374,10 @@ fn graphql_namehash(name: &str) -> Option<String> {
         .iter()
         .map(|label| label.as_bytes())
         .collect::<Vec<_>>();
-    Some(format!("{:#x}", crate::ens_namehash_label_bytes(&labels)))
+    Some(format!(
+        "{:#x}",
+        bigname_storage::ens_namehash_label_bytes(&labels)
+    ))
 }
 
 fn push_json_timestamp(builder: &mut QueryBuilder<'_, Postgres>, path: &[&str]) {

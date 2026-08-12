@@ -18,7 +18,7 @@ pub use row::NameCurrentRow;
 use row::decode_name_current_row;
 pub use snapshot::load_name_current_for_snapshot;
 
-pub(crate) const DEFAULT_NAME_CURRENT_READ_FILTER: &str = r#"
+pub const DEFAULT_NAME_CURRENT_READ_FILTER: &str = r#"
   AND nc.canonicality_summary ->> 'state' = 'canonical_lineage'
   AND EXISTS (
       SELECT 1
@@ -84,7 +84,7 @@ pub(crate) const DEFAULT_NAME_CURRENT_READ_FILTER: &str = r#"
   )
 "#;
 
-pub(crate) const DEFAULT_NAME_CURRENT_LINEAGE_JOINS: &str = r#"
+pub const DEFAULT_NAME_CURRENT_LINEAGE_JOINS: &str = r#"
   JOIN bigname_phase.chain_lineage surface_lineage
     ON surface_lineage.chain_id = surface.chain_id
    AND surface_lineage.block_hash = surface.block_hash
@@ -99,7 +99,7 @@ pub(crate) const DEFAULT_NAME_CURRENT_LINEAGE_JOINS: &str = r#"
    AND token_lineage_lineage.block_hash = token_lineage.block_hash
 "#;
 
-pub(crate) const DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER: &str = r#"
+pub const DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER: &str = r#"
   AND anc.canonicality_summary ->> 'state' = 'canonical_lineage'
   AND EXISTS (
       SELECT 1

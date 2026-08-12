@@ -72,8 +72,9 @@ pub use identity::{
 pub use identity_facade::{
     IdentityAddressRelationRow, IdentityNameCurrentRow, IdentityNameRecordRow,
     IdentityPrimaryNameSnapshot, IdentityRecordInventoryRow, IndexingStatusChainRow,
-    IndexingStatusRead, ReverseIdentityCursor, ReverseIdentityGroup, ReverseIdentityRecordRow,
-    ReverseIdentityRoles, ReverseIdentityStorageInput,
+    IndexingStatusRead, READABLE_REVERSE_IDENTITY_CTES, ReverseIdentityCursor,
+    ReverseIdentityGroup, ReverseIdentityRecordRow, ReverseIdentityRoles,
+    ReverseIdentityStorageInput,
 };
 pub use label_preimages::{
     ENS_RAINBOW_SOURCE_KIND, LabelPreimageImportSummary,
@@ -86,13 +87,15 @@ pub use lineage::{
     load_highest_canonical_chain_lineage_block,
 };
 pub use name_current::{
-    NameCurrentAddressFilter, NameCurrentAddressRelationFilter, NameCurrentListCursor,
-    NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage,
-    NameCurrentListRow, NameCurrentListSort, NameCurrentRow, count_name_current_list,
-    load_current_names_by_resource_ids, load_name_current, load_name_current_by_logical_name_ids,
-    load_name_current_for_snapshot, load_name_current_list_page,
-    load_name_current_list_page_offset, load_name_current_list_row_by_name,
-    load_name_current_list_row_by_namehash, name_current_list_cursor_from_row,
+    DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER, DEFAULT_NAME_CURRENT_LINEAGE_JOINS,
+    DEFAULT_NAME_CURRENT_READ_FILTER, NameCurrentAddressFilter, NameCurrentAddressRelationFilter,
+    NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder,
+    NameCurrentListPage, NameCurrentListRow, NameCurrentListSort, NameCurrentRow,
+    count_name_current_list, load_current_names_by_resource_ids, load_name_current,
+    load_name_current_by_logical_name_ids, load_name_current_for_snapshot,
+    load_name_current_list_page, load_name_current_list_page_offset,
+    load_name_current_list_row_by_name, load_name_current_list_row_by_namehash,
+    name_current_list_cursor_from_row,
 };
 pub use normalized_events::*;
 pub use permissions::{
@@ -108,11 +111,7 @@ pub use permissions::{
     load_permissions_current_resource_summaries, load_permissions_current_resource_summary,
 };
 pub use phase_projection_reads::{
-    PHASE_EXPECTED_CHAIN_IDS_SELECT, PhaseGraphqlNameCount, PhaseGraphqlNameCountTarget,
-    PhaseGraphqlNameListRow, PhaseGraphqlRecordInventoryKey, PhaseGraphqlRecordInventoryRow,
-    count_phase_graphql_name_list, load_phase_expected_status_chain_ids,
-    load_phase_graphql_name_list_page_offset, load_phase_graphql_name_row_by_name,
-    load_phase_graphql_name_row_by_namehash, load_phase_graphql_record_inventory_batch,
+    PHASE_EXPECTED_CHAIN_IDS_SELECT, load_phase_expected_status_chain_ids,
     load_phase_identity_name_feed_records_by_ids, load_phase_identity_records_by_ids,
     load_phase_indexing_status, load_phase_name_current_rows_by_ids,
     load_phase_resolver_bound_name_rows, load_phase_resolver_current,
@@ -122,10 +121,12 @@ pub use primary_name::{
     load_primary_name_current, load_primary_name_current_snapshot, normalized_claim_name,
 };
 pub use record_inventory::{
-    RecordInventoryCurrentRow, count_record_inventory_selectors_by_lookup_keys,
-    load_record_inventory_current, load_record_inventory_current_batch,
-    load_record_inventory_current_for_snapshot, load_record_inventory_current_with_anchor_fallback,
-    record_version_boundary_storage_key,
+    RECORD_INVENTORY_CANONICALITY_SUMMARY_FILTER, RECORD_INVENTORY_PROJECTION_LINEAGE_FILTER,
+    RECORD_INVENTORY_RESOURCE_CANONICALITY_FILTER, RECORD_INVENTORY_RESOURCE_LINEAGE_FILTER,
+    RESOURCE_CANONICALITY_JOINS, RecordInventoryCurrentRow,
+    count_record_inventory_selectors_by_lookup_keys, load_record_inventory_current,
+    load_record_inventory_current_batch, load_record_inventory_current_for_snapshot,
+    load_record_inventory_current_with_anchor_fallback, record_version_boundary_storage_key,
 };
 pub use resolution_support::{
     BASE_MAINNET_CHAIN_ID, BASENAMES_L1_RESOLVER_ADDRESS, BASENAMES_NAMESPACE, ENS_NAMESPACE,

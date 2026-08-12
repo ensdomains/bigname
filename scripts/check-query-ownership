@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# This is a tripwire for known API/storage naming patterns, not a SQL-origin classifier.
+# docs/internal/workstreams.md is the ownership authority. Any direct-SQL module added to
+# apps/api must name its ownership during review, whether or not this script recognizes its name.
+
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+[[ "$SCRIPT_PATH" == */* ]] || SCRIPT_PATH="./$SCRIPT_PATH"
+ROOT="$(cd "${SCRIPT_PATH%/*}/.." && pwd)"
+cd "$ROOT"
+
+if ! command -v rg >/dev/null 2>&1; then
+  printf '%s\n' 'query ownership check requires rg (ripgrep)' >&2
+  exit 1
+fi
+
+run_rg() {
+  local status=0
+  rg "$@" || status=$?
+  case "$status" in
+    0 | 1)
+      return 0
+      ;;
+    *)
+      printf 'query ownership check: rg failed with status %s\n' "$status" >&2
+      return "$status"
+      ;;
+  esac
+}
+
+storage_graphql_paths="$(
+  find crates/storage/src -type f -print \
+    | run_rg '/graphql[[:alnum:]_]*(\.rs$|/)' \
+    | sort
+)"
+storage_graphql_modules="$(
+  run_rg -n \
+    '^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?mod[[:space:]]+graphql[[:alnum:]_]*[[:space:]]*[;{]' \
+    crates/storage/src --glob '*.rs'
+)"
+
+# These two API snapshot helpers were individually reviewed. Only these exact files are allowed;
+# children of snapshot-named directories and other snapshot-named paths still fail the heuristic.
+readonly -a REVIEWED_API_STORAGE_HELPERS=(
+  'apps/api/src/v2/snapshots.rs'
+  'apps/api/src/v2/support/snapshots.rs'
+)
+
+filter_reviewed_api_storage_helpers() {
+  local path reviewed_path allowed
+  while IFS= read -r path; do
+    [[ -z "$path" ]] && continue
+    allowed=false
+    for reviewed_path in "${REVIEWED_API_STORAGE_HELPERS[@]}"; do
+      if [[ "$path" == "$reviewed_path" ]]; then
+        allowed=true
+        break
+      fi
+    done
+    if [[ "$allowed" == false ]]; then
+      printf '%s\n' "$path"
+    fi
+  done
+}
+
+api_storage_read_paths="$(
+  find apps/api/src -type f -print \
+    | run_rg '/(canonicality|database_invariants|identity_facade|[[:alnum:]_]+_reads)(\.rs$|/)|/snapshots[[:alnum:]_]*(\.rs$|/)' \
+    | filter_reviewed_api_storage_helpers \
+    | sort
+)"
+api_storage_read_modules="$(
+  run_rg -n \
+    '^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?mod[[:space:]]+(canonicality|database_invariants|identity_facade|[[:alnum:]_]+_reads)[[:space:]]*[;{]' \
+    apps/api/src --glob '*.rs'
+)"
+
+if [[ -n "$storage_graphql_paths" || -n "$storage_graphql_modules" \
+   || -n "$api_storage_read_paths" || -n "$api_storage_read_modules" ]]; then
+  printf '%s\n' 'query ownership check failed:' >&2
+  if [[ -n "$storage_graphql_paths" ]]; then
+    printf '%s\n%s\n' 'GraphQL-named files belong in apps/api:' "$storage_graphql_paths" >&2
+  fi
+  if [[ -n "$storage_graphql_modules" ]]; then
+    printf '%s\n%s\n' 'GraphQL-named storage module declarations are forbidden:' \
+      "$storage_graphql_modules" >&2
+  fi
+  if [[ -n "$api_storage_read_paths" ]]; then
+    printf '%s\n%s\n' 'Storage-owned read-pattern paths are forbidden in apps/api:' \
+      "$api_storage_read_paths" >&2
+  fi
+  if [[ -n "$api_storage_read_modules" ]]; then
+    printf '%s\n%s\n' 'Storage-owned read-pattern module declarations are forbidden in apps/api:' \
+      "$api_storage_read_modules" >&2
+  fi
+  exit 1
+fi
+
+printf '%s\n' 'query ownership check passed'

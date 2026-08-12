@@ -63,6 +63,16 @@ jobs:
             ./scripts/check-rust-file-size
           fi
 
+      - name: Install ripgrep
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ripgrep
+
+      - name: API/storage query ownership
+        run: |
+          ./scripts/check-query-ownership
+          (cd scripts && bash test-query-ownership)
+
       - name: Migration version guard
         run: ./scripts/check-migration-versions
 

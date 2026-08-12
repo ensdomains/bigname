@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+[[ "$SCRIPT_PATH" == */* ]] || SCRIPT_PATH="./$SCRIPT_PATH"
+ROOT="$(cd "${SCRIPT_PATH%/*}/.." && pwd)"
+cd "$ROOT"
+
+GATE="$ROOT/scripts/check-query-ownership"
+declare -a probe_paths=()
+declare -a probe_dirs=()
+
+cleanup() {
+  local path directory
+  for path in "${probe_paths[@]}"; do
+    rm -f -- "$path"
+  done
+  for directory in "${probe_dirs[@]}"; do
+    rmdir -- "$directory" 2>/dev/null || true
+  done
+}
+trap cleanup EXIT
+
+fail() {
+  printf 'query ownership gate test failed: %s\n' "$1" >&2
+  exit 1
+}
+
+expect_probe_rejected() {
+  local label="$1"
+  local path="$2"
+  local content="$3"
+  local expected="$4"
+  local directory output
+
+  [[ ! -e "$path" ]] || fail "$label probe path already exists: $path"
+  directory="${path%/*}"
+  if [[ ! -d "$directory" ]]; then
+    mkdir -p -- "$directory"
+    probe_dirs+=("$directory")
+  fi
+  printf '%s\n' "$content" >"$path"
+  probe_paths+=("$path")
+
+  if output="$($GATE 2>&1)"; then
+    fail "$label probe unexpectedly passed"
+  fi
+  [[ "$output" == *"$expected"* ]] \
+    || fail "$label probe failed without reporting $expected"
+
+  rm -f -- "$path"
+  rmdir -- "$directory" 2>/dev/null || true
+  "$GATE" >/dev/null
+  printf 'PASS: %s rejected (%s)\n' "$label" "$path"
+}
+
+"$GATE" >/dev/null
+
+if ! (cd scripts && bash check-query-ownership >/dev/null); then
+  fail 'gate basename invocation from scripts/ failed'
+fi
+printf '%s\n' 'PASS: gate basename invocation from scripts/'
+
+expect_probe_rejected \
+  'exact GraphQL storage file' \
+  'crates/storage/src/graphql.rs' \
+  '// query ownership probe' \
+  'crates/storage/src/graphql.rs'
+expect_probe_rejected \
+  'GraphQL storage directory' \
+  'crates/storage/src/graphql/query_ownership_probe.rs' \
+  '// query ownership probe' \
+  'crates/storage/src/graphql/query_ownership_probe.rs'
+expect_probe_rejected \
+  'prefixed GraphQL storage directory child' \
+  'crates/storage/src/graphql_query_ownership_probe/child_file.rs' \
+  '// query ownership probe' \
+  'crates/storage/src/graphql_query_ownership_probe/child_file.rs'
+expect_probe_rejected \
+  'prefixed GraphQL storage file' \
+  'crates/storage/src/graphql_query_ownership_probe.rs' \
+  '// query ownership probe' \
+  'crates/storage/src/graphql_query_ownership_probe.rs'
+expect_probe_rejected \
+  'exact GraphQL storage module' \
+  'crates/storage/src/query_ownership_exact_module_probe.rs' \
+  'mod graphql;' \
+  'mod graphql;'
+expect_probe_rejected \
+  'prefixed GraphQL storage module' \
+  'crates/storage/src/query_ownership_prefixed_module_probe.rs' \
+  'mod graphql_query_ownership_probe;' \
+  'mod graphql_query_ownership_probe;'
+expect_probe_rejected \
+  'inline GraphQL storage module' \
+  'crates/storage/src/query_ownership_inline_module_probe.rs' \
+  'mod graphql {' \
+  'mod graphql {'
+expect_probe_rejected \
+  'forbidden API read directory child' \
+  'apps/api/src/v2/ownership_probe_reads/child_file.rs' \
+  '// query ownership probe' \
+  'apps/api/src/v2/ownership_probe_reads/child_file.rs'
+expect_probe_rejected \
+  'inline forbidden API read module' \
+  'apps/api/src/v2/query_ownership_inline_module_probe.rs' \
+  'mod ownership_probe_reads {' \
+  'mod ownership_probe_reads {'
+expect_probe_rejected \
+  'new snapshot-prefixed API file' \
+  'apps/api/src/v2/snapshots_query_ownership_probe.rs' \
+  '// query ownership probe' \
+  'apps/api/src/v2/snapshots_query_ownership_probe.rs'
+expect_probe_rejected \
+  'new file under an API snapshots directory' \
+  'apps/api/src/v2/snapshots/query_ownership_probe.rs' \
+  '// query ownership probe' \
+  'apps/api/src/v2/snapshots/query_ownership_probe.rs'
+
+if output="$(PATH=/query-ownership-no-tools /usr/bin/bash "$GATE" 2>&1)"; then
+  fail 'missing-rg probe unexpectedly passed'
+fi
+[[ "$output" == *'query ownership check requires rg (ripgrep)'* ]] \
+  || fail 'missing-rg probe did not report the dependency'
+printf '%s\n' 'PASS: missing rg rejected'
+
+rg() {
+  return 2
+}
+export -f rg
+if output="$($GATE 2>&1)"; then
+  fail 'rg-status-2 probe unexpectedly passed'
+fi
+unset -f rg
+[[ "$output" == *'query ownership check: rg failed with status 2'* ]] \
+  || fail 'rg-status-2 probe was not propagated'
+printf '%s\n' 'PASS: rg status 2 propagated'
+
+"$GATE" >/dev/null
+printf '%s\n' 'query ownership gate tests passed'
