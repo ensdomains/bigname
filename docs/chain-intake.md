@@ -23,10 +23,14 @@ For each configured chain, the path is:
    and normalized events. When configured, it then applies
    [canonical-head hydration](glossary.md#hydration) to the two documented
    current projection surfaces.
-4. `verify` scans canonical selected raw logs through a frozen finalized
-   boundary and compares them with the chain's configured reference. Base dRPC
-   records `cross_checked` only through the Coinbase-to-dRPC ingest seam;
-   Ethereum reth records `node_checked`.
+4. `verify` freezes a finalized boundary. Where an independent reference is
+   configured, it scans and compares canonical selected raw logs: Base compares
+   with dRPC and records `cross_checked` only through the Coinbase-to-dRPC
+   ingest seam, while Ethereum Mainnet compares with reth and records
+   `node_checked`. Ethereum Sepolia validates the durable ingested extent
+   without selecting its dRPC intake source as an independent reference and
+   records `quick_synced`; the exact configured source's persisted cursor must
+   cover the finalized target.
 5. `live` follows a provider snapshot from the completed ingest handoff, walks
    backward to a stored readable ancestor, loads at most one bounded winning
    suffix batch, and publishes the resulting head through the shared head path.
@@ -97,12 +101,19 @@ stored boundary.
 
 Production source shape is exact: `ethereum-mainnet` has one local Reth DB
 source, while `base-mainnet` has one Coinbase SQL historical source and one
-dRPC source meeting at block `48,428,000`. Live follow uses only the chain block
-provider from that already-validated set. Verification uses local reth for
-Ethereum and dRPC as the independent reference for Base facts loaded from
-Coinbase. The dRPC source kind is capped at `cross_checked`, and its independent
-extent cannot pass the `48,428,000` seam because dRPC supplies intake after that
-block; only a local reth source can report `node_checked`. Unsupported
+dRPC source meeting at block `48,428,000`; `ethereum-sepolia` has exactly one
+dRPC intake source with `ethereum_head` seed basis and start block zero. Live
+follow uses only the chain block provider from that
+already-validated set. Verification uses local reth for Ethereum Mainnet and
+dRPC as the independent reference for Base facts loaded from Coinbase. The dRPC
+source kind is capped at `cross_checked`, and its independent extent cannot pass
+the `48,428,000` seam because dRPC supplies intake after that block; only a
+local reth source can report `node_checked`. Sepolia's dRPC is not an independent
+reference because it also supplied intake, so the chain records `quick_synced`.
+Its persisted cursor must match the configured source key, kind, seed basis,
+and start block and must cover the finalized verification target.
+Source-role separation and a Sepolia `cross_checked` path are deferred to
+[issue #411](https://github.com/ensdomains/bigname/issues/411). Unsupported
 combinations fail as configuration errors rather than falling back to another
 provider or range.
 
@@ -254,11 +265,13 @@ cargo phase -- redo \
 ```
 
 Ingest and `all` require a `--source` descriptor for every selected chain.
-Verify requires exactly one `drpc` or `reth_db` source per selected chain;
-`all` must satisfy that same verify-source rule. Verify and `all` also require
-the SELECT-only verification database URL. More than one `--chain` may be
-supplied. `--all-chains` is separate sugar that discovers every chain with an
-active synchronized manifest and applies the same phase selection and range
+Base and Ethereum Mainnet Verify require exactly one `drpc` or `reth_db`
+reference source respectively. Sepolia Verify validates the exact intake shape
+above, uses its durable ingest extent, and does not select the source as a
+reference. Verify and `all` also
+require the SELECT-only verification database URL. More than one `--chain` may
+be supplied. `--all-chains` is separate sugar that discovers every chain with
+an active synchronized manifest and applies the same phase selection and range
 through the ordinary per-chain path.
 
 `--phase all` means all four finite phases: ingest, interpret, project, and

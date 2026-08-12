@@ -81,13 +81,17 @@ whole-walk versus split-walk output but is not a boundary-carry artifact —
 the uninterrupted walk under-derives a wrapper authority lapse that a split
 walk derives.
 
-**Stored-history verification** — the read-only phase that compares canonical
-selected raw logs with the chain's configured reference source through a
-finalized block. Base uses dRPC to cross-check the Coinbase-loaded history and
-cannot extend that independent comparison past the Coinbase-to-dRPC ingest seam.
-Ethereum uses local reth for a node check. The phase records only its block
-extent, trust level, and any fatal mismatch in phase state. It does not write
-coverage attestations or repair raw data.
+**Stored-history verification** — the read-only phase that validates a chain's
+stored extent through a finalized block and, when the chain has an independent
+reference, compares canonical selected raw logs with it. Base uses dRPC to
+cross-check the Coinbase-loaded history and cannot extend that independent
+comparison past the Coinbase-to-dRPC ingest seam. Ethereum Mainnet uses local
+reth for a node check. Ethereum Sepolia validates its durable ingested extent
+and records provider trust without an independent comparison; source-role
+separation is deferred to
+[issue #411](https://github.com/ensdomains/bigname/issues/411). The phase records
+only its block extent, trust level, and any fatal mismatch in phase state. It
+does not write coverage attestations or repair raw data.
 
 **Verification level** — the source-bounded trust label for a chain's stored
 history through its reported verification extent: `quick_synced` is

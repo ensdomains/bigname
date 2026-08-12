@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use bigname_ingest::{VerificationLog, WatchFilter};
 
 use crate::{
+    config::SourceConfig,
     database::VerificationDatabase,
     error::{ErrorKind, RunnerError, RunnerResult},
     heads::BlockMarker,
@@ -187,6 +188,112 @@ impl VerificationStore {
         })
     }
 
+    pub(crate) async fn ingest_start_for(
+        &self,
+        chain_id: &str,
+        source_key: &str,
+    ) -> RunnerResult<i64> {
+        let start: Option<i64> = sqlx::query_scalar(
+            "SELECT start_block_number
+             FROM ingest_cursors
+             WHERE chain_id = $1 AND source_key = $2",
+        )
+        .bind(chain_id)
+        .bind(source_key)
+        .fetch_optional(self.database.pool())
+        .await
+        .map_err(|error| {
+            RunnerError::database(
+                format!("failed to load durable ingest cursor {source_key} for chain {chain_id}"),
+                error,
+            )
+        })?;
+        start.ok_or_else(|| {
+            RunnerError::data_integrity(format!(
+                "chain {chain_id} has no durable ingest cursor for configured source {source_key}"
+            ))
+        })
+    }
+
+    pub(crate) async fn require_provider_trusted_extent(
+        &self,
+        chain_id: &str,
+        source: &SourceConfig,
+        target: &BlockMarker,
+    ) -> RunnerResult<()> {
+        type CursorRow = (
+            String,
+            String,
+            i64,
+            i64,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            bool,
+        );
+        let row: Option<CursorRow> = sqlx::query_as(
+            "SELECT source_kind, seed_basis, start_block_number, next_block_number,
+                    target_block_number, last_processed_block_number,
+                    last_processed_block_hash,
+                    EXISTS (
+                        SELECT 1
+                        FROM chain_lineage lineage
+                        WHERE lineage.chain_id = cursor.chain_id
+                          AND lineage.block_number = cursor.last_processed_block_number
+                          AND lineage.block_hash = cursor.last_processed_block_hash
+                          AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+                    )
+             FROM ingest_cursors cursor
+             WHERE chain_id = $1 AND source_key = $2",
+        )
+        .bind(chain_id)
+        .bind(&source.source_key)
+        .fetch_optional(self.database.pool())
+        .await
+        .map_err(|error| {
+            RunnerError::database(
+                format!(
+                    "failed to validate provider-trusted ingest cursor {} for chain {chain_id}",
+                    source.source_key
+                ),
+                error,
+            )
+        })?;
+        let Some((
+            kind,
+            seed,
+            start,
+            next,
+            cursor_target,
+            processed,
+            processed_hash,
+            processed_is_readable,
+        )) = row
+        else {
+            return Err(RunnerError::data_integrity(format!(
+                "chain {chain_id} has no durable ingest cursor for configured source {}",
+                source.source_key
+            )));
+        };
+        let configuration_matches = normalized_kind(&kind) == normalized_kind(&source.source_kind)
+            && seed == source.seed_basis.as_str()
+            && start == source.start_block_number;
+        let covers_target = next > target.number
+            && cursor_target.is_some_and(|number| number >= target.number)
+            && processed.is_some_and(|number| number >= target.number)
+            && processed_is_readable
+            && (processed != Some(target.number)
+                || processed_hash.as_deref() == Some(target.hash.as_str()));
+        if configuration_matches && covers_target {
+            return Ok(());
+        }
+        Err(RunnerError::data_integrity(format!(
+            "provider-trusted verification for chain {chain_id} requires configured source {} to \
+             have a matching durable ingest cursor through finalized block {}",
+            source.source_key, target.number
+        )))
+    }
+
     pub(crate) async fn level_for_redo(
         &self,
         chain_id: &str,
@@ -230,6 +337,10 @@ impl VerificationStore {
             ))),
         }
     }
+}
+
+fn normalized_kind(kind: &str) -> String {
+    kind.trim().to_ascii_lowercase().replace('-', "_")
 }
 
 fn map_ingest_error(error: bigname_ingest::IngestError) -> RunnerError {

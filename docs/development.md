@@ -71,11 +71,15 @@ writer has been removed.
 ## Stage B phase runner
 
 The current phase runner implements `ingest`, `interpret`, `project`, read-only
-`verify`, and continuous `live` follow. Verification compares only finalized
-history: Base dRPC records `cross_checked` through the Coinbase-to-dRPC ingest
-seam, while Ethereum local reth records `node_checked` through its finalized
-marker. V2 verified name, record, and ENS/60 primary-name reads use the phase
-runner's schema-v2 lookup state. Other API reads use phase projections.
+`verify`, and continuous `live` follow. Verification operates only on finalized
+history. Base dRPC records `cross_checked` through the Coinbase-to-dRPC ingest
+seam, while Ethereum Mainnet local reth records `node_checked` through its
+finalized marker. Ethereum Sepolia validates its durable provider-trusted
+ingested extent and records `quick_synced`; its dRPC intake source is not reused
+as an independent reference. Source roles and a Sepolia `cross_checked` path
+are tracked in [issue #411](https://github.com/ensdomains/bigname/issues/411).
+V2 verified name, record, and ENS/60 primary-name reads use the phase runner's
+schema-v2 lookup state. Other API reads use phase projections.
 
 Set the [deployment profile](glossary.md#deployment-profile) root and
 chain/source descriptors, for example:
@@ -121,6 +125,8 @@ can record only `cross_checked`; the descriptor must retain the fixed
 `48,428,000` source start, and a range above that seam is rejected before the
 redo marker is written. A partial redo retains the level for the
 whole recorded extent, while a full-extent redo can change it.
+Sepolia verify redo does not select an intake descriptor as a reference and
+records `quick_synced` for the finalized durable extent.
 The reader URL must authenticate the dedicated role directly and resolve to the
 same PostgreSQL system/database identity as `BIGNAME_DATABASE_URL`.
 

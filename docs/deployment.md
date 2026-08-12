@@ -29,7 +29,8 @@ in-place change cannot preserve durable state. `phases` then invokes
 persist ingest-through-project output and continuously follow provider heads,
 including reorg-driven downstream redo and canonical-head hydration. Its
 read-only verification phase compares Base's Coinbase-loaded range with dRPC
-through the `48,428,000` ingest seam and compares Ethereum with local reth only
+through the `48,428,000` ingest seam and Ethereum Mainnet with local reth.
+Ethereum Sepolia instead records the provider-trusted durable ingested extent
 through the finalized head. V2, GraphQL, and operational paths consume its
 phase projections and lookup output. Apply append-only SQLx schema-migrations
 through deployment automation; there is no application schema-migration command
@@ -145,9 +146,17 @@ start block and independent verification extent are fixed at the block
 `48,428,000` Coinbase-to-dRPC ingest seam. A moved source start or verify redo
 above that seam is rejected before redo state is created.
 `ethereum-mainnet` must configure one `reth_db` source; that source records
-`node_checked`. A generic RPC kind is not accepted as Base verification
-authority because it does not identify the ratified independent provider.
-Each completed verification batch logs its actual dRPC request count, including
+`node_checked`. `ethereum-sepolia` must configure exactly one `drpc` intake
+source with `ethereum_head` seed basis and start block zero. Because that dRPC
+is the intake provider, Verify does not select it as a reference. Verify
+validates the durable ingested extent through its finalized marker and records
+`quick_synced` only when that exact source's persisted cursor matches its
+configuration and covers the finalized target. Separating intake and
+verification source roles, then upgrading Sepolia to `cross_checked`, is deferred to
+[issue #411](https://github.com/ensdomains/bigname/issues/411). A generic RPC
+kind is not accepted as Base verification authority
+because it does not identify the ratified independent provider.
+Each completed dRPC comparison batch logs its actual request count, including
 transport retries, range-splitting attempts, and target-marker checks. The count
 is log-only: `chain_phase_state` does not persist it. At sweep time, copy every
 structured `INFO` event with

@@ -106,53 +106,86 @@ impl Phase for VerifyPhase {
         sources: &[SourceConfig],
         mode: &RunMode,
     ) -> RunnerResult<()> {
-        let source = select_source(chain_id, sources)?;
-        validate_source_range(&source, mode)?;
-        self.reference.preflight(&source)
+        let plan = verification_plan(chain_id, sources)?;
+        validate_cross_check_range(plan.cross_check_through(), mode)?;
+        match &plan {
+            VerificationPlan::ProviderTrusted { .. } => Ok(()),
+            VerificationPlan::Compared(source) => self.reference.preflight(source),
+        }
     }
 
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
         Box::pin(async move {
-            let source = select_source(&context.chain_id, &context.sources)?;
-            let plan = BatchPlan::new(&context, &source, &self.store).await?;
-            let stored = self
-                .store
-                .load_batch(&context.chain_id, plan.from, plan.to)
-                .await?;
-            let reference = self
-                .reference
-                .fetch(&source, stored.filter.clone(), plan.from, plan.to)
-                .await?;
-            if let Some(mismatch) = verify_compare::compare(&stored, &reference) {
-                return Err(RunnerError::verification_mismatch(format!(
-                    "chain {} source {} range {}..={}: {mismatch}",
-                    context.chain_id,
-                    source.source_key(),
-                    plan.from,
-                    plan.to
-                )));
-            }
+            let verification = verification_plan(&context.chain_id, &context.sources)?;
+            let plan = BatchPlan::new(
+                &context,
+                verification.cross_check_through(),
+                verification.provider_trusted_source_key(),
+                &self.store,
+            )
+            .await?;
             let reported_level = if let Some(range) = context.mode.range() {
                 self.store
-                    .level_for_redo(&context.chain_id, range, source.verification_level())
+                    .level_for_redo(&context.chain_id, range, verification.verification_level())
                     .await?
             } else {
-                normal_extent_level(&context, source.verification_level())?
+                normal_extent_level(&context, verification.verification_level())?
+            };
+            let end = match &verification {
+                VerificationPlan::ProviderTrusted { source, .. } => {
+                    let end = self
+                        .store
+                        .finalized_marker(&context.chain_id, plan.to)
+                        .await?;
+                    self.store
+                        .require_provider_trusted_extent(&context.chain_id, source, &end)
+                        .await?;
+                    end
+                }
+                VerificationPlan::Compared(source) => {
+                    let stored = self
+                        .store
+                        .load_batch(&context.chain_id, plan.from, plan.to)
+                        .await?;
+                    let reference = self
+                        .reference
+                        .fetch(source, stored.filter.clone(), plan.from, plan.to)
+                        .await?;
+                    if let Some(mismatch) = verify_compare::compare(&stored, &reference) {
+                        return Err(RunnerError::verification_mismatch(format!(
+                            "chain {} source {} range {}..={}: {mismatch}",
+                            context.chain_id,
+                            source.source_key(),
+                            plan.from,
+                            plan.to
+                        )));
+                    }
+                    info!(
+                        chain_id = context.chain_id,
+                        source_key = source.source_key(),
+                        reference_kind = ?source.provider_kind(),
+                        reference_verification_level = source.verification_level().as_str(),
+                        reported_verification_level = reported_level.as_str(),
+                        from_block = plan.from,
+                        to_block = plan.to,
+                        reference_rpc_request_count = reference.rpc_request_count,
+                        "stored history verification batch matched its reference"
+                    );
+                    stored.end
+                }
             };
 
-            info!(
-                chain_id = context.chain_id,
-                source_key = source.source_key(),
-                reference_kind = ?source.provider_kind(),
-                reference_verification_level = source.verification_level().as_str(),
-                reported_verification_level = reported_level.as_str(),
-                from_block = plan.from,
-                to_block = plan.to,
-                reference_rpc_request_count = reference.rpc_request_count,
-                "stored history verification batch matched its reference"
-            );
+            if matches!(verification, VerificationPlan::ProviderTrusted { .. }) {
+                info!(
+                    chain_id = context.chain_id,
+                    reported_verification_level = reported_level.as_str(),
+                    from_block = plan.from,
+                    to_block = plan.to,
+                    "provider-trusted stored history extent accepted without an independent reference"
+                );
+            }
             let progress = PhaseProgress {
-                current: Some(stored.end),
+                current: Some(end),
                 target: Some(plan.target),
                 verification_level: Some(reported_level),
                 ..PhaseProgress::default()
@@ -175,13 +208,21 @@ struct BatchPlan {
 impl BatchPlan {
     async fn new(
         context: &PhaseContext,
-        source: &VerificationSource,
+        cross_check_through: Option<i64>,
+        provider_trusted_source_key: Option<&str>,
         store: &VerificationStore,
     ) -> RunnerResult<Self> {
         let range = context.mode.range();
         let start = match range {
             Some(range) => range.from,
-            None => store.ingest_start(&context.chain_id).await?,
+            None => match provider_trusted_source_key {
+                Some(source_key) => {
+                    store
+                        .ingest_start_for(&context.chain_id, source_key)
+                        .await?
+                }
+                None => store.ingest_start(&context.chain_id).await?,
+            },
         };
         let mut target = if let Some(target) = context.resume.target.clone() {
             target
@@ -209,8 +250,8 @@ impl BatchPlan {
                     ))
                 })?
         };
-        validate_source_range(source, &context.mode)?;
-        if let Some(cross_check_through) = source.cross_check_through
+        validate_cross_check_range(cross_check_through, &context.mode)?;
+        if let Some(cross_check_through) = cross_check_through
             && target.number > cross_check_through
         {
             target = store
@@ -285,8 +326,11 @@ const fn weakest_level(
     }
 }
 
-fn validate_source_range(source: &VerificationSource, mode: &RunMode) -> RunnerResult<()> {
-    let Some((cross_check_through, range)) = source.cross_check_through.zip(mode.range()) else {
+fn validate_cross_check_range(
+    cross_check_through: Option<i64>,
+    mode: &RunMode,
+) -> RunnerResult<()> {
+    let Some((cross_check_through, range)) = cross_check_through.zip(mode.range()) else {
         return Ok(());
     };
     if range.to <= cross_check_through {
@@ -299,6 +343,62 @@ fn validate_source_range(source: &VerificationSource, mode: &RunMode) -> RunnerR
              ingest seam {cross_check_through}",
             range.to
         ),
+    ))
+}
+
+enum VerificationPlan {
+    ProviderTrusted {
+        level: VerificationLevel,
+        source: SourceConfig,
+    },
+    Compared(VerificationSource),
+}
+
+impl VerificationPlan {
+    const fn verification_level(&self) -> VerificationLevel {
+        match self {
+            Self::ProviderTrusted { level, .. } => *level,
+            Self::Compared(source) => source.verification_level(),
+        }
+    }
+
+    const fn cross_check_through(&self) -> Option<i64> {
+        match self {
+            Self::ProviderTrusted { .. } => None,
+            Self::Compared(source) => source.cross_check_through,
+        }
+    }
+
+    fn provider_trusted_source_key(&self) -> Option<&str> {
+        match self {
+            Self::ProviderTrusted { source, .. } => Some(&source.source_key),
+            Self::Compared(_) => None,
+        }
+    }
+}
+
+fn verification_plan(chain_id: &str, sources: &[SourceConfig]) -> RunnerResult<VerificationPlan> {
+    if chain_id == "ethereum-sepolia" {
+        validate_sepolia_intake_source(sources)?;
+        return Ok(VerificationPlan::ProviderTrusted {
+            level: VerificationLevel::QuickSynced,
+            source: sources[0].clone(),
+        });
+    }
+    select_source(chain_id, sources).map(VerificationPlan::Compared)
+}
+
+fn validate_sepolia_intake_source(sources: &[SourceConfig]) -> RunnerResult<()> {
+    let valid = sources.len() == 1
+        && normalized_kind(&sources[0].source_kind) == "drpc"
+        && sources[0].seed_basis == crate::config::SeedBasis::EthereumHead
+        && sources[0].start_block_number == 0;
+    if valid {
+        return Ok(());
+    }
+    Err(RunnerError::new(
+        ErrorKind::Configuration,
+        "ethereum-sepolia requires one dRPC intake source with ethereum_head seed basis and start block 0",
     ))
 }
 
@@ -443,25 +543,31 @@ pub(crate) fn validate_reported_level(
     let Some(reported) = reported else {
         return Ok(());
     };
-    if chain_id != "base-mainnet" || reported != VerificationLevel::NodeChecked {
+    let declared = match chain_id {
+        "base-mainnet" | "ethereum-mainnet" => {
+            verification_plan(chain_id, sources)?.verification_level()
+        }
+        "ethereum-sepolia" => VerificationLevel::QuickSynced,
+        // Alternate Phase implementations can use the generic runner seam for
+        // other chains. Production Verify rejects those chains in preflight.
+        _ => return Ok(()),
+    };
+    if verification_level_rank(reported) <= verification_level_rank(declared) {
         return Ok(());
     }
-    let has_drpc = sources
-        .iter()
-        .any(|source| normalized_kind(&source.source_kind) == "drpc");
-    let has_reth = sources.iter().any(|source| {
-        matches!(
-            normalized_kind(&source.source_kind).as_str(),
-            "reth" | "reth_db"
-        )
-    });
-    if has_drpc || !has_reth {
-        return Err(RunnerError::data_integrity(
-            "base-mainnet cannot record node_checked without an exclusive local reth \
-             verification source; dRPC is capped at cross_checked",
-        ));
+    Err(RunnerError::data_integrity(format!(
+        "chain {chain_id} cannot record {} because its chain-specific verification path earns at most {}",
+        reported.as_str(),
+        declared.as_str()
+    )))
+}
+
+const fn verification_level_rank(level: VerificationLevel) -> u8 {
+    match level {
+        VerificationLevel::QuickSynced => 0,
+        VerificationLevel::CrossChecked => 1,
+        VerificationLevel::NodeChecked => 2,
     }
-    Ok(())
 }
 
 fn normalized_kind(kind: &str) -> String {
