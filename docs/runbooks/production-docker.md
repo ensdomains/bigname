@@ -58,11 +58,11 @@ the ledger is reconciled by hand. A migration that drops legacy
 maintenance window.
 
 Adding, editing, or deleting a covered interpreter input rotates the compiled
-interpreter content hash; `docs/storage.md` names what is covered. Covered
-files are hashed whole, so editing a unit test that lives inside one rotates
-the hash as surely as changing its production code. Do not mix new
-interpretation output with rows published under the old hash. For such a
-release:
+[interpreter content hash](../glossary.md#interpreter-content-hash);
+`docs/storage.md` names what is covered. Covered files are hashed whole, so
+editing a unit test that lives inside one rotates the hash as surely as
+changing its production code. Do not mix new interpretation output with rows
+published under the old hash. For such a release:
 
 A planned [re-derivation boundary](../glossary.md#re-derivation-boundary) may
 combine separately reviewed and separately merged PRs. Before merging the first
@@ -77,23 +77,31 @@ checks, publication, and Verify phase succeed.
 
 1. stop the API and phase runner;
 2. take and verify a database backup;
-3. apply the reviewed versioned schema-migration;
-4. reapply and validate the verifier's `GRANT SELECT ON ALL TABLES IN SCHEMA
-   bigname_phase` after the additive schema-migration, before starting any
-   one-shot or long-running runner process;
-5. keep the long-running phase-runner supervisor stopped and use the new
-   artifact's one-shot Ingest redo over every widened address/topic range in
-   the generated watch plan — the command requires the full argument set or it
-   is rejected before fetching anything:
+3. if the reviewed artifact set includes a versioned schema-migration, apply it;
+   otherwise skip this step;
+4. if an additive schema-migration created or changed a table, reapply and
+   validate the verifier's `GRANT SELECT ON ALL TABLES IN SCHEMA
+   bigname_phase` before starting any one-shot or long-running runner process;
+   otherwise skip this step;
+5. keep the long-running phase-runner supervisor stopped. If the generated
+   watch plan widened an address/topic range, use the new artifact's one-shot
+   Ingest redo over every widened range; otherwise skip this step. The command
+   requires the full argument set or it is rejected before fetching anything:
    `phase-runner redo --chain <chain-id> --phase ingest --from-block <from>
    --to-block <to> --source <source>` (at least one `--source`; the CLI
    refuses an ingest redo without one, and every redo requires the explicit
    block range);
-6. after the Ingest redo succeeds, invoke the exact required full-history
-   Interpret redo once to obtain the manifest-authority fence's invalidation
-   token, then rerun that same chain and block range with
-   `--attest-watch-set-coverage <token>`; do not use the unattended `run` path
-   for this attestation;
+6. after any required Ingest redo succeeds, resume an already-audited Interpret
+   redo with its existing token and exact active chain and range. Otherwise,
+   invoke the exact required full-history Interpret redo without an attestation
+   flag. If a current [manifest-authority
+   marker](../glossary.md#manifest-authority-marker) makes the redo reject and
+   print an invalidation token, run the required historical fetch for a widened
+   watch plan, or complete the required review proving that the watch plan did
+   not widen, then rerun the same chain and block range with
+   `--attest-watch-set-coverage <token>`. If no marker exists, let the unflagged
+   redo complete. Never invent a token, reuse one after completion, or use one
+   for another redo. Do not use the unattended `run` path for an attestation;
 7. complete the matching full-history Project redo while the supervisor remains
    stopped;
 8. start the long-running phase runner only after those one-shot redos succeed,
@@ -183,7 +191,192 @@ docker compose --env-file .env.server \
 The API remains reachable while indexing is paused, but health and status must
 continue to report the stale or absent loop honestly.
 
-## Reorg and verification incidents
+## Recovery plays
+
+Route from the first confirmed symptom:
+
+- `interpret` crash-loops with an identity or derivation mismatch, or one
+  chain's Interpret state is `failed` while the container stays up ->
+  [stop and escalate before selecting a repair](#stop-and-escalate-an-interpreter-mismatch).
+- a schema-migration deploy stops between the schema-migration and service
+  start -> [recover an aborted schema-migration deploy](#recover-an-aborted-schema-migration-deploy).
+- stored lineage, block canonicality, or verification disagrees ->
+  [follow the reorg and verification incident play](#reorg-and-verification-incidents).
+- rollback requires an older binary, deleted schema, or restored data ->
+  [follow the rollback boundary](#rollback).
+
+Use the exact Compose file set deployed on the host for every recovery command,
+retaining every active overlay. Replace `<compose-files>` below with that exact
+set. The tracked baselines look like these; append any host-local overlays in
+their deployed order:
+
+- internal: `-f docker-compose.server.yml`;
+- public: `-f docker-compose.server.yml -f docker-compose.public.yml`;
+- reth: `-f docker-compose.server.yml -f docker-compose.reth-db.yml`; or
+- public and reth: `-f docker-compose.server.yml -f docker-compose.public.yml
+  -f docker-compose.reth-db.yml`.
+
+Drain public traffic before running a recovery play. Use the deployment's
+maintainer-approved edge procedure and confirm that no public request reaches
+the API. The repository has no generic traffic-drain command; flag a missing
+deployment-specific procedure and stop. Record this step as not applicable on
+an internal deployment with no public edge.
+
+### Stop and escalate an interpreter mismatch
+
+Apply this play when the `interpret` phase crash-loops on an identity or
+derivation mismatch, or when one chain's Interpret state is `failed` with that
+error while another chain continues running.
+
+1. Record the exact image ID of the existing phase-runner container as
+   `<recovery-image>`. Do not use the mutable `latest` tag. If the command
+   returns no container or more than one ID, stop and escalate:
+
+   ```sh
+   docker inspect --format '{{.Image}}' \
+     "$(docker compose --env-file .env.server \
+       <compose-files> ps -q phase-runner)"
+   ```
+
+2. Stop the phase runner:
+
+   ```sh
+   docker compose --env-file .env.server \
+     <compose-files> stop phase-runner
+   ```
+
+3. Capture the full error and the affected chain from the logs. Record the
+   affected block when the error reports one; do not infer a missing block.
+   Choose `<incident-start>` early enough to include the first failure:
+
+   ```sh
+   docker compose --env-file .env.server \
+     <compose-files> logs --since <incident-start> phase-runner
+   ```
+
+4. Capture the durable Interpret and Project status, recorded heads, pending
+   redo state, and full `last_error`:
+
+   ```sh
+   docker compose --env-file .env.server \
+     <compose-files> exec -T postgres \
+     sh -c 'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+   SELECT chain_id,
+          phase_name,
+          phase_status,
+          current_block_number AS recorded_head,
+          target_block_number,
+          redo_in_progress,
+          last_error,
+          updated_at
+   FROM bigname_phase.chain_phase_state
+   WHERE phase_name IN ('interpret', 'project')
+   ORDER BY chain_id, phase_name;
+   SQL
+   ```
+
+5. Escalate the captured error before selecting a redo. If the Interpret row's
+   `recorded_head` is `NULL`, keep the phase runner stopped: neither a scoped nor
+   a full Interpret redo can start without a processed extent. Require a
+   separately reviewed recovery that preserves non-rebuildable state; do not
+   select phase-schema replacement from this symptom alone. If the error says
+   to run `recompute-flags`, follow the
+   [recompute-flags procedure](../deployment.md#phase-runner-configuration); do
+   not run an ordinary Interpret redo. Otherwise, require the incident owner to
+   identify the earliest affected stored block within the recorded Interpret
+   extent. If that start cannot be established, skip the scoped redo and follow
+   the full re-walk in step 7.
+6. Run the approved Interpret redo from the affected start through the recorded
+   Interpret head. Keep the long-running phase runner stopped. Interpret treats
+   later rows as potentially dependent on earlier rows, so it replays from
+   `<from>` through the recorded head and stamps the matching Project repair.
+   Pin the one-shot container to `<recovery-image>`. Copy every source
+   descriptor for the affected chain exactly from the deployed configuration
+   and repeat `--source` once for each descriptor. Each descriptor has the
+   `CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV` form. The explicit arguments
+   override the multi-chain `BIGNAME_PHASE_RUNNER_SOURCES` value for this
+   one-off redo:
+
+   ```sh
+   BIGNAME_IMAGE=<recovery-image> \
+     docker compose --env-file .env.server \
+     <compose-files> run --rm --pull never phase-runner \
+     phase-runner redo --chain <chain-id> --phase interpret \
+     --from-block <from> --to-block <recorded-interpret-head> \
+     --source <affected-chain-source> \
+     [--source <additional-affected-chain-source> ...]
+   ```
+
+7. If the mismatch reproduces during the redo, keep the phase runner stopped
+   and perform the full re-walk at the [planned re-derivation
+   boundary](#planned-migration-and-fingerprint-boundary). Do not widen or
+   repeat the scoped redo by guesswork. Stop this play; the full re-walk has its
+   own image, restart, and verification steps.
+8. If the redo succeeds, restart the phase runner with the same exact image.
+   Let the supervisor resume Interpret and complete the stamped Project repair:
+
+   ```sh
+   BIGNAME_IMAGE=<recovery-image> \
+     docker compose --env-file .env.server \
+     <compose-files> up -d --pull never phase-runner
+   ```
+
+9. Repeat the status query from step 4 until Interpret advances beyond the
+   pre-recovery recorded head without the same `last_error`. A
+   mismatch in the next uncommitted batch can appear only after restart. If the
+   same mismatch returns after the scoped redo, stop the phase runner and
+   perform the full re-walk in step 7. Stop this play when escalating.
+10. Require the Project row to report `phase_status = 'completed'`,
+    `redo_in_progress = false`, and a `recorded_head` at or beyond the recovered
+    Interpret head.
+11. [Verify health](#verify-health) with the same Compose file set, then restore
+    traffic through the same deployment-specific edge procedure used to drain
+    it.
+
+Never hand-edit identity or normalized-event rows. An in-place database update
+is not a sanctioned recovery play on this stack.
+
+### Recover an aborted schema-migration deploy
+
+Apply this play when a deploy containing schema-migrations is interrupted
+between the schema-migration step and service start, leaving the applied
+schema-migration state and service versions desynchronized and the stack down.
+The restore-or-re-roll decision was validated on 2026-07-29.
+
+1. Keep the stack down. Never hand-apply pending SQL with `psql`, and never
+   edit `_sqlx_migrations` to catch up.
+2. If the schema-migration command stopped before it reported success, or its
+   completion cannot be proven, treat it as half-applied. Keep the stack down
+   and invoke the storage owner. Restore the verified pre-deploy backup required
+   by the [existing backup steps](#planned-migration-and-fingerprint-boundary)
+   with the deployment-specific restore procedure recorded for that backup.
+   Do not substitute a generic repository command: storage snapshots and
+   filesystem base backups use different restore mechanisms. Flag a missing
+   deployment-specific restore procedure and stop. Do not complete or undo the
+   partial change by hand, and do not continue until the restore is verified.
+3. Do not resume at service start. Re-run the deploy from the top, from the
+   exact target commit, so the applied schema-migration state and service
+   versions move together. Repeat the applicable schema-migration checks and
+   apply steps under the [schema-migration and fingerprint
+   procedure](#planned-migration-and-fingerprint-boundary), but keep service
+   start blocked.
+4. Apply the release's reviewed re-derivation decision before starting
+   services. Any deploy that changes the interpreter content hash requires the
+   full re-walk under the [planned re-derivation
+   boundary](#planned-migration-and-fingerprint-boundary). A semantic change
+   outside that hash can also require re-derivation; review the surfaces listed
+   under [interpretation replay](../storage.md#interpretation-replay). Keep the
+   stack down until every required re-derivation step completes.
+5. Treat saved Interpret and Project redo progress from the prior hash as
+   invalid. Preserve pending Ingest or Verify redo markers and complete the
+   exact persisted work named by the runner before starting `--phase all`; do
+   not delete or skip those markers.
+6. If no re-derivation is required, or after the required re-derivation
+   boundary completes, [start or refresh
+   services](#start-or-refresh-services).
+7. [Verify health](#verify-health) before restoring traffic.
+
+### Reorg and verification incidents
 
 Use the bounded `phase-runner inspect` commands for stored lineage, block
 canonicality, and raw-event evidence. Use `phase-runner rewind` only after
@@ -192,7 +385,7 @@ the chain-scoped repair procedure in
 [`deployment.md`](../deployment.md#verification-mismatch-repair); do not edit
 immutable raw facts or mark a phase complete manually.
 
-## Rollback
+### Rollback
 
 Run `scripts/rollback-smoke` from the exact rollback checkout before changing
 binaries. A binary rollback does not recreate dropped legacy tables. If the
