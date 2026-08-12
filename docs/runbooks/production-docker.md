@@ -197,11 +197,11 @@ Route from the first confirmed symptom:
 
 - `interpret` crash-loops with an identity or derivation mismatch, or one
   chain's Interpret state is `failed` while the container stays up ->
-  [stop and run a scoped redo](#stop-and-escalate-an-interpreter-mismatch).
+  [stop and escalate before selecting a repair](#stop-and-escalate-an-interpreter-mismatch).
 - a schema-migration deploy stops between the schema-migration and service
-  start -> [restart the deploy from the top](#recover-an-aborted-schema-migration-deploy).
+  start -> [recover an aborted schema-migration deploy](#recover-an-aborted-schema-migration-deploy).
 - stored lineage, block canonicality, or verification disagrees ->
-  [inspect and repair the affected chain](#reorg-and-verification-incidents).
+  [follow the reorg and verification incident play](#reorg-and-verification-incidents).
 - rollback requires an older binary, deleted schema, or restored data ->
   [follow the rollback boundary](#rollback).
 
