@@ -52,7 +52,10 @@ const BASENAMES_RESOURCE: &str = "00000000-0000-0000-0000-000000000031";
 const EQUIVALENCE_BOB_RESOURCE: &str = "00000000-0000-0000-0000-0000000000b0";
 const EQUIVALENCE_BOB_BINDING: &str = "00000000-0000-0000-0000-0000000000b1";
 const EQUIVALENCE_PARENT_BINDING: &str = "00000000-0000-0000-0000-0000000000b3";
+const EQUIVALENCE_TRANSFER_RESOURCE: &str = "00000000-0000-0000-0000-0000000000b4";
+const EQUIVALENCE_TRANSFER_BINDING: &str = "00000000-0000-0000-0000-0000000000b5";
 const EQUIVALENCE_V2_RESOLVER: &str = "0x00000000000000000000000000000000000000b2";
+const EQUIVALENCE_TRANSFER_RESOLVER: &str = "0x00000000000000000000000000000000000000b3";
 const EQUIVALENCE_V2_IMPLEMENTATION: &str = "0x00000000000000000000000000000000000000c2";
 
 type ChildLabelRow = (Vec<u8>, Option<String>, Vec<u8>, Option<String>);
@@ -4810,7 +4813,7 @@ async fn incremental_ticks_match_one_full_rebuild_across_all_eight_serving_table
                      WHERE chain_id = $1 AND resolver_address = lower($2)",
                 )
                 .bind(CHAIN)
-                .bind(RESOLVER)
+                .bind(EQUIVALENCE_TRANSFER_RESOLVER)
                 .fetch_one(incremental.pool())
                 .await?;
             assert_eq!(
@@ -4851,12 +4854,14 @@ async fn incremental_ticks_match_one_full_rebuild_across_all_eight_serving_table
     let resolver_states: Vec<(String, String)> = sqlx::query_as(
         "SELECT resolver_address, support_status
          FROM resolver_current
-         WHERE chain_id = $1 AND resolver_address IN (lower($2), lower($3))
+         WHERE chain_id = $1
+           AND resolver_address IN (lower($2), lower($3), lower($4))
          ORDER BY resolver_address",
     )
     .bind(CHAIN)
     .bind(RESOLVER)
     .bind(EQUIVALENCE_V2_RESOLVER)
+    .bind(EQUIVALENCE_TRANSFER_RESOLVER)
     .fetch_all(incremental.pool())
     .await?;
     assert_eq!(
@@ -4864,8 +4869,9 @@ async fn incremental_ticks_match_one_full_rebuild_across_all_eight_serving_table
         vec![
             (RESOLVER.into(), "supported".into()),
             (EQUIVALENCE_V2_RESOLVER.into(), "supported".into()),
+            (EQUIVALENCE_TRANSFER_RESOLVER.into(), "supported".into()),
         ],
-        "the old and new resolver rows must both survive the move"
+        "the shared and moved resolver rows must survive"
     );
 
     incremental.cleanup().await?;
@@ -6458,6 +6464,47 @@ async fn extend_incremental_equivalence_fixture(pool: &PgPool) -> Result<()> {
 }
 
 async fn extend_equivalence_registrar_transfer_fixture(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO resources (
+             resource_id, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1, $2, $3, 1, 'canonical')",
+    )
+    .bind(Uuid::parse_str(EQUIVALENCE_TRANSFER_RESOURCE)?)
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 1))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO name_surfaces (
+             logical_name_id, namespace, raw_name, raw_labels,
+             dns_encoded_name, namehash, labelhashes, normalizer_version,
+             visibility_state, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES (
+             'ens:0xtransfer', 'ens', 'transfer.eth', ARRAY['transfer', 'eth'],
+             decode('00', 'hex'), '0xtransfer', ARRAY['0xtransfer-label', '0xeth'],
+             $1, 'active', $2, $3, 1, 'canonical'
+         )",
+    )
+    .bind(NORMALIZER)
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 1))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO surface_bindings (
+             surface_binding_id, logical_name_id, resource_id, binding_kind,
+             active_from, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES (
+             $1, 'ens:0xtransfer', $2, 'declared_registry_path',
+             to_timestamp(1), $3, $4, 1, 'canonical'
+         )",
+    )
+    .bind(Uuid::parse_str(EQUIVALENCE_TRANSFER_BINDING)?)
+    .bind(Uuid::parse_str(EQUIVALENCE_TRANSFER_RESOURCE)?)
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 1))
+    .execute(pool)
+    .await?;
     insert_manifest(
         pool,
         CHAIN,
@@ -6466,54 +6513,111 @@ async fn extend_equivalence_registrar_transfer_fixture(pool: &PgPool) -> Result<
         json!({
             "contracts":[{
                 "role":"l2_resolver",
-                "address":RESOLVER,
+                "address":EQUIVALENCE_TRANSFER_RESOLVER,
                 "proxy_kind":"none"
             }]
         }),
     )
     .await?;
-    sqlx::query(
-        "UPDATE normalized_events
-         SET source_family = CASE event_kind
-             WHEN 'ResolverChanged' THEN 'basenames_base_registry'
-             WHEN 'RecordChanged' THEN 'basenames_base_resolver'
-         END
-         WHERE chain_id = $1 AND logical_name_id = 'ens:0xbob'
-           AND block_number = 2
-           AND event_kind IN ('ResolverChanged', 'RecordChanged')",
+    insert_event(
+        pool,
+        CHAIN,
+        1,
+        Some("ens:0xtransfer"),
+        Some(EQUIVALENCE_TRANSFER_RESOURCE),
+        "RegistrationGranted",
+        "basenames_base_registrar",
+        json!({
+            "authority_kind":"registrar",
+            "registrant":OWNER,
+            "status":"registered"
+        }),
+        json!({}),
     )
-    .bind(CHAIN)
-    .execute(pool)
     .await?;
-    sqlx::query(
-        "UPDATE normalized_events
-         SET source_family = 'basenames_base_registrar',
-             after_state = jsonb_build_object('owner', lower($2::text)),
-             raw_fact_ref = jsonb_build_object('emitting_address', lower($3::text))
-         WHERE chain_id = $1 AND logical_name_id = 'ens:0xbob'
-           AND block_number = 7 AND event_kind = 'AuthorityTransferred'",
+    insert_event(
+        pool,
+        CHAIN,
+        1,
+        Some("ens:0xtransfer"),
+        Some(EQUIVALENCE_TRANSFER_RESOURCE),
+        "AuthorityTransferred",
+        "basenames_base_registrar",
+        json!({"owner":OWNER}),
+        json!({"emitting_address":REGISTRAR}),
     )
-    .bind(CHAIN)
-    .bind(TRANSFER_OWNER)
-    .bind(REGISTRAR)
-    .execute(pool)
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        1,
+        Some("ens:0xtransfer"),
+        Some(EQUIVALENCE_TRANSFER_RESOURCE),
+        "PermissionChanged",
+        "basenames_base_registrar",
+        json!({
+            "subject":OWNER,
+            "scope":{"kind":"resource"},
+            "effective_powers":["resource_control"],
+            "grant_source":{"kind":"fixture"},
+            "revocation_source":null,
+            "inheritance_path":[],
+            "transfer_behavior":"replace_on_authority_change"
+        }),
+        json!({"emitting_address":REGISTRAR}),
+    )
     .await?;
     insert_event(
         pool,
         CHAIN,
         2,
-        Some("ens:0xbob"),
-        Some(EQUIVALENCE_BOB_RESOURCE),
+        Some("ens:0xtransfer"),
+        Some(EQUIVALENCE_TRANSFER_RESOURCE),
+        "ResolverChanged",
+        "basenames_base_registry",
+        json!({"resolver":EQUIVALENCE_TRANSFER_RESOLVER}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        2,
+        Some("ens:0xtransfer"),
+        Some(EQUIVALENCE_TRANSFER_RESOURCE),
+        "RecordChanged",
+        "basenames_base_resolver",
+        json!({
+            "resolver":EQUIVALENCE_TRANSFER_RESOLVER,
+            "record_key":"text:url",
+            "record_family":"text",
+            "selector_key":"url",
+            "value_retained":true,
+            "value":"https://transfer.example.test"
+        }),
+        json!({"emitting_address":EQUIVALENCE_TRANSFER_RESOLVER}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        2,
+        Some("ens:0xtransfer"),
+        Some(EQUIVALENCE_TRANSFER_RESOURCE),
         "PermissionChanged",
         "basenames_base_registry",
         json!({
             "subject":OWNER,
-            "scope":{"kind":"resolver","chain_id":CHAIN,"resolver_address":RESOLVER},
+            "scope":{
+                "kind":"resolver",
+                "chain_id":CHAIN,
+                "resolver_address":EQUIVALENCE_TRANSFER_RESOLVER
+            },
             "effective_powers":["resolver_control"],
             "grant_source":{
                 "kind":"ens_v1_authority",
                 "authority_kind":"registrar",
-                "authority_key":"equivalence-bob",
+                "authority_key":"equivalence-transfer",
                 "source_event_kind":"ResolverChanged"
             },
             "revocation_source":null,
@@ -6527,19 +6631,47 @@ async fn extend_equivalence_registrar_transfer_fixture(pool: &PgPool) -> Result<
         pool,
         CHAIN,
         7,
-        Some("ens:0xbob"),
-        Some(EQUIVALENCE_BOB_RESOURCE),
+        Some("ens:0xtransfer"),
+        Some(EQUIVALENCE_TRANSFER_RESOURCE),
+        "AuthorityTransferred",
+        "basenames_base_registrar",
+        json!({"owner":TRANSFER_OWNER}),
+        json!({"emitting_address":REGISTRAR}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        8,
+        Some("ens:0xtransfer"),
+        Some(EQUIVALENCE_TRANSFER_RESOURCE),
+        "AuthorityTransferred",
+        "basenames_base_registrar",
+        json!({"owner":TRANSFER_OWNER}),
+        json!({"emitting_address":REGISTRAR}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        7,
+        Some("ens:0xtransfer"),
+        Some(EQUIVALENCE_TRANSFER_RESOURCE),
         "PermissionChanged",
         "basenames_base_registrar",
         json!({
             "subject":OWNER,
-            "scope":{"kind":"resolver","chain_id":CHAIN,"resolver_address":RESOLVER},
+            "scope":{
+                "kind":"resolver",
+                "chain_id":CHAIN,
+                "resolver_address":EQUIVALENCE_TRANSFER_RESOLVER
+            },
             "effective_powers":[],
             "grant_source":null,
             "revocation_source":{
                 "kind":"ens_v1_authority",
                 "authority_kind":"registrar",
-                "authority_key":"equivalence-bob",
+                "authority_key":"equivalence-transfer",
                 "source_event_kind":"TokenControlTransferred"
             },
             "inheritance_path":[],
@@ -6560,7 +6692,7 @@ async fn extend_equivalence_registrar_transfer_fixture(pool: &PgPool) -> Result<
              'grant_source', jsonb_build_object(
                  'kind', 'ens_v1_authority',
                  'authority_kind', 'registrar',
-                 'authority_key', 'equivalence-bob',
+                 'authority_key', 'equivalence-transfer',
                  'source_event_kind', 'TokenControlTransferred'
              ),
              'revocation_source', NULL,
@@ -6568,30 +6700,35 @@ async fn extend_equivalence_registrar_transfer_fixture(pool: &PgPool) -> Result<
              'transfer_behavior', 'replace_on_authority_change'
          )
          WHERE chain_id = $2 AND block_number = 7
+           AND logical_name_id = 'ens:0xtransfer'
            AND event_kind = 'PermissionChanged'
            AND after_state ->> 'subject' = $1",
     )
     .bind(OWNER)
     .bind(CHAIN)
-    .bind(RESOLVER)
+    .bind(EQUIVALENCE_TRANSFER_RESOLVER)
     .execute(pool)
     .await?;
     insert_event(
         pool,
         CHAIN,
         7,
-        Some("ens:0xbob"),
-        Some(EQUIVALENCE_BOB_RESOURCE),
+        Some("ens:0xtransfer"),
+        Some(EQUIVALENCE_TRANSFER_RESOURCE),
         "PermissionChanged",
         "basenames_base_registrar",
         json!({
             "subject":TRANSFER_OWNER,
-            "scope":{"kind":"resolver","chain_id":CHAIN,"resolver_address":RESOLVER},
+            "scope":{
+                "kind":"resolver",
+                "chain_id":CHAIN,
+                "resolver_address":EQUIVALENCE_TRANSFER_RESOLVER
+            },
             "effective_powers":["resolver_control"],
             "grant_source":{
                 "kind":"ens_v1_authority",
                 "authority_kind":"registrar",
-                "authority_key":"equivalence-bob",
+                "authority_key":"equivalence-transfer",
                 "source_event_kind":"TokenControlTransferred"
             },
             "revocation_source":null,
