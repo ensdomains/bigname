@@ -117,6 +117,7 @@ async fn create_events(
           AND lineage.block_hash = event.block_hash
           AND lineage.block_number = event.block_number
          WHERE event.chain_id = $1
+           AND event.consumer_visibility = 'activated'
            AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
            AND (
                (event.block_number IS NULL AND event.block_hash IS NULL)

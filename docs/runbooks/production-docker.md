@@ -75,6 +75,11 @@ publication and readiness remain per chain rather than cross-chain atomic; keep
 traffic drained for each affected chain until its own full re-walk, acceptance
 checks, publication, and Verify phase succeed.
 
+A phase-runner restart during a re-walk rebuilds its session cache with a full
+ranked scan over all interpreted events. That scan is expensive at production
+scale. Avoid restart loops; investigate the first interruption before restarting
+the walk repeatedly.
+
 1. stop the API and phase runner;
 2. take and verify a database backup;
 3. apply the reviewed versioned schema-migration;

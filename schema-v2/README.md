@@ -65,8 +65,10 @@ adapter-owned key used to compact prior interpreter state between batches. The
 phase loader may group by that key but does not derive it from event kinds, so
 changes to state-facet semantics remain inside the interpreter content hash.
 
-The event kind is a closed vocabulary. It reserves `RegistryCreated` for ENSv2
-event-announcement discovery and `Upgraded` for admitted proxy history. The
+The event kind is a closed vocabulary. It admits candidate-only
+`MigrationApplied` and `ContractDiscovered` ENSv1→ENSv2 migration facts, reserves
+`RegistryCreated` for ENSv2 event-announcement discovery, and uses `Upgraded`
+for admitted proxy history. The
 checked-in fresh-schema manifests and adapter intake admit both signatures.
 Their mandatory one-time historical-signature fetch must finish before the
 replacement rebuild. ENSv2 declares `RegistryCreated` and emits it first in the
@@ -83,7 +85,7 @@ admitted.
 
 The derivation kind is also closed and identifies the writer path, not the
 upstream event. The admitted values are `ens_v1_reverse_claim`,
-`ens_v1_unwrapped_authority`, `ens_v2_permissions`, `ens_v2_registrar`,
+`ens_v1_unwrapped_authority`, `ens_v2_migration`, `ens_v2_permissions`, `ens_v2_registrar`,
 `ens_v2_registry_resource_surface`, `ens_v2_resolver`, `manifest_sync`,
 `proxy_upgrade`, and `raw_log_preimage_observation`. Their meanings and write
 owners are defined by the canonical

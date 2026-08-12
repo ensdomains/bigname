@@ -1,3 +1,4 @@
+mod migration;
 pub(super) mod permissions;
 pub(super) mod v1;
 
@@ -48,6 +49,7 @@ pub(super) struct Interpreted {
     pub binding_closures: Vec<BindingClosureDraft>,
     pub bindings: Vec<BindingDraft>,
     pub discovery: Vec<DiscoveryDraft>,
+    pub migration_observations: Vec<MigrationObservation>,
 }
 
 impl Interpreted {
@@ -61,6 +63,7 @@ impl Interpreted {
             binding_closures: Vec::new(),
             bindings: Vec::new(),
             discovery: Vec::new(),
+            migration_observations: Vec::new(),
         }
     }
 
@@ -73,7 +76,19 @@ impl Interpreted {
         self.binding_closures.append(&mut other.binding_closures);
         self.bindings.append(&mut other.bindings);
         self.discovery.append(&mut other.discovery);
+        self.migration_observations
+            .append(&mut other.migration_observations);
     }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct MigrationObservation {
+    pub source_family: String,
+    pub event_name: String,
+    pub emitter_role: Option<String>,
+    pub contract_instance_id: Uuid,
+    pub raw: RawLogInput,
+    pub decoded: Value,
 }
 
 pub(super) fn v2_boundary_expiration(
@@ -202,6 +217,7 @@ pub(super) fn interpret(
             v2_registry::interpret(selected, raw, state)
         }
         "ens_v2_resolver_l1" => v2_resolver::interpret(selected, raw, state),
+        "ens_v2_migration_l1" => migration::interpret(selected, raw),
         family => bail!("source family {family} has no schema-v2 adapter"),
     }?;
     for event in &mut output.events {
@@ -362,6 +378,16 @@ fn supports_signature(source_family: &str, signature: &str) -> bool {
                 | "NameRenewed(string,bytes32,uint256,uint256,bytes32)"
                 | "Transfer(address,address,uint256)"
                 | "Upgraded(address)"
+        ),
+        "ens_v2_migration_l1" => matches!(
+            signature,
+            "ProxyDeployed(address,address,uint256,address)"
+                | "NameRenewed(uint256,string,uint64,uint64,address,bytes32,uint256)"
+                | "ControllerAdded(address)"
+                | "ControllerRemoved(address)"
+                | "NameRegistered(uint256,address,uint256)"
+                | "NameRenewed(uint256,uint256)"
+                | "Transfer(address,address,uint256)"
         ),
         "ens_v1_registry_l1" | "basenames_base_registry" => matches!(
             signature,

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, bail};
+use serde_json::Value;
 use uuid::Uuid;
 
 use super::{
@@ -8,6 +9,7 @@ use super::{
     manifest::{self, ManifestEvent, ManifestSource},
     model::{AddressAdmissionInput, DiscoveryRuleInput, ManifestInput, RawLogInput},
     protocol,
+    seam::MIGRATION_REGISTRY_ASSOCIATION_KIND,
 };
 
 #[derive(Clone, Debug)]
@@ -24,6 +26,12 @@ pub(super) struct Catalog {
     by_id: BTreeMap<i64, usize>,
     rules: Vec<DiscoveryRuleInput>,
     admissions: Vec<AddressAdmissionInput>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct MigrationRegistryCorrelation {
+    pub id: String,
+    pub evidence: Vec<Value>,
 }
 
 impl Catalog {
@@ -93,7 +101,9 @@ impl Catalog {
             .admissions
             .iter()
             .filter(|admission| {
-                applies(admission, raw)
+                admission.discovery_edge_kind.as_deref()
+                    != Some(MIGRATION_REGISTRY_ASSOCIATION_KIND)
+                    && applies(admission, raw)
                     && admission.discovery_edge_kind.as_deref() == Some("registry_announcement")
             })
             .filter_map(|admission| admission.source_manifest_id)
@@ -101,11 +111,10 @@ impl Catalog {
             .map(|source| source.namespace.as_str())
             .collect::<BTreeSet<_>>();
         let mut candidates = Vec::new();
-        for admission in self
-            .admissions
-            .iter()
-            .filter(|admission| applies(admission, raw))
-        {
+        for admission in self.admissions.iter().filter(|admission| {
+            admission.discovery_edge_kind.as_deref() != Some(MIGRATION_REGISTRY_ASSOCIATION_KIND)
+                && applies(admission, raw)
+        }) {
             let Some(manifest_id) = admission.source_manifest_id else {
                 continue;
             };
@@ -255,6 +264,13 @@ impl Catalog {
             .find(|source| source.source_family == source_family)
     }
 
+    pub(super) fn correlation_address(&self, source_family: &str, name: &str) -> Option<&str> {
+        self.source_for_family(source_family)?
+            .correlation_addresses
+            .get(name)
+            .map(String::as_str)
+    }
+
     pub(super) fn source_for_contract_instance(
         &self,
         contract_instance_id: Uuid,
@@ -264,6 +280,77 @@ impl Catalog {
             .filter(|admission| admission.contract_instance_id == contract_instance_id)
             .filter_map(|admission| admission.source_manifest_id)
             .find_map(|manifest_id| self.source(manifest_id))
+    }
+
+    pub(super) fn declared_address_for_role(
+        &self,
+        source_family: &str,
+        role: &str,
+    ) -> Option<&str> {
+        self.admissions.iter().find_map(|admission| {
+            (admission.role.as_deref() == Some(role)
+                && admission
+                    .source_manifest_id
+                    .and_then(|manifest_id| self.source(manifest_id))
+                    .is_some_and(|source| source.source_family == source_family))
+            .then_some(admission.address.as_str())
+        })
+    }
+
+    pub(super) fn declared_contract_instance_for_role(
+        &self,
+        source_family: &str,
+        role: &str,
+    ) -> Option<Uuid> {
+        self.admissions.iter().find_map(|admission| {
+            (admission.role.as_deref() == Some(role)
+                && admission
+                    .source_manifest_id
+                    .and_then(|manifest_id| self.source(manifest_id))
+                    .is_some_and(|source| source.source_family == source_family))
+            .then_some(admission.contract_instance_id)
+        })
+    }
+
+    pub(super) fn migration_registry_correlations(
+        &self,
+        address: &str,
+        block_number: i64,
+    ) -> Vec<MigrationRegistryCorrelation> {
+        self.admissions
+            .iter()
+            .filter(|admission| {
+                admission.discovery_edge_kind.as_deref()
+                    == Some(MIGRATION_REGISTRY_ASSOCIATION_KIND)
+                    && admission.address.eq_ignore_ascii_case(address)
+                    && admission
+                        .active_from_block
+                        .is_none_or(|from| block_number >= from)
+                    && admission
+                        .active_to_block
+                        .is_none_or(|to| block_number <= to)
+            })
+            .filter_map(|admission| admission.discovery_observation_key.as_deref())
+            .filter_map(|encoded| {
+                let parsed = serde_json::from_str::<Value>(encoded).ok();
+                let id = parsed
+                    .as_ref()
+                    .and_then(|value| value.get("id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or(encoded)
+                    .to_owned();
+                let evidence = parsed
+                    .as_ref()
+                    .and_then(|value| value.get("evidence"))
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                (!id.trim().is_empty()).then_some(MigrationRegistryCorrelation { id, evidence })
+            })
+            .map(|correlation| (correlation.id.clone(), correlation))
+            .collect::<BTreeMap<_, _>>()
+            .into_values()
+            .collect()
     }
 
     fn is_match_all(&self, source: &ManifestSource, event: &ManifestEvent) -> bool {

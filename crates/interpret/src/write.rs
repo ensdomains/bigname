@@ -1,6 +1,7 @@
 mod discovery;
 mod identity;
 mod identity_names;
+mod migration;
 mod normalized;
 
 use bigname_adapters::schema_v2::BatchOutput;
@@ -33,6 +34,7 @@ pub(crate) async fn batch(
     identity::write(&mut transaction, output, preserve_outside_range_closes).await?;
     discovery::write(&mut transaction, output, preserve_outside_range_closes).await?;
     normalized::events(&mut transaction, &output.normalized_events).await?;
+    migration::write(&mut transaction, output).await?;
     if let Some((from_block, to_block)) = redo_range.filter(|_| complete) {
         reanchor_stable_identities(&mut transaction, chain_id, from_block, to_block).await?;
     }
@@ -86,6 +88,7 @@ async fn prepare_redo_range(
     from_block: i64,
     to_block: i64,
 ) -> Result<()> {
+    migration::clear_redo_range(transaction, chain_id, from_block, to_block).await?;
     stage_referenced_stable_identities(transaction, chain_id, from_block, to_block).await?;
     orphan_bindings_started_in_range(transaction, chain_id, from_block, to_block).await?;
     reopen_bindings_closed_in_range(transaction, chain_id, from_block, to_block).await?;
@@ -524,5 +527,10 @@ fn estimate(output: &BatchOutput) -> u64 {
         + output.contract_instances.len()
         + output.contract_addresses.len()
         + output.discovery_edges.len();
+    let rows = rows
+        + output.migration_event_associations.len()
+        + output.migration_discovery_associations.len()
+        + output.migration_candidate_identity_effects.len()
+        + output.migration_candidate_discovery_effects.len();
     u64::try_from(rows).unwrap_or(u64::MAX).saturating_mul(512)
 }

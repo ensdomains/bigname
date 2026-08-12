@@ -6,6 +6,8 @@ use uuid::Uuid;
 
 use super::*;
 
+mod migration;
+
 const CHAIN: &str = "adapter-test";
 const CONTRACT: &str = "0x0000000000000000000000000000000000000042";
 
@@ -5144,6 +5146,8 @@ fn incomplete_registration_event(
         canonicality_state: "canonical".to_owned(),
         before_state: json!({}),
         after_state,
+        migration_correlation_ids: Vec::new(),
+        consumer_visibility: "activated".to_owned(),
         before_state_explicit: false,
     }
 }
@@ -13801,6 +13805,8 @@ fn reconciliation_probe_event(
         canonicality_state: "canonical".to_owned(),
         before_state: json!({}),
         after_state,
+        migration_correlation_ids: Vec::new(),
+        consumer_visibility: "activated".to_owned(),
         before_state_explicit: false,
     }
 }

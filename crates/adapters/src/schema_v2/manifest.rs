@@ -2,6 +2,7 @@ use alloy_json_abi::Event;
 use anyhow::{Context, bail};
 use bigname_domain::normalization::ENS_NORMALIZER_VERSION;
 use serde::Deserialize;
+use std::collections::BTreeMap;
 
 use super::model::ManifestInput;
 
@@ -13,6 +14,7 @@ pub(super) struct ManifestSource {
     pub source_family: String,
     pub chain_id: String,
     pub deployment_label: String,
+    pub correlation_addresses: BTreeMap<String, String>,
     pub events: Vec<ManifestEvent>,
 }
 
@@ -27,6 +29,8 @@ pub(super) struct ManifestEvent {
 
 #[derive(Deserialize)]
 struct StoredPayload {
+    #[serde(default)]
+    correlation_addresses: BTreeMap<String, String>,
     #[serde(default)]
     abi: StoredAbi,
 }
@@ -71,6 +75,7 @@ pub(super) fn decode(input: ManifestInput) -> anyhow::Result<ManifestSource> {
         source_family: input.source_family,
         chain_id: input.chain_id,
         deployment_label: input.deployment_label,
+        correlation_addresses: stored.correlation_addresses,
         events,
     })
 }

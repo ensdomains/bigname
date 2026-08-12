@@ -108,6 +108,7 @@ fn interpret_loaded(
     state: &mut State,
 ) -> anyhow::Result<BatchOutput> {
     let mut output = BatchOutput::default();
+    let mut migration_observations = Vec::new();
     let mut raw_logs = raw_logs.into_iter().peekable();
     let prior_tails = state.value_tails().clone();
     for block in blocks {
@@ -116,7 +117,13 @@ fn interpret_loaded(
             raw.block_number == block.block_number && raw.block_hash == block.block_hash
         }) {
             let raw = raw_logs.next().expect("peeked raw log");
-            interpret_raw(catalog, &raw, state, &mut output)?;
+            interpret_raw(
+                catalog,
+                &raw,
+                state,
+                &mut output,
+                &mut migration_observations,
+            )?;
         }
     }
     if let Some(raw) = raw_logs.next() {
@@ -129,6 +136,7 @@ fn interpret_loaded(
         );
     }
     super::protocol::reconcile_batch(&mut output);
+    super::migration::correlate(catalog, migration_observations, &mut output)?;
     rethread_before_states(&mut output, prior_tails);
     Ok(output)
 }
@@ -160,6 +168,7 @@ fn interpret_raw(
     raw: &RawLogInput,
     state: &mut State,
     output: &mut BatchOutput,
+    migration_observations: &mut Vec<super::protocol::MigrationObservation>,
 ) -> anyhow::Result<()> {
     let Some(selected) = catalog.select(raw)? else {
         return Ok(());
@@ -178,6 +187,7 @@ fn interpret_raw(
             });
         }
     };
+    migration_observations.extend(interpreted.migration_observations.clone());
     super::normalized::materialize(&selected, raw, interpreted.events.clone(), state, output);
     super::identity::materialize(&selected, raw, &interpreted, state, output)?;
     super::discovery::materialize(catalog, &selected, raw, interpreted.discovery, output)?;

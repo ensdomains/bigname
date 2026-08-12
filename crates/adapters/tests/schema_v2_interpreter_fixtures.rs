@@ -1982,7 +1982,7 @@ fn dense_output_is_purely_additive_over_the_pre_retention_snapshot() -> Result<(
         .join("\n");
     assert_eq!(
         format!("{:#x}", keccak256(snapshot.as_bytes())),
-        "0xdea10ee1d168b5444bfba23ed1f9b174c6c926be9b98997c1174bc486199ff02",
+        "0x3ac08e81a452dff5c20541400c62314eac3aee540351f724bdb3220aa604f22c",
         "output minus the debug-only flag and the retained rows must equal the pre-retention snapshot"
     );
     Ok(())

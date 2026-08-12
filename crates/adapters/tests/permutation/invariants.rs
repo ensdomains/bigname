@@ -729,6 +729,10 @@ fn absorb_rows(into: &mut BatchOutput, from: BatchOutput) {
         contract_addresses,
         discovery_edges,
         discovery_edge_closures,
+        migration_event_associations,
+        migration_discovery_associations,
+        migration_candidate_identity_effects,
+        migration_candidate_discovery_effects,
     } = from;
     into.normalized_events.extend(normalized_events);
     into.label_preimages.extend(label_preimages);
@@ -741,6 +745,14 @@ fn absorb_rows(into: &mut BatchOutput, from: BatchOutput) {
     into.contract_addresses.extend(contract_addresses);
     into.discovery_edges.extend(discovery_edges);
     into.discovery_edge_closures.extend(discovery_edge_closures);
+    into.migration_event_associations
+        .extend(migration_event_associations);
+    into.migration_discovery_associations
+        .extend(migration_discovery_associations);
+    into.migration_candidate_identity_effects
+        .extend(migration_candidate_identity_effects);
+    into.migration_candidate_discovery_effects
+        .extend(migration_candidate_discovery_effects);
 }
 
 pub fn split(len: usize, seed: u64) -> Vec<Range<usize>> {

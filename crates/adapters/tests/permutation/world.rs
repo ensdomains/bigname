@@ -150,6 +150,11 @@ pub const ENS_V2_SEPOLIA: World = World {
     ],
 };
 
+/// Active families whose event space is exercised by a dedicated corpus instead of the generic
+/// protocol permutation pool. Migration correlation is per name and path, so its decoded catalog
+/// fixtures are the authoritative generator rather than an uncorrelated source slot here.
+const DEDICATED_CORPUS_FAMILIES: &[(&str, &str)] = &[("ethereum-sepolia", "ens_v2_migration_l1")];
+
 pub struct Wiring {
     pub chain_id: String,
     manifests: Vec<ManifestInput>,
@@ -353,7 +358,8 @@ fn admitted<'a>(
 
 /// Fails the lane when a world no longer generates from what its namespace and chain have rolled
 /// out — either because a pin names a version other than the active one, or because an event-bearing
-/// family became active *in this world's own deployment epoch* that no scenario pool generates. A
+/// family became active *in this world's own deployment epoch* that neither its scenario pool nor
+/// an explicitly named dedicated corpus generates. A
 /// whole epoch appearing with no world at all is the companion check,
 /// `assert_worlds_cover_deployments`. Retired versions stay checked in, so the pin needs
 /// something to be checked against; the anchor is `rollout_status = "active"` rather than the
@@ -413,6 +419,9 @@ pub fn assert_pins_are_current(world: &World, checked_in: &[LoadedManifest]) -> 
     // that declares no events — an execution-owner entry, say — is not something logs can reach, and
     // a family rolled out under another epoch is `assert_worlds_cover_deployments`' business.
     for (family, versions) in &active {
+        if DEDICATED_CORPUS_FAMILIES.contains(&(world.chain_id, *family)) {
+            continue;
+        }
         if versions.iter().any(|loaded| {
             loaded.manifest.deployment_epoch == world.deployment_epoch
                 && !loaded.manifest.abi.events.is_empty()

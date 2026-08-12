@@ -171,6 +171,8 @@ mod tests {
             canonicality_state: "canonical".to_owned(),
             before_state: json!({}),
             after_state: json!({}),
+            migration_correlation_ids: Vec::new(),
+            consumer_visibility: "activated".to_owned(),
             before_state_explicit: false,
         }
     }

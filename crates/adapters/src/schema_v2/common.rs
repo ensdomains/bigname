@@ -256,7 +256,9 @@ pub(super) fn event_time(raw: &RawLogInput) -> OffsetDateTime {
 }
 
 pub(super) fn derivation_kind(source_family: &str, event_kind: &str) -> &'static str {
-    if event_kind == "Upgraded" {
+    if source_family == "ens_v2_migration_l1" {
+        "ens_v2_migration"
+    } else if event_kind == "Upgraded" {
         "proxy_upgrade"
     } else if event_kind == "PreimageObserved" {
         "raw_log_preimage_observation"

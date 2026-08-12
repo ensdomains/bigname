@@ -14,6 +14,7 @@ fn is_block_derived_preimage_source_family(source_family: &str) -> bool {
             | "ens_v2_registry_l1"
             | "ens_v2_registrar_l1"
             | "ens_v2_resolver_l1"
+            | "ens_v2_migration_l1"
     )
 }
 

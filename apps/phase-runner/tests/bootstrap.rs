@@ -124,9 +124,17 @@ async fn bootstrap_after_legacy_schema_drop_reaches_manifest_sync() -> Result<()
     let phase_structure_before = load_phase_schema_structure(database.pool()).await?;
     bigname_storage::MIGRATOR.run(database.pool()).await?;
     let phase_structure_after = load_phase_schema_structure(database.pool()).await?;
-    assert_eq!(
-        phase_structure_after, phase_structure_before,
-        "legacy public-schema deletion changed the installed phase schema"
+    let added = phase_structure_after
+        .iter()
+        .filter(|object| !phase_structure_before.contains(object))
+        .collect::<Vec<_>>();
+    let removed = phase_structure_before
+        .iter()
+        .filter(|object| !phase_structure_after.contains(object))
+        .collect::<Vec<_>>();
+    assert!(
+        added.is_empty() && removed.is_empty(),
+        "legacy public-schema deletion changed the installed phase schema; added={added:?}; removed={removed:?}"
     );
     let residual_public_objects = sqlx::query_scalar::<_, String>(
         r#"

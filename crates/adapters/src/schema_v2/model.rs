@@ -99,6 +99,10 @@ pub struct BatchOutput {
     pub contract_addresses: Vec<ContractAddress>,
     pub discovery_edges: Vec<DiscoveryEdge>,
     pub discovery_edge_closures: Vec<DiscoveryEdgeClosure>,
+    pub migration_event_associations: Vec<MigrationEventAssociation>,
+    pub migration_discovery_associations: Vec<MigrationDiscoveryAssociation>,
+    pub migration_candidate_identity_effects: Vec<MigrationCandidateEffect>,
+    pub migration_candidate_discovery_effects: Vec<MigrationCandidateEffect>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -122,10 +126,64 @@ pub struct NormalizedEvent {
     pub canonicality_state: String,
     pub before_state: Value,
     pub after_state: Value,
+    pub migration_correlation_ids: Vec<String>,
+    pub consumer_visibility: String,
     /// True when the interpreter deliberately computed `before_state` as a snapshot (rather than
     /// chaining it from the previous emitted event under the same interpreter state key). Not
     /// persisted; it steers the post-reconciliation before-state re-thread only.
     pub before_state_explicit: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MigrationEventAssociation {
+    pub event_identity: String,
+    pub migration_correlation_id: String,
+    pub correlation_kind: String,
+    pub evidence_refs: Value,
+    pub chain_id: String,
+    pub block_number: i64,
+    pub block_hash: String,
+    pub transaction_hash: String,
+    pub transaction_index: i64,
+    pub log_index: i64,
+    pub canonicality_state: String,
+    pub consumer_visibility: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MigrationDiscoveryAssociation {
+    pub logical_edge_identity: String,
+    pub migration_correlation_id: String,
+    pub registry_contract_instance_id: Uuid,
+    pub registry_address: String,
+    pub source_manifest_id: i64,
+    pub evidence_refs: Value,
+    pub chain_id: String,
+    pub block_number: i64,
+    pub block_hash: String,
+    pub transaction_hash: String,
+    pub transaction_index: i64,
+    pub log_index: i64,
+    pub canonicality_state: String,
+    pub consumer_visibility: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MigrationCandidateEffect {
+    pub effect_identity: String,
+    pub migration_correlation_ids: Vec<String>,
+    pub correlation_kind: String,
+    pub effect_kind: String,
+    pub proposed_effect: Value,
+    pub evidence_refs: Value,
+    pub chain_id: String,
+    pub block_number: i64,
+    pub block_hash: String,
+    pub transaction_hash: String,
+    pub transaction_index: i64,
+    pub log_index: i64,
+    pub canonicality_state: String,
+    pub consumer_visibility: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

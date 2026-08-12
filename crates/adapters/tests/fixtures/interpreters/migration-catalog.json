@@ -1,0 +1,95 @@
+{
+  "provenance": {
+    "repository": "ensdomains/bigname",
+    "branch": "worknotes/migration-catalog",
+    "commit": "d110108f2f098d1b43804c64c80d0b4588286326",
+    "validated_scenario_count": 63,
+    "derived_sources": [
+      { "path": "validation/U-01.json", "sha256": "b38534f6a135546afeb7042005bf13581b221bd5210426005506014b07886422" },
+      { "path": "validation/W-01.json", "sha256": "7174bc05fe4d62d69d29e7ebba693af5d3e531b77b38bda16a15023f5625bb74" },
+      { "path": "validation/L-01.json", "sha256": "d33a54d10ad139d37534f4735506ae6a6bfe67c523ccbd44709da738cabdff3c" },
+      { "path": "validation/R-01.json", "sha256": "dcb64891e720334ed08272d55a4de516c418d35610f42fd379fad4790a99bbb3" },
+      { "path": "validation/R-05.json", "sha256": "6eeb28c7ebc0dd500691e33598a2e452e92c7ef2aed4fc085757fb2e081aec88" },
+      { "path": "validation/G-02.json", "sha256": "70099ddeef518f0435ff6e1b3c685591bbaa71bd07a9f79702ca647de5b8c600" }
+    ]
+  },
+  "addresses": {
+    "base_registrar": "0xb7f8bc63bbcad18155201308c8f3540b07f84f5e",
+    "eth_registry": "0x36c02da8a0983159322a80ffe9f24b1acff8b570",
+    "unlocked_controller": "0xd8a5a9b31c3c0232e196d518e89fd8bf83acad43",
+    "locked_controller": "0x2b0d36facd61b71cc05ab8f3d2355ec3631c0dd5",
+    "graveyard": "0x7969c5ed335650692bc04293b07f5bf2e7a673c0",
+    "renewal_bridge": "0x202cce504e04bed6fc0521238ddf04bc9e8e15ab",
+    "factory": "0x4a679253410272dd5232b3ff7cf5dbb88f295319",
+    "locked_registry": "0x164abf89a4bb6255e027b1115bed12a7aa6df7d8",
+    "name_wrapper": "0x82e01223d51eb87e16a03e24687edf0f294da6f1"
+  },
+  "scenarios": {
+    "U-01": {
+      "label": "u01",
+      "labelhash": "0x7023c9201df7bb39b4d3dd49e5a6ea8591beeb18dbb5985818d695a6ae63d2ae",
+      "namehash": "0x2d2f286e69323d39eb4e0d31b25d3cd6e284808088409764548dd6d3e740d36d",
+      "base_token_id": "50722266805483044425935167141221047555663189299231323729128176642769828434606",
+      "v2_token_id": "50722266805483044425935167141221047555663189299231323729128176642766902657024",
+      "stored_expiry": 1822787351,
+      "migration_block": 236,
+      "graveyard_transfer_log_index": 4,
+      "v2_registration_log_index": 5,
+      "migration_path": "unwrapped"
+    },
+    "L-01": {
+      "label": "l01",
+      "labelhash": "0xc67a1534420f8c9c6145a87fe41477c817d2cc9b6ceb2a7c533cf794e7baf117",
+      "namehash": "0xa8821e242ea6354f86e593f91f750f781313d9565165018b908637909fb802e7",
+      "v2_token_id": "89773645706937224924954052298606104393855843420722334719117850291644433170432",
+      "factory_salt": "76218456708271166466698446343990696667945799425854877610349703395247469888231",
+      "stored_expiry": 1822787363,
+      "migration_block": 237,
+      "registry_created_log_index": 4,
+      "factory_log_index": 8,
+      "v2_registration_log_index": 9,
+      "migration_path": "locked_wrapped"
+    },
+    "W-01": {
+      "label": "w01",
+      "labelhash": "0x94c40532b312ecb510e8bf103329d6905a09f8672dfa3ab27e544a333a4abdb1",
+      "namehash": "0x1f443d35c246810667acff119005b80caea047f6e96c3225349ef7a16ad6ab9b",
+      "base_token_id": "67288639490607741471329381527299044583237042385903607214732634535389483941297",
+      "v2_token_id": "67288639490607741471329381527299044583237042385903607214732634535388505964544",
+      "stored_expiry": 1822787360,
+      "migration_block": 237,
+      "graveyard_transfer_log_index": 5,
+      "v2_registration_log_index": 6,
+      "migration_path": "unlocked_wrapped"
+    },
+    "R-01": {
+      "label": "r01",
+      "base_token_id": "53831372597252130853625206365324062260053578576419170990115237586222839423034",
+      "v2_token_id": "53831372597252130853625206365324062260053578576419170990115237586218770235392",
+      "v1_expiry": 1848966582,
+      "decoded_v2_expiry": 1854323383,
+      "duration": 31536000,
+      "renewal_block": 236
+    },
+    "R-05": {
+      "controller": "0x82e01223d51eb87e16a03e24687edf0f294da6f1",
+      "base_token_id": "6294053826781552269338400057048773394076514818746342249330991325421195015610",
+      "synchronized_expiry": "1848966584",
+      "configuration_block": 238,
+      "add_log_index": 0,
+      "remove_log_index": 3
+    },
+    "G-02": {
+      "labelhash": "0x516190133e7aad3ec87e3eeb53a0fd3d198c434fb99f491d3a2a968fd3ec653a",
+      "token_id": "36809719270820833622083267969382668502757846697484306321420473516088781202746",
+      "cleanup_expiry": "18446744073701775615",
+      "cleanup_block": 237,
+      "name_registered_log_index": 3
+    }
+  },
+  "corrections": {
+    "registry_resolver_clear": "required only when the stored resolver changes",
+    "registry_ttl_clear": "required only when the stored TTL changes",
+    "expiry_rule": "preserve each decoded expiry; do not reconstruct the premigration or renewal-bridge offset"
+  }
+}

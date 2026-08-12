@@ -201,8 +201,8 @@ describes the schema-v2 baseline rather than every row that has ever existed.
 edge created when a contract emits `RegistryCreated()`. It makes the emitting
 registry indexable from that event position. It does not assert parent-child
 reachability or attach the registry to a name. `SubregistryUpdated` supplies
-that separate relationship. For a registry created through the [planned
-ENSv1→ENSv2 migration family](manifests.md#ensv2-migration-family-admission-plan), the
+that separate relationship. For a registry created through the
+[ENSv1→ENSv2 migration source family](manifests.md#ensv2-migration-family-admission-plan), the
 edge remains ordinary and the watch plan traverses it while a separate
 `migration_registry_creation` candidate association carries consumer-visibility
 provenance. The association never turns indexability itself into name authority.
@@ -295,14 +295,14 @@ nothing to claim
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L212 @ ens_v2@ccaeb58)
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L224 @ ens_v2@ccaeb58).
 Nothing about it is cross-chain; see [`upstream.md`](upstream.md#known-divergences)
-for the stale upstream comment that says otherwise. The planned
-`ens_v2_migration_l1` [source family](#source-family) will admit
+for the stale upstream comment that says otherwise. The
+`ens_v2_migration_l1` [source family](#source-family) admits
 the fixed contracts and event shapes described in
 [`manifests.md`](manifests.md#ensv2-migration-family-admission-plan); public
 mixed-history ownership remains capability-gated separately. Distinct from
 bigname's own *schema-migration* history; see the note at the top of this file.
 
-**Migration boundary** (ENSv1→ENSv2 authority boundary) — the planned
+**Migration boundary** (ENSv1→ENSv2 authority boundary) — the candidate
 `MigrationApplied` normalized event records the position at which one logical
 name can stop taking current registration and control from ENSv1 and start
 taking them from its ENSv2 resource. Slice 1 records that position as a

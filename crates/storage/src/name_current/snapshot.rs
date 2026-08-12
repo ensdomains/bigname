@@ -172,6 +172,7 @@ async fn name_current_has_newer_projection_inputs(
               ON ne_lineage.chain_id = ne.chain_id
              AND ne_lineage.block_hash = ne.block_hash
             WHERE ne.chain_id = $1
+              AND ne.consumer_visibility = 'activated'
               AND ne.block_number > $2
               AND ne.block_number <= $3
               AND ne.canonicality_state IN (

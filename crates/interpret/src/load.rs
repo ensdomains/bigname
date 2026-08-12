@@ -9,6 +9,7 @@ use sqlx::{PgConnection, PgPool, types::Uuid};
 use crate::{InterpretError, Result};
 
 mod cache;
+mod migration;
 mod prior;
 
 pub(crate) use cache::{PriorCache, fold as fold_prior_cache};
@@ -100,7 +101,8 @@ pub(crate) async fn batch_input(
         )));
     }
     let discovery_rules = load_discovery_rules(&mut transaction, chain_id).await?;
-    let admissions = load_admissions(&mut transaction, chain_id, from_block).await?;
+    let mut admissions = load_admissions(&mut transaction, chain_id, from_block).await?;
+    admissions.extend(migration::admissions(&mut transaction, chain_id, from_block).await?);
     let blocks = load_blocks(&mut transaction, chain_id, from_block, to_block).await?;
     let raw_logs = load_raw_logs(&mut transaction, chain_id, from_block, to_block).await?;
     transaction.commit().await.map_err(|error| {

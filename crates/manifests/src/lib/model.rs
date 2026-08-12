@@ -95,6 +95,8 @@ pub struct SourceManifest {
     pub deployment_epoch: String,
     pub rollout_status: RolloutStatus,
     pub normalizer_version: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub correlation_addresses: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolver_implementations: Vec<ResolverImplementation>,
     pub capability_flags: BTreeMap<String, CapabilityFlag>,
@@ -251,6 +253,8 @@ pub(crate) struct RawSourceManifest {
     rollout_status: RolloutStatus,
     normalizer_version: String,
     #[serde(default)]
+    correlation_addresses: BTreeMap<String, String>,
+    #[serde(default)]
     resolver_implementations: Vec<ResolverImplementation>,
     capability_flags: BTreeMap<String, RawCapabilityFlag>,
     roots: Vec<ManifestRoot>,
@@ -277,6 +281,7 @@ impl From<RawSourceManifest> for SourceManifest {
             deployment_epoch: value.deployment_epoch,
             rollout_status: value.rollout_status,
             normalizer_version: value.normalizer_version,
+            correlation_addresses: value.correlation_addresses,
             resolver_implementations: value.resolver_implementations,
             capability_flags: value
                 .capability_flags

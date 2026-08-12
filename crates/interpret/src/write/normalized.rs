@@ -29,11 +29,14 @@ pub(super) async fn events(
                 derivation_kind,
                 canonicality_state,
                 before_state,
-                after_state
+                after_state,
+                migration_correlation_ids,
+                consumer_visibility
             )
             VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                $11, $12, $13, $14, $15, $16, $17::canonicality_state, $18, $19
+                $11, $12, $13, $14, $15, $16, $17::canonicality_state, $18, $19,
+                $20, $21
             )
             ON CONFLICT (event_identity) DO UPDATE
             SET canonicality_state = EXCLUDED.canonicality_state,
@@ -56,6 +59,8 @@ pub(super) async fn events(
                 normalized_events.derivation_kind,
                 normalized_events.before_state,
                 normalized_events.after_state
+                , normalized_events.migration_correlation_ids
+                , normalized_events.consumer_visibility
             ) IS NOT DISTINCT FROM ROW(
                 EXCLUDED.namespace,
                 EXCLUDED.logical_name_id,
@@ -74,6 +79,8 @@ pub(super) async fn events(
                 EXCLUDED.derivation_kind,
                 EXCLUDED.before_state,
                 EXCLUDED.after_state
+                , EXCLUDED.migration_correlation_ids
+                , EXCLUDED.consumer_visibility
             )
             RETURNING event_identity
             ",
@@ -97,6 +104,8 @@ pub(super) async fn events(
         .bind(&event.canonicality_state)
         .bind(&event.before_state)
         .bind(&event.after_state)
+        .bind(&event.migration_correlation_ids)
+        .bind(&event.consumer_visibility)
         .fetch_optional(&mut **transaction)
         .await
         .map_err(|error| InterpretError::database("failed to write normalized event", error))?;
