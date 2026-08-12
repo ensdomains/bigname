@@ -64,7 +64,9 @@ jobs:
           fi
 
       - name: API/storage query ownership
-        run: ./scripts/check-query-ownership
+        run: |
+          ./scripts/check-query-ownership
+          (cd scripts && bash test-query-ownership)
 
       - name: Migration version guard
         run: ./scripts/check-migration-versions

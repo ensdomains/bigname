@@ -7,8 +7,11 @@ mod validation;
 
 pub use boundary_key::record_version_boundary_storage_key;
 
-pub(crate) use canonicality::{
-    DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER, RESOURCE_CANONICALITY_JOINS,
+pub(crate) use canonicality::DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER;
+pub use canonicality::{
+    RECORD_INVENTORY_CANONICALITY_SUMMARY_FILTER, RECORD_INVENTORY_PROJECTION_LINEAGE_FILTER,
+    RECORD_INVENTORY_RESOURCE_CANONICALITY_FILTER, RECORD_INVENTORY_RESOURCE_LINEAGE_FILTER,
+    RESOURCE_CANONICALITY_JOINS,
 };
 pub use counts::count_record_inventory_selectors_by_lookup_keys;
 pub use row_decode::RecordInventoryCurrentRow;

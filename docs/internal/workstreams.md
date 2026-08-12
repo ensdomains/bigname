@@ -12,6 +12,9 @@ Internal reference for splitting implementation work. `AGENTS.md` is the process
 - Storage owns [canonicality](../glossary.md#canonicality), snapshot selection, reusable row reads,
   and database invariants.
   API code owns route-specific joins, pagination, wire shaping, and GraphQL compatibility.
+- This documented boundary is authoritative. `scripts/check-query-ownership` is a tripwire for
+  known naming patterns, not a complete classification of SQL ownership. Review for every new
+  direct-SQL module in `apps/api` must state whether storage or the API owns its query behavior.
 - Lookup uses declared topology and manifests, not adapter internals.
 - Manifest and discovery code decides what is authoritative.
 

@@ -50,6 +50,10 @@ GraphQL compatibility queries therefore live with the API surface, while their r
 canonicality predicates come from storage. API helpers that confirm one request reads against an
 unchanged selected chain position also remain in `apps/api`; they are not reusable database reads.
 
+This documented boundary is authoritative. `scripts/check-query-ownership` is a tripwire for
+known naming patterns, not a complete classification of SQL ownership. Review for every new
+direct-SQL module in `apps/api` must state whether storage or the API owns its query behavior.
+
 The first four layers are inputs to Project, but ENSv1→ENSv2
 migration-correlated contributions marked `consumer_visibility=candidate` are
 diagnostic input only until their contracted consumer activation. Current

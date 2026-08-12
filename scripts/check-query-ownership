@@ -1,30 +1,79 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# This is a tripwire for known API/storage naming patterns, not a SQL-origin classifier.
+# docs/internal/workstreams.md is the ownership authority. Any direct-SQL module added to
+# apps/api must name its ownership during review, whether or not this script recognizes its name.
+
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+[[ "$SCRIPT_PATH" == */* ]] || SCRIPT_PATH="./$SCRIPT_PATH"
+ROOT="$(cd "${SCRIPT_PATH%/*}/.." && pwd)"
 cd "$ROOT"
 
+if ! command -v rg >/dev/null 2>&1; then
+  printf '%s\n' 'query ownership check requires rg (ripgrep)' >&2
+  exit 1
+fi
+
+run_rg() {
+  local status=0
+  rg "$@" || status=$?
+  case "$status" in
+    0 | 1)
+      return 0
+      ;;
+    *)
+      printf 'query ownership check: rg failed with status %s\n' "$status" >&2
+      return "$status"
+      ;;
+  esac
+}
+
 storage_graphql_paths="$(
-  find crates/storage/src -type f -name 'graphql_*.rs' -print | sort
+  find crates/storage/src -type f -print \
+    | run_rg '/graphql[[:alnum:]_]*(\.rs|/)' \
+    | sort
 )"
 storage_graphql_modules="$(
-  rg -n \
-    '^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?mod[[:space:]]+graphql_[[:alnum:]_]+[[:space:]]*;' \
-    crates/storage/src --glob '*.rs' || true
+  run_rg -n \
+    '^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?mod[[:space:]]+graphql[[:alnum:]_]*[[:space:]]*;' \
+    crates/storage/src --glob '*.rs'
 )"
 
-# API modules whose names match this storage-owned read pattern claim the wrong boundary.
-# `snapshots` is intentionally not part of the pattern: API helpers there confirm one request reads
-# against an unchanged selected chain position.
+# These two API snapshot helpers were individually reviewed. Snapshot-named paths otherwise match
+# the storage-read naming heuristic and must be added here deliberately after ownership review.
+readonly -a REVIEWED_API_STORAGE_HELPERS=(
+  'apps/api/src/v2/snapshots.rs'
+  'apps/api/src/v2/support/snapshots.rs'
+)
+
+filter_reviewed_api_storage_helpers() {
+  local path reviewed_path allowed
+  while IFS= read -r path; do
+    [[ -z "$path" ]] && continue
+    allowed=false
+    for reviewed_path in "${REVIEWED_API_STORAGE_HELPERS[@]}"; do
+      if [[ "$path" == "$reviewed_path" ]]; then
+        allowed=true
+        break
+      fi
+    done
+    if [[ "$allowed" == false ]]; then
+      printf '%s\n' "$path"
+    fi
+  done
+}
+
 api_storage_read_paths="$(
   find apps/api/src -type f -print \
-    | rg '/(canonicality|database_invariants|identity_facade|[[:alnum:]_]+_reads)(\.rs|/mod\.rs)$' \
-    | sort || true
+    | run_rg '/(canonicality|database_invariants|identity_facade|[[:alnum:]_]+_reads)(\.rs|/mod\.rs)$|/snapshots[[:alnum:]_]*(\.rs|/)' \
+    | filter_reviewed_api_storage_helpers \
+    | sort
 )"
 api_storage_read_modules="$(
-  rg -n \
+  run_rg -n \
     '^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?mod[[:space:]]+(canonicality|database_invariants|identity_facade|[[:alnum:]_]+_reads)[[:space:]]*;' \
-    apps/api/src --glob '*.rs' || true
+    apps/api/src --glob '*.rs'
 )"
 
 if [[ -n "$storage_graphql_paths" || -n "$storage_graphql_modules" \
