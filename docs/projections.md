@@ -30,8 +30,10 @@ own `resolver_current` row, but do not rebuild other names that use that
 resolver. Record and record-version events do not contribute to the resolver
 overview's derived sections, so an existing resolver touched only by those
 kinds is republished at the new target without restaging unrelated resolver
-history. `ResolverChanged` rebuilds its name and resource plus the old and new
-resolver rows, again without expanding either resolver to its other names.
+history. That republish path is existing-row only: a record or record-version
+observation without a linked name or resource does not create a resolver row.
+`ResolverChanged` rebuilds its name and resource plus the old and new resolver
+rows, again without expanding either resolver to its other names.
 Only a resolver `Upgraded` event or stale resolver classification caused by the
 active manifest set expands through resources whose current resolver pointer
 matches that resolver. Topology and registrar-label changes expand through

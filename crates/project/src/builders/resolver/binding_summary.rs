@@ -93,6 +93,12 @@ pub(super) async fn stage(
             WHERE staged.declared_summary #>> '{resolver,chain_id}' = $3
               AND (
                     $2 OR EXISTS (
+                        SELECT 1 FROM project_scope_names name_scope
+                        WHERE name_scope.logical_name_id = staged.logical_name_id
+                    )
+                  )
+              AND (
+                    $2 OR EXISTS (
                         SELECT 1 FROM project_scope_resolvers scope
                         WHERE lower(scope.resolver_address) = lower(
                             staged.declared_summary #>> '{resolver,address}'

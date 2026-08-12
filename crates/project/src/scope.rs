@@ -47,10 +47,11 @@ pub(crate) async fn initialize(
     include_topology_scope(transaction, chain_id, target.number).await?;
     include_classification_scope(transaction, chain_id, target.number).await?;
     include_resolver_dependents(transaction, chain_id, target.number).await?;
-    resolver::classify_passthrough(transaction, chain_id).await?;
     close_binding_scope(transaction, chain_id, target).await?;
     include_alias_and_wildcard_scope(transaction, chain_id, target).await?;
     close_binding_scope(transaction, chain_id, target).await?;
+    resolver::include_resource_pointers(transaction, chain_id).await?;
+    resolver::classify_passthrough(transaction, chain_id).await?;
     Ok(())
 }
 

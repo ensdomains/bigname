@@ -226,10 +226,11 @@ async fn create_scoped_event_ids(
         WHERE event.chain_id = $1 AND event.block_number <= $2
           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
         UNION
-        -- An ENSv2 child edge combines the parent's current subregistry with the
-        -- child's registration history. Rebuilding a scoped parent's row family
-        -- therefore stages each current sibling's registrations without adding
-        -- those siblings to the wider projection scope.
+        -- ENSv2 registration stores the entry's subregistry and emits the label registration
+        -- separately. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L459 @ ens_v2@ccaeb58)
+        -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L464 @ ens_v2@ccaeb58)
+        -- The child-edge projection combines those inputs, so rebuilding a scoped parent's row
+        -- family stages each current sibling's registrations without widening projection scope.
         SELECT event.normalized_event_id
         FROM project_scope_children scope
         JOIN children_current child

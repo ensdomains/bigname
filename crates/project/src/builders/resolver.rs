@@ -78,9 +78,7 @@ pub(super) async fn build(
                                event.before_state ->> 'resolver',
                                event.raw_fact_ref ->> 'emitting_address'
                            )
-                       WHEN event.event_kind IN (
-                           'RecordChanged', 'RecordVersionChanged', 'PermissionChanged'
-                       )
+                       WHEN event.event_kind = 'PermissionChanged'
                            THEN event.raw_fact_ref ->> 'emitting_address'
                    END) AS resolver_address,
                    event.source_family,
@@ -110,14 +108,6 @@ pub(super) async fn build(
                   )) <> ''
               ) OR (
                       event.event_kind = 'PermissionChanged'
-                  AND event.source_family IN (
-                      'ens_v1_resolver_l1', 'ens_v2_resolver_l1',
-                      'basenames_base_resolver'
-                  )
-                  AND event.raw_fact_ref ->> 'emitting_address' IS NOT NULL
-                  AND btrim(event.raw_fact_ref ->> 'emitting_address') <> ''
-              ) OR (
-                      event.event_kind IN ('RecordChanged', 'RecordVersionChanged')
                   AND event.source_family IN (
                       'ens_v1_resolver_l1', 'ens_v2_resolver_l1',
                       'basenames_base_resolver'
