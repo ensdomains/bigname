@@ -1,6 +1,8 @@
 use sqlx::{Postgres, Transaction};
 
-use crate::{Marker, ProjectError, Result};
+use crate::{
+    Marker, ProjectError, Result, resolver_address::PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES,
+};
 
 mod primary;
 mod resolver;
@@ -185,7 +187,7 @@ async fn seed_direct_scope(
             })?;
     }
 
-    sqlx::query(
+    let direct_resolver_scope = format!(
         "INSERT INTO project_scope_resolvers
          SELECT lower(address)
          FROM (
@@ -203,22 +205,33 @@ async fn seed_direct_scope(
              UNION ALL
              SELECT raw_fact_ref ->> 'emitting_address' FROM project_changed_events
              WHERE event_kind IN (
-                 'RecordChanged', 'RecordVersionChanged', 'PermissionChanged',
-                 'AliasChanged'
+                 'RecordChanged', 'RecordVersionChanged', 'AliasChanged'
              )
                AND source_family IN (
                    'ens_v1_resolver_l1', 'ens_v2_resolver_l1',
                    'basenames_base_resolver'
                )
+             UNION ALL
+             SELECT permission.resolver_address
+             FROM project_changed_events event
+             CROSS JOIN LATERAL (VALUES
+                 {PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES},
+                 (CASE WHEN event.source_family IN (
+                     'ens_v1_resolver_l1', 'ens_v2_resolver_l1',
+                     'basenames_base_resolver'
+                 ) THEN event.raw_fact_ref ->> 'emitting_address' END)
+             ) permission(resolver_address)
+             WHERE event.event_kind = 'PermissionChanged'
          ) candidate
          WHERE address IS NOT NULL AND btrim(address) <> ''
            AND lower(address) <>
                '0x0000000000000000000000000000000000000000'
          ON CONFLICT DO NOTHING",
-    )
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to derive direct resolver scope", error))?;
+    );
+    sqlx::query(&direct_resolver_scope)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to derive direct resolver scope", error))?;
 
     sqlx::query(
         "INSERT INTO project_scope_resolver_dependents

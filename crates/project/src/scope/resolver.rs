@@ -1,6 +1,6 @@
 use sqlx::{Postgres, Transaction};
 
-use crate::{ProjectError, Result};
+use crate::{ProjectError, Result, resolver_address::PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES};
 
 pub(super) async fn include_resource_pointers(
     transaction: &mut Transaction<'_, Postgres>,
@@ -37,7 +37,7 @@ pub(super) async fn classify_passthrough(
     // also needs only its pointer resolver's existing classification. In either case, republish
     // the existing resolver summary at the new target without staging unrelated history. Redo and
     // resolver-entity changes are excluded because their keys are in resolver_dependents.
-    sqlx::query(
+    let passthrough_scope = format!(
         "INSERT INTO project_scope_resolver_passthrough
          SELECT lower(current.resolver_address)
          FROM resolver_current current
@@ -77,8 +77,8 @@ pub(super) async fn classify_passthrough(
                      EXISTS (
                          SELECT 1 FROM name_current name
                          WHERE name.logical_name_id = event.logical_name_id
-                           AND name.declared_summary #>> '{resolver,chain_id}' = $1
-                           AND lower(name.declared_summary #>> '{resolver,address}') =
+                           AND name.declared_summary #>> '{{resolver,chain_id}}' = $1
+                           AND lower(name.declared_summary #>> '{{resolver,address}}') =
                                lower(current.resolver_address)
                      )
                      OR EXISTS (
@@ -97,7 +97,8 @@ pub(super) async fn classify_passthrough(
                    (event.before_state ->> 'resolver'),
                    (event.after_state ->> 'proxy_address'),
                    (event.before_state ->> 'proxy_address'),
-                   (event.raw_fact_ref ->> 'emitting_address')
+                   (event.raw_fact_ref ->> 'emitting_address'),
+                   {PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES}
                ) candidate(resolver_address)
                WHERE event.event_kind IN (
                    'ResolverChanged', 'PermissionChanged', 'AliasChanged', 'Upgraded'
@@ -106,12 +107,13 @@ pub(super) async fn classify_passthrough(
                      lower(current.resolver_address)
            )
          ON CONFLICT DO NOTHING",
-    )
-    .bind(chain_id)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| {
-        ProjectError::database("failed to classify record-only resolver scope", error)
-    })?;
+    );
+    sqlx::query(&passthrough_scope)
+        .bind(chain_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            ProjectError::database("failed to classify record-only resolver scope", error)
+        })?;
     Ok(())
 }

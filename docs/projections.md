@@ -25,13 +25,16 @@ phase state transactionally.
 Normal incremental Project work starts from events and identity rows in the
 `(previous, target]` block window. Name- or resource-local events rebuild only
 that name or resource. `RecordChanged`, `RecordVersionChanged`,
-`PermissionChanged`, and `AliasChanged` also rebuild the emitting resolver's
-own `resolver_current` row, but do not rebuild other names that use that
-resolver. Record and record-version events do not contribute to the resolver
-overview's derived sections, so an existing resolver touched only by those
-kinds is republished at the new target without restaging unrelated resolver
-history. That republish path is existing-row only: a record or record-version
-observation without a linked name or resource does not create a resolver row.
+and `AliasChanged` also rebuild the emitting resolver's own `resolver_current`
+row. `PermissionChanged` rebuilds every resolver identified by
+`scope.resolver_address` in its before or after state and, for a resolver
+[source family](glossary.md#source-family), also rebuilds the emitting resolver.
+None of these events rebuilds other names that use the resolver. Record and
+record-version events do not contribute to the resolver overview's derived
+sections, so an existing resolver touched only by those kinds is republished at
+the new target without restaging unrelated resolver history. That republish
+path is existing-row only: a record or record-version observation without a
+linked name or resource does not create a resolver row.
 `ResolverChanged` rebuilds its name and resource plus the old and new resolver
 rows, again without expanding either resolver to its other names.
 Only a resolver `Upgraded` event or stale resolver classification caused by the

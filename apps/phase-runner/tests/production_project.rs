@@ -35,6 +35,7 @@ const CHAIN: &str = "project-fixture";
 const BASE_CHAIN: &str = "base-mainnet";
 const ETHEREUM_CHAIN: &str = "ethereum-mainnet";
 const OWNER: &str = "0x00000000000000000000000000000000000000a1";
+const TRANSFER_OWNER: &str = "0x00000000000000000000000000000000000000a2";
 const RESOLVER: &str = "0x00000000000000000000000000000000000000b1";
 const BASENAMES_RESOLVER: &str = "0xc6d566a56a1aff6508b41f6c90ff131615583bcd";
 const BASENAMES_L1_RESOLVER: &str = "0xde9049636f4a1dfe0a64d1bfe3155c0a14c54f31";
@@ -78,6 +79,7 @@ sol! {
         address indexed owner,
         uint256 expires
     );
+    event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
     event NameWrapped(
         bytes32 indexed node,
         bytes name,
@@ -4666,6 +4668,7 @@ async fn incremental_ticks_match_one_full_rebuild_across_all_eight_serving_table
     seed_project_fixture(full.pool()).await?;
     for pool in [incremental.pool(), full.pool()] {
         extend_incremental_equivalence_fixture(pool).await?;
+        extend_equivalence_registrar_transfer_fixture(pool).await?;
     }
 
     for target in 1..=8 {
@@ -4795,6 +4798,29 @@ async fn incremental_ticks_match_one_full_rebuild_across_all_eight_serving_table
             assert_eq!(
                 inventory_status, "supported",
                 "Upgraded must rebuild the resolver's current resource dependents"
+            );
+            let transferred_resolver_permission: (Option<String>, Option<String>, Option<String>) =
+                sqlx::query_as(
+                    "SELECT
+                         declared_summary #>> '{permissions,items,0,subject}',
+                         declared_summary #>>
+                             '{permissions,items,0,grant_source,source_event_kind}',
+                         declared_summary #>> '{role_holders,items,0,subject}'
+                     FROM resolver_current
+                     WHERE chain_id = $1 AND resolver_address = lower($2)",
+                )
+                .bind(CHAIN)
+                .bind(RESOLVER)
+                .fetch_one(incremental.pool())
+                .await?;
+            assert_eq!(
+                transferred_resolver_permission,
+                (
+                    Some(TRANSFER_OWNER.into()),
+                    Some("TokenControlTransferred".into()),
+                    Some(TRANSFER_OWNER.into())
+                ),
+                "registrar transfer must refresh the resolver permission summary"
             );
         }
         if target == 8 {
@@ -5150,6 +5176,201 @@ async fn raw_ingest_fixture_flows_through_interpret_then_project() -> Result<()>
         "every projection table must be populated from interpreted raw facts: {outputs:?}"
     );
     scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn registrar_transfer_nested_resolver_scope_matches_full_rebuild() -> Result<()> {
+    assert_registrar_transfer_matches_full_rebuild("project-resolver-transfer", false).await
+}
+
+#[tokio::test]
+async fn registrar_transfer_authority_flip_matches_full_rebuild() -> Result<()> {
+    assert_registrar_transfer_matches_full_rebuild("project-resolver-transfer-flip", true).await
+}
+
+async fn assert_registrar_transfer_matches_full_rebuild(
+    chain: &str,
+    include_registry_owner: bool,
+) -> Result<()> {
+    let incremental = ScratchDatabase::create(&format!("{chain}-incremental")).await?;
+    let full = ScratchDatabase::create(&format!("{chain}-full")).await?;
+    for pool in [incremental.pool(), full.pool()] {
+        seed_raw_registrar_transfer_fixture(pool, chain, include_registry_owner).await?;
+        InterpretEngine::new(pool.clone())
+            .run_batch(InterpretRequest {
+                chain_id: chain.into(),
+                from_block: 0,
+                to_block: 5,
+                resume_current: None,
+                mode: InterpretRunMode::Normal,
+            })
+            .await?;
+    }
+
+    let resolver_permissions: Vec<(Value, Value, String, Option<String>)> = sqlx::query_as(
+        "SELECT before_state, after_state, source_family,
+                raw_fact_ref ->> 'emitting_address'
+         FROM normalized_events
+         WHERE chain_id = $1 AND block_number = 5
+           AND event_kind = 'PermissionChanged'
+           AND COALESCE(
+               after_state #>> '{scope,kind}',
+               before_state #>> '{scope,kind}'
+           ) = 'resolver'
+         ORDER BY normalized_event_id",
+    )
+    .bind(chain)
+    .fetch_all(incremental.pool())
+    .await?;
+    assert_eq!(
+        resolver_permissions.len(),
+        2,
+        "transfer must emit one resolver revoke and one resolver grant"
+    );
+    assert!(resolver_permissions.iter().all(|(_, _, family, emitter)| {
+        family == "basenames_base_registrar" && emitter.as_deref() == Some(REGISTRAR)
+    }));
+    let revoke = resolver_permissions
+        .iter()
+        .find(|(before, _, _, _)| before.pointer("/subject").and_then(Value::as_str) == Some(OWNER))
+        .expect("old-owner resolver revoke");
+    assert_eq!(
+        revoke.0.pointer("/scope/resolver_address"),
+        Some(&json!(RESOLVER))
+    );
+    assert_eq!(
+        revoke.0.pointer("/effective_powers"),
+        Some(&json!(["resolver_control"]))
+    );
+    let grant = resolver_permissions
+        .iter()
+        .find(|(_, after, _, _)| {
+            after.pointer("/subject").and_then(Value::as_str) == Some(TRANSFER_OWNER)
+        })
+        .expect("new-owner resolver grant");
+    assert_eq!(
+        grant.1.pointer("/scope/resolver_address"),
+        Some(&json!(RESOLVER))
+    );
+    assert_eq!(
+        grant.1.pointer("/grant_source/source_event_kind"),
+        Some(&json!("TokenControlTransferred"))
+    );
+    assert!(resolver_permissions.iter().all(|(before, after, _, _)| {
+        before.get("resolver").is_none() && after.get("resolver").is_none()
+    }));
+
+    let surface_event_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events
+         WHERE chain_id = $1 AND block_number = 5
+           AND event_kind IN ('SurfaceBound', 'SurfaceUnbound')",
+    )
+    .bind(chain)
+    .fetch_one(incremental.pool())
+    .await?;
+    if include_registry_owner {
+        assert!(
+            surface_event_count > 0,
+            "authority mismatch must flip the surface"
+        );
+    } else {
+        assert_eq!(
+            surface_event_count, 0,
+            "registrar authority must be retained"
+        );
+    }
+
+    run_project(incremental.pool(), chain, None, RunMode::Normal, 0, 4).await?;
+    let pointer_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM record_inventory_current
+             WHERE provenance ->> 'chain_id' = $1
+               AND lower(provenance ->> 'resolver_address') = lower($2)
+         )",
+    )
+    .bind(chain)
+    .bind(RESOLVER)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert!(
+        pointer_exists,
+        "fixture must scope the resolver through its resource pointer"
+    );
+    run_project(
+        incremental.pool(),
+        chain,
+        Some(Marker {
+            number: 4,
+            hash: block_hash(chain, 4),
+        }),
+        RunMode::Normal,
+        5,
+        5,
+    )
+    .await?;
+    run_project(full.pool(), chain, None, RunMode::Normal, 0, 5).await?;
+
+    for pool in [incremental.pool(), full.pool()] {
+        let current_permission: (String, Option<String>) = sqlx::query_as(
+            "SELECT subject, grant_source ->> 'source_event_kind'
+             FROM permissions_current
+             WHERE scope_kind = 'resolver'
+               AND lower(scope_detail ->> 'resolver_address') = lower($1)",
+        )
+        .bind(RESOLVER)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            current_permission,
+            (
+                TRANSFER_OWNER.into(),
+                Some("TokenControlTransferred".into())
+            )
+        );
+    }
+
+    let incremental_resolver = resolver_permission_summary(incremental.pool(), chain).await?;
+    let full_resolver = resolver_permission_summary(full.pool(), chain).await?;
+    for summary in [&incremental_resolver, &full_resolver] {
+        assert_eq!(
+            summary.pointer("/permissions/items/0/subject"),
+            Some(&json!(TRANSFER_OWNER))
+        );
+        assert_eq!(
+            summary.pointer("/permissions/items/0/grant_source/source_event_kind"),
+            Some(&json!("TokenControlTransferred"))
+        );
+        assert_eq!(
+            summary.pointer("/role_holders/items/0/subject"),
+            Some(&json!(TRANSFER_OWNER))
+        );
+    }
+
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(full.pool()).await?;
+    assert_eq!(
+        serving_table_snapshot(incremental.pool()).await?,
+        serving_table_snapshot(full.pool()).await?,
+        "registrar-transfer incremental tick diverged from a full rebuild"
+    );
+
+    incremental.cleanup().await?;
+    full.cleanup().await
+}
+
+async fn resolver_permission_summary(pool: &PgPool, chain: &str) -> Result<Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+             'permissions', declared_summary -> 'permissions',
+             'role_holders', declared_summary -> 'role_holders'
+         )
+         FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(chain)
+    .bind(RESOLVER)
+    .fetch_one(pool)
+    .await?)
 }
 
 #[tokio::test]
@@ -5773,7 +5994,6 @@ async fn extend_incremental_equivalence_fixture(pool: &PgPool) -> Result<()> {
         }),
     )
     .await?;
-
     for (block, timestamp) in [
         (4, 7_776_001),
         (5, 7_776_004),
@@ -6234,6 +6454,153 @@ async fn extend_incremental_equivalence_fixture(pool: &PgPool) -> Result<()> {
         )
         .await?;
     }
+    Ok(())
+}
+
+async fn extend_equivalence_registrar_transfer_fixture(pool: &PgPool) -> Result<()> {
+    insert_manifest(
+        pool,
+        CHAIN,
+        "basenames_base_resolver",
+        "tests/project-equivalence-basenames-resolver.toml",
+        json!({
+            "contracts":[{
+                "role":"l2_resolver",
+                "address":RESOLVER,
+                "proxy_kind":"none"
+            }]
+        }),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET source_family = CASE event_kind
+             WHEN 'ResolverChanged' THEN 'basenames_base_registry'
+             WHEN 'RecordChanged' THEN 'basenames_base_resolver'
+         END
+         WHERE chain_id = $1 AND logical_name_id = 'ens:0xbob'
+           AND block_number = 2
+           AND event_kind IN ('ResolverChanged', 'RecordChanged')",
+    )
+    .bind(CHAIN)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET source_family = 'basenames_base_registrar',
+             after_state = jsonb_build_object('owner', lower($2::text)),
+             raw_fact_ref = jsonb_build_object('emitting_address', lower($3::text))
+         WHERE chain_id = $1 AND logical_name_id = 'ens:0xbob'
+           AND block_number = 7 AND event_kind = 'AuthorityTransferred'",
+    )
+    .bind(CHAIN)
+    .bind(TRANSFER_OWNER)
+    .bind(REGISTRAR)
+    .execute(pool)
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        2,
+        Some("ens:0xbob"),
+        Some(EQUIVALENCE_BOB_RESOURCE),
+        "PermissionChanged",
+        "basenames_base_registry",
+        json!({
+            "subject":OWNER,
+            "scope":{"kind":"resolver","chain_id":CHAIN,"resolver_address":RESOLVER},
+            "effective_powers":["resolver_control"],
+            "grant_source":{
+                "kind":"ens_v1_authority",
+                "authority_kind":"registrar",
+                "authority_key":"equivalence-bob",
+                "source_event_kind":"ResolverChanged"
+            },
+            "revocation_source":null,
+            "inheritance_path":[],
+            "transfer_behavior":"replace_on_authority_change"
+        }),
+        json!({"emitting_address":REGISTRY}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        7,
+        Some("ens:0xbob"),
+        Some(EQUIVALENCE_BOB_RESOURCE),
+        "PermissionChanged",
+        "basenames_base_registrar",
+        json!({
+            "subject":OWNER,
+            "scope":{"kind":"resolver","chain_id":CHAIN,"resolver_address":RESOLVER},
+            "effective_powers":[],
+            "grant_source":null,
+            "revocation_source":{
+                "kind":"ens_v1_authority",
+                "authority_kind":"registrar",
+                "authority_key":"equivalence-bob",
+                "source_event_kind":"TokenControlTransferred"
+            },
+            "inheritance_path":[],
+            "transfer_behavior":"replace_on_authority_change"
+        }),
+        json!({"emitting_address":REGISTRAR}),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET before_state = jsonb_build_object(
+             'subject', $1::text,
+             'scope', jsonb_build_object(
+                 'kind', 'resolver', 'chain_id', $2::text,
+                 'resolver_address', lower($3::text)
+             ),
+             'effective_powers', jsonb_build_array('resolver_control'),
+             'grant_source', jsonb_build_object(
+                 'kind', 'ens_v1_authority',
+                 'authority_kind', 'registrar',
+                 'authority_key', 'equivalence-bob',
+                 'source_event_kind', 'TokenControlTransferred'
+             ),
+             'revocation_source', NULL,
+             'inheritance_path', '[]'::jsonb,
+             'transfer_behavior', 'replace_on_authority_change'
+         )
+         WHERE chain_id = $2 AND block_number = 7
+           AND event_kind = 'PermissionChanged'
+           AND after_state ->> 'subject' = $1",
+    )
+    .bind(OWNER)
+    .bind(CHAIN)
+    .bind(RESOLVER)
+    .execute(pool)
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        7,
+        Some("ens:0xbob"),
+        Some(EQUIVALENCE_BOB_RESOURCE),
+        "PermissionChanged",
+        "basenames_base_registrar",
+        json!({
+            "subject":TRANSFER_OWNER,
+            "scope":{"kind":"resolver","chain_id":CHAIN,"resolver_address":RESOLVER},
+            "effective_powers":["resolver_control"],
+            "grant_source":{
+                "kind":"ens_v1_authority",
+                "authority_kind":"registrar",
+                "authority_key":"equivalence-bob",
+                "source_event_kind":"TokenControlTransferred"
+            },
+            "revocation_source":null,
+            "inheritance_path":[],
+            "transfer_behavior":"replace_on_authority_change"
+        }),
+        json!({"emitting_address":REGISTRAR}),
+    )
+    .await?;
     Ok(())
 }
 
@@ -6718,6 +7085,183 @@ async fn seed_reconvergence_fixture(pool: &PgPool, chain: &str) -> Result<i64> {
     Ok(resolver_manifest)
 }
 
+async fn seed_raw_registrar_transfer_fixture(
+    pool: &PgPool,
+    chain: &str,
+    include_registry_owner: bool,
+) -> Result<()> {
+    // BaseRegistrar inherits this ERC-721 transfer path, which updates token ownership and emits
+    // Transfer; registry ownership changes through the separate reclaim call.
+    // (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L24 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/lib/solady/src/tokens/ERC721.sol:L287 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/lib/solady/src/tokens/ERC721.sol:L307 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L321 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L329 @ basenames@1809bbc)
+    seed_lineage(pool, chain, 5).await?;
+    insert_declared_source_manifest_events(
+        pool,
+        "basenames",
+        chain,
+        "basenames_base_registrar",
+        "registrar",
+        REGISTRAR,
+        &[
+            (
+                "NameRegistered",
+                "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
+                &["registrar"],
+                &[
+                    "RegistrationGranted",
+                    "ExpiryChanged",
+                    "PermissionChanged",
+                    "SurfaceUnbound",
+                    "SurfaceBound",
+                    "AuthorityEpochChanged",
+                    "PreimageObserved",
+                ],
+            ),
+            (
+                "Transfer",
+                "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
+                &["registrar"],
+                &[
+                    "TokenControlTransferred",
+                    "PermissionChanged",
+                    "SurfaceUnbound",
+                    "SurfaceBound",
+                    "AuthorityEpochChanged",
+                ],
+            ),
+        ],
+    )
+    .await?;
+    insert_declared_source_manifest_events(
+        pool,
+        "basenames",
+        chain,
+        "basenames_base_registry",
+        "registry",
+        REGISTRY,
+        &[
+            (
+                "NewOwner",
+                "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)",
+                &["registry"],
+                &[
+                    "SubregistryChanged",
+                    "AuthorityTransferred",
+                    "PermissionChanged",
+                ],
+            ),
+            (
+                "NewResolver",
+                "event NewResolver(bytes32 indexed node, address resolver)",
+                &["registry"],
+                &["ResolverChanged", "PermissionChanged"],
+            ),
+        ],
+    )
+    .await?;
+    insert_declared_source_manifest_events(
+        pool,
+        "basenames",
+        chain,
+        "basenames_base_resolver",
+        "l2_resolver",
+        RESOLVER,
+        &[(
+            "TextChanged",
+            "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+            &[],
+            &["RecordChanged"],
+        )],
+    )
+    .await?;
+
+    let base_eth_node = raw_namehash(&[b"base", b"eth"]);
+    let alice_node = raw_namehash(&[b"alice", b"base", b"eth"]);
+    let alice_label = B256::from(keccak256(b"alice"));
+    if include_registry_owner {
+        let registry_owner = NewOwner {
+            node: base_eth_node,
+            label: alice_label,
+            owner: OWNER.parse::<Address>()?,
+        }
+        .encode_log_data();
+        insert_raw_event(
+            pool,
+            chain,
+            1,
+            REGISTRY,
+            registry_owner.topics(),
+            registry_owner.data.as_ref(),
+        )
+        .await?;
+    }
+    let registration = NameRegistered {
+        name: "alice".into(),
+        label: alice_label,
+        owner: OWNER.parse::<Address>()?,
+        expires: U256::from(4_000_000_000_u64),
+    }
+    .encode_log_data();
+    insert_raw_event(
+        pool,
+        chain,
+        2,
+        REGISTRAR,
+        registration.topics(),
+        registration.data.as_ref(),
+    )
+    .await?;
+    let resolver = NewResolver {
+        node: alice_node,
+        resolver: RESOLVER.parse::<Address>()?,
+    }
+    .encode_log_data();
+    insert_raw_event(
+        pool,
+        chain,
+        3,
+        REGISTRY,
+        resolver.topics(),
+        resolver.data.as_ref(),
+    )
+    .await?;
+    let record = TextChanged {
+        node: alice_node,
+        indexedKey: keccak256(b"url"),
+        key: "url".into(),
+        value: "https://resolver-transfer.example.test".into(),
+    }
+    .encode_log_data();
+    insert_raw_event(
+        pool,
+        chain,
+        4,
+        RESOLVER,
+        record.topics(),
+        record.data.as_ref(),
+    )
+    .await?;
+    let transfer = Transfer {
+        from: OWNER.parse::<Address>()?,
+        to: TRANSFER_OWNER.parse::<Address>()?,
+        tokenId: U256::from_be_bytes(alice_label.0),
+    }
+    .encode_log_data();
+    insert_raw_event(
+        pool,
+        chain,
+        5,
+        REGISTRAR,
+        transfer.topics(),
+        transfer.data.as_ref(),
+    )
+    .await?;
+    Ok(())
+}
+
 async fn seed_raw_registration_fixture(pool: &PgPool, chain: &str) -> Result<()> {
     seed_lineage(pool, chain, 5).await?;
     insert_declared_source_manifest(
@@ -6900,6 +7444,96 @@ async fn seed_raw_registration_fixture(pool: &PgPool, chain: &str) -> Result<()>
         reverse.topics(),
         reverse.data.as_ref(),
     )
+    .await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_declared_source_manifest_events(
+    pool: &PgPool,
+    namespace: &str,
+    chain: &str,
+    source_family: &str,
+    role: &str,
+    address: &str,
+    events: &[(&str, &str, &[&str], &[&str])],
+) -> Result<()> {
+    let abi_events: Vec<Value> = events
+        .iter()
+        .map(|(name, fragment, emitter_roles, normalized_events)| {
+            json!({
+                "name": name,
+                "fragment": fragment,
+                "emitter_roles": emitter_roles,
+                "normalized_events": normalized_events
+            })
+        })
+        .collect();
+    let payload = json!({
+        "manifest_version": 1,
+        "namespace": namespace,
+        "source_family": source_family,
+        "chain": chain,
+        "deployment_epoch": "fixture",
+        "rollout_status": "active",
+        "normalizer_version": NORMALIZER,
+        "capability_flags": {},
+        "roots": [],
+        "contracts": [{
+            "role": role,
+            "address": address,
+            "proxy_kind": "none",
+            "start_block": 0
+        }],
+        "discovery_rules": [],
+        "abi": {"events": abi_events, "calls": []}
+    });
+    let manifest = insert_namespaced_manifest(
+        pool,
+        namespace,
+        chain,
+        source_family,
+        1,
+        "fixture",
+        &format!("tests/raw-{source_family}.toml"),
+        payload,
+    )
+    .await?;
+    let instance = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO contract_instances (
+             contract_instance_id, chain_id, contract_kind
+         ) VALUES ($1, $2, 'contract')",
+    )
+    .bind(instance)
+    .bind(chain)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO manifest_contract_instances (
+             manifest_id, chain_id, declaration_kind, declaration_name,
+             contract_instance_id, declared_address, role, proxy_kind,
+             start_block_number
+         ) VALUES ($1, $2, 'contract', $3, $4, $5, $3, 'none', 0)",
+    )
+    .bind(manifest)
+    .bind(chain)
+    .bind(role)
+    .bind(instance)
+    .bind(address)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO contract_instance_addresses (
+             contract_instance_id, chain_id, address, active_from_block_number,
+             source_manifest_id
+         ) VALUES ($1, $2, $3, 0, $4)",
+    )
+    .bind(instance)
+    .bind(chain)
+    .bind(address)
+    .bind(manifest)
+    .execute(pool)
     .await?;
     Ok(())
 }

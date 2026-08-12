@@ -4,7 +4,9 @@ mod permission_summary;
 
 use sqlx::{Postgres, Transaction};
 
-use crate::{Marker, ProjectError, Result};
+use crate::{
+    Marker, ProjectError, Result, resolver_address::PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES,
+};
 
 const SUMMARY_SAMPLE_LIMIT: i32 = 100;
 
@@ -18,7 +20,7 @@ pub(super) async fn build(
     alias_summary::stage(transaction, chain_id, SUMMARY_SAMPLE_LIMIT).await?;
     permission_summary::stage(transaction, chain_id, SUMMARY_SAMPLE_LIMIT, full_rebuild).await?;
 
-    sqlx::query(
+    let resolver_build = format!(
         r#"
         WITH discovered AS (
             SELECT lower(address.address) AS resolver_address,
@@ -78,8 +80,6 @@ pub(super) async fn build(
                                event.before_state ->> 'resolver',
                                event.raw_fact_ref ->> 'emitting_address'
                            )
-                       WHEN event.event_kind = 'PermissionChanged'
-                           THEN event.raw_fact_ref ->> 'emitting_address'
                    END) AS resolver_address,
                    event.source_family,
                    NULL::text AS classification_role,
@@ -106,15 +106,29 @@ pub(super) async fn build(
                       event.before_state ->> 'resolver',
                       event.raw_fact_ref ->> 'emitting_address'
                   )) <> ''
-              ) OR (
-                      event.event_kind = 'PermissionChanged'
-                  AND event.source_family IN (
-                      'ens_v1_resolver_l1', 'ens_v2_resolver_l1',
-                      'basenames_base_resolver'
-                  )
-                  AND event.raw_fact_ref ->> 'emitting_address' IS NOT NULL
-                  AND btrim(event.raw_fact_ref ->> 'emitting_address') <> ''
               )
+            UNION ALL
+            SELECT lower(candidate.resolver_address),
+                   CASE
+                       WHEN event.source_family LIKE 'ens_v2_%'
+                           THEN 'ens_v2_resolver_l1'
+                       WHEN event.source_family LIKE 'basenames_%'
+                           THEN 'basenames_base_resolver'
+                       ELSE 'ens_v1_resolver_l1'
+                   END,
+                   NULL::text,
+                   3
+            FROM project_events event
+            CROSS JOIN LATERAL (VALUES
+                {PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES},
+                (CASE WHEN event.source_family IN (
+                    'ens_v1_resolver_l1', 'ens_v2_resolver_l1',
+                    'basenames_base_resolver'
+                ) THEN event.raw_fact_ref ->> 'emitting_address' END)
+            ) candidate(resolver_address)
+            WHERE event.event_kind = 'PermissionChanged'
+              AND candidate.resolver_address IS NOT NULL
+              AND btrim(candidate.resolver_address) <> ''
             UNION ALL
             SELECT lower(candidate.resolver_address),
                    CASE
@@ -406,14 +420,15 @@ pub(super) async fn build(
         WHERE current.chain_id = $1
         ORDER BY resolver_address
         "#,
-    )
-    .bind(chain_id)
-    .bind(target.number)
-    .bind(&target.hash)
-    .bind(full_rebuild)
-    .bind(SUMMARY_SAMPLE_LIMIT)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to build resolver_current", error))?;
+    );
+    sqlx::query(&resolver_build)
+        .bind(chain_id)
+        .bind(target.number)
+        .bind(&target.hash)
+        .bind(full_rebuild)
+        .bind(SUMMARY_SAMPLE_LIMIT)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to build resolver_current", error))?;
     Ok(())
 }
