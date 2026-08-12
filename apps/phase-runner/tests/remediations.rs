@@ -787,6 +787,10 @@ async fn interpret_redo_stops_at_the_recorded_processed_head() -> Result<()> {
 async fn killed_advisory_lock_connection_stops_before_batch_progress_writes() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_lock_liveness").await?;
     let chain_id = "lock-liveness-chain";
+    let configured_chain = chain(chain_id, SeedBasis::BaseSeam)?;
+    PhaseStore::new(scratch.pool().clone())
+        .update_ingest_cursors(&configured_chain.sources, &PhaseProgress::default())
+        .await?;
     seed_lineage(scratch.pool(), chain_id, 0).await?;
     sqlx::query("CREATE TABLE lock_liveness_writes (marker text PRIMARY KEY)")
         .execute(scratch.pool())
@@ -811,7 +815,6 @@ async fn killed_advisory_lock_connection_stops_before_batch_progress_writes() ->
     )?;
     let cancellation = CancellationToken::new();
     let run_cancellation = cancellation.clone();
-    let configured_chain = chain(chain_id, SeedBasis::BaseSeam)?;
     let task =
         tokio::spawn(async move { runner.run_chain(&configured_chain, run_cancellation).await });
     entered.notified().await;
@@ -846,11 +849,14 @@ async fn killed_advisory_lock_connection_stops_before_batch_progress_writes() ->
         .bind(chain_id)
         .fetch_one(scratch.pool())
         .await?;
-    let cursors: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM ingest_cursors WHERE chain_id = $1")
-            .bind(chain_id)
-            .fetch_one(scratch.pool())
-            .await?;
+    let cursor: (i64, i64, Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT start_block_number, next_block_number,
+                target_block_number, last_processed_block_number
+         FROM ingest_cursors WHERE chain_id = $1 AND source_key = 'source'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
     let state: (String, Option<i64>) = sqlx::query_as(
         "
         SELECT phase_status, current_block_number
@@ -864,7 +870,7 @@ async fn killed_advisory_lock_connection_stops_before_batch_progress_writes() ->
     .await?;
     assert_eq!(phase_owned_writes, 0);
     assert_eq!(heads, 0);
-    assert_eq!(cursors, 0);
+    assert_eq!(cursor, (0, 0, None, None));
     assert_eq!(state, ("running".to_owned(), None));
     scratch.cleanup().await
 }
@@ -1442,12 +1448,23 @@ async fn multi_source_ingest_completion_requires_every_configured_source() -> Re
             .contains("missing source progress for rpc")
     );
 
-    let cursor_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM ingest_cursors WHERE chain_id = $1")
-            .bind(chain_id)
-            .fetch_one(scratch.pool())
-            .await?;
-    assert_eq!(cursor_count, 0);
+    type EmptyCursor = (String, i64, i64, Option<i64>, Option<i64>);
+    let cursors: Vec<EmptyCursor> = sqlx::query_as(
+        "SELECT source_key, start_block_number, next_block_number,
+                target_block_number, last_processed_block_number
+         FROM ingest_cursors WHERE chain_id = $1 ORDER BY source_key",
+    )
+    .bind(chain_id)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        cursors,
+        vec![
+            ("bulk".to_owned(), 0, 0, None, None),
+            ("rpc".to_owned(), 0, 0, None, None),
+        ],
+        "invalid completion must leave only the phase-entry identities"
+    );
     scratch.cleanup().await
 }
 
@@ -1486,12 +1503,19 @@ async fn ingest_completion_requires_each_source_to_reach_its_target() -> Result<
             .contains("source source cannot complete at block 1 before target block 3")
     );
 
-    let cursor_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM ingest_cursors WHERE chain_id = $1")
-            .bind(chain_id)
-            .fetch_one(scratch.pool())
-            .await?;
-    assert_eq!(cursor_count, 0);
+    let cursor: (i64, i64, Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT start_block_number, next_block_number,
+                target_block_number, last_processed_block_number
+         FROM ingest_cursors WHERE chain_id = $1 AND source_key = 'source'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        cursor,
+        (0, 0, None, None),
+        "invalid completion must leave only the phase-entry identity"
+    );
     scratch.cleanup().await
 }
 

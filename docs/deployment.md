@@ -133,11 +133,24 @@ that role's write authority, and startup rejects it.
 
 Each `BIGNAME_PHASE_RUNNER_SOURCES` entry has the form
 `CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV`; the named environment variable
-contains the provider URL. On every chain, changing a source's normalized kind
-after its cursor records progress is a data-integrity error checked before
-Ingest runs. Case-only changes, surrounding whitespace, and hyphen/underscore
-spelling changes are equivalent. Capacity, retry, and polling controls use the
-`BIGNAME_PHASE_RUNNER_*` names exposed by `phase-runner --help`.
+contains the provider URL. Before Ingest can make its first provider write, the
+runner persists each configured source's cursor row with its kind, seed basis,
+and start block and with empty progress fields. On every chain, changing a
+source's normalized kind after that row exists is a data-integrity error checked
+before Ingest runs. Case-only changes, surrounding whitespace, and
+hyphen/underscore spelling changes are equivalent. Before a runnable Ingest
+phase contacts a provider, each row's seed basis and start block must also match
+the runtime source. Any other kind change requires an explicitly reviewed reset
+that removes the cursor and every raw fact that may have come from the source,
+followed by a [full source re-walk](glossary.md#re-derivation-boundary); never
+relabel the row in place. Retained raw facts block initialization of any missing
+configured source row because they do not identify their provider, so the
+runner cannot distinguish a safe addition from replacement of the source that
+supplied them. Use the affected-chain wipe and resync under [verification mismatch
+repair](#verification-mismatch-repair) unless a narrower reset procedure has
+been separately reviewed. An ordinary redo is not that reset. Capacity, retry,
+and polling controls use the `BIGNAME_PHASE_RUNNER_*` names exposed by
+`phase-runner --help`.
 The server Compose file forwards the documented `RETH_DATA_DIR` source and the
 hydration URL map. Its reth overlay bind-mounts `RETH_DATA_DIR` read-only at the
 same container path. Add any differently named provider environment variable
@@ -155,9 +168,11 @@ is the intake provider, Verify does not select it as a reference. Verify
 validates the durable ingested extent through its finalized marker and records
 `quick_synced` only when that exact source's persisted cursor matches its
 configuration and covers the finalized target. That binding and coverage are
-checked when verification completes. On every runner start, Verify checks the
-current configuration and cursor against the completion-time target without
-changing the recorded `quick_synced` extent as Live finality moves. Separating
+checked when verification completes, and the returned final block-number/hash
+marker must equal the frozen target before completion is recorded or Live can
+run. On every runner start, Verify checks the current configuration and cursor
+against the completion-time target without changing the recorded
+`quick_synced` extent as Live finality moves. Separating
 intake and verification source roles, then upgrading Sepolia to `cross_checked`, is deferred to
 [issue #411](https://github.com/ensdomains/bigname/issues/411). A generic RPC
 kind is not accepted as Base verification authority

@@ -303,7 +303,7 @@ impl PhaseRunner {
         phase_lock: &mut PhaseLock,
     ) -> RunnerResult<()> {
         let phase_name = phase.name();
-        self.validate_ingest_identity(phase_name, chain).await?;
+        self.check_ingest_identity(phase_name, chain, &mode).await?;
         let supplied_manifest_authority_generation = (phase_name == PhaseName::Interpret)
             .then(|| self.supplied_manifest_attestation_generation(&chain.chain_id))
             .flatten();

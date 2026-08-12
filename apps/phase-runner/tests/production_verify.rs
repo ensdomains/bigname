@@ -51,6 +51,8 @@ const BASE: &str = "base-mainnet";
 const ETHEREUM: &str = "ethereum-mainnet";
 const SEPOLIA: &str = "ethereum-sepolia";
 const CONTRACT: &str = "0x00000000000000000000000000000000000000aa";
+const MULTI_BATCH_VERIFY_TARGET: i64 = 131_073;
+const FIRST_VERIFY_BATCH_END: i64 = 131_071;
 
 #[tokio::test]
 async fn verifier_rejects_a_database_role_with_write_privileges() -> Result<()> {
@@ -474,6 +476,107 @@ async fn completed_sepolia_verify_rejects_a_corrupted_completion_target() -> Res
     assert_eq!(current_restart_live_calls.load(Ordering::SeqCst), 0);
 
     drop(current_restarted);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn verify_completion_rejects_a_changed_frozen_target_identity() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_frozen_target_identity").await?;
+    seed_sparse_verify_boundaries(scratch.pool()).await?;
+    seed_ingest_cursor(
+        scratch.pool(),
+        SEPOLIA,
+        "drpc-intake",
+        MULTI_BATCH_VERIFY_TARGET,
+    )
+    .await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, MULTI_BATCH_VERIFY_TARGET).await?;
+
+    run_first_verify_batch(&scratch).await?;
+    let after_first = verify_marker_state(scratch.pool()).await?;
+    assert_eq!(
+        after_first,
+        (
+            "failed".to_owned(),
+            Some(FIRST_VERIFY_BATCH_END),
+            Some(block_hash(SEPOLIA, FIRST_VERIFY_BATCH_END)),
+            Some(MULTI_BATCH_VERIFY_TARGET),
+            Some(block_hash(SEPOLIA, MULTI_BATCH_VERIFY_TARGET)),
+        )
+    );
+
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET target_block_hash = 'changed-frozen-target'
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .execute(scratch.pool())
+    .await?;
+
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let runner = sepolia_verifier_runner(&scratch, Arc::clone(&live_calls)).await?;
+    let error = runner
+        .run_chain(
+            &sepolia_chain_with_key("drpc-intake")?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("Verify must reject a final marker that differs from its frozen target");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(error.to_string().contains("frozen target"), "{error}");
+    assert_eq!(live_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        verify_marker_state(scratch.pool()).await?,
+        (
+            "failed".to_owned(),
+            Some(FIRST_VERIFY_BATCH_END),
+            Some(block_hash(SEPOLIA, FIRST_VERIFY_BATCH_END)),
+            Some(MULTI_BATCH_VERIFY_TARGET),
+            Some("changed-frozen-target".to_owned()),
+        ),
+        "the rejected final batch must not record completion progress"
+    );
+
+    drop(runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn verify_completion_accepts_an_intact_multi_batch_target() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_intact_multi_batch_target").await?;
+    seed_sparse_verify_boundaries(scratch.pool()).await?;
+    seed_ingest_cursor(
+        scratch.pool(),
+        SEPOLIA,
+        "drpc-intake",
+        MULTI_BATCH_VERIFY_TARGET,
+    )
+    .await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, MULTI_BATCH_VERIFY_TARGET).await?;
+
+    run_first_verify_batch(&scratch).await?;
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let runner = sepolia_verifier_runner(&scratch, Arc::clone(&live_calls)).await?;
+    runner
+        .run_chain(
+            &sepolia_chain_with_key("drpc-intake")?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert_eq!(live_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        verify_marker_state(scratch.pool()).await?,
+        (
+            "completed".to_owned(),
+            Some(MULTI_BATCH_VERIFY_TARGET),
+            Some(block_hash(SEPOLIA, MULTI_BATCH_VERIFY_TARGET)),
+            Some(MULTI_BATCH_VERIFY_TARGET),
+            Some(block_hash(SEPOLIA, MULTI_BATCH_VERIFY_TARGET)),
+        )
+    );
+
+    drop(runner);
     scratch.cleanup().await
 }
 
@@ -1696,6 +1799,37 @@ impl Phase for CountingLivePhase {
     }
 }
 
+struct StopAfterFirstVerifyBatch {
+    inner: VerifyPhase,
+    batches: AtomicUsize,
+}
+
+impl Phase for StopAfterFirstVerifyBatch {
+    fn name(&self) -> PhaseName {
+        PhaseName::Verify
+    }
+
+    fn preflight(
+        &self,
+        chain_id: &str,
+        sources: &[SourceConfig],
+        mode: &phase_runner::phase::RunMode,
+    ) -> RunnerResult<()> {
+        self.inner.preflight(chain_id, sources, mode)
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        if self.batches.fetch_add(1, Ordering::SeqCst) > 0 {
+            return Box::pin(async {
+                Err(RunnerError::data_integrity(
+                    "fixture stop between Verify batches",
+                ))
+            });
+        }
+        self.inner.run_batch(context)
+    }
+}
+
 struct AdvancingLivePhase {
     pool: sqlx::PgPool,
     from: i64,
@@ -1929,6 +2063,42 @@ async fn sepolia_verifier_runner_with_live(
     )?)
 }
 
+async fn run_first_verify_batch(scratch: &ScratchDatabase) -> Result<()> {
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let phases = PhaseSet::new([
+        Arc::new(UnexpectedPhase::new(PhaseName::Ingest)) as Arc<dyn Phase>,
+        Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(StopAfterFirstVerifyBatch {
+            inner: VerifyPhase::with_reference_provider(
+                scratch.verification_database(2).await?,
+                Arc::new(UnexpectedReferences),
+            ),
+            batches: AtomicUsize::new(0),
+        }),
+        Arc::new(CountingLivePhase {
+            calls: Arc::clone(&live_calls),
+        }),
+    ])?;
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-verifier-first-multi-batch",
+        test_timing(),
+    )?;
+    let error = runner
+        .run_chain(
+            &sepolia_chain_with_key("drpc-intake")?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the fixture must stop between Verify batches");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert_eq!(live_calls.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
 fn test_timing() -> TimingConfig {
     TimingConfig {
         initial_backoff: Duration::from_millis(1),
@@ -2097,6 +2267,55 @@ async fn ingest_phase_state(
     .await?)
 }
 
+type VerifyMarkerState = (
+    String,
+    Option<i64>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+);
+
+async fn verify_marker_state(pool: &sqlx::PgPool) -> Result<VerifyMarkerState> {
+    Ok(sqlx::query_as(
+        "SELECT phase_status, current_block_number, current_block_hash,
+                target_block_number, target_block_hash
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn seed_sparse_verify_boundaries(pool: &sqlx::PgPool) -> Result<()> {
+    for number in [FIRST_VERIFY_BATCH_END, MULTI_BATCH_VERIFY_TARGET] {
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, parent_hash, block_number,
+                 block_timestamp, canonicality_state
+             ) VALUES ($1, $2, $3, $4, to_timestamp($4), 'finalized')",
+        )
+        .bind(SEPOLIA)
+        .bind(block_hash(SEPOLIA, number))
+        .bind(block_hash(SEPOLIA, number - 1))
+        .bind(number)
+        .execute(pool)
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO chain_heads (
+             chain_id, latest_block_hash, latest_block_number,
+             safe_block_hash, safe_block_number,
+             finalized_block_hash, finalized_block_number
+         ) VALUES ($1, $2, $3, $2, $3, $2, $3)",
+    )
+    .bind(SEPOLIA)
+    .bind(block_hash(SEPOLIA, MULTI_BATCH_VERIFY_TARGET))
+    .bind(MULTI_BATCH_VERIFY_TARGET)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 async fn move_finalized_head(pool: &sqlx::PgPool, chain_id: &str, finalized: i64) -> Result<()> {
     sqlx::query(
         "UPDATE chain_lineage
@@ -2178,9 +2397,42 @@ async fn seed_chain(
     finalized: i64,
     log_data: u8,
 ) -> Result<()> {
+    seed_ingest_identities(pool, chain_id).await?;
     seed_lineage_and_heads(pool, chain_id, latest, safe, finalized).await?;
     seed_watch_manifest(pool, chain_id).await?;
     insert_log(pool, chain_id, log_data).await
+}
+
+async fn seed_ingest_identities(pool: &sqlx::PgPool, chain_id: &str) -> Result<()> {
+    let sources = match chain_id {
+        BASE => vec![
+            ("coinbase-history", "coinbase_sql", "base_seam", 0),
+            (
+                "drpc-reference",
+                "drpc",
+                "base_seam",
+                BASE_COINBASE_SEAM_BLOCK,
+            ),
+        ],
+        ETHEREUM => vec![("reth-reference", "reth_db", "ethereum_head", 0)],
+        _ => Vec::new(),
+    };
+    for (source_key, source_kind, seed_basis, start) in sources {
+        sqlx::query(
+            "INSERT INTO ingest_cursors (
+                 chain_id, source_key, source_kind, seed_basis,
+                 start_block_number, next_block_number
+             ) VALUES ($1, $2, $3, $4, $5, $5)",
+        )
+        .bind(chain_id)
+        .bind(source_key)
+        .bind(source_kind)
+        .bind(seed_basis)
+        .bind(start)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
 }
 
 async fn seed_lineage_and_heads(

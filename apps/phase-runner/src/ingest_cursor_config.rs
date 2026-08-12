@@ -5,9 +5,20 @@ use crate::{
     error::{RunnerError, RunnerResult},
 };
 
-type StoredSourceConfig = (String, String, i64, bool);
+type StoredSourceConfig = (String, String, i64);
 
-pub(crate) async fn validate_existing(pool: &PgPool, sources: &[SourceConfig]) -> RunnerResult<()> {
+pub(crate) async fn ensure_all(pool: &PgPool, sources: &[SourceConfig]) -> RunnerResult<()> {
+    for source in sources {
+        let stored = initialize(pool, source).await?;
+        validate(source, stored)?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn validate_existing_kinds(
+    pool: &PgPool,
+    sources: &[SourceConfig],
+) -> RunnerResult<()> {
     for source in sources {
         if let Some(stored) = load(pool, source).await? {
             validate_kind(source, &stored)?;
@@ -17,23 +28,33 @@ pub(crate) async fn validate_existing(pool: &PgPool, sources: &[SourceConfig]) -
 }
 
 pub(crate) async fn ensure(pool: &PgPool, source: &SourceConfig) -> RunnerResult<()> {
+    let stored = initialize(pool, source).await?;
+    validate(source, stored)
+}
+
+async fn initialize(pool: &PgPool, source: &SourceConfig) -> RunnerResult<StoredSourceConfig> {
+    if let Some(stored) = load(pool, source).await? {
+        return Ok(stored);
+    }
+    if has_durable_ingest_data(pool, &source.chain_id).await? {
+        return Err(RunnerError::data_integrity(format!(
+            "cannot initialize ingest source {} on chain {} because durable ingest data already \
+             exists without a matching cursor; an explicit reset is required before Ingest can \
+             run",
+            source.source_key, source.chain_id
+        )));
+    }
     sqlx::query(
         "INSERT INTO ingest_cursors (
              chain_id, source_key, source_kind, seed_basis,
              start_block_number, next_block_number
          )
          VALUES ($1, $2, $3, $4, $5, $5)
-         ON CONFLICT (chain_id, source_key) DO UPDATE
-         SET source_kind = EXCLUDED.source_kind,
-             updated_at = now()
-         WHERE ingest_cursors.last_processed_block_number IS NULL
-           AND ingest_cursors.next_block_number = ingest_cursors.start_block_number
-           AND ingest_cursors.seed_basis = EXCLUDED.seed_basis
-           AND ingest_cursors.start_block_number = EXCLUDED.start_block_number",
+         ON CONFLICT (chain_id, source_key) DO NOTHING",
     )
     .bind(&source.chain_id)
     .bind(&source.source_key)
-    .bind(&source.source_kind)
+    .bind(normalized_source_kind(&source.source_kind))
     .bind(source.seed_basis.as_str())
     .bind(source.start_block_number)
     .execute(pool)
@@ -47,20 +68,38 @@ pub(crate) async fn ensure(pool: &PgPool, source: &SourceConfig) -> RunnerResult
             error,
         )
     })?;
-    let stored = load(pool, source).await?.ok_or_else(|| {
+    load(pool, source).await?.ok_or_else(|| {
         RunnerError::data_integrity(format!(
             "initialized ingest cursor {} for chain {} is missing",
             source.source_key, source.chain_id
         ))
-    })?;
-    validate(source, stored)
+    })
+}
+
+async fn has_durable_ingest_data(pool: &PgPool, chain_id: &str) -> RunnerResult<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM raw_transactions WHERE chain_id = $1
+         ) OR EXISTS (
+             SELECT 1 FROM raw_receipts WHERE chain_id = $1
+         ) OR EXISTS (
+             SELECT 1 FROM raw_logs WHERE chain_id = $1
+         )",
+    )
+    .bind(chain_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| {
+        RunnerError::database(
+            format!("failed to check durable ingest data for chain {chain_id}"),
+            error,
+        )
+    })
 }
 
 async fn load(pool: &PgPool, source: &SourceConfig) -> RunnerResult<Option<StoredSourceConfig>> {
     sqlx::query_as(
-        "SELECT source_kind, seed_basis, start_block_number,
-                last_processed_block_number IS NOT NULL
-                    OR next_block_number > start_block_number
+        "SELECT source_kind, seed_basis, start_block_number
          FROM ingest_cursors
          WHERE chain_id = $1 AND source_key = $2",
     )
@@ -80,7 +119,7 @@ async fn load(pool: &PgPool, source: &SourceConfig) -> RunnerResult<Option<Store
 }
 
 fn validate(source: &SourceConfig, stored: StoredSourceConfig) -> RunnerResult<()> {
-    let (_, stored_seed, stored_start, _) = &stored;
+    let (_, stored_seed, stored_start) = &stored;
     if stored_seed != source.seed_basis.as_str() || *stored_start != source.start_block_number {
         return Err(RunnerError::data_integrity(format!(
             "persisted ingest seed configuration for source {} on chain {} differs from runtime \
@@ -92,13 +131,12 @@ fn validate(source: &SourceConfig, stored: StoredSourceConfig) -> RunnerResult<(
 }
 
 fn validate_kind(source: &SourceConfig, stored: &StoredSourceConfig) -> RunnerResult<()> {
-    let (stored_kind, _, _, has_progress) = stored;
-    if *has_progress
-        && normalized_source_kind(stored_kind) != normalized_source_kind(&source.source_kind)
-    {
+    let (stored_kind, _, _) = stored;
+    if normalized_source_kind(stored_kind) != normalized_source_kind(&source.source_kind) {
         return Err(RunnerError::data_integrity(format!(
             "persisted ingest source kind for source {} on chain {} differs from runtime \
-             configuration after progress was recorded",
+             configuration; source kind changes require an explicit reset and full source \
+             re-walk (docs/glossary.md#re-derivation-boundary)",
             source.source_key, source.chain_id
         )));
     }

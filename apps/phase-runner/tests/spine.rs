@@ -1813,7 +1813,7 @@ async fn changed_ingest_seed_configuration_fails_loudly() -> Result<()> {
 }
 
 #[tokio::test]
-async fn progress_free_ingest_cursor_can_change_source_kind() -> Result<()> {
+async fn progress_free_ingest_cursor_rejects_source_kind_change() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_cursor_progress_free_kind").await?;
     let store = PhaseStore::new(scratch.runner().pool().clone());
     let original = SourceConfig::new(
@@ -1835,9 +1835,12 @@ async fn progress_free_ingest_cursor_can_change_source_kind() -> Result<()> {
         0,
         "http://source.invalid",
     )?;
-    store
+    let error = store
         .update_ingest_cursors(&[changed], &PhaseProgress::default())
-        .await?;
+        .await
+        .expect_err("a progress-free cursor still carries immutable source provenance");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(error.to_string().contains("explicit reset"), "{error}");
 
     let row: (String, i64, Option<i64>) = sqlx::query_as(
         "SELECT source_kind, next_block_number, last_processed_block_number
@@ -1846,7 +1849,7 @@ async fn progress_free_ingest_cursor_can_change_source_kind() -> Result<()> {
     )
     .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(row, ("drpc".to_owned(), 0, None));
+    assert_eq!(row, ("rpc".to_owned(), 0, None));
     scratch.cleanup().await
 }
 

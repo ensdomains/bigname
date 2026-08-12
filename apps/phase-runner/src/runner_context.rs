@@ -12,13 +12,21 @@ use crate::{
 use super::PhaseRunner;
 
 impl PhaseRunner {
-    pub(super) async fn validate_ingest_identity(
+    pub(super) async fn check_ingest_identity(
         &self,
         phase: PhaseName,
         chain: &ChainConfig,
+        mode: &RunMode,
     ) -> RunnerResult<()> {
         if phase == PhaseName::Ingest {
-            self.store.validate_ingest_sources(&chain.sources).await?;
+            let status = self.store.status(&chain.chain_id, phase).await?;
+            if matches!(mode, RunMode::Normal) && status == crate::state::PhaseStatus::Completed {
+                self.store
+                    .validate_existing_ingest_source_kinds(&chain.sources)
+                    .await?;
+            } else {
+                self.store.ensure_ingest_sources(&chain.sources).await?;
+            }
         }
         Ok(())
     }

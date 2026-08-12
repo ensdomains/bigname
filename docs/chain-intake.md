@@ -31,9 +31,11 @@ For each configured chain, the path is:
    without selecting its dRPC intake source as an independent reference and
    records `quick_synced`; the exact configured source's persisted cursor must
    cover the finalized target. That binding and coverage are checked when
-   verification completes. Every runner start checks the current source
-   configuration and cursor again against that completion-time target; later
-   Live finality does not extend the completed Verify extent.
+   verification completes. The final returned block-number/hash marker must
+   equal the frozen target before Verify records completion or Live can run.
+   Every runner start checks the current source configuration and cursor again
+   against that completion-time target; later Live finality does not extend the
+   completed Verify extent.
 5. `live` follows a provider snapshot from the completed ingest handoff, walks
    backward to a stored readable ancestor, loads at most one bounded winning
    suffix batch, and publishes the resulting head through the shared head path.
@@ -100,10 +102,24 @@ CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV
 The endpoint itself is read from `URL_ENV`. Source cursors are independent, so
 one source cannot claim another source's range. The runner records the resolved
 target and last processed block hash for each source; restart resumes from that
-stored boundary. On every chain, a source's normalized kind becomes immutable
-once its cursor records progress. Case-only changes, surrounding whitespace,
-and hyphen/underscore spelling changes are equivalent; any other kind change
-fails before Ingest runs or changes phase progress.
+stored boundary. Before Ingest can make its first provider write, the runner
+persists a cursor row containing the source kind, seed basis, and start block,
+with no progress recorded. On every chain, that row makes the normalized source
+kind immutable even while its progress fields are empty. Case-only changes,
+surrounding whitespace, and hyphen/underscore spelling changes are equivalent;
+any other kind change fails before Ingest runs or changes phase progress. Before
+a runnable Ingest phase contacts a provider, the row's seed basis and start block
+must also match the runtime source. A kind change requires an explicitly
+reviewed reset that removes the cursor and every raw fact that may have come from
+that source, followed by a [full source
+re-walk](glossary.md#re-derivation-boundary); it is never an in-place cursor
+update. Retained raw facts block creation of any missing configured source row:
+the runner cannot distinguish a safe addition from replacement of the provider
+that supplied those facts, so it treats the facts as unclaimed provider output
+and requires the same reset before Ingest runs. Because retained raw facts do
+not identify which provider supplied them, the checked-in safe procedure is the
+affected-chain wipe and resync in [verification mismatch
+repair](deployment.md#verification-mismatch-repair), not an ordinary redo.
 
 Production source shape is exact: `ethereum-mainnet` has one local Reth DB
 source, while `base-mainnet` has one Coinbase SQL historical source and one
@@ -118,9 +134,10 @@ local reth source can report `node_checked`. Sepolia's dRPC is not an independen
 reference because it also supplied intake, so the chain records `quick_synced`.
 Its persisted cursor must match the configured source key, kind, seed basis,
 and start block and must cover the finalized verification target. Verify checks
-the binding and coverage when it completes. On every runner start, it checks
-the current configuration and cursor against the completion-time target and
-leaves the recorded `quick_synced` extent unchanged when finality has moved.
+the binding and coverage when it completes, and the returned final marker must
+exactly match the frozen target marker. On every runner start, it checks the
+current configuration and cursor against the completion-time target and leaves
+the recorded `quick_synced` extent unchanged when finality has moved.
 Source-role separation and a Sepolia `cross_checked` path are deferred to
 [issue #411](https://github.com/ensdomains/bigname/issues/411). Unsupported
 combinations fail as configuration errors rather than falling back to another

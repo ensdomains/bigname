@@ -1,20 +1,36 @@
 #[allow(dead_code)]
 mod support;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use alloy_primitives::{Address, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use anyhow::{Context, Result};
 use axum::{Json, Router, extract::State, routing::post};
-use bigname_ingest::{BatchRequest, Engine, ErrorKind as IngestErrorKind, SourceDescriptor};
+use bigname_ingest::{
+    BatchRequest, Engine, ErrorKind as IngestErrorKind, SourceDescriptor, VerificationBatch,
+    WatchFilter,
+};
 use phase_runner::{
     capacity::CapacityGuard,
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
+    error::{ErrorKind, RunnerError, RunnerResult},
     ingest_phase::IngestPhase,
     interpret_phase::InterpretPhase,
-    phase::{LoopbackPhase, PhaseName, PhaseSet},
+    phase::{
+        LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName,
+        PhaseProgress, PhaseSet,
+    },
     runner::PhaseRunner,
+    verify_phase::{
+        VerificationReferenceFuture, VerificationReferenceProvider, VerificationSource, VerifyPhase,
+    },
 };
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -38,6 +54,7 @@ const ANNOUNCED_REGISTRY: &str = "0x0000000000000000000000000000000000000045";
 const TRANSFER_TOPIC: &str = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 const SIBLING_TOPIC: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NORMALIZER: &str = "ensip15@ens-normalize-0.1.1";
+const SEPOLIA: &str = "ethereum-sepolia";
 
 sol! {
     event RegistryCreated();
@@ -243,6 +260,405 @@ async fn production_ingest_writes_raw_facts_cursors_heads_and_handoff() -> Resul
 }
 
 #[tokio::test]
+async fn source_kind_change_after_first_batch_crash_is_rejected_at_phase_entry() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_ingest_crash_kind_change").await?;
+    seed_watch_set(scratch.pool(), SEPOLIA).await?;
+
+    let (rpc_endpoint, rpc_server, rpc_requests) = spawn_crash_window_rpc(false).await?;
+    let first_live_calls = Arc::new(AtomicUsize::new(0));
+    let first_runner = crash_window_runner(&scratch, Arc::clone(&first_live_calls))?;
+    let first_error = first_runner
+        .run_chain(
+            &sepolia_ingest_chain("rpc", &rpc_endpoint)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the fixture must stop after the raw-fact commit");
+    assert_eq!(first_error.kind(), ErrorKind::DataIntegrity);
+    assert!(rpc_requests.load(Ordering::SeqCst) > 0);
+    assert_eq!(first_live_calls.load(Ordering::SeqCst), 0);
+    drop(first_runner);
+    rpc_server.abort();
+
+    assert_eq!(stored_log_indexes(scratch.pool()).await?, vec![0, 1]);
+    let identity_after_crash = ingest_identity(scratch.pool()).await?;
+
+    let (drpc_endpoint, drpc_server, drpc_requests) = spawn_crash_window_rpc(true).await?;
+    let restarted_live_calls = Arc::new(AtomicUsize::new(0));
+    let restarted = complete_ingest_runner(&scratch, Arc::clone(&restarted_live_calls)).await?;
+    let error = restarted
+        .run_chain(
+            &sepolia_ingest_chain("drpc", &drpc_endpoint)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a persisted rpc source identity must reject an in-place drpc relabel");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(error.to_string().contains("source kind"), "{error}");
+    assert!(error.to_string().contains("explicit reset"), "{error}");
+    assert_eq!(drpc_requests.load(Ordering::SeqCst), 0);
+    assert_eq!(restarted_live_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        identity_after_crash,
+        Some((
+            "rpc".to_owned(),
+            "ethereum_head".to_owned(),
+            0,
+            0,
+            None,
+            None,
+            None,
+        )),
+        "phase entry must persist provenance before the first provider write"
+    );
+    assert_eq!(
+        ingest_identity(scratch.pool()).await?,
+        identity_after_crash,
+        "the rejected kind change must leave the original identity intact"
+    );
+    let verify: (String, Option<String>) = sqlx::query_as(
+        "SELECT phase_status, verification_level
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_ne!(
+        verify,
+        ("completed".to_owned(), Some("quick_synced".to_owned()))
+    );
+    assert_eq!(stored_log_indexes(scratch.pool()).await?, vec![0, 1]);
+
+    drop(restarted);
+    drpc_server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn source_key_and_kind_change_after_first_batch_crash_is_rejected_at_phase_entry()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("production_ingest_crash_source_replacement").await?;
+    seed_watch_set(scratch.pool(), SEPOLIA).await?;
+
+    let (rpc_endpoint, rpc_server, rpc_requests) = spawn_crash_window_rpc(false).await?;
+    let first_runner = crash_window_runner(&scratch, Arc::new(AtomicUsize::new(0)))?;
+    first_runner
+        .run_chain(
+            &sepolia_ingest_chain_with(
+                "original",
+                "rpc",
+                SeedBasis::EthereumHead,
+                0,
+                &rpc_endpoint,
+            )?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the fixture must stop after the raw-fact commit");
+    assert!(rpc_requests.load(Ordering::SeqCst) > 0);
+    drop(first_runner);
+    rpc_server.abort();
+    assert_eq!(stored_log_indexes(scratch.pool()).await?, vec![0, 1]);
+
+    let (drpc_endpoint, drpc_server, drpc_requests) = spawn_crash_window_rpc(true).await?;
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let restarted = complete_ingest_runner(&scratch, Arc::clone(&live_calls)).await?;
+    let error = restarted
+        .run_chain(
+            &sepolia_ingest_chain_with(
+                "replacement",
+                "drpc",
+                SeedBasis::EthereumHead,
+                0,
+                &drpc_endpoint,
+            )?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("retained facts cannot be assigned to a replacement source identity");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(error.to_string().contains("explicit reset"), "{error}");
+    assert_eq!(drpc_requests.load(Ordering::SeqCst), 0);
+    assert_eq!(live_calls.load(Ordering::SeqCst), 0);
+    let identities: Vec<(String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT source_key, source_kind, last_processed_block_number
+         FROM ingest_cursors WHERE chain_id = $1 ORDER BY source_key",
+    )
+    .bind(SEPOLIA)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        identities,
+        vec![("original".to_owned(), "rpc".to_owned(), None)]
+    );
+    assert_eq!(stored_log_indexes(scratch.pool()).await?, vec![0, 1]);
+
+    drop(restarted);
+    drpc_server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn persisted_seed_basis_and_start_block_are_checked_before_provider_writes() -> Result<()> {
+    for (prefix, restarted_seed, restarted_start) in [
+        (
+            "production_ingest_crash_seed_change",
+            SeedBasis::NewSignatureRange,
+            0,
+        ),
+        (
+            "production_ingest_crash_start_change",
+            SeedBasis::EthereumHead,
+            1,
+        ),
+    ] {
+        let scratch = ScratchDatabase::create(prefix).await?;
+        seed_watch_set(scratch.pool(), SEPOLIA).await?;
+
+        let (first_endpoint, first_server, _) = spawn_crash_window_rpc(false).await?;
+        let first_runner = crash_window_runner(&scratch, Arc::new(AtomicUsize::new(0)))?;
+        first_runner
+            .run_chain(
+                &sepolia_ingest_chain_with(
+                    "intake",
+                    "drpc",
+                    SeedBasis::EthereumHead,
+                    0,
+                    &first_endpoint,
+                )?,
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("the fixture must stop after the raw-fact commit");
+        drop(first_runner);
+        first_server.abort();
+
+        let (restart_endpoint, restart_server, restart_requests) =
+            spawn_crash_window_rpc(false).await?;
+        let live_calls = Arc::new(AtomicUsize::new(0));
+        let restarted = complete_ingest_runner(&scratch, Arc::clone(&live_calls)).await?;
+        let error = restarted
+            .run_chain(
+                &sepolia_ingest_chain_with(
+                    "intake",
+                    "drpc",
+                    restarted_seed,
+                    restarted_start,
+                    &restart_endpoint,
+                )?,
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("persisted seed identity must be checked at phase entry");
+        assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+        assert!(error.to_string().contains("seed configuration"), "{error}");
+        assert_eq!(restart_requests.load(Ordering::SeqCst), 0);
+        assert_eq!(live_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(stored_log_indexes(scratch.pool()).await?, vec![0, 1]);
+        assert_eq!(
+            ingest_identity(scratch.pool()).await?,
+            Some((
+                "drpc".to_owned(),
+                "ethereum_head".to_owned(),
+                0,
+                0,
+                None,
+                None,
+                None,
+            ))
+        );
+
+        drop(restarted);
+        restart_server.abort();
+        scratch.cleanup().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn cursorless_legacy_raw_facts_require_reset_before_source_initialization() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_ingest_legacy_cursorless_facts").await?;
+    seed_watch_set(scratch.pool(), SEPOLIA).await?;
+
+    let (rpc_endpoint, rpc_server, rpc_requests) = spawn_crash_window_rpc(false).await?;
+    Engine::new(scratch.pool().clone())
+        .run_batch(BatchRequest {
+            chain_id: SEPOLIA.to_owned(),
+            sources: vec![SourceDescriptor {
+                key: "intake".to_owned(),
+                kind: "rpc".to_owned(),
+                start_block: 0,
+                endpoint: rpc_endpoint,
+            }],
+            cursors: Vec::new(),
+            redo_range: None,
+            resume_current: None,
+        })
+        .await?;
+    assert!(rpc_requests.load(Ordering::SeqCst) > 0);
+    rpc_server.abort();
+    assert_eq!(stored_log_indexes(scratch.pool()).await?, vec![0, 1]);
+    assert_eq!(ingest_identity(scratch.pool()).await?, None);
+
+    let (drpc_endpoint, drpc_server, drpc_requests) = spawn_crash_window_rpc(true).await?;
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let restarted = complete_ingest_runner(&scratch, Arc::clone(&live_calls)).await?;
+    let error = restarted
+        .run_chain(
+            &sepolia_ingest_chain("drpc", &drpc_endpoint)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("cursorless legacy raw facts must require an explicit reset");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(error.to_string().contains("durable ingest data"), "{error}");
+    assert!(error.to_string().contains("explicit reset"), "{error}");
+    assert_eq!(drpc_requests.load(Ordering::SeqCst), 0);
+    assert_eq!(live_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(ingest_identity(scratch.pool()).await?, None);
+    assert_eq!(stored_log_indexes(scratch.pool()).await?, vec![0, 1]);
+
+    drop(restarted);
+    drpc_server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn same_kind_restart_after_first_batch_crash_refetches_and_completes() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_ingest_crash_same_kind").await?;
+    seed_watch_set(scratch.pool(), SEPOLIA).await?;
+
+    let (first_endpoint, first_server, _) = spawn_crash_window_rpc(false).await?;
+    let first_runner = crash_window_runner(&scratch, Arc::new(AtomicUsize::new(0)))?;
+    first_runner
+        .run_chain(
+            &sepolia_ingest_chain("drpc", &first_endpoint)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the fixture must stop after the raw-fact commit");
+    drop(first_runner);
+    first_server.abort();
+    assert_eq!(stored_log_indexes(scratch.pool()).await?, vec![0, 1]);
+
+    let (restart_endpoint, restart_server, restart_requests) =
+        spawn_crash_window_rpc(false).await?;
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let restarted = complete_ingest_runner(&scratch, Arc::clone(&live_calls)).await?;
+    restarted
+        .run_chain(
+            &sepolia_ingest_chain("drpc", &restart_endpoint)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert!(
+        restart_requests.load(Ordering::SeqCst) > 0,
+        "the restart must refetch the uncheckpointed range"
+    );
+    assert_eq!(stored_log_indexes(scratch.pool()).await?, vec![0, 1]);
+    assert_eq!(
+        ingest_identity(scratch.pool()).await?,
+        Some((
+            "drpc".to_owned(),
+            "ethereum_head".to_owned(),
+            0,
+            2,
+            Some(1),
+            Some(1),
+            Some(BLOCK_1.to_owned()),
+        ))
+    );
+    let verify: (String, Option<String>) = sqlx::query_as(
+        "SELECT phase_status, verification_level
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        verify,
+        ("completed".to_owned(), Some("quick_synced".to_owned()))
+    );
+    assert_eq!(live_calls.load(Ordering::SeqCst), 1);
+
+    drop(restarted);
+    restart_server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn fresh_sources_persist_any_kind_before_ingest_runs() -> Result<()> {
+    for (prefix, chain_id, kind) in [
+        ("production_ingest_fresh_rpc", "fresh-rpc-chain", "rpc"),
+        ("production_ingest_fresh_drpc", "fresh-drpc-chain", "drpc"),
+    ] {
+        let scratch = ScratchDatabase::create(prefix).await?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let phases = PhaseSet::new([
+            Arc::new(ObserveFreshIdentityPhase {
+                pool: scratch.pool().clone(),
+                calls: Arc::clone(&calls),
+            }) as Arc<dyn Phase>,
+            Arc::new(UnexpectedPhase::new(PhaseName::Interpret)),
+            Arc::new(UnexpectedPhase::new(PhaseName::Project)),
+            Arc::new(UnexpectedPhase::new(PhaseName::Verify)),
+            Arc::new(UnexpectedPhase::new(PhaseName::Live)),
+        ])?;
+        let runner = PhaseRunner::new(
+            scratch.runner(),
+            phases,
+            CapacityGuard::system(CapacityConfig::default()),
+            format!("fresh-source-{kind}"),
+            test_timing(),
+        )?;
+        let chain = ChainConfig::new(
+            chain_id,
+            vec![SourceConfig::new(
+                chain_id,
+                "intake",
+                kind,
+                SeedBasis::EthereumHead,
+                0,
+                "https://unused.invalid",
+            )?],
+            true,
+        )?;
+        let error = runner
+            .run_chain(&chain, CancellationToken::new())
+            .await
+            .expect_err("the observing phase stops after checking its pre-write identity");
+        assert!(
+            error.to_string().contains("fresh identity observed"),
+            "{error}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let identity: (String, String, i64, i64, Option<i64>) = sqlx::query_as(
+            "SELECT source_kind, seed_basis, start_block_number,
+                    next_block_number, last_processed_block_number
+             FROM ingest_cursors WHERE chain_id = $1 AND source_key = 'intake'",
+        )
+        .bind(chain_id)
+        .fetch_one(scratch.pool())
+        .await?;
+        assert_eq!(
+            identity,
+            (kind.to_owned(), "ethereum_head".to_owned(), 0, 0, None)
+        );
+        let raw_fact_count: i64 = sqlx::query_scalar(
+            "SELECT (SELECT count(*) FROM raw_logs WHERE chain_id = $1)
+                  + (SELECT count(*) FROM raw_transactions WHERE chain_id = $1)",
+        )
+        .bind(chain_id)
+        .fetch_one(scratch.pool())
+        .await?;
+        assert_eq!(raw_fact_count, 0);
+        drop(runner);
+        scratch.cleanup().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn cold_catch_up_fetches_events_after_registry_announcement() -> Result<()> {
     let scratch = ScratchDatabase::create("production_ingest_registry_announcement").await?;
     let chain_id = "rpc-registry-announcement-test";
@@ -424,6 +840,247 @@ async fn block_hash_pinned_log_mismatch_is_terminal_data_integrity() -> Result<(
     assert_eq!(error.kind(), IngestErrorKind::DataIntegrity);
     assert!(error.to_string().contains("outside blockHash-pinned block"));
     scratch.cleanup().await
+}
+
+struct CrashAfterCommitIngest {
+    inner: IngestPhase,
+}
+
+impl Phase for CrashAfterCommitIngest {
+    fn name(&self) -> PhaseName {
+        PhaseName::Ingest
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            let _committed = self.inner.run_batch(context).await?;
+            Err(RunnerError::data_integrity(
+                "fixture crash after raw-fact commit and before cursor persistence",
+            ))
+        })
+    }
+}
+
+struct ObserveFreshIdentityPhase {
+    pool: sqlx::PgPool,
+    calls: Arc<AtomicUsize>,
+}
+
+impl Phase for ObserveFreshIdentityPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Ingest
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let source = &context.sources[0];
+            let identity: Option<(String, String, i64, i64, Option<i64>)> = sqlx::query_as(
+                "SELECT source_kind, seed_basis, start_block_number,
+                        next_block_number, last_processed_block_number
+                 FROM ingest_cursors WHERE chain_id = $1 AND source_key = $2",
+            )
+            .bind(&source.chain_id)
+            .bind(&source.source_key)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| {
+                RunnerError::data_integrity(format!(
+                    "fresh identity observation failed to query its cursor: {error}"
+                ))
+            })?;
+            if identity
+                != Some((
+                    source.source_kind.clone(),
+                    source.seed_basis.as_str().to_owned(),
+                    source.start_block_number,
+                    source.start_block_number,
+                    None,
+                ))
+            {
+                return Err(RunnerError::data_integrity(format!(
+                    "fresh source identity was not persisted before Ingest: {identity:?}"
+                )));
+            }
+            Err(RunnerError::data_integrity("fresh identity observed"))
+        })
+    }
+}
+
+struct UnexpectedPhase {
+    name: PhaseName,
+}
+
+impl UnexpectedPhase {
+    const fn new(name: PhaseName) -> Self {
+        Self { name }
+    }
+}
+
+impl Phase for UnexpectedPhase {
+    fn name(&self) -> PhaseName {
+        self.name
+    }
+
+    fn run_batch(&self, _context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            Err(RunnerError::data_integrity(format!(
+                "phase {} unexpectedly ran",
+                self.name
+            )))
+        })
+    }
+}
+
+struct CountingLivePhase {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Phase for CountingLivePhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Live
+    }
+
+    fn run_batch(&self, _context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(PhaseBatchOutcome::Complete(PhaseProgress::default()))
+        })
+    }
+}
+
+struct UnexpectedReferences;
+
+impl VerificationReferenceProvider for UnexpectedReferences {
+    fn preflight(&self, _source: &VerificationSource) -> RunnerResult<()> {
+        Err(RunnerError::data_integrity(
+            "provider-trusted verification selected a reference during preflight",
+        ))
+    }
+
+    fn fetch<'a>(
+        &'a self,
+        _source: &'a VerificationSource,
+        _filter: WatchFilter,
+        _from_block: i64,
+        _to_block: i64,
+    ) -> VerificationReferenceFuture<'a> {
+        Box::pin(async {
+            Err::<VerificationBatch, _>(RunnerError::data_integrity(
+                "provider-trusted verification fetched an independent reference",
+            ))
+        })
+    }
+}
+
+fn crash_window_runner(
+    scratch: &ScratchDatabase,
+    live_calls: Arc<AtomicUsize>,
+) -> Result<PhaseRunner> {
+    let phases = PhaseSet::new([
+        Arc::new(CrashAfterCommitIngest {
+            inner: IngestPhase::new(scratch.pool().clone()),
+        }) as Arc<dyn Phase>,
+        Arc::new(UnexpectedPhase::new(PhaseName::Interpret)),
+        Arc::new(UnexpectedPhase::new(PhaseName::Project)),
+        Arc::new(UnexpectedPhase::new(PhaseName::Verify)),
+        Arc::new(CountingLivePhase { calls: live_calls }),
+    ])?;
+    Ok(PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-ingest-crash-window",
+        test_timing(),
+    )?)
+}
+
+async fn complete_ingest_runner(
+    scratch: &ScratchDatabase,
+    live_calls: Arc<AtomicUsize>,
+) -> Result<PhaseRunner> {
+    let phases = PhaseSet::new([
+        Arc::new(IngestPhase::new(scratch.pool().clone())) as Arc<dyn Phase>,
+        Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(VerifyPhase::with_reference_provider(
+            scratch.verification_database(2).await?,
+            Arc::new(UnexpectedReferences),
+        )),
+        Arc::new(CountingLivePhase { calls: live_calls }),
+    ])?;
+    Ok(PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-ingest-crash-window-restart",
+        test_timing(),
+    )?)
+}
+
+fn sepolia_ingest_chain(source_kind: &str, endpoint: &str) -> RunnerResult<ChainConfig> {
+    sepolia_ingest_chain_with("intake", source_kind, SeedBasis::EthereumHead, 0, endpoint)
+}
+
+fn sepolia_ingest_chain_with(
+    source_key: &str,
+    source_kind: &str,
+    seed_basis: SeedBasis,
+    start_block: i64,
+    endpoint: &str,
+) -> RunnerResult<ChainConfig> {
+    ChainConfig::new(
+        SEPOLIA,
+        vec![SourceConfig::new(
+            SEPOLIA,
+            source_key,
+            source_kind,
+            seed_basis,
+            start_block,
+            endpoint,
+        )?],
+        true,
+    )
+}
+
+fn test_timing() -> TimingConfig {
+    TimingConfig {
+        initial_backoff: Duration::from_millis(1),
+        maximum_backoff: Duration::from_millis(4),
+        live_poll_interval: Duration::from_millis(2),
+    }
+}
+
+type IngestIdentity = (
+    String,
+    String,
+    i64,
+    i64,
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+);
+
+async fn ingest_identity(pool: &sqlx::PgPool) -> Result<Option<IngestIdentity>> {
+    Ok(sqlx::query_as(
+        "SELECT source_kind, seed_basis, start_block_number, next_block_number,
+                target_block_number, last_processed_block_number,
+                last_processed_block_hash
+         FROM ingest_cursors WHERE chain_id = $1 AND source_key = 'intake'",
+    )
+    .bind(SEPOLIA)
+    .fetch_optional(pool)
+    .await?)
+}
+
+async fn stored_log_indexes(pool: &sqlx::PgPool) -> Result<Vec<i64>> {
+    Ok(sqlx::query_scalar(
+        "SELECT log_index FROM raw_logs
+         WHERE chain_id = $1 ORDER BY block_number, log_index",
+    )
+    .bind(SEPOLIA)
+    .fetch_all(pool)
+    .await?)
 }
 
 async fn seed_watch_set(pool: &sqlx::PgPool, chain_id: &str) -> Result<()> {
@@ -871,6 +1528,105 @@ fn announcement_receipt(block_number: i64, transaction_hash: &str) -> Value {
         "gasUsed": "0x5208",
         "logsBloom": "0x"
     })
+}
+
+#[derive(Clone)]
+struct CrashWindowRpcState {
+    omit_second_log: bool,
+    requests: Arc<AtomicUsize>,
+}
+
+async fn spawn_crash_window_rpc(
+    omit_second_log: bool,
+) -> Result<(String, tokio::task::JoinHandle<()>, Arc<AtomicUsize>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let requests = Arc::new(AtomicUsize::new(0));
+    let state = CrashWindowRpcState {
+        omit_second_log,
+        requests: Arc::clone(&requests),
+    };
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/", post(crash_window_rpc))
+                .with_state(state),
+        )
+        .await
+        .expect("crash-window RPC server");
+    });
+    Ok((format!("http://{address}/"), server, requests))
+}
+
+async fn crash_window_rpc(
+    State(state): State<CrashWindowRpcState>,
+    Json(request): Json<Value>,
+) -> Json<Value> {
+    state.requests.fetch_add(1, Ordering::SeqCst);
+    if let Some(requests) = request.as_array() {
+        return Json(Value::Array(
+            requests
+                .iter()
+                .map(|request| crash_window_rpc_response(request, state.omit_second_log))
+                .collect(),
+        ));
+    }
+    Json(crash_window_rpc_response(&request, state.omit_second_log))
+}
+
+fn crash_window_rpc_response(request: &Value, omit_second_log: bool) -> Value {
+    let id = request.get("id").cloned().unwrap_or(json!(1));
+    let method = request["method"].as_str().unwrap_or_default();
+    let params = request["params"].as_array().cloned().unwrap_or_default();
+    let result = match method {
+        "eth_getBlockByNumber" => {
+            let selection = params.first().and_then(Value::as_str).unwrap_or_default();
+            match selection {
+                "latest" | "safe" | "finalized" | "0x1" => {
+                    Some(block(1, params.get(1) == Some(&Value::Bool(true))))
+                }
+                "0x0" => Some(block(0, params.get(1) == Some(&Value::Bool(true)))),
+                _ => None,
+            }
+        }
+        "eth_getBlockByHash" => match params.first().and_then(Value::as_str).unwrap_or_default() {
+            BLOCK_0 => Some(block(0, params.get(1) == Some(&Value::Bool(true)))),
+            BLOCK_1 => Some(block(1, params.get(1) == Some(&Value::Bool(true)))),
+            _ => None,
+        },
+        "eth_getLogs" => {
+            let filter = params.first().cloned().unwrap_or_default();
+            match filter.get("blockHash").and_then(Value::as_str) {
+                Some(BLOCK_0) => Some(json!([])),
+                _ => Some(Value::Array(crash_window_logs(omit_second_log))),
+            }
+        }
+        "eth_getBlockReceipts" => Some(json!([receipt()])),
+        _ => None,
+    };
+    json!({"jsonrpc": "2.0", "id": id, "result": result})
+}
+
+fn crash_window_logs(omit_second_log: bool) -> Vec<Value> {
+    let mut logs = vec![raw_log()];
+    if !omit_second_log {
+        logs.push(json!({
+            "blockHash": BLOCK_1,
+            "blockNumber": "0x1",
+            "transactionHash": TRANSACTION,
+            "transactionIndex": "0x0",
+            "logIndex": "0x1",
+            "address": CONTRACT,
+            "topics": [
+                TRANSFER_TOPIC,
+                format!("0x{}", "00".repeat(32)),
+                format!("0x{}", "00".repeat(32))
+            ],
+            "data": "0x1234"
+        }));
+    }
+    logs
 }
 
 async fn spawn_rpc(

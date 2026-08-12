@@ -187,13 +187,17 @@ impl Phase for VerifyPhase {
                     "provider-trusted stored history extent accepted without an independent reference"
                 );
             }
+            let completes_target = plan.to == plan.target.number;
+            if completes_target {
+                completed::require_frozen_target(&context.chain_id, &end, &plan.target)?;
+            }
             let progress = PhaseProgress {
                 current: Some(end),
                 target: Some(plan.target),
                 verification_level: Some(reported_level),
                 ..PhaseProgress::default()
             };
-            if plan.to == progress.target.as_ref().expect("target was set").number {
+            if completes_target {
                 Ok(PhaseBatchOutcome::Complete(progress))
             } else {
                 Ok(PhaseBatchOutcome::Continue(progress))
