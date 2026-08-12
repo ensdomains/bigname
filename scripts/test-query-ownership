@@ -72,6 +72,11 @@ expect_probe_rejected \
   '// query ownership probe' \
   'crates/storage/src/graphql/query_ownership_probe.rs'
 expect_probe_rejected \
+  'prefixed GraphQL storage directory child' \
+  'crates/storage/src/graphql_query_ownership_probe/child_file.rs' \
+  '// query ownership probe' \
+  'crates/storage/src/graphql_query_ownership_probe/child_file.rs'
+expect_probe_rejected \
   'prefixed GraphQL storage file' \
   'crates/storage/src/graphql_query_ownership_probe.rs' \
   '// query ownership probe' \
@@ -86,6 +91,11 @@ expect_probe_rejected \
   'crates/storage/src/query_ownership_prefixed_module_probe.rs' \
   'mod graphql_query_ownership_probe;' \
   'mod graphql_query_ownership_probe;'
+expect_probe_rejected \
+  'forbidden API read directory child' \
+  'apps/api/src/v2/ownership_probe_reads/child_file.rs' \
+  '// query ownership probe' \
+  'apps/api/src/v2/ownership_probe_reads/child_file.rs'
 expect_probe_rejected \
   'new snapshot-prefixed API file' \
   'apps/api/src/v2/snapshots_query_ownership_probe.rs' \

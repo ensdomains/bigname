@@ -31,7 +31,7 @@ run_rg() {
 
 storage_graphql_paths="$(
   find crates/storage/src -type f -print \
-    | run_rg '/graphql[[:alnum:]_]*(\.rs|/)' \
+    | run_rg '/graphql[[:alnum:]_]*(\.rs$|/)' \
     | sort
 )"
 storage_graphql_modules="$(
@@ -40,8 +40,8 @@ storage_graphql_modules="$(
     crates/storage/src --glob '*.rs'
 )"
 
-# These two API snapshot helpers were individually reviewed. Snapshot-named paths otherwise match
-# the storage-read naming heuristic and must be added here deliberately after ownership review.
+# These two API snapshot helpers were individually reviewed. Only these exact files are allowed;
+# children of snapshot-named directories and other snapshot-named paths still fail the heuristic.
 readonly -a REVIEWED_API_STORAGE_HELPERS=(
   'apps/api/src/v2/snapshots.rs'
   'apps/api/src/v2/support/snapshots.rs'
@@ -66,7 +66,7 @@ filter_reviewed_api_storage_helpers() {
 
 api_storage_read_paths="$(
   find apps/api/src -type f -print \
-    | run_rg '/(canonicality|database_invariants|identity_facade|[[:alnum:]_]+_reads)(\.rs|/mod\.rs)$|/snapshots[[:alnum:]_]*(\.rs|/)' \
+    | run_rg '/(canonicality|database_invariants|identity_facade|[[:alnum:]_]+_reads)(\.rs$|/)|/snapshots[[:alnum:]_]*(\.rs$|/)' \
     | filter_reviewed_api_storage_helpers \
     | sort
 )"
