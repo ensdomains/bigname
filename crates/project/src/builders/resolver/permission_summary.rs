@@ -6,17 +6,53 @@ pub(super) async fn stage(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     sample_limit: i32,
+    full_rebuild: bool,
 ) -> Result<()> {
+    // Resolver summaries depend on the current resolver-scoped permission rows, not on every
+    // resource that historically pointed at the resolver. Merge untouched current rows with the
+    // rebuilt resource slice so rebuilding the resolver itself never requires dependent scope.
     sqlx::query(
         "CREATE TEMP TABLE project_resolver_permission_rows ON COMMIT DROP AS
+         WITH retained_permissions AS (
+             SELECT current.*
+             FROM permissions_current current
+             WHERE NOT $2
+               AND EXISTS (
+                   SELECT 1 FROM project_scope_resolvers resolver_scope
+                   WHERE lower(resolver_scope.resolver_address) =
+                         lower(current.scope_detail ->> 'resolver_address')
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM project_scope_resources scope
+                   WHERE scope.resource_id = current.resource_id
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM project_scope_resolver_passthrough passthrough
+                   WHERE lower(passthrough.resolver_address) =
+                         lower(current.scope_detail ->> 'resolver_address')
+               )
+         ), projected_permissions AS (
+             SELECT * FROM retained_permissions
+             UNION ALL
+             SELECT * FROM project_stage_permissions_current
+         )
          SELECT permission.*,
                 lower(permission.scope_detail ->> 'resolver_address') AS resolver_address
-         FROM project_stage_permissions_current permission
+         FROM projected_permissions permission
          WHERE permission.scope_kind = 'resolver'
            AND permission.scope_detail ->> 'chain_id' = $1
-           AND permission.scope_detail ->> 'resolver_address' IS NOT NULL",
+           AND permission.scope_detail ->> 'resolver_address' IS NOT NULL
+           AND (
+               $2 OR EXISTS (
+                   SELECT 1 FROM project_scope_resolvers resolver_scope
+                   WHERE lower(resolver_scope.resolver_address) = lower(
+                       permission.scope_detail ->> 'resolver_address'
+                   )
+               )
+           )",
     )
     .bind(chain_id)
+    .bind(full_rebuild)
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to stage resolver permissions", error))?;

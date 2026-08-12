@@ -3,6 +3,7 @@ use sqlx::{Postgres, Transaction};
 use crate::{Marker, ProjectError, Result};
 
 mod primary;
+mod resolver;
 mod retracted;
 mod wrapper;
 
@@ -30,10 +31,23 @@ pub(crate) async fn initialize(
     wrapper::include_time_boundaries(transaction, chain_id, window.previous, target).await?;
     if window.retain_retracted {
         retracted::seed(transaction, chain_id, window.from_block, window.to_block).await?;
+        // Redo keeps the pre-existing resolver expansion for every retained or changed
+        // resolver key. Normal live-follow uses the event-kind split seeded below.
+        sqlx::query(
+            "INSERT INTO project_scope_resolver_dependents
+             SELECT resolver_address FROM project_scope_resolvers
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            ProjectError::database("failed to retain redo resolver-dependent scope", error)
+        })?;
     }
     include_topology_scope(transaction, chain_id, target.number).await?;
     include_classification_scope(transaction, chain_id, target.number).await?;
     include_resolver_dependents(transaction, chain_id, target.number).await?;
+    resolver::classify_passthrough(transaction, chain_id).await?;
     close_binding_scope(transaction, chain_id, target).await?;
     include_alias_and_wildcard_scope(transaction, chain_id, target).await?;
     close_binding_scope(transaction, chain_id, target).await?;
@@ -46,6 +60,8 @@ async fn create_scope_tables(transaction: &mut Transaction<'_, Postgres>) -> Res
         "CREATE TEMP TABLE project_scope_children (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_resolvers (resolver_address text PRIMARY KEY) ON COMMIT DROP",
+        "CREATE TEMP TABLE project_scope_resolver_dependents (resolver_address text PRIMARY KEY) ON COMMIT DROP",
+        "CREATE TEMP TABLE project_scope_resolver_passthrough (resolver_address text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_primary (address text, coin_type text, namespace text, PRIMARY KEY (address, coin_type, namespace)) ON COMMIT DROP",
     ] {
         sqlx::query(statement)
@@ -89,20 +105,32 @@ async fn seed_direct_scope(
         "INSERT INTO project_scope_names
          SELECT logical_name_id FROM project_changed_events
          WHERE logical_name_id IS NOT NULL
-         UNION
-         SELECT logical_name_id FROM name_surfaces
-         WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3
-         UNION
-         SELECT logical_name_id FROM surface_bindings
-         WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3
          ON CONFLICT DO NOTHING",
     )
-    .bind(chain_id)
-    .bind(from_block)
-    .bind(to_block)
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to derive direct name scope", error))?;
+
+    for statement in [
+        "INSERT INTO project_scope_names
+         SELECT logical_name_id FROM name_surfaces
+         WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3
+         ON CONFLICT DO NOTHING",
+        "INSERT INTO project_scope_names
+         SELECT logical_name_id FROM surface_bindings
+         WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3
+         ON CONFLICT DO NOTHING",
+    ] {
+        sqlx::query(statement)
+            .bind(chain_id)
+            .bind(from_block)
+            .bind(to_block)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to derive changed name identity scope", error)
+            })?;
+    }
 
     sqlx::query(
         "INSERT INTO project_scope_children
@@ -126,28 +154,42 @@ async fn seed_direct_scope(
         "INSERT INTO project_scope_resources
          SELECT resource_id FROM project_changed_events
          WHERE resource_id IS NOT NULL
-         UNION
-         SELECT resource_id FROM resources
-         WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3
-         UNION
-         SELECT resource_id FROM surface_bindings
-         WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3
          ON CONFLICT DO NOTHING",
     )
-    .bind(chain_id)
-    .bind(from_block)
-    .bind(to_block)
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to derive direct resource scope", error))?;
+
+    for statement in [
+        "INSERT INTO project_scope_resources
+         SELECT resource_id FROM resources
+         WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3
+         ON CONFLICT DO NOTHING",
+        "INSERT INTO project_scope_resources
+         SELECT resource_id FROM surface_bindings
+         WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3
+         ON CONFLICT DO NOTHING",
+    ] {
+        sqlx::query(statement)
+            .bind(chain_id)
+            .bind(from_block)
+            .bind(to_block)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to derive changed resource identity scope", error)
+            })?;
+    }
 
     sqlx::query(
         "INSERT INTO project_scope_resolvers
          SELECT lower(address)
          FROM (
              SELECT after_state ->> 'resolver' AS address FROM project_changed_events
+             WHERE event_kind = 'ResolverChanged'
              UNION ALL
              SELECT before_state ->> 'resolver' FROM project_changed_events
+             WHERE event_kind = 'ResolverChanged'
              UNION ALL
              SELECT after_state ->> 'proxy_address' FROM project_changed_events
              WHERE event_kind = 'Upgraded'
@@ -160,6 +202,10 @@ async fn seed_direct_scope(
                  'RecordChanged', 'RecordVersionChanged', 'PermissionChanged',
                  'AliasChanged'
              )
+               AND source_family IN (
+                   'ens_v1_resolver_l1', 'ens_v2_resolver_l1',
+                   'basenames_base_resolver'
+               )
          ) candidate
          WHERE address IS NOT NULL AND btrim(address) <> ''
            AND lower(address) <>
@@ -170,6 +216,27 @@ async fn seed_direct_scope(
     .await
     .map_err(|error| ProjectError::database("failed to derive direct resolver scope", error))?;
 
+    sqlx::query(
+        "INSERT INTO project_scope_resolver_dependents
+         SELECT lower(address)
+         FROM (
+             SELECT after_state ->> 'proxy_address' AS address
+             FROM project_changed_events WHERE event_kind = 'Upgraded'
+             UNION ALL
+             SELECT before_state ->> 'proxy_address'
+             FROM project_changed_events WHERE event_kind = 'Upgraded'
+         ) candidate
+         WHERE address IS NOT NULL AND btrim(address) <> ''
+           AND lower(address) <>
+               '0x0000000000000000000000000000000000000000'
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database("failed to derive resolver-entity dependent scope", error)
+    })?;
+
     primary::seed(transaction).await?;
     Ok(())
 }
@@ -177,53 +244,50 @@ async fn seed_direct_scope(
 async fn include_topology_scope(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
-    target_block: i64,
+    _target_block: i64,
 ) -> Result<()> {
     sqlx::query(
         "INSERT INTO project_scope_children
-         SELECT event.namespace || ':' || lower(candidate.node)
-         FROM normalized_events event
-         JOIN chain_lineage lineage
-           ON lineage.chain_id = event.chain_id
-          AND lineage.block_hash = event.block_hash
-          AND lineage.block_number = event.block_number
-         CROSS JOIN LATERAL (
-             VALUES (event.after_state ->> 'node'),
-                    (event.after_state ->> 'child_node')
-         ) candidate(node)
-         WHERE event.chain_id = $1
-           AND event.block_number <= $2
-           AND event.event_kind = 'SubregistryChanged'
-           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND candidate.node IS NOT NULL
-           AND (
-               EXISTS (
-                   SELECT 1 FROM project_scope_names scope
-                   WHERE scope.logical_name_id IN (
-                       event.namespace || ':' ||
-                           lower(event.after_state ->> 'node'),
-                       event.namespace || ':' ||
-                           lower(event.after_state ->> 'child_node')
-                   )
-               )
-               OR EXISTS (
-                   SELECT 1 FROM project_scope_children scope
-                   WHERE scope.logical_name_id IN (
-                       event.namespace || ':' || lower(event.after_state ->> 'node'),
-                       event.namespace || ':' || lower(event.after_state ->> 'child_node')
-                   )
-               )
-               OR EXISTS (
-                   SELECT 1 FROM project_changed_events changed
-                   WHERE changed.after_state ->> 'labelhash' =
-                         event.after_state ->> 'labelhash'
-               )
+         SELECT child.parent_logical_name_id
+         FROM children_current child
+         JOIN (
+             SELECT logical_name_id FROM project_scope_names
+             UNION
+             SELECT logical_name_id FROM project_scope_children
+         ) scope
+           ON scope.logical_name_id IN (
+               child.parent_logical_name_id, child.child_logical_name_id
            )
+         WHERE child.provenance ->> 'chain_id' = $1
+         UNION
+         SELECT child.child_logical_name_id
+         FROM children_current child
+         JOIN (
+             SELECT logical_name_id FROM project_scope_names
+             UNION
+             SELECT logical_name_id FROM project_scope_children
+         ) scope
+           ON scope.logical_name_id IN (
+               child.parent_logical_name_id, child.child_logical_name_id
+           )
+         WHERE child.provenance ->> 'chain_id' = $1
+         UNION
+         SELECT child.parent_logical_name_id
+         FROM children_current child
+         JOIN project_changed_events changed
+           ON changed.namespace = child.namespace
+          AND lower(changed.after_state ->> 'labelhash') = lower(child.labelhash)
+         WHERE child.provenance ->> 'chain_id' = $1
+         UNION
+         SELECT child.child_logical_name_id
+         FROM children_current child
+         JOIN project_changed_events changed
+           ON changed.namespace = child.namespace
+          AND lower(changed.after_state ->> 'labelhash') = lower(child.labelhash)
+         WHERE child.provenance ->> 'chain_id' = $1
          ON CONFLICT DO NOTHING",
     )
     .bind(chain_id)
-    .bind(target_block)
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to close child topology scope", error))?;
@@ -236,7 +300,7 @@ async fn include_classification_scope(
     target_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO project_scope_resolvers
+        "INSERT INTO project_scope_resolver_dependents
          SELECT lower(live.resolver_address)
          FROM resolver_current live
          LEFT JOIN project_manifests manifest
@@ -305,71 +369,54 @@ async fn include_classification_scope(
     .map_err(|error| {
         ProjectError::database("failed to scope resolver classification changes", error)
     })?;
+
+    sqlx::query(
+        "INSERT INTO project_scope_resolvers
+         SELECT resolver_address FROM project_scope_resolver_dependents
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database("failed to rebuild changed resolver entities", error)
+    })?;
     Ok(())
 }
 
 async fn include_resolver_dependents(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
-    target_block: i64,
+    _target_block: i64,
 ) -> Result<()> {
     sqlx::query(
         "INSERT INTO project_scope_resources
-         SELECT event.resource_id
-         FROM normalized_events event
-         JOIN chain_lineage lineage
-           ON lineage.chain_id = event.chain_id
-          AND lineage.block_hash = event.block_hash
-          AND lineage.block_number = event.block_number
-         JOIN project_scope_resolvers scope
-           ON lower(scope.resolver_address) IN (
-              lower(event.after_state ->> 'resolver'),
-              lower(event.before_state ->> 'resolver')
-           )
-         WHERE event.chain_id = $1
-           AND event.block_number <= $2
-           AND event.event_kind = 'ResolverChanged'
-           AND event.resource_id IS NOT NULL
-           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-         UNION
          SELECT inventory.resource_id
          FROM record_inventory_current inventory
-         JOIN project_scope_resolvers scope
+         JOIN project_scope_resolver_dependents scope
            ON lower(scope.resolver_address) = lower(
-               inventory.record_version_boundary ->> 'resolver_address'
+               inventory.provenance ->> 'resolver_address'
            )
+         WHERE inventory.provenance ->> 'chain_id' = $1
          ON CONFLICT DO NOTHING",
     )
     .bind(chain_id)
-    .bind(target_block)
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to scope resolver resources", error))?;
 
     sqlx::query(
         "INSERT INTO project_scope_names
-         SELECT event.logical_name_id
-         FROM normalized_events event
-         JOIN chain_lineage lineage
-           ON lineage.chain_id = event.chain_id
-          AND lineage.block_hash = event.block_hash
-          AND lineage.block_number = event.block_number
-         JOIN project_scope_resolvers scope
-           ON lower(scope.resolver_address) IN (
-              lower(event.after_state ->> 'resolver'),
-              lower(event.before_state ->> 'resolver')
+         SELECT inventory.provenance ->> 'logical_name_id'
+         FROM record_inventory_current inventory
+         JOIN project_scope_resolver_dependents scope
+           ON lower(scope.resolver_address) = lower(
+               inventory.provenance ->> 'resolver_address'
            )
-         WHERE event.chain_id = $1
-           AND event.block_number <= $2
-           AND event.event_kind = 'ResolverChanged'
-           AND event.logical_name_id IS NOT NULL
-           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+         WHERE inventory.provenance ->> 'chain_id' = $1
+           AND inventory.provenance ->> 'logical_name_id' IS NOT NULL
          ON CONFLICT DO NOTHING",
     )
     .bind(chain_id)
-    .bind(target_block)
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to scope resolver names", error))?;
@@ -455,19 +502,11 @@ async fn include_alias_and_wildcard_scope(
     sqlx::query(
         "INSERT INTO project_scope_names
          SELECT event.after_state ->> 'to_logical_name_id'
-         FROM normalized_events event
-         JOIN project_scope_names scope
-           ON scope.logical_name_id = event.logical_name_id
-         JOIN chain_lineage lineage
-           ON lineage.chain_id = event.chain_id
-          AND lineage.block_hash = event.block_hash
-          AND lineage.block_number = event.block_number
+         FROM project_changed_events event
+         JOIN project_scope_names scope USING (logical_name_id)
          WHERE event.chain_id = $1
-           AND event.block_number <= $2
            AND event.event_kind = 'AliasChanged'
            AND event.after_state ->> 'to_logical_name_id' IS NOT NULL
-           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
          UNION
          SELECT ancestor.logical_name_id
          FROM name_surfaces scoped
@@ -477,6 +516,8 @@ async fn include_alias_and_wildcard_scope(
            ON scoped_lineage.chain_id = scoped.chain_id
           AND scoped_lineage.block_hash = scoped.block_hash
           AND scoped_lineage.block_number = scoped.block_number
+         -- No interpreter producer writes observed_wildcard_path today; retain this
+         -- behavior until a producer is admitted instead of deleting it in this change.
          JOIN surface_bindings binding
            ON binding.logical_name_id = scoped.logical_name_id
           AND binding.binding_kind = 'observed_wildcard_path'

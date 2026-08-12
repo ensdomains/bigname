@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use bigname_domain::normalization::normalize_name;
 use bigname_lookup::{
     ChainRpcUrls, EnsReverseNameMulticallBlock, EnsReverseNameMulticallRequest,
@@ -12,6 +10,7 @@ use super::{ETHEREUM, HYDRATION_KEY, hydration_provenance};
 use crate::{Marker, ProjectError, Result};
 
 const BATCH_SIZE: usize = 250;
+const ROLLING_REFRESH_LIMIT: i64 = 250;
 
 /// ENSv1 reverse resolvers that answer `name()` without emitting a record event, so the claim can
 /// only be learned by calling them. The reference indexer records the same for this deployment
@@ -139,15 +138,7 @@ impl Candidates {
 
 pub(super) async fn load_candidates(pool: &PgPool, head: &Marker) -> Result<Candidates> {
     let active = load_active_candidates(pool, head).await?;
-    let active_keys = active
-        .iter()
-        .map(|candidate| candidate.identity.clone())
-        .collect::<BTreeSet<_>>();
-    let stale = load_hydrated_candidates(pool)
-        .await?
-        .into_iter()
-        .filter(|candidate| !active_keys.contains(&candidate.identity))
-        .collect();
+    let stale = load_hydrated_candidates(pool, head).await?;
     Ok(Candidates { active, stale })
 }
 
@@ -167,75 +158,54 @@ async fn load_active_candidates(pool: &PgPool, head: &Marker) -> Result<Vec<Reve
     );
     let rows = sqlx::query_as::<_, Row>(
         r#"
-        WITH reverse_claims AS (
-            SELECT DISTINCT ON (
-                       lower(event.after_state ->> 'address'),
-                       event.after_state ->> 'coin_type',
-                       COALESCE(event.after_state ->> 'namespace', event.namespace)
-                   )
-                   lower(event.after_state ->> 'address') AS address,
-                   event.after_state ->> 'coin_type' AS coin_type,
-                   COALESCE(event.after_state ->> 'namespace', event.namespace) AS namespace,
-                   lower(event.after_state ->> 'reverse_node') AS reverse_node
-            FROM normalized_events event
-            JOIN chain_lineage lineage
-              ON lineage.chain_id = event.chain_id
-             AND lineage.block_hash = event.block_hash
-             AND lineage.block_number = event.block_number
-            WHERE event.chain_id = $1
-              AND event.block_number <= $2
-              AND event.event_kind = 'ReverseChanged'
-              AND event.after_state ->> 'coin_type' = '60'
-              AND COALESCE(event.after_state ->> 'namespace', event.namespace) = 'ens'
-              AND event.after_state ->> 'reverse_node' IS NOT NULL
-              AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-              AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-            ORDER BY lower(event.after_state ->> 'address'),
-                     event.after_state ->> 'coin_type',
-                     COALESCE(event.after_state ->> 'namespace', event.namespace),
-                     event.block_number DESC, event.transaction_index DESC NULLS LAST,
-                     event.log_index DESC NULLS LAST, event.normalized_event_id DESC
-        ), latest_resolvers AS (
-            SELECT DISTINCT ON (lower(event.after_state ->> 'node'))
-                   lower(event.after_state ->> 'node') AS reverse_node,
-                   lower(event.after_state ->> 'resolver') AS resolver_address
-            FROM normalized_events event
-            JOIN chain_lineage lineage
-              ON lineage.chain_id = event.chain_id
-             AND lineage.block_hash = event.block_hash
-             AND lineage.block_number = event.block_number
-            WHERE event.chain_id = $1
-              AND event.block_number <= $2
-              AND event.event_kind = 'ResolverChanged'
-              AND event.after_state ->> 'node' IS NOT NULL
-              AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-              AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-            ORDER BY lower(event.after_state ->> 'node'),
-                     event.block_number DESC, event.transaction_index DESC NULLS LAST,
-                     event.log_index DESC NULLS LAST, event.normalized_event_id DESC
+        WITH eligible AS (
+            SELECT current.*,
+                   lower(current.claim_provenance ->> 'reverse_node') AS reverse_node,
+                   lower(current.claim_provenance ->> 'resolver_address') AS resolver_address,
+                   COALESCE(current.claim_provenance ->> 'target_block_number' = $3::text
+                       AND current.claim_provenance ->> 'target_block_hash' = $4, false)
+                       AS delta_scoped
+            FROM primary_names_current current
+            WHERE current.coin_type = '60'
+              AND current.namespace = 'ens'
+              AND current.claim_provenance ->> 'chain_id' = $2
+              AND current.claim_provenance ->> 'reverse_node' IS NOT NULL
+              AND lower(current.claim_provenance ->> 'resolver_address') = ANY($1)
+        ), delta_scoped AS (
+            SELECT * FROM eligible WHERE delta_scoped
+        ), rolling AS (
+            SELECT *
+            FROM eligible
+            WHERE NOT delta_scoped
+            ORDER BY
+                NULLIF(
+                    claim_provenance -> $5 ->> 'block_number',
+                    ''
+                )::bigint NULLS FIRST,
+                address, coin_type, namespace
+            LIMIT $6
+        ), selected AS (
+            SELECT * FROM delta_scoped
+            UNION ALL
+            SELECT * FROM rolling
         )
-        SELECT claim.address, claim.coin_type, claim.namespace, claim.reverse_node,
-               resolver.resolver_address, current.claim_status, current.raw_claim_name,
+        SELECT current.address, current.coin_type, current.namespace, current.reverse_node,
+               current.resolver_address, current.claim_status, current.raw_claim_name,
                current.claim_name_is_normalized, current.unsupported_reason,
                current.claim_provenance
-        FROM reverse_claims claim
-        JOIN latest_resolvers resolver USING (reverse_node)
-        JOIN primary_names_current current
-          ON current.address = claim.address
-         AND current.coin_type = claim.coin_type
-         AND current.namespace = claim.namespace
-        WHERE resolver.resolver_address = ANY($3)
-        ORDER BY claim.address
+        FROM selected current
+        ORDER BY current.address, current.coin_type, current.namespace
         "#,
     )
+    .bind(resolvers)
     .bind(ETHEREUM)
     .bind(head.number)
-    .bind(resolvers)
+    .bind(&head.hash)
+    .bind(HYDRATION_KEY)
+    .bind(ROLLING_REFRESH_LIMIT)
     .fetch_all(pool)
     .await
-    .map_err(|error| {
-        ProjectError::database("failed to load reverse hydration candidates", error)
-    })?;
+    .map_err(|error| ProjectError::database("failed to load reverse candidates", error))?;
     rows.into_iter()
         .map(
             |(
@@ -271,7 +241,11 @@ async fn load_active_candidates(pool: &PgPool, head: &Marker) -> Result<Vec<Reve
         .collect()
 }
 
-async fn load_hydrated_candidates(pool: &PgPool) -> Result<Vec<StaleReverseCandidate>> {
+async fn load_hydrated_candidates(
+    pool: &PgPool,
+    head: &Marker,
+) -> Result<Vec<StaleReverseCandidate>> {
+    let resolvers = EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES;
     type Row = (
         String,
         String,
@@ -283,14 +257,48 @@ async fn load_hydrated_candidates(pool: &PgPool) -> Result<Vec<StaleReverseCandi
         Value,
     );
     let rows = sqlx::query_as::<_, Row>(
-        "SELECT address, coin_type, namespace, claim_status, raw_claim_name,
-                claim_name_is_normalized, unsupported_reason, claim_provenance
-         FROM primary_names_current
-         WHERE (claim_provenance -> $1) ->> 'chain_id' = $2
-         ORDER BY address, coin_type, namespace",
+        r#"
+        WITH stale AS (
+            SELECT current.*,
+                   COALESCE(current.claim_provenance ->> 'target_block_number' = $3::text
+                       AND current.claim_provenance ->> 'target_block_hash' = $4, false)
+                       AS delta_scoped
+            FROM primary_names_current current
+            WHERE (current.claim_provenance -> $1) ->> 'chain_id' = $2
+              AND NOT (
+                  current.coin_type = '60'
+                  AND current.namespace = 'ens'
+                  AND current.claim_provenance ->> 'reverse_node' IS NOT NULL
+                  AND COALESCE(lower(current.claim_provenance ->> 'resolver_address') = ANY($5),
+                               false)
+              )
+        ), delta_scoped AS (
+            SELECT * FROM stale WHERE delta_scoped
+        ), rolling AS (
+            SELECT *
+            FROM stale
+            WHERE NOT delta_scoped
+            ORDER BY
+                NULLIF(claim_provenance -> $1 ->> 'block_number', '')::bigint NULLS FIRST,
+                address, coin_type, namespace
+            LIMIT $6
+        )
+        SELECT address, coin_type, namespace, claim_status, raw_claim_name,
+               claim_name_is_normalized, unsupported_reason, claim_provenance
+        FROM delta_scoped
+        UNION ALL
+        SELECT address, coin_type, namespace, claim_status, raw_claim_name,
+               claim_name_is_normalized, unsupported_reason, claim_provenance
+        FROM rolling
+        ORDER BY address, coin_type, namespace
+        "#,
     )
     .bind(HYDRATION_KEY)
     .bind(ETHEREUM)
+    .bind(head.number)
+    .bind(&head.hash)
+    .bind(resolvers)
+    .bind(ROLLING_REFRESH_LIMIT)
     .fetch_all(pool)
     .await
     .map_err(|error| {

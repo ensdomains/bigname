@@ -357,6 +357,33 @@ CREATE INDEX IF NOT EXISTS normalized_events_block_idx
     )
     WHERE block_hash IS NOT NULL;
 
+CREATE INDEX IF NOT EXISTS normalized_events_chain_block_number_idx
+    ON normalized_events (chain_id, block_number);
+
+CREATE INDEX IF NOT EXISTS normalized_events_resolver_alias_history_idx
+    ON normalized_events (
+        chain_id,
+        lower(COALESCE(
+            after_state ->> 'resolver',
+            before_state ->> 'resolver',
+            raw_fact_ref ->> 'emitting_address'
+        )),
+        block_number DESC,
+        normalized_event_id DESC
+    )
+    WHERE event_kind = 'AliasChanged'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
+CREATE INDEX IF NOT EXISTS normalized_events_resolver_upgrade_history_idx
+    ON normalized_events (
+        chain_id,
+        lower(after_state ->> 'proxy_address'),
+        block_number DESC,
+        normalized_event_id DESC
+    )
+    WHERE event_kind = 'Upgraded'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
 CREATE INDEX IF NOT EXISTS normalized_events_projection_idx
     ON normalized_events (
         event_kind,

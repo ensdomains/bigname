@@ -23,8 +23,13 @@ in-place schema-migrations for initialized `bigname_phase` databases.
 `phase-runner init-schema` installs the fresh baseline into an empty
 `bigname_phase` namespace and refuses a nonempty target. The phase runner and
 API use that namespace in one database. Reviewed versioned schema-migrations
-upgrade an initialized namespace in place when the change can preserve its
-durable state; the reviewed replacement procedure is required otherwise.
+normally upgrade an initialized namespace in place when the change can preserve
+its durable state; the reviewed replacement procedure is required otherwise.
+An additive baseline index may be an explicitly reviewed release exception when
+its production build must use `CREATE INDEX CONCURRENTLY`: the release runbook
+must carry the exact live DDL, validity checks, recovery procedure, and
+release-record evidence instead of silently treating the baseline edit as an
+initialized-namespace upgrade.
 
 The physical layers are:
 
@@ -563,6 +568,10 @@ manifest drift, watch plans, or execution traces.
   names.
 - Schema-v2 baseline changes require either a reviewed in-place upgrade or the
   documented offline namespace replacement and full pipeline walk.
+- Explicitly reviewed additive baseline indexes may use the manual concurrent
+  build procedure documented for that release. The step must be named in
+  deployment preflight and recorded outside `_sqlx_migrations`; it does not
+  establish a general manual schema-change path.
 - A schema-migration that changes identity, manifest authority, canonicality,
   projection meaning, or replay behavior updates the corresponding contract
   docs in the same change.

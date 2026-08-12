@@ -2863,6 +2863,61 @@ async fn event_silent_reverse_hydration_refreshes_and_follows_a_fork() -> Result
 }
 
 #[tokio::test]
+async fn event_silent_reverse_hydration_bounds_the_rolling_refresh_batch() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_live_reverse_hydration_bound").await?;
+    seed_branch(scratch.pool(), ETHEREUM, 1, 2, None).await?;
+    publish(scratch.pool(), ETHEREUM, 1, 2, 0, 0).await?;
+    sqlx::query(
+        "INSERT INTO primary_names_current (
+             address, coin_type, namespace, claim_status,
+             unsupported_reason, claim_provenance
+         )
+         SELECT '0x' || lpad(to_hex(candidate), 40, '0'),
+                '60', 'ens', 'unsupported',
+                'legacy_resolver_does_not_emit_name',
+                jsonb_build_object(
+                    'chain_id', $1::text,
+                    'reverse_node', '0x' || lpad(to_hex(candidate), 64, '0'),
+                    'resolver_address', $2::text,
+                    'target_block_number', 1,
+                    'target_block_hash', $3::text
+                )
+         FROM generate_series(1, 251) candidate",
+    )
+    .bind(ETHEREUM)
+    .bind(REVERSE_RESOLVER)
+    .bind(block_hash(1, 1))
+    .execute(scratch.pool())
+    .await?;
+    let names = std::iter::repeat_n("alice.eth", 250)
+        .collect::<Vec<_>>()
+        .join("|");
+    let rpc = HydrationRpc::spawn(BTreeMap::from([(
+        block_hash(1, 2),
+        format!("{MULTICALL_RESULTS_PREFIX}{names}"),
+    )]))
+    .await?;
+    let hydrator = Hydrator::new(
+        scratch.pool().clone(),
+        ChainRpcUrls::from_entries(&[format!("{ETHEREUM}={}", rpc.endpoint)])?,
+    );
+
+    let outcome = hydrator.hydrate_canonical_head(ETHEREUM).await?;
+    assert_eq!(outcome.reverse_candidates, 250);
+    assert_eq!(outcome.updated_rows, 250);
+    let refreshed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM primary_names_current
+         WHERE claim_provenance ? 'canonical_head_multicall_hydration'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(refreshed, 250);
+
+    rpc.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn missing_hydration_rpc_fails_before_retracting_existing_values() -> Result<()> {
     let scratch = ScratchDatabase::create("production_live_missing_hydration_rpc").await?;
     seed_branch(scratch.pool(), ETHEREUM, 1, 1, None).await?;
@@ -3077,6 +3132,19 @@ async fn reverse_hydration_retracts_when_the_legacy_resolver_becomes_ineligible(
         "node": REVERSE_NODE,
         "resolver": "0x0000000000000000000000000000000000000000"
     }))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE primary_names_current
+         SET claim_provenance = claim_provenance || jsonb_build_object(
+             'resolver_address', '0x0000000000000000000000000000000000000000',
+             'target_block_number', 2,
+             'target_block_hash', $1::text
+         )
+         WHERE address = $2 AND coin_type = '60' AND namespace = 'ens'",
+    )
+    .bind(block_hash(1, 2))
+    .bind(ADDRESS)
     .execute(scratch.pool())
     .await?;
     publish(scratch.pool(), ETHEREUM, 1, 2, 0, 0).await?;
@@ -3892,9 +3960,16 @@ async fn seed_reverse_candidate_for(
              address, coin_type, namespace, claim_status,
              unsupported_reason, claim_provenance
          ) VALUES ($1, '60', 'ens', 'unsupported',
-                   'legacy_resolver_does_not_emit_name', '{}'::jsonb)",
+                   'legacy_resolver_does_not_emit_name', $2)",
     )
     .bind(address)
+    .bind(json!({
+        "chain_id": ETHEREUM,
+        "reverse_node": reverse_node,
+        "resolver_address": REVERSE_RESOLVER,
+        "target_block_number": 1,
+        "target_block_hash": block_hash(1, 1)
+    }))
     .execute(pool)
     .await?;
     Ok(())

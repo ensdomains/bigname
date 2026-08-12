@@ -895,6 +895,201 @@ BEGIN
         ) AS required(index_name)
         UNION ALL
         SELECT
+            format('%s has the reviewed delta-driven definition', required.index_name),
+            EXISTS (
+                SELECT 1
+                FROM pg_class AS index_relation
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid = index_relation.relnamespace
+                JOIN pg_index AS index_state
+                  ON index_state.indexrelid = index_relation.oid
+                JOIN pg_class AS table_relation
+                  ON table_relation.oid = index_state.indrelid
+                JOIN pg_am AS access_method
+                  ON access_method.oid = index_relation.relam
+                WHERE namespace.nspname = current_schema()
+                  AND index_relation.relname = required.index_name
+                  AND table_relation.relname = required.table_name
+                  AND access_method.amname = 'btree'
+                  AND index_state.indisvalid
+                  AND index_state.indisready
+                  AND index_state.indislive
+                  AND index_state.indnatts = index_state.indnkeyatts
+                  AND index_state.indnkeyatts =
+                      cardinality(required.key_patterns)
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM generate_subscripts(required.key_patterns, 1)
+                          AS key(ordinal)
+                      WHERE pg_get_indexdef(
+                                index_relation.oid,
+                                key.ordinal,
+                                true
+                            ) NOT LIKE required.key_patterns[key.ordinal]
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM generate_subscripts(required.key_patterns, 1)
+                          AS key(ordinal)
+                      WHERE pg_index_column_has_property(
+                                index_relation.oid,
+                                key.ordinal,
+                                'desc'
+                            ) IS DISTINCT FROM (
+                                required.index_name IN (
+                                    'normalized_events_resolver_alias_history_idx',
+                                    'normalized_events_resolver_upgrade_history_idx'
+                                )
+                                AND key.ordinal IN (3, 4)
+                            )
+                  )
+                  AND CASE
+                      WHEN required.predicate_patterns IS NULL
+                          THEN index_state.indpred IS NULL
+                      ELSE index_state.indpred IS NOT NULL
+                           AND NOT EXISTS (
+                               SELECT 1
+                               FROM generate_subscripts(
+                                   required.predicate_patterns,
+                                   1
+                               ) AS predicate(ordinal)
+                               WHERE pg_get_expr(
+                                         index_state.indpred,
+                                         index_state.indrelid,
+                                         true
+                                     ) NOT LIKE
+                                     required.predicate_patterns[predicate.ordinal]
+                           )
+                  END
+            )
+        FROM (
+            VALUES
+                (
+                    'normalized_events_chain_block_number_idx',
+                    'normalized_events',
+                    ARRAY['chain_id', 'block_number'],
+                    NULL::text[]
+                ),
+                (
+                    'normalized_events_resolver_alias_history_idx',
+                    'normalized_events',
+                    ARRAY[
+                        'chain_id',
+                        '%lower%COALESCE%after_state%resolver%before_state%resolver%raw_fact_ref%emitting_address%',
+                        'block_number',
+                        'normalized_event_id'
+                    ],
+                    ARRAY[
+                        '%event_kind%AliasChanged%',
+                        '%canonicality_state%canonical%safe%finalized%'
+                    ]
+                ),
+                (
+                    'normalized_events_resolver_upgrade_history_idx',
+                    'normalized_events',
+                    ARRAY[
+                        'chain_id',
+                        '%lower%after_state%proxy_address%',
+                        'block_number',
+                        'normalized_event_id'
+                    ],
+                    ARRAY[
+                        '%event_kind%Upgraded%',
+                        '%canonicality_state%canonical%safe%finalized%'
+                    ]
+                ),
+                (
+                    'name_surfaces_chain_block_number_idx',
+                    'name_surfaces',
+                    ARRAY['chain_id', 'block_number'],
+                    NULL
+                ),
+                (
+                    'surface_bindings_chain_block_number_idx',
+                    'surface_bindings',
+                    ARRAY['chain_id', 'block_number'],
+                    NULL
+                ),
+                (
+                    'resources_chain_block_number_idx',
+                    'resources',
+                    ARRAY['chain_id', 'block_number'],
+                    NULL
+                ),
+                (
+                    'children_current_labelhash_idx',
+                    'children_current',
+                    ARRAY[
+                        'namespace',
+                        'lower(labelhash)',
+                        'parent_logical_name_id',
+                        'child_logical_name_id'
+                    ],
+                    NULL
+                ),
+                (
+                    'name_current_resolver_idx',
+                    'name_current',
+                    ARRAY[
+                        '%declared_summary%resolver%chain_id%',
+                        '%lower%declared_summary%resolver%address%',
+                        'logical_name_id'
+                    ],
+                    ARRAY['%declared_summary%resolver%address%IS NOT NULL%']
+                ),
+                (
+                    'permissions_current_resolver_scope_idx',
+                    'permissions_current',
+                    ARRAY[
+                        '%scope_detail%chain_id%',
+                        '%lower%scope_detail%resolver_address%',
+                        'resource_id'
+                    ],
+                    ARRAY[
+                        '%scope_kind%resolver%',
+                        '%scope_detail%resolver_address%IS NOT NULL%'
+                    ]
+                ),
+                (
+                    'record_inventory_current_resolver_idx',
+                    'record_inventory_current',
+                    ARRAY[
+                        '%provenance%chain_id%',
+                        '%lower%provenance%resolver_address%',
+                        'resource_id'
+                    ],
+                    ARRAY['%provenance%resolver_address%IS NOT NULL%']
+                ),
+                (
+                    'primary_names_current_reverse_node_idx',
+                    'primary_names_current',
+                    ARRAY[
+                        '%claim_provenance%chain_id%',
+                        '%lower%claim_provenance%reverse_node%',
+                        'address',
+                        'coin_type',
+                        'namespace'
+                    ],
+                    ARRAY['%claim_provenance%reverse_node%IS NOT NULL%']
+                ),
+                (
+                    'permissions_current_resource_wrapper_expiry_idx',
+                    'permissions_current_resource_summary',
+                    ARRAY[
+                        '%provenance%chain_id%',
+                        '%provenance%wrapper_expiry_boundary%expiry_seconds%numeric%',
+                        'resource_id'
+                    ],
+                    ARRAY['%provenance%wrapper_expiry_boundary%']
+                )
+        ) AS required(
+            index_name,
+            table_name,
+            key_patterns,
+            predicate_patterns
+        )
+        UNION ALL
+        SELECT
             'normalized event state compaction has its expression index',
             EXISTS (
                 SELECT 1

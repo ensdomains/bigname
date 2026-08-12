@@ -80,15 +80,88 @@ ranked scan over all interpreted events. That scan is expensive at production
 scale. Avoid restart loops; investigate the first interruption before restarting
 the walk repeatedly.
 
+The release containing Issue #400 adds baseline indexes without a schema-v2
+schema-migration file. Fresh namespaces receive them from `schema-v2/baseline`.
+For an initialized production namespace, keep the API and every phase-runner or
+one-shot Project process stopped and apply the following statements one at a
+time with the writer role before deploying the new binary. Do not wrap them in
+a transaction: PostgreSQL requires each `CREATE INDEX CONCURRENTLY` to run as a
+top-level statement. The `normalized_events` builds are expected to take hours
+at the production corpus size; monitor them through `pg_stat_progress_create_index`,
+allow each build to finish, and confirm every named index is valid in `pg_index`
+before continuing. A failed concurrent build can leave an invalid index; drop
+only that exact invalid index and retry its reviewed statement before proceeding.
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_chain_block_number_idx
+    ON bigname_phase.normalized_events (chain_id, block_number);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_resolver_alias_history_idx
+    ON bigname_phase.normalized_events
+       (chain_id,
+        lower(COALESCE(after_state ->> 'resolver', before_state ->> 'resolver',
+                       raw_fact_ref ->> 'emitting_address')),
+        block_number DESC, normalized_event_id DESC)
+    WHERE event_kind = 'AliasChanged'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_resolver_upgrade_history_idx
+    ON bigname_phase.normalized_events
+       (chain_id, lower(after_state ->> 'proxy_address'),
+        block_number DESC, normalized_event_id DESC)
+    WHERE event_kind = 'Upgraded'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_chain_block_number_idx
+    ON bigname_phase.name_surfaces (chain_id, block_number);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS surface_bindings_chain_block_number_idx
+    ON bigname_phase.surface_bindings (chain_id, block_number);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS resources_chain_block_number_idx
+    ON bigname_phase.resources (chain_id, block_number);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS children_current_labelhash_idx
+    ON bigname_phase.children_current
+       (namespace, lower(labelhash), parent_logical_name_id, child_logical_name_id);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_current_resolver_idx
+    ON bigname_phase.name_current
+       ((declared_summary #>> '{resolver,chain_id}'),
+        lower(declared_summary #>> '{resolver,address}'), logical_name_id)
+    WHERE declared_summary #>> '{resolver,address}' IS NOT NULL;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS permissions_current_resolver_scope_idx
+    ON bigname_phase.permissions_current
+       ((scope_detail ->> 'chain_id'),
+        lower(scope_detail ->> 'resolver_address'), resource_id)
+    WHERE scope_kind = 'resolver'
+      AND scope_detail ->> 'resolver_address' IS NOT NULL;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS record_inventory_current_resolver_idx
+    ON bigname_phase.record_inventory_current
+       ((provenance ->> 'chain_id'), lower(provenance ->> 'resolver_address'), resource_id)
+    WHERE provenance ->> 'resolver_address' IS NOT NULL;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS primary_names_current_reverse_node_idx
+    ON bigname_phase.primary_names_current
+       ((claim_provenance ->> 'chain_id'),
+        lower(claim_provenance ->> 'reverse_node'), address, coin_type, namespace)
+    WHERE claim_provenance ->> 'reverse_node' IS NOT NULL;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS permissions_current_resource_wrapper_expiry_idx
+    ON bigname_phase.permissions_current_resource_summary
+       ((provenance ->> 'chain_id'),
+        ((provenance -> 'wrapper_expiry_boundary' ->> 'expiry_seconds')::numeric),
+        resource_id)
+    WHERE provenance ? 'wrapper_expiry_boundary';
+```
+
+Record this manual index step, its start/end times, validity check, and the
+pre/post Project tick measurements in the release record for the shared
+re-derivation boundary, alongside the complete artifact set. These indexes are
+additive; rollback may leave them in place.
+
 1. stop the API and phase runner;
 2. take and verify a database backup;
-3. if the reviewed artifact set includes a versioned schema-migration, apply it;
+3. for the release containing Issue #400, apply and validate the concurrent
+   baseline indexes above; otherwise skip this step;
+4. if the reviewed artifact set includes a versioned schema-migration, apply it;
    otherwise skip this step;
-4. if an additive schema-migration created or changed a table, reapply and
+5. if an additive schema-migration created or changed a table, reapply and
    validate the verifier's `GRANT SELECT ON ALL TABLES IN SCHEMA
    bigname_phase` before starting any one-shot or long-running runner process;
    otherwise skip this step;
-5. keep the long-running phase-runner supervisor stopped. If the generated
+6. keep the long-running phase-runner supervisor stopped. If the generated
    watch plan widened an address/topic range, use the new artifact's one-shot
    Ingest redo over every widened range; otherwise skip this step. The command
    requires the full argument set or it is rejected before fetching anything:
@@ -96,7 +169,7 @@ the walk repeatedly.
    --to-block <to> --source <source>` (at least one `--source`; the CLI
    refuses an ingest redo without one, and every redo requires the explicit
    block range);
-6. after any required Ingest redo succeeds, resume an already-audited Interpret
+7. after any required Ingest redo succeeds, resume an already-audited Interpret
    redo with its existing token and exact active chain and range. Otherwise,
    invoke the exact required full-history Interpret redo without an attestation
    flag. If a current [manifest-authority
@@ -107,20 +180,20 @@ the walk repeatedly.
    `--attest-watch-set-coverage <token>`. If no marker exists, let the unflagged
    redo complete. Never invent a token, reuse one after completion, or use one
    for another redo. Do not use the unattended `run` path for an attestation;
-7. complete the matching full-history Project redo while the supervisor remains
+8. complete the matching full-history Project redo while the supervisor remains
    stopped;
-8. start the long-running phase runner only after those one-shot redos succeed,
+9. start the long-running phase runner only after those one-shot redos succeed,
    let the production Verify phase complete for every affected chain, and require
    its reviewed reference path rather than omitting or bypassing Verify;
-9. confirm the phase state directly in the database while the API is still
+10. confirm the phase state directly in the database while the API is still
    stopped — the `project` row in `chain_phase_state` current with no pending
    redo, and Verify success from the `verify` row for each affected chain plus
    the supervisor's Verify completion output (`/v2/status` cannot be used
    here: the API is stopped, and the route reads only the Project row's
    lifecycle, redo, and heartbeat state — it does not expose Verify);
-10. start the API built from the same commit and confirm `/v2/status` reports
-    current phase state and no pending redo; and
-11. run the release smoke and public-edge checks before undraining traffic.
+11. start the API built from the same commit and confirm `/v2/status` reports
+   current phase state and no pending redo; and
+12. run the release smoke and public-edge checks before undraining traffic.
 
 If the phase schema itself must be replaced, follow
 [`deployment.md`](../deployment.md#replacing-an-initialized-phase-schema). Do

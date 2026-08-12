@@ -8,6 +8,9 @@ pub(super) async fn build(
     chain_id: &str,
     target: &Marker,
 ) -> Result<()> {
+    // Primary-name rows are keyed by the current reverse tuple and its current name() claim.
+    // Resolver history matters only for that tuple's current reverse node, so no historical
+    // resolver-pointer dependent can change another address's primary-name row.
     stage_claim_normalization(transaction).await?;
     sqlx::query(
         r#"
@@ -67,22 +70,38 @@ pub(super) async fn build(
                    claim.after_state -> 'primary_claim_source' -> 'claim_provenance',
                    reverse.after_state -> 'claim_provenance',
                    '{}'::jsonb
-               ) || jsonb_build_object(
+               ) || jsonb_strip_nulls(jsonb_build_object(
                    'chain_id', $1,
                    'reverse_event_id', reverse.normalized_event_id,
                    'claim_event_id', claim.normalized_event_id,
+                   'resolver_event_id', resolver.normalized_event_id,
+                   'reverse_node', lower(reverse.after_state ->> 'reverse_node'),
+                   'resolver_address', resolver.resolver_address,
                    'target_block_number', $2,
                    'target_block_hash', $3,
                    'coverage', jsonb_build_object(
                        'status', 'projected',
                        'exhaustiveness', 'not_asserted'
                    )
-               )
+               ))
         FROM latest_reverse reverse
         LEFT JOIN latest_claim claim
           ON claim.claim_address = lower(reverse.address)
          AND claim.claim_coin_type = reverse.coin_type
          AND claim.claim_namespace = reverse.claim_namespace
+        LEFT JOIN LATERAL (
+            SELECT event.normalized_event_id,
+                   lower(event.after_state ->> 'resolver') AS resolver_address
+            FROM project_events event
+            WHERE event.event_kind = 'ResolverChanged'
+              AND lower(event.after_state ->> 'node') =
+                  lower(reverse.after_state ->> 'reverse_node')
+            ORDER BY event.block_number DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST,
+                     event.log_index DESC NULLS LAST,
+                     event.normalized_event_id DESC
+            LIMIT 1
+        ) resolver ON TRUE
         LEFT JOIN project_primary_claim_normalization normalized
           ON normalized.normalized_event_id = claim.normalized_event_id
         ORDER BY lower(reverse.address), reverse.coin_type, reverse.claim_namespace

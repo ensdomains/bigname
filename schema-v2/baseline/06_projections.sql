@@ -85,6 +85,14 @@ CREATE INDEX IF NOT EXISTS name_current_resource_idx
     ON name_current (resource_id)
     WHERE resource_id IS NOT NULL;
 
+CREATE INDEX IF NOT EXISTS name_current_resolver_idx
+    ON name_current (
+        (declared_summary #>> '{resolver,chain_id}'),
+        lower(declared_summary #>> '{resolver,address}'),
+        logical_name_id
+    )
+    WHERE declared_summary #>> '{resolver,address}' IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS children_current (
     parent_logical_name_id text NOT NULL
         REFERENCES name_surfaces (logical_name_id),
@@ -153,6 +161,14 @@ CREATE INDEX IF NOT EXISTS children_current_parent_idx
 CREATE INDEX IF NOT EXISTS children_current_namehash_idx
     ON children_current (namespace, namehash);
 
+CREATE INDEX IF NOT EXISTS children_current_labelhash_idx
+    ON children_current (
+        namespace,
+        lower(labelhash),
+        parent_logical_name_id,
+        child_logical_name_id
+    );
+
 CREATE TABLE IF NOT EXISTS permissions_current (
     resource_id uuid NOT NULL
         REFERENCES resources (resource_id),
@@ -201,6 +217,15 @@ CREATE TABLE IF NOT EXISTS permissions_current (
 
 CREATE INDEX IF NOT EXISTS permissions_current_subject_idx
     ON permissions_current (subject, resource_id, scope);
+
+CREATE INDEX IF NOT EXISTS permissions_current_resolver_scope_idx
+    ON permissions_current (
+        (scope_detail ->> 'chain_id'),
+        lower(scope_detail ->> 'resolver_address'),
+        resource_id
+    )
+    WHERE scope_kind = 'resolver'
+      AND scope_detail ->> 'resolver_address' IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS permissions_current_resource_summary (
     resource_id uuid PRIMARY KEY
@@ -269,6 +294,14 @@ CREATE TABLE IF NOT EXISTS record_inventory_current (
     CHECK (jsonb_typeof(canonicality_summary) = 'object'),
     CHECK (manifest_version > 0)
 );
+
+CREATE INDEX IF NOT EXISTS record_inventory_current_resolver_idx
+    ON record_inventory_current (
+        (provenance ->> 'chain_id'),
+        lower(provenance ->> 'resolver_address'),
+        resource_id
+    )
+    WHERE provenance ->> 'resolver_address' IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS resolver_current (
     chain_id text NOT NULL,
@@ -444,6 +477,24 @@ CREATE INDEX IF NOT EXISTS primary_names_current_claim_idx
         address
     )
     WHERE claim_status = 'success';
+
+CREATE INDEX IF NOT EXISTS primary_names_current_reverse_node_idx
+    ON primary_names_current (
+        (claim_provenance ->> 'chain_id'),
+        lower(claim_provenance ->> 'reverse_node'),
+        address,
+        coin_type,
+        namespace
+    )
+    WHERE claim_provenance ->> 'reverse_node' IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS permissions_current_resource_wrapper_expiry_idx
+    ON permissions_current_resource_summary (
+        (provenance ->> 'chain_id'),
+        ((provenance -> 'wrapper_expiry_boundary' ->> 'expiry_seconds')::numeric),
+        resource_id
+    )
+    WHERE provenance ? 'wrapper_expiry_boundary';
 
 COMMENT ON TABLE name_current IS
     'This table stores the current product row for each visible name.';

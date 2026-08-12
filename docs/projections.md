@@ -22,6 +22,29 @@ allowing a winning fork to retract losing-fork output. It stages the affected
 scope in connection-local tables and publishes the related projection rows and
 phase state transactionally.
 
+Normal incremental Project work starts from events and identity rows in the
+`(previous, target]` block window. Name- or resource-local events rebuild only
+that name or resource. `RecordChanged`, `RecordVersionChanged`,
+`PermissionChanged`, and `AliasChanged` also rebuild the emitting resolver's
+own `resolver_current` row, but do not rebuild other names that use that
+resolver. Record and record-version events do not contribute to the resolver
+overview's derived sections, so an existing resolver touched only by those
+kinds is republished at the new target without restaging unrelated resolver
+history. `ResolverChanged` rebuilds its name and resource plus the old and new
+resolver rows, again without expanding either resolver to its other names.
+Only a resolver `Upgraded` event or stale resolver classification caused by the
+active manifest set expands through resources whose current resolver pointer
+matches that resolver. Topology and registrar-label changes expand through
+`children_current`, not normalized-event history.
+
+Wrapper expiry and `.eth` grace transitions read the latest raw fuse word and
+wrapper expiry stored in the affected resource's
+`permissions_current_resource_summary` provenance.[^v1-wrapper-grace-expiry]
+The permission builder
+refreshes that internal boundary whenever the resource is rebuilt. This keeps
+timestamp-only Project ticks on projected current state instead of re-reading
+all `PermissionScopeChanged` and `ExpiryChanged` history.
+
 After event-derived publication, configured Ethereum
 [hydration](glossary.md#hydration) may refresh:
 
@@ -238,6 +261,14 @@ Current-head hydration for an admitted event-silent ENSv1 reverse resolver may
 refresh an existing ENS/60 claim tuple at the exact published Ethereum head. It
 does not create a normalized event or verified result. Provider failure restores
 the event-derived row and keeps Project retryable.
+
+Each hydration tick refreshes every eligible reverse tuple rebuilt by the
+Project delta at that head, then at most 250 additional eligible tuples ordered
+by their oldest successful hydration head and stable tuple identity. It also
+restores every newly ineligible delta tuple and at most 250 older ineligible
+hydrated tuples per tick. Thus event-driven changes are visible immediately,
+while event-silent provider values for the remaining corpus are refreshed in
+bounded rolling batches instead of all being polled at every head.
 
 Verified ENS/60 primary-name status is computed per request by schema-v2 lookup.
 It requires the declared claim and a matching forward address; tuple presence

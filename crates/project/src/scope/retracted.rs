@@ -140,6 +140,14 @@ async fn seed_resources(
             FROM address_names_current row
             WHERE row.provenance ->> 'chain_id' = $1 AND row.resource_id IS NOT NULL
             UNION ALL
+            SELECT row.resource_id, citation.event_id, false
+            FROM permissions_current_resource_summary row
+            CROSS JOIN LATERAL (VALUES
+                (row.provenance -> 'wrapper_expiry_boundary' ->> 'fuses_event_id'),
+                (row.provenance -> 'wrapper_expiry_boundary' ->> 'expiry_event_id')
+            ) citation(event_id)
+            WHERE row.provenance ->> 'chain_id' = $1
+            UNION ALL
             SELECT row.resource_id, NULL, true
             FROM permissions_current_resource_summary row
             WHERE row.provenance ->> 'chain_id' = $1
@@ -226,7 +234,8 @@ async fn seed_primary(transaction: &mut Transaction<'_, Postgres>, chain_id: &st
             FROM primary_names_current row
             CROSS JOIN LATERAL (
                 VALUES (row.claim_provenance ->> 'reverse_event_id'),
-                       (row.claim_provenance ->> 'claim_event_id')
+                       (row.claim_provenance ->> 'claim_event_id'),
+                       (row.claim_provenance ->> 'resolver_event_id')
             ) citation(event_id)
             WHERE row.claim_provenance ->> 'chain_id' = $1
         )

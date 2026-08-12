@@ -14,9 +14,9 @@ pub(super) async fn build(
     target: &Marker,
     full_rebuild: bool,
 ) -> Result<()> {
-    binding_summary::stage(transaction, SUMMARY_SAMPLE_LIMIT).await?;
+    binding_summary::stage(transaction, chain_id, SUMMARY_SAMPLE_LIMIT, full_rebuild).await?;
     alias_summary::stage(transaction, chain_id, SUMMARY_SAMPLE_LIMIT).await?;
-    permission_summary::stage(transaction, chain_id, SUMMARY_SAMPLE_LIMIT).await?;
+    permission_summary::stage(transaction, chain_id, SUMMARY_SAMPLE_LIMIT, full_rebuild).await?;
 
     sqlx::query(
         r#"
@@ -73,8 +73,14 @@ pub(super) async fn build(
                        WHEN event.event_kind = 'Upgraded'
                            THEN event.after_state ->> 'proxy_address'
                        WHEN event.event_kind = 'AliasChanged'
-                           THEN event.after_state ->> 'resolver'
-                       WHEN event.event_kind = 'PermissionChanged'
+                           THEN COALESCE(
+                               event.after_state ->> 'resolver',
+                               event.before_state ->> 'resolver',
+                               event.raw_fact_ref ->> 'emitting_address'
+                           )
+                       WHEN event.event_kind IN (
+                           'RecordChanged', 'RecordVersionChanged', 'PermissionChanged'
+                       )
                            THEN event.raw_fact_ref ->> 'emitting_address'
                    END) AS resolver_address,
                    event.source_family,
@@ -92,8 +98,16 @@ pub(super) async fn build(
                       'ens_v1_resolver_l1', 'ens_v2_resolver_l1',
                       'basenames_base_resolver'
                   )
-                  AND event.after_state ->> 'resolver' IS NOT NULL
-                  AND btrim(event.after_state ->> 'resolver') <> ''
+                  AND COALESCE(
+                      event.after_state ->> 'resolver',
+                      event.before_state ->> 'resolver',
+                      event.raw_fact_ref ->> 'emitting_address'
+                  ) IS NOT NULL
+                  AND btrim(COALESCE(
+                      event.after_state ->> 'resolver',
+                      event.before_state ->> 'resolver',
+                      event.raw_fact_ref ->> 'emitting_address'
+                  )) <> ''
               ) OR (
                       event.event_kind = 'PermissionChanged'
                   AND event.source_family IN (
@@ -102,7 +116,34 @@ pub(super) async fn build(
                   )
                   AND event.raw_fact_ref ->> 'emitting_address' IS NOT NULL
                   AND btrim(event.raw_fact_ref ->> 'emitting_address') <> ''
+              ) OR (
+                      event.event_kind IN ('RecordChanged', 'RecordVersionChanged')
+                  AND event.source_family IN (
+                      'ens_v1_resolver_l1', 'ens_v2_resolver_l1',
+                      'basenames_base_resolver'
+                  )
+                  AND event.raw_fact_ref ->> 'emitting_address' IS NOT NULL
+                  AND btrim(event.raw_fact_ref ->> 'emitting_address') <> ''
               )
+            UNION ALL
+            SELECT lower(candidate.resolver_address),
+                   CASE
+                       WHEN event.source_family LIKE 'ens_v2_%'
+                           THEN 'ens_v2_resolver_l1'
+                       WHEN event.source_family LIKE 'basenames_%'
+                           THEN 'basenames_base_resolver'
+                       ELSE 'ens_v1_resolver_l1'
+                   END,
+                   NULL::text,
+                   3
+            FROM project_events event
+            CROSS JOIN LATERAL (
+                VALUES (event.after_state ->> 'resolver'),
+                       (event.before_state ->> 'resolver')
+            ) candidate(resolver_address)
+            WHERE event.event_kind = 'ResolverChanged'
+              AND candidate.resolver_address IS NOT NULL
+              AND btrim(candidate.resolver_address) <> ''
         ),
         observed AS (
             SELECT resolver_address, source_family,
@@ -128,6 +169,11 @@ pub(super) async fn build(
                       WHERE lower(scope.resolver_address) =
                             lower(combined.resolver_address)
                   )
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM project_scope_resolver_passthrough passthrough
+                  WHERE lower(passthrough.resolver_address) =
+                        lower(combined.resolver_address)
               )
             ORDER BY combined.resolver_address,
                      combined.priority,
@@ -347,6 +393,27 @@ pub(super) async fn build(
                ),
                manifest_version
         FROM summarized
+        UNION ALL
+        SELECT current.chain_id,
+               current.resolver_address,
+               current.declared_summary,
+               current.support_status,
+               current.unsupported_reason,
+               current.provenance,
+               current.chain_positions || jsonb_build_object(
+                   'target_block_number', $2,
+                   'target_block_hash', $3
+               ),
+               current.canonicality_summary || jsonb_build_object(
+                   'state', 'canonical_lineage',
+                   'target_block_number', $2,
+                   'target_block_hash', $3
+               ),
+               current.manifest_version
+        FROM resolver_current current
+        JOIN project_scope_resolver_passthrough passthrough
+          ON lower(passthrough.resolver_address) = lower(current.resolver_address)
+        WHERE current.chain_id = $1
         ORDER BY resolver_address
         "#,
     )

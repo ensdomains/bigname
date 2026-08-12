@@ -184,6 +184,9 @@ CREATE TABLE IF NOT EXISTS resources (
 CREATE INDEX IF NOT EXISTS resources_block_idx
     ON resources (chain_id, block_hash);
 
+CREATE INDEX IF NOT EXISTS resources_chain_block_number_idx
+    ON resources (chain_id, block_number);
+
 CREATE TABLE IF NOT EXISTS name_surfaces (
     logical_name_id text PRIMARY KEY,
     namespace text NOT NULL,
@@ -241,6 +244,9 @@ CREATE INDEX IF NOT EXISTS name_surfaces_visibility_idx
 
 CREATE INDEX IF NOT EXISTS name_surfaces_block_idx
     ON name_surfaces (chain_id, block_hash);
+
+CREATE INDEX IF NOT EXISTS name_surfaces_chain_block_number_idx
+    ON name_surfaces (chain_id, block_number);
 
 CREATE TABLE IF NOT EXISTS surface_bindings (
     surface_binding_id uuid PRIMARY KEY,
@@ -316,6 +322,9 @@ CREATE INDEX IF NOT EXISTS surface_bindings_resource_idx
 
 CREATE INDEX IF NOT EXISTS surface_bindings_block_idx
     ON surface_bindings (chain_id, block_hash);
+
+CREATE INDEX IF NOT EXISTS surface_bindings_chain_block_number_idx
+    ON surface_bindings (chain_id, block_number);
 
 COMMENT ON TABLE contract_instances IS
     'This table stores stable identities for admitted contracts.';

@@ -1,12 +1,12 @@
-use sqlx::{Postgres, Transaction};
-
 use crate::{Marker, ProjectError, Result};
-
+use sqlx::{Postgres, Transaction};
 pub(super) async fn build(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     target: &Marker,
 ) -> Result<()> {
+    // Permission rows fold resource-keyed history. Resolver addresses are stored as scope values;
+    // no output follows historical pointers, so the changed resource and resolver row suffice.
     sqlx::query(
         r#"
         WITH target_time AS (
@@ -347,7 +347,6 @@ pub(super) async fn build(
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to build permissions_current", error))?;
-
     sqlx::query(
         r#"
         WITH resource_event_candidates AS (
@@ -424,6 +423,46 @@ pub(super) async fn build(
             FROM resource_event_candidates
             GROUP BY resource_id
         ),
+        wrapper_modifiers AS (
+            SELECT DISTINCT ON (event.resource_id)
+                   event.resource_id, event.normalized_event_id,
+                   event.block_number, event.block_hash,
+                   CASE WHEN jsonb_typeof(event.after_state -> 'fuses') = 'number'
+                        AND (event.after_state ->> 'fuses')::numeric BETWEEN 0 AND 9223372036854775807
+                           THEN (event.after_state ->> 'fuses')::bigint
+                   END AS fuses
+            FROM project_events event
+            WHERE event.event_kind = 'PermissionScopeChanged'
+              AND event.source_family = 'ens_v1_wrapper_l1'
+              AND event.resource_id IS NOT NULL
+            ORDER BY event.resource_id, event.block_number DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
+                     event.normalized_event_id DESC
+        ),
+        wrapper_expiries AS (
+            SELECT DISTINCT ON (event.resource_id)
+                   event.resource_id, event.normalized_event_id,
+                   event.block_number, event.block_hash,
+                   CASE WHEN jsonb_typeof(event.after_state -> 'expiry') = 'number'
+                        AND (event.after_state ->> 'expiry')::numeric
+                            BETWEEN 0 AND 18446744073709551615
+                           THEN (event.after_state ->> 'expiry')::numeric
+                   END AS expiry_seconds
+            FROM project_events event
+            WHERE event.event_kind = 'ExpiryChanged'
+              AND event.resource_id IS NOT NULL
+              AND (
+                    event.source_family = 'ens_v1_wrapper_l1'
+                 OR (
+                        event.source_family = 'ens_v1_registrar_l1'
+                    AND event.after_state ->> 'source_event' = 'NameRenewed'
+                    AND event.after_state ->> 'authority_kind' = 'wrapper'
+                 )
+              )
+            ORDER BY event.resource_id, event.block_number DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
+                     event.normalized_event_id DESC
+        ),
         resource_authority AS (
             SELECT resource.*,
                    CASE COALESCE(
@@ -452,12 +491,20 @@ pub(super) async fn build(
                            END
                        )
                    END AS authority_kind,
-                   summary.raw_fact_ref,
-                   summary.authority_block_number,
-                   summary.authority_block_hash,
-                   summary.authority_manifest_version
+                   summary.raw_fact_ref, summary.authority_block_number,
+                   summary.authority_block_hash, summary.authority_manifest_version,
+                   modifier.fuses AS wrapper_fuses,
+                   modifier.normalized_event_id AS wrapper_modifier_event_id,
+                   modifier.block_number AS wrapper_modifier_block_number,
+                   modifier.block_hash AS wrapper_modifier_block_hash,
+                   expiry.expiry_seconds AS wrapper_expiry_seconds,
+                   expiry.normalized_event_id AS wrapper_expiry_event_id,
+                   expiry.block_number AS wrapper_expiry_block_number,
+                   expiry.block_hash AS wrapper_expiry_block_hash
             FROM project_resources resource
             LEFT JOIN resource_event_summaries summary USING (resource_id)
+            LEFT JOIN wrapper_modifiers modifier USING (resource_id)
+            LEFT JOIN wrapper_expiries expiry USING (resource_id)
         )
         INSERT INTO project_stage_permissions_current_resource_summary (
             resource_id, authority_kind, root_resource_id, support_status,
@@ -491,10 +538,34 @@ pub(super) async fn build(
                        'status', 'projected',
                        'exhaustiveness', 'not_asserted'
                    )
-               ),
+               ) || CASE
+                   WHEN resource.wrapper_fuses IS NOT NULL
+                    AND resource.wrapper_expiry_seconds IS NOT NULL
+                       THEN jsonb_build_object(
+                           'wrapper_expiry_boundary', jsonb_build_object(
+                               'fuses', resource.wrapper_fuses,
+                               'expiry_seconds', resource.wrapper_expiry_seconds,
+                               'fuses_event_id', resource.wrapper_modifier_event_id,
+                               'expiry_event_id', resource.wrapper_expiry_event_id
+                           )
+                       )
+                   ELSE '{}'::jsonb
+               END,
                jsonb_strip_nulls(jsonb_build_object(
-                   'block_number', resource.authority_block_number,
-                   'block_hash', resource.authority_block_hash,
+                   'block_number', NULLIF(GREATEST(
+                       COALESCE(resource.authority_block_number, -1),
+                       COALESCE(resource.wrapper_modifier_block_number, -1),
+                       COALESCE(resource.wrapper_expiry_block_number, -1)), -1),
+                   'block_hash', CASE
+                       WHEN COALESCE(resource.wrapper_expiry_block_number, -1) >= GREATEST(
+                            COALESCE(resource.wrapper_modifier_block_number, -1),
+                            COALESCE(resource.authority_block_number, -1))
+                           THEN resource.wrapper_expiry_block_hash
+                       WHEN COALESCE(resource.wrapper_modifier_block_number, -1) >=
+                            COALESCE(resource.authority_block_number, -1)
+                           THEN resource.wrapper_modifier_block_hash
+                       ELSE resource.authority_block_hash
+                   END,
                    'target_block_number', $2,
                    'target_block_hash', $3
                )),
@@ -524,11 +595,6 @@ pub(super) async fn build(
     .bind(&target.hash)
     .execute(&mut **transaction)
     .await
-    .map_err(|error| {
-        ProjectError::database(
-            "failed to build permissions_current_resource_summary",
-            error,
-        )
-    })?;
+    .map_err(|error| ProjectError::database("failed to build resource permissions", error))?;
     Ok(())
 }

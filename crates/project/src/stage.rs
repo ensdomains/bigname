@@ -41,7 +41,41 @@ pub(crate) async fn inputs(
     full_rebuild: bool,
 ) -> Result<()> {
     create_events(transaction, chain_id, target.number, full_rebuild).await?;
+    if !full_rebuild {
+        close_staged_topology_scope(transaction).await?;
+    }
     create_identity_views(transaction, chain_id, target, full_rebuild).await?;
+    Ok(())
+}
+
+async fn close_staged_topology_scope(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO project_scope_children
+         SELECT event.namespace || ':' || lower(candidate.node)
+         FROM project_events event
+         CROSS JOIN LATERAL (
+             VALUES (event.after_state ->> 'node'),
+                    (event.after_state ->> 'child_node')
+         ) candidate(node)
+         WHERE event.event_kind = 'SubregistryChanged'
+           AND candidate.node IS NOT NULL
+           AND EXISTS (
+               SELECT 1
+               FROM (
+                   SELECT logical_name_id FROM project_scope_names
+                   UNION
+                   SELECT logical_name_id FROM project_scope_children
+               ) scope
+               WHERE scope.logical_name_id IN (
+                   event.namespace || ':' || lower(event.after_state ->> 'node'),
+                   event.namespace || ':' || lower(event.after_state ->> 'child_node')
+               )
+           )
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to close staged topology scope", error))?;
     Ok(())
 }
 
@@ -108,10 +142,21 @@ async fn create_events(
     target_block: i64,
     full_rebuild: bool,
 ) -> Result<()> {
-    sqlx::query(
+    if !full_rebuild {
+        create_scoped_event_ids(transaction, chain_id, target_block).await?;
+    }
+
+    let scope_join = if full_rebuild {
+        ""
+    } else {
+        "JOIN project_event_ids scope
+           ON scope.normalized_event_id = event.normalized_event_id"
+    };
+    let statement = format!(
         "CREATE TEMP TABLE project_events ON COMMIT DROP AS
          SELECT event.*
          FROM normalized_events event
+         {scope_join}
          LEFT JOIN chain_lineage lineage
            ON lineage.chain_id = event.chain_id
           AND lineage.block_hash = event.block_hash
@@ -125,84 +170,14 @@ async fn create_events(
                    event.block_number <= $2
                    AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
                )
-           )
-           AND (
-               $3
-               OR event.event_kind = 'SourceManifestUpdated'
-               OR EXISTS (
-                   SELECT 1 FROM project_scope_names scope
-                   WHERE scope.logical_name_id = event.logical_name_id
-                      OR scope.logical_name_id =
-                         event.namespace || ':' || lower(event.after_state ->> 'node')
-                      OR scope.logical_name_id =
-                         event.namespace || ':' || lower(event.after_state ->> 'child_node')
-                      OR scope.logical_name_id =
-                         event.after_state ->> 'to_logical_name_id'
-                      OR scope.logical_name_id =
-                         event.before_state ->> 'to_logical_name_id'
-               )
-               OR EXISTS (
-                   SELECT 1 FROM project_scope_children scope
-                   WHERE scope.logical_name_id = event.logical_name_id
-                      OR scope.logical_name_id =
-                         event.namespace || ':' || lower(event.after_state ->> 'node')
-                      OR scope.logical_name_id =
-                         event.namespace || ':' || lower(event.after_state ->> 'child_node')
-               )
-               OR EXISTS (
-                   SELECT 1 FROM project_scope_resources scope
-                   WHERE scope.resource_id = event.resource_id
-                      OR scope.resource_id::text =
-                         event.after_state ->> 'to_resource_id'
-                      OR scope.resource_id::text =
-                         event.before_state ->> 'to_resource_id'
-               )
-               OR EXISTS (
-                   SELECT 1 FROM project_scope_resolvers scope
-                   WHERE lower(scope.resolver_address) IN (
-                       lower(event.after_state ->> 'resolver'),
-                       lower(event.before_state ->> 'resolver'),
-                       lower(event.after_state ->> 'proxy_address'),
-                       lower(event.before_state ->> 'proxy_address'),
-                       lower(event.raw_fact_ref ->> 'emitting_address')
-                   )
-               )
-               OR EXISTS (
-                   SELECT 1 FROM project_scope_primary scope
-                   WHERE (
-                       lower(scope.address) = lower(event.after_state ->> 'address')
-                       AND scope.coin_type = event.after_state ->> 'coin_type'
-                       AND scope.namespace = event.after_state ->> 'namespace'
-                   ) OR (
-                       lower(scope.address) = lower(event.before_state ->> 'address')
-                       AND scope.coin_type = event.before_state ->> 'coin_type'
-                       AND scope.namespace = event.before_state ->> 'namespace'
-                   ) OR (
-                       lower(scope.address) = lower(
-                           event.after_state -> 'primary_claim_source' ->> 'address'
-                       )
-                       AND scope.coin_type = event.after_state
-                           -> 'primary_claim_source' ->> 'coin_type'
-                       AND scope.namespace = event.after_state
-                           -> 'primary_claim_source' ->> 'namespace'
-                   ) OR (
-                       lower(scope.address) = lower(
-                           event.before_state -> 'primary_claim_source' ->> 'address'
-                       )
-                       AND scope.coin_type = event.before_state
-                           -> 'primary_claim_source' ->> 'coin_type'
-                       AND scope.namespace = event.before_state
-                           -> 'primary_claim_source' ->> 'namespace'
-                   )
-               )
-           )",
-    )
-    .bind(chain_id)
-    .bind(target_block)
-    .bind(full_rebuild)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to stage canonical events", error))?;
+           )"
+    );
+    sqlx::query(&statement)
+        .bind(chain_id)
+        .bind(target_block)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to stage canonical events", error))?;
     for statement in [
         "CREATE INDEX ON project_events (logical_name_id, normalized_event_id)",
         "CREATE INDEX ON project_events (resource_id, normalized_event_id)",
@@ -216,16 +191,205 @@ async fn create_events(
     Ok(())
 }
 
+async fn create_scoped_event_ids(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    target_block: i64,
+) -> Result<()> {
+    sqlx::query(
+        "CREATE TEMP TABLE project_event_ids (
+             normalized_event_id bigint PRIMARY KEY
+         ) ON COMMIT DROP",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to create event identity stage", error))?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO project_event_ids
+        SELECT event.normalized_event_id
+        FROM normalized_events event
+        WHERE event.chain_id = $1
+          AND event.event_kind = 'SourceManifestUpdated'
+          AND (event.block_number IS NULL OR event.block_number <= $2)
+        UNION
+        SELECT event.normalized_event_id
+        FROM project_scope_names scope
+        JOIN normalized_events event USING (logical_name_id)
+        WHERE event.chain_id = $1 AND event.block_number <= $2
+          AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+        UNION
+        SELECT event.normalized_event_id
+        FROM project_scope_children scope
+        JOIN normalized_events event USING (logical_name_id)
+        WHERE event.chain_id = $1 AND event.block_number <= $2
+          AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+        UNION
+        -- An ENSv2 child edge combines the parent's current subregistry with the
+        -- child's registration history. Rebuilding a scoped parent's row family
+        -- therefore stages each current sibling's registrations without adding
+        -- those siblings to the wider projection scope.
+        SELECT event.normalized_event_id
+        FROM project_scope_children scope
+        JOIN children_current child
+          ON child.parent_logical_name_id = scope.logical_name_id
+         AND child.provenance ->> 'chain_id' = $1
+        JOIN normalized_events event
+          ON event.logical_name_id = child.child_logical_name_id
+        WHERE event.chain_id = $1 AND event.block_number <= $2
+          AND event.event_kind IN (
+              'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased'
+          )
+          AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+        UNION
+        SELECT event.normalized_event_id
+        FROM project_scope_resources scope
+        JOIN normalized_events event USING (resource_id)
+        WHERE event.chain_id = $1 AND event.block_number <= $2
+          AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+        UNION
+        SELECT event.normalized_event_id
+        FROM normalized_events event
+        CROSS JOIN LATERAL (
+            VALUES
+                (event.namespace || ':' || lower(event.after_state ->> 'node')),
+                (event.namespace || ':' || lower(event.after_state ->> 'child_node')),
+                (event.after_state ->> 'to_logical_name_id'),
+                (event.before_state ->> 'to_logical_name_id')
+        ) candidate(logical_name_id)
+        JOIN (
+            SELECT logical_name_id FROM project_scope_names
+            UNION
+            SELECT logical_name_id FROM project_scope_children
+        ) scope
+          ON scope.logical_name_id = candidate.logical_name_id
+        WHERE event.chain_id = $1 AND event.block_number <= $2
+          AND event.event_kind IN ('SubregistryChanged', 'AliasChanged')
+          AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+        UNION
+        SELECT event.normalized_event_id
+        FROM normalized_events event
+        CROSS JOIN LATERAL (
+            VALUES (event.after_state ->> 'to_resource_id'),
+                   (event.before_state ->> 'to_resource_id')
+        ) candidate(resource_id)
+        JOIN project_scope_resources scope
+          ON scope.resource_id::text = candidate.resource_id
+        WHERE event.chain_id = $1 AND event.block_number <= $2
+          AND event.event_kind = 'AliasChanged'
+          AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+        UNION
+        SELECT event.normalized_event_id
+        FROM project_scope_resolvers scope
+        JOIN normalized_events event
+          ON lower(COALESCE(
+                 event.after_state ->> 'resolver',
+                 event.before_state ->> 'resolver',
+                 event.raw_fact_ref ->> 'emitting_address'
+             )) = lower(scope.resolver_address)
+        WHERE event.chain_id = $1 AND event.block_number <= $2
+          AND event.event_kind = 'AliasChanged'
+          AND NOT EXISTS (
+              SELECT 1 FROM project_scope_resolver_passthrough passthrough
+              WHERE lower(passthrough.resolver_address) =
+                    lower(scope.resolver_address)
+          )
+          AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+        UNION
+        SELECT event.normalized_event_id
+        FROM project_scope_resolvers scope
+        JOIN normalized_events event
+          ON lower(event.after_state ->> 'proxy_address') =
+             lower(scope.resolver_address)
+        WHERE event.chain_id = $1 AND event.block_number <= $2
+          AND event.event_kind = 'Upgraded'
+          AND NOT EXISTS (
+              SELECT 1 FROM project_scope_resolver_passthrough passthrough
+              WHERE lower(passthrough.resolver_address) =
+                    lower(scope.resolver_address)
+          )
+          AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+        UNION
+        SELECT event.normalized_event_id
+        FROM normalized_events event
+        CROSS JOIN LATERAL (
+            VALUES
+                (lower(event.after_state ->> 'address'),
+                 event.after_state ->> 'coin_type',
+                 event.after_state ->> 'namespace'),
+                (lower(event.before_state ->> 'address'),
+                 event.before_state ->> 'coin_type',
+                 event.before_state ->> 'namespace'),
+                (lower(event.after_state -> 'primary_claim_source' ->> 'address'),
+                 event.after_state -> 'primary_claim_source' ->> 'coin_type',
+                 event.after_state -> 'primary_claim_source' ->> 'namespace'),
+                (lower(event.before_state -> 'primary_claim_source' ->> 'address'),
+                 event.before_state -> 'primary_claim_source' ->> 'coin_type',
+                 event.before_state -> 'primary_claim_source' ->> 'namespace')
+        ) candidate(address, coin_type, namespace)
+        JOIN project_scope_primary scope
+          ON scope.address = candidate.address
+         AND scope.coin_type = candidate.coin_type
+         AND scope.namespace = candidate.namespace
+        WHERE event.chain_id = $1 AND event.block_number <= $2
+          AND event.event_kind IN ('ReverseChanged', 'RecordChanged')
+          AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+        UNION
+        SELECT resolver.normalized_event_id
+        FROM project_scope_primary scope
+        JOIN normalized_events reverse
+          ON reverse.chain_id = $1
+         AND reverse.block_number <= $2
+         AND reverse.event_kind = 'ReverseChanged'
+         AND reverse.canonicality_state IN ('canonical', 'safe', 'finalized')
+         AND lower(reverse.after_state ->> 'address') = scope.address
+         AND reverse.after_state ->> 'coin_type' = scope.coin_type
+         AND reverse.after_state ->> 'namespace' = scope.namespace
+        JOIN normalized_events resolver
+          ON resolver.chain_id = $1
+         AND resolver.block_number <= $2
+         AND resolver.event_kind = 'ResolverChanged'
+         AND resolver.canonicality_state IN ('canonical', 'safe', 'finalized')
+         AND lower(resolver.after_state ->> 'node') =
+             lower(reverse.after_state ->> 'reverse_node')
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(chain_id)
+    .bind(target_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to stage scoped event identities", error))?;
+    Ok(())
+}
+
 async fn create_identity_views(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     target: &Marker,
     full_rebuild: bool,
 ) -> Result<()> {
-    sqlx::query(
+    let surface_scope_join = if full_rebuild {
+        ""
+    } else {
+        "JOIN (
+             SELECT logical_name_id FROM project_scope_names
+             UNION
+             SELECT logical_name_id FROM project_scope_children
+             UNION
+             SELECT child.child_logical_name_id
+             FROM project_scope_children parent
+             JOIN children_current child
+               ON child.parent_logical_name_id = parent.logical_name_id
+              AND child.provenance ->> 'chain_id' = $1
+         ) scope USING (logical_name_id)"
+    };
+    let surface_statement = format!(
         "CREATE TEMP TABLE project_surfaces ON COMMIT DROP AS
          SELECT surface.*
          FROM name_surfaces surface
+         {surface_scope_join}
          JOIN chain_lineage lineage
            ON lineage.chain_id = surface.chain_id
           AND lineage.block_hash = surface.block_hash
@@ -233,28 +397,25 @@ async fn create_identity_views(
          WHERE surface.chain_id = $1
            AND surface.block_number <= $2
            AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND (
-               $3 OR EXISTS (
-                   SELECT 1 FROM project_scope_names scope
-                   WHERE scope.logical_name_id = surface.logical_name_id
-               ) OR EXISTS (
-                   SELECT 1 FROM project_scope_children scope
-                   WHERE scope.logical_name_id = surface.logical_name_id
-               )
-           )",
-    )
-    .bind(chain_id)
-    .bind(target.number)
-    .bind(full_rebuild)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to stage name identities", error))?;
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')"
+    );
+    sqlx::query(&surface_statement)
+        .bind(chain_id)
+        .bind(target.number)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to stage name identities", error))?;
 
-    sqlx::query(
+    let resource_scope_join = if full_rebuild {
+        ""
+    } else {
+        "JOIN project_scope_resources scope USING (resource_id)"
+    };
+    let resource_statement = format!(
         "CREATE TEMP TABLE project_resources ON COMMIT DROP AS
          SELECT resource.*
          FROM resources resource
+         {resource_scope_join}
          JOIN chain_lineage lineage
            ON lineage.chain_id = resource.chain_id
           AND lineage.block_hash = resource.block_hash
@@ -262,20 +423,14 @@ async fn create_identity_views(
          WHERE resource.chain_id = $1
            AND resource.block_number <= $2
            AND resource.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND (
-               $3 OR EXISTS (
-                   SELECT 1 FROM project_scope_resources scope
-                   WHERE scope.resource_id = resource.resource_id
-               )
-           )",
-    )
-    .bind(chain_id)
-    .bind(target.number)
-    .bind(full_rebuild)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to stage resource identities", error))?;
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')"
+    );
+    sqlx::query(&resource_statement)
+        .bind(chain_id)
+        .bind(target.number)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to stage resource identities", error))?;
 
     sqlx::query(
         "CREATE TEMP TABLE project_bindings ON COMMIT DROP AS
