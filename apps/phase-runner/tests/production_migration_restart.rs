@@ -30,6 +30,7 @@ const ANNOUNCEMENT_BLOCK: i64 = 11_163_420;
 const LATER_BLOCK: i64 = ANNOUNCEMENT_BLOCK + 1;
 const ORPHANED_ANNOUNCEMENT_HASH: &str =
     "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff42";
+const ORPHANED_EVENT_IDENTITY: &str = "migration-restart:orphaned-event";
 const FACTORY: &str = "0x118bc31a50d559f7015a8da26d54b3b030cdb70f";
 const LOCKED_CONTROLLER: &str = "0x681802eff57b83edce99d688c023ab1284495176";
 const PROXY: &str = "0x0000000000000000000000000000000000000045";
@@ -249,6 +250,7 @@ async fn run_lane(lane: RestartLane) -> Result<LaneSnapshot> {
             .execute(scratch.pool())
             .await?;
             seed_orphaned_discovery_association(scratch.pool()).await?;
+            seed_orphaned_event_association(scratch.pool()).await?;
             InterpretEngine::new(scratch.pool().clone())
                 .run_batch(InterpretRequest {
                     chain_id: CHAIN.to_owned(),
@@ -270,6 +272,30 @@ async fn run_lane(lane: RestartLane) -> Result<LaneSnapshot> {
             assert_eq!(
                 orphaned_association_count, 1,
                 "redo must retain old-fork discovery evidence under its original lineage"
+            );
+            let orphaned_event_count: i64 = sqlx::query_scalar(
+                "SELECT count(*)
+                 FROM normalized_events
+                 WHERE event_identity = $1",
+            )
+            .bind(ORPHANED_EVENT_IDENTITY)
+            .fetch_one(scratch.pool())
+            .await?;
+            assert_eq!(
+                orphaned_event_count, 0,
+                "redo must still clear old-fork normalized events in its range"
+            );
+            let orphaned_event_association_count: i64 = sqlx::query_scalar(
+                "SELECT count(*)
+                 FROM migration_event_associations
+                 WHERE event_identity = $1",
+            )
+            .bind(ORPHANED_EVENT_IDENTITY)
+            .fetch_one(scratch.pool())
+            .await?;
+            assert_eq!(
+                orphaned_event_association_count, 1,
+                "redo must retain old-fork event-correlation evidence after parent cleanup"
             );
         }
         RestartLane::LiveFollow => {
@@ -429,6 +455,58 @@ async fn seed_orphaned_discovery_association(pool: &sqlx::PgPool) -> Result<()> 
     .bind(ANNOUNCEMENT_BLOCK)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+async fn seed_orphaned_event_association(pool: &sqlx::PgPool) -> Result<()> {
+    let inserted_parent = sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, resource_id, event_kind,
+             source_family, manifest_version, source_manifest_id, chain_id, block_number,
+             block_hash, transaction_hash, transaction_index, log_index, raw_fact_ref,
+             derivation_kind, canonicality_state, before_state, after_state,
+             migration_correlation_ids, consumer_visibility
+         )
+         SELECT $1, event.namespace, event.logical_name_id, event.resource_id, event.event_kind,
+                event.source_family, event.manifest_version, event.source_manifest_id,
+                event.chain_id, event.block_number, $2, event.transaction_hash || ':orphaned',
+                event.transaction_index, event.log_index, event.raw_fact_ref,
+                event.derivation_kind, 'orphaned', event.before_state, event.after_state,
+                event.migration_correlation_ids, event.consumer_visibility
+         FROM normalized_events event
+         JOIN migration_event_associations association
+           ON association.event_identity = event.event_identity
+         WHERE event.chain_id = $3 AND event.block_number = $4
+         LIMIT 1",
+    )
+    .bind(ORPHANED_EVENT_IDENTITY)
+    .bind(ORPHANED_ANNOUNCEMENT_HASH)
+    .bind(CHAIN)
+    .bind(ANNOUNCEMENT_BLOCK)
+    .execute(pool)
+    .await?;
+    assert_eq!(inserted_parent.rows_affected(), 1);
+
+    let inserted_association = sqlx::query(
+        "INSERT INTO migration_event_associations (
+             event_identity, migration_correlation_id, correlation_kind, evidence_refs,
+             chain_id, block_number, block_hash, transaction_hash, transaction_index,
+             log_index, canonicality_state, consumer_visibility, interpreter_content_hash
+         )
+         SELECT $1, migration_correlation_id || ':orphaned', correlation_kind, evidence_refs,
+                chain_id, block_number, $2, transaction_hash || ':orphaned', transaction_index,
+                log_index, 'orphaned', consumer_visibility, interpreter_content_hash
+         FROM migration_event_associations
+         WHERE chain_id = $3 AND block_number = $4
+         LIMIT 1",
+    )
+    .bind(ORPHANED_EVENT_IDENTITY)
+    .bind(ORPHANED_ANNOUNCEMENT_HASH)
+    .bind(CHAIN)
+    .bind(ANNOUNCEMENT_BLOCK)
+    .execute(pool)
+    .await?;
+    assert_eq!(inserted_association.rows_affected(), 1);
     Ok(())
 }
 

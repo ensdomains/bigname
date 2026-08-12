@@ -163,11 +163,9 @@ CREATE TABLE IF NOT EXISTS migration_event_associations (
     interpreter_content_hash text NOT NULL,
     observed_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (event_identity, migration_correlation_id),
-    FOREIGN KEY (event_identity)
-        REFERENCES normalized_events (event_identity)
-        ON DELETE CASCADE,
     FOREIGN KEY (chain_id, block_hash, block_number)
         REFERENCES chain_lineage (chain_id, block_hash, block_number),
+    CHECK (btrim(event_identity) <> ''),
     CHECK (btrim(migration_correlation_id) <> ''),
     CHECK (
         correlation_kind IN (
@@ -418,8 +416,8 @@ COMMENT ON COLUMN normalized_events.observed_at IS
     'This time records the stored observation.';
 
 COMMENT ON TABLE migration_event_associations IS
-    'This table records candidate ENSv1→ENSv2 migration meaning attached to independently admitted events.';
-COMMENT ON COLUMN migration_event_associations.event_identity IS 'This value identifies the independently admitted normalized event.';
+    'This table records candidate ENSv1→ENSv2 migration meaning attached to independently admitted events and retains old-fork evidence after normalized-event redo cleanup.';
+COMMENT ON COLUMN migration_event_associations.event_identity IS 'This plain value identifies the independently admitted normalized event; retained old-fork evidence may outlive that event row.';
 COMMENT ON COLUMN migration_event_associations.migration_correlation_id IS 'This value identifies one ENSv1→ENSv2 migration correlation group.';
 COMMENT ON COLUMN migration_event_associations.correlation_kind IS 'This value states the ENSv1→ENSv2 migration correlation shape.';
 COMMENT ON COLUMN migration_event_associations.evidence_refs IS 'This array stores the complete evidence references.';

@@ -738,6 +738,16 @@ BEGIN
             )
         UNION ALL
         SELECT
+            'migration event associations retain missing normalized-event parents',
+            NOT EXISTS (
+                SELECT 1
+                FROM pg_constraint
+                WHERE conrelid = 'migration_event_associations'::regclass
+                  AND confrelid = 'normalized_events'::regclass
+                  AND contype = 'f'
+            )
+        UNION ALL
+        SELECT
             'receipt transaction positions match their transactions',
             EXISTS (
                 SELECT 1

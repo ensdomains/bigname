@@ -109,8 +109,13 @@ separate `migration_event_associations` row keyed to the ordinary event identity
 with the sorted correlation ID set, `correlation_kind`, evidence references,
 chain positions, canonicality, and `consumer_visibility=candidate`. Correlation
 never duplicates, suppresses, or reclassifies the independently admitted event.
-Project and product history readers ignore the association row; diagnostics may
-join it to the ordinary event.
+The event identity is a plain value rather than a foreign key. A redo deletes
+normalized events in its range before replay, but retains association rows whose
+lineage is already orphaned as fork evidence; such a row may therefore have no
+normalized-event parent. Replay re-creates the canonical-path event under the
+same identity. Project and product history readers ignore association rows;
+diagnostic readers treat the normalized-event join as optional and can read a
+retained association from its own position and `chain_lineage` anchor.
 
 Slice 1 applies the same precedence to identity and discovery, with one explicit
 intake carveout. A migration-created registry's independently admitted

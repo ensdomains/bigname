@@ -57,11 +57,9 @@ $function$
             interpreter_content_hash text NOT NULL,
             observed_at timestamptz NOT NULL DEFAULT now(),
             PRIMARY KEY (event_identity, migration_correlation_id),
-            FOREIGN KEY (event_identity)
-                REFERENCES bigname_phase.normalized_events (event_identity)
-                ON DELETE CASCADE,
             FOREIGN KEY (chain_id, block_hash, block_number)
                 REFERENCES bigname_phase.chain_lineage (chain_id, block_hash, block_number),
+            CHECK (btrim(event_identity) <> ''),
             CHECK (btrim(migration_correlation_id) <> ''),
             CHECK (
                 correlation_kind IN (
@@ -303,7 +301,7 @@ $function$
     $ddl$;
     EXECUTE $ddl$
         COMMENT ON TABLE bigname_phase.migration_event_associations IS
-            'This table records candidate ENSv1→ENSv2 migration meaning attached to independently admitted events.'
+            'This table records candidate ENSv1→ENSv2 migration meaning attached to independently admitted events and retains old-fork evidence after normalized-event redo cleanup.'
     $ddl$;
     EXECUTE $ddl$
         COMMENT ON TABLE bigname_phase.migration_discovery_associations IS
@@ -320,7 +318,7 @@ $function$
 
     EXECUTE $ddl$
         COMMENT ON COLUMN bigname_phase.migration_event_associations.event_identity IS
-            'This value identifies the independently admitted normalized event.'
+            'This plain value identifies the independently admitted normalized event; retained old-fork evidence may outlive that event row.'
     $ddl$;
     EXECUTE $ddl$
         COMMENT ON COLUMN bigname_phase.migration_event_associations.migration_correlation_id IS
