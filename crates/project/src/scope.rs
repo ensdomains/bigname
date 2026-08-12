@@ -45,12 +45,14 @@ pub(crate) async fn initialize(
             ProjectError::database("failed to retain redo resolver-dependent scope", error)
         })?;
     }
-    include_topology_scope(transaction, chain_id, target.number).await?;
     include_classification_scope(transaction, chain_id, target.number).await?;
     include_resolver_dependents(transaction, chain_id, target.number).await?;
     close_binding_scope(transaction, chain_id, target).await?;
     include_alias_and_wildcard_scope(transaction, chain_id, target).await?;
     close_binding_scope(transaction, chain_id, target).await?;
+    // Time-bound resource boundaries and resolver expansion add names through binding closure.
+    // Topology must consume that final name set before event-history staging begins.
+    include_topology_scope(transaction, chain_id, target.number).await?;
     resolver::include_resource_pointers(transaction, chain_id).await?;
     resolver::classify_passthrough(transaction, chain_id).await?;
     Ok(())

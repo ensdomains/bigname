@@ -50,6 +50,7 @@ const TOKEN_LINEAGE: &str = "00000000-0000-0000-0000-000000000013";
 const BASENAMES_RESOURCE: &str = "00000000-0000-0000-0000-000000000031";
 const EQUIVALENCE_BOB_RESOURCE: &str = "00000000-0000-0000-0000-0000000000b0";
 const EQUIVALENCE_BOB_BINDING: &str = "00000000-0000-0000-0000-0000000000b1";
+const EQUIVALENCE_PARENT_BINDING: &str = "00000000-0000-0000-0000-0000000000b3";
 const EQUIVALENCE_V2_RESOLVER: &str = "0x00000000000000000000000000000000000000b2";
 const EQUIVALENCE_V2_IMPLEMENTATION: &str = "0x00000000000000000000000000000000000000c2";
 
@@ -4541,6 +4542,123 @@ async fn incremental_resolver_binding_summary_isolated_by_chain() -> Result<()> 
 }
 
 #[tokio::test]
+async fn incremental_wrapper_expiry_only_tick_retains_child_families() -> Result<()> {
+    let incremental = ScratchDatabase::create("production_project_wrapper_child_scope").await?;
+    let full = ScratchDatabase::create("production_project_wrapper_child_scope_full").await?;
+    for pool in [incremental.pool(), full.pool()] {
+        seed_project_fixture(pool).await?;
+        extend_incremental_equivalence_fixture(pool).await?;
+    }
+
+    for target in 1..=4 {
+        let previous = (target > 1).then(|| Marker {
+            number: target - 1,
+            hash: block_hash(CHAIN, target - 1),
+        });
+        run_project(
+            incremental.pool(),
+            CHAIN,
+            previous,
+            RunMode::Normal,
+            target,
+            target,
+        )
+        .await?;
+    }
+
+    let mut incremental_children = Vec::new();
+    let mut full_children = Vec::new();
+    for target in [5, 6] {
+        let event_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM normalized_events
+             WHERE chain_id = $1 AND block_number = $2",
+        )
+        .bind(CHAIN)
+        .bind(target)
+        .fetch_one(incremental.pool())
+        .await?;
+        assert_eq!(event_count, 0, "the {target} tick must be event-free");
+
+        run_project(
+            incremental.pool(),
+            CHAIN,
+            Some(Marker {
+                number: target - 1,
+                hash: block_hash(CHAIN, target - 1),
+            }),
+            RunMode::Normal,
+            target,
+            target,
+        )
+        .await?;
+        run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, target).await?;
+
+        let incremental_v1 = selected_children(
+            incremental.pool(),
+            "ens:0xeth",
+            &["ens:0xalice", "ens:0xhostile"],
+        )
+        .await?;
+        let full_v1 =
+            selected_children(full.pool(), "ens:0xeth", &["ens:0xalice", "ens:0xhostile"]).await?;
+        let incremental_v2 = selected_children(
+            incremental.pool(),
+            "ens:0xequivalence-parent",
+            &["ens:0xequivalence-c0", "ens:0xequivalence-c1"],
+        )
+        .await?;
+        let full_v2 = selected_children(
+            full.pool(),
+            "ens:0xequivalence-parent",
+            &["ens:0xequivalence-c0", "ens:0xequivalence-c1"],
+        )
+        .await?;
+        incremental_children.push((target, incremental_v1, incremental_v2));
+        full_children.push((target, full_v1, full_v2));
+    }
+    assert_eq!(
+        full_children,
+        vec![
+            (
+                5,
+                vec!["ens:0xalice".into(), "ens:0xhostile".into()],
+                vec!["ens:0xequivalence-c1".into()]
+            ),
+            (
+                6,
+                vec!["ens:0xalice".into(), "ens:0xhostile".into()],
+                vec!["ens:0xequivalence-c1".into()]
+            ),
+        ]
+    );
+    assert_eq!(
+        incremental_children, full_children,
+        "the expiry tick or its event-free successor lost a child family"
+    );
+
+    incremental.cleanup().await?;
+    full.cleanup().await
+}
+
+async fn selected_children(
+    pool: &PgPool,
+    parent: &str,
+    candidates: &[&str],
+) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT child_logical_name_id
+         FROM children_current
+         WHERE parent_logical_name_id = $1
+           AND child_logical_name_id = ANY($2)
+         ORDER BY child_logical_name_id",
+    )
+    .bind(parent)
+    .bind(candidates)
+    .fetch_all(pool)
+    .await?)
+}
+
+#[tokio::test]
 async fn incremental_ticks_match_one_full_rebuild_across_all_eight_serving_tables() -> Result<()> {
     let incremental = ScratchDatabase::create("production_project_incremental_equivalence").await?;
     let full = ScratchDatabase::create("production_project_full_equivalence").await?;
@@ -4614,6 +4732,14 @@ async fn incremental_ticks_match_one_full_rebuild_across_all_eight_serving_table
             );
         }
         if target == 5 {
+            let event_count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM normalized_events
+                 WHERE chain_id = $1 AND block_number = 5",
+            )
+            .bind(CHAIN)
+            .fetch_one(incremental.pool())
+            .await?;
+            assert_eq!(event_count, 0, "expiry must cross in an event-free window");
             let wrapper_permission_exists: bool = sqlx::query_scalar(
                 "SELECT EXISTS (
                      SELECT 1 FROM permissions_current WHERE resource_id = $1
@@ -4626,8 +4752,40 @@ async fn incremental_ticks_match_one_full_rebuild_across_all_eight_serving_table
                 !wrapper_permission_exists,
                 "expiry boundary must be crossed"
             );
+            let eth_children = selected_children(
+                incremental.pool(),
+                "ens:0xeth",
+                &["ens:0xalice", "ens:0xbob", "ens:0xhostile"],
+            )
+            .await?;
+            assert_eq!(
+                eth_children,
+                vec!["ens:0xalice", "ens:0xbob", "ens:0xhostile"],
+                "closure-only expiry scope must retain the whole .eth child family"
+            );
+            let v2_children = selected_children(
+                incremental.pool(),
+                "ens:0xequivalence-parent",
+                &["ens:0xequivalence-c0", "ens:0xequivalence-c1"],
+            )
+            .await?;
+            assert_eq!(
+                v2_children,
+                vec!["ens:0xequivalence-c1"],
+                "closure-only expiry scope must retain the selected ENSv2 registry family"
+            );
         }
         if target == 6 {
+            let event_count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM normalized_events
+                 WHERE chain_id = $1 AND block_number = 6",
+            )
+            .bind(CHAIN)
+            .fetch_one(incremental.pool())
+            .await?;
+            assert_eq!(event_count, 0, "the follow-up tick must remain event-free");
+        }
+        if target == 7 {
             let inventory_status: String = sqlx::query_scalar(
                 "SELECT support_status FROM record_inventory_current WHERE resource_id = $1",
             )
@@ -5890,7 +6048,7 @@ async fn extend_incremental_equivalence_fixture(pool: &PgPool) -> Result<()> {
     insert_event(
         pool,
         CHAIN,
-        5,
+        7,
         Some("ens:0xalice"),
         Some(RESOURCE),
         "AliasChanged",
@@ -5912,7 +6070,7 @@ async fn extend_incremental_equivalence_fixture(pool: &PgPool) -> Result<()> {
     insert_event(
         pool,
         CHAIN,
-        6,
+        7,
         None,
         None,
         "Upgraded",
@@ -6158,10 +6316,27 @@ async fn seed_equivalence_subregistry_flip(pool: &PgPool) -> Result<()> {
         .await?;
     }
     sqlx::query(
+        "INSERT INTO surface_bindings (
+             surface_binding_id, logical_name_id, resource_id, binding_kind,
+             active_from, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES (
+             $1, 'ens:0xequivalence-parent', $2, 'declared_registry_path',
+             to_timestamp(7776002), $3, $4, 1, 'canonical'
+         )",
+    )
+    .bind(Uuid::parse_str(EQUIVALENCE_PARENT_BINDING)?)
+    .bind(Uuid::parse_str(RESOURCE)?)
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 1))
+    .execute(pool)
+    .await?;
+    sqlx::query(
         "INSERT INTO label_preimages (
              labelhash, raw_label, decoded_label, normalizer_version,
              normalized_under_version, source_kind, source_priority
          ) VALUES
+             ('0xequivalence-parent-label', convert_to('equivalence', 'UTF8'), 'equivalence', $1,
+              true, 'fixture', 1),
              ('0xequivalence-c0-label', convert_to('c0', 'UTF8'), 'c0', $1,
               true, 'fixture', 1),
              ('0xequivalence-c1-label', convert_to('c1', 'UTF8'), 'c1', $1,
@@ -6171,6 +6346,23 @@ async fn seed_equivalence_subregistry_flip(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    insert_event(
+        pool,
+        CHAIN,
+        1,
+        Some("ens:0xequivalence-parent"),
+        Some(RESOURCE),
+        "SubregistryChanged",
+        "ens_v1_registry_l1",
+        json!({
+            "node":"0xeth",
+            "child_node":"0xequivalence-parent",
+            "labelhash":"0xequivalence-parent-label",
+            "owner":OWNER
+        }),
+        json!({}),
+    )
+    .await?;
     insert_event(
         pool,
         CHAIN,
