@@ -56,6 +56,10 @@ pub(crate) struct DiagnosticEvent {
     pub(crate) canonicality_state: String,
     pub(crate) before_state: Value,
     pub(crate) after_state: Value,
+    pub(crate) consumer_visibility: String,
+    pub(crate) migration_correlation_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) migration_associations: Vec<Value>,
     pub(crate) provenance: Value,
     pub(crate) coverage: Value,
 }
@@ -87,6 +91,7 @@ pub(crate) async fn get_diagnostic_events(
         storage_cursor.as_ref(),
         params.page_size,
         HistorySummaryMode::None,
+        true,
     )
     .await
     .map_err(|error| {
@@ -169,6 +174,13 @@ pub(crate) fn build_diagnostic_event(
         canonicality_state: row.canonicality_state.as_str().to_owned(),
         before_state: row.before_state.clone(),
         after_state: row.after_state.clone(),
+        consumer_visibility: row.consumer_visibility.clone(),
+        migration_correlation_ids: row.migration_correlation_ids.clone(),
+        migration_associations: row
+            .migration_associations
+            .as_array()
+            .cloned()
+            .unwrap_or_default(),
         provenance: ensure_object(&row.provenance),
         coverage: build_coverage(&row.coverage),
     }
@@ -250,6 +262,13 @@ mod tests {
             canonicality_state: CanonicalityState::Canonical,
             before_state: json!({"before": true}),
             after_state: json!({"after": true}),
+            migration_correlation_ids: vec!["migration:alice.eth".to_owned()],
+            consumer_visibility: "candidate".to_owned(),
+            migration_associations: json!([{
+                "migration_correlation_ids": ["migration:alice.eth"],
+                "correlation_kind": "authority_transition",
+                "consumer_visibility": "candidate",
+            }]),
             provenance: json!({"source": "test"}),
             coverage: json!({
                 "status": "full",
@@ -274,6 +293,19 @@ mod tests {
         assert_eq!(event.canonicality_state, "canonical");
         assert_eq!(event.before_state, json!({"before": true}));
         assert_eq!(event.after_state, json!({"after": true}));
+        assert_eq!(event.consumer_visibility, "candidate");
+        assert_eq!(
+            event.migration_correlation_ids,
+            vec!["migration:alice.eth".to_owned()]
+        );
+        assert_eq!(
+            event.migration_associations,
+            vec![json!({
+                "migration_correlation_ids": ["migration:alice.eth"],
+                "correlation_kind": "authority_transition",
+                "consumer_visibility": "candidate",
+            })]
+        );
         assert_eq!(event.provenance, json!({"source": "test"}));
         assert_eq!(
             event.chain_position,

@@ -14,8 +14,10 @@ pub(super) fn decode_address_history_anchor(row: PgRow) -> Result<AddressHistory
 pub(super) fn decode_history_event(row: PgRow) -> Result<HistoryEvent> {
     let provenance: Value = crate::sql_row::get(&row, "provenance")?;
     let coverage: Value = crate::sql_row::get(&row, "coverage")?;
+    let migration_associations: Value = crate::sql_row::get(&row, "migration_associations")?;
     ensure_json_object(&provenance, "provenance")?;
     ensure_json_object(&coverage, "coverage")?;
+    ensure_json_array(&migration_associations, "migration_associations")?;
 
     Ok(HistoryEvent {
         normalized_event_id: crate::sql_row::get(&row, "normalized_event_id")?,
@@ -41,9 +43,20 @@ pub(super) fn decode_history_event(row: PgRow) -> Result<HistoryEvent> {
         )?)?,
         before_state: crate::sql_row::get(&row, "before_state")?,
         after_state: crate::sql_row::get(&row, "after_state")?,
+        migration_correlation_ids: crate::sql_row::get(&row, "migration_correlation_ids")?,
+        consumer_visibility: crate::sql_row::get(&row, "consumer_visibility")?,
+        migration_associations,
         provenance,
         coverage,
     })
+}
+
+fn ensure_json_array(value: &Value, field_name: &str) -> Result<()> {
+    if !value.is_array() {
+        bail!("history field {field_name} must be a JSON array");
+    }
+
+    Ok(())
 }
 
 fn ensure_json_object(value: &Value, field_name: &str) -> Result<()> {

@@ -97,6 +97,7 @@ pub(crate) async fn get_events(
         storage_cursor.as_ref(),
         params.page_size,
         HistorySummaryMode::None,
+        false,
     )
     .await
     .map_err(|error| {
@@ -371,6 +372,9 @@ mod tests {
             canonicality_state: CanonicalityState::Canonical,
             before_state: json!({}),
             after_state: json!({}),
+            migration_correlation_ids: Vec::new(),
+            consumer_visibility: "activated".to_owned(),
+            migration_associations: json!([]),
             provenance: json!({}),
             coverage: json!({}),
         }
@@ -499,6 +503,14 @@ mod tests {
             )
             .is_none()
         );
+        assert!(
+            build_event(
+                &storage_event("MigrationApplied", Some("ens:alice.eth")),
+                Some("alice.eth")
+            )
+            .is_none()
+        );
+        assert!(build_event(&storage_event("ContractDiscovered", None), None).is_none());
     }
 
     #[test]

@@ -134,6 +134,276 @@ async fn v2_get_history_paginates_with_anchor_bound_cursor() -> Result<()> {
 }
 
 #[tokio::test]
+async fn normalized_event_cursors_resume_after_rewalk_ids_rotate() -> Result<()> {
+    const ADDRESS: &str = "0x00000000000000000000000000000000000000cc";
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    let routes = [
+        (
+            "/v2/names/history.eth/history?page_size=1".to_owned(),
+            false,
+        ),
+        ("/v2/events?name=history.eth&page_size=1".to_owned(), false),
+        (
+            format!("/v2/addresses/{ADDRESS}/history?page_size=1"),
+            false,
+        ),
+        (
+            "/v2/diagnostics/events?name=history.eth&page_size=1".to_owned(),
+            true,
+        ),
+    ];
+
+    let mut before = Vec::new();
+    for (route, diagnostic) in &routes {
+        let first = v2_history_payload_for_database(&database, route).await?;
+        if route.starts_with("/v2/names/") || route.starts_with("/v2/events?") {
+            assert_eq!(
+                first["data"],
+                json!([]),
+                "the saved product cursor must anchor the unmapped SurfaceBound row: {route}"
+            );
+        }
+        let cursor = first["page"]["next_cursor"]
+            .as_str()
+            .with_context(|| format!("{route} must produce a saved cursor"))?
+            .to_owned();
+        before.push((
+            cursor_surface_page(&first, *diagnostic),
+            cursor.clone(),
+            collect_remaining_cursor_pages(&database, route, cursor, *diagnostic).await?,
+        ));
+    }
+
+    sqlx::query(
+        "UPDATE normalized_events
+         SET normalized_event_id = DEFAULT",
+    )
+    .execute(&database.pool)
+    .await?;
+
+    for ((route, diagnostic), (first_before, saved_cursor, remaining_before)) in
+        routes.iter().zip(before)
+    {
+        let remaining_after = collect_remaining_cursor_pages(
+            &database,
+            route,
+            saved_cursor,
+            *diagnostic,
+        )
+        .await?;
+        assert_eq!(remaining_after, remaining_before, "saved cursor: {route}");
+
+        let fresh = v2_history_payload_for_database(&database, route).await?;
+        assert_eq!(
+            cursor_surface_page(&fresh, *diagnostic),
+            first_before,
+            "fresh page: {route}"
+        );
+        let fresh_cursor = fresh["page"]["next_cursor"]
+            .as_str()
+            .with_context(|| format!("{route} must produce a fresh cursor"))?
+            .to_owned();
+        assert_eq!(
+            collect_remaining_cursor_pages(&database, route, fresh_cursor, *diagnostic).await?,
+            remaining_before,
+            "fresh cursor: {route}"
+        );
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn candidate_migration_rows_are_diagnostic_only() -> Result<()> {
+    const ADDRESS: &str = "0x00000000000000000000000000000000000000cc";
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    seed_v2_history_name(
+        &database,
+        "ens:candidate-only.eth",
+        "Candidate-Only.eth",
+        "node:candidate-only.eth",
+        118,
+        Uuid::from_u128(0x7500),
+        Uuid::from_u128(0x8500),
+        Uuid::from_u128(0x9500),
+    )
+    .await?;
+    seed_v2_history_blocks(&database, 112..=113).await?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[v2_history_event(
+            "candidate-only-ordinary-renewal",
+            None,
+            Some(Uuid::from_u128(0x7500)),
+            "RegistrationRenewed",
+            112,
+        )],
+    )
+    .await?;
+
+    let product_routes = [
+        "/v2/names/history.eth/history?page_size=20".to_owned(),
+        "/v2/events?name=history.eth&page_size=20".to_owned(),
+        format!("/v2/addresses/{ADDRESS}/history?page_size=20"),
+    ];
+    let mut product_before = Vec::new();
+    for route in &product_routes {
+        product_before.push(v2_history_payload_for_database(&database, route).await?);
+    }
+
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, resource_id, event_kind, source_family,
+             manifest_version, chain_id, block_number, block_hash, transaction_hash,
+             transaction_index, log_index, raw_fact_ref, derivation_kind,
+             canonicality_state, before_state, after_state,
+             migration_correlation_ids, consumer_visibility
+         ) VALUES (
+             'candidate-migration-renewal', 'ens', NULL,
+             '00000000-0000-0000-0000-000000007100'::uuid,
+             'RegistrationRenewed', 'ens_v2_migration_l1', 1,
+             'ethereum-mainnet', 111, '0xhistory111', '0xcandidate-migration',
+             1, 9, '{}'::jsonb, 'ens_v2_migration', 'canonical', '{}'::jsonb,
+             '{\"expiry\": 1999999999}'::jsonb,
+             ARRAY['candidate-correlation'], 'candidate'
+         ), (
+             'candidate-address-registration', 'ens', NULL,
+             '00000000-0000-0000-0000-000000007500'::uuid,
+             'RegistrationGranted', 'ens_v1_registrar_l1', 1,
+             'ethereum-mainnet', 113, '0xhistory113', '0xcandidate-address',
+             1, 0, '{}'::jsonb, 'ens_v1_unwrapped_authority', 'canonical', '{}'::jsonb,
+             '{\"registrant\": \"0x00000000000000000000000000000000000000cc\"}'::jsonb,
+             ARRAY['candidate-address-correlation'], 'candidate'
+         )",
+    )
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO migration_event_associations (
+             event_identity, migration_correlation_id, correlation_kind, evidence_refs,
+             chain_id, block_number, block_hash, transaction_hash, transaction_index,
+             log_index, canonicality_state, consumer_visibility, interpreter_content_hash
+         ) VALUES (
+             'history-renewal', 'attached-candidate-correlation', 'synchronized_renewal',
+             '[{\"event_identity\": \"candidate-migration-renewal\"}]'::jsonb,
+             'ethereum-mainnet', 110, '0xhistory110', '0xtx110', 0, 0,
+             'canonical', 'candidate', 'keccak256:test'
+         )",
+    )
+    .execute(&database.pool)
+    .await?;
+
+    for (route, before) in product_routes.iter().zip(product_before) {
+        let after = v2_history_payload_for_database(&database, route).await?;
+        assert_eq!(after, before, "candidate storage changed product route {route}");
+    }
+
+    let diagnostics = v2_history_payload_for_database(
+        &database,
+        "/v2/diagnostics/events?name=history.eth&page_size=20",
+    )
+    .await?;
+    let diagnostic_rows = diagnostics["data"].as_array().expect("diagnostic rows");
+    let candidate = diagnostic_rows
+        .iter()
+        .find(|row| row["event_identity"] == "candidate-migration-renewal")
+        .expect("candidate migration row");
+    assert_eq!(candidate["consumer_visibility"], json!("candidate"));
+    assert_eq!(candidate["migration_correlation_ids"], json!(["candidate-correlation"]));
+    assert!(candidate.get("migration_associations").is_none());
+
+    let ordinary = diagnostic_rows
+        .iter()
+        .find(|row| row["event_identity"] == "history-renewal")
+        .expect("ordinary renewal row");
+    assert_eq!(ordinary["consumer_visibility"], json!("activated"));
+    assert_eq!(ordinary["migration_correlation_ids"], json!([]));
+    assert_eq!(ordinary["migration_associations"], json!([{
+        "migration_correlation_ids": ["attached-candidate-correlation"],
+        "correlation_kind": "synchronized_renewal",
+        "consumer_visibility": "candidate",
+    }]));
+
+    let candidate_only_diagnostics = v2_history_payload_for_database(
+        &database,
+        &format!(
+            "/v2/diagnostics/events?registration_id={}&page_size=20",
+            Uuid::from_u128(0x7500)
+        ),
+    )
+    .await?;
+    assert!(candidate_only_diagnostics["data"].as_array().is_some_and(|rows| {
+        rows.iter().any(|row| row["event_identity"] == "candidate-address-registration")
+    }));
+
+    let candidate_address_diagnostics = v2_history_payload_for_database(
+        &database,
+        &format!("/v2/diagnostics/events?address={ADDRESS}&page_size=20"),
+    )
+    .await?;
+    let candidate_address_rows = candidate_address_diagnostics["data"]
+        .as_array()
+        .expect("candidate address diagnostic rows");
+    assert!(candidate_address_rows.iter().any(|row| {
+        row["event_identity"] == "candidate-address-registration"
+            && row["consumer_visibility"] == "candidate"
+    }));
+    assert!(candidate_address_rows.iter().any(|row| {
+        row["event_identity"] == "candidate-only-ordinary-renewal"
+            && row["consumer_visibility"] == "activated"
+    }));
+
+    database.cleanup().await
+}
+
+async fn collect_remaining_cursor_pages(
+    database: &TestDatabase,
+    route: &str,
+    mut cursor: String,
+    diagnostic: bool,
+) -> Result<Vec<Value>> {
+    let mut pages = Vec::new();
+    loop {
+        let payload = v2_history_payload_for_database(
+            database,
+            &format!("{route}&cursor={cursor}"),
+        )
+        .await?;
+        pages.push(cursor_surface_page(&payload, diagnostic));
+        let Some(next) = payload["page"]["next_cursor"].as_str() else {
+            return Ok(pages);
+        };
+        cursor = next.to_owned();
+    }
+}
+
+fn product_page(payload: &Value) -> Value {
+    json!({
+        "data": payload["data"],
+        "page_size": payload["page"]["page_size"],
+        "total_count": payload["page"]["total_count"],
+        "has_more": payload["page"]["has_more"],
+        "meta": payload["meta"],
+    })
+}
+
+fn cursor_surface_page(payload: &Value, diagnostic: bool) -> Value {
+    let mut page = product_page(payload);
+    if diagnostic
+        && let Some(rows) = page["data"].as_array_mut()
+    {
+        for row in rows {
+            if let Some(row) = row.as_object_mut() {
+                row.remove("normalized_event_id");
+            }
+        }
+    }
+    page
+}
+
+#[tokio::test]
 async fn v2_get_history_rejects_cross_name_and_cross_scope_cursor_reuse() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_fixture(&database).await?;
