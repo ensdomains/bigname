@@ -383,15 +383,17 @@ order emissions arrive in.
 The interpreter content hash covers the current interpretation inputs: the
 adapter, manifest-authority, and project sources, the manifest ABI event
 declarations, and the named semantic dependencies those sources call to decide
-a persisted row — ENS normalization, plus the resolver-call encode/decode,
-record-selector vocabulary, batched record and reverse-name read helpers, and
-the JSON-RPC envelope interpretation deciding which provider response those
-helpers accept as an answer. The lockfile fingerprints (version and checksum)
-of the decode-semantic crates the adapters compile against — alloy-sol-types,
-alloy-sol-macro and its expander and input crates, alloy-sol-type-parser,
-alloy-dyn-abi, and alloy-primitives — are covered on the same rule: a release
-of any of them can change how a raw log word decodes into a persisted event
-body without touching a watched source file. The rest of the lockfile stays
+a persisted row — ENS normalization, the typed projected-resolution topology
+serializer and its closed wire vocabularies, plus the resolver-call
+encode/decode, record-selector vocabulary, batched record and reverse-name read
+helpers, and the JSON-RPC envelope interpretation deciding which provider
+response those helpers accept as an answer. The lockfile fingerprints (version
+and checksum) of the semantic dependencies are covered on the same rule:
+alloy-sol-types, alloy-sol-macro and its expander and input crates,
+alloy-sol-type-parser, alloy-dyn-abi, and alloy-primitives can change how a raw
+log word decodes into a persisted event body; serde, serde-core, serde-derive,
+and serde-json can change the final projected-topology serialization. The rest
+of the lockfile stays
 outside, so an unrelated dependency bump does not force a re-derivation.
 Interpret's persistence stage is covered on the
 same rule: which interpreted row wins a conflict, how a redo range reopens and

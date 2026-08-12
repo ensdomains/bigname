@@ -12,7 +12,7 @@ use super::{
 use crate::compute::{
     cfg_test_source_exclusions, excluded_source_reason, hashed_source_paths, semantic_source_files,
 };
-use crate::lockfile::{decode_crate_fingerprints, decode_crate_lists};
+use crate::lockfile::{semantic_crate_fingerprints, semantic_crate_lists};
 
 const SAMPLE_DECODE_PACKAGES: &[(&str, &str, &str)] = &[
     ("alloy-dyn-abi", "1.5.7", "aa"),
@@ -27,6 +27,10 @@ const SAMPLE_DECODE_PACKAGES: &[(&str, &str, &str)] = &[
 fn sample_lockfile_packages() -> Vec<(&'static str, &'static str, &'static str)> {
     let mut packages = SAMPLE_DECODE_PACKAGES.to_vec();
     packages.push(("serde", "1.0.219", "hh"));
+    packages.push(("serde_core", "1.0.219", "ii"));
+    packages.push(("serde_derive", "1.0.219", "jj"));
+    packages.push(("serde_json", "1.0.145", "kk"));
+    packages.push(("anyhow", "1.0.100", "ll"));
     packages
 }
 
@@ -261,7 +265,7 @@ fn every_hash_input_is_watched_for_rebuilds() {
     }
     assert!(
         watched.contains(&workspace_root.join("Cargo.lock")),
-        "Cargo.lock supplies the decode-crate fingerprints but is not watched"
+        "Cargo.lock supplies the semantic-crate fingerprints but is not watched"
     );
 }
 
@@ -286,6 +290,28 @@ fn decode_crate_version_bumps_rotate_the_hash() {
 }
 
 #[test]
+fn serializer_crate_version_bumps_rotate_the_hash() {
+    for serializer_crate in ["serde", "serde_core", "serde_derive", "serde_json"] {
+        let tree = SampleTree::new();
+        let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+
+        let mut packages = sample_lockfile_packages();
+        let bumped = packages
+            .iter_mut()
+            .find(|(name, _, _)| *name == serializer_crate)
+            .expect("sample lockfile carries serializer crate");
+        bumped.1 = "9.9.9";
+        tree.write("Cargo.lock", &lockfile_document(&packages));
+
+        let changed = interpreter_content_hash(tree.path()).expect("bumped lockfile must hash");
+        assert_ne!(
+            first, changed,
+            "a {serializer_crate} bump must force projection re-derivation"
+        );
+    }
+}
+
+#[test]
 fn unrelated_lockfile_bumps_do_not_rotate_the_hash() {
     let tree = SampleTree::new();
     let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
@@ -293,9 +319,9 @@ fn unrelated_lockfile_bumps_do_not_rotate_the_hash() {
     let mut packages = sample_lockfile_packages();
     let bumped = packages
         .iter_mut()
-        .find(|(name, _, _)| *name == "serde")
-        .expect("sample lockfile carries serde");
-    bumped.1 = "1.0.220";
+        .find(|(name, _, _)| *name == "anyhow")
+        .expect("sample lockfile carries anyhow");
+    bumped.1 = "1.0.101";
     tree.write("Cargo.lock", &lockfile_document(&packages));
 
     let changed = interpreter_content_hash(tree.path()).expect("bumped lockfile must hash");
@@ -306,23 +332,23 @@ fn unrelated_lockfile_bumps_do_not_rotate_the_hash() {
 }
 
 #[test]
-fn checked_in_lockfile_covers_the_decode_crate_set() {
-    let (required, optional) = decode_crate_lists();
+fn checked_in_lockfile_covers_the_semantic_crate_set() {
+    let (required, optional) = semantic_crate_lists();
     let expected: BTreeSet<&str> = required.iter().chain(optional.iter()).copied().collect();
     let fingerprints =
-        decode_crate_fingerprints(&workspace_root()).expect("checked-in lockfile must parse");
+        semantic_crate_fingerprints(&workspace_root()).expect("checked-in lockfile must parse");
     let names: BTreeSet<&str> = fingerprints
         .iter()
         .map(|(name, _, _, _)| name.as_str())
         .collect();
     assert_eq!(
         names, expected,
-        "a renamed or dropped decode crate must fail here, not empty the fingerprint"
+        "a renamed or dropped semantic crate must fail here, not empty the fingerprint"
     );
     for (name, version, source, checksum) in &fingerprints {
         assert!(
             !version.is_empty() && !source.is_empty() && !checksum.is_empty(),
-            "decode crate {name} needs a complete version+source+checksum fingerprint"
+            "semantic crate {name} needs a complete version+source+checksum fingerprint"
         );
     }
 }
@@ -395,7 +421,7 @@ fn a_missing_lockfile_fails_the_hash_instead_of_narrowing_it() {
 }
 
 #[test]
-fn a_missing_decode_crate_fails_the_hash_instead_of_narrowing_it() {
+fn a_missing_semantic_crate_fails_the_hash_instead_of_narrowing_it() {
     let tree = SampleTree::new();
     let packages: Vec<_> = sample_lockfile_packages()
         .into_iter()
@@ -404,11 +430,11 @@ fn a_missing_decode_crate_fails_the_hash_instead_of_narrowing_it() {
     tree.write("Cargo.lock", &lockfile_document(&packages));
 
     let error = interpreter_content_hash(tree.path())
-        .expect_err("a lockfile without a required decode crate must fail loudly");
+        .expect_err("a lockfile without a required semantic crate must fail loudly");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(
         error.to_string().contains("alloy-primitives"),
-        "missing decode crate must be named: {error}"
+        "missing semantic crate must be named: {error}"
     );
 }
 
@@ -464,6 +490,14 @@ fn semantic_dependencies_of_the_watched_roots_affect_the_hash() {
         (
             "crates/domain/src/normalization.rs",
             "pub fn normalize_name() -> bool { false }\n",
+        ),
+        (
+            "crates/domain/src/resolution_topology.rs",
+            "pub struct ResolutionTopology { pub changed: bool }\n",
+        ),
+        (
+            "crates/domain/src/vocabulary.rs",
+            "pub enum ChainId { Changed }\n",
         ),
         (
             "crates/lookup/src/reverse_names.rs",

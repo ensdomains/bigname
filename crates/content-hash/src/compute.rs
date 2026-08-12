@@ -42,6 +42,10 @@ const SEMANTIC_SOURCE_FILES: &[&str] = &[
     // ENS normalization decides primary-name claim status, the stored spelling, label sets, and
     // DNS encoding for identity, discovery, and primary-name projection.
     "crates/domain/src/normalization.rs",
+    // The topology model and its closed vocabularies are the final serializer for projected
+    // resolution topology. Changing either can reshape persisted `name_current` summaries.
+    "crates/domain/src/resolution_topology.rs",
+    "crates/domain/src/vocabulary.rs",
     // Namehash, DNS encoding, resolver-call encoding, and result decoding shared by the hydration
     // multicalls below.
     "crates/lookup/src/abi.rs",
@@ -196,7 +200,7 @@ fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
     )?;
     collect_manifest_event_blocks(workspace_root, &mut inputs)?;
     collect_semantic_sources(workspace_root, &mut inputs)?;
-    crate::lockfile::collect_decode_crate_fingerprints(workspace_root, &mut inputs)?;
+    crate::lockfile::collect_semantic_crate_fingerprints(workspace_root, &mut inputs)?;
     Ok(inputs)
 }
 

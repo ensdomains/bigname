@@ -1,12 +1,9 @@
-//! Lockfile fingerprints of the crates whose releases decide how the adapters turn raw log
-//! words into persisted event bodies: the strict `SolEvent` decode, the tolerant retry's masked
-//! word, and the address and integer types decoded values land in. A version bump of any of
-//! them can change persisted interpretation without touching a watched source file, so each
-//! one's lockfile fingerprint (version + source + checksum) is a hash input. Only the named
-//! crates participate — an unrelated dependency bump must not rotate the hash and force a
-//! re-derivation. The source field is load-bearing for git-patched dependencies: a git
-//! revision carries no checksum, so without it two revisions of the same version would
-//! fingerprint identically.
+//! Lockfile fingerprints of crates whose releases can change persisted interpretation or
+//! projection output without changing a watched source file. This includes the Alloy decode
+//! stack and the Serde stack used by the authoritative projected-topology serializer. Only the
+//! named crates participate, so an unrelated dependency bump does not force re-derivation. The
+//! source field is load-bearing for git-patched dependencies: a git revision carries no checksum,
+//! so without it two revisions of the same version would fingerprint identically.
 
 use std::{collections::BTreeMap, fs, io, path::Path};
 
@@ -17,17 +14,21 @@ pub(crate) const LOCKFILE: &str = "Cargo.lock";
 /// The required set must be present — a missing entry fails the build rather than silently
 /// narrowing the fingerprint — while the macro support crates are included when the lock
 /// happens to carry them.
-const REQUIRED_DECODE_CRATES: &[&str] = &[
+const REQUIRED_SEMANTIC_CRATES: &[&str] = &[
     "alloy-dyn-abi",
     "alloy-primitives",
     "alloy-sol-macro",
     "alloy-sol-type-parser",
     "alloy-sol-types",
+    "serde",
+    "serde_core",
+    "serde_derive",
+    "serde_json",
 ];
-const OPTIONAL_DECODE_CRATES: &[&str] = &["alloy-sol-macro-expander", "alloy-sol-macro-input"];
+const OPTIONAL_SEMANTIC_CRATES: &[&str] = &["alloy-sol-macro-expander", "alloy-sol-macro-input"];
 
-/// Adds one input per decode-semantic crate found in the workspace lockfile.
-pub(crate) fn collect_decode_crate_fingerprints(
+/// Adds one input per semantic dependency found in the workspace lockfile.
+pub(crate) fn collect_semantic_crate_fingerprints(
     workspace_root: &Path,
     inputs: &mut Vec<Input>,
 ) -> io::Result<()> {
@@ -36,7 +37,7 @@ pub(crate) fn collect_decode_crate_fingerprints(
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "interpreter content hash requires decode-crate fingerprints from {LOCKFILE}; if \
+                "interpreter content hash requires semantic-crate fingerprints from {LOCKFILE}; if \
                  the lockfile moved, update LOCKFILE in the same change"
             ),
         ));
@@ -44,8 +45,8 @@ pub(crate) fn collect_decode_crate_fingerprints(
     let packages = parse_lockfile_packages(&fs::read_to_string(&path)?);
     let mut fingerprints: BTreeMap<&str, Vec<(&str, &str, &str)>> = BTreeMap::new();
     for (name, version, source, checksum) in &packages {
-        if REQUIRED_DECODE_CRATES.contains(&name.as_str())
-            || OPTIONAL_DECODE_CRATES.contains(&name.as_str())
+        if REQUIRED_SEMANTIC_CRATES.contains(&name.as_str())
+            || OPTIONAL_SEMANTIC_CRATES.contains(&name.as_str())
         {
             fingerprints.entry(name.as_str()).or_default().push((
                 version.as_str(),
@@ -54,14 +55,14 @@ pub(crate) fn collect_decode_crate_fingerprints(
             ));
         }
     }
-    for required in REQUIRED_DECODE_CRATES {
+    for required in REQUIRED_SEMANTIC_CRATES {
         if !fingerprints.contains_key(required) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "interpreter content hash requires a {LOCKFILE} entry for decode crate \
-                     {required}; if the adapters no longer decode through it, update \
-                     REQUIRED_DECODE_CRATES in the same change"
+                    "interpreter content hash requires a {LOCKFILE} entry for semantic crate \
+                     {required}; if persisted output no longer depends on it, update \
+                     REQUIRED_SEMANTIC_CRATES in the same change"
                 ),
             ));
         }
@@ -78,7 +79,7 @@ pub(crate) fn collect_decode_crate_fingerprints(
             content.push(b'\n');
         }
         inputs.push(Input {
-            key: format!("decode-crate:{name}"),
+            key: format!("semantic-crate:{name}"),
             content,
         });
     }
@@ -137,20 +138,20 @@ fn parse_lockfile_packages(contents: &str) -> Vec<(String, String, String, Strin
 }
 
 #[cfg(test)]
-pub(crate) fn decode_crate_lists() -> (&'static [&'static str], &'static [&'static str]) {
-    (REQUIRED_DECODE_CRATES, OPTIONAL_DECODE_CRATES)
+pub(crate) fn semantic_crate_lists() -> (&'static [&'static str], &'static [&'static str]) {
+    (REQUIRED_SEMANTIC_CRATES, OPTIONAL_SEMANTIC_CRATES)
 }
 
 #[cfg(test)]
-pub(crate) fn decode_crate_fingerprints(
+pub(crate) fn semantic_crate_fingerprints(
     workspace_root: &Path,
 ) -> io::Result<Vec<(String, String, String, String)>> {
     let packages = parse_lockfile_packages(&fs::read_to_string(workspace_root.join(LOCKFILE))?);
     Ok(packages
         .into_iter()
         .filter(|(name, _, _, _)| {
-            REQUIRED_DECODE_CRATES.contains(&name.as_str())
-                || OPTIONAL_DECODE_CRATES.contains(&name.as_str())
+            REQUIRED_SEMANTIC_CRATES.contains(&name.as_str())
+                || OPTIONAL_SEMANTIC_CRATES.contains(&name.as_str())
         })
         .collect())
 }

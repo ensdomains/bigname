@@ -1,23 +1,30 @@
+pub use bigname_domain::resolution_topology::ResolutionRoute as VerifiedResolutionPathClass;
+use bigname_domain::{
+    resolution_topology::ResolutionTransportContract,
+    vocabulary::{ChainId, EvmAddress, Namespace},
+};
 use serde_json::Value;
 
-pub const ENS_NAMESPACE: &str = "ens";
-pub const BASENAMES_NAMESPACE: &str = "basenames";
-pub const BASE_MAINNET_CHAIN_ID: &str = "base-mainnet";
-pub const ETHEREUM_MAINNET_CHAIN_ID: &str = "ethereum-mainnet";
+pub const ENS_NAMESPACE: &str = Namespace::Ens.as_str();
+pub const BASENAMES_NAMESPACE: &str = Namespace::Basenames.as_str();
+pub const BASE_MAINNET_CHAIN_ID: &str = ChainId::BaseMainnet.as_str();
+pub const ETHEREUM_MAINNET_CHAIN_ID: &str = ChainId::EthereumMainnet.as_str();
 pub const BASENAMES_L1_RESOLVER_ADDRESS: &str = "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31";
+
+pub(crate) const BASENAMES_EXPECTED_TRANSPORT: ResolutionTransportContract =
+    ResolutionTransportContract {
+        source_chain_id: ChainId::BaseMainnet,
+        target_chain_id: ChainId::EthereumMainnet,
+        contract_address: EvmAddress::from_bytes([
+            0xde, 0x90, 0x49, 0x63, 0x6f, 0x4a, 0x1d, 0xfe, 0x0a, 0x64, 0xd1, 0xbf, 0xe3, 0x15,
+            0x5c, 0x0a, 0x14, 0xc5, 0x4f, 0x31,
+        ]),
+    };
 
 pub trait VerifiedResolutionRecord {
     fn record_key(&self) -> &str;
     fn record_family(&self) -> &str;
     fn selector_key(&self) -> Option<&str>;
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum VerifiedResolutionPathClass {
-    Direct,
-    AliasOnly,
-    WildcardDerived,
-    BasenamesTransportDirect,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

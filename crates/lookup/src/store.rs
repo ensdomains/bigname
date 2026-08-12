@@ -1,19 +1,23 @@
-use serde_json::{Map, Value};
+use bigname_domain::{
+    resolution_topology::{
+        ResolutionRoute, ResolutionRoutePolicy, ResolutionTopology, ResolutionTransportContract,
+    },
+    vocabulary::{ChainId, EvmAddress, Namespace, SourceFamily},
+};
+use serde_json::Value;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 
 use crate::{
-    BASE_MAINNET_CHAIN_ID, BASENAMES_EXECUTION_SOURCE_FAMILY, BASENAMES_L1_RESOLVER_ROLE,
-    BASENAMES_NAMESPACE, ENS_EXECUTION_SOURCE_FAMILY, ENS_NAMESPACE, ENS_UNIVERSAL_RESOLVER_ROLE,
-    ENS_V1_REGISTRY_SOURCE_FAMILY, ETHEREUM_MAINNET_CHAIN_ID, LookupError, LookupPosition,
-    LookupRequest, RecordSelector, Result, abi::ResolutionResultAbi, call::ExecutionBlock,
-    error::database,
+    BASENAMES_L1_RESOLVER_ROLE, ENS_EXECUTION_SOURCE_FAMILY, ENS_NAMESPACE,
+    ENS_UNIVERSAL_RESOLVER_ROLE, ENS_V1_REGISTRY_SOURCE_FAMILY, ETHEREUM_MAINNET_CHAIN_ID,
+    LookupError, LookupPosition, LookupRequest, RecordSelector, Result, abi::ResolutionResultAbi,
+    call::ExecutionBlock, error::database,
 };
 
 mod indexed;
 mod manifests;
 mod persistence;
 mod positions;
-mod topology;
 #[cfg(test)]
 pub(crate) use indexed::answer as indexed_answer;
 #[cfg(test)]
@@ -105,74 +109,63 @@ pub(crate) async fn load_snapshot(
         .await
         .map_err(database("set lookup read isolation"))?;
     let name = load_name(&mut transaction, &request.logical_name_id).await?;
-    let topology = name
+    let namespace = name.namespace.parse::<Namespace>().map_err(|error| {
+        LookupError::unsupported(format!(
+            "projected name has an unsupported namespace: {error}"
+        ))
+    })?;
+    let topology_value = name
         .declared_summary
         .get("topology")
         .filter(|value| value.is_object())
         .ok_or_else(|| LookupError::unsupported("verified lookup requires projected topology"))?;
-    let path_class = topology::ensure_supported_execution_path(
-        &name.namespace,
-        &name.logical_name_id,
-        topology,
-    )?;
-    let (resolver_chain_id, resolver_address) = selected_resolver(topology)?;
-    if resolver_chain_id != name.resource_chain_id {
+    let topology =
+        serde_json::from_value::<ResolutionTopology>(topology_value.clone()).map_err(|error| {
+            LookupError::unsupported(format!(
+                "projected topology does not match ResolutionTopology: {error}"
+            ))
+        })?;
+    topology
+        .classify(
+            &name.logical_name_id,
+            preflight_route_policy(namespace, &topology)?,
+        )
+        .map_err(|error| LookupError::unsupported(error.to_string()))?;
+    let (resolver_chain_id, resolver_address) = selected_resolver(&topology)?;
+    if resolver_chain_id.as_str() != name.resource_chain_id {
         return Err(LookupError::unsupported(
             "projected resolver and indexed authority object are on different chains",
         ));
     }
-    let boundary = topology
+    let boundary = topology_value
         .pointer("/version_boundaries/record_version_boundary")
         .filter(|value| value.is_object())
         .ok_or_else(|| {
             LookupError::unsupported("verified lookup requires a projected record boundary")
         })?;
-    let inventory = if path_class == topology::ExecutionPathClass::EnsWildcard {
-        None
-    } else {
-        let boundary_resource_id = boundary
-            .get("resource_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                LookupError::unsupported(
-                    "verified lookup record boundary has no comparison resource",
-                )
-            })?;
-        Some(load_inventory(&mut transaction, boundary_resource_id, boundary).await?)
-    };
-    let resolver_head = load_head(&mut transaction, &resolver_chain_id).await?;
+    let resolver_head = load_head(&mut transaction, resolver_chain_id.as_str()).await?;
     let project_row_xmin =
         positions::ensure_project_at_head(&mut transaction, &resolver_head).await?;
     let resolver_position =
-        positions::position_for_chain(&name.chain_positions, &resolver_chain_id)?;
+        positions::position_for_chain(&name.chain_positions, resolver_chain_id.as_str())?;
     positions::ensure_canonical(&mut transaction, &resolver_position).await?;
-    let comparison_position = if let Some(inventory) = &inventory {
-        positions::inventory_position(
-            &mut transaction,
-            "record_inventory_current",
-            &inventory.chain_positions,
-            &resolver_chain_id,
-        )
-        .await?
-    } else {
-        resolver_position.clone()
-    };
 
-    let entrypoint = entrypoint_authority(&name.namespace, topology, &resolver_chain_id)?;
+    let entrypoint = entrypoint_authority(namespace, resolver_chain_id)?;
     let authoritative_position = LookupPosition {
         chain_id: resolver_head.chain_id,
         block_number: resolver_head.block_number,
         block_hash: resolver_head.block_hash,
         timestamp: resolver_head.timestamp,
     };
-    let execution_position = if entrypoint.chain_id == resolver_position.chain_id {
+    let execution_position = if entrypoint.chain_id.as_str() == resolver_position.chain_id {
         resolver_position.clone()
     } else {
-        let position = positions::position_for_chain(&name.chain_positions, entrypoint.chain_id)?;
+        let position =
+            positions::position_for_chain(&name.chain_positions, entrypoint.chain_id.as_str())?;
         positions::ensure_canonical(&mut transaction, &position).await?;
         position
     };
-    let execution_block = if entrypoint.chain_id == resolver_position.chain_id {
+    let execution_block = if entrypoint.chain_id.as_str() == resolver_position.chain_id {
         ExecutionBlock {
             chain_id: authoritative_position.chain_id.clone(),
             block_number: authoritative_position.block_number,
@@ -185,7 +178,7 @@ pub(crate) async fn load_snapshot(
             block_hash: execution_position.block_hash.clone(),
         }
     };
-    let live_execution_position = if entrypoint.chain_id == resolver_position.chain_id {
+    let live_execution_position = if entrypoint.chain_id.as_str() == resolver_position.chain_id {
         authoritative_position.clone()
     } else {
         execution_position.clone().into()
@@ -193,9 +186,9 @@ pub(crate) async fn load_snapshot(
     let entrypoint_manifest = manifests::load_entrypoint(
         &mut transaction,
         manifests::EntrypointQuery {
-            namespace: &name.namespace,
-            source_family: entrypoint.source_family,
-            chain_id: entrypoint.chain_id,
+            namespace: namespace.as_str(),
+            source_family: entrypoint.source_family.as_str(),
+            chain_id: entrypoint.chain_id.as_str(),
             role: entrypoint.role,
             allow_shadow: entrypoint.allow_shadow,
             execution_block_number: execution_block.block_number,
@@ -204,15 +197,34 @@ pub(crate) async fn load_snapshot(
         },
     )
     .await?;
-    if let Some(expected) = entrypoint.transport_address
-        && !entrypoint_manifest
-            .declared_address
-            .eq_ignore_ascii_case(expected)
-    {
-        return Err(LookupError::unsupported(
-            "projected transport address does not match the execution manifest",
-        ));
-    }
+    let route_policy = route_policy(namespace, &entrypoint_manifest)?;
+    let path_class = topology
+        .classify(&name.logical_name_id, route_policy)
+        .map_err(|error| LookupError::unsupported(error.to_string()))?;
+    let inventory = if path_class == ResolutionRoute::WildcardDerived {
+        None
+    } else {
+        let boundary_resource_id = boundary
+            .get("resource_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                LookupError::unsupported(
+                    "verified lookup record boundary has no comparison resource",
+                )
+            })?;
+        Some(load_inventory(&mut transaction, boundary_resource_id, boundary).await?)
+    };
+    let comparison_position = if let Some(inventory) = &inventory {
+        positions::inventory_position(
+            &mut transaction,
+            "record_inventory_current",
+            &inventory.chain_positions,
+            resolver_chain_id.as_str(),
+        )
+        .await?
+    } else {
+        resolver_position.clone()
+    };
     transaction
         .commit()
         .await
@@ -234,9 +246,9 @@ pub(crate) async fn load_snapshot(
         node: crate::abi::parse_node(&name.namehash).map_err(|error| {
             LookupError::unsupported(format!("indexed namehash is malformed: {error:#}"))
         })?,
-        resolver_chain_id,
-        resolver_address: resolver_address.to_ascii_lowercase(),
-        entrypoint_chain_id: entrypoint.chain_id.to_owned(),
+        resolver_chain_id: resolver_chain_id.to_string(),
+        resolver_address: resolver_address.to_string(),
+        entrypoint_chain_id: entrypoint.chain_id.to_string(),
         entrypoint_address: entrypoint_manifest.declared_address.to_ascii_lowercase(),
         authoritative_position,
         execution_position: live_execution_position,
@@ -450,88 +462,108 @@ async fn load_head(transaction: &mut Transaction<'_, Postgres>, chain_id: &str) 
     .ok_or_else(|| LookupError::stale(format!("chain {chain_id} has no readable latest head")))
 }
 
-struct EntrypointAuthority<'a> {
-    source_family: &'a str,
-    chain_id: &'a str,
-    role: &'a str,
-    transport_address: Option<&'a str>,
+struct EntrypointAuthority {
+    source_family: SourceFamily,
+    chain_id: ChainId,
+    role: &'static str,
     follow_ccip: bool,
     result_abi: ResolutionResultAbi,
     allow_shadow: bool,
     required_manifest_version: Option<i64>,
 }
 
-fn entrypoint_authority<'a>(
-    namespace: &str,
-    topology: &'a Value,
-    resolver_chain_id: &str,
-) -> Result<EntrypointAuthority<'a>> {
-    let transport = topology.get("transport").and_then(Value::as_object);
-    let transport_source = transport.and_then(|value| string(value, "source_chain_id"));
-    let transport_target = transport.and_then(|value| string(value, "target_chain_id"));
-    let transport_address = transport.and_then(|value| string(value, "contract_address"));
-    match namespace {
-        ENS_NAMESPACE
-            if resolver_chain_id == ETHEREUM_MAINNET_CHAIN_ID
-                && transport_source.is_none()
-                && transport_target.is_none()
-                && transport_address.is_none() =>
-        {
-            Ok(EntrypointAuthority {
-                source_family: ENS_EXECUTION_SOURCE_FAMILY,
-                chain_id: ETHEREUM_MAINNET_CHAIN_ID,
-                role: ENS_UNIVERSAL_RESOLVER_ROLE,
-                transport_address: None,
-                follow_ccip: false,
-                result_abi: ResolutionResultAbi::EnsUniversalResolver,
-                allow_shadow: true,
-                required_manifest_version: None,
-            })
-        }
-        BASENAMES_NAMESPACE
-            if resolver_chain_id == BASE_MAINNET_CHAIN_ID
-                && transport_source == Some(BASE_MAINNET_CHAIN_ID)
-                && transport_target == Some(ETHEREUM_MAINNET_CHAIN_ID)
-                && transport_address.is_some() =>
-        {
-            Ok(EntrypointAuthority {
-                source_family: BASENAMES_EXECUTION_SOURCE_FAMILY,
-                chain_id: ETHEREUM_MAINNET_CHAIN_ID,
-                role: BASENAMES_L1_RESOLVER_ROLE,
-                transport_address,
-                follow_ccip: true,
-                result_abi: ResolutionResultAbi::BasenamesL1Resolver,
-                allow_shadow: false,
-                required_manifest_version: Some(2),
-            })
-        }
+fn entrypoint_authority(
+    namespace: Namespace,
+    resolver_chain_id: ChainId,
+) -> Result<EntrypointAuthority> {
+    match (namespace, resolver_chain_id) {
+        (Namespace::Ens, ChainId::EthereumMainnet) => Ok(EntrypointAuthority {
+            source_family: SourceFamily::EnsExecution,
+            chain_id: ChainId::EthereumMainnet,
+            role: ENS_UNIVERSAL_RESOLVER_ROLE,
+            follow_ccip: false,
+            result_abi: ResolutionResultAbi::EnsUniversalResolver,
+            allow_shadow: true,
+            required_manifest_version: None,
+        }),
+        (Namespace::Basenames, ChainId::BaseMainnet) => Ok(EntrypointAuthority {
+            source_family: SourceFamily::BasenamesExecution,
+            chain_id: ChainId::EthereumMainnet,
+            role: BASENAMES_L1_RESOLVER_ROLE,
+            follow_ccip: true,
+            result_abi: ResolutionResultAbi::BasenamesL1Resolver,
+            allow_shadow: false,
+            required_manifest_version: Some(2),
+        }),
         _ => Err(LookupError::unsupported(
             "projected resolution topology is outside the supported lookup paths",
         )),
     }
 }
 
-fn selected_resolver(topology: &Value) -> Result<(String, String)> {
+fn route_policy(
+    namespace: Namespace,
+    entrypoint_manifest: &manifests::ManifestEntry,
+) -> Result<ResolutionRoutePolicy> {
+    match namespace {
+        Namespace::Ens => Ok(ResolutionRoutePolicy::Ens),
+        Namespace::Basenames => {
+            let contract_address = entrypoint_manifest
+                .declared_address
+                .parse::<EvmAddress>()
+                .map_err(|error| {
+                    LookupError::unsupported(format!(
+                        "execution manifest declares an invalid transport address: {error}"
+                    ))
+                })?;
+            Ok(ResolutionRoutePolicy::Basenames {
+                expected_transport: ResolutionTransportContract {
+                    source_chain_id: ChainId::BaseMainnet,
+                    target_chain_id: ChainId::EthereumMainnet,
+                    contract_address,
+                },
+            })
+        }
+    }
+}
+
+fn preflight_route_policy(
+    namespace: Namespace,
+    topology: &ResolutionTopology,
+) -> Result<ResolutionRoutePolicy> {
+    match namespace {
+        Namespace::Ens => Ok(ResolutionRoutePolicy::Ens),
+        Namespace::Basenames => {
+            let contract_address = topology
+                .transport
+                .as_ref()
+                .and_then(|transport| transport.contract_address)
+                .ok_or_else(|| {
+                    LookupError::unsupported(
+                        "projected Basenames topology must include a transport contract",
+                    )
+                })?;
+            Ok(ResolutionRoutePolicy::Basenames {
+                expected_transport: ResolutionTransportContract {
+                    source_chain_id: ChainId::BaseMainnet,
+                    target_chain_id: ChainId::EthereumMainnet,
+                    contract_address,
+                },
+            })
+        }
+    }
+}
+
+fn selected_resolver(topology: &ResolutionTopology) -> Result<(ChainId, EvmAddress)> {
     let hop = topology
-        .get("resolver_path")
-        .and_then(Value::as_array)
+        .resolver_path
+        .as_ref()
         .and_then(|path| path.last())
         .ok_or_else(|| LookupError::unsupported("projected topology has no selected resolver"))?;
-    let chain_id = hop.get("chain_id").and_then(Value::as_str);
-    let address = hop.get("address").and_then(Value::as_str);
-    match (chain_id, address) {
-        (Some(chain_id), Some(address)) if !chain_id.is_empty() && !address.is_empty() => {
-            Ok((chain_id.to_owned(), address.to_owned()))
-        }
+    match (hop.chain_id, hop.address) {
+        (Some(chain_id), Some(address)) => Ok((chain_id, address)),
         _ => Err(LookupError::unsupported(
             "projected topology has no concrete resolver",
         )),
     }
-}
-
-fn string<'a>(value: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
 }

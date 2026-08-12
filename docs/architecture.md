@@ -607,7 +607,36 @@ split walk derives. Three rules keep the written rows batch-independent:
 
 ### `topology`
 
-Fixed declared object:
+Fixed declared object. The authoritative serialized model is
+`bigname_domain::resolution_topology::ResolutionTopology`: Project finishes
+each set-based topology rebuild by deserializing and serializing through that
+model before publication. Storage and live lookup deserialize the same model
+and call its `ResolutionRoute` classifier. The classifier receives the
+deployment's expected transport contract as a typed policy input; neither
+consumer reparses the object. Storage supplies the documented support
+contract, while live lookup supplies the address from the selected execution
+manifest. Project publishes a Basenames topology only when that manifest
+declares the same contract, so both typed policy inputs agree for every
+published supported topology.
+
+The model uses the domain-owned `Namespace`, `ChainId`, and strict 20-byte
+`EvmAddress` vocabularies. The same domain module owns the closed
+`SourceFamily` vocabulary used when lookup selects a supported execution
+entrypoint, but source families are not fields in the serialized topology.
+Manifest repository identities remain authored strings because generated
+deployment profiles may use isolated test identities. The closed chain
+vocabulary includes the fixed non-production labels used by the repository's
+topology and reorg suites. Its complete wire set is `base-mainnet`,
+`ethereum-mainnet`, `ethereum-sepolia`, `base-e2e-composed-reorg`,
+`ethereum-e2e-rpc`, `ethereum-e2e-reorg`,
+`ethereum-e2e-composed-reorg`, and `project-fixture`. Project rejects a
+topology carrying any other chain ID before publication; generated deployment
+profiles that publish topology must use one of those labels. EVM addresses in newly
+derived topologies serialize as
+lowercase `0x`-prefixed strings. Before this
+model was introduced, the Basenames `transport.contract_address` retained the
+checksummed manifest spelling; after the boundary re-derivation it is
+lowercase. The field set and nesting otherwise remain unchanged.
 
 - `registry_path` — ordered `NameRef` array from the requested surface toward declared registry authority. Never empty when `topology` is supported.
 - `subregistry_path` — toward the nearest declared subregistry ancestor. Empty when none participates.
@@ -616,6 +645,12 @@ Fixed declared object:
 - `alias` — `{final_target, hops}`. `null/[]` means alias didn't participate.
 - `version_boundaries` — `{topology_version_boundary, record_version_boundary}` with `logical_name_id`, `resource_id`, `normalized_event_id`, `event_kind`, `chain_position`.
 - `transport` — `{source_chain_id, target_chain_id, contract_address, latest_event_kind}`. All `null` means no transport. For Basenames capability-promotion target paths, `source=base-mainnet, target=ethereum-mainnet` through the L1 Resolver.[^bn-readme-l22][^bn-readme-l28][^bn-readme-l29][^bn-readme-l34][^bn-readme-l69][^bn-readme-l70]
+
+The non-empty `registry_path` rule is a Project producer invariant, not a
+[verified lookup](glossary.md#verified-lookup) route discriminator. The shared classifier preserves the
+prior storage and lookup route matrix: it identifies direct, alias-only,
+wildcard-derived, and Basenames transport-assisted paths from the resolver,
+alias, wildcard, subregistry, and transport fields listed below.
 
 For ENSv2, `alias` is declared topology only when `PermissionedResolver` provides an `AliasChanged` mapping; the resolver resolves aliases by longest suffix and rewrites calldata before [resolver-profile](glossary.md) dispatch.[^v2-iperm-resolver-l14][^v2-pres-l56][^v2-pres-l412][^v2-pres-l650] Wildcard is observed topology — populated only when execution input identifies an ancestor/source resolver and matched labels.[^v2-pres-l38][^v2-pres-l412]
 

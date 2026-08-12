@@ -439,7 +439,10 @@ dependencies = [
 name = "bigname-domain"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "ens-normalize",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -466,6 +469,7 @@ dependencies = [
  "alloy-json-abi",
  "alloy-primitives",
  "anyhow",
+ "bigname-domain",
  "futures-util",
  "serde",
  "serde_json",
