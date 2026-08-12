@@ -7,9 +7,10 @@ use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use anyhow::{Context, Result, bail};
 use bigname_adapters::schema_v2::{
-    AddressAdmissionInput, BatchInput, BatchOutput, DiscoveryRuleInput, ManifestInput,
-    RawBlockInput, RawLogInput, interpret_schema_v2_batch, interpret_schema_v2_batch_incremental,
-    seam,
+    AddressAdmissionInput, BatchInput, BatchOutput, DiscoveryRuleInput, InterpreterStateRequest,
+    InterpreterStateValue, ManifestInput, PriorEventInput, RawBlockInput, RawLogInput,
+    StateCacheCapacity, begin_schema_v2_adapter_restore, interpret_schema_v2_batch,
+    interpret_schema_v2_batch_incremental, prepare_schema_v2_batch_incremental, seam,
 };
 use bigname_manifests::{LoadedManifest, load_repository};
 use serde::Deserialize;
@@ -603,12 +604,43 @@ fn interpret_with_incremental_equivalence(case_id: &str, input: BatchInput) -> R
         incremental, fresh,
         "{case_id}: incremental output differs from fresh interpretation"
     );
+    let tiny_prepared =
+        prepare_schema_v2_batch_incremental(input.clone(), None, StateCacheCapacity::Entries(3))?;
+    let tiny_cache_misses = tiny_prepared.state_value_requests().len();
+    let tiny_loaded =
+        requested_state_values(&input.prior_events, tiny_prepared.state_value_requests());
+    let (tiny, _) = tiny_prepared.finish(tiny_loaded)?;
+    assert_eq!(
+        tiny, incremental,
+        "{case_id}: tiny-cache output differs from unlimited capacity"
+    );
+    eprintln!("fixture case={case_id} tiny_cache_misses={tiny_cache_misses}");
 
     let retained = seam::fold_prior_events(
         input.prior_events.clone(),
         &incremental.normalized_events,
         &input.blocks,
     )?;
+    let tiny_retained = seam::fold_prior_events(
+        input.prior_events.clone(),
+        &tiny.normalized_events,
+        &input.blocks,
+    )?;
+    assert_eq!(
+        tiny_retained, retained,
+        "{case_id}: tiny-cache persisted state tails differ from unlimited capacity"
+    );
+    let mut streamed_restore = begin_schema_v2_adapter_restore(
+        input.chain_id.clone(),
+        input.manifests.clone(),
+        input.discovery_rules.clone(),
+        input.admissions.clone(),
+        StateCacheCapacity::Unlimited,
+    )?;
+    for chunk in retained.chunks(2) {
+        streamed_restore.apply_prior_events(chunk.to_vec())?;
+    }
+    let streamed_session = streamed_restore.finish();
     let (_, restored_session) = interpret_schema_v2_batch_incremental(
         BatchInput {
             prior_events: retained,
@@ -622,6 +654,10 @@ fn interpret_with_incremental_equivalence(case_id: &str, input: BatchInput) -> R
         live_session, restored_session,
         "{case_id}: live incremental adapter state differs from a compacted restore"
     );
+    assert_eq!(
+        streamed_session, restored_session,
+        "{case_id}: streamed cold restore differs from the one-shot restore"
+    );
     Ok(incremental)
 }
 
@@ -633,6 +669,7 @@ fn interpret_physical_batches(
     let mut live_session = None;
     let mut retained_prior = input.prior_events.clone();
     let mut outputs = Vec::new();
+    let mut tiny_cache_misses = 0_usize;
     let mut covered_blocks = HashSet::new();
     for range in ranges {
         let blocks = input
@@ -676,8 +713,31 @@ fn interpret_physical_batches(
             incremental, fresh,
             "{case_id}: physical-batch incremental output differs from retained-state restore"
         );
-        retained_prior =
-            seam::fold_prior_events(retained_prior, &incremental.normalized_events, &blocks)?;
+        let tiny_prepared = prepare_schema_v2_batch_incremental(
+            restored_input.clone(),
+            None,
+            StateCacheCapacity::Entries(3),
+        )?;
+        tiny_cache_misses =
+            tiny_cache_misses.saturating_add(tiny_prepared.state_value_requests().len());
+        let tiny_loaded =
+            requested_state_values(&retained_prior, tiny_prepared.state_value_requests());
+        let (tiny, _) = tiny_prepared.finish(tiny_loaded)?;
+        assert_eq!(
+            tiny, incremental,
+            "{case_id}: physical-batch tiny-cache output differs from unlimited capacity"
+        );
+        let next_prior = seam::fold_prior_events(
+            retained_prior.clone(),
+            &incremental.normalized_events,
+            &blocks,
+        )?;
+        let tiny_prior = seam::fold_prior_events(retained_prior, &tiny.normalized_events, &blocks)?;
+        assert_eq!(
+            tiny_prior, next_prior,
+            "{case_id}: physical-batch tiny-cache state tails differ from unlimited capacity"
+        );
+        retained_prior = next_prior;
         let (_, restored_session) = interpret_schema_v2_batch_incremental(
             BatchInput {
                 prior_events: retained_prior.clone(),
@@ -701,7 +761,34 @@ fn interpret_physical_batches(
             input.blocks.len()
         );
     }
+    eprintln!("fixture case={case_id} tiny_cache_misses={tiny_cache_misses}");
     Ok(outputs)
+}
+
+fn requested_state_values(
+    prior: &[PriorEventInput],
+    requested: &[InterpreterStateRequest],
+) -> Vec<InterpreterStateValue> {
+    let tails = prior
+        .iter()
+        .filter_map(|event| {
+            event
+                .retained_state_key
+                .strip_prefix("state:")
+                .map(|key| (key, &event.after_state))
+        })
+        .collect::<BTreeMap<_, _>>();
+    requested
+        .iter()
+        .filter_map(|request| {
+            tails
+                .get(request.state_key.as_str())
+                .map(|after_state| InterpreterStateValue {
+                    state_key: request.state_key.clone(),
+                    after_state: (*after_state).clone(),
+                })
+        })
+        .collect()
 }
 
 fn assert_fixture_binding_resources<'a>(

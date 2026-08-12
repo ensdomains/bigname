@@ -78,6 +78,7 @@ The implemented phases use:
 - `BIGNAME_PHASE_RUNNER_SOURCES`
 - `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS`
 - `BIGNAME_PHASE_RUNNER_INSTANCE_ID`
+- `BIGNAME_PHASE_RUNNER_INTERPRETER_STATE_CACHE_ENTRIES`
 
 `BIGNAME_DATABASE_URL` is the writer credential. Supervised `run` and a
 `verify` redo also require
@@ -90,6 +91,14 @@ directly: startup rejects a writer session that assumes the reader role. A
 reader is accepted only when its PostgreSQL system identifier, database OID,
 and database name match the writer connection. A non-verification redo does
 not require the reader URL.
+
+`BIGNAME_PHASE_RUNNER_INTERPRETER_STATE_CACHE_ENTRIES` bounds the number of
+persisted per-key interpreter values held by each active [interpreter
+session](glossary.md#interpreter-session). It defaults to 65,536 entries. Lower
+values reduce process memory and cause more indexed reads from
+`normalized_events`; zero is valid and forces every required pre-batch value
+through that read path. The setting does not change stored output or the
+[interpreter content hash](glossary.md#interpreter-content-hash).
 
 Point both database URLs at the writer primary. Never point the verification
 URL at a replica, standby, physical basebackup clone, or a pooler that can route

@@ -21,6 +21,12 @@ impl InterpretPhase {
             engine: Engine::new(pool),
         }
     }
+
+    pub fn with_state_cache_capacity(pool: PgPool, entries: usize) -> Self {
+        Self {
+            engine: Engine::with_state_cache_capacity(pool, entries),
+        }
+    }
 }
 
 impl Phase for InterpretPhase {

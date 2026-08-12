@@ -59,7 +59,7 @@ pub struct RawBlockInput {
     pub canonicality_state: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PriorEventInput {
     pub retained_state_key: String,
     pub chain_id: String,
