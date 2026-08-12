@@ -1,5 +1,5 @@
 use crate::{
-    config::SourceConfig,
+    config::{SourceConfig, normalized_source_kind},
     error::{RunnerError, RunnerResult},
     phase::BlockRange,
     redo_manifest_attestation::{AttestedManifestAuthority, ManifestAuthorityAttestation},
@@ -118,7 +118,7 @@ pub(crate) async fn require_interpret_raw_data(
                 range.to,
             ))
         })?;
-        if source_kind != source.source_kind
+        if normalized_source_kind(&source_kind) != normalized_source_kind(&source.source_kind)
             || seed_basis != source.seed_basis.as_str()
             || start != source.start_block_number
         {

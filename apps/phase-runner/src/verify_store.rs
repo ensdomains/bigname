@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use bigname_ingest::{VerificationLog, WatchFilter};
 
 use crate::{
-    config::SourceConfig,
+    config::{SourceConfig, normalized_source_kind},
     database::VerificationDatabase,
     error::{ErrorKind, RunnerError, RunnerResult},
     heads::BlockMarker,
@@ -275,7 +275,8 @@ impl VerificationStore {
                 source.source_key
             )));
         };
-        let configuration_matches = normalized_kind(&kind) == normalized_kind(&source.source_kind)
+        let configuration_matches = normalized_source_kind(&kind)
+            == normalized_source_kind(&source.source_kind)
             && seed == source.seed_basis.as_str()
             && start == source.start_block_number;
         let covers_target = next > target.number
@@ -337,10 +338,6 @@ impl VerificationStore {
             ))),
         }
     }
-}
-
-fn normalized_kind(kind: &str) -> String {
-    kind.trim().to_ascii_lowercase().replace('-', "_")
 }
 
 fn map_ingest_error(error: bigname_ingest::IngestError) -> RunnerError {

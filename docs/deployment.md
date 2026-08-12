@@ -133,7 +133,10 @@ that role's write authority, and startup rejects it.
 
 Each `BIGNAME_PHASE_RUNNER_SOURCES` entry has the form
 `CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV`; the named environment variable
-contains the provider URL. Capacity, retry, and polling controls use the
+contains the provider URL. On every chain, changing a source's normalized kind
+after its cursor records progress is a data-integrity error checked before
+Ingest runs. Case-only changes, surrounding whitespace, and hyphen/underscore
+spelling changes are equivalent. Capacity, retry, and polling controls use the
 `BIGNAME_PHASE_RUNNER_*` names exposed by `phase-runner --help`.
 The server Compose file forwards the documented `RETH_DATA_DIR` source and the
 hydration URL map. Its reth overlay bind-mounts `RETH_DATA_DIR` read-only at the
@@ -152,10 +155,10 @@ is the intake provider, Verify does not select it as a reference. Verify
 validates the durable ingested extent through its finalized marker and records
 `quick_synced` only when that exact source's persisted cursor matches its
 configuration and covers the finalized target. That binding and coverage are
-checked when verification completes and on every runner start; the restart
-check can advance the recorded `quick_synced` extent to the current finalized
-marker. Separating intake and
-verification source roles, then upgrading Sepolia to `cross_checked`, is deferred to
+checked when verification completes. On every runner start, Verify checks the
+current configuration and cursor against the completion-time target without
+changing the recorded `quick_synced` extent as Live finality moves. Separating
+intake and verification source roles, then upgrading Sepolia to `cross_checked`, is deferred to
 [issue #411](https://github.com/ensdomains/bigname/issues/411). A generic RPC
 kind is not accepted as Base verification authority
 because it does not identify the ratified independent provider.

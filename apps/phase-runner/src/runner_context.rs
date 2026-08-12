@@ -12,6 +12,17 @@ use crate::{
 use super::PhaseRunner;
 
 impl PhaseRunner {
+    pub(super) async fn validate_ingest_identity(
+        &self,
+        phase: PhaseName,
+        chain: &ChainConfig,
+    ) -> RunnerResult<()> {
+        if phase == PhaseName::Ingest {
+            self.store.validate_ingest_sources(&chain.sources).await?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn revalidate_completed_phase(
         &self,
         chain: &ChainConfig,

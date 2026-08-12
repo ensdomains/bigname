@@ -28,9 +28,10 @@ use phase_runner::{
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
     database::VerificationDatabase,
     error::{ErrorKind, RunnerError, RunnerResult},
+    heads::{BlockMarker, HeadMarkers},
     phase::{
-        BlockRange, LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName,
-        PhaseProgress, PhaseSet, VerificationLevel,
+        BlockRange, IngestCursor, LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext,
+        PhaseFuture, PhaseName, PhaseProgress, PhaseSet, SourceProgress, VerificationLevel,
     },
     runner::{PhaseRunner, RedoPhase},
     state::PhaseStore,
@@ -249,7 +250,7 @@ async fn sepolia_provider_trusted_verify_reports_quick_synced_without_reference_
 }
 
 #[tokio::test]
-async fn completed_sepolia_verify_revalidates_source_binding_and_advances_extent() -> Result<()> {
+async fn completed_sepolia_verify_revalidates_source_binding_at_completion_extent() -> Result<()> {
     let scratch = ScratchDatabase::create("production_verify_sepolia_restart").await?;
     seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
     seed_ingest_cursor(scratch.pool(), SEPOLIA, "drpc-intake", 8).await?;
@@ -303,11 +304,302 @@ async fn completed_sepolia_verify_revalidates_source_binding_and_advances_extent
     .await?;
     assert_eq!(
         state,
-        ("completed".to_owned(), "quick_synced".to_owned(), 6, 6)
+        ("completed".to_owned(), "quick_synced".to_owned(), 5, 5)
     );
     assert_eq!(resumed_live_calls.load(Ordering::SeqCst), 1);
 
     drop(resumed_runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn completed_sepolia_verify_survives_live_finality_past_ingest_cursor() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_sepolia_live_restart").await?;
+    seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
+    seed_ingest_cursor(scratch.pool(), SEPOLIA, "drpc-intake", 8).await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, 8).await?;
+
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let first_runner = sepolia_verifier_runner_with_live(
+        &scratch,
+        Arc::new(AdvancingLivePhase {
+            pool: scratch.pool().clone(),
+            from: 9,
+            through: 12,
+            calls: Arc::clone(&live_calls),
+        }),
+    )
+    .await?;
+    first_runner
+        .run_chain(
+            &sepolia_chain_with_key("drpc-intake")?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert_eq!(live_calls.load(Ordering::SeqCst), 1);
+    drop(first_runner);
+
+    assert_eq!(
+        verify_state(scratch.pool()).await?,
+        ("completed".to_owned(), "quick_synced".to_owned(), 5, 5)
+    );
+    let cursor = ingest_cursor_row(scratch.pool(), "drpc-intake").await?;
+    assert_eq!(
+        cursor,
+        (
+            "drpc".to_owned(),
+            "ethereum_head".to_owned(),
+            0,
+            9,
+            Some(8),
+            Some(8),
+            Some(block_hash(SEPOLIA, 8)),
+        )
+    );
+    let highest_finalized: i64 = sqlx::query_scalar(
+        "SELECT max(block_number) FROM chain_lineage
+         WHERE chain_id = $1 AND canonicality_state = 'finalized'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(highest_finalized, 12);
+
+    for attempt in 1..=2 {
+        let restart_live_calls = Arc::new(AtomicUsize::new(0));
+        let restarted = sepolia_verifier_runner(&scratch, Arc::clone(&restart_live_calls)).await?;
+        restarted
+            .run_chain(
+                &sepolia_chain_with_key("drpc-intake")?,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!("restart {attempt} must reach Live without extending Verify: {error}")
+            });
+        assert_eq!(restart_live_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            verify_state(scratch.pool()).await?,
+            ("completed".to_owned(), "quick_synced".to_owned(), 5, 5)
+        );
+        assert_eq!(
+            ingest_cursor_row(scratch.pool(), "drpc-intake").await?,
+            cursor
+        );
+        drop(restarted);
+    }
+
+    let rotated_live_calls = Arc::new(AtomicUsize::new(0));
+    let rotated = sepolia_verifier_runner(&scratch, Arc::clone(&rotated_live_calls)).await?;
+    let error = rotated
+        .run_chain(
+            &sepolia_chain_with_key("rotated-drpc-intake")?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a rotated source without a durable cursor must still fail closed");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error.to_string().contains("durable ingest cursor"),
+        "{error}"
+    );
+    assert_eq!(rotated_live_calls.load(Ordering::SeqCst), 0);
+
+    drop(rotated);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn completed_sepolia_verify_rejects_a_corrupted_completion_target() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_corrupt_completion_target").await?;
+    seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
+    seed_ingest_cursor(scratch.pool(), SEPOLIA, "drpc-intake", 8).await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, 8).await?;
+
+    let first_live_calls = Arc::new(AtomicUsize::new(0));
+    let first_runner = sepolia_verifier_runner(&scratch, Arc::clone(&first_live_calls)).await?;
+    first_runner
+        .run_chain(
+            &sepolia_chain_with_key("drpc-intake")?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert_eq!(first_live_calls.load(Ordering::SeqCst), 1);
+    drop(first_runner);
+
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET target_block_hash = 'corrupted-completion-target'
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .execute(scratch.pool())
+    .await?;
+
+    let restart_live_calls = Arc::new(AtomicUsize::new(0));
+    let restarted = sepolia_verifier_runner(&scratch, Arc::clone(&restart_live_calls)).await?;
+    let error = restarted
+        .run_chain(
+            &sepolia_chain_with_key("drpc-intake")?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("completed Verify must retain its finalized target identity");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert_eq!(restart_live_calls.load(Ordering::SeqCst), 0);
+    drop(restarted);
+
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET target_block_hash = $2,
+             current_block_hash = 'corrupted-completion-current'
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .bind(block_hash(SEPOLIA, 5))
+    .execute(scratch.pool())
+    .await?;
+
+    let current_restart_live_calls = Arc::new(AtomicUsize::new(0));
+    let current_restarted =
+        sepolia_verifier_runner(&scratch, Arc::clone(&current_restart_live_calls)).await?;
+    let error = current_restarted
+        .run_chain(
+            &sepolia_chain_with_key("drpc-intake")?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("completed Verify current and target markers must match");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert_eq!(current_restart_live_calls.load(Ordering::SeqCst), 0);
+
+    drop(current_restarted);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn progressed_ingest_cursor_rejects_source_kind_change_before_verify() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_source_kind_restart").await?;
+    seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
+
+    let stage_a_live_calls = Arc::new(AtomicUsize::new(0));
+    let stage_a = PhaseSet::new([
+        Arc::new(PartialThenStopIngestPhase {
+            batches: AtomicUsize::new(0),
+        }) as Arc<dyn Phase>,
+        Arc::new(UnexpectedPhase::new(PhaseName::Interpret)),
+        Arc::new(UnexpectedPhase::new(PhaseName::Project)),
+        Arc::new(VerifyPhase::with_reference_provider(
+            scratch.verification_database(2).await?,
+            Arc::new(UnexpectedReferences),
+        )),
+        Arc::new(CountingLivePhase {
+            calls: Arc::clone(&stage_a_live_calls),
+        }),
+    ])?;
+    let stage_a_runner = PhaseRunner::new(
+        scratch.runner(),
+        stage_a,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-verify-source-kind-stage-a",
+        test_timing(),
+    )?;
+    let stage_a_error = stage_a_runner
+        .run_chain(
+            &sepolia_chain_with_kind("intake", "rpc")?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the fixture must stop after persisting the rpc prefix");
+    assert_eq!(stage_a_error.kind(), ErrorKind::DataIntegrity);
+    assert_eq!(stage_a_live_calls.load(Ordering::SeqCst), 0);
+    drop(stage_a_runner);
+
+    let before = ingest_cursor_row(scratch.pool(), "intake").await?;
+    let phase_before = ingest_phase_state(scratch.pool()).await?;
+    assert_eq!(
+        before,
+        (
+            "rpc".to_owned(),
+            "ethereum_head".to_owned(),
+            0,
+            5,
+            Some(8),
+            Some(4),
+            Some(block_hash(SEPOLIA, 4)),
+        )
+    );
+
+    let observed_resume = Arc::new(Mutex::new(Vec::new()));
+    let resumed_ingest_calls = Arc::new(AtomicUsize::new(0));
+    let stage_b_live_calls = Arc::new(AtomicUsize::new(0));
+    let stage_b = PhaseSet::new([
+        Arc::new(ResumingIngestPhase {
+            observed_resume: Arc::clone(&observed_resume),
+            calls: Arc::clone(&resumed_ingest_calls),
+        }) as Arc<dyn Phase>,
+        Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(VerifyPhase::with_reference_provider(
+            scratch.verification_database(2).await?,
+            Arc::new(UnexpectedReferences),
+        )),
+        Arc::new(CountingLivePhase {
+            calls: Arc::clone(&stage_b_live_calls),
+        }),
+    ])?;
+    let stage_b_runner = PhaseRunner::new(
+        scratch.runner(),
+        stage_b,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-verify-source-kind-stage-b",
+        test_timing(),
+    )?;
+    let result = stage_b_runner
+        .run_chain(
+            &sepolia_chain_with_kind("intake", "drpc")?,
+            CancellationToken::new(),
+        )
+        .await;
+    let after = ingest_cursor_row(scratch.pool(), "intake").await?;
+    let verify = verify_state_optional(scratch.pool()).await?;
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.kind() == ErrorKind::DataIntegrity),
+        "source kind change must fail closed; result={result:?}, cursor={after:?}, verify={verify:?}, live_calls={}",
+        stage_b_live_calls.load(Ordering::SeqCst),
+    );
+    assert_eq!(
+        after, before,
+        "the rejected resume must not mutate its cursor"
+    );
+    assert_eq!(
+        resumed_ingest_calls.load(Ordering::SeqCst),
+        0,
+        "source compatibility must fail before resumed Ingest runs"
+    );
+    assert_eq!(
+        ingest_phase_state(scratch.pool()).await?,
+        phase_before,
+        "source compatibility must fail before phase progress changes"
+    );
+    assert_eq!(stage_b_live_calls.load(Ordering::SeqCst), 0);
+    assert!(
+        verify.as_ref().is_none_or(
+            |state| state.0 != "completed" || state.1.as_deref() != Some("quick_synced")
+        ),
+        "the rejected mixed-provenance cursor must not earn quick_synced"
+    );
+    assert!(
+        observed_resume
+            .lock()
+            .expect("resume observation lock")
+            .is_empty(),
+        "the incompatible cursor must not be handed to Ingest"
+    );
+
+    drop(stage_b_runner);
     scratch.cleanup().await
 }
 
@@ -1404,6 +1696,118 @@ impl Phase for CountingLivePhase {
     }
 }
 
+struct AdvancingLivePhase {
+    pool: sqlx::PgPool,
+    from: i64,
+    through: i64,
+    calls: Arc<AtomicUsize>,
+}
+
+impl Phase for AdvancingLivePhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Live
+    }
+
+    fn run_batch(&self, _context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            for number in self.from..=self.through {
+                sqlx::query(
+                    "INSERT INTO chain_lineage (
+                         chain_id, block_hash, parent_hash, block_number, block_timestamp
+                     ) VALUES ($1, $2, $3, $4, to_timestamp($4))
+                     ON CONFLICT (chain_id, block_hash) DO NOTHING",
+                )
+                .bind(SEPOLIA)
+                .bind(block_hash(SEPOLIA, number))
+                .bind(block_hash(SEPOLIA, number - 1))
+                .bind(number)
+                .execute(&self.pool)
+                .await
+                .map_err(|error| {
+                    RunnerError::data_integrity(format!(
+                        "live fixture failed to store lineage: {error}"
+                    ))
+                })?;
+            }
+            let marker = BlockMarker::new(self.through, block_hash(SEPOLIA, self.through))?;
+            Ok(PhaseBatchOutcome::Complete(PhaseProgress {
+                current: Some(marker.clone()),
+                target: Some(marker.clone()),
+                heads: Some(HeadMarkers {
+                    latest: marker.clone(),
+                    safe: Some(marker.clone()),
+                    finalized: Some(marker),
+                }),
+                ..PhaseProgress::default()
+            }))
+        })
+    }
+}
+
+struct PartialThenStopIngestPhase {
+    batches: AtomicUsize,
+}
+
+impl Phase for PartialThenStopIngestPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Ingest
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            if self.batches.fetch_add(1, Ordering::SeqCst) > 0 {
+                return Err(RunnerError::data_integrity("fixture stop mid-ingest"));
+            }
+            let current = BlockMarker::new(4, block_hash(SEPOLIA, 4))?;
+            let target = BlockMarker::new(8, block_hash(SEPOLIA, 8))?;
+            Ok(PhaseBatchOutcome::Continue(PhaseProgress {
+                current: Some(current.clone()),
+                target: Some(target.clone()),
+                source_progress: vec![SourceProgress {
+                    source_key: context.sources[0].source_key.clone(),
+                    current: Some(current),
+                    target: Some(target),
+                }],
+                ..PhaseProgress::default()
+            }))
+        })
+    }
+}
+
+struct ResumingIngestPhase {
+    observed_resume: Arc<Mutex<Vec<IngestCursor>>>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl Phase for ResumingIngestPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Ingest
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            *self
+                .observed_resume
+                .lock()
+                .expect("resume observation lock") = context.resume.ingest_cursors.to_vec();
+            let end = BlockMarker::new(8, block_hash(SEPOLIA, 8))?;
+            Ok(PhaseBatchOutcome::Complete(PhaseProgress {
+                current: Some(end.clone()),
+                target: Some(end.clone()),
+                live_handoff: Some(end.clone()),
+                source_progress: vec![SourceProgress {
+                    source_key: context.sources[0].source_key.clone(),
+                    current: Some(end.clone()),
+                    target: Some(end),
+                }],
+                ..PhaseProgress::default()
+            }))
+        })
+    }
+}
+
 struct FailingLivePhase;
 
 impl Phase for FailingLivePhase {
@@ -1498,15 +1902,23 @@ async fn sepolia_verifier_runner(
     scratch: &ScratchDatabase,
     live_calls: Arc<AtomicUsize>,
 ) -> Result<PhaseRunner> {
+    sepolia_verifier_runner_with_live(scratch, Arc::new(CountingLivePhase { calls: live_calls }))
+        .await
+}
+
+async fn sepolia_verifier_runner_with_live(
+    scratch: &ScratchDatabase,
+    live: Arc<dyn Phase>,
+) -> Result<PhaseRunner> {
     let phases = PhaseSet::new([
         Arc::new(UnexpectedPhase::new(PhaseName::Ingest)) as Arc<dyn Phase>,
-        Arc::new(UnexpectedPhase::new(PhaseName::Interpret)),
-        Arc::new(UnexpectedPhase::new(PhaseName::Project)),
+        Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
         Arc::new(VerifyPhase::with_reference_provider(
             scratch.verification_database(2).await?,
             Arc::new(UnexpectedReferences),
         )),
-        Arc::new(CountingLivePhase { calls: live_calls }),
+        live,
     ])?;
     Ok(PhaseRunner::new(
         scratch.runner(),
@@ -1581,12 +1993,16 @@ fn sepolia_chain() -> RunnerResult<ChainConfig> {
 }
 
 fn sepolia_chain_with_key(source_key: &str) -> RunnerResult<ChainConfig> {
+    sepolia_chain_with_kind(source_key, "drpc")
+}
+
+fn sepolia_chain_with_kind(source_key: &str, source_kind: &str) -> RunnerResult<ChainConfig> {
     ChainConfig::new(
         SEPOLIA,
         vec![SourceConfig::new(
             SEPOLIA,
             source_key,
-            "drpc",
+            source_kind,
             SeedBasis::EthereumHead,
             0,
             "https://drpc.invalid",
@@ -1615,6 +2031,70 @@ async fn seed_ingest_cursor(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+type IngestCursorRow = (
+    String,
+    String,
+    i64,
+    i64,
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+);
+
+async fn ingest_cursor_row(pool: &sqlx::PgPool, source_key: &str) -> Result<IngestCursorRow> {
+    Ok(sqlx::query_as(
+        "SELECT source_kind, seed_basis, start_block_number, next_block_number,
+                target_block_number, last_processed_block_number, last_processed_block_hash
+         FROM ingest_cursors WHERE chain_id = $1 AND source_key = $2",
+    )
+    .bind(SEPOLIA)
+    .bind(source_key)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn verify_state(pool: &sqlx::PgPool) -> Result<(String, String, i64, i64)> {
+    Ok(sqlx::query_as(
+        "SELECT phase_status, verification_level, current_block_number, target_block_number
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn verify_state_optional(
+    pool: &sqlx::PgPool,
+) -> Result<Option<(String, Option<String>, Option<i64>, Option<i64>)>> {
+    Ok(sqlx::query_as(
+        "SELECT phase_status, verification_level, current_block_number, target_block_number
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .fetch_optional(pool)
+    .await?)
+}
+
+async fn ingest_phase_state(
+    pool: &sqlx::PgPool,
+) -> Result<(
+    String,
+    Option<i64>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+)> {
+    Ok(sqlx::query_as(
+        "SELECT phase_status, current_block_number, current_block_hash,
+                target_block_number, target_block_hash, last_error
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(pool)
+    .await?)
 }
 
 async fn move_finalized_head(pool: &sqlx::PgPool, chain_id: &str, finalized: i64) -> Result<()> {

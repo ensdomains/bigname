@@ -465,6 +465,10 @@ impl PhaseStore {
     ) -> RunnerResult<()> {
         update_ingest_cursors(&self.pool, sources, progress).await
     }
+
+    pub async fn validate_ingest_sources(&self, sources: &[SourceConfig]) -> RunnerResult<()> {
+        crate::ingest_cursor_config::validate_existing(&self.pool, sources).await
+    }
 }
 
 async fn completed_phase_is_behind(

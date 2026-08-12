@@ -31,7 +31,9 @@ For each configured chain, the path is:
    without selecting its dRPC intake source as an independent reference and
    records `quick_synced`; the exact configured source's persisted cursor must
    cover the finalized target. That binding and coverage are checked when
-   verification completes and again on every runner start.
+   verification completes. Every runner start checks the current source
+   configuration and cursor again against that completion-time target; later
+   Live finality does not extend the completed Verify extent.
 5. `live` follows a provider snapshot from the completed ingest handoff, walks
    backward to a stored readable ancestor, loads at most one bounded winning
    suffix batch, and publishes the resulting head through the shared head path.
@@ -98,7 +100,10 @@ CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV
 The endpoint itself is read from `URL_ENV`. Source cursors are independent, so
 one source cannot claim another source's range. The runner records the resolved
 target and last processed block hash for each source; restart resumes from that
-stored boundary.
+stored boundary. On every chain, a source's normalized kind becomes immutable
+once its cursor records progress. Case-only changes, surrounding whitespace,
+and hyphen/underscore spelling changes are equivalent; any other kind change
+fails before Ingest runs or changes phase progress.
 
 Production source shape is exact: `ethereum-mainnet` has one local Reth DB
 source, while `base-mainnet` has one Coinbase SQL historical source and one
@@ -113,9 +118,9 @@ local reth source can report `node_checked`. Sepolia's dRPC is not an independen
 reference because it also supplied intake, so the chain records `quick_synced`.
 Its persisted cursor must match the configured source key, kind, seed basis,
 and start block and must cover the finalized verification target. Verify checks
-that condition when it completes and on every runner start; restart
-revalidation uses the current configuration and can advance the recorded
-`quick_synced` extent when finality has moved.
+the binding and coverage when it completes. On every runner start, it checks
+the current configuration and cursor against the completion-time target and
+leaves the recorded `quick_synced` extent unchanged when finality has moved.
 Source-role separation and a Sepolia `cross_checked` path are deferred to
 [issue #411](https://github.com/ensdomains/bigname/issues/411). Unsupported
 combinations fail as configuration errors rather than falling back to another

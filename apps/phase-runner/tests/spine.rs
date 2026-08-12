@@ -1813,6 +1813,90 @@ async fn changed_ingest_seed_configuration_fails_loudly() -> Result<()> {
 }
 
 #[tokio::test]
+async fn progress_free_ingest_cursor_can_change_source_kind() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_cursor_progress_free_kind").await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    let original = SourceConfig::new(
+        "cursor-kind-chain",
+        "source",
+        "rpc",
+        SeedBasis::EthereumHead,
+        0,
+        "http://source.invalid",
+    )?;
+    store
+        .update_ingest_cursors(&[original], &PhaseProgress::default())
+        .await?;
+    let changed = SourceConfig::new(
+        "cursor-kind-chain",
+        "source",
+        "drpc",
+        SeedBasis::EthereumHead,
+        0,
+        "http://source.invalid",
+    )?;
+    store
+        .update_ingest_cursors(&[changed], &PhaseProgress::default())
+        .await?;
+
+    let row: (String, i64, Option<i64>) = sqlx::query_as(
+        "SELECT source_kind, next_block_number, last_processed_block_number
+         FROM ingest_cursors
+         WHERE chain_id = 'cursor-kind-chain' AND source_key = 'source'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(row, ("drpc".to_owned(), 0, None));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn interpret_redo_accepts_a_normalized_equivalent_source_kind() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_redo_normalized_source_kind").await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    let chain_id = "redo-normalized-source-kind-chain";
+    store.initialize_chain(chain_id).await?;
+    mark_completed(scratch.pool(), chain_id, PhaseName::Ingest, None).await?;
+    mark_completed(
+        scratch.pool(),
+        chain_id,
+        PhaseName::Interpret,
+        Some(phase_runner::INTERPRETER_CONTENT_HASH),
+    )
+    .await?;
+    set_phase_extent(scratch.pool(), chain_id, PhaseName::Interpret, 1).await?;
+    seed_interpret_redo_presence(scratch.pool(), chain_id, 1).await?;
+    let configured = ChainConfig::new(
+        chain_id,
+        vec![SourceConfig::new(
+            chain_id,
+            "source",
+            "TEST",
+            SeedBasis::EthereumHead,
+            0,
+            "http://source.invalid",
+        )?],
+        false,
+    )?;
+
+    runner(
+        scratch.runner(),
+        PhaseSet::loopback(),
+        available_capacity(),
+        "redo-normalized-source-kind-runner",
+    )?
+    .redo(
+        &configured,
+        RedoPhase::Phase(PhaseName::Interpret),
+        BlockRange::new(0, 1)?,
+        CancellationToken::new(),
+    )
+    .await?;
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn verify_phase_records_its_trust_level() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_verify_level").await?;
     let phases = PhaseName::ALL.map(|name| {

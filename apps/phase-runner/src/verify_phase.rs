@@ -12,7 +12,7 @@ use bigname_ingest::{
 use tracing::info;
 
 use crate::{
-    config::SourceConfig,
+    config::{SourceConfig, normalized_source_kind},
     database::VerificationDatabase,
     error::{ErrorKind, RunnerError, RunnerResult},
     heads::BlockMarker,
@@ -405,7 +405,7 @@ fn verification_plan(chain_id: &str, sources: &[SourceConfig]) -> RunnerResult<V
 
 fn validate_sepolia_intake_source(sources: &[SourceConfig]) -> RunnerResult<()> {
     let valid = sources.len() == 1
-        && normalized_kind(&sources[0].source_kind) == "drpc"
+        && normalized_source_kind(&sources[0].source_kind) == "drpc"
         && sources[0].seed_basis == crate::config::SeedBasis::EthereumHead
         && sources[0].start_block_number == 0;
     if valid {
@@ -476,7 +476,7 @@ fn select_source(chain_id: &str, sources: &[SourceConfig]) -> RunnerResult<Verif
     let candidates = sources
         .iter()
         .filter_map(|source| {
-            let kind = normalized_kind(&source.source_kind);
+            let kind = normalized_source_kind(&source.source_kind);
             match kind.as_str() {
                 "drpc" => Some((
                     source,
@@ -583,10 +583,6 @@ const fn verification_level_rank(level: VerificationLevel) -> u8 {
         VerificationLevel::CrossChecked => 1,
         VerificationLevel::NodeChecked => 2,
     }
-}
-
-fn normalized_kind(kind: &str) -> String {
-    kind.trim().to_ascii_lowercase().replace('-', "_")
 }
 
 fn map_ingest_error(error: bigname_ingest::IngestError) -> RunnerError {

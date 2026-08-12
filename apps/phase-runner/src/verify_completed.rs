@@ -22,27 +22,42 @@ pub(super) async fn revalidate(
     else {
         return Ok(None);
     };
-    let target_number = context
-        .available_heads
-        .as_ref()
-        .and_then(|heads| heads.finalized.as_ref())
-        .ok_or_else(|| {
-            RunnerError::transient(format!(
-                "chain {} has no finalized head available for verification",
-                context.chain_id
-            ))
-        })?
-        .number;
-    let target = phase
+    let current = context.resume.current.ok_or_else(|| {
+        RunnerError::data_integrity(format!(
+            "completed provider-trusted verification for chain {} has no recorded current block",
+            context.chain_id
+        ))
+    })?;
+    let target = context.resume.target.ok_or_else(|| {
+        RunnerError::data_integrity(format!(
+            "completed provider-trusted verification for chain {} has no recorded target block",
+            context.chain_id
+        ))
+    })?;
+    let finalized_target = phase
         .store
-        .finalized_marker(&context.chain_id, target_number)
+        .finalized_marker(&context.chain_id, target.number)
         .await?;
+    if finalized_target != target {
+        return Err(RunnerError::data_integrity(format!(
+            "completed provider-trusted verification target for chain {} does not match finalized \
+             lineage at block {}",
+            context.chain_id, target.number
+        )));
+    }
+    if current != target {
+        return Err(RunnerError::data_integrity(format!(
+            "completed provider-trusted verification for chain {} has different current and \
+             target markers",
+            context.chain_id
+        )));
+    }
     phase
         .store
         .require_provider_trusted_extent(&context.chain_id, &source, &target)
         .await?;
     Ok(Some(PhaseProgress {
-        current: Some(target.clone()),
+        current: Some(current),
         target: Some(target),
         verification_level: Some(level),
         ..PhaseProgress::default()
