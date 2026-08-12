@@ -249,7 +249,7 @@ pub(super) async fn build(
                    jsonb_path_query_array(
                        COALESCE(binding.alias_items, '[]'::jsonb) ||
                            COALESCE(alias.items, '[]'::jsonb),
-                       '$[0 to 99]'::jsonpath
+                       format('$[0 to %s]', $5::integer - 1)::jsonpath
                    ) AS alias_items,
                    COALESCE(permission.item_count, 0) AS permission_count,
                    COALESCE(permission.items, '[]'::jsonb) AS permission_items,

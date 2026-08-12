@@ -474,7 +474,7 @@ async fn permission_builder_preserves_grouped_history_output_exactly() -> Result
         scratch.pool(),
         "ens",
         CHAIN,
-        2,
+        3,
         Some("ens:0xalice"),
         Some(RESOURCE),
         "PermissionChanged",
@@ -484,12 +484,12 @@ async fn permission_builder_preserves_grouped_history_output_exactly() -> Result
             "subject":OWNER,
             "scope":{"kind":"resource"},
             "effective_powers":["resource_control","set_resolver"],
-            "grant_source":{"kind":"prior"},
+            "grant_source":{"kind":"tie_break_winner"},
             "revocation_source":null,
-            "inheritance_path":["prior"],
+            "inheritance_path":["tie_break_winner"],
             "transfer_behavior":"retain"
         }),
-        json!({"history":"prior"}),
+        json!({"history":"tie_break_winner"}),
     )
     .await?;
     insert_namespaced_event(
@@ -506,14 +506,32 @@ async fn permission_builder_preserves_grouped_history_output_exactly() -> Result
             "subject":OWNER,
             "scope":{"kind":"resource"},
             "effective_powers":["set_resolver"],
-            "grant_source":{"kind":"latest"},
+            "grant_source":{"kind":"later_inserted_loser"},
             "revocation_source":null,
-            "inheritance_path":["latest"],
+            "inheritance_path":["later_inserted_loser"],
             "transfer_behavior":"retain"
         }),
-        json!({"history":"latest"}),
+        json!({"history":"later_inserted_loser"}),
     )
     .await?;
+    let positioned = sqlx::query(
+        "UPDATE normalized_events event
+         SET transaction_hash = $2,
+             transaction_index = position.transaction_index,
+             log_index = position.log_index
+         FROM (VALUES
+             ('tie_break_winner', 5::bigint, 9::bigint),
+             ('later_inserted_loser', 5::bigint, 8::bigint)
+         ) position(history, transaction_index, log_index)
+         WHERE event.chain_id = $1
+           AND event.raw_fact_ref ->> 'history' = position.history",
+    )
+    .bind(CHAIN)
+    .bind(format!("{CHAIN}-permission-history-transaction"))
+    .execute(scratch.pool())
+    .await?
+    .rows_affected();
+    assert_eq!(positioned, 2);
 
     run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
     let snapshot: Value = sqlx::query_scalar(
@@ -546,12 +564,14 @@ async fn permission_builder_preserves_grouped_history_output_exactly() -> Result
                 "chain_positions": {
                     "block_hash": "project-fixture-block-3",
                     "block_number": 3,
+                    "log_index": 9,
                     "target_block_hash": "project-fixture-block-3",
-                    "target_block_number": 3
+                    "target_block_number": 3,
+                    "transaction_index": 5
                 },
-                "effective_powers": ["set_resolver"],
-                "grant_source": {"kind": "latest"},
-                "inheritance_path": ["latest"],
+                "effective_powers": ["resource_control", "set_resolver"],
+                "grant_source": {"kind": "tie_break_winner"},
+                "inheritance_path": ["tie_break_winner"],
                 "manifest_version": 3,
                 "provenance": {
                     "chain_id": "project-fixture",
@@ -580,8 +600,8 @@ async fn permission_builder_preserves_grouped_history_output_exactly() -> Result
                     "normalized_event_ids": [6, 13, 14],
                     "raw_fact_refs": [
                         {},
-                        {"history": "prior"},
-                        {"history": "latest"}
+                        {"history": "tie_break_winner"},
+                        {"history": "later_inserted_loser"}
                     ]
                 },
                 "resource_id": RESOURCE,
@@ -605,14 +625,14 @@ async fn permission_builder_preserves_grouped_history_output_exactly() -> Result
                     "target_block_hash": "project-fixture-block-3",
                     "target_block_number": 3
                 },
-                "manifest_version": 2,
+                "manifest_version": 3,
                 "provenance": {
                     "chain_id": "project-fixture",
                     "coverage": {
                         "exhaustiveness": "not_asserted",
                         "status": "projected"
                     },
-                    "history": "latest"
+                    "history": "tie_break_winner"
                 },
                 "resource_id": RESOURCE,
                 "root_resource_id": null,
@@ -2936,11 +2956,25 @@ async fn incremental_resolver_builder_stages_only_the_scoped_discovered_resolver
     )
     .await?;
 
-    let staged_candidates: i64 =
-        sqlx::query_scalar("SELECT last_value FROM resolver_stage_candidate_count")
+    let staged_candidates: (i64, bool) =
+        sqlx::query_as("SELECT last_value, is_called FROM resolver_stage_candidate_count")
             .fetch_one(scratch.pool())
             .await?;
-    assert_eq!(staged_candidates, 1);
+    assert_eq!(staged_candidates, (1, true));
+    let scoped_resolver: (String, String) = sqlx::query_as(
+        "SELECT support_status,
+                declared_summary -> 'classification' ->> 'source_family'
+         FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(RESOLVER)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        scoped_resolver,
+        ("supported".into(), "ens_v1_resolver_l1".into())
+    );
     scratch.cleanup().await
 }
 
