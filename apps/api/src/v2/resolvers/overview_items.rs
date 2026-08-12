@@ -295,18 +295,20 @@ fn compact_resolver_role_item(item: &Value) -> V2Result<Value> {
     if let Some(value) = compact.remove("subject") {
         compact.insert("address".to_owned(), value);
     }
-    if let Some(value) = compact.remove("resource_count") {
+    let resource_count = compact.remove("resource_count");
+    if let Some(value) = resource_count.clone() {
         compact.insert("registration_count".to_owned(), value);
     }
-    if let Some(value) = compact.remove("permission_row_count") {
+    compact.remove("permission_row_count");
+    if let Some(value) = resource_count {
+        // Resolver-scoped permission staging is unique by resource, subject, and
+        // scope, so a holder's resource count is also its permission-row count.
         compact.insert("permission_count".to_owned(), value);
     }
     if let Some(value) = compact.remove("effective_powers") {
         compact.insert("powers".to_owned(), permission_powers_value(&value)?);
     }
-    if let Some(value) = compact.remove("resource_ids") {
-        compact.insert("registration_ids".to_owned(), value);
-    }
+    compact.remove("resource_ids");
     Ok(Value::Object(compact))
 }
 

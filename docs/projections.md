@@ -203,8 +203,13 @@ fail closed rather than converting it into broader support.
 ## Resolver and records
 
 `resolver_current` summarizes one resolver contract across readable bound names,
-aliases, roles, record evidence, and normalized events. It is diagnostic and
-does not replace exact-name topology.
+aliases, roles, record evidence, and normalized events. Embedded binding,
+alias, permission, and role-holder summaries store `total_count`,
+`sample_limit=100`, `sample_count`, `truncated`, and a deterministic `items`
+sample no longer than that limit. Full bound-name and permission collections
+remain on their name-side projections and routes instead of being duplicated
+into one resolver row. The resolver summary is diagnostic and does not replace
+exact-name topology.
 
 `record_inventory_current` records the selectors observed for the current
 resource and boundary, explicit gaps, unsupported families, and any retained

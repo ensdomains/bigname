@@ -30,6 +30,27 @@ pub(super) async fn build(
                      transaction_index DESC NULLS LAST,
                      log_index DESC NULLS LAST,
                      normalized_event_id DESC
+        ),
+        claim_candidates AS (
+            SELECT event.*,
+                   lower(event.after_state -> 'primary_claim_source' ->> 'address')
+                       AS claim_address,
+                   event.after_state -> 'primary_claim_source' ->> 'coin_type'
+                       AS claim_coin_type,
+                   event.after_state -> 'primary_claim_source' ->> 'namespace'
+                       AS claim_namespace
+            FROM project_events event
+            WHERE event.event_kind = 'RecordChanged'
+              AND event.after_state ? 'primary_claim_source'
+        ),
+        latest_claim AS (
+            SELECT DISTINCT ON (claim_address, claim_coin_type, claim_namespace) *
+            FROM claim_candidates
+            ORDER BY claim_address, claim_coin_type, claim_namespace,
+                     block_number DESC NULLS LAST,
+                     transaction_index DESC NULLS LAST,
+                     log_index DESC NULLS LAST,
+                     normalized_event_id DESC
         )
         INSERT INTO project_stage_primary_names_current (
             address, coin_type, namespace, claim_status, raw_claim_name,
@@ -58,22 +79,10 @@ pub(super) async fn build(
                    )
                )
         FROM latest_reverse reverse
-        LEFT JOIN LATERAL (
-            SELECT event.*
-            FROM project_events event
-            WHERE event.event_kind = 'RecordChanged'
-              AND event.after_state ? 'primary_claim_source'
-              AND lower(event.after_state -> 'primary_claim_source' ->> 'address') =
-                  lower(reverse.address)
-              AND event.after_state -> 'primary_claim_source' ->> 'coin_type' = reverse.coin_type
-              AND event.after_state -> 'primary_claim_source' ->> 'namespace' =
-                  reverse.claim_namespace
-            ORDER BY event.block_number DESC NULLS LAST,
-                     event.transaction_index DESC NULLS LAST,
-                     event.log_index DESC NULLS LAST,
-                     event.normalized_event_id DESC
-            LIMIT 1
-        ) claim ON TRUE
+        LEFT JOIN latest_claim claim
+          ON claim.claim_address = lower(reverse.address)
+         AND claim.claim_coin_type = reverse.coin_type
+         AND claim.claim_namespace = reverse.claim_namespace
         LEFT JOIN project_primary_claim_normalization normalized
           ON normalized.normalized_event_id = claim.normalized_event_id
         ORDER BY lower(reverse.address), reverse.coin_type, reverse.claim_namespace

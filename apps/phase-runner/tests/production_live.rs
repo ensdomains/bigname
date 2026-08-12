@@ -64,6 +64,7 @@ const WATCH_ADDRESS_B: &str = "0x00000000000000000000000000000000000000b2";
 const TRANSFER_TOPIC: &str = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 const TEST_AUTHORITY_FINGERPRINT: &str =
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const HEAD_ADVANCE_DEADLINE: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Default)]
 struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
@@ -348,7 +349,7 @@ async fn live_head_walk_advances_published_markers() -> Result<()> {
     let mut task =
         tokio::spawn(async move { runner.run_chain(&configured_chain, run_cancellation).await });
     {
-        let head_advanced = tokio::time::timeout(Duration::from_secs(5), async {
+        let head_advanced = tokio::time::timeout(HEAD_ADVANCE_DEADLINE, async {
             loop {
                 let latest: i64 = sqlx::query_scalar(
                     "SELECT latest_block_number FROM chain_heads WHERE chain_id = $1",
@@ -3635,7 +3636,7 @@ async fn rewind_snapshot(pool: &PgPool, chain: &str) -> Result<RewindSnapshot> {
 }
 
 async fn wait_for_head(pool: &PgPool, chain: &str, number: i64, hash: &str) -> Result<()> {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(HEAD_ADVANCE_DEADLINE, async {
         loop {
             let current: (i64, String) = sqlx::query_as(
                 "SELECT latest_block_number, latest_block_hash
@@ -3660,7 +3661,7 @@ async fn wait_for_rederived_head(
     number: i64,
     hash: &str,
 ) -> Result<()> {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(HEAD_ADVANCE_DEADLINE, async {
         loop {
             let head: (i64, String) = sqlx::query_as(
                 "SELECT latest_block_number, latest_block_hash

@@ -96,6 +96,167 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
 
     run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
 
+    let grouped_builder_snapshot: Value = sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+             'permissions', COALESCE((
+                 SELECT jsonb_agg(
+                     to_jsonb(permission) - 'last_recomputed_at' - 'inserted_at'
+                     ORDER BY resource_id, subject, scope
+                 ) FROM permissions_current permission
+             ), '[]'::jsonb),
+             'permission_summaries', COALESCE((
+                 SELECT jsonb_agg(
+                     to_jsonb(summary) - 'last_recomputed_at' ORDER BY resource_id
+                 ) FROM permissions_current_resource_summary summary
+             ), '[]'::jsonb),
+             'resolvers', COALESCE((
+                 SELECT jsonb_agg(
+                     (to_jsonb(resolver) - 'last_recomputed_at' - 'inserted_at' -
+                         'declared_summary') || jsonb_build_object(
+                             'declared_summary', declared_summary - 'bindings' - 'aliases' -
+                                 'permissions' - 'role_holders'
+                         )
+                     ORDER BY chain_id, resolver_address
+                 ) FROM resolver_current resolver
+             ), '[]'::jsonb),
+             'primary_names', COALESCE((
+                 SELECT jsonb_agg(to_jsonb(primary_name)
+                     ORDER BY address, coin_type, namespace)
+                 FROM primary_names_current primary_name
+             ), '[]'::jsonb)
+         )",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        grouped_builder_snapshot,
+        json!({
+            "permission_summaries": [{
+                "authority_kind": "registrar",
+                "canonicality_summary": {
+                    "state": "canonical_lineage",
+                    "target_block_hash": "project-fixture-block-3",
+                    "target_block_number": 3
+                },
+                "chain_positions": {
+                    "block_hash": "project-fixture-block-1",
+                    "block_number": 1,
+                    "target_block_hash": "project-fixture-block-3",
+                    "target_block_number": 3
+                },
+                "manifest_version": 1,
+                "provenance": {
+                    "chain_id": "project-fixture",
+                    "coverage": {
+                        "exhaustiveness": "not_asserted",
+                        "status": "projected"
+                    }
+                },
+                "resource_id": RESOURCE,
+                "root_resource_id": null,
+                "support_status": "supported",
+                "unsupported_reason": null
+            }],
+            "permissions": [{
+                "canonicality_summary": {
+                    "state": "canonical",
+                    "target_block_hash": "project-fixture-block-3",
+                    "target_block_number": 3
+                },
+                "chain_positions": {
+                    "block_hash": "project-fixture-block-1",
+                    "block_number": 1,
+                    "target_block_hash": "project-fixture-block-3",
+                    "target_block_number": 3
+                },
+                "effective_powers": ["resource_control"],
+                "grant_source": {"kind": "fixture"},
+                "inheritance_path": [],
+                "manifest_version": 1,
+                "provenance": {
+                    "chain_id": "project-fixture",
+                    "coverage": {
+                        "exhaustiveness": "not_asserted",
+                        "status": "projected"
+                    },
+                    "derivation_kind": "permissions_current_rebuild",
+                    "manifest_versions": [{
+                        "manifest_version": 1,
+                        "source_family": "ens_v1_registrar_l1",
+                        "source_manifest_id": null
+                    }],
+                    "normalized_event_ids": [6],
+                    "raw_fact_refs": [{}]
+                },
+                "resource_id": RESOURCE,
+                "revocation_source": null,
+                "scope": "resource",
+                "scope_detail": {"kind": "resource"},
+                "scope_kind": "resource",
+                "subject": OWNER,
+                "transfer_behavior": {"mode": "replace_on_authority_change"}
+            }],
+            "primary_names": [{
+                "address": OWNER,
+                "claim_name_is_normalized": true,
+                "claim_provenance": {
+                    "chain_id": "project-fixture",
+                    "claim_event_id": 10,
+                    "coverage": {
+                        "exhaustiveness": "not_asserted",
+                        "status": "projected"
+                    },
+                    "reverse_event_id": 9,
+                    "source_family": "ens_v1_reverse_l1",
+                    "target_block_hash": "project-fixture-block-3",
+                    "target_block_number": 3
+                },
+                "claim_status": "success",
+                "coin_type": "60",
+                "namespace": "ens",
+                "raw_claim_name": "alice.eth",
+                "unsupported_reason": null
+            }],
+            "resolvers": [{
+                "canonicality_summary": {
+                    "state": "canonical_lineage",
+                    "target_block_hash": "project-fixture-block-3",
+                    "target_block_number": 3
+                },
+                "chain_id": "project-fixture",
+                "chain_positions": {
+                    "target_block_hash": "project-fixture-block-3",
+                    "target_block_number": 3
+                },
+                "declared_summary": {
+                    "classification": {
+                        "basis": "manifest_declared_address",
+                        "role": "public_resolver",
+                        "source_family": "ens_v1_resolver_l1"
+                    },
+                    "coverage": {
+                        "exhaustiveness": "not_asserted",
+                        "status": "projected"
+                    },
+                    "event_summary": {
+                        "status": "unsupported",
+                        "unsupported_reason":
+                            "resolver_binding_enumeration_not_projected"
+                    }
+                },
+                "manifest_version": 1,
+                "provenance": {
+                    "chain_id": "project-fixture",
+                    "manifest_event_id": 2,
+                    "manifest_id": 2
+                },
+                "resolver_address": RESOLVER,
+                "support_status": "supported",
+                "unsupported_reason": null
+            }]
+        })
+    );
+
     let counts: (i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM name_current),
@@ -306,6 +467,184 @@ async fn recompute_flags_refreshes_same_class_flags_and_primary_projection_witho
 }
 
 #[tokio::test]
+async fn permission_builder_preserves_grouped_history_output_exactly() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_permission_history").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    insert_namespaced_event(
+        scratch.pool(),
+        "ens",
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "PermissionChanged",
+        "ens_v1_registry_l1",
+        3,
+        json!({
+            "subject":OWNER,
+            "scope":{"kind":"resource"},
+            "effective_powers":["resource_control","set_resolver"],
+            "grant_source":{"kind":"tie_break_winner"},
+            "revocation_source":null,
+            "inheritance_path":["tie_break_winner"],
+            "transfer_behavior":"retain"
+        }),
+        json!({"history":"tie_break_winner"}),
+    )
+    .await?;
+    insert_namespaced_event(
+        scratch.pool(),
+        "ens",
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "PermissionChanged",
+        "ens_v1_registry_l1",
+        2,
+        json!({
+            "subject":OWNER,
+            "scope":{"kind":"resource"},
+            "effective_powers":["set_resolver"],
+            "grant_source":{"kind":"later_inserted_loser"},
+            "revocation_source":null,
+            "inheritance_path":["later_inserted_loser"],
+            "transfer_behavior":"retain"
+        }),
+        json!({"history":"later_inserted_loser"}),
+    )
+    .await?;
+    let positioned = sqlx::query(
+        "UPDATE normalized_events event
+         SET transaction_hash = $2,
+             transaction_index = position.transaction_index,
+             log_index = position.log_index
+         FROM (VALUES
+             ('tie_break_winner', 5::bigint, 9::bigint),
+             ('later_inserted_loser', 5::bigint, 8::bigint)
+         ) position(history, transaction_index, log_index)
+         WHERE event.chain_id = $1
+           AND event.raw_fact_ref ->> 'history' = position.history",
+    )
+    .bind(CHAIN)
+    .bind(format!("{CHAIN}-permission-history-transaction"))
+    .execute(scratch.pool())
+    .await?
+    .rows_affected();
+    assert_eq!(positioned, 2);
+
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let snapshot: Value = sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+             'permission', (
+                 SELECT to_jsonb(permission) - 'last_recomputed_at' - 'inserted_at'
+                 FROM permissions_current permission
+                 WHERE resource_id = $1 AND subject = lower($2) AND scope = 'resource'
+             ),
+             'resource_summary', (
+                 SELECT to_jsonb(summary) - 'last_recomputed_at'
+                 FROM permissions_current_resource_summary summary
+                 WHERE resource_id = $1
+             )
+         )",
+    )
+    .bind(Uuid::parse_str(RESOURCE)?)
+    .bind(OWNER)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        snapshot,
+        json!({
+            "permission": {
+                "canonicality_summary": {
+                    "state": "canonical",
+                    "target_block_hash": "project-fixture-block-3",
+                    "target_block_number": 3
+                },
+                "chain_positions": {
+                    "block_hash": "project-fixture-block-3",
+                    "block_number": 3,
+                    "log_index": 9,
+                    "target_block_hash": "project-fixture-block-3",
+                    "target_block_number": 3,
+                    "transaction_index": 5
+                },
+                "effective_powers": ["resource_control", "set_resolver"],
+                "grant_source": {"kind": "tie_break_winner"},
+                "inheritance_path": ["tie_break_winner"],
+                "manifest_version": 3,
+                "provenance": {
+                    "chain_id": "project-fixture",
+                    "coverage": {
+                        "exhaustiveness": "not_asserted",
+                        "status": "projected"
+                    },
+                    "derivation_kind": "permissions_current_rebuild",
+                    "manifest_versions": [
+                        {
+                            "manifest_version": 1,
+                            "source_family": "ens_v1_registrar_l1",
+                            "source_manifest_id": null
+                        },
+                        {
+                            "manifest_version": 3,
+                            "source_family": "ens_v1_registry_l1",
+                            "source_manifest_id": null
+                        },
+                        {
+                            "manifest_version": 2,
+                            "source_family": "ens_v1_registry_l1",
+                            "source_manifest_id": null
+                        }
+                    ],
+                    "normalized_event_ids": [6, 13, 14],
+                    "raw_fact_refs": [
+                        {},
+                        {"history": "tie_break_winner"},
+                        {"history": "later_inserted_loser"}
+                    ]
+                },
+                "resource_id": RESOURCE,
+                "revocation_source": null,
+                "scope": "resource",
+                "scope_detail": {"kind": "resource"},
+                "scope_kind": "resource",
+                "subject": OWNER,
+                "transfer_behavior": {"mode": "retain"}
+            },
+            "resource_summary": {
+                "authority_kind": "registrar",
+                "canonicality_summary": {
+                    "state": "canonical_lineage",
+                    "target_block_hash": "project-fixture-block-3",
+                    "target_block_number": 3
+                },
+                "chain_positions": {
+                    "block_hash": "project-fixture-block-3",
+                    "block_number": 3,
+                    "target_block_hash": "project-fixture-block-3",
+                    "target_block_number": 3
+                },
+                "manifest_version": 3,
+                "provenance": {
+                    "chain_id": "project-fixture",
+                    "coverage": {
+                        "exhaustiveness": "not_asserted",
+                        "status": "projected"
+                    },
+                    "history": "tie_break_winner"
+                },
+                "resource_id": RESOURCE,
+                "root_resource_id": null,
+                "support_status": "supported",
+                "unsupported_reason": null
+            }
+        })
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn shadow_identity_labels_retain_bytes_and_decode_only_exact_text() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_shadow_labels").await?;
     seed_project_fixture(scratch.pool()).await?;
@@ -398,8 +737,164 @@ async fn primary_name_builder_preserves_success_invalid_blank_and_byte_only_clai
         )
         .await?;
     }
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        2,
+        None,
+        None,
+        "RecordChanged",
+        "ens_v1_reverse_l1",
+        json!({
+            "raw_name":"stale.eth",
+            "primary_claim_source":{
+                "address":OWNER,
+                "coin_type":"60",
+                "namespace":"ens",
+                "claim_provenance":{"history":"stale"}
+            }
+        }),
+        json!({"history":"stale"}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        3,
+        None,
+        None,
+        "RecordChanged",
+        "ens_v1_reverse_l1",
+        json!({
+            "raw_name":"latest.eth",
+            "primary_claim_source":{
+                "address":OWNER,
+                "coin_type":"60",
+                "namespace":"ens",
+                "claim_provenance":{
+                    "history":"latest",
+                    "source_family":"ens_v1_reverse_l1"
+                }
+            }
+        }),
+        json!({"history":"latest"}),
+    )
+    .await?;
 
     run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let full_claims: Value = sqlx::query_scalar(
+        "SELECT jsonb_agg(to_jsonb(primary_name) ORDER BY address, coin_type, namespace)
+         FROM primary_names_current primary_name",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        full_claims,
+        json!([
+            {
+                "address": "0x0000000000000000000000000000000000000010",
+                "claim_name_is_normalized": false,
+                "claim_provenance": {
+                    "chain_id": "project-fixture",
+                    "claim_event_id": 14,
+                    "coverage": {
+                        "exhaustiveness": "not_asserted",
+                        "status": "projected"
+                    },
+                    "reverse_event_id": 13,
+                    "target_block_hash": "project-fixture-block-3",
+                    "target_block_number": 3
+                },
+                "claim_status": "success",
+                "coin_type": "60",
+                "namespace": "ens",
+                "raw_claim_name": "Alice.eth",
+                "unsupported_reason": null
+            },
+            {
+                "address": "0x0000000000000000000000000000000000000011",
+                "claim_name_is_normalized": false,
+                "claim_provenance": {
+                    "chain_id": "project-fixture",
+                    "claim_event_id": 16,
+                    "coverage": {
+                        "exhaustiveness": "not_asserted",
+                        "status": "projected"
+                    },
+                    "reverse_event_id": 15,
+                    "target_block_hash": "project-fixture-block-3",
+                    "target_block_number": 3
+                },
+                "claim_status": "invalid_name",
+                "coin_type": "60",
+                "namespace": "ens",
+                "raw_claim_name": "bad name.eth",
+                "unsupported_reason": null
+            },
+            {
+                "address": "0x0000000000000000000000000000000000000012",
+                "claim_name_is_normalized": false,
+                "claim_provenance": {
+                    "chain_id": "project-fixture",
+                    "claim_event_id": 18,
+                    "coverage": {
+                        "exhaustiveness": "not_asserted",
+                        "status": "projected"
+                    },
+                    "reverse_event_id": 17,
+                    "target_block_hash": "project-fixture-block-3",
+                    "target_block_number": 3
+                },
+                "claim_status": "not_found",
+                "coin_type": "60",
+                "namespace": "ens",
+                "raw_claim_name": null,
+                "unsupported_reason": null
+            },
+            {
+                "address": "0x0000000000000000000000000000000000000013",
+                "claim_name_is_normalized": false,
+                "claim_provenance": {
+                    "chain_id": "project-fixture",
+                    "claim_event_id": 20,
+                    "coverage": {
+                        "exhaustiveness": "not_asserted",
+                        "status": "projected"
+                    },
+                    "reverse_event_id": 19,
+                    "target_block_hash": "project-fixture-block-3",
+                    "target_block_number": 3
+                },
+                "claim_status": "unsupported",
+                "coin_type": "60",
+                "namespace": "ens",
+                "raw_claim_name": null,
+                "unsupported_reason": "claim_name_not_decodable"
+            },
+            {
+                "address": OWNER,
+                "claim_name_is_normalized": true,
+                "claim_provenance": {
+                    "chain_id": "project-fixture",
+                    "claim_event_id": 22,
+                    "coverage": {
+                        "exhaustiveness": "not_asserted",
+                        "status": "projected"
+                    },
+                    "history": "latest",
+                    "reverse_event_id": 9,
+                    "source_family": "ens_v1_reverse_l1",
+                    "target_block_hash": "project-fixture-block-3",
+                    "target_block_number": 3
+                },
+                "claim_status": "success",
+                "coin_type": "60",
+                "namespace": "ens",
+                "raw_claim_name": "latest.eth",
+                "unsupported_reason": null
+            }
+        ])
+    );
     let claims: Vec<PrimaryClaimRow> = sqlx::query_as(
         "SELECT address, claim_status, raw_claim_name,
                 claim_name_is_normalized, unsupported_reason
@@ -1371,6 +1866,258 @@ async fn shared_ensv1_resolver_keeps_fan_in_sections_explicitly_unsupported() ->
 }
 
 #[tokio::test]
+async fn resolver_embedded_collections_report_totals_and_cap_samples() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_resolver_summary_cap").await?;
+    seed_basenames_project_fixture(scratch.pool()).await?;
+
+    sqlx::query(
+        "INSERT INTO resources (
+             resource_id, chain_id, block_hash, block_number, canonicality_state
+         )
+         SELECT ('10000000-0000-0000-0000-' || lpad(ordinal::text, 12, '0'))::uuid,
+                $1, $2, 1, 'canonical'
+         FROM generate_series(1, 100) AS ordinal",
+    )
+    .bind(BASE_CHAIN)
+    .bind(block_hash(BASE_CHAIN, 1))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO name_surfaces (
+             logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+             namehash, labelhashes, normalizer_version, visibility_state,
+             chain_id, block_hash, block_number, canonicality_state
+         )
+         SELECT 'basenames:0xsample' || lpad(ordinal::text, 3, '0'),
+                'basenames', 'sample-' || lpad(ordinal::text, 3, '0') || '.base.eth',
+                ARRAY['sample-' || lpad(ordinal::text, 3, '0'), 'base', 'eth'],
+                decode('00', 'hex'), '0xsample' || lpad(ordinal::text, 3, '0'),
+                ARRAY['0xsample' || lpad(ordinal::text, 3, '0'), '0xbase', '0xeth'],
+                $1, 'active', $2, $3, 1, 'canonical'
+         FROM generate_series(1, 100) AS ordinal",
+    )
+    .bind(NORMALIZER)
+    .bind(BASE_CHAIN)
+    .bind(block_hash(BASE_CHAIN, 1))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO surface_bindings (
+             surface_binding_id, logical_name_id, resource_id, binding_kind,
+             active_from, chain_id, block_hash, block_number, canonicality_state
+         )
+         SELECT ('20000000-0000-0000-0000-' || lpad(ordinal::text, 12, '0'))::uuid,
+                'basenames:0xsample' || lpad(ordinal::text, 3, '0'),
+                ('10000000-0000-0000-0000-' || lpad(ordinal::text, 12, '0'))::uuid,
+                CASE WHEN ordinal = 100 THEN 'resolver_alias_path'
+                     ELSE 'declared_registry_path' END,
+                to_timestamp(1), $1, $2, 1, 'canonical'
+         FROM generate_series(1, 100) AS ordinal",
+    )
+    .bind(BASE_CHAIN)
+    .bind(block_hash(BASE_CHAIN, 1))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, resource_id, event_kind,
+             source_family, manifest_version, chain_id, block_number, block_hash,
+             raw_fact_ref, derivation_kind, canonicality_state, before_state, after_state
+         )
+         SELECT $1 || ':ResolverChanged:sample:' || ordinal,
+                'basenames', 'basenames:0xsample' || lpad(ordinal::text, 3, '0'),
+                ('10000000-0000-0000-0000-' || lpad(ordinal::text, 12, '0'))::uuid,
+                'ResolverChanged', 'basenames_base_registry', 1, $1, 2, $2,
+                '{}'::jsonb, 'ens_v1_unwrapped_authority', 'canonical', '{}'::jsonb,
+                jsonb_build_object('resolver', $3::text)
+         FROM generate_series(1, 100) AS ordinal",
+    )
+    .bind(BASE_CHAIN)
+    .bind(block_hash(BASE_CHAIN, 2))
+    .bind(BASENAMES_RESOLVER)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, resource_id, event_kind,
+             source_family, manifest_version, chain_id, block_number, block_hash,
+             raw_fact_ref, derivation_kind, canonicality_state, before_state, after_state
+         )
+         SELECT $1 || ':AliasChanged:sample:' || ordinal,
+                'basenames', 'basenames:0xsample' || lpad(ordinal::text, 3, '0'),
+                ('10000000-0000-0000-0000-' || lpad(ordinal::text, 12, '0'))::uuid,
+                'AliasChanged', 'basenames_base_resolver', 1, $1, 3, $2,
+                jsonb_build_object('emitting_address', $3::text),
+                'ens_v1_unwrapped_authority', 'canonical', '{}'::jsonb,
+                jsonb_build_object(
+                    'resolver', $3::text, 'active', true,
+                    'from_name', 'alias-' || lpad(ordinal::text, 3, '0') || '.base.eth',
+                    'to_name', 'sample-' || lpad(ordinal::text, 3, '0') || '.base.eth',
+                    'to_logical_name_id',
+                        'basenames:0xsample' || lpad(ordinal::text, 3, '0'),
+                    'to_resource_id',
+                        '10000000-0000-0000-0000-' || lpad(ordinal::text, 12, '0')
+                )
+         FROM generate_series(1, 100) AS ordinal",
+    )
+    .bind(BASE_CHAIN)
+    .bind(block_hash(BASE_CHAIN, 3))
+    .bind(BASENAMES_RESOLVER)
+    .execute(scratch.pool())
+    .await?;
+    insert_namespaced_event(
+        scratch.pool(),
+        "basenames",
+        BASE_CHAIN,
+        3,
+        Some("basenames:0xalice-base"),
+        Some(BASENAMES_RESOURCE),
+        "AliasChanged",
+        "basenames_base_resolver",
+        1,
+        json!({
+            "resolver":BASENAMES_RESOLVER,
+            "active":true,
+            "from_name":"alias.alice.base.eth",
+            "to_name":"alice.base.eth",
+            "to_logical_name_id":"basenames:0xalice-base",
+            "to_resource_id":BASENAMES_RESOURCE
+        }),
+        json!({"emitting_address":BASENAMES_RESOLVER}),
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, resource_id, event_kind,
+             source_family, manifest_version, chain_id, block_number, block_hash,
+             raw_fact_ref, derivation_kind, canonicality_state, before_state, after_state
+         )
+         SELECT $1 || ':PermissionChanged:sample:' || ordinal,
+                'basenames', 'basenames:0xsample' || lpad(ordinal::text, 3, '0'),
+                ('10000000-0000-0000-0000-' || lpad(ordinal::text, 12, '0'))::uuid,
+                'PermissionChanged', 'basenames_base_resolver', 1, $1, 4, $2,
+                jsonb_build_object('emitting_address', $3::text),
+                'ens_v1_unwrapped_authority', 'canonical', '{}'::jsonb,
+                jsonb_build_object(
+                    'subject', '0x' || lpad(to_hex(ordinal), 40, '0'),
+                    'scope', jsonb_build_object(
+                        'kind', 'resolver', 'chain_id', $1::text,
+                        'resolver_address', $3::text
+                    ),
+                    'effective_powers', jsonb_build_array('record_write'),
+                    'grant_source', jsonb_build_object('kind', 'fixture'),
+                    'inheritance_path', '[]'::jsonb,
+                    'transfer_behavior', 'replace_on_authority_change'
+                )
+         FROM generate_series(1, 100) AS ordinal",
+    )
+    .bind(BASE_CHAIN)
+    .bind(block_hash(BASE_CHAIN, 4))
+    .bind(BASENAMES_RESOLVER)
+    .execute(scratch.pool())
+    .await?;
+    insert_namespaced_event(
+        scratch.pool(),
+        "basenames",
+        BASE_CHAIN,
+        4,
+        Some("basenames:0xalice-base"),
+        Some(BASENAMES_RESOURCE),
+        "PermissionChanged",
+        "basenames_base_resolver",
+        1,
+        json!({
+            "subject":"0x0000000000000000000000000000000000000000",
+            "scope":{
+                "kind":"resolver",
+                "chain_id":BASE_CHAIN,
+                "resolver_address":BASENAMES_RESOLVER
+            },
+            "effective_powers":["record_write","set_resolver"],
+            "grant_source":{"kind":"fixture"},
+            "inheritance_path":[],
+            "transfer_behavior":"replace_on_authority_change"
+        }),
+        json!({"emitting_address":BASENAMES_RESOLVER}),
+    )
+    .await?;
+
+    run_project(scratch.pool(), BASE_CHAIN, None, RunMode::Normal, 0, 4).await?;
+    let summary: Value = sqlx::query_scalar(
+        "SELECT declared_summary FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = $2",
+    )
+    .bind(BASE_CHAIN)
+    .bind(BASENAMES_RESOLVER)
+    .fetch_one(scratch.pool())
+    .await?;
+
+    let bindings = &summary["bindings"];
+    assert_eq!(bindings["count"], 101);
+    assert_eq!(bindings["total_count"], 101);
+    assert_eq!(bindings["sample_limit"], 100);
+    assert_eq!(bindings["sample_count"], 100);
+    assert_eq!(bindings["truncated"], true);
+    let items = bindings["items"].as_array().expect("binding sample array");
+    assert_eq!(items.len(), 100);
+    assert_eq!(items[0]["raw_name"], "alice.base.eth");
+    assert_eq!(items[99]["raw_name"], "sample-099.base.eth");
+    assert!(
+        items
+            .iter()
+            .all(|item| item["raw_name"] != "sample-100.base.eth")
+    );
+
+    assert_eq!(summary["aliases"]["total_count"], 102);
+    assert_eq!(summary["aliases"]["sample_limit"], 100);
+    assert_eq!(summary["aliases"]["sample_count"], 100);
+    assert_eq!(summary["aliases"]["truncated"], true);
+    let aliases = summary["aliases"]["items"]
+        .as_array()
+        .expect("alias sample array");
+    assert_eq!(aliases[0]["binding_kind"], "resolver_alias_path");
+    assert_eq!(aliases[0]["raw_name"], "sample-100.base.eth");
+    assert_eq!(aliases[1]["from_name"], "alias.alice.base.eth");
+    assert_eq!(aliases[99]["from_name"], "alias-098.base.eth");
+    assert!(aliases.iter().all(|item| {
+        item["from_name"] != "alias-099.base.eth" && item["from_name"] != "alias-100.base.eth"
+    }));
+
+    for section in ["permissions", "role_holders"] {
+        assert_eq!(summary[section]["total_count"], 101, "{section}");
+        assert_eq!(summary[section]["sample_limit"], 100, "{section}");
+        assert_eq!(summary[section]["sample_count"], 100, "{section}");
+        assert_eq!(summary[section]["truncated"], true, "{section}");
+        assert_eq!(
+            summary[section]["items"].as_array().map(Vec::len),
+            Some(100)
+        );
+    }
+    assert!(
+        summary["role_holders"]["items"][0]
+            .get("resource_ids")
+            .is_none()
+    );
+    let role_holders = summary["role_holders"]["items"]
+        .as_array()
+        .expect("role-holder sample array");
+    assert_eq!(
+        role_holders[0]["subject"],
+        "0x0000000000000000000000000000000000000000"
+    );
+    assert_eq!(
+        role_holders[99]["subject"],
+        "0x0000000000000000000000000000000000000063"
+    );
+    assert!(
+        role_holders
+            .iter()
+            .all(|item| { item["subject"] != "0x0000000000000000000000000000000000000064" })
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn children_follow_topology_tombstones_not_surface_suffixes() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_children_tombstone").await?;
     seed_project_fixture(scratch.pool()).await?;
@@ -2098,6 +2845,140 @@ async fn incremental_project_revisits_wrapper_timestamp_boundaries() -> Result<(
             .fetch_one(scratch.pool())
             .await?;
     assert_eq!(expired_permissions, 0);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn incremental_resolver_builder_stages_only_the_scoped_discovered_resolver() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_resolver_candidate_scope").await?;
+    seed_project_fixture(scratch.pool()).await?;
+
+    let resolver_manifest: i64 = sqlx::query_scalar(
+        "SELECT source_manifest_id
+         FROM normalized_events
+         WHERE chain_id = $1
+           AND event_kind = 'SourceManifestUpdated'
+           AND source_family = 'ens_v1_resolver_l1'",
+    )
+    .bind(CHAIN)
+    .fetch_one(scratch.pool())
+    .await?;
+    let source_instance = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO contract_instances (
+             contract_instance_id, chain_id, contract_kind
+         ) VALUES ($1, $2, 'contract')",
+    )
+    .bind(source_instance)
+    .bind(CHAIN)
+    .execute(scratch.pool())
+    .await?;
+    for address in [
+        "0x00000000000000000000000000000000000000B1",
+        "0x00000000000000000000000000000000000000C2",
+    ] {
+        let resolver_instance = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO contract_instances (
+                 contract_instance_id, chain_id, contract_kind
+             ) VALUES ($1, $2, 'contract')",
+        )
+        .bind(resolver_instance)
+        .bind(CHAIN)
+        .execute(scratch.pool())
+        .await?;
+        sqlx::query(
+            "INSERT INTO contract_instance_addresses (
+                 contract_instance_id, chain_id, address,
+                 active_from_block_number, active_from_block_hash,
+                 source_manifest_id
+             ) VALUES ($1, $2, $3, 1, $4, $5)",
+        )
+        .bind(resolver_instance)
+        .bind(CHAIN)
+        .bind(address)
+        .bind(block_hash(CHAIN, 1))
+        .bind(resolver_manifest)
+        .execute(scratch.pool())
+        .await?;
+        sqlx::query(
+            "INSERT INTO discovery_edges (
+                 chain_id, edge_kind, from_contract_instance_id,
+                 to_contract_instance_id, discovery_source, admission_basis,
+                 source_manifest_id, active_from_block_number,
+                 active_from_block_hash, canonicality_state
+             ) VALUES (
+                 $1, 'resolver', $2, $3, 'fixture', 'reachable_from_root',
+                 $4, 1, $5, 'canonical'
+             )",
+        )
+        .bind(CHAIN)
+        .bind(source_instance)
+        .bind(resolver_instance)
+        .bind(resolver_manifest)
+        .bind(block_hash(CHAIN, 1))
+        .execute(scratch.pool())
+        .await?;
+    }
+
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    insert_lineage_block(scratch.pool(), CHAIN, 4).await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        4,
+        None,
+        None,
+        "RecordChanged",
+        "ens_v1_resolver_l1",
+        json!({"selector":"text:url","value":"https://example.test"}),
+        json!({"emitting_address":RESOLVER}),
+    )
+    .await?;
+
+    sqlx::query("CREATE SEQUENCE resolver_stage_candidate_count")
+        .execute(scratch.pool())
+        .await?;
+    sqlx::query(
+        "ALTER TABLE resolver_current
+         ALTER COLUMN last_recomputed_at SET DEFAULT
+             to_timestamp(nextval('resolver_stage_candidate_count')::double precision)",
+    )
+    .execute(scratch.pool())
+    .await?;
+
+    run_project(
+        scratch.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Normal,
+        4,
+        4,
+    )
+    .await?;
+
+    let staged_candidates: (i64, bool) =
+        sqlx::query_as("SELECT last_value, is_called FROM resolver_stage_candidate_count")
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(staged_candidates, (1, true));
+    let scoped_resolver: (String, String) = sqlx::query_as(
+        "SELECT support_status,
+                declared_summary -> 'classification' ->> 'source_family'
+         FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(RESOLVER)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        scoped_resolver,
+        ("supported".into(), "ens_v1_resolver_l1".into())
+    );
     scratch.cleanup().await
 }
 
