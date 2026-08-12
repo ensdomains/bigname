@@ -5,6 +5,7 @@ use crate::{Marker, ProjectError, Result};
 mod primary;
 mod resolver;
 mod retracted;
+mod topology;
 mod wrapper;
 
 pub(crate) struct Window<'a> {
@@ -245,8 +246,10 @@ async fn seed_direct_scope(
 async fn include_topology_scope(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
-    _target_block: i64,
+    target_block: i64,
 ) -> Result<()> {
+    topology::include_referenced_registrations(transaction, chain_id, target_block).await?;
+
     sqlx::query(
         "INSERT INTO project_scope_children
          SELECT child.parent_logical_name_id

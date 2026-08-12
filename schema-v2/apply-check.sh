@@ -891,7 +891,8 @@ BEGIN
                 ('surface_bindings_name_idx'),
                 ('surface_bindings_resource_idx'),
                 ('normalized_events_name_history_idx'),
-                ('normalized_events_resource_history_idx')
+                ('normalized_events_resource_history_idx'),
+                ('normalized_events_subregistry_registration_history_idx')
         ) AS required(index_name)
         UNION ALL
         SELECT
@@ -938,7 +939,8 @@ BEGIN
                             ) IS DISTINCT FROM (
                                 required.index_name IN (
                                     'normalized_events_resolver_alias_history_idx',
-                                    'normalized_events_resolver_upgrade_history_idx'
+                                    'normalized_events_resolver_upgrade_history_idx',
+                                    'normalized_events_subregistry_registration_history_idx'
                                 )
                                 AND key.ordinal IN (3, 4)
                             )
@@ -996,6 +998,24 @@ BEGIN
                     ARRAY[
                         '%event_kind%Upgraded%',
                         '%canonicality_state%canonical%safe%finalized%'
+                    ]
+                ),
+                (
+                    'normalized_events_subregistry_registration_history_idx',
+                    'normalized_events',
+                    ARRAY[
+                        'chain_id',
+                        '%after_state%registry_contract_instance_id%',
+                        'block_number',
+                        'normalized_event_id',
+                        'logical_name_id'
+                    ],
+                    ARRAY[
+                        '%event_kind%RegistrationGranted%RegistrationRenewed%RegistrationReleased%',
+                        '%source_family%ens_v2_root_l1%ens_v2_registry_l1%',
+                        '%canonicality_state%canonical%safe%finalized%',
+                        '%logical_name_id%IS NOT NULL%',
+                        '%after_state%registry_contract_instance_id%IS NOT NULL%'
                     ]
                 ),
                 (

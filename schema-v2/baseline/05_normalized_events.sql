@@ -384,6 +384,22 @@ CREATE INDEX IF NOT EXISTS normalized_events_resolver_upgrade_history_idx
     WHERE event_kind = 'Upgraded'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
+CREATE INDEX IF NOT EXISTS normalized_events_subregistry_registration_history_idx
+    ON normalized_events (
+        chain_id,
+        (after_state ->> 'registry_contract_instance_id'),
+        block_number DESC,
+        normalized_event_id DESC,
+        logical_name_id
+    )
+    WHERE event_kind IN (
+              'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased'
+          )
+      AND source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND logical_name_id IS NOT NULL
+      AND after_state ->> 'registry_contract_instance_id' IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS normalized_events_projection_idx
     ON normalized_events (
         event_kind,

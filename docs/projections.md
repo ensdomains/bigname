@@ -36,8 +36,12 @@ observation without a linked name or resource does not create a resolver row.
 rows, again without expanding either resolver to its other names.
 Only a resolver `Upgraded` event or stale resolver classification caused by the
 active manifest set expands through resources whose current resolver pointer
-matches that resolver. Topology and registrar-label changes expand through
-`children_current`, not normalized-event history.
+matches that resolver. Registrar-label changes and already projected topology
+expand through `children_current`. For a scoped ENSv2 name, Project also reads
+only that name's canonical `SubregistryChanged` history through the target,
+resolves the previous and new registry instances, and expands through the
+indexed registration histories for those instances. It does not scan unrelated
+topology or registration history.
 
 Wrapper expiry and `.eth` grace transitions read the latest raw fuse word and
 wrapper expiry stored in the affected resource's

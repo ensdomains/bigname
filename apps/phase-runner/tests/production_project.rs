@@ -2556,6 +2556,240 @@ async fn incremental_v2_child_renewal_retains_sibling_edges() -> Result<()> {
     scratch.cleanup().await
 }
 
+#[tokio::test]
+async fn incremental_v2_subregistry_flip_replaces_children_in_both_directions() -> Result<()> {
+    let incremental = ScratchDatabase::create("production_project_v2_subregistry_flip").await?;
+    let full = ScratchDatabase::create("production_project_v2_subregistry_flip_full").await?;
+    for pool in [incremental.pool(), full.pool()] {
+        seed_project_fixture(pool).await?;
+        seed_v2_subregistry_flip_fixture(pool).await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    assert_eq!(
+        v2_flip_children(incremental.pool()).await?,
+        vec!["ens:0xflip-c0"],
+        "the initial S1 pointer must select c0"
+    );
+
+    for (target, expected) in [
+        (4, vec!["ens:0xflip-c1", "ens:0xflip-shared"]),
+        (5, vec!["ens:0xflip-c0"]),
+        (6, vec!["ens:0xflip-c0"]),
+    ] {
+        run_project(
+            incremental.pool(),
+            CHAIN,
+            Some(Marker {
+                number: target - 1,
+                hash: block_hash(CHAIN, target - 1),
+            }),
+            RunMode::Normal,
+            target,
+            target,
+        )
+        .await?;
+        run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, target).await?;
+
+        let incremental_children = v2_flip_children(incremental.pool()).await?;
+        let full_children = v2_flip_children(full.pool()).await?;
+        assert_eq!(
+            full_children, expected,
+            "unexpected full rebuild at {target}"
+        );
+        assert_eq!(
+            incremental_children, full_children,
+            "incremental child edges diverged after the subregistry tick at {target}"
+        );
+    }
+
+    incremental.cleanup().await?;
+    full.cleanup().await
+}
+
+async fn v2_flip_children(pool: &PgPool) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT child_logical_name_id
+         FROM children_current
+         WHERE parent_logical_name_id = 'ens:0xflip-parent'
+         ORDER BY child_logical_name_id",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+async fn seed_v2_subregistry_flip_fixture(pool: &PgPool) -> Result<()> {
+    const S1_ADDRESS: &str = "0x0000000000000000000000000000000000000f01";
+    const S2_ADDRESS: &str = "0x0000000000000000000000000000000000000f02";
+    let s1 = Uuid::parse_str("00000000-0000-0000-0000-000000000f01")?;
+    let s2 = Uuid::parse_str("00000000-0000-0000-0000-000000000f02")?;
+
+    for block in 4..=6 {
+        insert_lineage_block(pool, CHAIN, block).await?;
+    }
+    for (instance, address) in [(s1, S1_ADDRESS), (s2, S2_ADDRESS)] {
+        sqlx::query(
+            "INSERT INTO contract_instances (
+                 contract_instance_id, chain_id, contract_kind
+             ) VALUES ($1, $2, 'contract')",
+        )
+        .bind(instance)
+        .bind(CHAIN)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO contract_instance_addresses (
+                 contract_instance_id, chain_id, address, active_from_block_number
+             ) VALUES ($1, $2, $3, 0)",
+        )
+        .bind(instance)
+        .bind(CHAIN)
+        .bind(address)
+        .execute(pool)
+        .await?;
+    }
+    for (logical_name_id, raw_name, raw_labels, namehash, labelhashes) in [
+        (
+            "ens:0xflip-parent",
+            "flip.eth",
+            vec!["flip", "eth"],
+            "0xflip-parent",
+            vec!["0xflip-parent-label", "0xeth"],
+        ),
+        (
+            "ens:0xflip-c0",
+            "c0.flip.eth",
+            vec!["c0", "flip", "eth"],
+            "0xflip-c0",
+            vec!["0xflip-c0-label", "0xflip-parent-label", "0xeth"],
+        ),
+        (
+            "ens:0xflip-c1",
+            "c1.flip.eth",
+            vec!["c1", "flip", "eth"],
+            "0xflip-c1",
+            vec!["0xflip-c1-label", "0xflip-parent-label", "0xeth"],
+        ),
+        (
+            "ens:0xflip-shared",
+            "shared.flip.eth",
+            vec!["shared", "flip", "eth"],
+            "0xflip-shared",
+            vec!["0xflip-shared-label", "0xflip-parent-label", "0xeth"],
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO name_surfaces (
+                 logical_name_id, namespace, raw_name, raw_labels,
+                 dns_encoded_name, namehash, labelhashes, normalizer_version,
+                 visibility_state, chain_id, block_hash, block_number,
+                 canonicality_state
+             ) VALUES ($1, 'ens', $2, $3, decode('00', 'hex'), $4, $5, $6,
+                       'active', $7, $8, 1, 'canonical')",
+        )
+        .bind(logical_name_id)
+        .bind(raw_name)
+        .bind(raw_labels)
+        .bind(namehash)
+        .bind(labelhashes)
+        .bind(NORMALIZER)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO label_preimages (
+             labelhash, raw_label, decoded_label, normalizer_version,
+             normalized_under_version, source_kind, source_priority
+         ) VALUES
+             ('0xflip-c0-label', convert_to('c0', 'UTF8'), 'c0', $1, true, 'fixture', 1),
+             ('0xflip-c1-label', convert_to('c1', 'UTF8'), 'c1', $1, true, 'fixture', 1),
+             ('0xflip-shared-label', convert_to('shared', 'UTF8'), 'shared', $1,
+              true, 'fixture', 1)",
+    )
+    .bind(NORMALIZER)
+    .execute(pool)
+    .await?;
+
+    insert_event(
+        pool,
+        CHAIN,
+        1,
+        Some("ens:0xflip-parent"),
+        None,
+        "SubregistryChanged",
+        "ens_v2_registry_l1",
+        json!({"subregistry":S1_ADDRESS}),
+        json!({}),
+    )
+    .await?;
+    for (block, logical_name_id, instance) in [
+        (1, "ens:0xflip-c0", s1),
+        (2, "ens:0xflip-c1", s2),
+        (1, "ens:0xflip-shared", s2),
+        (2, "ens:0xflip-shared", s1),
+    ] {
+        insert_event(
+            pool,
+            CHAIN,
+            block,
+            Some(logical_name_id),
+            None,
+            "RegistrationGranted",
+            "ens_v2_registry_l1",
+            json!({
+                "registry_contract_instance_id":instance,
+                "registrant":OWNER
+            }),
+            json!({}),
+        )
+        .await?;
+    }
+    insert_event(
+        pool,
+        CHAIN,
+        3,
+        Some("ens:0xflip-shared"),
+        None,
+        "RegistrationReleased",
+        "ens_v2_registry_l1",
+        json!({
+            "registry_contract_instance_id":s1,
+            "registrant":OWNER
+        }),
+        json!({}),
+    )
+    .await?;
+    for (block, before, after) in [(4, S1_ADDRESS, S2_ADDRESS), (5, S2_ADDRESS, S1_ADDRESS)] {
+        insert_event(
+            pool,
+            CHAIN,
+            block,
+            Some("ens:0xflip-parent"),
+            None,
+            "SubregistryChanged",
+            "ens_v2_registry_l1",
+            json!({"subregistry":after}),
+            json!({}),
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE normalized_events
+             SET before_state = jsonb_build_object('subregistry', lower($1))
+             WHERE chain_id = $2 AND block_number = $3
+               AND logical_name_id = 'ens:0xflip-parent'
+               AND event_kind = 'SubregistryChanged'",
+        )
+        .bind(before)
+        .bind(CHAIN)
+        .bind(block)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
 fn expected_wrapper_fuses(fuses: u32) -> Value {
     json!({
         "fuses": fuses,
@@ -4316,7 +4550,7 @@ async fn incremental_ticks_match_one_full_rebuild_across_all_eight_serving_table
         extend_incremental_equivalence_fixture(pool).await?;
     }
 
-    for target in 1..=7 {
+    for target in 1..=8 {
         let previous = (target > 1).then(|| Marker {
             number: target - 1,
             hash: block_hash(CHAIN, target - 1),
@@ -4366,6 +4600,18 @@ async fn incremental_ticks_match_one_full_rebuild_across_all_eight_serving_table
             .fetch_one(incremental.pool())
             .await?;
             assert_eq!(grace_powers, json!(["approve"]));
+            let children: Vec<String> = sqlx::query_scalar(
+                "SELECT child_logical_name_id FROM children_current
+                 WHERE parent_logical_name_id = 'ens:0xequivalence-parent'
+                 ORDER BY child_logical_name_id",
+            )
+            .fetch_all(incremental.pool())
+            .await?;
+            assert_eq!(
+                children,
+                vec!["ens:0xequivalence-c1"],
+                "SubregistryChanged must stage the newly selected registry's children"
+            );
         }
         if target == 5 {
             let wrapper_permission_exists: bool = sqlx::query_scalar(
@@ -4393,8 +4639,22 @@ async fn incremental_ticks_match_one_full_rebuild_across_all_eight_serving_table
                 "Upgraded must rebuild the resolver's current resource dependents"
             );
         }
+        if target == 8 {
+            let children: Vec<String> = sqlx::query_scalar(
+                "SELECT child_logical_name_id FROM children_current
+                 WHERE parent_logical_name_id = 'ens:0xequivalence-parent'
+                 ORDER BY child_logical_name_id",
+            )
+            .fetch_all(incremental.pool())
+            .await?;
+            assert_eq!(
+                children,
+                vec!["ens:0xequivalence-c1"],
+                "SubregistryChanged must replace the old registry's children"
+            );
+        }
     }
-    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 7).await?;
+    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 8).await?;
 
     normalize_projection_clocks(incremental.pool()).await?;
     normalize_projection_clocks(full.pool()).await?;
@@ -4461,17 +4721,17 @@ async fn topology_staged_sibling_is_not_double_counted_in_resolver_bindings() ->
             "INSERT INTO chain_lineage (
                  chain_id, block_hash, parent_hash, block_number,
                  block_timestamp, canonicality_state
-             ) VALUES ($1, $2, $3, 8, to_timestamp(7776007), 'canonical')",
+             ) VALUES ($1, $2, $3, 9, to_timestamp(7776008), 'canonical')",
         )
         .bind(CHAIN)
+        .bind(block_hash(CHAIN, 9))
         .bind(block_hash(CHAIN, 8))
-        .bind(block_hash(CHAIN, 7))
         .execute(pool)
         .await?;
         insert_event(
             pool,
             CHAIN,
-            8,
+            9,
             Some("ens:0xalice"),
             Some(RESOURCE),
             "SubregistryChanged",
@@ -4488,7 +4748,7 @@ async fn topology_staged_sibling_is_not_double_counted_in_resolver_bindings() ->
         insert_event(
             pool,
             CHAIN,
-            8,
+            9,
             Some("ens:0xalice"),
             Some(RESOURCE),
             "PermissionChanged",
@@ -4510,20 +4770,20 @@ async fn topology_staged_sibling_is_not_double_counted_in_resolver_bindings() ->
         .await?;
     }
 
-    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 7).await?;
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 8).await?;
     run_project(
         incremental.pool(),
         CHAIN,
         Some(Marker {
-            number: 7,
-            hash: block_hash(CHAIN, 7),
+            number: 8,
+            hash: block_hash(CHAIN, 8),
         }),
         RunMode::Normal,
-        8,
-        8,
+        9,
+        9,
     )
     .await?;
-    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 8).await?;
+    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 9).await?;
 
     let incremental_summary: Value = sqlx::query_scalar(
         "SELECT declared_summary FROM resolver_current
@@ -5361,6 +5621,7 @@ async fn extend_incremental_equivalence_fixture(pool: &PgPool) -> Result<()> {
         (5, 7_776_004),
         (6, 7_776_005),
         (7, 7_776_006),
+        (8, 7_776_007),
     ] {
         sqlx::query(
             "INSERT INTO chain_lineage (
@@ -5376,6 +5637,8 @@ async fn extend_incremental_equivalence_fixture(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await?;
     }
+
+    seed_equivalence_subregistry_flip(pool).await?;
 
     sqlx::query(
         "INSERT INTO resources (
@@ -5721,6 +5984,247 @@ async fn extend_incremental_equivalence_fixture(pool: &PgPool) -> Result<()> {
         }),
         json!({}),
     )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        8,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "AuthorityTransferred",
+        "ens_v1_registrar_l1",
+        json!({"owner":OWNER}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        8,
+        Some("ens:0xbob"),
+        Some(EQUIVALENCE_BOB_RESOURCE),
+        "AuthorityTransferred",
+        "ens_v1_registrar_l1",
+        json!({"owner":"0x00000000000000000000000000000000000000a7"}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        8,
+        Some("ens:0xeth"),
+        None,
+        "PreimageObserved",
+        "ens_v1_registry_l1",
+        json!({"labelhash":"0xeth","raw_labels_hex":["657468"]}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        8,
+        None,
+        None,
+        "ReverseChanged",
+        "ens_v1_reverse_l1",
+        json!({
+            "address":OWNER,
+            "coin_type":"60",
+            "namespace":"ens",
+            "claim_provenance":{"source_family":"ens_v1_reverse_l1"}
+        }),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        8,
+        None,
+        None,
+        "RecordChanged",
+        "ens_v1_reverse_l1",
+        json!({
+            "raw_name":"alice.eth",
+            "primary_claim_source":{
+                "address":OWNER,
+                "coin_type":"60",
+                "namespace":"ens",
+                "claim_provenance":{"source_family":"ens_v1_reverse_l1"}
+            }
+        }),
+        json!({}),
+    )
+    .await?;
+    for logical_name_id in [
+        "ens:0xequivalence-parent",
+        "ens:0xequivalence-c0",
+        "ens:0xequivalence-c1",
+    ] {
+        insert_event(
+            pool,
+            CHAIN,
+            8,
+            Some(logical_name_id),
+            None,
+            "PreimageObserved",
+            "ens_v2_registry_l1",
+            json!({"raw_labels_hex":[]}),
+            json!({}),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn seed_equivalence_subregistry_flip(pool: &PgPool) -> Result<()> {
+    const S1_ADDRESS: &str = "0x0000000000000000000000000000000000000e01";
+    const S2_ADDRESS: &str = "0x0000000000000000000000000000000000000e02";
+    let s1 = Uuid::parse_str("00000000-0000-0000-0000-000000000e01")?;
+    let s2 = Uuid::parse_str("00000000-0000-0000-0000-000000000e02")?;
+
+    for (instance, address) in [(s1, S1_ADDRESS), (s2, S2_ADDRESS)] {
+        sqlx::query(
+            "INSERT INTO contract_instances (
+                 contract_instance_id, chain_id, contract_kind
+             ) VALUES ($1, $2, 'contract')",
+        )
+        .bind(instance)
+        .bind(CHAIN)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO contract_instance_addresses (
+                 contract_instance_id, chain_id, address, active_from_block_number
+             ) VALUES ($1, $2, $3, 0)",
+        )
+        .bind(instance)
+        .bind(CHAIN)
+        .bind(address)
+        .execute(pool)
+        .await?;
+    }
+    for (logical_name_id, raw_name, raw_labels, namehash, labelhashes) in [
+        (
+            "ens:0xequivalence-parent",
+            "equivalence.eth",
+            vec!["equivalence", "eth"],
+            "0xequivalence-parent",
+            vec!["0xequivalence-parent-label", "0xeth"],
+        ),
+        (
+            "ens:0xequivalence-c0",
+            "c0.equivalence.eth",
+            vec!["c0", "equivalence", "eth"],
+            "0xequivalence-c0",
+            vec![
+                "0xequivalence-c0-label",
+                "0xequivalence-parent-label",
+                "0xeth",
+            ],
+        ),
+        (
+            "ens:0xequivalence-c1",
+            "c1.equivalence.eth",
+            vec!["c1", "equivalence", "eth"],
+            "0xequivalence-c1",
+            vec![
+                "0xequivalence-c1-label",
+                "0xequivalence-parent-label",
+                "0xeth",
+            ],
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO name_surfaces (
+                 logical_name_id, namespace, raw_name, raw_labels,
+                 dns_encoded_name, namehash, labelhashes, normalizer_version,
+                 visibility_state, chain_id, block_hash, block_number,
+                 canonicality_state
+             ) VALUES ($1, 'ens', $2, $3, decode('00', 'hex'), $4, $5, $6,
+                       'active', $7, $8, 1, 'canonical')",
+        )
+        .bind(logical_name_id)
+        .bind(raw_name)
+        .bind(raw_labels)
+        .bind(namehash)
+        .bind(labelhashes)
+        .bind(NORMALIZER)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO label_preimages (
+             labelhash, raw_label, decoded_label, normalizer_version,
+             normalized_under_version, source_kind, source_priority
+         ) VALUES
+             ('0xequivalence-c0-label', convert_to('c0', 'UTF8'), 'c0', $1,
+              true, 'fixture', 1),
+             ('0xequivalence-c1-label', convert_to('c1', 'UTF8'), 'c1', $1,
+              true, 'fixture', 1)",
+    )
+    .bind(NORMALIZER)
+    .execute(pool)
+    .await?;
+
+    insert_event(
+        pool,
+        CHAIN,
+        1,
+        Some("ens:0xequivalence-parent"),
+        None,
+        "SubregistryChanged",
+        "ens_v2_registry_l1",
+        json!({"subregistry":S1_ADDRESS}),
+        json!({}),
+    )
+    .await?;
+    for (block, logical_name_id, instance) in [
+        (1, "ens:0xequivalence-c0", s1),
+        (2, "ens:0xequivalence-c1", s2),
+    ] {
+        insert_event(
+            pool,
+            CHAIN,
+            block,
+            Some(logical_name_id),
+            None,
+            "RegistrationGranted",
+            "ens_v2_registry_l1",
+            json!({
+                "registry_contract_instance_id":instance,
+                "registrant":OWNER
+            }),
+            json!({}),
+        )
+        .await?;
+    }
+    insert_event(
+        pool,
+        CHAIN,
+        4,
+        Some("ens:0xequivalence-parent"),
+        None,
+        "SubregistryChanged",
+        "ens_v2_registry_l1",
+        json!({"subregistry":S2_ADDRESS}),
+        json!({}),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET before_state = jsonb_build_object('subregistry', lower($1))
+         WHERE chain_id = $2 AND block_number = 4
+           AND logical_name_id = 'ens:0xequivalence-parent'
+           AND event_kind = 'SubregistryChanged'",
+    )
+    .bind(S1_ADDRESS)
+    .bind(CHAIN)
+    .execute(pool)
     .await?;
     Ok(())
 }
