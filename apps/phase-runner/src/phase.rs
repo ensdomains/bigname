@@ -8,6 +8,8 @@ use crate::{
 
 pub type PhaseFuture<'a> =
     Pin<Box<dyn Future<Output = RunnerResult<PhaseBatchOutcome>> + Send + 'a>>;
+pub type CompletedPhaseFuture<'a> =
+    Pin<Box<dyn Future<Output = RunnerResult<Option<PhaseProgress>>> + Send + 'a>>;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum PhaseName {
@@ -211,6 +213,18 @@ pub trait Phase: Send + Sync {
     }
 
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_>;
+
+    fn revalidates_completed(
+        &self,
+        _chain_id: &str,
+        _sources: &[SourceConfig],
+    ) -> RunnerResult<bool> {
+        Ok(false)
+    }
+
+    fn revalidate_completed(&self, _context: PhaseContext) -> CompletedPhaseFuture<'_> {
+        Box::pin(async { Ok(None) })
+    }
 }
 
 #[derive(Clone, Debug)]

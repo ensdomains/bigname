@@ -17,12 +17,15 @@ use crate::{
     error::{ErrorKind, RunnerError, RunnerResult},
     heads::BlockMarker,
     phase::{
-        Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName, PhaseProgress, RunMode,
-        VerificationLevel,
+        CompletedPhaseFuture, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName,
+        PhaseProgress, RunMode, VerificationLevel,
     },
     verify_compare,
     verify_store::VerificationStore,
 };
+
+#[path = "verify_completed.rs"]
+mod completed;
 
 const VERIFICATION_BATCH_BLOCKS: i64 = 131_072;
 
@@ -196,6 +199,18 @@ impl Phase for VerifyPhase {
                 Ok(PhaseBatchOutcome::Continue(progress))
             }
         })
+    }
+
+    fn revalidates_completed(
+        &self,
+        chain_id: &str,
+        sources: &[SourceConfig],
+    ) -> RunnerResult<bool> {
+        completed::is_required(chain_id, sources)
+    }
+
+    fn revalidate_completed(&self, context: PhaseContext) -> CompletedPhaseFuture<'_> {
+        Box::pin(completed::revalidate(self, context))
     }
 }
 

@@ -151,7 +151,10 @@ source with `ethereum_head` seed basis and start block zero. Because that dRPC
 is the intake provider, Verify does not select it as a reference. Verify
 validates the durable ingested extent through its finalized marker and records
 `quick_synced` only when that exact source's persisted cursor matches its
-configuration and covers the finalized target. Separating intake and
+configuration and covers the finalized target. That binding and coverage are
+checked when verification completes and on every runner start; the restart
+check can advance the recorded `quick_synced` extent to the current finalized
+marker. Separating intake and
 verification source roles, then upgrading Sepolia to `cross_checked`, is deferred to
 [issue #411](https://github.com/ensdomains/bigname/issues/411). A generic RPC
 kind is not accepted as Base verification authority

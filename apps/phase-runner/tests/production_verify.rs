@@ -249,6 +249,109 @@ async fn sepolia_provider_trusted_verify_reports_quick_synced_without_reference_
 }
 
 #[tokio::test]
+async fn completed_sepolia_verify_revalidates_source_binding_and_advances_extent() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_sepolia_restart").await?;
+    seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
+    seed_ingest_cursor(scratch.pool(), SEPOLIA, "drpc-intake", 8).await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, 8).await?;
+
+    let first_live_calls = Arc::new(AtomicUsize::new(0));
+    let first_runner = sepolia_verifier_runner(&scratch, Arc::clone(&first_live_calls)).await?;
+    first_runner
+        .run_chain(
+            &sepolia_chain_with_key("drpc-intake")?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert_eq!(first_live_calls.load(Ordering::SeqCst), 1);
+    drop(first_runner);
+
+    let rotated_live_calls = Arc::new(AtomicUsize::new(0));
+    let rotated_runner = sepolia_verifier_runner(&scratch, Arc::clone(&rotated_live_calls)).await?;
+    let error = rotated_runner
+        .run_chain(
+            &sepolia_chain_with_key("rotated-drpc-intake")?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("completed Sepolia Verify must revalidate the configured source key");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error.to_string().contains("durable ingest cursor"),
+        "{error}"
+    );
+    assert_eq!(rotated_live_calls.load(Ordering::SeqCst), 0);
+    drop(rotated_runner);
+
+    move_finalized_head(scratch.pool(), SEPOLIA, 6).await?;
+    let resumed_live_calls = Arc::new(AtomicUsize::new(0));
+    let resumed_runner = sepolia_verifier_runner(&scratch, Arc::clone(&resumed_live_calls)).await?;
+    resumed_runner
+        .run_chain(
+            &sepolia_chain_with_key("drpc-intake")?,
+            CancellationToken::new(),
+        )
+        .await?;
+    let state: (String, String, i64, i64) = sqlx::query_as(
+        "SELECT phase_status, verification_level,
+                current_block_number, target_block_number
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        state,
+        ("completed".to_owned(), "quick_synced".to_owned(), 6, 6)
+    );
+    assert_eq!(resumed_live_calls.load(Ordering::SeqCst), 1);
+
+    drop(resumed_runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn completed_compared_verify_remains_attested_across_config_rotation() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_compared_restart").await?;
+    seed_chain(scratch.pool(), BASE, 5, 5, 5, 1).await?;
+    let reference = Arc::new(FixtureReferences::new([reference_log(BASE, 1)]));
+    let first_runner =
+        verifier_runner(&scratch, reference.clone(), Arc::new(CompleteLivePhase)).await?;
+    first_runner
+        .run_chain(&base_chain(true)?, CancellationToken::new())
+        .await?;
+    assert_eq!(reference.calls().len(), 1);
+    drop(first_runner);
+    reference.clear_calls();
+
+    let restarted_runner =
+        verifier_runner(&scratch, reference.clone(), Arc::new(CompleteLivePhase)).await?;
+    restarted_runner
+        .run_chain(&base_reth_chain()?, CancellationToken::new())
+        .await?;
+    assert!(
+        reference.calls().is_empty(),
+        "completed compared verification must not rescan after source rotation"
+    );
+    let state: (String, String, i64) = sqlx::query_as(
+        "SELECT phase_status, verification_level, current_block_number
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(BASE)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        state,
+        ("completed".to_owned(), "cross_checked".to_owned(), 5)
+    );
+
+    drop(restarted_runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn sepolia_requires_its_configured_intake_cursor_through_finality() -> Result<()> {
     for (prefix, cursor_key, cursor_through, orphan_cursor) in [
         ("changed_key", "previous-drpc-intake", 8, false),
@@ -1391,6 +1494,29 @@ async fn verifier_runner(
     )?)
 }
 
+async fn sepolia_verifier_runner(
+    scratch: &ScratchDatabase,
+    live_calls: Arc<AtomicUsize>,
+) -> Result<PhaseRunner> {
+    let phases = PhaseSet::new([
+        Arc::new(UnexpectedPhase::new(PhaseName::Ingest)) as Arc<dyn Phase>,
+        Arc::new(UnexpectedPhase::new(PhaseName::Interpret)),
+        Arc::new(UnexpectedPhase::new(PhaseName::Project)),
+        Arc::new(VerifyPhase::with_reference_provider(
+            scratch.verification_database(2).await?,
+            Arc::new(UnexpectedReferences),
+        )),
+        Arc::new(CountingLivePhase { calls: live_calls }),
+    ])?;
+    Ok(PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-verifier-sepolia-restart",
+        test_timing(),
+    )?)
+}
+
 fn test_timing() -> TimingConfig {
     TimingConfig {
         initial_backoff: Duration::from_millis(1),
@@ -1451,11 +1577,15 @@ fn ethereum_chain_with_start(start: i64) -> RunnerResult<ChainConfig> {
 }
 
 fn sepolia_chain() -> RunnerResult<ChainConfig> {
+    sepolia_chain_with_key("drpc-intake")
+}
+
+fn sepolia_chain_with_key(source_key: &str) -> RunnerResult<ChainConfig> {
     ChainConfig::new(
         SEPOLIA,
         vec![SourceConfig::new(
             SEPOLIA,
-            "drpc-intake",
+            source_key,
             "drpc",
             SeedBasis::EthereumHead,
             0,
@@ -1482,6 +1612,29 @@ async fn seed_ingest_cursor(
     .bind(source_key)
     .bind(through)
     .bind(block_hash(chain_id, through))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn move_finalized_head(pool: &sqlx::PgPool, chain_id: &str, finalized: i64) -> Result<()> {
+    sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'finalized'
+         WHERE chain_id = $1 AND block_number <= $2",
+    )
+    .bind(chain_id)
+    .bind(finalized)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE chain_heads
+         SET finalized_block_number = $2, finalized_block_hash = $3
+         WHERE chain_id = $1",
+    )
+    .bind(chain_id)
+    .bind(finalized)
+    .bind(block_hash(chain_id, finalized))
     .execute(pool)
     .await?;
     Ok(())

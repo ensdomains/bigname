@@ -4,12 +4,53 @@ use crate::{
     config::ChainConfig,
     error::{RunnerError, RunnerResult},
     heads::{HeadMarkers, load_available_heads, load_marker},
-    phase::{PhaseContext, PhaseName, RunMode},
+    phase::{Phase, PhaseContext, PhaseName, RunMode},
+    phase_lock::PhaseLock,
+    state_persistence::validate_progress,
 };
 
 use super::PhaseRunner;
 
 impl PhaseRunner {
+    pub(super) async fn revalidate_completed_phase(
+        &self,
+        chain: &ChainConfig,
+        phase: Arc<dyn Phase>,
+        phase_lock: &mut PhaseLock,
+    ) -> RunnerResult<()> {
+        let phase_name = phase.name();
+        let context = self
+            .phase_context(chain, phase_name, RunMode::Normal)
+            .await?;
+        let progress = phase_lock
+            .run_while_alive(
+                self.timing.live_poll_interval,
+                phase.revalidate_completed(context),
+            )
+            .await?;
+        let Some(progress) = progress else {
+            return Ok(());
+        };
+        phase_lock.check_alive().await?;
+        validate_progress(phase_name, &progress, true)?;
+        if phase_name == PhaseName::Verify {
+            crate::verify_phase::validate_reported_level(
+                &chain.chain_id,
+                &chain.sources,
+                progress.verification_level,
+            )?;
+        }
+        if progress.heads.is_some() {
+            return Err(RunnerError::data_integrity(format!(
+                "completed phase {phase_name} cannot publish chain heads during revalidation"
+            )));
+        }
+        phase_lock.check_alive().await?;
+        self.store
+            .record_progress(&chain.chain_id, phase_name, &RunMode::Normal, &progress)
+            .await
+    }
+
     pub(super) async fn phase_context(
         &self,
         chain: &ChainConfig,

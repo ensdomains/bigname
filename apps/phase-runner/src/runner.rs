@@ -331,7 +331,14 @@ impl PhaseRunner {
                 .start_phase(&chain.chain_id, phase_name, &mode)
                 .await?
             {
-                StartDisposition::AlreadyCompleted => return Ok(()),
+                StartDisposition::AlreadyCompleted => {
+                    if !phase.revalidates_completed(&chain.chain_id, &chain.sources)? {
+                        return Ok(());
+                    }
+                    return self
+                        .revalidate_completed_phase(chain, phase, phase_lock)
+                        .await;
+                }
                 StartDisposition::Started => {}
             }
             None

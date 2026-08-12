@@ -30,7 +30,8 @@ For each configured chain, the path is:
    `node_checked`. Ethereum Sepolia validates the durable ingested extent
    without selecting its dRPC intake source as an independent reference and
    records `quick_synced`; the exact configured source's persisted cursor must
-   cover the finalized target.
+   cover the finalized target. That binding and coverage are checked when
+   verification completes and again on every runner start.
 5. `live` follows a provider snapshot from the completed ingest handoff, walks
    backward to a stored readable ancestor, loads at most one bounded winning
    suffix batch, and publishes the resulting head through the shared head path.
@@ -111,7 +112,10 @@ the `48,428,000` seam because dRPC supplies intake after that block; only a
 local reth source can report `node_checked`. Sepolia's dRPC is not an independent
 reference because it also supplied intake, so the chain records `quick_synced`.
 Its persisted cursor must match the configured source key, kind, seed basis,
-and start block and must cover the finalized verification target.
+and start block and must cover the finalized verification target. Verify checks
+that condition when it completes and on every runner start; restart
+revalidation uses the current configuration and can advance the recorded
+`quick_synced` extent when finality has moved.
 Source-role separation and a Sepolia `cross_checked` path are deferred to
 [issue #411](https://github.com/ensdomains/bigname/issues/411). Unsupported
 combinations fail as configuration errors rather than falling back to another
