@@ -195,8 +195,22 @@ async fn load_primary_names(
                 AS requested(input_index, address, coin_type)
         )
         SELECT requested.input_index, primary_name.address, primary_name.namespace,
-               primary_name.coin_type, primary_name.claim_status,
-               primary_name.raw_claim_name, primary_name.claim_name_is_normalized,
+               primary_name.coin_type,
+               CASE WHEN hydration.readable THEN primary_name.claim_status
+                    ELSE primary_name.claim_provenance
+                        -> 'canonical_head_multicall_hydration'
+                        -> 'baseline' ->> 'claim_status'
+               END AS claim_status,
+               CASE WHEN hydration.readable THEN primary_name.raw_claim_name
+                    ELSE primary_name.claim_provenance
+                        -> 'canonical_head_multicall_hydration'
+                        -> 'baseline' ->> 'raw_claim_name'
+               END AS raw_claim_name,
+               CASE WHEN hydration.readable THEN primary_name.claim_name_is_normalized
+                    ELSE (primary_name.claim_provenance
+                        -> 'canonical_head_multicall_hydration'
+                        -> 'baseline' ->> 'claim_name_is_normalized')::boolean
+               END AS claim_name_is_normalized,
                CASE
                    WHEN lineage.block_hash IS NULL THEN NULL
                    ELSE jsonb_build_object(
@@ -227,6 +241,25 @@ async fn load_primary_names(
           ON lineage.chain_id = primary_name.claim_provenance ->> 'chain_id'
          AND lineage.block_hash = primary_name.claim_provenance ->> 'target_block_hash'
          AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+        CROSS JOIN LATERAL (
+            SELECT NOT (
+                primary_name.claim_provenance ? 'canonical_head_multicall_hydration'
+            ) OR EXISTS (
+                SELECT 1
+                FROM bigname_phase.chain_lineage hydration_lineage
+                WHERE hydration_lineage.chain_id = primary_name.claim_provenance
+                    -> 'canonical_head_multicall_hydration' ->> 'chain_id'
+                  AND hydration_lineage.block_number::text = primary_name.claim_provenance
+                    -> 'canonical_head_multicall_hydration' ->> 'block_number'
+                  AND hydration_lineage.block_hash = primary_name.claim_provenance
+                    -> 'canonical_head_multicall_hydration' ->> 'block_hash'
+                  AND hydration_lineage.canonicality_state IN (
+                      'canonical'::bigname_phase.canonicality_state,
+                      'safe'::bigname_phase.canonicality_state,
+                      'finalized'::bigname_phase.canonicality_state
+                  )
+            ) AS readable
+        ) hydration
         ORDER BY requested.input_index, primary_name.namespace
         "#,
     )

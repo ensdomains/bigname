@@ -5,30 +5,60 @@ use crate::{ProjectError, Result, resolver_address::PERMISSION_CHANGED_RESOLVER_
 pub(super) async fn include_resource_pointers(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
+    target_block: i64,
 ) -> Result<()> {
     // A resource slice rebuild embeds its current resolver classification in record inventory.
-    // Scope that pointer's resolver row without expanding its dependents; classify_passthrough
-    // below republishes the existing resolver summary when no resolver-derived input changed.
+    // Scope both the projected pointer and the latest readable pointer. Redo needs the former to
+    // retract losing output and the latter to classify surviving inventory. Unchanged resolver
+    // summaries can be republished without staging their unrelated history.
     sqlx::query(
         "INSERT INTO project_scope_resolvers
-         SELECT lower(inventory.provenance ->> 'resolver_address')
-         FROM record_inventory_current inventory
-         JOIN project_scope_resources scope USING (resource_id)
-         WHERE inventory.provenance ->> 'chain_id' = $1
-           AND inventory.provenance ->> 'resolver_address' IS NOT NULL
-           AND btrim(inventory.provenance ->> 'resolver_address') <> ''
-           AND lower(inventory.provenance ->> 'resolver_address') <>
+         SELECT lower(pointer.resolver_address)
+         FROM (
+             SELECT inventory.provenance ->> 'resolver_address' AS resolver_address
+             FROM record_inventory_current inventory
+             JOIN project_scope_resources scope USING (resource_id)
+             WHERE inventory.provenance ->> 'chain_id' = $1
+             UNION ALL
+             SELECT latest.resolver_address
+             FROM (
+                 SELECT DISTINCT ON (event.resource_id)
+                        event.resource_id,
+                        event.after_state ->> 'resolver' AS resolver_address
+                 FROM normalized_events event
+                 JOIN project_scope_resources scope USING (resource_id)
+                 JOIN chain_lineage lineage
+                   ON lineage.chain_id = event.chain_id
+                  AND lineage.block_hash = event.block_hash
+                  AND lineage.block_number = event.block_number
+                 WHERE event.chain_id = $1
+                   AND event.event_kind = 'ResolverChanged'
+                   AND event.consumer_visibility = 'activated'
+                   AND event.block_number <= $2
+                   AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+                   AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+                 ORDER BY event.resource_id,
+                          event.block_number DESC NULLS LAST,
+                          event.transaction_index DESC NULLS LAST,
+                          event.log_index DESC NULLS LAST,
+                          event.normalized_event_id DESC
+             ) latest
+         ) pointer
+         WHERE pointer.resolver_address IS NOT NULL
+           AND btrim(pointer.resolver_address) <> ''
+           AND lower(pointer.resolver_address) <>
                '0x0000000000000000000000000000000000000000'
          ON CONFLICT DO NOTHING",
     )
     .bind(chain_id)
+    .bind(target_block)
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to scope resource pointer resolvers", error))?;
     Ok(())
 }
 
-pub(super) async fn classify_passthrough(
+pub(super) async fn classify_unchanged(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
 ) -> Result<()> {

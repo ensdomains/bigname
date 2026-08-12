@@ -4114,6 +4114,154 @@ async fn non_resolver_resource_delta_preserves_record_inventory_classification()
 }
 
 #[tokio::test]
+async fn project_redo_restores_the_surviving_resolver_pointer_like_a_full_rebuild() -> Result<()> {
+    const LOSING_RESOLVER: &str = "0x00000000000000000000000000000000000000b9";
+
+    let incremental = ScratchDatabase::create("production_project_resolver_pointer_redo").await?;
+    let full = ScratchDatabase::create("production_project_resolver_pointer_redo_full").await?;
+    for pool in [incremental.pool(), full.pool()] {
+        seed_project_fixture(pool).await?;
+        insert_lineage_block(pool, CHAIN, 4).await?;
+    }
+    insert_event(
+        incremental.pool(),
+        CHAIN,
+        4,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "ResolverChanged",
+        "ens_v1_registry_l1",
+        json!({"resolver":LOSING_RESOLVER}),
+        json!({}),
+    )
+    .await?;
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+
+    sqlx::query(
+        "DELETE FROM normalized_events
+         WHERE chain_id = $1 AND block_number = 4
+           AND event_kind = 'ResolverChanged'",
+    )
+    .bind(CHAIN)
+    .execute(incremental.pool())
+    .await?;
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 4,
+            hash: block_hash(CHAIN, 4),
+        }),
+        RunMode::Redo,
+        4,
+        4,
+    )
+    .await?;
+    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(full.pool()).await?;
+    assert_eq!(
+        serving_table_snapshot(incremental.pool()).await?,
+        serving_table_snapshot(full.pool()).await?,
+        "redo of a removed resolver pointer diverged from the surviving full rebuild"
+    );
+
+    incremental.cleanup().await?;
+    full.cleanup().await
+}
+
+#[tokio::test]
+async fn candidate_resolver_pointer_cannot_change_resource_delta_scope() -> Result<()> {
+    const CANDIDATE_RESOLVER: &str = "0x00000000000000000000000000000000000000b9";
+
+    let scratch = ScratchDatabase::create("production_project_candidate_pointer").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    insert_lineage_block(scratch.pool(), CHAIN, 4).await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        4,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "AuthorityTransferred",
+        "ens_v1_registrar_l1",
+        json!({"owner":"0x00000000000000000000000000000000000000a4"}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        4,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "ResolverChanged",
+        "ens_v1_registry_l1",
+        json!({"resolver":CANDIDATE_RESOLVER}),
+        json!({}),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET consumer_visibility = 'candidate',
+             migration_correlation_ids = ARRAY['candidate-fixture']::text[]
+         WHERE chain_id = $1 AND block_number = 4
+           AND event_kind = 'ResolverChanged'",
+    )
+    .bind(CHAIN)
+    .execute(scratch.pool())
+    .await?;
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    sqlx::query(
+        "INSERT INTO resolver_current (
+             chain_id, resolver_address, declared_summary, support_status,
+             unsupported_reason, provenance, chain_positions,
+             canonicality_summary, manifest_version
+         ) SELECT
+             chain_id, lower($2), declared_summary || '{\"sentinel\":true}'::jsonb,
+             support_status, unsupported_reason, provenance, chain_positions,
+             canonicality_summary, manifest_version
+         FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($3)",
+    )
+    .bind(CHAIN)
+    .bind(CANDIDATE_RESOLVER)
+    .bind(RESOLVER)
+    .execute(scratch.pool())
+    .await?;
+    run_project(
+        scratch.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Normal,
+        4,
+        4,
+    )
+    .await?;
+    let sentinel: Option<Value> = sqlx::query_scalar(
+        "SELECT declared_summary FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(CANDIDATE_RESOLVER)
+    .fetch_optional(scratch.pool())
+    .await?;
+    assert_eq!(
+        sentinel
+            .as_ref()
+            .and_then(|summary| summary.get("sentinel")),
+        Some(&json!(true)),
+        "candidate resolver evidence changed an unscoped resolver row"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn surface_unbind_rebuilds_the_pointer_resolver_binding_summary() -> Result<()> {
     let incremental = ScratchDatabase::create("production_project_surface_unbind_scope").await?;
     let full = ScratchDatabase::create("production_project_surface_unbind_scope_full").await?;

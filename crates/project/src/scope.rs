@@ -34,6 +34,10 @@ pub(crate) async fn initialize(
     wrapper::include_time_boundaries(transaction, chain_id, window.previous, target).await?;
     if window.retain_retracted {
         retracted::seed(transaction, chain_id, window.from_block, window.to_block).await?;
+        // Resource citations retain the losing projected pointer while canonical history supplies
+        // its surviving replacement. Both resolver keys must expand before redo rebuilds either
+        // row family.
+        resolver::include_resource_pointers(transaction, chain_id, target.number).await?;
         // Redo keeps the pre-existing resolver expansion for every retained or changed
         // resolver key. Normal live-follow uses the event-kind split seeded below.
         sqlx::query(
@@ -55,8 +59,8 @@ pub(crate) async fn initialize(
     // Time-bound resource boundaries and resolver expansion add names through binding closure.
     // Topology must consume that final name set before event-history staging begins.
     include_topology_scope(transaction, chain_id, target.number).await?;
-    resolver::include_resource_pointers(transaction, chain_id).await?;
-    resolver::classify_passthrough(transaction, chain_id).await?;
+    resolver::include_resource_pointers(transaction, chain_id, target.number).await?;
+    resolver::classify_unchanged(transaction, chain_id).await?;
     Ok(())
 }
 

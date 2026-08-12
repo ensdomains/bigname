@@ -278,6 +278,9 @@ restores every newly ineligible delta tuple and at most 250 older ineligible
 hydrated tuples per tick. Thus event-driven changes are visible immediately,
 while event-silent provider values for the remaining corpus are refreshed in
 bounded rolling batches instead of all being polled at every head.
+If a hydration block becomes noncanonical, readers expose the stored event-derived baseline until
+that tuple is refreshed at a readable head. Exact-head mismatches sort before already-refreshed
+tuples, so a same-height fork cannot starve the remaining rolling batch.
 
 Verified ENS/60 primary-name status is computed per request by schema-v2 lookup.
 It requires the declared claim and a matching forward address; tuple presence

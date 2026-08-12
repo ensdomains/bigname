@@ -21,6 +21,7 @@ use bigname_ingest::{Engine, LiveBatchRequest, Marker, SourceDescriptor, load_wa
 use bigname_lookup::ChainRpcUrls;
 use bigname_manifests::{load_repository, sync_schema_v2_repository};
 use bigname_project::Hydrator;
+use bigname_storage::{PrimaryNameClaimStatus, load_primary_name_current};
 use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     capacity::CapacityGuard,
@@ -2912,6 +2913,88 @@ async fn event_silent_reverse_hydration_bounds_the_rolling_refresh_batch() -> Re
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(refreshed, 250);
+
+    rpc.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn event_silent_reverse_hydration_does_not_serve_or_starve_an_orphaned_batch() -> Result<()> {
+    let scratch =
+        ScratchDatabase::create("production_live_reverse_hydration_orphaned_batch").await?;
+    seed_branch(scratch.pool(), ETHEREUM, 1, 2, None).await?;
+    publish(scratch.pool(), ETHEREUM, 1, 2, 1, 1).await?;
+    sqlx::query(
+        "INSERT INTO primary_names_current (
+             address, coin_type, namespace, claim_status, raw_claim_name,
+             claim_name_is_normalized, claim_provenance
+         )
+         SELECT '0x' || lpad(to_hex(candidate), 40, '0'),
+                '60', 'ens', 'success', 'old.eth', true,
+                jsonb_build_object(
+                    'chain_id', $1::text,
+                    'reverse_node', '0x' || lpad(to_hex(candidate), 64, '0'),
+                    'resolver_address', $2::text,
+                    'target_block_number', 1,
+                    'target_block_hash', $3::text,
+                    'canonical_head_multicall_hydration', jsonb_build_object(
+                        'chain_id', $1::text,
+                        'block_number', 2,
+                        'block_hash', $4::text,
+                        'resolver_address', $2::text,
+                        'reverse_node', '0x' || lpad(to_hex(candidate), 64, '0'),
+                        'baseline', jsonb_build_object(
+                            'claim_status', 'unsupported',
+                            'raw_claim_name', NULL,
+                            'claim_name_is_normalized', false,
+                            'unsupported_reason', 'legacy_resolver_does_not_emit_name'
+                        )
+                    )
+                )
+         FROM generate_series(1, 251) candidate",
+    )
+    .bind(ETHEREUM)
+    .bind(REVERSE_RESOLVER)
+    .bind(block_hash(1, 1))
+    .bind(block_hash(1, 2))
+    .execute(scratch.pool())
+    .await?;
+
+    seed_branch(scratch.pool(), ETHEREUM, 2, 2, Some((1, block_hash(1, 1)))).await?;
+    publish(scratch.pool(), ETHEREUM, 2, 2, 1, 1).await?;
+    let names = std::iter::repeat_n("new.eth", 250)
+        .collect::<Vec<_>>()
+        .join("|");
+    let rpc = HydrationRpc::spawn(BTreeMap::from([(
+        block_hash(2, 2),
+        format!("{MULTICALL_RESULTS_PREFIX}{names}"),
+    )]))
+    .await?;
+    let hydrator = Hydrator::new(
+        scratch.pool().clone(),
+        ChainRpcUrls::from_entries(&[format!("{ETHEREUM}={}", rpc.endpoint)])?,
+    );
+
+    let first = hydrator.hydrate_canonical_head(ETHEREUM).await?;
+    assert_eq!(first.reverse_candidates, 250);
+    let last_address = "0x00000000000000000000000000000000000000fb";
+    let last_read = load_primary_name_current(scratch.pool(), last_address, "ens", "60")
+        .await?
+        .expect("the event-derived baseline remains readable");
+    assert_eq!(last_read.claim_status, PrimaryNameClaimStatus::Unsupported);
+    assert_eq!(last_read.raw_claim_name, None);
+
+    let second = hydrator.hydrate_canonical_head(ETHEREUM).await?;
+    assert_eq!(second.reverse_candidates, 250);
+    let last_hydration_hash: String = sqlx::query_scalar(
+        "SELECT claim_provenance -> 'canonical_head_multicall_hydration' ->> 'block_hash'
+         FROM primary_names_current
+         WHERE address = $1 AND coin_type = '60' AND namespace = 'ens'",
+    )
+    .bind(last_address)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(last_hydration_hash, block_hash(2, 2));
 
     rpc.server.abort();
     scratch.cleanup().await

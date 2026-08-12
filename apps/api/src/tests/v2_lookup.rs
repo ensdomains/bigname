@@ -673,6 +673,58 @@ async fn v2_lookup_paginates_normalizable_phase_primary_claim() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_lookup_uses_the_event_baseline_for_an_orphaned_hydration() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    sqlx::query(
+        "INSERT INTO bigname_phase.chain_lineage (
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state
+         ) VALUES (
+             'ethereum-mainnet', '0xorphaned-hydration', 42,
+             '2026-04-17T00:00:42Z', 'orphaned'
+         )",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE primary_names_current
+        SET claim_status = 'success', raw_claim_name = 'alice.eth',
+            claim_name_is_normalized = true,
+            claim_provenance = claim_provenance || jsonb_build_object(
+                'canonical_head_multicall_hydration', jsonb_build_object(
+                    'chain_id', 'ethereum-mainnet',
+                    'block_number', 42,
+                    'block_hash', '0xorphaned-hydration',
+                    'baseline', jsonb_build_object(
+                        'claim_status', 'unsupported',
+                        'raw_claim_name', NULL,
+                        'claim_name_is_normalized', false,
+                        'unsupported_reason', 'legacy_resolver_does_not_emit_name'
+                    )
+                )
+            )
+        WHERE address = lower($1) AND namespace = 'ens' AND coin_type = '60'
+        "#,
+    )
+    .bind(address)
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let payload = v2_lookup_json(&database, json!({"inputs": [{"address": address}]})).await?;
+    let alice = payload["data"][0]["records"]
+        .as_array()
+        .expect("reverse records must be an array")
+        .iter()
+        .find(|record| record["name"] == json!("alice.eth"))
+        .expect("alice relation must remain readable");
+    assert_eq!(alice["is_primary"], json!(false));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_lookup_rejects_head_reorg_before_project_republication() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_identity_name(

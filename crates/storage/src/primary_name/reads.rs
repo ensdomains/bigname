@@ -26,17 +26,49 @@ pub async fn load_primary_name_current_snapshot(
     let row = sqlx::query(
         r#"
         SELECT
-            address,
-            namespace,
-            coin_type,
-            claim_status,
-            raw_claim_name,
-            claim_name_is_normalized,
-            claim_provenance
+            pnc.address,
+            pnc.namespace,
+            pnc.coin_type,
+            CASE WHEN hydration.readable THEN pnc.claim_status
+                 ELSE pnc.claim_provenance
+                     -> 'canonical_head_multicall_hydration'
+                     -> 'baseline' ->> 'claim_status'
+            END AS claim_status,
+            CASE WHEN hydration.readable THEN pnc.raw_claim_name
+                 ELSE pnc.claim_provenance
+                     -> 'canonical_head_multicall_hydration'
+                     -> 'baseline' ->> 'raw_claim_name'
+            END AS raw_claim_name,
+            CASE WHEN hydration.readable THEN pnc.claim_name_is_normalized
+                 ELSE (pnc.claim_provenance
+                     -> 'canonical_head_multicall_hydration'
+                     -> 'baseline' ->> 'claim_name_is_normalized')::boolean
+            END AS claim_name_is_normalized,
+            CASE WHEN hydration.readable THEN pnc.claim_provenance
+                 ELSE pnc.claim_provenance - 'canonical_head_multicall_hydration'
+            END AS claim_provenance
         FROM bigname_phase.primary_names_current pnc
-        WHERE address = $1
-          AND namespace = $2
-          AND coin_type = $3
+        CROSS JOIN LATERAL (
+            SELECT NOT (pnc.claim_provenance ? 'canonical_head_multicall_hydration')
+                OR EXISTS (
+                    SELECT 1
+                    FROM bigname_phase.chain_lineage hydration_lineage
+                    WHERE hydration_lineage.chain_id = pnc.claim_provenance
+                        -> 'canonical_head_multicall_hydration' ->> 'chain_id'
+                      AND hydration_lineage.block_number::text = pnc.claim_provenance
+                        -> 'canonical_head_multicall_hydration' ->> 'block_number'
+                      AND hydration_lineage.block_hash = pnc.claim_provenance
+                        -> 'canonical_head_multicall_hydration' ->> 'block_hash'
+                      AND hydration_lineage.canonicality_state IN (
+                          'canonical'::bigname_phase.canonicality_state,
+                          'safe'::bigname_phase.canonicality_state,
+                          'finalized'::bigname_phase.canonicality_state
+                      )
+                ) AS readable
+        ) hydration
+        WHERE pnc.address = $1
+          AND pnc.namespace = $2
+          AND pnc.coin_type = $3
           AND EXISTS (
               SELECT 1
               FROM bigname_phase.chain_lineage projection_lineage

@@ -178,6 +178,11 @@ async fn load_active_candidates(pool: &PgPool, head: &Marker) -> Result<Vec<Reve
             FROM eligible
             WHERE NOT delta_scoped
             ORDER BY
+                COALESCE(
+                    claim_provenance -> $5 ->> 'block_number' = $3::text
+                    AND claim_provenance -> $5 ->> 'block_hash' = $4,
+                    false
+                ),
                 NULLIF(
                     claim_provenance -> $5 ->> 'block_number',
                     ''
