@@ -358,10 +358,11 @@ stopped between its formerly separate summary and cursor writes.
 
 When a bounded Ingest redo replaces the hash at a source cursor's latest stored
 height, and the per-source progress proves that height was inside the completed
-redo range, redo completion updates that cursor hash in the same transaction as
-the phase summary. The previous live handoff remains in place until the next
-normal Ingest pass confirms the reconciled cursor and publishes the replacement
-handoff.
+redo range, redo completion updates that cursor hash only when matching block
+lineage already records that height and hash. The cursor update and phase
+summary share one transaction. The previous live handoff remains in place until
+the next normal Ingest pass confirms the reconciled cursor and publishes the
+replacement handoff.
 
 ## Interpretation replay
 

@@ -4,7 +4,7 @@ mod support;
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -43,10 +43,14 @@ use support::ScratchDatabase;
 const BLOCK_0: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
 const BLOCK_1: &str = "0x0000000000000000000000000000000000000000000000000000000000000002";
 const BLOCK_1_REORG: &str = "0x0000000000000000000000000000000000000000000000000000000000000012";
+const BLOCK_1_SECOND_REORG: &str =
+    "0x0000000000000000000000000000000000000000000000000000000000000022";
 const BLOCK_2: &str = "0x0000000000000000000000000000000000000000000000000000000000000007";
 const TRANSACTION: &str = "0x0000000000000000000000000000000000000000000000000000000000000003";
 const REORG_TRANSACTION: &str =
     "0x0000000000000000000000000000000000000000000000000000000000000013";
+const SECOND_REORG_TRANSACTION: &str =
+    "0x0000000000000000000000000000000000000000000000000000000000000023";
 const ANNOUNCEMENT_TRANSACTION: &str =
     "0x0000000000000000000000000000000000000000000000000000000000000008";
 const REGISTRATION_TRANSACTION: &str =
@@ -268,7 +272,7 @@ async fn ingest_boundary_redo_reconciles_cursor_before_normal_restart() -> Resul
     let scratch = ScratchDatabase::create("phase_runner_ingest_boundary_redo_cursor").await?;
     let chain_id = "rpc-ingest-boundary-redo";
     seed_watch_set(scratch.pool(), chain_id).await?;
-    let (endpoint, reorged, server) = spawn_hash_switchable_rpc().await?;
+    let (endpoint, hash_epoch, server) = spawn_hash_switchable_rpc().await?;
     let configured_chain = ChainConfig::new(
         chain_id,
         vec![SourceConfig::new(
@@ -304,7 +308,7 @@ async fn ingest_boundary_redo_reconciles_cursor_before_normal_restart() -> Resul
         )
     );
 
-    reorged.store(true, Ordering::SeqCst);
+    hash_epoch.store(1, Ordering::SeqCst);
     runner
         .redo(
             &configured_chain,
@@ -346,16 +350,238 @@ async fn ingest_boundary_redo_reconciles_cursor_before_normal_restart() -> Resul
     scratch.cleanup().await
 }
 
+#[tokio::test]
+async fn resumed_ingest_redo_requires_lineage_before_reconciling_cursor() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_ingest_redo_lineage_guard").await?;
+    let chain_id = "rpc-ingest-redo-lineage-guard";
+    seed_watch_set(scratch.pool(), chain_id).await?;
+    let (endpoint, hash_epoch, server) = spawn_hash_switchable_rpc().await?;
+    let configured_chain = ChainConfig::new(
+        chain_id,
+        vec![SourceConfig::new(
+            chain_id,
+            "rpc",
+            "rpc",
+            SeedBasis::NewSignatureRange,
+            0,
+            endpoint,
+        )?],
+        false,
+    )?;
+    let runner = production_ingest_runner(scratch.runner(), "redo-lineage-normal-runner")?;
+    run_until_ingest_handoff(runner, configured_chain.clone(), scratch.pool(), BLOCK_1).await?;
+
+    hash_epoch.store(1, Ordering::SeqCst);
+    let interrupting_ingest = Arc::new(InterruptAfterCompletedIngestBatch {
+        inner: IngestPhase::new(scratch.pool().clone()),
+        interrupt_next_batch: AtomicBool::new(false),
+    });
+    let interrupted_runner = production_ingest_runner_with_phase(
+        scratch.runner(),
+        "redo-lineage-interrupted-runner",
+        interrupting_ingest,
+    )?;
+    let interruption = interrupted_runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the wrapper must interrupt after durable final-batch progress");
+    assert_eq!(interruption.kind(), ErrorKind::DataIntegrity);
+    assert!(interruption.to_string().contains("forced interruption"));
+    let resumable: (
+        bool,
+        Option<i64>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT phase.redo_in_progress,
+                    phase.redo_current_block_number,
+                    phase.redo_current_block_hash,
+                    cursor.last_processed_block_number,
+                    cursor.last_processed_block_hash
+             FROM chain_phase_state phase
+             JOIN ingest_cursors cursor USING (chain_id)
+             WHERE phase.chain_id = $1
+               AND phase.phase_name = 'ingest'
+               AND cursor.source_key = 'rpc'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        resumable,
+        (
+            true,
+            Some(1),
+            Some(BLOCK_1_REORG.to_owned()),
+            Some(1),
+            Some(BLOCK_1.to_owned()),
+        )
+    );
+    assert_eq!(
+        load_boundary_lineage_hashes(scratch.pool(), chain_id).await?,
+        vec![BLOCK_1.to_owned(), BLOCK_1_REORG.to_owned()]
+    );
+
+    hash_epoch.store(2, Ordering::SeqCst);
+    let resumed_runner = production_ingest_runner(scratch.runner(), "redo-lineage-resume-runner")?;
+    resumed_runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    let resumed: (bool, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT phase.redo_in_progress,
+                phase.current_block_hash,
+                cursor.last_processed_block_hash
+         FROM chain_phase_state phase
+         JOIN ingest_cursors cursor USING (chain_id)
+         WHERE phase.chain_id = $1
+           AND phase.phase_name = 'ingest'
+           AND cursor.source_key = 'rpc'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        resumed,
+        (
+            false,
+            Some(BLOCK_1_SECOND_REORG.to_owned()),
+            Some(BLOCK_1.to_owned()),
+        ),
+        "a resumed redo must not reconcile a cursor to a hash absent from chain lineage"
+    );
+    assert_eq!(
+        load_boundary_lineage_hashes(scratch.pool(), chain_id).await?,
+        vec![BLOCK_1.to_owned(), BLOCK_1_REORG.to_owned()]
+    );
+
+    let restart_error = resumed_runner
+        .clone()
+        .run_chain(&configured_chain, CancellationToken::new())
+        .await
+        .expect_err("normal processing must reject the unreconciled boundary");
+    assert_eq!(restart_error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        restart_error
+            .to_string()
+            .contains("complete an Ingest redo covering that block"),
+        "unexpected normal-restart failure: {restart_error}"
+    );
+    assert!(
+        !restart_error
+            .to_string()
+            .contains("missing from chain lineage")
+    );
+    let published_head: (i64, String) = sqlx::query_as(
+        "SELECT latest_block_number, latest_block_hash
+         FROM chain_heads
+         WHERE chain_id = $1",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(published_head, (1, BLOCK_1.to_owned()));
+
+    resumed_runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert_eq!(
+        load_boundary_lineage_hashes(scratch.pool(), chain_id).await?,
+        vec![
+            BLOCK_1.to_owned(),
+            BLOCK_1_REORG.to_owned(),
+            BLOCK_1_SECOND_REORG.to_owned(),
+        ]
+    );
+    run_until_ingest_handoff(
+        resumed_runner,
+        configured_chain,
+        scratch.pool(),
+        BLOCK_1_SECOND_REORG,
+    )
+    .await?;
+    assert_eq!(
+        load_ingest_boundary_state(scratch.pool(), chain_id).await?,
+        (
+            "completed".to_owned(),
+            Some(BLOCK_1_SECOND_REORG.to_owned()),
+            Some(BLOCK_1_SECOND_REORG.to_owned()),
+            Some(BLOCK_1_SECOND_REORG.to_owned()),
+            2,
+            Some(1),
+            Some(1),
+            Some(BLOCK_1_SECOND_REORG.to_owned()),
+        )
+    );
+    server.abort();
+    scratch.cleanup().await
+}
+
+struct InterruptAfterCompletedIngestBatch {
+    inner: IngestPhase,
+    interrupt_next_batch: AtomicBool,
+}
+
+impl Phase for InterruptAfterCompletedIngestBatch {
+    fn name(&self) -> PhaseName {
+        PhaseName::Ingest
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            if self.interrupt_next_batch.swap(false, Ordering::SeqCst) {
+                return Err(RunnerError::data_integrity(
+                    "forced interruption after durable final-batch redo progress",
+                ));
+            }
+            match self.inner.run_batch(context).await? {
+                PhaseBatchOutcome::Complete(progress) => {
+                    self.interrupt_next_batch.store(true, Ordering::SeqCst);
+                    Ok(PhaseBatchOutcome::Continue(progress))
+                }
+                outcome => Ok(outcome),
+            }
+        })
+    }
+}
+
 fn production_ingest_runner(
     database: phase_runner::database::RunnerDatabase,
     instance_id: &str,
 ) -> Result<PhaseRunner> {
-    let phases = PhaseSet::new([
+    production_ingest_runner_with_phase(
+        database.clone(),
+        instance_id,
         Arc::new(IngestPhase::new(database.pool().clone())),
-        Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
-        Arc::new(LoopbackPhase::new(PhaseName::Project)),
-        Arc::new(LoopbackPhase::new(PhaseName::Verify)),
-        Arc::new(LoopbackPhase::new(PhaseName::Live)),
+    )
+}
+
+fn production_ingest_runner_with_phase(
+    database: phase_runner::database::RunnerDatabase,
+    instance_id: &str,
+    ingest: Arc<dyn Phase>,
+) -> Result<PhaseRunner> {
+    let phases = PhaseSet::new([
+        ingest,
+        Arc::new(LoopbackPhase::new(PhaseName::Interpret)) as Arc<dyn Phase>,
+        Arc::new(LoopbackPhase::new(PhaseName::Project)) as Arc<dyn Phase>,
+        Arc::new(LoopbackPhase::new(PhaseName::Verify)) as Arc<dyn Phase>,
+        Arc::new(LoopbackPhase::new(PhaseName::Live)) as Arc<dyn Phase>,
     ])?;
     Ok(PhaseRunner::new(
         database,
@@ -382,8 +608,8 @@ async fn run_until_ingest_handoff(
     let mut task = tokio::spawn(async move { runner.run_chain(&chain, task_cancellation).await });
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            let state: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
-                "SELECT phase_status, live_handoff_block_hash, last_error
+            let state: Option<(String, Option<String>)> = sqlx::query_as(
+                "SELECT phase_status, live_handoff_block_hash
                  FROM chain_phase_state
                  WHERE chain_id = $1 AND phase_name = 'ingest'",
             )
@@ -391,16 +617,10 @@ async fn run_until_ingest_handoff(
             .fetch_optional(pool)
             .await?;
             match state {
-                Some((status, Some(handoff), _))
+                Some((status, Some(handoff)))
                     if status == "completed" && handoff == expected_hash =>
                 {
                     return Ok::<_, anyhow::Error>(());
-                }
-                Some((status, _, error)) if status == "failed" => {
-                    anyhow::bail!(
-                        "production ingest failed: {}",
-                        error.unwrap_or_else(|| "no failure reason".to_owned())
-                    );
                 }
                 _ => {}
             }
@@ -453,6 +673,18 @@ async fn load_ingest_boundary_state(
     )
     .bind(chain_id)
     .fetch_one(pool)
+    .await?)
+}
+
+async fn load_boundary_lineage_hashes(pool: &sqlx::PgPool, chain_id: &str) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT block_hash
+         FROM chain_lineage
+         WHERE chain_id = $1 AND block_number = 1
+         ORDER BY block_hash",
+    )
+    .bind(chain_id)
+    .fetch_all(pool)
     .await?)
 }
 
@@ -2128,12 +2360,12 @@ fn crash_window_logs(omit_second_log: bool) -> Vec<Value> {
     logs
 }
 
-async fn spawn_hash_switchable_rpc()
--> Result<(String, Arc<AtomicBool>, tokio::task::JoinHandle<()>)> {
+async fn spawn_hash_switchable_rpc() -> Result<(String, Arc<AtomicU8>, tokio::task::JoinHandle<()>)>
+{
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
-    let reorged = Arc::new(AtomicBool::new(false));
-    let server_state = Arc::clone(&reorged);
+    let hash_epoch = Arc::new(AtomicU8::new(0));
+    let server_state = Arc::clone(&hash_epoch);
     let server = tokio::spawn(async move {
         axum::serve(
             listener,
@@ -2144,34 +2376,34 @@ async fn spawn_hash_switchable_rpc()
         .await
         .expect("hash-switchable test RPC server");
     });
-    Ok((format!("http://{address}/"), reorged, server))
+    Ok((format!("http://{address}/"), hash_epoch, server))
 }
 
 async fn hash_switchable_rpc(
-    State(reorged): State<Arc<AtomicBool>>,
+    State(hash_epoch): State<Arc<AtomicU8>>,
     Json(request): Json<Value>,
 ) -> Json<Value> {
-    let reorged = reorged.load(Ordering::SeqCst);
+    let hash_epoch = hash_epoch.load(Ordering::SeqCst);
     if let Some(requests) = request.as_array() {
         return Json(Value::Array(
             requests
                 .iter()
-                .map(|request| hash_switchable_rpc_response(request, reorged))
+                .map(|request| hash_switchable_rpc_response(request, hash_epoch))
                 .collect::<Vec<_>>(),
         ));
     }
-    Json(hash_switchable_rpc_response(&request, reorged))
+    Json(hash_switchable_rpc_response(&request, hash_epoch))
 }
 
-fn hash_switchable_rpc_response(request: &Value, reorged: bool) -> Value {
+fn hash_switchable_rpc_response(request: &Value, hash_epoch: u8) -> Value {
     let id = request.get("id").cloned().unwrap_or(json!(1));
     let method = request["method"].as_str().unwrap_or_default();
     let params = request["params"].as_array().cloned().unwrap_or_default();
-    let boundary_hash = if reorged { BLOCK_1_REORG } else { BLOCK_1 };
-    let transaction_hash = if reorged {
-        REORG_TRANSACTION
-    } else {
-        TRANSACTION
+    let (boundary_hash, transaction_hash) = match hash_epoch {
+        0 => (BLOCK_1, TRANSACTION),
+        1 => (BLOCK_1_REORG, REORG_TRANSACTION),
+        2 => (BLOCK_1_SECOND_REORG, SECOND_REORG_TRANSACTION),
+        other => panic!("unsupported hash epoch {other}"),
     };
     let result = match method {
         "eth_getBlockByNumber" => {
@@ -2193,9 +2425,14 @@ fn hash_switchable_rpc_response(request: &Value, reorged: bool) -> Value {
             let full = params.get(1) == Some(&Value::Bool(true));
             match params.first().and_then(Value::as_str).unwrap_or_default() {
                 BLOCK_0 => Some(block(0, full)),
-                hash if hash == boundary_hash => {
-                    Some(switchable_block(1, boundary_hash, transaction_hash, full))
-                }
+                BLOCK_1 => Some(switchable_block(1, BLOCK_1, TRANSACTION, full)),
+                BLOCK_1_REORG => Some(switchable_block(1, BLOCK_1_REORG, REORG_TRANSACTION, full)),
+                BLOCK_1_SECOND_REORG => Some(switchable_block(
+                    1,
+                    BLOCK_1_SECOND_REORG,
+                    SECOND_REORG_TRANSACTION,
+                    full,
+                )),
                 _ => None,
             }
         }
@@ -2203,16 +2440,27 @@ fn hash_switchable_rpc_response(request: &Value, reorged: bool) -> Value {
             let filter = params.first().cloned().unwrap_or_default();
             match filter.get("blockHash").and_then(Value::as_str) {
                 Some(BLOCK_0) => Some(json!([])),
-                Some(hash) if hash == boundary_hash => {
-                    Some(json!([switchable_log(boundary_hash, transaction_hash)]))
+                Some(BLOCK_1) => Some(json!([switchable_log(BLOCK_1, TRANSACTION)])),
+                Some(BLOCK_1_REORG) => {
+                    Some(json!([switchable_log(BLOCK_1_REORG, REORG_TRANSACTION)]))
                 }
+                Some(BLOCK_1_SECOND_REORG) => Some(json!([switchable_log(
+                    BLOCK_1_SECOND_REORG,
+                    SECOND_REORG_TRANSACTION
+                )])),
                 _ => Some(json!([])),
             }
         }
         "eth_getBlockReceipts" => match params.first().and_then(Value::as_str) {
-            Some(hash) if hash == boundary_hash => {
-                Some(json!([switchable_receipt(boundary_hash, transaction_hash)]))
-            }
+            Some(BLOCK_1) => Some(json!([switchable_receipt(BLOCK_1, TRANSACTION)])),
+            Some(BLOCK_1_REORG) => Some(json!([switchable_receipt(
+                BLOCK_1_REORG,
+                REORG_TRANSACTION
+            )])),
+            Some(BLOCK_1_SECOND_REORG) => Some(json!([switchable_receipt(
+                BLOCK_1_SECOND_REORG,
+                SECOND_REORG_TRANSACTION
+            )])),
             Some(BLOCK_0) => Some(json!([])),
             _ => None,
         },

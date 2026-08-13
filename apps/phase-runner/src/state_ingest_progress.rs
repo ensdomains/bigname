@@ -129,7 +129,14 @@ pub(crate) async fn reconcile_redo_boundary_cursors(
                  updated_at = now()
              WHERE chain_id = $1
                AND source_key = $2
-               AND last_processed_block_number = $3",
+               AND last_processed_block_number = $3
+               AND EXISTS (
+                   SELECT 1
+                   FROM chain_lineage
+                   WHERE chain_lineage.chain_id = $1
+                     AND chain_lineage.block_number = $3
+                     AND chain_lineage.block_hash = $4
+               )",
         )
         .bind(chain_id)
         .bind(&source.source_key)

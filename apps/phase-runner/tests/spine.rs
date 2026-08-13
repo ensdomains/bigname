@@ -2423,6 +2423,7 @@ async fn ingest_redo_does_not_rewrite_a_cursor_past_its_range() -> Result<()> {
     .await?;
 
     let redo_boundary = BlockMarker::new(1, format!("{chain_id}-replacement-block-1"))?;
+    seed_alternative_lineage_marker(scratch.pool(), chain_id, &redo_boundary).await?;
     let redo_progress = PhaseProgress {
         current: Some(redo_boundary.clone()),
         target: Some(redo_boundary.clone()),
@@ -2488,6 +2489,7 @@ async fn ingest_redo_does_not_reconcile_incomplete_source_progress() -> Result<(
 
     let unverified_block_1 =
         BlockMarker::new(1, format!("{chain_id}-unverified-replacement-block-1"))?;
+    seed_alternative_lineage_marker(scratch.pool(), chain_id, &unverified_block_1).await?;
     let redo_progress = PhaseProgress {
         current: Some(block_2.clone()),
         target: Some(block_2.clone()),
@@ -2565,6 +2567,27 @@ async fn seed_completed_ingest_cursor(
     store
         .complete_phase(&chain.chain_id, PhaseName::Ingest, &progress)
         .await?;
+    Ok(())
+}
+
+async fn seed_alternative_lineage_marker(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+    marker: &BlockMarker,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state
+         )
+         VALUES ($1, $2, $3, $4, to_timestamp($4), 'observed')",
+    )
+    .bind(chain_id)
+    .bind(&marker.hash)
+    .bind(format!("{chain_id}-block-0"))
+    .bind(marker.number)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
