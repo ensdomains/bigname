@@ -1,4 +1,4 @@
-pub(super) const DEFAULT_PERMISSIONS_CURRENT_READ_FILTER: &str = r#"
+pub const DEFAULT_PERMISSIONS_CURRENT_READ_FILTER: &str = r#"
   AND pc.canonicality_summary ->> 'state' IN ('canonical', 'safe', 'finalized')
   AND EXISTS (
       SELECT 1

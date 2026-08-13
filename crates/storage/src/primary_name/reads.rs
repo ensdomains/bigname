@@ -3,6 +3,21 @@ use super::types::{PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot, normalize_
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 
+pub const DEFAULT_PRIMARY_NAME_CURRENT_READ_FILTER: &str = r#"
+  AND EXISTS (
+      SELECT 1
+      FROM bigname_phase.chain_lineage projection_lineage
+      WHERE projection_lineage.chain_id = pnc.claim_provenance ->> 'chain_id'
+        AND projection_lineage.block_hash =
+            pnc.claim_provenance ->> 'target_block_hash'
+        AND projection_lineage.canonicality_state IN (
+            'canonical'::bigname_phase.canonicality_state,
+            'safe'::bigname_phase.canonicality_state,
+            'finalized'::bigname_phase.canonicality_state
+        )
+  )
+"#;
+
 /// Load one declared primary-name claim-state row by exact address, namespace, and coin_type.
 pub async fn load_primary_name_current(
     pool: &PgPool,
@@ -23,7 +38,7 @@ pub async fn load_primary_name_current_snapshot(
     coin_type: &str,
 ) -> Result<Option<PrimaryNameCurrentSnapshot>> {
     let normalized_address = normalize_address(address);
-    let row = sqlx::query(
+    let row = sqlx::query(&format!(
         r#"
         SELECT
             pnc.address,
@@ -69,20 +84,9 @@ pub async fn load_primary_name_current_snapshot(
         WHERE pnc.address = $1
           AND pnc.namespace = $2
           AND pnc.coin_type = $3
-          AND EXISTS (
-              SELECT 1
-              FROM bigname_phase.chain_lineage projection_lineage
-              WHERE projection_lineage.chain_id = pnc.claim_provenance ->> 'chain_id'
-                AND projection_lineage.block_hash =
-                    pnc.claim_provenance ->> 'target_block_hash'
-                AND projection_lineage.canonicality_state IN (
-                    'canonical'::bigname_phase.canonicality_state,
-                    'safe'::bigname_phase.canonicality_state,
-                    'finalized'::bigname_phase.canonicality_state
-                )
-          )
+          {DEFAULT_PRIMARY_NAME_CURRENT_READ_FILTER}
         "#,
-    )
+    ))
     .bind(&normalized_address)
     .bind(namespace)
     .bind(coin_type)

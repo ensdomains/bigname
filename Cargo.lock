@@ -1717,6 +1717,7 @@ dependencies = [
  "bigname-interpret",
  "bigname-lookup",
  "bigname-project",
+ "bigname-storage",
  "bigname-test-support",
  "clap",
  "reqwest 0.13.2",

@@ -10,7 +10,7 @@ pub use types::{
 
 const DECLARED_SURFACE_CLASS: &str = "declared";
 
-const DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS: &str = r#"
+pub const DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS: &str = r#"
   JOIN bigname_phase.name_surfaces parent
     ON parent.logical_name_id = cc.parent_logical_name_id
   LEFT JOIN bigname_phase.name_surfaces child
@@ -23,7 +23,7 @@ const DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS: &str = r#"
    AND child_lineage.block_hash = child.block_hash
 "#;
 
-const DEFAULT_CHILDREN_CURRENT_READ_FILTER: &str = r#"
+pub const DEFAULT_CHILDREN_CURRENT_READ_FILTER: &str = r#"
   AND cc.canonicality_summary ->> 'state' IN ('canonical', 'safe', 'finalized')
   AND EXISTS (
       SELECT 1

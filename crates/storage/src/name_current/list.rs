@@ -2,8 +2,9 @@ use anyhow::{Context, Result};
 use sqlx::{PgPool, Postgres, QueryBuilder, postgres::PgRow, types::time::OffsetDateTime};
 
 use super::{
-    DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER, DEFAULT_NAME_CURRENT_LINEAGE_JOINS,
-    DEFAULT_NAME_CURRENT_READ_FILTER, NameCurrentRow, decode_name_current_row,
+    DEFAULT_ADDRESS_NAMES_MEMBERSHIP_JOINS, DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER,
+    DEFAULT_NAME_CURRENT_LINEAGE_JOINS, DEFAULT_NAME_CURRENT_READ_FILTER, NameCurrentRow,
+    decode_name_current_row,
 };
 use crate::{
     AddressNameRelation,
@@ -455,28 +456,10 @@ fn push_address_membership_cte<'a>(
         address_membership AS (
             SELECT DISTINCT anc.logical_name_id
             FROM bigname_phase.address_names_current anc
-            JOIN bigname_phase.name_surfaces membership_surface
-              ON membership_surface.logical_name_id = anc.logical_name_id
-            JOIN bigname_phase.resources membership_resource
-              ON membership_resource.resource_id = anc.resource_id
-            JOIN bigname_phase.surface_bindings membership_binding
-              ON membership_binding.surface_binding_id = anc.surface_binding_id
-            LEFT JOIN bigname_phase.token_lineages membership_token_lineage
-              ON membership_token_lineage.token_lineage_id = anc.token_lineage_id
-            JOIN bigname_phase.chain_lineage membership_surface_lineage
-              ON membership_surface_lineage.chain_id = membership_surface.chain_id
-             AND membership_surface_lineage.block_hash = membership_surface.block_hash
-            JOIN bigname_phase.chain_lineage membership_resource_lineage
-              ON membership_resource_lineage.chain_id = membership_resource.chain_id
-             AND membership_resource_lineage.block_hash = membership_resource.block_hash
-            JOIN bigname_phase.chain_lineage membership_binding_lineage
-              ON membership_binding_lineage.chain_id = membership_binding.chain_id
-             AND membership_binding_lineage.block_hash = membership_binding.block_hash
-            LEFT JOIN bigname_phase.chain_lineage membership_token_lineage_lineage
-              ON membership_token_lineage_lineage.chain_id = membership_token_lineage.chain_id
-             AND membership_token_lineage_lineage.block_hash = membership_token_lineage.block_hash
-            WHERE "#,
+        "#,
     );
+    builder.push(DEFAULT_ADDRESS_NAMES_MEMBERSHIP_JOINS);
+    builder.push(" WHERE ");
     match address_filter.addresses.as_ref() {
         Some(addresses) => {
             builder.push("anc.address = ANY(");

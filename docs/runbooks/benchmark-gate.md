@@ -88,14 +88,20 @@ address/name/relation combinations from the target projections, plus at least
 name claims, plus at least 1,000 supported resolver rows. The name and parent
 samples are divided deterministically across every active public namespace;
 an active namespace with no supported name or parent seed makes the run red.
+Name, address, parent, permission, primary-name, and resolver samples use the
+same [read-safe](../glossary.md#readable--read-safe) canonical-block checks for
+each projection and its referenced identity rows as their API reads, so hidden
+rows cannot satisfy a corpus floor or enter the timed request set.
 The report records the name and parent counts contributed by each namespace,
-and name-mode lookup batches alternate those namespace buckets. Before sampling that corpus, it
-counts the complete
-`name_current` and `address_names_current` tables and requires at least 3
-million supported rows in each. Unsupported rows are excluded because the gate
-cannot use them as request seeds. These floors leave headroom below the roughly
-3.5 million names in the production dataset while excluding staging-sized
-databases. The JSON report records both supported-row totals and both floors. It varies names, addresses,
+and name-mode lookup batches alternate those namespace buckets. Before sampling
+that corpus, it counts API-visible rows in the `name_current` and
+`address_names_current` tables and requires at least 3 million supported rows in
+each. Unsupported rows and rows whose projection or referenced identity rows
+are not read-safe are excluded because the API cannot return them as request
+seeds.
+These floors leave headroom below the roughly 3.5 million names in the
+production dataset while excluding staging-sized databases. The JSON report
+records both API-visible supported-row totals and both floors. It varies names, addresses,
 search text, relations, history scopes, sort order, page size, and any cursors
 returned by seed requests, and uses the real resolver and namespace rows. The
 lookup mix covers 1, 10, 100, 250, and 1,000 inputs per batch, with large
@@ -203,11 +209,13 @@ refuses writes before Interpret or Project on any mismatch. The connection
 carries the same interpreter content-hash setting as the phase runner, so
 ENSv1→ENSv2 migration correlation writes behave normally.
 
-The writable database URL must connect directly or through a session-affine
-proxy, meaning each open client connection remains on one PostgreSQL backend
-until it disconnects. Do not use transaction or statement pooling, or a
-failover proxy that can silently move an open client connection between
-backends; a connection-setup check cannot observe that kind of switch.
+The writable database URL hostname must resolve to one stable listener address
+and port for the complete run. Connect directly or through a session-affine
+proxy to one backend, meaning each open client connection remains on that
+PostgreSQL backend until it disconnects. Do not use transaction or statement
+pooling, a session-mode pooler with multiple backend hosts, or a failover proxy
+that can silently move an open client connection between backends; a
+connection-setup check cannot observe that kind of switch.
 
 Every new pooled connection repeats the expected-name, marker-table, UUID, and
 database-name checks and requires its opaque database-instance token to exactly
@@ -222,10 +230,11 @@ message. It does not claim to detect an in-place logical restore that preserves
 the database instance identity. The incremental tick runs first, the Interpret
 redo runs second, and
 the full Project rebuild runs last so the rebuilt projections match the
-interpreted copy. The report records the opaque database identity token before
-and after those measurements; a restart, failover, or listener change during
-the indexing run is red, and the per-connection check also rejects a transient
-switch away and back between those two report samples.
+interpreted copy. The report's pre/post opaque database identity fields are
+recorded evidence and a defense-in-depth comparison. In the supported stable
+connection setup, a restart, failover, or listener change that requires a new
+connection is red at the per-connection check and may stop the run with a pool
+timeout before a report is written.
 
 ## Run the API half
 
@@ -245,17 +254,21 @@ BIGNAME_BENCHMARK_API_BASE_URL='https://drained-generation-api.example' \
 
 This command cannot run an indexing operation. Every connection it opens sets
 `default_transaction_read_only=on` and verifies `transaction_read_only=on`
-before reading the corpus. Before load begins, it checks `/healthz` and requires
+before reading the corpus. A standalone connection captures the database
+instance identity before the pool opens, and every new pooled connection must
+match it. Before load begins, the harness checks `/healthz` and requires
 the target build SHA to match the clean harness checkout's `HEAD`, and requires
 the interpreter content hash to match the harness.
 It also requires the API-reported opaque database identity to match the
 read-only database connection used to count and sample the corpus. The report
 records both sides of that identity check. Configure the API database URL and
 `BIGNAME_BENCHMARK_DATABASE_URL` to reach PostgreSQL through the same TCP
-listener address and port; do not mix a Unix socket with TCP or use alternate
-listen addresses for the two connections. The endpoint-scoped identity makes
-an ambiguous access path red rather than treating two connections as proven to
-reach the same serving database. Cursor seed requests cover top-level list cursors,
+listener address and port. Each hostname must resolve to that one stable
+address for the complete run; do not mix a Unix socket with TCP, use alternate
+listen addresses, or put either connection behind a pooler that can choose
+different backend hosts. The endpoint-scoped identity makes an ambiguous access
+path red rather than treating two connections as proven to reach the same
+serving database. Cursor seed requests cover top-level list cursors,
 per-result reverse-lookup cursors, and the resolver route's nested bound-name
 cursor.
 
@@ -263,10 +276,12 @@ After every timed endpoint window, the harness repeats the API build, content
 hash, and running-database identity checks and rechecks the corpus connection.
 A build or database-identity change during the run is red even when every
 individual request succeeded. A failed boundary probe is recorded as a red,
-endpoint-named report failure rather than discarding the run's evidence. This
-detects a PostgreSQL restart or failover
-and a deployment roll that changes the build; a same-build API process restart
-is not distinguished from a continuously running process. A transient
+endpoint-named report failure rather than discarding the run's evidence. The
+read-only pool refuses a replacement connection to a different instance, so a
+PostgreSQL restart or failover may instead stop the run with the named refusal
+on stderr followed by a pool timeout. A deployment roll that changes the build
+is also red; a same-build API process restart is not distinguished from a
+continuously running process. A transient
 same-build identity flip entirely inside one endpoint window also cannot be
 distinguished; the boundary checks limit that blind window to one route's
 measurement rather than the complete load sequence.

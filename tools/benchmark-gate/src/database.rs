@@ -23,21 +23,76 @@ pub async fn connect_read_only(database_url: &str, maximum_connections: u32) -> 
         ("default_transaction_read_only", "on"),
         ("statement_timeout", "120000"),
     ]);
+    let expected_database_instance_identity =
+        preflight_read_only(&options, Duration::from_secs(30)).await?;
     let pool = PgPoolOptions::new()
         .max_connections(maximum_connections)
         .acquire_timeout(Duration::from_secs(30))
+        .after_connect(move |connection, _metadata| {
+            let expected_database_instance_identity = expected_database_instance_identity.clone();
+            Box::pin(async move {
+                validate_read_only_runtime_connection(
+                    connection,
+                    &expected_database_instance_identity,
+                )
+                .await
+                .map_err(|error| {
+                    eprintln!("benchmark read-only connection refused: {error:#}");
+                    sqlx::Error::Protocol(error.to_string())
+                })
+            })
+        })
         .connect_with(options)
         .await
         .context("failed to connect to the benchmark target in read-only mode")?;
+    Ok(pool)
+}
+
+async fn preflight_read_only(options: &PgConnectOptions, timeout: Duration) -> Result<String> {
+    let timeout_ms = timeout.as_millis();
+    tokio::time::timeout(timeout, async {
+        let mut preflight = PgConnection::connect_with(options)
+            .await
+            .context("failed to open the benchmark read-only preflight connection")?;
+        require_read_only_connection(&mut preflight).await?;
+        let database_instance_identity =
+            connection_database_instance_identity(&mut preflight).await?;
+        preflight
+            .close()
+            .await
+            .context("failed to close the benchmark read-only preflight connection")?;
+        Ok::<String, anyhow::Error>(database_instance_identity)
+    })
+    .await
+    .with_context(|| {
+        format!("benchmark read-only preflight did not complete within {timeout_ms}ms")
+    })?
+}
+
+async fn validate_read_only_runtime_connection(
+    connection: &mut PgConnection,
+    expected_database_instance_identity: &str,
+) -> Result<()> {
+    require_read_only_connection(connection).await?;
+    let actual_database_instance_identity =
+        connection_database_instance_identity(connection).await?;
+    ensure!(
+        actual_database_instance_identity == expected_database_instance_identity,
+        "benchmark read-only database instance identity changed from {expected_database_instance_identity:?} to {actual_database_instance_identity:?}; refusing corpus reads"
+    );
+    Ok(())
+}
+
+async fn require_read_only_connection(connection: &mut PgConnection) -> Result<()> {
     let read_only: String = sqlx::query_scalar("SHOW transaction_read_only")
-        .fetch_one(&pool)
+        .fetch_one(&mut *connection)
         .await
-        .context("failed to verify the benchmark read-only session")?;
+        .context("failed to inspect a benchmark read-only connection")?;
     ensure!(
         read_only == "on",
         "benchmark read connection is not read-only"
     );
-    Ok(pool)
+    Ok(())
 }
 
 pub async fn connect_disposable_copy(
@@ -46,6 +101,25 @@ pub async fn connect_disposable_copy(
     statement_timeout: Duration,
     expected_database_name: &str,
     expected_marker: Uuid,
+) -> Result<PgPool> {
+    connect_disposable_copy_with_acquire_timeout(
+        database_url,
+        maximum_connections,
+        statement_timeout,
+        expected_database_name,
+        expected_marker,
+        Duration::from_secs(30),
+    )
+    .await
+}
+
+async fn connect_disposable_copy_with_acquire_timeout(
+    database_url: &str,
+    maximum_connections: u32,
+    statement_timeout: Duration,
+    expected_database_name: &str,
+    expected_marker: Uuid,
+    acquire_timeout: Duration,
 ) -> Result<PgPool> {
     let timeout_ms = statement_timeout.as_millis().max(1).to_string();
     let options =
@@ -67,7 +141,7 @@ pub async fn connect_disposable_copy(
     let expected_database_name = expected_database_name.to_owned();
     let pool = PgPoolOptions::new()
         .max_connections(maximum_connections)
-        .acquire_timeout(Duration::from_secs(30))
+        .acquire_timeout(acquire_timeout)
         .after_connect(move |connection, _metadata| {
             let expected_database_name = expected_database_name.clone();
             let expected_database_instance_identity = expected_database_instance_identity.clone();
@@ -79,7 +153,10 @@ pub async fn connect_disposable_copy(
                     &expected_database_instance_identity,
                 )
                 .await
-                .map_err(|error| sqlx::Error::Protocol(error.to_string()))
+                .map_err(|error| {
+                    eprintln!("disposable-copy connection refused: {error:#}");
+                    sqlx::Error::Protocol(error.to_string())
+                })
             })
         })
         .connect_with(options)
@@ -154,7 +231,7 @@ async fn connection_database_instance_identity(connection: &mut PgConnection) ->
     let identity = sqlx::query_as(DATABASE_INSTANCE_IDENTITY_SQL)
         .fetch_one(&mut *connection)
         .await
-        .context("failed to identify disposable-copy database instance")?;
+        .context("failed to identify benchmark database connection instance")?;
     Ok(format_database_instance_identity(identity))
 }
 
@@ -363,17 +440,15 @@ mod tests {
     }
 
     #[test]
-    fn local_socket_identity_is_stable_for_one_running_instance() {
-        let identity = || {
-            (
-                "42".to_owned(),
-                "1234.5".to_owned(),
-                "local-socket".to_owned(),
-                "local-socket".to_owned(),
-            )
-        };
-        let first = format_database_instance_identity(identity());
-        let second = format_database_instance_identity(identity());
+    fn local_socket_identity_changes_with_postmaster_epoch() {
+        // This pins the load-bearing restart input for local sockets. The pooled
+        // connection tests exercise preflight-to-pool equality on real TCP sessions.
+        let first = format_database_instance_identity((
+            "42".to_owned(),
+            "1234.5".to_owned(),
+            "local-socket".to_owned(),
+            "local-socket".to_owned(),
+        ));
         let restarted = format_database_instance_identity((
             "42".to_owned(),
             "1235.5".to_owned(),
@@ -381,7 +456,6 @@ mod tests {
             "local-socket".to_owned(),
         ));
 
-        assert_eq!(first, second);
         assert_ne!(first, restarted);
     }
 
@@ -659,12 +733,13 @@ mod tests {
         .await
         .unwrap();
         let database_url = scratch_database_url(database.database_name());
-        let pool = connect_disposable_copy(
+        let pool = connect_disposable_copy_with_acquire_timeout(
             &database_url,
             1,
             Duration::from_secs(30),
             database.database_name(),
             marker,
+            Duration::from_millis(250),
         )
         .await
         .unwrap();
@@ -675,12 +750,16 @@ mod tests {
             .unwrap();
         held.close().await.unwrap();
 
-        let fresh = tokio::time::timeout(Duration::from_secs(2), pool.acquire()).await;
-        let refused = !matches!(fresh, Ok(Ok(_)));
-        drop(fresh);
+        let error = pool
+            .acquire()
+            .await
+            .expect_err("a new connection accepted a removed marker");
         pool.close().await;
         database.cleanup().await.unwrap();
-        assert!(refused, "a new connection accepted a removed marker");
+        assert!(
+            matches!(error, sqlx::Error::PoolTimedOut),
+            "marker refusal had the wrong pool error shape: {error:?}"
+        );
     }
 
     #[tokio::test]
@@ -754,6 +833,107 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(database_name, database.database_name());
+            connections.push(connection);
+        }
+
+        drop(connections);
+        pool.close().await;
+        database.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_only_connection_to_a_second_database_instance_is_rejected() {
+        let first = TestDatabase::create(TestDatabaseConfig::new("benchmark_reader_first"))
+            .await
+            .unwrap();
+        let second = TestDatabase::create(TestDatabaseConfig::new("benchmark_reader_second"))
+            .await
+            .unwrap();
+        let first_identity = database_instance_identity(first.pool()).await.unwrap();
+        let second_url = scratch_database_url(second.database_name());
+        let options = common_options(&second_url, "benchmark-reader-second")
+            .unwrap()
+            .options([("default_transaction_read_only", "on")]);
+        let mut second_connection = PgConnection::connect_with(&options).await.unwrap();
+        let second_identity = connection_database_instance_identity(&mut second_connection)
+            .await
+            .unwrap();
+        assert_ne!(first_identity, second_identity);
+
+        let result =
+            validate_read_only_runtime_connection(&mut second_connection, &first_identity).await;
+
+        second_connection.close().await.unwrap();
+        first.cleanup().await.unwrap();
+        second.cleanup().await.unwrap();
+        let error = result.expect_err(
+            "a read-only connection to a different preflighted database instance must be refused",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("database instance identity changed"),
+            "read-only instance refusal lost its named reason: {error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_identity_query_failure_uses_mode_neutral_context() {
+        let database = TestDatabase::create(TestDatabaseConfig::new(
+            "benchmark_reader_identity_diagnostic",
+        ))
+        .await
+        .unwrap();
+        let database_url = scratch_database_url(database.database_name());
+        let options = common_options(&database_url, "benchmark-reader-diagnostic")
+            .unwrap()
+            .options([("default_transaction_read_only", "on")]);
+        let mut connection = PgConnection::connect_with(&options).await.unwrap();
+        let backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+            .bind(backend_pid)
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert!(terminated);
+
+        let error = connection_database_instance_identity(&mut connection)
+            .await
+            .expect_err("a terminated read-only connection unexpectedly returned an identity");
+
+        database.cleanup().await.unwrap();
+        let diagnostic = format!("{error:#}");
+        assert!(
+            diagnostic.contains("failed to identify benchmark database connection instance"),
+            "read-only identity failure lost its mode-neutral context: {diagnostic}"
+        );
+        assert!(!diagnostic.contains("disposable-copy"));
+    }
+
+    #[tokio::test]
+    async fn all_eight_read_only_pool_connections_match_the_preflight_instance() {
+        let database = TestDatabase::create(TestDatabaseConfig::new("benchmark_reader_pool"))
+            .await
+            .unwrap();
+        let database_url = scratch_database_url(database.database_name());
+        let pool = connect_read_only(&database_url, 8).await.unwrap();
+        let expected_identity = database_instance_identity(database.pool()).await.unwrap();
+
+        let mut connections = Vec::with_capacity(8);
+        for _ in 0..8 {
+            let mut connection = pool.acquire().await.unwrap();
+            let read_only: String = sqlx::query_scalar("SHOW transaction_read_only")
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap();
+            let identity = connection_database_instance_identity(&mut connection)
+                .await
+                .unwrap();
+            assert_eq!(read_only, "on");
+            assert_eq!(identity, expected_identity);
             connections.push(connection);
         }
 

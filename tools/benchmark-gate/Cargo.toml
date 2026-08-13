@@ -24,4 +24,5 @@ bigname-content-hash.workspace = true
 bigname-interpret.workspace = true
 bigname-lookup.workspace = true
 bigname-project.workspace = true
+bigname-storage.workspace = true
 bigname-test-support.workspace = true
