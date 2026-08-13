@@ -322,7 +322,7 @@ fn table_scale_failures(
     let mut failures = Vec::new();
     if name_rows < min_name_rows {
         failures.push(format!(
-            "name_current has {name_rows} API-visible supported rows after canonical projection and identity filtering; release profile requires {min_name_rows}"
+            "name_current has {name_rows} API-visible supported rows in active public namespaces after canonical projection and identity filtering; release profile requires {min_name_rows}"
         ));
     }
     if address_rows < min_address_rows {
@@ -360,6 +360,12 @@ fn name_scale_sql() -> String {
            LEFT JOIN bigname_phase.token_lineages token_lineage
              ON token_lineage.token_lineage_id = nc.token_lineage_id
            {DEFAULT_NAME_CURRENT_LINEAGE_JOINS}
+           JOIN (
+               SELECT DISTINCT namespace
+               FROM bigname_phase.manifest_versions
+               WHERE rollout_status = 'active'
+                 AND namespace IN ('ens', 'basenames')
+           ) active ON active.namespace = nc.namespace
            WHERE nc.support_status = 'supported'
              {DEFAULT_NAME_CURRENT_READ_FILTER}"#
     )
@@ -556,7 +562,7 @@ mod tests {
         assert_eq!(
             failures,
             [
-                "name_current has 0 API-visible supported rows after canonical projection and identity filtering; release profile requires 8",
+                "name_current has 0 API-visible supported rows in active public namespaces after canonical projection and identity filtering; release profile requires 8",
                 "address_names_current has 0 API-visible supported rows in active public namespaces after canonical projection and identity filtering; release profile requires 8",
             ]
         );
@@ -616,6 +622,49 @@ mod tests {
         database.cleanup().await.unwrap();
         assert_eq!(names, [("ens".to_owned(), "healthy.eth".to_owned())]);
         assert_eq!(scale.name_current_rows, 1);
+    }
+
+    #[tokio::test]
+    async fn inactive_namespace_names_do_not_satisfy_the_scale_floor() {
+        let database = TestDatabase::create(
+            TestDatabaseConfig::new("benchmark_active_name_scale").pool_max_connections(1),
+        )
+        .await
+        .unwrap();
+        install_name_visibility_schema(database.pool()).await;
+        sqlx::query("INSERT INTO manifest_versions VALUES ('ens', 'active')")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        for index in 0..2 {
+            insert_name_with_visibility(
+                database.pool(),
+                "ens",
+                &format!("active-{index}.eth"),
+                &format!("ens:active-{index}"),
+                "supported",
+                "canonical",
+                "canonical",
+            )
+            .await;
+        }
+        for index in 0..5 {
+            insert_name_with_visibility(
+                database.pool(),
+                "ens-sepolia",
+                &format!("inactive-{index}.eth"),
+                &format!("ens-sepolia:inactive-{index}"),
+                "supported",
+                "canonical",
+                "canonical",
+            )
+            .await;
+        }
+
+        let scale = load_table_scale(database.pool()).await.unwrap();
+
+        database.cleanup().await.unwrap();
+        assert_eq!(scale.name_current_rows, 2);
     }
 
     #[tokio::test]

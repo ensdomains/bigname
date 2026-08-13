@@ -94,17 +94,19 @@ address/name/relation combinations from the target projections, plus at least
 name claims, plus at least 1,000 supported resolver rows. The name and parent
 samples are divided deterministically across every active public namespace;
 an active namespace with no supported name or parent seed makes the run red.
+Address and successful primary-name samples are restricted to those same
+active public namespaces.
 Name, address, parent, permission, primary-name, and resolver samples use the
 same [read-safe](../glossary.md#readable--read-safe) canonical-block checks for
 each projection and its referenced identity rows as their API reads, so hidden
 rows cannot satisfy a corpus floor or enter the timed request set.
 The report records the name and parent counts contributed by each namespace,
 and name-mode lookup batches alternate those namespace buckets. Before sampling
-that corpus, it counts API-visible rows in the `name_current` and
-`address_names_current` tables and requires at least 3 million supported rows in
-each. Unsupported rows and rows whose projection or referenced identity rows
-are not read-safe are excluded because the API cannot return them as request
-seeds.
+that corpus, it counts API-visible rows in active public namespaces in the
+`name_current` and `address_names_current` tables and requires at least 3
+million supported rows in each. Unsupported rows, rows from inactive
+namespaces, and rows whose projection or referenced identity rows are not
+read-safe are excluded because the API cannot return them as request seeds.
 These floors leave headroom below the roughly 3.5 million names in the
 production dataset while excluding staging-sized databases. The JSON report
 records both API-visible supported-row totals and both floors. It varies names, addresses,
@@ -262,7 +264,12 @@ This command cannot run an indexing operation. Every connection it opens sets
 `default_transaction_read_only=on` and verifies `transaction_read_only=on`
 before reading the corpus. A standalone connection captures the database
 instance identity before the pool opens, and every new pooled connection must
-match it. Before load begins, the harness checks `/healthz` and requires
+match it. Before corpus sampling or timed load, the harness refuses an active
+ENS chain, or the Basenames `base-mainnet` serving-authority chain, when its
+`chain_phase_state.interpret.redo_in_progress` flag is set. Complete or roll
+back the Interpret redo, take a fresh copy, and rerun the gate; otherwise
+address-mode lookup can omit the affected namespace.
+The harness also checks `/healthz` and requires
 the target build SHA to match the clean harness checkout's `HEAD`, and requires
 the interpreter content hash to match the harness.
 It also requires the API-reported opaque database identity to match the
@@ -299,10 +306,19 @@ does not produce the required populated result or cursor, the harness continues
 through the bounded target-database corpus before declaring the route red; a resumed
 cursor request becomes part of the timed workload. For the records route,
 populated means at least one requested key has an `ok` answer, not merely that
-the name exists. This prevents a fast empty-result workload from counting as
-release evidence. Timed records responses are also classified as populated or
-empty. At least 1 percent must contain an `ok` requested record, and the report
-records the observed populated share and its checked-in floor.
+the name exists. For lookup, populated means at least one address-kind result
+has status `ok` and a non-empty `records` list; a forward name result or an
+empty reverse result is not evidence that reverse lookup was measured. This
+prevents a fast empty-result workload from counting as release evidence. Timed
+records responses are also classified as populated or empty. At least 1 percent
+must contain an `ok` requested record, and the report records the observed
+populated share and its checked-in floor.
+
+Per-request namespace readiness cannot be fully precomputed by the corpus SQL.
+Restricting address and primary-name seeds to active public namespaces, plus the
+Interpret-redo preflight above, closes the confirmed state that silently
+narrowed address-mode lookup. The remaining serving-side readiness asymmetry is
+tracked in [issue #449](https://github.com/ensdomains/bigname/issues/449).
 
 ## Decide green or red
 

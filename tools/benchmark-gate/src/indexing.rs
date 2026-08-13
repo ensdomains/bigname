@@ -567,8 +567,10 @@ mod tests {
     #[tokio::test]
     async fn kernel_high_water_mark_captures_a_freed_transient_allocation() {
         const CHILD_ENV: &str = "BIGNAME_BENCHMARK_HWM_PROBE_CHILD";
+        const CHILD_SENTINEL: &str = "BIGNAME_BENCHMARK_HWM_PROBE_RAN";
         if std::env::var_os(CHILD_ENV).is_some() {
             run_kernel_high_water_mark_probe().await;
+            println!("{CHILD_SENTINEL}");
             return;
         }
 
@@ -600,6 +602,10 @@ mod tests {
             output.status.success(),
             "isolated VmHWM probe failed with {}",
             output.status
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(CHILD_SENTINEL),
+            "isolated VmHWM child exited successfully without running the exact probe test"
         );
     }
 

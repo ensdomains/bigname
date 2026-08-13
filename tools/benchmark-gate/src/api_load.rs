@@ -15,8 +15,10 @@ use serde_json::Value;
 use sqlx::PgPool;
 use tokio::task::JoinSet;
 mod corpus;
+mod preflight;
 mod workload;
 use corpus::{Corpus, TableScale, load_table_scale};
+use preflight::interpret_redo_preflight_failures;
 use workload::{RequestSpec, get, normalized_base_url, request_variants};
 #[derive(Clone, Debug, Serialize)]
 pub struct ApiReport {
@@ -154,6 +156,7 @@ pub async fn run(
     let scale = load_table_scale(pool).await?;
     let mut preflight_failures =
         api_identity_failures(&identity, expected_build_sha, &database_identity);
+    preflight_failures.extend(interpret_redo_preflight_failures(pool).await?);
     preflight_failures.extend(scale.failures(budgets));
     if !preflight_failures.is_empty() {
         return Ok(preflight_failure_report(
@@ -852,6 +855,28 @@ mod tests {
                     "kind": "address",
                     "status": "ok",
                     "records": []
+                }]
+            })
+        ));
+        for status in ["stale", "unsupported"] {
+            assert!(!response_is_populated(
+                "lookup",
+                &json!({
+                    "data": [{
+                        "kind": "address",
+                        "status": status,
+                        "records": [{"name": format!("{status}.eth")}]
+                    }]
+                })
+            ));
+        }
+        assert!(!response_is_populated(
+            "lookup",
+            &json!({
+                "data": [{
+                    "kind": "name",
+                    "status": "ok",
+                    "record": {"name": "forward.eth"}
                 }]
             })
         ));
