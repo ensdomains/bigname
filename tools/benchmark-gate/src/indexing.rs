@@ -1,4 +1,5 @@
 use std::{
+    fs,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -22,6 +23,9 @@ use sqlx::PgPool;
 use crate::{budgets::GateBudgets, database};
 
 const PROJECTION_NAME_COUNT_SQL: &str = "SELECT count(*) FROM name_current WHERE provenance ->> 'chain_id' = $1 AND support_status = 'supported'";
+const PROC_SELF_STATUS: &str = "/proc/self/status";
+const PROC_SELF_CLEAR_REFS: &str = "/proc/self/clear_refs";
+static HWM_RESET_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Clone, Debug)]
 pub struct IndexingInput {
@@ -59,6 +63,8 @@ pub struct IndexingReport {
     pub interpret_blocks_per_hour: f64,
     pub interpret_min_blocks_per_hour: u64,
     pub interpret_peak_rss_mib: f64,
+    pub interpret_kernel_hwm_rss_mib: f64,
+    pub interpret_sampled_peak_rss_mib: f64,
     pub interpret_max_peak_rss_mib: u64,
     pub interpret_state_cache_entries: usize,
     pub green: bool,
@@ -115,8 +121,10 @@ pub async fn run(
     .context("incremental projection tick and canonical-head hydration exceeded twice their release budget")??;
     let project_tick_ms = tick_started.elapsed().as_millis();
 
-    let (interpret_walk_seconds, peak_rss_mib) =
+    let interpret_walk =
         run_interpret_walk(pool, input, budgets.interpret_state_cache_entries).await?;
+    let interpret_walk_seconds = interpret_walk.elapsed_seconds;
+    let peak_rss_mib = interpret_walk.budget_peak_rss_mib;
     let interpret_blocks_per_hour =
         walk_blocks as f64 * 3_600.0 / interpret_walk_seconds.max(0.000_001);
 
@@ -206,6 +214,8 @@ pub async fn run(
         interpret_blocks_per_hour,
         interpret_min_blocks_per_hour: budgets.interpret_min_blocks_per_hour,
         interpret_peak_rss_mib: peak_rss_mib,
+        interpret_kernel_hwm_rss_mib: interpret_walk.kernel_hwm_rss_mib,
+        interpret_sampled_peak_rss_mib: interpret_walk.sampled_peak_rss_mib,
         interpret_max_peak_rss_mib: budgets.interpret_max_peak_rss_mib,
         interpret_state_cache_entries: budgets.interpret_state_cache_entries,
         green: failures.is_empty(),
@@ -254,6 +264,8 @@ fn scale_failure_report(
         interpret_blocks_per_hour: 0.0,
         interpret_min_blocks_per_hour: budgets.interpret_min_blocks_per_hour,
         interpret_peak_rss_mib: 0.0,
+        interpret_kernel_hwm_rss_mib: 0.0,
+        interpret_sampled_peak_rss_mib: 0.0,
         interpret_max_peak_rss_mib: budgets.interpret_max_peak_rss_mib,
         interpret_state_cache_entries: budgets.interpret_state_cache_entries,
         green: false,
@@ -328,11 +340,20 @@ fn require_completed_hydration(hydration: bigname_project::HydrationOutcome) -> 
     Ok(hydration.updated_rows)
 }
 
+struct InterpretWalkMetrics {
+    elapsed_seconds: f64,
+    budget_peak_rss_mib: f64,
+    kernel_hwm_rss_mib: f64,
+    sampled_peak_rss_mib: f64,
+}
+
 async fn run_interpret_walk(
     pool: &PgPool,
     input: &IndexingInput,
     state_cache_entries: usize,
-) -> Result<(f64, f64)> {
+) -> Result<InterpretWalkMetrics> {
+    let _hwm_reset_guard = HWM_RESET_LOCK.lock().await;
+    reset_peak_rss_hwm()?;
     let initial_rss_kib = rss_kib().context(
         "failed to read process RSS from /proc/self/status; the memory gate requires Linux procfs",
     )?;
@@ -379,7 +400,15 @@ async fn run_interpret_walk(
     running.store(false, Ordering::Relaxed);
     sampler.await.context("Interpret RSS sampler failed")?;
     walk_result?;
-    Ok((elapsed, peak_kib.load(Ordering::Relaxed) as f64 / 1_024.0))
+    let sampled_peak_kib = peak_kib.load(Ordering::Relaxed);
+    let kernel_hwm_kib = peak_rss_hwm_kib()
+        .context("failed to read process VmHWM from /proc/self/status after the Interpret walk")?;
+    Ok(InterpretWalkMetrics {
+        elapsed_seconds: elapsed,
+        budget_peak_rss_mib: sampled_peak_kib.max(kernel_hwm_kib) as f64 / 1_024.0,
+        kernel_hwm_rss_mib: kernel_hwm_kib as f64 / 1_024.0,
+        sampled_peak_rss_mib: sampled_peak_kib as f64 / 1_024.0,
+    })
 }
 
 async fn validate_input(pool: &PgPool, input: &IndexingInput, budgets: &GateBudgets) -> Result<()> {
@@ -454,17 +483,32 @@ async fn project_marker(pool: &PgPool, chain_id: &str, block_number: i64) -> Res
 }
 
 fn rss_kib() -> Option<u64> {
-    std::fs::read_to_string("/proc/self/status")
+    fs::read_to_string(PROC_SELF_STATUS)
         .ok()
-        .and_then(|status| {
-            status.lines().find_map(|line| {
-                line.strip_prefix("VmRSS:")?
-                    .split_whitespace()
-                    .next()?
-                    .parse::<u64>()
-                    .ok()
-            })
-        })
+        .and_then(|status| parse_status_memory_kib(&status, "VmRSS"))
+}
+
+fn peak_rss_hwm_kib() -> Option<u64> {
+    fs::read_to_string(PROC_SELF_STATUS)
+        .ok()
+        .and_then(|status| parse_status_memory_kib(&status, "VmHWM"))
+}
+
+fn parse_status_memory_kib(status: &str, field: &str) -> Option<u64> {
+    let prefix = format!("{field}:");
+    status.lines().find_map(|line| {
+        line.strip_prefix(&prefix)?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()
+    })
+}
+
+fn reset_peak_rss_hwm() -> Result<()> {
+    fs::write(PROC_SELF_CLEAR_REFS, "5").context(
+        "failed to reset process VmHWM through /proc/self/clear_refs before the Interpret walk; the memory gate requires writable Linux procfs",
+    )
 }
 
 fn require_minimum_walk_blocks(walk_blocks: i64, minimum: u64) -> Result<()> {
@@ -511,6 +555,87 @@ fn database_instance_identity_failures(preflight: &str, postflight: &str) -> Vec
 mod tests {
     use super::*;
     use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+
+    #[test]
+    fn parses_kernel_high_water_mark_from_proc_status() {
+        let status = "Name:\tbenchmark\nVmRSS:\t  1024 kB\nVmHWM:\t  8192 kB\n";
+        assert_eq!(parse_status_memory_kib(status, "VmHWM"), Some(8_192));
+        assert_eq!(parse_status_memory_kib(status, "VmRSS"), Some(1_024));
+        assert_eq!(parse_status_memory_kib(status, "VmPeak"), None);
+    }
+
+    #[tokio::test]
+    async fn kernel_high_water_mark_captures_a_freed_transient_allocation() {
+        const CHILD_ENV: &str = "BIGNAME_BENCHMARK_HWM_PROBE_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            run_kernel_high_water_mark_probe().await;
+            return;
+        }
+
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let unrelated = std::thread::spawn(move || {
+            let allocation = vec![1_u8; 64 * 1_024 * 1_024];
+            std::hint::black_box(&allocation);
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(allocation);
+        });
+        ready_rx.recv().unwrap();
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "indexing::tests::kernel_high_water_mark_captures_a_freed_transient_allocation",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .output()
+            .unwrap();
+        release_tx.send(()).unwrap();
+        unrelated.join().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        print!("{}", String::from_utf8_lossy(&output.stdout));
+        assert!(
+            output.status.success(),
+            "isolated VmHWM probe failed with {}",
+            output.status
+        );
+    }
+
+    async fn run_kernel_high_water_mark_probe() {
+        let _hwm_reset_guard = HWM_RESET_LOCK.lock().await;
+        reset_peak_rss_hwm().unwrap();
+        let baseline_rss = rss_kib().unwrap();
+        let reset_hwm = peak_rss_hwm_kib().unwrap();
+        assert!(reset_hwm >= baseline_rss);
+        assert!(reset_hwm - baseline_rss < 16 * 1_024);
+
+        const TRANSIENT_BYTES: usize = 96 * 1_024 * 1_024;
+        let mut transient = vec![0_u8; TRANSIENT_BYTES];
+        for page in transient.chunks_mut(4_096) {
+            page[0] = 1;
+        }
+        std::hint::black_box(&transient);
+        let allocated_hwm = peak_rss_hwm_kib().unwrap();
+        assert!(allocated_hwm >= reset_hwm + 80 * 1_024);
+        drop(transient);
+
+        let mut current_rss = rss_kib().unwrap();
+        for _ in 0..50 {
+            if current_rss <= baseline_rss + 32 * 1_024 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            current_rss = rss_kib().unwrap();
+        }
+        let final_hwm = peak_rss_hwm_kib().unwrap();
+        eprintln!(
+            "VmRSS baseline={baseline_rss}kB current={current_rss}kB; VmHWM reset={reset_hwm}kB allocated={allocated_hwm}kB final={final_hwm}kB"
+        );
+        assert!(current_rss <= baseline_rss + 32 * 1_024);
+        assert!(final_hwm >= reset_hwm + 80 * 1_024);
+    }
 
     #[test]
     fn dense_walk_cannot_use_a_trivial_range() {

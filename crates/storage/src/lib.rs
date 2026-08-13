@@ -37,6 +37,7 @@ pub use address_names::{
     AddressNamesCurrentOrder, AddressNamesCurrentPage, AddressNamesCurrentProvenanceSummary,
     AddressNamesCurrentSort, AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue,
     AddressNamesCurrentSortedPage, AddressNamesCurrentSummary,
+    DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
     count_address_names_current_for_app_filter, load_address_names_current,
     load_address_names_current_for_relations, load_address_names_current_including_noncanonical,
     load_address_names_current_including_noncanonical_for_relations,

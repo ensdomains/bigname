@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, ensure};
 use bigname_storage::{
-    DEFAULT_ADDRESS_NAMES_MEMBERSHIP_JOINS, DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER,
+    DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
     DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS, DEFAULT_CHILDREN_CURRENT_READ_FILTER,
     DEFAULT_NAME_CURRENT_LINEAGE_JOINS, DEFAULT_NAME_CURRENT_READ_FILTER,
     DEFAULT_PERMISSIONS_CURRENT_READ_FILTER, DEFAULT_PRIMARY_NAME_CURRENT_READ_FILTER,
@@ -185,9 +185,15 @@ fn address_corpus_sql() -> String {
     format!(
         r#"SELECT anc.address, min(anc.raw_name), anc.namespace, anc.relation
            FROM bigname_phase.address_names_current anc
-           {DEFAULT_ADDRESS_NAMES_MEMBERSHIP_JOINS}
+           {DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS}
+           JOIN (
+               SELECT DISTINCT namespace
+               FROM bigname_phase.manifest_versions
+               WHERE rollout_status = 'active'
+                 AND namespace IN ('ens', 'basenames')
+           ) active ON active.namespace = anc.namespace
            WHERE anc.support_status = 'supported'
-             {DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER}
+             {DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER}
            GROUP BY anc.address, anc.namespace, anc.relation
            ORDER BY anc.address, anc.namespace, anc.relation
            LIMIT $1"#
@@ -221,6 +227,12 @@ fn primary_name_corpus_sql() -> String {
     format!(
         r#"SELECT pnc.address, pnc.coin_type, pnc.namespace
            FROM bigname_phase.primary_names_current pnc
+           JOIN (
+               SELECT DISTINCT namespace
+               FROM bigname_phase.manifest_versions
+               WHERE rollout_status = 'active'
+                 AND namespace IN ('ens', 'basenames')
+           ) active ON active.namespace = pnc.namespace
            WHERE pnc.claim_status = 'success'
              {DEFAULT_PRIMARY_NAME_CURRENT_READ_FILTER}
            ORDER BY pnc.address, pnc.coin_type, pnc.namespace
@@ -310,12 +322,12 @@ fn table_scale_failures(
     let mut failures = Vec::new();
     if name_rows < min_name_rows {
         failures.push(format!(
-            "name_current has {name_rows} supported rows; release profile requires {min_name_rows}"
+            "name_current has {name_rows} API-visible supported rows after canonical projection and identity filtering; release profile requires {min_name_rows}"
         ));
     }
     if address_rows < min_address_rows {
         failures.push(format!(
-                "address_names_current has {address_rows} supported rows; release profile requires {min_address_rows}"
+                "address_names_current has {address_rows} API-visible supported rows in active public namespaces after canonical projection and identity filtering; release profile requires {min_address_rows}"
             ));
     }
     failures
@@ -357,9 +369,15 @@ fn address_scale_sql() -> String {
     format!(
         r#"SELECT count(*)
            FROM bigname_phase.address_names_current anc
-           {DEFAULT_ADDRESS_NAMES_MEMBERSHIP_JOINS}
+           {DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS}
+           JOIN (
+               SELECT DISTINCT namespace
+               FROM bigname_phase.manifest_versions
+               WHERE rollout_status = 'active'
+                 AND namespace IN ('ens', 'basenames')
+           ) active ON active.namespace = anc.namespace
            WHERE anc.support_status = 'supported'
-             {DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER}"#
+             {DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER}"#
     )
 }
 
@@ -538,8 +556,8 @@ mod tests {
         assert_eq!(
             failures,
             [
-                "name_current has 0 supported rows; release profile requires 8",
-                "address_names_current has 0 supported rows; release profile requires 8",
+                "name_current has 0 API-visible supported rows after canonical projection and identity filtering; release profile requires 8",
+                "address_names_current has 0 API-visible supported rows in active public namespaces after canonical projection and identity filtering; release profile requires 8",
             ]
         );
         database.cleanup().await.unwrap();
@@ -608,6 +626,10 @@ mod tests {
         .await
         .unwrap();
         install_name_visibility_schema(database.pool()).await;
+        sqlx::query("INSERT INTO manifest_versions VALUES ('ens', 'active')")
+            .execute(database.pool())
+            .await
+            .unwrap();
         sqlx::query(
             "INSERT INTO chain_lineage VALUES
                  ('ethereum-mainnet', 'visible-surface', 'canonical'),
@@ -674,6 +696,78 @@ mod tests {
         assert_eq!(addresses[0].1, "visible.eth");
         assert_eq!(resolvers.len(), 1);
         assert_eq!(resolvers[0].1, "0x0000000000000000000000000000000000000031");
+        assert_eq!(scale.address_names_current_rows, 1);
+    }
+
+    #[tokio::test]
+    async fn inactive_namespace_rows_are_excluded_from_address_and_primary_corpora() {
+        let database = TestDatabase::create(
+            TestDatabaseConfig::new("benchmark_active_public_corpus").pool_max_connections(1),
+        )
+        .await
+        .unwrap();
+        install_name_visibility_schema(database.pool()).await;
+        sqlx::query("INSERT INTO manifest_versions VALUES ('ens', 'active')")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO chain_lineage VALUES
+                 ('ethereum-mainnet', 'ens-surface', 'canonical'),
+                 ('ethereum-mainnet', 'ens-resource', 'canonical'),
+                 ('ethereum-mainnet', 'ens-binding', 'canonical'),
+                 ('ethereum-mainnet', 'ens-projection', 'canonical'),
+                 ('ethereum-sepolia', 'sepolia-surface', 'canonical'),
+                 ('ethereum-sepolia', 'sepolia-resource', 'canonical'),
+                 ('ethereum-sepolia', 'sepolia-binding', 'canonical'),
+                 ('ethereum-sepolia', 'sepolia-projection', 'canonical'),
+                 ('ethereum-mainnet', 'ens-primary-projection', 'canonical'),
+                 ('ethereum-sepolia', 'sepolia-primary-projection', 'canonical');
+             INSERT INTO name_surfaces VALUES
+                 ('ens:visible-address', 'ethereum-mainnet', 'ens-surface', 'canonical'),
+                 ('ens-sepolia:inactive-address', 'ethereum-sepolia', 'sepolia-surface', 'canonical');
+             INSERT INTO resources VALUES
+                 ('00000000-0000-0000-0000-000000000061', 'ethereum-mainnet', 'ens-resource', 'canonical'),
+                 ('00000000-0000-0000-0000-000000000062', 'ethereum-sepolia', 'sepolia-resource', 'canonical');
+             INSERT INTO surface_bindings VALUES
+                 ('00000000-0000-0000-0000-000000000071', 'ethereum-mainnet', 'ens-binding', 'canonical', NULL),
+                 ('00000000-0000-0000-0000-000000000072', 'ethereum-sepolia', 'sepolia-binding', 'canonical', NULL);
+             INSERT INTO address_names_current VALUES
+                 ('0x0000000000000000000000000000000000000061', 'visible.eth', 'ens', 'effective_controller', 'ens:visible-address', 'supported',
+                  '00000000-0000-0000-0000-000000000071', '00000000-0000-0000-0000-000000000061', NULL,
+                  '{\"chain_id\":\"ethereum-mainnet\"}', '{\"target_block_hash\":\"ens-projection\"}', '{\"state\":\"canonical_lineage\"}'),
+                 ('0x0000000000000000000000000000000000000062', 'inactive.eth', 'ens-sepolia', 'effective_controller', 'ens-sepolia:inactive-address', 'supported',
+                  '00000000-0000-0000-0000-000000000072', '00000000-0000-0000-0000-000000000062', NULL,
+                  '{\"chain_id\":\"ethereum-sepolia\"}', '{\"target_block_hash\":\"sepolia-projection\"}', '{\"state\":\"canonical_lineage\"}');
+             INSERT INTO primary_names_current VALUES
+                 ('0x0000000000000000000000000000000000000061', '60', 'ens', 'success',
+                  '{\"chain_id\":\"ethereum-mainnet\",\"target_block_hash\":\"ens-primary-projection\"}'),
+                 ('0x0000000000000000000000000000000000000062', '60', 'ens-sepolia', 'success',
+                  '{\"chain_id\":\"ethereum-sepolia\",\"target_block_hash\":\"sepolia-primary-projection\"}')",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        let addresses: Vec<(String, String, String, String)> =
+            sqlx::query_as(&address_corpus_sql())
+                .bind(10_i64)
+                .fetch_all(database.pool())
+                .await
+                .unwrap();
+        let primary_names: Vec<(String, String, String)> =
+            sqlx::query_as(&primary_name_corpus_sql())
+                .bind(10_i64)
+                .fetch_all(database.pool())
+                .await
+                .unwrap();
+        let scale = load_table_scale(database.pool()).await.unwrap();
+
+        database.cleanup().await.unwrap();
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0].2, "ens");
+        assert_eq!(primary_names.len(), 1);
+        assert_eq!(primary_names[0].2, "ens");
         assert_eq!(scale.address_names_current_rows, 1);
     }
 

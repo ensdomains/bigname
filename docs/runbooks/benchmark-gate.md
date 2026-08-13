@@ -68,17 +68,23 @@ database copy because all three operations write derived state:
 - the restored copy must contain at least 3 million supported current name rows
   before any timed projection work begins, owned by the selected chain's
   Project output;
-- the Interpret process must stay at or below 32 GiB peak RSS while using the
+- the Interpret walk must stay at or below 32 GiB peak RSS while using the
   configured 65,536-entry interpreter-state cache.
 
 The density check prevents a sparse historical range from producing a false
 green throughput result. The current-name floor prevents a staging-sized copy
 from producing a false-green full rebuild. The harness counts current names
 before and after the rebuild, requires both totals to meet the floor, and
-records both totals and the floor. The 32 GiB limit is a whole-process limit. It includes
-the bounded value cache introduced after the 94 GiB out-of-memory incident and
-the smaller protocol-state maps that remain resident; it is not merely the
-cache's estimated JSON size.
+records both totals and the floor. Immediately before the Interpret walk, the
+harness resets the Linux kernel's process high-water RSS counter to the current
+RSS through `/proc/self/clear_refs`; failure to reset it is a hard error. This
+excludes an earlier incremental Project tick or smoke-fixture setup while still
+including the process memory already resident when the walk starts. The 32 GiB
+cap uses the larger of the post-walk kernel `VmHWM` value and the existing 20 ms
+RSS sampler peak. The report records both inputs separately for diagnosis. It
+includes the bounded value cache introduced after the 94 GiB out-of-memory
+incident and the smaller protocol-state maps that remain resident; it is not
+merely the cache's estimated JSON size.
 
 The API half sends each Tier 1 and Tier 2 REST route in
 [`api-v2-routes.md`](../api-v2-routes.md) 2,000 requests per second for 60

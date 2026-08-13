@@ -21,7 +21,7 @@ pub use types::{
     AddressNamesCurrentSummary,
 };
 
-pub(crate) const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = r#"
+pub const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = r#"
   AND anc.canonicality_summary ->> 'state' = 'canonical_lineage'
   AND EXISTS (
       SELECT 1
@@ -82,7 +82,7 @@ pub(crate) const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = r#"
   )
 "#;
 
-pub(crate) const DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS: &str = r#"
+pub const DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS: &str = r#"
   JOIN bigname_phase.name_surfaces surface
     ON surface.logical_name_id = anc.logical_name_id
   JOIN bigname_phase.resources resource

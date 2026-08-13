@@ -513,9 +513,14 @@ fn response_is_populated(endpoint: &str, body: &Value) -> bool {
             .get("data")
             .and_then(Value::as_array)
             .is_some_and(|results| {
-                results
-                    .iter()
-                    .any(|result| result.get("status").and_then(Value::as_str) == Some("ok"))
+                results.iter().any(|result| {
+                    result.get("kind").and_then(Value::as_str) == Some("address")
+                        && result.get("status").and_then(Value::as_str) == Some("ok")
+                        && result
+                            .get("records")
+                            .and_then(Value::as_array)
+                            .is_some_and(|records| !records.is_empty())
+                })
             }),
         "subnames" | "name_history" | "permissions" | "address_names" | "address_history"
         | "search" | "events" => body
@@ -836,6 +841,40 @@ mod tests {
         assert!(endpoint_requires_cursor("lookup"));
         assert!(endpoint_requires_cursor("resolver"));
         assert!(!endpoint_requires_cursor("primary_name"));
+    }
+
+    #[test]
+    fn lookup_probe_requires_a_nonempty_address_result() {
+        assert!(!response_is_populated(
+            "lookup",
+            &json!({
+                "data": [{
+                    "kind": "address",
+                    "status": "ok",
+                    "records": []
+                }]
+            })
+        ));
+        assert!(response_is_populated(
+            "lookup",
+            &json!({
+                "data": [{
+                    "kind": "address",
+                    "status": "ok",
+                    "records": [{"name": "visible.eth"}]
+                }]
+            })
+        ));
+        assert!(!response_is_populated(
+            "lookup",
+            &json!({
+                "data": [{
+                    "kind": "address",
+                    "status": "failed",
+                    "records": [{"name": "failed.eth", "status": "failed"}]
+                }]
+            })
+        ));
     }
 
     #[test]

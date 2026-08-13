@@ -15,12 +15,15 @@ const SENDER: &str = "0x0000000000000000000000000000000000000043";
 const REGISTRY: &str = "0x0000000000000000000000000000000000000044";
 const REGISTRY_ROLE: &str = "registry";
 const NORMALIZER: &str = "ensip15@ens-normalize-0.1.1";
+// (upstream: .refs/ens_v1/deployments/archive/ETHRegistrarController_mainnet_9380471.sol/ETHRegistrarController_mainnet_9380471.json:L33-L67 @ ens_v1@91c966f)
 const REGISTRATION_EVENT_FRAGMENT: &str = "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 cost, uint256 expires)";
 // (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L6 @ ens_v1@91c966f)
 const NEW_OWNER_EVENT_FRAGMENT: &str =
     "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)";
+// (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f)
 const NEW_RESOLVER_EVENT_FRAGMENT: &str =
     "event NewResolver(bytes32 indexed node, address resolver)";
+// (upstream: .refs/ens_v1/contracts/resolvers/profiles/ITextResolver.sol:L5 @ ens_v1@91c966f)
 const RESOLVER_EVENT_FRAGMENT: &str =
     "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)";
 const REGISTRATION_NORMALIZED_EVENTS: &[&str] = &["RegistrationGranted"];
