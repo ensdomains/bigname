@@ -978,12 +978,16 @@ and routes that additionally require supported rows say so. `POST /v2/lookup`
 reverse address results are one such route
 ([api-v2.md](api-v2.md#cursors-and-pagination)).
 
-**Re-derivation boundary** — a coordinated deployment point for changes that
-alter interpreted or projected content. The boundary adopts one interpreter
-content hash, performs the mandatory historical Ingest fetch for every range
-added by the generated watch plan, runs Interpret from the earliest affected
-source position through the fixed readable head, runs Project through that same
-head, and makes one publication decision for that target chain. The boundary is
+**Re-derivation boundary** — a planned point when the indexed dataset is rebuilt
+from raw chain data, starting at block zero or a documented lower bound, because
+interpretation semantics changed. The [interpreter content
+hash](#interpreter-content-hash) names the generation of interpretation
+semantics used for that rebuild; a deployment that changes that hash happens
+only at a re-derivation boundary.
+At the boundary, Ingest performs the mandatory historical fetch for every range
+added by the generated watch plan, Interpret runs from the chosen lower bound
+through the fixed readable head, Project runs through that same head, and the
+operator makes one publication decision for that target chain. The boundary is
 not a cross-chain transaction: a multi-chain deployment retains one independent
 decision and readiness result per chain. A *full source re-walk* in this contract
 means that complete Ingest, Interpret, and Project sequence; it is not an
