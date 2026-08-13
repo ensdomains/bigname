@@ -14,6 +14,7 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY .cargo .cargo
 COPY apps apps
 COPY crates crates
+COPY tools tools
 COPY migrations migrations
 COPY manifests manifests
 COPY schema-v2 schema-v2
