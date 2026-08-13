@@ -429,12 +429,7 @@ impl PhaseRunner {
             Ok(PhaseLoopResult::Completed(progress)) => {
                 phase_lock.check_alive().await?;
                 self.store
-                    .complete_phase_on_connection(
-                        phase_lock.connection(),
-                        &chain.chain_id,
-                        phase_name,
-                        &progress,
-                    )
+                    .complete_phase_with_lock(phase_lock, &chain.chain_id, phase_name, &progress)
                     .await
             }
             Ok(PhaseLoopResult::Cancelled) => {

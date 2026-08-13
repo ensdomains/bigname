@@ -347,6 +347,80 @@ if [[ "$heartbeat_comment_check" != *heartbeat_liveness_comment_exact* ]]; then
     exit 1
 fi
 
+# Exercise the initialized-schema unconfigured-settlement upgrade from its preceding
+# shape. The existing row must stay NULL, and both additive migrations must be
+# idempotent after the constraint has been validated.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "INSERT INTO chain_phase_state (chain_id, phase_name)" \
+        "VALUES ('verify-settlement-upgrade-check', 'verify');" \
+        "ALTER TABLE chain_phase_state" \
+        "    DROP CONSTRAINT chain_phase_state_unconfigured_settlement_check," \
+        "    DROP COLUMN settled_while_unconfigured;"
+} | run_psql
+for ignored in 1 2; do
+    for migration_file in \
+        "$ROOT/migrations/20260813121000_verify_unconfigured_settlement.sql" \
+        "$ROOT/migrations/20260813121100_verify_unconfigured_settlement_validate.sql"
+    do
+        sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
+    done
+done
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "INSERT INTO chain_phase_state (" \
+        "    chain_id, phase_name, settled_while_unconfigured" \
+        ") VALUES (" \
+        "    'phase-settlement-upgrade-check', 'ingest', TRUE" \
+        ");"
+} | run_psql
+verify_settlement_upgrade_check="$({
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+SELECT CASE WHEN
+    (SELECT settled_while_unconfigured IS NULL
+     FROM chain_phase_state
+     WHERE chain_id = 'verify-settlement-upgrade-check'
+       AND phase_name = 'verify')
+    AND (SELECT settled_while_unconfigured IS TRUE
+         FROM chain_phase_state
+         WHERE chain_id = 'phase-settlement-upgrade-check'
+           AND phase_name = 'ingest')
+    AND EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'chain_phase_state'
+          AND column_name = 'settled_while_unconfigured'
+          AND is_nullable = 'YES'
+          AND column_default IS NULL
+    )
+    AND col_description(
+        'chain_phase_state'::regclass,
+        (SELECT attnum
+         FROM pg_attribute
+         WHERE attrelid = 'chain_phase_state'::regclass
+           AND attname = 'settled_while_unconfigured'
+           AND NOT attisdropped)
+    ) = 'True only when startup settled an active phase row for a chain absent from runtime configuration; NULL identifies ordinary phase state.'
+    AND EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'chain_phase_state'::regclass
+          AND conname = 'chain_phase_state_unconfigured_settlement_check'
+          AND convalidated
+    )
+THEN 'verify_settlement_upgrade_exact'
+ELSE 'verify_settlement_upgrade_wrong' END;
+SQL
+} | run_psql)"
+if [[ "$verify_settlement_upgrade_check" != *verify_settlement_upgrade_exact* ]]; then
+    printf '%s\n' "Verify settlement provenance upgrade was not applied exactly" >&2
+    exit 1
+fi
+
 # Exercise the initialized-schema upgrade against the preceding closed
 # vocabularies. Rewrite only the qualified schema name so the checked-in
 # schema-migration runs against this isolated scratch namespace.

@@ -66,8 +66,8 @@ impl PhaseStore {
             "UPDATE chain_phase_state
              SET phase_status = 'completed', last_error = NULL,
                  settled_while_unconfigured = CASE
-                     WHEN $3 AND phase_name = 'verify' THEN TRUE
-                     ELSE NULL
+                     WHEN $3 THEN TRUE
+                     ELSE settled_while_unconfigured
                  END,
                  live_handoff_block_number = CASE
                      WHEN phase_name = 'ingest' THEN NULL
@@ -104,23 +104,21 @@ impl PhaseStore {
         chain_id: &str,
         phase: PhaseName,
     ) -> RunnerResult<()> {
-        if phase != PhaseName::Verify {
-            return Ok(());
-        }
         sqlx::query(
             "UPDATE chain_phase_state
              SET settled_while_unconfigured = NULL, updated_at = now()
-             WHERE chain_id = $1 AND phase_name = 'verify'
+             WHERE chain_id = $1 AND phase_name = $2
                AND phase_status = 'completed'
                AND settled_while_unconfigured",
         )
         .bind(chain_id)
+        .bind(phase.as_str())
         .execute(&mut *lock_connection)
         .await
         .map(|_| ())
         .map_err(|error| {
             RunnerError::database(
-                format!("failed to clear unconfigured Verify settlement for chain {chain_id}"),
+                format!("failed to clear unconfigured {phase} settlement for chain {chain_id}"),
                 error,
             )
         })

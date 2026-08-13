@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS chain_phase_state (
     phase_name text NOT NULL,
     phase_status text NOT NULL DEFAULT 'idle',
     verification_level text,
+    settled_while_unconfigured boolean,
     current_block_number bigint,
     current_block_hash text,
     target_block_number bigint,
@@ -100,6 +101,10 @@ CREATE TABLE IF NOT EXISTS chain_phase_state (
     ),
     CONSTRAINT chain_phase_state_verification_phase_check
         CHECK (verification_level IS NULL OR phase_name = 'verify'),
+    CONSTRAINT chain_phase_state_unconfigured_settlement_check CHECK (
+        settled_while_unconfigured IS NULL
+        OR settled_while_unconfigured
+    ),
     CHECK (
         (current_block_number IS NULL)
         = (current_block_hash IS NULL)
@@ -282,6 +287,8 @@ COMMENT ON COLUMN chain_phase_state.phase_status IS
     'This value states the current phase state, including capacity pauses.';
 COMMENT ON COLUMN chain_phase_state.verification_level IS
     'This value states how source data was checked.';
+COMMENT ON COLUMN chain_phase_state.settled_while_unconfigured IS
+    'True only when startup settled an active phase row for a chain absent from runtime configuration; NULL identifies ordinary phase state.';
 COMMENT ON COLUMN chain_phase_state.current_block_number IS
     'This value is the latest phase block height.';
 COMMENT ON COLUMN chain_phase_state.current_block_hash IS

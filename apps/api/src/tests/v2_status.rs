@@ -395,6 +395,59 @@ async fn v2_status_keeps_sepolia_unready_until_provider_trusted_verify_completes
     let after_initial_verify_completes = sepolia_status_value(state.clone()).await?;
     sqlx::query(
         "UPDATE chain_phase_state
+         SET phase_status = 'completed',
+             settled_while_unconfigured = TRUE,
+             live_handoff_block_number = NULL,
+             live_handoff_block_hash = NULL,
+             finished_at = now()
+         WHERE chain_id = 'ethereum-sepolia' AND phase_name = 'ingest'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let while_ingest_completion_is_settled = sepolia_status_value(state.clone()).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'failed', last_error = 'verification failed', finished_at = now()
+         WHERE chain_id = 'ethereum-sepolia' AND phase_name = 'verify'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let failed_verify_while_ingest_is_settled = sepolia_status_value(state.clone()).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'completed', last_error = NULL, finished_at = now()
+         WHERE chain_id = 'ethereum-sepolia' AND phase_name = 'verify'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        "UPDATE service_heartbeats
+         SET started_at = now() - interval '2 hours 1 second',
+             heartbeat_at = now() - interval '2 hours'
+         WHERE service_name = 'phase-runner' AND chain_id = 'ethereum-sepolia'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let stale_heartbeat_while_ingest_is_settled = sepolia_status_value(state.clone()).await?;
+    sqlx::query(
+        "UPDATE service_heartbeats SET heartbeat_at = now()
+         WHERE service_name = 'phase-runner' AND chain_id = 'ethereum-sepolia'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET settled_while_unconfigured = NULL,
+             live_handoff_block_number = target_block_number,
+             live_handoff_block_hash = target_block_hash,
+             finished_at = now()
+         WHERE chain_id = 'ethereum-sepolia' AND phase_name = 'ingest'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let after_ingest_completion_is_genuine = sepolia_status_value(state.clone()).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
          SET settled_while_unconfigured = TRUE,
              current_block_number = 119, current_block_hash = '0xsepolia-before-published'
          WHERE chain_id = 'ethereum-sepolia' AND phase_name = 'verify'",
@@ -462,6 +515,10 @@ async fn v2_status_keeps_sepolia_unready_until_provider_trusted_verify_completes
     database.cleanup().await?;
     assert_eq!(while_verify_runs, json!("degraded"));
     assert_eq!(after_initial_verify_completes, json!("ready"));
+    assert_eq!(while_ingest_completion_is_settled, json!("degraded"));
+    assert_eq!(failed_verify_while_ingest_is_settled, json!("stale"));
+    assert_eq!(stale_heartbeat_while_ingest_is_settled, json!("stale"));
+    assert_eq!(after_ingest_completion_is_genuine, json!("ready"));
     assert_eq!(while_verify_completion_is_settled, json!("degraded"));
     assert_eq!(after_verify_redo_clears_settlement, json!("ready"));
     assert_eq!(after_completed_ingest_validation_fails, json!("stale"));

@@ -7,6 +7,7 @@ use crate::{
     error::{ErrorKind, RunnerError, RunnerResult},
     heads::BlockMarker,
     phase::{PhaseName, PhaseProgress, PhaseResume, RunMode},
+    phase_lock::PhaseLock,
     redo_state::{self, RedoOutcome, RedoSession},
     state_ingest_progress::{update_ingest_cursors, update_ingest_progress},
     state_persistence::{
@@ -335,19 +336,15 @@ impl PhaseStore {
         }
     }
 
-    pub async fn complete_phase(
+    pub async fn complete_phase_with_lock(
         &self,
+        phase_lock: &mut PhaseLock,
         chain_id: &str,
         phase: PhaseName,
         progress: &PhaseProgress,
     ) -> RunnerResult<()> {
-        let mut connection = self.pool.acquire().await.map_err(|error| {
-            RunnerError::database(
-                format!("failed to acquire completion connection for {chain_id} {phase}"),
-                error,
-            )
-        })?;
-        self.complete_phase_on_connection(&mut connection, chain_id, phase, progress)
+        let connection = phase_lock.connection_for(chain_id, phase)?;
+        self.complete_phase_on_connection(connection, chain_id, phase, progress)
             .await
     }
 

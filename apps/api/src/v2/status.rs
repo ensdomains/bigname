@@ -203,6 +203,9 @@ fn phase_readiness(
         None => return StatusReadiness::Degraded,
         Some(_) => {}
     }
+    if row.any_phase_settled_while_unconfigured {
+        return StatusReadiness::Degraded;
+    }
     if ingest_incomplete || verify_incomplete {
         return StatusReadiness::Degraded;
     }
@@ -507,6 +510,7 @@ mod tests {
             project_phase_status: Some("completed".to_owned()),
             verify_phase_status: None,
             verify_verification_level: None,
+            any_phase_settled_while_unconfigured: false,
             provider_trusted_verification_required: false,
             project_generation_current: true,
             project_redo_in_progress: false,

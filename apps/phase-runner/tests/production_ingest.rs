@@ -608,16 +608,21 @@ async fn run_until_ingest_handoff(
     let mut task = tokio::spawn(async move { runner.run_chain(&chain, task_cancellation).await });
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            let state: Option<(String, Option<String>)> = sqlx::query_as(
-                "SELECT phase_status, live_handoff_block_hash
-                 FROM chain_phase_state
-                 WHERE chain_id = $1 AND phase_name = 'ingest'",
+            let state: Option<(String, Option<String>, bool)> = sqlx::query_as(
+                "SELECT ingest.phase_status, ingest.live_handoff_block_hash,
+                        EXISTS (
+                            SELECT 1 FROM chain_phase_state pending
+                            WHERE pending.chain_id = ingest.chain_id
+                              AND pending.redo_in_progress
+                        ) AS has_pending_redo
+                 FROM chain_phase_state ingest
+                 WHERE ingest.chain_id = $1 AND ingest.phase_name = 'ingest'",
             )
             .bind(&chain_id)
             .fetch_optional(pool)
             .await?;
             match state {
-                Some((status, Some(handoff)))
+                Some((status, Some(handoff), false))
                     if status == "completed" && handoff == expected_hash =>
                 {
                     return Ok::<_, anyhow::Error>(());

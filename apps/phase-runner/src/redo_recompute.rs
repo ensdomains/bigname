@@ -112,6 +112,16 @@ pub(crate) async fn clear_staged_project_refresh(
                  WHEN redo_previous_phase_status IN ('running', 'paused') THEN 'failed'
                  ELSE redo_previous_phase_status
              END,
+             settled_while_unconfigured = CASE
+                 WHEN redo_previous_phase_status = 'completed'
+                  AND current_block_number IS NOT NULL
+                  AND current_block_number = target_block_number
+                  AND current_block_hash IS NOT NULL
+                  AND current_block_hash = target_block_hash
+                  AND input_content_hash IS NOT NULL
+                 THEN NULL
+                 ELSE settled_while_unconfigured
+             END,
              last_error = CASE
                  WHEN redo_previous_phase_status IN ('running', 'paused')
                      THEN 'phase was interrupted before redo; resume the normal phase'

@@ -502,7 +502,7 @@ pub(crate) async fn finish(
         UPDATE chain_phase_state
         SET phase_status = CASE WHEN $15 THEN 'failed' ELSE $3 END,
             verification_level = $4,
-            settled_while_unconfigured = CASE WHEN phase_name = 'verify' AND NOT $15 AND $4 IS NOT NULL AND $5 IS NOT NULL AND $7 IS NOT NULL AND $5 = $7 AND $6 IS NOT NULL AND $8 IS NOT NULL AND $6 = $8 THEN NULL ELSE settled_while_unconfigured END,
+            settled_while_unconfigured = CASE WHEN NOT $15 AND $5 IS NOT NULL AND $7 IS NOT NULL AND $5 = $7 AND $6 IS NOT NULL AND $8 IS NOT NULL AND $6 = $8 AND (phase_name != 'verify' OR $4 IS NOT NULL) AND (phase_name != 'ingest' OR ($10 IS NOT NULL AND $11 IS NOT NULL AND $10 = $5 AND $11 = $6)) THEN NULL ELSE settled_while_unconfigured END,
             current_block_number = $5,
             current_block_hash = $6,
             target_block_number = $7,

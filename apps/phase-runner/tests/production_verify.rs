@@ -2317,7 +2317,21 @@ async fn successful_verify_redo_clears_unconfigured_settlement_without_normal_pa
         .iter()
         .find(|row| row.chain_id == SEPOLIA)
         .expect("Sepolia status row");
-    assert!(!sepolia.verify_settled_while_unconfigured);
+    assert!(!sepolia.any_phase_settled_while_unconfigured);
+
+    runner.run_chain(&chain, CancellationToken::new()).await?;
+    let after_restart: (String, Option<bool>, bool, Option<String>) = sqlx::query_as(
+        "SELECT phase_status, settled_while_unconfigured,
+                redo_in_progress, verification_level
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        after_restart, completed,
+        "ordinary phase start must accept the cleared, revalidated Verify completion"
+    );
 
     drop(runner);
     scratch.cleanup().await
@@ -2517,7 +2531,7 @@ async fn partial_verify_redo_keeps_unconfigured_settlement_until_normal_resume()
         .iter()
         .find(|row| row.chain_id == SEPOLIA)
         .expect("Sepolia status row after partial redo");
-    assert!(sepolia_after_partial_redo.verify_settled_while_unconfigured);
+    assert!(sepolia_after_partial_redo.any_phase_settled_while_unconfigured);
 
     runner.run_chain(&chain, CancellationToken::new()).await?;
     let after_resume: (String, Option<bool>, i64, i64, Option<String>) = sqlx::query_as(
@@ -2546,7 +2560,7 @@ async fn partial_verify_redo_keeps_unconfigured_settlement_until_normal_resume()
         .iter()
         .find(|row| row.chain_id == SEPOLIA)
         .expect("Sepolia status row after resume");
-    assert!(!sepolia_after_resume.verify_settled_while_unconfigured);
+    assert!(!sepolia_after_resume.any_phase_settled_while_unconfigured);
 
     drop(runner);
     scratch.cleanup().await

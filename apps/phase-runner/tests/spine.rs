@@ -21,6 +21,7 @@ use phase_runner::{
         BlockRange, LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName,
         PhaseProgress, PhaseSet, RunMode, SourceProgress, VerificationLevel,
     },
+    phase_lock::PhaseLock,
     runner::{PhaseRunner, RedoPhase},
     state::{PhaseStatus, PhaseStore, StartDisposition},
 };
@@ -41,10 +42,15 @@ async fn phase_transitions_are_legal_and_persisted() -> Result<()> {
         .await
         .expect_err("interpret must wait for ingest");
     assert_eq!(error.kind(), ErrorKind::InvalidTransition);
-    let error = store
-        .complete_phase(chain, PhaseName::Verify, &PhaseProgress::default())
-        .await
-        .expect_err("an idle phase cannot complete");
+    let error = complete_phase_with_lock(
+        &scratch,
+        &store,
+        chain,
+        PhaseName::Verify,
+        &PhaseProgress::default(),
+    )
+    .await
+    .expect_err("an idle phase cannot complete");
     assert_eq!(error.kind(), ErrorKind::InvalidTransition);
 
     let marker = BlockMarker::new(7, "transition-block-7")?;
@@ -66,15 +72,11 @@ async fn phase_transitions_are_legal_and_persisted() -> Result<()> {
         PhaseStatus::Paused
     );
     store.resume_phase(chain, PhaseName::Ingest).await?;
-    store
-        .complete_phase(chain, PhaseName::Ingest, &ingest_progress)
-        .await?;
+    complete_phase_with_lock(&scratch, &store, chain, PhaseName::Ingest, &ingest_progress).await?;
 
     for phase in [PhaseName::Interpret, PhaseName::Project] {
         store.start_phase(chain, phase, &RunMode::Normal).await?;
-        store
-            .complete_phase(chain, phase, &PhaseProgress::default())
-            .await?;
+        complete_phase_with_lock(&scratch, &store, chain, phase, &PhaseProgress::default()).await?;
     }
     store
         .start_phase(chain, PhaseName::Verify, &RunMode::Normal)
@@ -90,19 +92,25 @@ async fn phase_transitions_are_legal_and_persisted() -> Result<()> {
         store.status(chain, PhaseName::Live).await?,
         PhaseStatus::Running
     );
-    store
-        .complete_phase(
-            chain,
-            PhaseName::Verify,
-            &PhaseProgress {
-                verification_level: Some(VerificationLevel::QuickSynced),
-                ..PhaseProgress::default()
-            },
-        )
-        .await?;
-    store
-        .complete_phase(chain, PhaseName::Live, &PhaseProgress::default())
-        .await?;
+    complete_phase_with_lock(
+        &scratch,
+        &store,
+        chain,
+        PhaseName::Verify,
+        &PhaseProgress {
+            verification_level: Some(VerificationLevel::QuickSynced),
+            ..PhaseProgress::default()
+        },
+    )
+    .await?;
+    complete_phase_with_lock(
+        &scratch,
+        &store,
+        chain,
+        PhaseName::Live,
+        &PhaseProgress::default(),
+    )
+    .await?;
 
     let error = store
         .fail_phase(chain, PhaseName::Project, "late generic failure")
@@ -728,6 +736,104 @@ async fn startup_settles_active_phase_for_unconfigured_chain() -> Result<()> {
         store.status(removed_chain, PhaseName::Live).await?,
         PhaseStatus::Completed
     );
+    let settlement: Option<bool> = sqlx::query_scalar(
+        "SELECT settled_while_unconfigured
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'live'",
+    )
+    .bind(removed_chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(settlement, Some(true));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn startup_marks_every_phase_it_settles_for_unconfigured_chains() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_all_phase_settlement_markers").await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    for phase in PhaseName::ALL {
+        let chain_id = format!("removed-{phase}-chain");
+        store.initialize_chain(&chain_id).await?;
+        sqlx::query(
+            "UPDATE chain_phase_state
+             SET phase_status = 'running', started_at = now(),
+                 finished_at = NULL, updated_at = now()
+             WHERE chain_id = $1 AND phase_name = $2",
+        )
+        .bind(&chain_id)
+        .bind(phase.as_str())
+        .execute(scratch.pool())
+        .await?;
+    }
+
+    let runtime = RuntimeConfig::new(
+        "all-phase-settlement-marker-runner",
+        vec![chain("retained-chain")?],
+        CapacityConfig::default(),
+        test_timing(),
+    )?;
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    Arc::new(runner(
+        scratch.runner(),
+        complete_phase_set(None),
+        available_capacity(),
+        "all-phase-settlement-marker-runner",
+    )?)
+    .run(&runtime, cancellation)
+    .await?;
+
+    let settled_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM chain_phase_state
+         WHERE chain_id LIKE 'removed-%-chain'
+           AND phase_status = 'completed'
+           AND settled_while_unconfigured IS TRUE",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(settled_count, PhaseName::ALL.len() as i64);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn configured_restart_preserves_a_settled_live_marker_until_real_completion() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_preserves_live_settlement_marker").await?;
+    let chain_id = "readded-live-chain";
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running', settled_while_unconfigured = TRUE,
+             started_at = now(), finished_at = NULL, updated_at = now()
+         WHERE chain_id = $1 AND phase_name = 'live'",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    runner(
+        scratch.runner(),
+        complete_phase_set(None),
+        available_capacity(),
+        "readded-live-marker-runner",
+    )?
+    .run_chain(&chain(chain_id)?, cancellation)
+    .await?;
+
+    let recovered: (String, Option<bool>) = sqlx::query_as(
+        "SELECT phase_status, settled_while_unconfigured
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'live'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        recovered,
+        ("completed".to_owned(), Some(true)),
+        "stopped-phase recovery must preserve settlement provenance until a real Live completion"
+    );
     scratch.cleanup().await
 }
 
@@ -953,6 +1059,14 @@ async fn readding_chain_restarts_ingest_settled_before_handoff() -> Result<()> {
         store.status(chain_id, PhaseName::Ingest).await?,
         PhaseStatus::Completed
     );
+    let settled: Option<bool> = sqlx::query_scalar(
+        "SELECT settled_while_unconfigured
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(settled, Some(true));
 
     let calls = Arc::new(Mutex::new(Vec::new()));
     let cancellation = CancellationToken::new();
@@ -1032,16 +1146,19 @@ async fn readding_chain_restarts_ingest_settled_before_handoff() -> Result<()> {
             PhaseName::Live,
         ]
     );
-    let ingest: (String, Option<i64>, Option<i64>, Option<i64>) = sqlx::query_as(
+    let ingest: (String, Option<i64>, Option<i64>, Option<i64>, Option<bool>) = sqlx::query_as(
         "SELECT phase_status, current_block_number, target_block_number,
-                live_handoff_block_number
+                live_handoff_block_number, settled_while_unconfigured
          FROM chain_phase_state
          WHERE chain_id = $1 AND phase_name = 'ingest'",
     )
     .bind(chain_id)
     .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(ingest, ("completed".to_owned(), Some(3), Some(3), Some(3)));
+    assert_eq!(
+        ingest,
+        ("completed".to_owned(), Some(3), Some(3), Some(3), None)
+    );
     scratch.cleanup().await
 }
 
@@ -1191,9 +1308,14 @@ async fn readding_chain_restarts_verify_settled_without_level() -> Result<()> {
     store
         .update_ingest_cursors(&configured_chain.sources, &ingest_progress)
         .await?;
-    store
-        .complete_phase(chain_id, PhaseName::Ingest, &ingest_progress)
-        .await?;
+    complete_phase_with_lock(
+        &scratch,
+        &store,
+        chain_id,
+        PhaseName::Ingest,
+        &ingest_progress,
+    )
+    .await?;
     publish_heads(
         scratch.pool(),
         chain_id,
@@ -1206,17 +1328,18 @@ async fn readding_chain_restarts_verify_settled_without_level() -> Result<()> {
     .await?;
     for phase in [PhaseName::Interpret, PhaseName::Project] {
         store.start_phase(chain_id, phase, &RunMode::Normal).await?;
-        store
-            .complete_phase(
-                chain_id,
-                phase,
-                &PhaseProgress {
-                    current: Some(marker.clone()),
-                    target: Some(marker.clone()),
-                    ..PhaseProgress::default()
-                },
-            )
-            .await?;
+        complete_phase_with_lock(
+            &scratch,
+            &store,
+            chain_id,
+            phase,
+            &PhaseProgress {
+                current: Some(marker.clone()),
+                target: Some(marker.clone()),
+                ..PhaseProgress::default()
+            },
+        )
+        .await?;
     }
     store
         .start_phase(chain_id, PhaseName::Verify, &RunMode::Normal)
@@ -1340,9 +1463,14 @@ async fn readding_chain_restarts_verify_settled_before_target_with_level() -> Re
     store
         .update_ingest_cursors(&configured_chain.sources, &ingest_progress)
         .await?;
-    store
-        .complete_phase(chain_id, PhaseName::Ingest, &ingest_progress)
-        .await?;
+    complete_phase_with_lock(
+        &scratch,
+        &store,
+        chain_id,
+        PhaseName::Ingest,
+        &ingest_progress,
+    )
+    .await?;
     publish_heads(
         scratch.pool(),
         chain_id,
@@ -1355,17 +1483,18 @@ async fn readding_chain_restarts_verify_settled_before_target_with_level() -> Re
     .await?;
     for phase in [PhaseName::Interpret, PhaseName::Project] {
         store.start_phase(chain_id, phase, &RunMode::Normal).await?;
-        store
-            .complete_phase(
-                chain_id,
-                phase,
-                &PhaseProgress {
-                    current: Some(target.clone()),
-                    target: Some(target.clone()),
-                    ..PhaseProgress::default()
-                },
-            )
-            .await?;
+        complete_phase_with_lock(
+            &scratch,
+            &store,
+            chain_id,
+            phase,
+            &PhaseProgress {
+                current: Some(target.clone()),
+                target: Some(target.clone()),
+                ..PhaseProgress::default()
+            },
+        )
+        .await?;
     }
     store
         .start_phase(chain_id, PhaseName::Verify, &RunMode::Normal)
@@ -2814,9 +2943,14 @@ async fn seed_completed_ingest_cursor(
     store
         .record_ingest_progress(&chain.chain_id, &chain.sources, &progress)
         .await?;
-    store
-        .complete_phase(&chain.chain_id, PhaseName::Ingest, &progress)
-        .await?;
+    complete_phase_with_lock(
+        scratch,
+        &store,
+        &chain.chain_id,
+        PhaseName::Ingest,
+        &progress,
+    )
+    .await?;
     Ok(())
 }
 
@@ -3221,6 +3355,26 @@ fn runner(
     instance_id: &str,
 ) -> RunnerResult<PhaseRunner> {
     PhaseRunner::new(database, phases, capacity, instance_id, test_timing())
+}
+
+async fn complete_phase_with_lock(
+    scratch: &ScratchDatabase,
+    store: &PhaseStore,
+    chain_id: &str,
+    phase: PhaseName,
+    progress: &PhaseProgress,
+) -> RunnerResult<()> {
+    let mut phase_lock =
+        PhaseLock::acquire(scratch.writer_connect_options(), chain_id, phase).await?;
+    let result = store
+        .complete_phase_with_lock(&mut phase_lock, chain_id, phase, progress)
+        .await;
+    let release = phase_lock.release().await;
+    match (result, release) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(error)) | (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(_release_error)) => Err(error),
+    }
 }
 
 fn test_timing() -> TimingConfig {

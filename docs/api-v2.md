@@ -295,13 +295,18 @@ The lookup route uses the common record shape and in-band per-result statuses.
 head and finality fields come from `chain_heads`; indexed progress is the
 `project` phase's most recent completed publication. Readiness also uses that
 phase's lifecycle state, redo marker, and newest per-chain heartbeat in
-`service_heartbeats`. For Ethereum Sepolia, readiness also requires its
+`service_heartbeats`. A phase row that startup settled while its chain was
+unconfigured keeps the chain `degraded` until genuine phase completion or
+completed-state revalidation clears that marker. For Ethereum Sepolia,
+readiness also requires its
 [provider-trusted](glossary.md#verification-level) `verify` phase to be
 `completed` with `quick_synced` evidence and its `ingest` phase to remain
-`completed`. A failed Ingest or Verify, or a completed Verify without that
+`completed`.
+A failed Ingest or Verify, or an ordinary completed Verify without that
 evidence, maps to `stale`. An idle, running, paused, or missing Ingest or Verify
 maps to `degraded`. An expired runner heartbeat remains `stale` while either
-required phase is incomplete. Chains without this requirement are unaffected. A
+required phase is incomplete. Chains without this requirement omit those
+Ingest and Verify evidence checks. A
 failed Project or expired heartbeat maps to `stale`; a paused, redoing, or missing-heartbeat Project maps
 to `degraded`. A running Project with a completed publication remains eligible
 for `ready` when its block and time lag are within the configured thresholds,
