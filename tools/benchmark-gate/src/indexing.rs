@@ -21,6 +21,9 @@ use sqlx::PgPool;
 
 use crate::budgets::GateBudgets;
 
+const PROJECTION_NAME_COUNT_SQL: &str =
+    "SELECT count(*) FROM name_current WHERE provenance ->> 'chain_id' = $1";
+
 #[derive(Clone, Debug)]
 pub struct IndexingInput {
     pub chain_id: String,
@@ -32,6 +35,7 @@ pub struct IndexingInput {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct IndexingReport {
+    pub preflight_passed: bool,
     pub chain_id: String,
     pub head_block: i64,
     pub walk_from_block: i64,
@@ -40,6 +44,9 @@ pub struct IndexingReport {
     pub raw_logs: i64,
     pub raw_logs_per_1000_blocks: f64,
     pub min_raw_logs_per_1000_blocks: u64,
+    pub pre_rebuild_name_current_rows: u64,
+    pub post_rebuild_name_current_rows: u64,
+    pub min_name_current_rows: u64,
     pub project_tick_ms: u128,
     pub project_tick_max_ms: u64,
     pub project_tick_hydration_updated_rows: usize,
@@ -63,6 +70,10 @@ pub async fn run(
     budgets: &GateBudgets,
 ) -> Result<IndexingReport> {
     validate_input(pool, input, budgets).await?;
+    let name_current_rows = projection_name_count(pool, &input.chain_id).await?;
+    if name_current_rows < budgets.project_min_name_current_rows {
+        return Ok(scale_failure_report(input, budgets, name_current_rows));
+    }
     let walk_blocks = input.walk_to_block - input.walk_from_block + 1;
     let raw_logs: i64 = sqlx::query_scalar(
         "SELECT count(*)
@@ -110,8 +121,14 @@ pub async fn run(
         Ok(result) => (result?, true),
         Err(_) => (0, false),
     };
+    let post_rebuild_name_current_rows = projection_name_count(pool, &input.chain_id).await?;
 
     let mut failures = Vec::new();
+    failures.extend(projection_scale_failures(
+        name_current_rows,
+        post_rebuild_name_current_rows,
+        budgets.project_min_name_current_rows,
+    ));
     if density < budgets.dense_min_raw_logs_per_1000_blocks as f64 {
         failures.push(format!(
             "walk density {density:.1} raw logs/1000 blocks is below {:.1}",
@@ -149,6 +166,7 @@ pub async fn run(
     }
 
     Ok(IndexingReport {
+        preflight_passed: true,
         chain_id: input.chain_id.clone(),
         head_block: input.head_block,
         walk_from_block: input.walk_from_block,
@@ -157,6 +175,9 @@ pub async fn run(
         raw_logs,
         raw_logs_per_1000_blocks: density,
         min_raw_logs_per_1000_blocks: budgets.dense_min_raw_logs_per_1000_blocks,
+        pre_rebuild_name_current_rows: name_current_rows,
+        post_rebuild_name_current_rows,
+        min_name_current_rows: budgets.project_min_name_current_rows,
         project_tick_ms,
         project_tick_max_ms: budgets.project_tick_max_ms,
         project_tick_hydration_updated_rows,
@@ -173,6 +194,45 @@ pub async fn run(
         green: failures.is_empty(),
         failures,
     })
+}
+
+fn scale_failure_report(
+    input: &IndexingInput,
+    budgets: &GateBudgets,
+    name_current_rows: u64,
+) -> IndexingReport {
+    IndexingReport {
+        preflight_passed: false,
+        chain_id: input.chain_id.clone(),
+        head_block: input.head_block,
+        walk_from_block: input.walk_from_block,
+        walk_to_block: input.walk_to_block,
+        min_walk_blocks: budgets.interpret_min_walk_blocks,
+        raw_logs: 0,
+        raw_logs_per_1000_blocks: 0.0,
+        min_raw_logs_per_1000_blocks: budgets.dense_min_raw_logs_per_1000_blocks,
+        pre_rebuild_name_current_rows: name_current_rows,
+        post_rebuild_name_current_rows: 0,
+        min_name_current_rows: budgets.project_min_name_current_rows,
+        project_tick_ms: 0,
+        project_tick_max_ms: budgets.project_tick_max_ms,
+        project_tick_hydration_updated_rows: 0,
+        project_rebuild_seconds: 0.0,
+        project_rebuild_max_seconds: budgets.project_rebuild_max_seconds,
+        project_rebuild_completed: false,
+        project_hydration_updated_rows: 0,
+        interpret_walk_seconds: 0.0,
+        interpret_blocks_per_hour: 0.0,
+        interpret_min_blocks_per_hour: budgets.interpret_min_blocks_per_hour,
+        interpret_peak_rss_mib: 0.0,
+        interpret_max_peak_rss_mib: budgets.interpret_max_peak_rss_mib,
+        interpret_state_cache_entries: budgets.interpret_state_cache_entries,
+        green: false,
+        failures: vec![format!(
+            "name_current has {name_current_rows} rows; release profile requires {} before projection benchmarking",
+            budgets.project_min_name_current_rows
+        )],
+    }
 }
 
 async fn run_project_tick(
@@ -231,6 +291,14 @@ async fn hydrate_project_head(
         .await
         .context("canonical-head projection hydration failed")?
         .context("selected rebuild head is not the current canonical head")?;
+    require_completed_hydration(hydration)
+}
+
+fn require_completed_hydration(hydration: bigname_project::HydrationOutcome) -> Result<usize> {
+    ensure!(
+        !hydration.deferred_for_redo,
+        "canonical-head projection hydration was deferred for an Interpret redo"
+    );
     Ok(hydration.updated_rows)
 }
 
@@ -381,6 +449,30 @@ fn require_minimum_walk_blocks(walk_blocks: i64, minimum: u64) -> Result<()> {
     Ok(())
 }
 
+async fn projection_name_count(pool: &PgPool, chain_id: &str) -> Result<u64> {
+    let count: i64 = sqlx::query_scalar(PROJECTION_NAME_COUNT_SQL)
+        .bind(chain_id)
+        .fetch_one(pool)
+        .await
+        .context("failed to count selected-chain names during projection benchmarking")?;
+    u64::try_from(count).context("name_current returned a negative row count")
+}
+
+fn projection_scale_failures(pre_rebuild: u64, post_rebuild: u64, minimum: u64) -> Vec<String> {
+    let mut failures = Vec::new();
+    if pre_rebuild < minimum {
+        failures.push(format!(
+            "name_current had {pre_rebuild} rows before rebuild; release profile requires {minimum}"
+        ));
+    }
+    if post_rebuild < minimum {
+        failures.push(format!(
+            "name_current has {post_rebuild} rows after rebuild; release profile requires {minimum}"
+        ));
+    }
+    failures
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,5 +482,56 @@ mod tests {
         assert!(require_minimum_walk_blocks(100_000, 100_000).is_ok());
         assert!(require_minimum_walk_blocks(99_999, 100_000).is_err());
         assert!(require_minimum_walk_blocks(1, 100_000).is_err());
+    }
+
+    #[test]
+    fn hydration_deferred_for_redo_cannot_count_as_complete() {
+        let deferred = bigname_project::HydrationOutcome {
+            head: ProjectMarker {
+                number: 16,
+                hash: "block-16".to_owned(),
+            },
+            deferred_for_redo: true,
+            reverse_candidates: 0,
+            text_candidates: 0,
+            updated_rows: 0,
+        };
+        assert!(require_completed_hydration(deferred).is_err());
+    }
+
+    #[test]
+    fn undersized_projection_returns_a_red_preflight_report() {
+        let budgets = crate::budgets::BudgetsFile::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../benchmarks/release-gate.toml"),
+        )
+        .unwrap();
+        let report = scale_failure_report(
+            &IndexingInput {
+                chain_id: "ethereum-mainnet".to_owned(),
+                head_block: 16,
+                walk_from_block: 1,
+                walk_to_block: 16,
+                hydration_rpc_urls: None,
+            },
+            budgets.profile(crate::budgets::BudgetProfile::Production),
+            50_000,
+        );
+        assert!(!report.preflight_passed);
+        assert!(!report.green);
+        assert_eq!(report.pre_rebuild_name_current_rows, 50_000);
+        assert_eq!(report.post_rebuild_name_current_rows, 0);
+        assert_eq!(report.min_name_current_rows, 3_000_000);
+        assert_eq!(report.project_tick_ms, 0);
+    }
+
+    #[test]
+    fn rebuild_that_drops_projection_scale_is_red() {
+        assert!(!projection_scale_failures(3_500_000, 2_900_000, 3_000_000).is_empty());
+    }
+
+    #[test]
+    fn projection_scale_uses_selected_project_ownership() {
+        assert!(PROJECTION_NAME_COUNT_SQL.contains("provenance ->> 'chain_id' = $1"));
     }
 }

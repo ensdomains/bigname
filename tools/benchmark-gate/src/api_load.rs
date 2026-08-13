@@ -4,20 +4,35 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::{
+    budgets::{EndpointBudget, GateBudgets},
+    database,
+};
 use anyhow::{Context, Result, ensure};
 use reqwest::{Client, Method};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::PgPool;
 use tokio::task::JoinSet;
-
-use crate::budgets::{EndpointBudget, GateBudgets};
-
+mod corpus;
 mod workload;
-use workload::{Corpus, RequestSpec, normalized_base_url, request_variants};
-
+use corpus::{Corpus, TableScale, load_table_scale};
+use workload::{RequestSpec, get, normalized_base_url, request_variants};
 #[derive(Clone, Debug, Serialize)]
 pub struct ApiReport {
+    pub api_build_sha: String,
+    pub expected_api_build_sha: Option<String>,
+    pub api_interpreter_content_hash: String,
+    pub api_database_identity: String,
+    pub corpus_database_identity: String,
+    pub postflight_api_build_sha: Option<String>,
+    pub postflight_api_interpreter_content_hash: Option<String>,
+    pub postflight_api_database_identity: Option<String>,
+    pub postflight_corpus_database_identity: Option<String>,
+    pub name_current_rows: u64,
+    pub min_name_current_rows: u64,
+    pub address_names_current_rows: u64,
+    pub min_address_names_current_rows: u64,
     pub corpus_names: usize,
     pub corpus_addresses: usize,
     pub corpus_parents: usize,
@@ -28,7 +43,6 @@ pub struct ApiReport {
     pub green: bool,
     pub failures: Vec<String>,
 }
-
 #[derive(Clone, Debug, Serialize)]
 pub struct EndpointReport {
     pub endpoint: String,
@@ -50,7 +64,6 @@ pub struct EndpointReport {
     pub green: bool,
     pub failures: Vec<String>,
 }
-
 #[derive(Debug)]
 struct Sample {
     elapsed_micros: u128,
@@ -64,20 +77,89 @@ struct SeedProbe {
     cursor_variants: usize,
 }
 
-pub async fn run(pool: &PgPool, api_base_url: &str, budgets: &GateBudgets) -> Result<ApiReport> {
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+struct ApiTargetIdentity {
+    build_sha: String,
+    interpreter_content_hash: String,
+    database_identity: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct HealthResponse {
+    identity: HealthIdentity,
+    database: HealthDatabase,
+}
+
+#[derive(Debug, Deserialize)]
+struct HealthIdentity {
+    build_sha: String,
+    interpreter_content_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct HealthDatabase {
+    identity: Option<String>,
+}
+
+fn api_identity_failures(
+    actual: &ApiTargetIdentity,
+    expected_build_sha: Option<&str>,
+    expected_database_identity: &str,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    if expected_build_sha.is_some_and(|expected| actual.build_sha != expected) {
+        failures.push(format!(
+            "target API build SHA {:?} does not match expected {:?}",
+            actual.build_sha,
+            expected_build_sha.unwrap_or_default()
+        ));
+    }
+    if actual.interpreter_content_hash != bigname_content_hash::INTERPRETER_CONTENT_HASH {
+        failures.push(format!(
+            "target API interpreter content hash {:?} does not match harness {:?}",
+            actual.interpreter_content_hash,
+            bigname_content_hash::INTERPRETER_CONTENT_HASH
+        ));
+    }
+    if actual.database_identity != expected_database_identity {
+        failures.push(format!(
+            "target API database identity {:?} does not match corpus database identity {:?}",
+            actual.database_identity, expected_database_identity
+        ));
+    }
+    failures
+}
+
+pub async fn run(
+    pool: &PgPool,
+    api_base_url: &str,
+    expected_build_sha: Option<&str>,
+    budgets: &GateBudgets,
+) -> Result<ApiReport> {
     let base = normalized_base_url(api_base_url)?;
-    let corpus = Corpus::load(
-        pool,
-        budgets.api_corpus_size,
-        budgets.api_min_specialized_corpus_size,
-    )
-    .await?;
     let client = Client::builder()
         .pool_max_idle_per_host((budgets.api_target_qps / 2).clamp(32, 1_024) as usize)
         .tcp_nodelay(true)
         .timeout(Duration::from_secs(30))
         .build()
         .context("failed to build API benchmark client")?;
+    let identity = load_api_target_identity(&client, &base).await?;
+    let database_identity = database::database_instance_identity(pool).await?;
+    let scale = load_table_scale(pool).await?;
+    let mut preflight_failures =
+        api_identity_failures(&identity, expected_build_sha, &database_identity);
+    preflight_failures.extend(scale.failures(budgets));
+    if !preflight_failures.is_empty() {
+        return Ok(preflight_failure_report(
+            scale,
+            budgets,
+            identity,
+            database_identity,
+            expected_build_sha,
+            preflight_failures,
+        ));
+    }
+    let corpus = Corpus::load(pool, budgets).await?;
 
     let mut endpoint_reports = Vec::with_capacity(budgets.endpoints.len());
     let mut failures = Vec::new();
@@ -101,7 +183,7 @@ pub async fn run(pool: &PgPool, api_base_url: &str, budgets: &GateBudgets) -> Re
             endpoint.name
         );
         ensure!(
-            !budgets.api_require_cursor_variants
+            !requires_cursor_probe(budgets, &endpoint.name)
                 || !endpoint_requires_cursor(&endpoint.name)
                 || probe.cursor_variants > 0,
             "endpoint {:?} produced no real continuation cursor",
@@ -134,8 +216,34 @@ pub async fn run(pool: &PgPool, api_base_url: &str, budgets: &GateBudgets) -> Re
         );
         endpoint_reports.push(report);
     }
+    let postflight_identity = load_api_target_identity(&client, &base).await?;
+    let postflight_database_identity = database::database_instance_identity(pool).await?;
+    failures.extend(api_identity_failures(
+        &postflight_identity,
+        expected_build_sha,
+        &postflight_database_identity,
+    ));
+    failures.extend(api_postflight_failures(
+        &identity,
+        &postflight_identity,
+        &database_identity,
+        &postflight_database_identity,
+    ));
 
     Ok(ApiReport {
+        api_build_sha: identity.build_sha,
+        expected_api_build_sha: expected_build_sha.map(str::to_owned),
+        api_interpreter_content_hash: identity.interpreter_content_hash,
+        api_database_identity: identity.database_identity,
+        corpus_database_identity: database_identity,
+        postflight_api_build_sha: Some(postflight_identity.build_sha),
+        postflight_api_interpreter_content_hash: Some(postflight_identity.interpreter_content_hash),
+        postflight_api_database_identity: Some(postflight_identity.database_identity),
+        postflight_corpus_database_identity: Some(postflight_database_identity),
+        name_current_rows: scale.name_current_rows,
+        min_name_current_rows: budgets.api_min_name_current_rows,
+        address_names_current_rows: scale.address_names_current_rows,
+        min_address_names_current_rows: budgets.api_min_address_names_current_rows,
         corpus_names: corpus.names.len(),
         corpus_addresses: corpus.address_names.len(),
         corpus_parents: corpus.parents.len(),
@@ -145,6 +253,86 @@ pub async fn run(pool: &PgPool, api_base_url: &str, budgets: &GateBudgets) -> Re
         green: failures.is_empty(),
         failures,
         endpoints: endpoint_reports,
+    })
+}
+
+fn api_postflight_failures(
+    preflight: &ApiTargetIdentity,
+    postflight: &ApiTargetIdentity,
+    preflight_database_identity: &str,
+    postflight_database_identity: &str,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    if preflight != postflight {
+        failures.push("target API identity changed during the load benchmark".to_owned());
+    }
+    if preflight_database_identity != postflight_database_identity {
+        failures.push("corpus database identity changed during the load benchmark".to_owned());
+    }
+    failures
+}
+
+fn requires_cursor_probe(budgets: &GateBudgets, endpoint: &str) -> bool {
+    budgets.api_require_cursor_variants
+        || (budgets.api_require_resolver_cursor_variant && endpoint == "resolver")
+}
+
+fn preflight_failure_report(
+    scale: TableScale,
+    budgets: &GateBudgets,
+    identity: ApiTargetIdentity,
+    corpus_database_identity: String,
+    expected_build_sha: Option<&str>,
+    failures: Vec<String>,
+) -> ApiReport {
+    ApiReport {
+        api_build_sha: identity.build_sha,
+        expected_api_build_sha: expected_build_sha.map(str::to_owned),
+        api_interpreter_content_hash: identity.interpreter_content_hash,
+        api_database_identity: identity.database_identity,
+        corpus_database_identity,
+        postflight_api_build_sha: None,
+        postflight_api_interpreter_content_hash: None,
+        postflight_api_database_identity: None,
+        postflight_corpus_database_identity: None,
+        name_current_rows: scale.name_current_rows,
+        min_name_current_rows: budgets.api_min_name_current_rows,
+        address_names_current_rows: scale.address_names_current_rows,
+        min_address_names_current_rows: budgets.api_min_address_names_current_rows,
+        corpus_names: 0,
+        corpus_addresses: 0,
+        corpus_parents: 0,
+        corpus_permission_subjects: 0,
+        corpus_primary_names: 0,
+        corpus_resolvers: 0,
+        endpoints: Vec::new(),
+        green: false,
+        failures,
+    }
+}
+
+async fn load_api_target_identity(
+    client: &Client,
+    base: &reqwest::Url,
+) -> Result<ApiTargetIdentity> {
+    let request = get(base, &["healthz"], &[])?;
+    let response = send(client, &request).await?;
+    ensure!(
+        response.status().is_success(),
+        "target API /healthz returned {}",
+        response.status()
+    );
+    let health: HealthResponse = response
+        .json()
+        .await
+        .context("failed to parse target API /healthz response")?;
+    Ok(ApiTargetIdentity {
+        build_sha: health.identity.build_sha,
+        interpreter_content_hash: health.identity.interpreter_content_hash,
+        database_identity: health
+            .database
+            .identity
+            .context("target API /healthz did not identify its database")?,
     })
 }
 
@@ -422,7 +610,9 @@ fn cursor_variants(seed: &RequestSpec, body: &Value) -> Vec<RequestSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::budgets::{BudgetProfile, BudgetsFile};
     use serde_json::json;
+    use std::path::Path;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use workload::{get, post};
 
@@ -473,6 +663,72 @@ mod tests {
         assert!(endpoint_requires_cursor("lookup"));
         assert!(endpoint_requires_cursor("resolver"));
         assert!(!endpoint_requires_cursor("primary_name"));
+    }
+
+    #[test]
+    fn preflight_failure_report_records_observed_totals_and_floors() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/release-gate.toml");
+        let budgets = BudgetsFile::load(&path).unwrap();
+        let production = budgets.profile(BudgetProfile::Production);
+        let report = preflight_failure_report(
+            corpus::TableScale {
+                name_current_rows: 50_000,
+                address_names_current_rows: 75_000,
+            },
+            production,
+            ApiTargetIdentity {
+                build_sha: "release".to_owned(),
+                interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH.to_owned(),
+                database_identity: "keccak256:database".to_owned(),
+            },
+            "keccak256:database".to_owned(),
+            Some("release"),
+            vec!["name_current is below its floor".to_owned()],
+        );
+
+        assert!(!report.green);
+        assert_eq!(report.name_current_rows, 50_000);
+        assert_eq!(report.min_name_current_rows, 3_000_000);
+        assert_eq!(report.address_names_current_rows, 75_000);
+        assert_eq!(report.min_address_names_current_rows, 3_000_000);
+        assert!(report.endpoints.is_empty());
+    }
+
+    #[test]
+    fn production_api_identity_must_match_the_release() {
+        let failures = api_identity_failures(
+            &ApiTargetIdentity {
+                build_sha: "old-release".to_owned(),
+                interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH.to_owned(),
+                database_identity: "database".to_owned(),
+            },
+            Some("new-release"),
+            "database",
+        );
+        assert_eq!(failures.len(), 1);
+
+        let failures = api_identity_failures(
+            &ApiTargetIdentity {
+                build_sha: "new-release".to_owned(),
+                interpreter_content_hash: "keccak256:old-interpreter".to_owned(),
+                database_identity: "database".to_owned(),
+            },
+            Some("new-release"),
+            "database",
+        );
+        assert_eq!(failures.len(), 1);
+
+        let before = ApiTargetIdentity {
+            build_sha: "new-release".to_owned(),
+            interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH.to_owned(),
+            database_identity: "database-before".to_owned(),
+        };
+        let mut after = before.clone();
+        after.database_identity = "database-after".to_owned();
+        assert_eq!(
+            api_postflight_failures(&before, &after, "corpus-before", "corpus-after").len(),
+            2
+        );
     }
 
     #[tokio::test]

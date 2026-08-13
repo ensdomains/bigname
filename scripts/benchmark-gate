@@ -15,5 +15,22 @@ elif [ "$profile" != "release" ]; then
   target_dir="$profile"
 fi
 
+source_head="$(git rev-parse HEAD)"
+if [ "$profile" = "release" ]; then
+  if [ -n "$(git status --porcelain=v1 --untracked-files=normal)" ]; then
+    echo "release-profile benchmark commands require a clean worktree before build" >&2
+    exit 1
+  fi
+fi
+
 cargo build "${profile_args[@]}" -p bigname-benchmark-gate -p bigname-api
-exec "target/$target_dir/bigname-benchmark-gate" "$@"
+if [ "$profile" = "release" ]; then
+  if [ "$(git rev-parse HEAD)" != "$source_head" ] || \
+     [ -n "$(git status --porcelain=v1 --untracked-files=normal)" ]; then
+    echo "benchmark source changed while the release binary was building" >&2
+    exit 1
+  fi
+fi
+exec env BIGNAME_BENCHMARK_BUILT_HEAD="$source_head" \
+  BIGNAME_BENCHMARK_CARGO_PROFILE="$profile" \
+  "target/$target_dir/bigname-benchmark-gate" "$@"

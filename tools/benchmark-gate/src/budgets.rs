@@ -22,6 +22,7 @@ const PRODUCTION_ENDPOINTS: &[&str] = &[
 
 const SMOKE_ENDPOINTS: &[&str] = &[
     "lookup",
+    "status",
     "name",
     "records",
     "subnames",
@@ -32,6 +33,7 @@ const SMOKE_ENDPOINTS: &[&str] = &[
     "address_history",
     "search",
     "events",
+    "resolver",
     "namespace",
 ];
 
@@ -51,16 +53,20 @@ pub struct GateBudgets {
     pub interpret_state_cache_entries: usize,
     pub interpret_min_walk_blocks: u64,
     pub dense_min_raw_logs_per_1000_blocks: u64,
+    pub project_min_name_current_rows: u64,
     pub api_target_qps: u64,
     pub api_min_achieved_qps: u64,
     pub api_duration_seconds: u64,
     pub api_warmup_seconds: u64,
     pub api_corpus_size: usize,
     pub api_min_specialized_corpus_size: usize,
+    pub api_min_name_current_rows: u64,
+    pub api_min_address_names_current_rows: u64,
     pub api_min_success_percent: f64,
     pub api_cursor_seed_count: usize,
     pub api_require_populated_probes: bool,
     pub api_require_cursor_variants: bool,
+    pub api_require_resolver_cursor_variant: bool,
     pub endpoints: Vec<EndpointBudget>,
 }
 
@@ -130,9 +136,18 @@ impl GateBudgets {
                 "dense_min_raw_logs_per_1000_blocks",
                 self.dense_min_raw_logs_per_1000_blocks,
             ),
+            (
+                "project_min_name_current_rows",
+                self.project_min_name_current_rows,
+            ),
             ("api_target_qps", self.api_target_qps),
             ("api_min_achieved_qps", self.api_min_achieved_qps),
             ("api_duration_seconds", self.api_duration_seconds),
+            ("api_min_name_current_rows", self.api_min_name_current_rows),
+            (
+                "api_min_address_names_current_rows",
+                self.api_min_address_names_current_rows,
+            ),
         ] {
             ensure!(value > 0, "{profile}.{name} must be positive");
         }
@@ -194,5 +209,12 @@ mod tests {
         let budgets = BudgetsFile::load(&path).expect("checked-in budgets must be valid");
         assert_eq!(budgets.production.api_target_qps, 2_000);
         assert_eq!(budgets.production.project_tick_max_ms, 1_000);
+        assert_eq!(budgets.production.project_min_name_current_rows, 3_000_000);
+        assert_eq!(budgets.production.api_min_name_current_rows, 3_000_000);
+        assert_eq!(
+            budgets.production.api_min_address_names_current_rows,
+            3_000_000
+        );
+        assert!(budgets.smoke.api_require_resolver_cursor_variant);
     }
 }

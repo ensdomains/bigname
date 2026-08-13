@@ -1,131 +1,14 @@
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::{Method, Url};
 use serde_json::{Value, json};
-use sqlx::PgPool;
 
-#[derive(Clone, Debug)]
-pub(super) struct Corpus {
-    pub(super) names: Vec<String>,
-    pub(super) address_names: Vec<(String, String, String, String)>,
-    pub(super) parents: Vec<String>,
-    pub(super) permission_subjects: Vec<String>,
-    pub(super) primary_names: Vec<(String, String, String)>,
-    pub(super) resolvers: Vec<(String, String)>,
-    namespaces: Vec<String>,
-}
+use super::corpus::Corpus;
 
 #[derive(Clone, Debug)]
 pub(super) struct RequestSpec {
     pub(super) method: Method,
     pub(super) url: Url,
     pub(super) body: Option<Value>,
-}
-
-impl Corpus {
-    pub(super) async fn load(
-        pool: &PgPool,
-        target: usize,
-        specialized_minimum: usize,
-    ) -> Result<Self> {
-        let limit = i64::try_from(target).context("API corpus size exceeds PostgreSQL limit")?;
-        let names: Vec<String> = sqlx::query_scalar(
-            "SELECT raw_name FROM name_current WHERE support_status = 'supported' ORDER BY logical_name_id LIMIT $1",
-        )
-        .bind(limit)
-        .fetch_all(pool)
-        .await
-        .context("failed to load name benchmark corpus")?;
-        let address_names: Vec<(String, String, String, String)> = sqlx::query_as(
-            "SELECT address, min(raw_name), namespace, relation
-             FROM address_names_current
-             WHERE support_status = 'supported'
-             GROUP BY address, namespace, relation
-             ORDER BY address, namespace, relation
-             LIMIT $1",
-        )
-        .bind(limit)
-        .fetch_all(pool)
-        .await
-        .context("failed to load address benchmark corpus")?;
-        let parents: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT surface.raw_name FROM children_current child JOIN name_surfaces surface ON surface.logical_name_id = child.parent_logical_name_id ORDER BY surface.raw_name LIMIT $1",
-        )
-        .bind(limit)
-        .fetch_all(pool)
-        .await
-        .context("failed to load subname-parent benchmark corpus")?;
-        let permission_subjects: Vec<String> = sqlx::query_scalar(
-            "SELECT subject
-             FROM permissions_current
-             WHERE subject ~ '^0x[0-9A-Fa-f]{40}$'
-             GROUP BY subject
-             ORDER BY subject
-             LIMIT $1",
-        )
-        .bind(limit)
-        .fetch_all(pool)
-        .await
-        .context("failed to load permission-subject benchmark corpus")?;
-        let primary_names: Vec<(String, String, String)> = sqlx::query_as(
-            "SELECT address, coin_type, namespace
-             FROM primary_names_current
-             WHERE claim_status = 'success'
-             ORDER BY address, coin_type, namespace
-             LIMIT $1",
-        )
-        .bind(limit)
-        .fetch_all(pool)
-        .await
-        .context("failed to load primary-name benchmark corpus")?;
-        let resolvers: Vec<(String, String)> = sqlx::query_as(
-            "SELECT chain_id, resolver_address FROM resolver_current WHERE support_status = 'supported' ORDER BY chain_id, resolver_address LIMIT $1",
-        )
-        .bind(limit)
-        .fetch_all(pool)
-        .await
-        .context("failed to load resolver benchmark corpus")?;
-        let namespaces: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT namespace FROM manifest_versions WHERE rollout_status = 'active' AND namespace IN ('ens', 'basenames') ORDER BY namespace",
-        )
-        .fetch_all(pool)
-        .await
-        .context("failed to load namespace benchmark corpus")?;
-
-        ensure!(
-            names.len() >= target,
-            "name corpus has {} rows; release profile requires {target}",
-            names.len()
-        );
-        ensure!(
-            address_names.len() >= target,
-            "address corpus has {} rows; release profile requires {target}",
-            address_names.len()
-        );
-        ensure!(
-            !namespaces.is_empty(),
-            "benchmark database has no active public namespace"
-        );
-        for (label, actual) in [
-            ("subname parent", parents.len()),
-            ("permission subject", permission_subjects.len()),
-            ("successful primary name", primary_names.len()),
-        ] {
-            ensure!(
-                actual >= specialized_minimum,
-                "{label} corpus has {actual} rows; release profile requires {specialized_minimum}"
-            );
-        }
-
-        Ok(Self {
-            names,
-            address_names,
-            parents,
-            permission_subjects,
-            primary_names,
-            resolvers,
-            namespaces,
-        })
-    }
 }
 
 pub(super) fn request_variants(

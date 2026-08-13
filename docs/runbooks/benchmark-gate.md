@@ -10,7 +10,11 @@ The checked-in source of every limit is
 override a failed limit. Production commands always load that exact path and
 record it in the JSON report; they accept no alternate budget file. A budget
 change is a reviewed release-policy change and moves in the same PR as this
-runbook and the harness.
+runbook and the harness. Production runs require a clean worktree, including no
+untracked files, relative to the reported `HEAD`. Write reports outside the
+checkout as shown below. The wrapper checks before and after its release-profile
+build, passes the captured commit into the binary, and the binary rechecks it
+before and after measurement.
 
 ## What the gate measures
 
@@ -27,11 +31,17 @@ database copy because all three operations write derived state:
   per hour;
 - the dense range must contain at least 100,000 consecutive canonical blocks;
 - that range must contain at least 8,000 retained raw logs per 1,000 blocks;
+- the restored copy must contain at least 3 million current name rows before
+  any timed projection work begins, owned by the selected chain's Project
+  output;
 - the Interpret process must stay at or below 32 GiB peak RSS while using the
   configured 65,536-entry interpreter-state cache.
 
 The density check prevents a sparse historical range from producing a false
-green throughput result. The 32 GiB limit is a whole-process limit. It includes
+green throughput result. The current-name floor prevents a staging-sized copy
+from producing a false-green full rebuild. The harness counts current names
+before and after the rebuild, requires both totals to meet the floor, and
+records both totals and the floor. The 32 GiB limit is a whole-process limit. It includes
 the bounded value cache introduced after the 94 GiB out-of-memory incident and
 the smaller protocol-state maps that remain resident; it is not merely the
 cache's estimated JSON size.
@@ -41,7 +51,11 @@ The API half sends each Tier 1 and Tier 2 REST route in
 seconds after a 10-second warmup. It loads 10,000 names and 10,000 distinct
 address/name/relation combinations from the target projections, plus at least
 1,000 populated subname parents, permission subjects, and successful primary
-name claims. It varies names, addresses,
+name claims. Before sampling that corpus, it counts the complete
+`name_current` and `address_names_current` tables and requires at least 3
+million rows in each. These floors leave headroom below the roughly 3.5 million
+names in the production dataset while excluding staging-sized databases. The
+JSON report records both actual totals and both floors. It varies names, addresses,
 search text, relations, history scopes, sort order, page size, and any cursors
 returned by seed requests, and uses the real resolver and namespace rows. The
 lookup mix covers 1, 10, 100, 250, and 1,000 inputs per batch, with large
@@ -58,14 +72,15 @@ file is authoritative for the exact route mapping.
 
 ## Prepare the targets
 
-Record the release commit, interpreter content hash, host CPU and memory,
+Record the release commit, [interpreter content hash](../glossary.md#interpreter-content-hash), host CPU and memory,
 PostgreSQL version and settings, database size, selected chain and head, dense
 Interpret range, and whether the API target is host-local or reached over a
 network. Keep those facts with both JSON reports.
 
 Use two targets:
 
-1. A disposable production-shaped PostgreSQL copy for indexing. Restore it
+1. A disposable production-shaped PostgreSQL copy for indexing. Give the copy
+   a database name distinct from production, restore it
    from the same production generation and retain the full immutable raw facts,
    canonical lineage, interpreted rows, and current projections. The benchmark
    rewrites interpreted and projected state. Never point this command at the
@@ -88,28 +103,60 @@ Choose a contiguous dense-era range on the selected chain. The command reports
 the raw-log density and fails before claiming throughput green when it is below
 the checked-in floor.
 
+Immediately after restoring the copy, prepare it with a fresh UUID that is not
+stored in production. This table is intentionally in a separate
+`bigname_benchmark` schema, outside the application's exact `bigname_phase`
+table inventory and schema history. It exists only on the disposable benchmark
+copy. Keep the two shell variables for the indexing command that follows.
+
 ```sh
-BIGNAME_BENCHMARK_DATABASE_URL='postgres://benchmark-writer@copy-host/bigname' \
+DISPOSABLE_DATABASE='bigname_benchmark_copy_20260813'
+DISPOSABLE_MARKER="$(uuidgen)"
+psql "postgres://benchmark-writer@copy-host/$DISPOSABLE_DATABASE" \
+  --set=ON_ERROR_STOP=1 \
+  --set=disposable_marker="$DISPOSABLE_MARKER" <<'SQL'
+CREATE SCHEMA bigname_benchmark;
+CREATE TABLE bigname_benchmark.disposable_copy_marker (
+    marker uuid PRIMARY KEY,
+    database_name text NOT NULL UNIQUE,
+    prepared_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO bigname_benchmark.disposable_copy_marker (
+    marker,
+    database_name
+) VALUES (:'disposable_marker'::uuid, current_database());
+SQL
+```
+
+Do not create this table in production or include it in a production backup.
+Restoring production alone therefore never produces the marker required for
+writes.
+
+```sh
+BIGNAME_BENCHMARK_DATABASE_URL="postgres://benchmark-writer@copy-host/$DISPOSABLE_DATABASE" \
   scripts/benchmark-gate \
-    --report indexing-benchmark.json \
+    --report /tmp/indexing-benchmark.json \
     index \
     --chain ethereum-mainnet \
     --head-block <copy-head> \
     --walk-from-block <dense-range-start> \
     --walk-to-block <dense-range-end> \
-    --expected-database-name <exact-copy-database-name> \
+    --expected-database-name "$DISPOSABLE_DATABASE" \
+    --disposable-marker "$DISPOSABLE_MARKER" \
     --chain-rpc-url <selected-chain-production-rpc-url> \
     --allow-disposable-copy-writes
 ```
 
-The acknowledgement flag, expected database name, and hydration RPC URL are
-required. Without them, argument parsing stops before opening PostgreSQL. After
-connecting, the harness compares `current_database()` with the typed name and
-refuses writes on a mismatch. The connection carries the same interpreter
-content-hash setting as the phase runner, so ENSv1→ENSv2 migration correlation
-writes behave normally. The incremental tick runs first, the Interpret redo
-runs second, and the full Project rebuild runs last so the rebuilt projections
-match the interpreted copy.
+The acknowledgement flag, expected database name, disposable marker UUID, and
+hydration RPC URL are required. Without them, argument parsing stops before
+opening PostgreSQL. After connecting, the harness compares `current_database()`
+with the typed name, requires the marker table, and requires a row whose UUID
+and database name both match. It refuses writes before Interpret or Project on
+any mismatch. The connection carries the same interpreter content-hash setting
+as the phase runner, so ENSv1→ENSv2 migration correlation writes behave
+normally. The incremental tick runs first, the Interpret redo runs second, and
+the full Project rebuild runs last so the rebuilt projections match the
+interpreted copy.
 
 ## Run the API half
 
@@ -123,15 +170,32 @@ not sufficient release evidence for the under-10-ms lookup p95.
 BIGNAME_BENCHMARK_DATABASE_URL='postgres://benchmark-reader@prod-host/bigname' \
 BIGNAME_BENCHMARK_API_BASE_URL='https://drained-generation-api.example' \
   scripts/benchmark-gate \
-    --report api-benchmark.json \
+    --report /tmp/api-benchmark.json \
     api
 ```
 
 This command cannot run an indexing operation. Every connection it opens sets
 `default_transaction_read_only=on` and verifies `transaction_read_only=on`
-before reading the corpus. Cursor seed requests cover top-level list cursors,
+before reading the corpus. Before load begins, it checks `/healthz` and requires
+the target build SHA to match the clean harness checkout's `HEAD`, and requires
+the interpreter content hash to match the harness.
+It also requires the API-reported opaque database identity to match the
+read-only database connection used to count and sample the corpus. The report
+records both sides of that identity check. Configure the API database URL and
+`BIGNAME_BENCHMARK_DATABASE_URL` to reach PostgreSQL through the same TCP
+listener address and port; do not mix a Unix socket with TCP or use alternate
+listen addresses for the two connections. The endpoint-scoped identity makes
+an ambiguous access path red rather than treating two connections as proven to
+reach the same serving database. Cursor seed requests cover top-level list cursors,
 per-result reverse-lookup cursors, and the resolver route's nested bound-name
 cursor.
+
+After the complete timed endpoint sequence, the harness repeats the API build,
+content hash, and running-database identity checks and rechecks the corpus connection.
+A build or database-identity change during the run is red even when every
+individual request succeeded. This detects a PostgreSQL restart or failover
+and a deployment roll that changes the build; a same-build API process restart
+is not distinguished from a continuously running process.
 
 Before timed load begins, production mode sends seed requests and refuses to
 run unless every route returns at least one populated result. Every paginated
@@ -149,6 +213,8 @@ latency percentiles. Missing corpus cardinality or a missing real resolver row
 is red rather than silently reducing request variety.
 
 Attach both reports and the recorded environment facts to the release record.
+Each report includes the database name and the database server address observed
+by PostgreSQL; the API report also includes the drained API URL.
 Keep traffic drained after any red result. Fix the measured path, restore a
 fresh disposable copy if indexing was partially run, and repeat the complete
 half that failed. Restore traffic only after this gate and the ordinary health,
@@ -158,10 +224,13 @@ readiness, Verify, and public-edge checks are all green.
 
 This repository lane proves wiring only against the sanctioned local test
 PostgreSQL container. It creates a uniquely named database, applies the checked-in
-schema baseline, inserts the same ENSv1 registrar event shape used by the phase
-tests, runs both real phase engines, starts the real API, uses the smoke budget
-set, and removes the database. It intentionally omits external JSON-RPC
-hydration; the production indexing command requires and measures it.
+schema baseline, admits smoke manifests, and inserts registrar, registry, and
+resolver logs through event fragments admitted by the checked-in production
+manifests. It runs both real phase engines, starts the real API, exercises all
+Tier 1 and Tier 2 routes
+including status and resolver bound-name pagination, uses the smoke budget set,
+and removes the database. It intentionally omits external JSON-RPC hydration;
+the production indexing command requires and measures it.
 
 ```sh
 BIGNAME_BENCHMARK_CARGO_PROFILE=dev \
@@ -171,5 +240,5 @@ BIGNAME_BENCHMARK_CARGO_PROFILE=dev \
 
 The smoke budget set is intentionally too small to support a release decision.
 It exists to keep safety checks, request construction, report generation, and
-the end-to-end operating path executable without production data. This harness
-does not run in default CI.
+the end-to-end operating path executable without production data. CI runs the
+benchmark crate's unit tests but does not run the production-scale harness.

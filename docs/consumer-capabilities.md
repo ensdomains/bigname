@@ -12,7 +12,7 @@ Wire format and route details live in [`api-v2.md`](api-v2.md) and
 | Product reads | `/v2/names/*`, `/v2/addresses/*`, `/v2/permissions`, `/v2/search`, `/v2/events`, `/v2/resolvers/*`, `/v2/namespaces/*` | Name, record, address, permission, event, resolver, and namespace reads. |
 | Diagnostics | `/v2/diagnostics/*` | Coverage, binding, authority, record, manifest, and event inspection. |
 | GraphQL compatibility | `POST /graphql` | The documented narrow subgraph-compatible operations. |
-| Operator health | `GET /healthz` | API process, database, and phase-runner heartbeat readiness. This is not a product route. |
+| Operator health | `GET /healthz` | API process, opaque running-database-instance identity, and phase-runner heartbeat readiness. This is not a product route. |
 
 The v1 REST surface has been removed. In particular,
 `POST /v1/identity:lookup` no longer serves the native identity capability.

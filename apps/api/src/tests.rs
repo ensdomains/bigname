@@ -9,6 +9,12 @@ async fn healthz_reports_phase_runner_health_from_the_phase_schema() -> Result<(
     let payload = healthz_payload(&database).await?;
     assert_eq!(payload["status"], json!("ready"));
     assert_eq!(payload["api_status"], json!("ready"));
+    assert_eq!(payload["database"]["check"], json!("database_identity"));
+    assert!(
+        payload["database"]["identity"]
+            .as_str()
+            .is_some_and(|identity| identity.starts_with("keccak256:"))
+    );
     assert_eq!(payload["loops"]["phase_runner"]["status"], json!("running"));
     assert_eq!(payload["loops"]["phase_runner"]["phase"], json!("live"));
     assert_eq!(
@@ -16,6 +22,81 @@ async fn healthz_reports_phase_runner_health_from_the_phase_schema() -> Result<(
         json!(bigname_content_hash::INTERPRETER_CONTENT_HASH)
     );
 
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn healthz_identity_works_with_read_only_api_role_privileges() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_expected_phase_chains(&database, &["1"]).await?;
+    seed_phase_runner_heartbeat(&database, "1", "now()").await?;
+    let role = format!(
+        "bigname_api_reader_{}_{}",
+        std::process::id(),
+        NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    sqlx::query(&format!("CREATE ROLE {role} NOLOGIN"))
+        .execute(&database.lookup_pool)
+        .await?;
+    sqlx::query(&format!("GRANT USAGE ON SCHEMA bigname_phase TO {role}"))
+        .execute(&database.lookup_pool)
+        .await?;
+    sqlx::query(&format!(
+        "GRANT SELECT ON ALL TABLES IN SCHEMA bigname_phase TO {role}"
+    ))
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let config = database.database_config(2)?;
+    let options = PgConnectOptions::from_str(
+        config
+            .database_url
+            .as_deref()
+            .context("restricted API test database URL is missing")?,
+    )?
+    .options([("search_path", "bigname_phase".to_owned())]);
+    let set_role = format!("SET ROLE {role}");
+    let restricted_pool = PgPoolOptions::new()
+        .max_connections(config.max_connections)
+        .after_connect(move |connection, _metadata| {
+            let set_role = set_role.clone();
+            Box::pin(async move {
+                sqlx::query(&set_role).execute(&mut *connection).await?;
+                Ok(())
+            })
+        })
+        .connect_with(options)
+        .await?;
+    let state = AppState::new_with_rpc_urls(
+        restricted_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    )
+    .with_public_namespaces_for_test(["ens", "basenames"]);
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .expect("health request must build"),
+        )
+        .await?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    restricted_pool.close().await;
+    sqlx::query(&format!("DROP OWNED BY {role}"))
+        .execute(&database.lookup_pool)
+        .await?;
+    sqlx::query(&format!("DROP ROLE {role}"))
+        .execute(&database.lookup_pool)
+        .await?;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        payload["database"]["identity"]
+            .as_str()
+            .is_some_and(|identity| identity.starts_with("keccak256:")),
+        "read-only API role must be able to produce the opaque database identity: {payload}"
+    );
     database.cleanup().await
 }
 

@@ -4,9 +4,10 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
+use uuid::Uuid;
 
 mod api_load;
 mod budgets;
@@ -59,6 +60,11 @@ struct IndexArgs {
     expected_database_name: String,
     #[arg(
         long,
+        help = "UUID stored by the documented disposable-copy preparation step"
+    )]
+    disposable_marker: Uuid,
+    #[arg(
+        long,
         help = "JSON-RPC URL used by the production Project canonical-head hydration step"
     )]
     chain_rpc_url: String,
@@ -87,10 +93,13 @@ struct SmokeArgs {
 #[derive(Debug, Serialize)]
 struct GateReport<T: Serialize> {
     head_sha: String,
+    source_tree_clean: bool,
+    cargo_profile: String,
     interpreter_content_hash: &'static str,
     budgets: &'static str,
     budget_profile: &'static str,
     database: String,
+    database_host: String,
     api_base_url: Option<String>,
     green: bool,
     results: T,
@@ -106,12 +115,16 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Index(args) => {
+            let head_sha = begin_release_run()?;
+            require_release_profile()?;
             let profile = budgets.profile(BudgetProfile::Production);
             let timeout =
                 Duration::from_secs(profile.project_rebuild_max_seconds.saturating_add(60));
             let pool = database::connect_disposable_copy(&args.database_url, 8, timeout).await?;
             let database_name = database::database_identity(&pool).await?;
+            let database_host = database::database_host(&pool).await?;
             database::require_database_identity(&database_name, &args.expected_database_name)?;
+            database::require_disposable_marker(&pool, args.disposable_marker).await?;
             let rpc_urls = bigname_lookup::ChainRpcUrls::from_entries(&[format!(
                 "{}={}",
                 args.chain, args.chain_rpc_url
@@ -129,12 +142,16 @@ async fn main() -> Result<()> {
             )
             .await?;
             pool.close().await;
+            finish_release_run(&head_sha)?;
             let report = GateReport {
-                head_sha: git_head(),
+                head_sha,
+                source_tree_clean: true,
+                cargo_profile: cargo_profile(),
                 interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH,
                 budgets: BUDGETS_PATH,
                 budget_profile: "production",
                 database: database_name,
+                database_host,
                 api_base_url: None,
                 green: results.green,
                 results,
@@ -146,17 +163,25 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Api(args) => {
+            let head_sha = begin_release_run()?;
+            require_release_profile()?;
             let profile = budgets.profile(BudgetProfile::Production);
             let pool = database::connect_read_only(&args.database_url, 8).await?;
             let database_name = database::database_identity(&pool).await?;
-            let results = api_load::run(&pool, &args.api_base_url, profile).await?;
+            let database_host = database::database_host(&pool).await?;
+            let results =
+                api_load::run(&pool, &args.api_base_url, Some(&head_sha), profile).await?;
             pool.close().await;
+            finish_release_run(&head_sha)?;
             let report = GateReport {
-                head_sha: git_head(),
+                head_sha,
+                source_tree_clean: true,
+                cargo_profile: cargo_profile(),
                 interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH,
                 budgets: BUDGETS_PATH,
                 budget_profile: "production",
                 database: database_name,
+                database_host,
                 api_base_url: Some(args.api_base_url),
                 green: results.green,
                 results,
@@ -168,14 +193,18 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Smoke(args) => {
+            let database_host = smoke::configured_database_host()?;
             let results =
                 smoke::run(&args.api_binary, budgets.profile(BudgetProfile::Smoke)).await?;
             let report = GateReport {
                 head_sha: git_head(),
+                source_tree_clean: worktree_is_clean()?,
+                cargo_profile: cargo_profile(),
                 interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH,
                 budgets: BUDGETS_PATH,
                 budget_profile: "smoke",
                 database: "isolated scripts/test-db database".to_owned(),
+                database_host,
                 api_base_url: None,
                 green: results.green,
                 results,
@@ -199,6 +228,63 @@ fn git_head() -> String {
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn require_clean_worktree() -> Result<()> {
+    ensure!(
+        worktree_is_clean()?,
+        "production benchmark commands require a clean worktree"
+    );
+    Ok(())
+}
+
+fn begin_release_run() -> Result<String> {
+    require_clean_worktree()?;
+    let head = git_head();
+    ensure!(
+        head != "unknown",
+        "production benchmark could not identify HEAD"
+    );
+    let built_head = std::env::var("BIGNAME_BENCHMARK_BUILT_HEAD")
+        .context("production benchmark must be launched by scripts/benchmark-gate")?;
+    ensure!(
+        built_head == head,
+        "benchmark binary was built from {built_head}, but runtime HEAD is {head}"
+    );
+    Ok(head)
+}
+
+fn cargo_profile() -> String {
+    std::env::var("BIGNAME_BENCHMARK_CARGO_PROFILE").unwrap_or_else(|_| "unknown".to_owned())
+}
+
+fn require_release_profile() -> Result<()> {
+    ensure!(
+        cargo_profile() == "release",
+        "production benchmark commands require the release Cargo profile"
+    );
+    Ok(())
+}
+
+fn finish_release_run(expected_head: &str) -> Result<()> {
+    require_clean_worktree()?;
+    ensure!(
+        git_head() == expected_head,
+        "benchmark source HEAD changed while the production gate was running"
+    );
+    Ok(())
+}
+
+fn worktree_is_clean() -> Result<bool> {
+    let output = std::process::Command::new("git")
+        .args(["status", "--porcelain=v1", "--untracked-files=normal"])
+        .output()
+        .context("failed to inspect benchmark source worktree")?;
+    ensure!(
+        output.status.success(),
+        "git could not inspect benchmark source worktree"
+    );
+    Ok(output.stdout.is_empty())
 }
 
 fn emit_report<T: Serialize>(report: &GateReport<T>, path: Option<&Path>) -> Result<()> {
@@ -233,6 +319,8 @@ mod tests {
             "10",
             "--expected-database-name",
             "bigname-benchmark-copy",
+            "--disposable-marker",
+            "00000000-0000-4000-8000-000000000001",
             "--chain-rpc-url",
             "http://127.0.0.1:8545",
         ]);

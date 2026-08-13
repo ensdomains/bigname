@@ -10,16 +10,20 @@ interpret_max_peak_rss_mib = 32768
 interpret_state_cache_entries = 65536
 interpret_min_walk_blocks = 100000
 dense_min_raw_logs_per_1000_blocks = 8000
+project_min_name_current_rows = 3000000
 api_target_qps = 2000
 api_min_achieved_qps = 1950
 api_duration_seconds = 60
 api_warmup_seconds = 10
 api_corpus_size = 10000
 api_min_specialized_corpus_size = 1000
+api_min_name_current_rows = 3000000
+api_min_address_names_current_rows = 3000000
 api_min_success_percent = 100.0
 api_cursor_seed_count = 128
 api_require_populated_probes = true
 api_require_cursor_variants = true
+api_require_resolver_cursor_variant = true
 
 [[production.endpoints]]
 name = "lookup"
@@ -115,19 +119,29 @@ interpret_max_peak_rss_mib = 2048
 interpret_state_cache_entries = 65536
 interpret_min_walk_blocks = 16
 dense_min_raw_logs_per_1000_blocks = 1
+project_min_name_current_rows = 8
 api_target_qps = 5
 api_min_achieved_qps = 4
 api_duration_seconds = 1
 api_warmup_seconds = 1
 api_corpus_size = 8
 api_min_specialized_corpus_size = 0
+api_min_name_current_rows = 8
+api_min_address_names_current_rows = 8
 api_min_success_percent = 100.0
 api_cursor_seed_count = 4
 api_require_populated_probes = false
 api_require_cursor_variants = false
+api_require_resolver_cursor_variant = true
 
 [[smoke.endpoints]]
 name = "lookup"
+p50_ms = 2000
+p95_ms = 2000
+p99_ms = 2000
+
+[[smoke.endpoints]]
+name = "status"
 p50_ms = 2000
 p95_ms = 2000
 p99_ms = 2000
@@ -188,6 +202,12 @@ p99_ms = 2000
 
 [[smoke.endpoints]]
 name = "events"
+p50_ms = 2000
+p95_ms = 2000
+p99_ms = 2000
+
+[[smoke.endpoints]]
+name = "resolver"
 p50_ms = 2000
 p95_ms = 2000
 p99_ms = 2000

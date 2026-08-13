@@ -1,18 +1,20 @@
 use std::{path::Path, process::Stdio, str::FromStr, time::Duration};
 
-use alloy_primitives::{Address, B256, U256, keccak256};
-use alloy_sol_types::{SolEvent, sol};
 use anyhow::{Context, Result, ensure};
+use bigname_interpret::{
+    BatchRequest as InterpretRequest, Engine as InterpretEngine, RunMode as InterpretMode,
+};
+use bigname_project::{
+    BatchRequest as ProjectRequest, Engine as ProjectEngine, RunMode as ProjectMode,
+};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig, database_url_from_env};
 use serde::Serialize;
-use serde_json::json;
 use sqlx::{
     PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 use tokio::process::{Child, Command};
 use url::Url;
-use uuid::Uuid;
 
 use crate::{
     api_load::{self, ApiReport},
@@ -21,20 +23,8 @@ use crate::{
     indexing::{self, IndexingInput, IndexingReport},
 };
 
-const CHAIN: &str = "ethereum-mainnet";
-const HEAD: i64 = 16;
-const CONTRACT: &str = "0x0000000000000000000000000000000000000042";
-const SENDER: &str = "0x0000000000000000000000000000000000000043";
-const NORMALIZER: &str = "ensip15@ens-normalize-0.1.1";
-
-sol! {
-    event NameRegistered(
-        string name,
-        bytes32 indexed label,
-        address indexed owner,
-        uint256 expires
-    );
-}
+mod fixture;
+use fixture::{CHAIN, HEAD};
 
 #[derive(Debug, Serialize)]
 pub struct SmokeReport {
@@ -63,6 +53,13 @@ pub async fn run(api_binary: &Path, budgets: &GateBudgets) -> Result<SmokeReport
     result
 }
 
+pub fn configured_database_host() -> Result<String> {
+    let url = Url::parse(&database_url_from_env()).context("failed to parse test database URL")?;
+    url.host_str()
+        .map(str::to_owned)
+        .context("test database URL has no host")
+}
+
 async fn run_in_scratch(
     scratch_url: &str,
     bootstrap_pool: &PgPool,
@@ -71,7 +68,8 @@ async fn run_in_scratch(
 ) -> Result<SmokeReport> {
     initialize_schema_v2(bootstrap_pool).await?;
     let writer = smoke_writer_pool(scratch_url).await?;
-    seed_fixture(&writer).await?;
+    fixture::seed(&writer).await?;
+    prepare_existing_projection(&writer).await?;
 
     let indexing = indexing::run(
         &writer,
@@ -85,13 +83,13 @@ async fn run_in_scratch(
         budgets,
     )
     .await?;
-    seed_serving_state(&writer).await?;
+    fixture::seed_serving_state(&writer).await?;
 
     let (api_addr, metrics_addr) = reserve_addresses().await?;
     let mut api = spawn_api(api_binary, scratch_url, &api_addr, &metrics_addr)?;
     wait_for_api(&api_addr, &mut api).await?;
     let reader = database::connect_read_only(scratch_url, 8).await?;
-    let api_report = api_load::run(&reader, &format!("http://{api_addr}"), budgets).await;
+    let api_report = api_load::run(&reader, &format!("http://{api_addr}"), None, budgets).await;
     reader.close().await;
     stop_child(&mut api).await;
     writer.close().await;
@@ -101,6 +99,43 @@ async fn run_in_scratch(
         indexing,
         api,
     })
+}
+
+async fn prepare_existing_projection(pool: &PgPool) -> Result<()> {
+    let interpret = InterpretEngine::with_state_cache_capacity(pool.clone(), 65_536);
+    let mut resume_current = None;
+    loop {
+        let outcome = interpret
+            .run_batch(InterpretRequest {
+                chain_id: CHAIN.to_owned(),
+                from_block: 1,
+                to_block: HEAD,
+                resume_current,
+                mode: InterpretMode::Redo,
+            })
+            .await
+            .context("failed to prepare smoke interpreted rows")?;
+        if outcome.complete {
+            break;
+        }
+        resume_current = Some(outcome.current);
+    }
+    let project = ProjectEngine::new(pool.clone())
+        .run_batch(ProjectRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block: HEAD,
+            affected_from_block: 0,
+            affected_to_block: HEAD,
+            resume_current: None,
+            mode: ProjectMode::Normal,
+        })
+        .await
+        .context("failed to prepare smoke projection rows")?;
+    ensure!(
+        project.complete,
+        "smoke projection preparation did not complete"
+    );
+    Ok(())
 }
 
 async fn smoke_writer_pool(database_url: &str) -> Result<PgPool> {
@@ -139,191 +174,6 @@ async fn initialize_schema_v2(pool: &PgPool) -> Result<()> {
         sqlx::raw_sql(source).execute(&mut *transaction).await?;
     }
     transaction.commit().await?;
-    Ok(())
-}
-
-async fn seed_fixture(pool: &PgPool) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number, block_timestamp, canonicality_state)
-         SELECT $1, $1 || '-block-' || number,
-                CASE WHEN number = 0 THEN NULL ELSE $1 || '-block-' || (number - 1) END,
-                number, to_timestamp(1700000000 + number), 'canonical'::canonicality_state
-         FROM generate_series(0, $2::bigint) AS number",
-    )
-    .bind(CHAIN)
-    .bind(HEAD)
-    .execute(pool)
-    .await?;
-
-    let instance_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO contract_instances VALUES ($1, $2, 'contract', '{}'::jsonb, now())")
-        .bind(instance_id)
-        .bind(CHAIN)
-        .execute(pool)
-        .await?;
-    let payload = json!({
-        "manifest_version": 1,
-        "namespace": "ens",
-        "source_family": "ens_v1_registrar_l1",
-        "chain": CHAIN,
-        "deployment_epoch": "benchmark-smoke",
-        "rollout_status": "active",
-        "normalizer_version": NORMALIZER,
-        "capability_flags": {},
-        "roots": [],
-        "contracts": [{
-            "role": "registrar",
-            "address": CONTRACT,
-            "proxy_kind": "none",
-            "implementation": null,
-            "start_block": 0
-        }],
-        "discovery_rules": [],
-        "abi": {"events": [{
-            "name": "NameRegistered",
-            "fragment": "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 expires)",
-            "emitter_roles": ["registrar"],
-            "normalized_events": ["RegistrationGranted"]
-        }], "calls": []}
-    });
-    let manifest_id: i64 = sqlx::query_scalar(
-        "INSERT INTO manifest_versions (
-             manifest_version, namespace, source_family, chain_id, deployment_label,
-             rollout_status, normalizer_version, file_path, manifest_payload
-         ) VALUES (1, 'ens', 'ens_v1_registrar_l1', $1, 'benchmark-smoke', 'active', $2, $3, $4)
-         RETURNING manifest_id",
-    )
-    .bind(CHAIN)
-    .bind(NORMALIZER)
-    .bind("benchmarks/smoke-ens-v1-registrar.toml")
-    .bind(payload)
-    .fetch_one(pool)
-    .await?;
-    sqlx::query(
-        "INSERT INTO manifest_contract_instances (
-             manifest_id, chain_id, declaration_kind, declaration_name,
-             contract_instance_id, declared_address, role, proxy_kind, start_block_number
-         ) VALUES ($1, $2, 'contract', 'registrar', $3, $4, 'registrar', 'none', 0)",
-    )
-    .bind(manifest_id)
-    .bind(CHAIN)
-    .bind(instance_id)
-    .bind(CONTRACT)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "INSERT INTO contract_instance_addresses (
-             contract_instance_id, chain_id, address, active_from_block_number,
-             source_manifest_id, provenance
-         ) VALUES ($1, $2, $3, 0, $4, '{}'::jsonb)",
-    )
-    .bind(instance_id)
-    .bind(CHAIN)
-    .bind(CONTRACT)
-    .bind(manifest_id)
-    .execute(pool)
-    .await?;
-
-    for block in 1..=HEAD {
-        insert_registration(pool, block).await?;
-    }
-    Ok(())
-}
-
-async fn insert_registration(pool: &PgPool, block: i64) -> Result<()> {
-    let transaction_hash = format!("{CHAIN}-transaction-{block}");
-    sqlx::query(
-        "INSERT INTO raw_transactions (
-             chain_id, block_hash, block_number, transaction_hash, transaction_index,
-             from_address, to_address
-         ) VALUES ($1, $2, $3, $4, 0, $5, $6)",
-    )
-    .bind(CHAIN)
-    .bind(block_hash(block))
-    .bind(block)
-    .bind(&transaction_hash)
-    .bind(SENDER)
-    .bind(CONTRACT)
-    .execute(pool)
-    .await?;
-    let label = format!("bench{block:04}");
-    let mut owner_bytes = [0u8; 20];
-    owner_bytes[12..].copy_from_slice(&(block as u64).to_be_bytes());
-    let encoded = NameRegistered {
-        name: label.clone(),
-        label: B256::from(keccak256(label.as_bytes())),
-        owner: Address::from(owner_bytes),
-        expires: U256::from(2_000_000_000u64 + block as u64),
-    }
-    .encode_log_data();
-    let topics = encoded
-        .topics()
-        .iter()
-        .map(|topic| format!("{topic:#x}"))
-        .collect::<Vec<_>>();
-    sqlx::query(
-        "INSERT INTO raw_logs (
-             chain_id, block_hash, block_number, transaction_hash, transaction_index,
-             log_index, emitting_address, topics, data
-         ) VALUES ($1, $2, $3, $4, 0, 0, $5, $6, $7)",
-    )
-    .bind(CHAIN)
-    .bind(block_hash(block))
-    .bind(block)
-    .bind(transaction_hash)
-    .bind(CONTRACT)
-    .bind(topics)
-    .bind(encoded.data.to_vec())
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-async fn seed_serving_state(pool: &PgPool) -> Result<()> {
-    // API fixture rows use the canonical UTC-seconds spelling required by snapshot tokens.
-    // The phase timings above finish before this smoke-only fixture normalization runs.
-    for table in ["name_current", "record_inventory_current"] {
-        sqlx::query(&format!(
-            "UPDATE {table}
-             SET chain_positions = jsonb_set(
-                 chain_positions,
-                 '{{ethereum,timestamp}}',
-                 to_jsonb(to_char(
-                     (chain_positions #>> '{{ethereum,timestamp}}')::timestamptz AT TIME ZONE 'UTC',
-                     'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'
-                 ))
-             )
-             WHERE chain_positions #>> '{{ethereum,timestamp}}' IS NOT NULL"
-        ))
-        .execute(pool)
-        .await?;
-    }
-    sqlx::query(
-        "INSERT INTO chain_heads (chain_id, latest_block_hash, latest_block_number)
-         VALUES ($1, $2, $3)",
-    )
-    .bind(CHAIN)
-    .bind(block_hash(HEAD))
-    .bind(HEAD)
-    .execute(pool)
-    .await?;
-    for phase in ["ingest", "interpret", "project"] {
-        let input_hash =
-            (phase != "ingest").then_some(bigname_content_hash::INTERPRETER_CONTENT_HASH);
-        sqlx::query(
-            "INSERT INTO chain_phase_state (
-                 chain_id, phase_name, phase_status, current_block_number, current_block_hash,
-                 target_block_number, target_block_hash, input_content_hash, started_at, finished_at
-             ) VALUES ($1, $2, 'completed', $3, $4, $3, $4, $5, now(), now())",
-        )
-        .bind(CHAIN)
-        .bind(phase)
-        .bind(HEAD)
-        .bind(block_hash(HEAD))
-        .bind(input_hash)
-        .execute(pool)
-        .await?;
-    }
     Ok(())
 }
 
@@ -395,6 +245,99 @@ async fn stop_child(child: &mut Child) {
     let _ = child.wait().await;
 }
 
-fn block_hash(number: i64) -> String {
-    format!("{CHAIN}-block-{number}")
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::budgets::{BudgetProfile, BudgetsFile};
+
+    #[tokio::test]
+    async fn fixture_projects_admitted_resolver_and_bound_names() {
+        let scratch = TestDatabase::create(TestDatabaseConfig::new("benchmark_resolver_fixture"))
+            .await
+            .unwrap();
+        let scratch_url = scratch_database_url(scratch.database_name()).unwrap();
+        initialize_schema_v2(scratch.pool()).await.unwrap();
+        let writer = smoke_writer_pool(&scratch_url).await.unwrap();
+        fixture::seed(&writer).await.unwrap();
+        prepare_existing_projection(&writer).await.unwrap();
+        let budgets = BudgetsFile::load(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/release-gate.toml"),
+        )
+        .unwrap();
+        indexing::run(
+            &writer,
+            &IndexingInput {
+                chain_id: CHAIN.to_owned(),
+                head_block: HEAD,
+                walk_from_block: 1,
+                walk_to_block: HEAD,
+                hydration_rpc_urls: None,
+            },
+            budgets.profile(BudgetProfile::Smoke),
+        )
+        .await
+        .unwrap();
+
+        let resolver_rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM resolver_current
+             WHERE chain_id = $1 AND resolver_address = lower($2)",
+        )
+        .bind(CHAIN)
+        .bind(fixture::RESOLVER)
+        .fetch_one(&writer)
+        .await
+        .unwrap();
+        let bound_names: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM name_current
+             WHERE lower(declared_summary #>> '{resolver,address}') = lower($1)",
+        )
+        .bind(fixture::RESOLVER)
+        .fetch_one(&writer)
+        .await
+        .unwrap();
+        let resolver_bindings: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM normalized_events event
+             JOIN surface_bindings binding
+               ON binding.logical_name_id = event.logical_name_id
+              AND binding.resource_id = event.resource_id
+             WHERE event.event_kind = 'ResolverChanged'",
+        )
+        .fetch_one(&writer)
+        .await
+        .unwrap();
+        let manifest_events: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM normalized_events
+             WHERE event_kind = 'SourceManifestUpdated'",
+        )
+        .fetch_one(&writer)
+        .await
+        .unwrap();
+        let corpus_resolver_rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM (
+                 SELECT declared_summary FROM name_current
+                 ORDER BY logical_name_id LIMIT 8
+             ) corpus
+             WHERE corpus.declared_summary #>> '{resolver,address}' IS NOT NULL",
+        )
+        .fetch_one(&writer)
+        .await
+        .unwrap();
+        assert_eq!(manifest_events, 3, "all fixture sources must be admitted");
+        assert!(
+            resolver_bindings >= HEAD,
+            "Interpret must bind every resolver event"
+        );
+        assert_eq!(
+            resolver_rows, 1,
+            "Project must publish the admitted resolver"
+        );
+        assert!(bound_names > 1, "Project must publish pageable bound names");
+        assert_eq!(
+            corpus_resolver_rows, 0,
+            "exact-name smoke corpus must retain its registration-only coverage"
+        );
+
+        writer.close().await;
+        scratch.cleanup().await.unwrap();
+    }
 }
