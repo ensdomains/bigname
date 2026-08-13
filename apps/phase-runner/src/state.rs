@@ -530,7 +530,6 @@ impl PhaseStore {
         crate::ingest_cursor_config::validate_completed(&self.pool, chain_id, sources).await
     }
 }
-
 async fn completed_phase_is_behind(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     chain_id: &str,
@@ -551,6 +550,11 @@ async fn completed_phase_is_behind(
         )
     })?;
     let Some((head_number, head_hash)) = head else {
+        if row.settled_while_unconfigured == Some(true) {
+            return Err(RunnerError::data_integrity(format!(
+                "cannot revalidate settlement-marked phase {phase} for chain {chain_id} without a canonical head"
+            )));
+        }
         return Ok(false);
     };
     let Some(current_number) = row.current_block_number else {

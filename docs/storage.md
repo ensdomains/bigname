@@ -150,7 +150,14 @@ completed-state revalidation, or a successful redo that leaves complete
 retained phase evidence clears it, so the recovered row is indistinguishable
 from an ordinary completion. These clearing writes use the phase advisory-lock
 connection, so losing phase ownership aborts the write. While any phase marker
-is present, that chain is not eligible for `ready` on the status endpoint.
+is present, that chain is not eligible for `ready` on the status endpoint and
+reports `degraded` unless a stronger `stale` condition applies, such as a
+genuinely failed phase or an expired heartbeat. Interpret and Project do not
+run a separate completed-state revalidation pass. For those phases, the
+phase-start check is the revalidation: their retained current block must match
+the canonical head's height and hash before `AlreadyCompleted` authorizes the
+marker-clearing write. If no canonical head is stored, startup reports a data
+integrity error and leaves both the retained position and marker unchanged.
 
 ### ENSv1→ENSv2 correlation visibility
 

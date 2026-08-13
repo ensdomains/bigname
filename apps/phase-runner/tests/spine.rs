@@ -838,6 +838,63 @@ async fn configured_restart_preserves_a_settled_live_marker_until_real_completio
 }
 
 #[tokio::test]
+async fn readding_chain_preserves_settled_derived_phase_without_a_canonical_head() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_settled_derived_without_head").await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+
+    for phase in [PhaseName::Interpret, PhaseName::Project] {
+        let chain_id = format!("settled-{phase}-without-head");
+        store.initialize_chain(&chain_id).await?;
+        mark_completed(scratch.pool(), &chain_id, PhaseName::Ingest, None).await?;
+        mark_completed(
+            scratch.pool(),
+            &chain_id,
+            PhaseName::Interpret,
+            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+        )
+        .await?;
+        if phase == PhaseName::Project {
+            mark_completed(
+                scratch.pool(),
+                &chain_id,
+                PhaseName::Project,
+                Some(phase_runner::INTERPRETER_CONTENT_HASH),
+            )
+            .await?;
+        }
+        sqlx::query(
+            "UPDATE chain_phase_state SET settled_while_unconfigured = TRUE
+             WHERE chain_id = $1 AND phase_name = $2",
+        )
+        .bind(&chain_id)
+        .bind(phase.as_str())
+        .execute(scratch.pool())
+        .await?;
+
+        let error = store
+            .start_phase(&chain_id, phase, &RunMode::Normal)
+            .await
+            .expect_err("a settled phase cannot be revalidated without a canonical head");
+        assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+        assert!(
+            error.to_string().contains("without a canonical head"),
+            "{error}"
+        );
+        let state: (String, Option<bool>, Option<i64>) = sqlx::query_as(
+            "SELECT phase_status, settled_while_unconfigured, current_block_number
+             FROM chain_phase_state WHERE chain_id = $1 AND phase_name = $2",
+        )
+        .bind(&chain_id)
+        .bind(phase.as_str())
+        .fetch_one(scratch.pool())
+        .await?;
+        assert_eq!(state, ("completed".to_owned(), Some(true), Some(100)));
+    }
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn unconfigured_settlement_stops_without_writing_after_lock_connection_loss() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_unconfigured_settlement_lock_loss").await?;
     let removed_chain = "removed-chain-lock-loss";

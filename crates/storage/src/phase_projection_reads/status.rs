@@ -38,6 +38,8 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
             project.phase_status AS project_phase_status,
             verify.phase_status AS verify_phase_status,
             verify.verification_level AS verify_verification_level,
+            COALESCE(verify.settled_while_unconfigured, false)
+                AS verify_settled_while_unconfigured,
             COALESCE(settlement.any_phase_settled_while_unconfigured, false)
                 AS any_phase_settled_while_unconfigured,
             known_chains.chain_id = $2 AS provider_trusted_verification_required,
@@ -119,6 +121,10 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
                 project_phase_status: crate::sql_row::get(&row, "project_phase_status")?,
                 verify_phase_status: crate::sql_row::get(&row, "verify_phase_status")?,
                 verify_verification_level: crate::sql_row::get(&row, "verify_verification_level")?,
+                verify_settled_while_unconfigured: crate::sql_row::get(
+                    &row,
+                    "verify_settled_while_unconfigured",
+                )?,
                 any_phase_settled_while_unconfigured: crate::sql_row::get(
                     &row,
                     "any_phase_settled_while_unconfigured",

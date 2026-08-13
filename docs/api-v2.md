@@ -296,9 +296,10 @@ head and finality fields come from `chain_heads`; indexed progress is the
 `project` phase's most recent completed publication. Readiness also uses that
 phase's lifecycle state, redo marker, and newest per-chain heartbeat in
 `service_heartbeats`. A phase row that startup settled while its chain was
-unconfigured keeps the chain `degraded` until genuine phase completion or
-completed-state revalidation clears that marker. For Ethereum Sepolia,
-readiness also requires its
+unconfigured is not eligible for `ready` until genuine phase completion or
+completed-state revalidation clears that marker. It reports `degraded` unless
+a stronger `stale` condition applies, such as a genuinely failed phase or an
+expired heartbeat. For Ethereum Sepolia, readiness also requires its
 [provider-trusted](glossary.md#verification-level) `verify` phase to be
 `completed` with `quick_synced` evidence and its `ingest` phase to remain
 `completed`.

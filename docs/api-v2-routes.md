@@ -234,8 +234,10 @@ Field ownership:
 - The existing per-chain `status` field also maps the `project` phase
   lifecycle, redo marker, and newest per-chain
   `bigname_phase.service_heartbeats` timestamp. A phase row that startup
-  settled while its chain was unconfigured keeps the chain `degraded` until
+  settled while its chain was unconfigured is not eligible for `ready` until
   genuine phase completion or completed-state revalidation clears that marker.
+  It reports `degraded` unless a stronger `stale` condition applies, such as a
+  genuinely failed phase or an expired heartbeat.
   Ethereum Sepolia is not eligible for `ready` until its
   [provider-trusted](glossary.md#verification-level) `verify` phase is
   `completed` with `quick_synced` evidence and its `ingest` phase remains

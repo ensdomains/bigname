@@ -449,12 +449,38 @@ async fn v2_status_keeps_sepolia_unready_until_provider_trusted_verify_completes
     sqlx::query(
         "UPDATE chain_phase_state
          SET settled_while_unconfigured = TRUE,
+             verification_level = NULL,
              current_block_number = 119, current_block_hash = '0xsepolia-before-published'
          WHERE chain_id = 'ethereum-sepolia' AND phase_name = 'verify'",
     )
     .execute(&database.lookup_pool)
     .await?;
-    let while_verify_completion_is_settled = sepolia_status_value(state.clone()).await?;
+    let while_verify_completion_is_settled_without_level =
+        sepolia_status_value(state.clone()).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET verification_level = 'cross_checked'
+         WHERE chain_id = 'ethereum-sepolia' AND phase_name = 'verify'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let while_verify_completion_is_settled_cross_checked =
+        sepolia_status_value(state.clone()).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET verification_level = 'node_checked'
+         WHERE chain_id = 'ethereum-sepolia' AND phase_name = 'verify'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let while_verify_completion_is_settled_node_checked =
+        sepolia_status_value(state.clone()).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET verification_level = 'quick_synced'
+         WHERE chain_id = 'ethereum-sepolia' AND phase_name = 'verify'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let while_verify_completion_is_settled_quick_synced =
+        sepolia_status_value(state.clone()).await?;
     sqlx::query(
         "UPDATE chain_phase_state
          SET settled_while_unconfigured = NULL,
@@ -519,7 +545,22 @@ async fn v2_status_keeps_sepolia_unready_until_provider_trusted_verify_completes
     assert_eq!(failed_verify_while_ingest_is_settled, json!("stale"));
     assert_eq!(stale_heartbeat_while_ingest_is_settled, json!("stale"));
     assert_eq!(after_ingest_completion_is_genuine, json!("ready"));
-    assert_eq!(while_verify_completion_is_settled, json!("degraded"));
+    assert_eq!(
+        while_verify_completion_is_settled_without_level,
+        json!("degraded")
+    );
+    assert_eq!(
+        while_verify_completion_is_settled_cross_checked,
+        json!("degraded")
+    );
+    assert_eq!(
+        while_verify_completion_is_settled_node_checked,
+        json!("degraded")
+    );
+    assert_eq!(
+        while_verify_completion_is_settled_quick_synced,
+        json!("degraded")
+    );
     assert_eq!(after_verify_redo_clears_settlement, json!("ready"));
     assert_eq!(after_completed_ingest_validation_fails, json!("stale"));
     assert_eq!(after_ingest_validation_recovers, json!("ready"));

@@ -53,6 +53,43 @@ run_psql() {
     esac
 }
 
+assert_unconfigured_settlement_constraint() {
+    local provenance="$1"
+    local false_error
+
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' \
+            "INSERT INTO chain_phase_state (" \
+            "    chain_id, phase_name, settled_while_unconfigured" \
+            ") VALUES (" \
+            "    'phase-settlement-${provenance}-true', 'ingest', TRUE" \
+            ");"
+    } | run_psql
+
+    if false_error="$({
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' \
+            "INSERT INTO chain_phase_state (" \
+            "    chain_id, phase_name, settled_while_unconfigured" \
+            ") VALUES (" \
+            "    'phase-settlement-${provenance}-false', 'project', FALSE" \
+            ");"
+    } | run_psql 2>&1)"; then
+        printf '%s\n' \
+            "$provenance settlement constraint accepted a FALSE marker" >&2
+        exit 1
+    fi
+    if [[ "$false_error" != *chain_phase_state_unconfigured_settlement_check* ]]; then
+        printf '%s\n' \
+            "$provenance FALSE marker failed without the named settlement constraint" >&2
+        printf '%s\n' "$false_error" >&2
+        exit 1
+    fi
+    printf '%s\n' \
+        "$provenance settlement constraint accepts non-Verify TRUE and rejects FALSE"
+}
+
 wait_for_schema_v2_race_session() {
     local application_name="$1"
     local status
@@ -350,6 +387,7 @@ fi
 # Exercise the initialized-schema unconfigured-settlement upgrade from its preceding
 # shape. The existing row must stay NULL, and both additive migrations must be
 # idempotent after the constraint has been validated.
+assert_unconfigured_settlement_constraint baseline
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     printf '%s\n' \
@@ -367,15 +405,7 @@ for ignored in 1 2; do
         sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
     done
 done
-{
-    printf 'SET search_path TO "%s";\n' "$scratch_schema"
-    printf '%s\n' \
-        "INSERT INTO chain_phase_state (" \
-        "    chain_id, phase_name, settled_while_unconfigured" \
-        ") VALUES (" \
-        "    'phase-settlement-upgrade-check', 'ingest', TRUE" \
-        ");"
-} | run_psql
+assert_unconfigured_settlement_constraint migration
 verify_settlement_upgrade_check="$({
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     cat <<'SQL'
@@ -386,7 +416,7 @@ SELECT CASE WHEN
        AND phase_name = 'verify')
     AND (SELECT settled_while_unconfigured IS TRUE
          FROM chain_phase_state
-         WHERE chain_id = 'phase-settlement-upgrade-check'
+         WHERE chain_id = 'phase-settlement-migration-true'
            AND phase_name = 'ingest')
     AND EXISTS (
         SELECT 1

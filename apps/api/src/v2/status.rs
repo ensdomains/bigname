@@ -189,6 +189,9 @@ fn phase_readiness(
             row.verify_phase_status.as_deref(),
             row.verify_verification_level.as_deref(),
         ) {
+            (Some("completed"), _) if row.verify_settled_while_unconfigured => {
+                (ingest_incomplete, true)
+            }
             (Some("completed"), Some("quick_synced")) => (ingest_incomplete, false),
             (Some("idle" | "running" | "paused") | None, _) => (ingest_incomplete, true),
             (Some("completed" | "failed"), _) | (Some(_), _) => {
@@ -510,6 +513,7 @@ mod tests {
             project_phase_status: Some("completed".to_owned()),
             verify_phase_status: None,
             verify_verification_level: None,
+            verify_settled_while_unconfigured: false,
             any_phase_settled_while_unconfigured: false,
             provider_trusted_verification_required: false,
             project_generation_current: true,
@@ -525,6 +529,30 @@ mod tests {
         row.verify_phase_status = Some("completed".to_owned());
 
         assert_eq!(phase_readiness(&row, 30), StatusReadiness::Stale);
+    }
+
+    #[test]
+    fn v2_status_degrades_settled_required_verify_at_every_level() {
+        for level in [
+            None,
+            Some("cross_checked"),
+            Some("node_checked"),
+            Some("quick_synced"),
+        ] {
+            let mut row = row("ethereum-sepolia", Some(1), Some(1), Some(1), Some(1));
+            row.provider_trusted_verification_required = true;
+            row.ingest_phase_status = Some("completed".to_owned());
+            row.verify_phase_status = Some("completed".to_owned());
+            row.verify_verification_level = level.map(str::to_owned);
+            row.verify_settled_while_unconfigured = true;
+            row.any_phase_settled_while_unconfigured = true;
+
+            assert_eq!(
+                phase_readiness(&row, 30),
+                StatusReadiness::Degraded,
+                "settled Verify level {level:?}"
+            );
+        }
     }
 
     #[test]
