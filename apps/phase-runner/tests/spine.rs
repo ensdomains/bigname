@@ -452,6 +452,8 @@ async fn capacity_breach_pauses_and_then_resumes_the_phase() -> Result<()> {
             minimum_free_disk_bytes: 1,
             writable_path: ".".into(),
             poll_interval: Duration::from_millis(1),
+            interpreter_state_cache_entries:
+                bigname_interpret::DEFAULT_INTERPRETER_STATE_CACHE_ENTRIES,
         },
         probe.clone(),
     );

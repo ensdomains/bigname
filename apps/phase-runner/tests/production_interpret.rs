@@ -957,6 +957,109 @@ async fn prior_state_is_loaded_once_and_folded_forward_across_500_block_batches(
 }
 
 #[tokio::test]
+async fn zero_capacity_reloads_the_exact_prior_state_from_normalized_events() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_zero_state_cache").await?;
+    let chain = "interpret-zero-state-cache";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice"), (501, "alice")]).await?;
+    let first = Engine::with_state_cache_capacity(scratch.pool().clone(), 0)
+        .run_batch(BatchRequest {
+            chain_id: chain.to_owned(),
+            from_block: 0,
+            to_block: 1,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    assert!(first.complete);
+
+    // A new engine has no retained in-process state. It must stream prior rows into an empty cache,
+    // then use the request-shaped reload for the evicted value needed at block 501.
+    let second = Engine::with_state_cache_capacity(scratch.pool().clone(), 0)
+        .run_batch(BatchRequest {
+            chain_id: chain.to_owned(),
+            from_block: 2,
+            to_block: 501,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    assert!(second.complete);
+    let prior_registrant: Option<String> = sqlx::query_scalar(
+        "SELECT before_state ->> 'registrant' FROM normalized_events \
+         WHERE chain_id = $1 AND block_number = 501 AND event_kind = 'RegistrationGranted'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(prior_registrant.as_deref(), Some(CONTRACT));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn cache_reload_snapshot_aba_is_rejected_by_the_orphaning_epoch() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_state_reload_aba").await?;
+    let chain = "interpret-state-reload-aba";
+    seed_fixture(scratch.pool(), chain, &[(1, "alice"), (501, "alice")]).await?;
+    insert_orphaned_registration(scratch.pool(), chain, 1, "bob").await?;
+    publish_heads(
+        scratch.pool(),
+        chain,
+        &HeadMarkers {
+            latest: BlockMarker::new(501, block_hash(chain, 501))?,
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?;
+    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
+
+    // The fourth connection acquisition is the bounded-cache miss snapshot: target and marker
+    // selection use the first two, and the input snapshot uses the third.
+    let (engine_pool, reload_acquire_reached, release_reload_acquire) =
+        pool_with_acquire_gate(scratch.pool(), 4).await?;
+    let pool = engine_pool.clone();
+    let chain_for_task = chain.to_owned();
+    let running = tokio::spawn(async move {
+        Engine::with_state_cache_capacity(pool, 0)
+            .run_batch(BatchRequest {
+                chain_id: chain_for_task,
+                from_block: 2,
+                to_block: 501,
+                resume_current: None,
+                mode: InterpretRunMode::Normal,
+            })
+            .await
+    });
+
+    reload_acquire_reached.notified().await;
+    switch_live_lineage(scratch.pool(), chain, &format!("{chain}-orphan-1")).await?;
+    switch_live_lineage(scratch.pool(), chain, &block_hash(chain, 1)).await?;
+    sqlx::query(
+        "UPDATE chain_heads SET lineage_orphaning_epoch = lineage_orphaning_epoch + 1 \
+         WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    release_reload_acquire.notify_one();
+
+    let error = running
+        .await?
+        .expect_err("an ABA change across the state reload snapshot must retry");
+    assert_eq!(error.kind(), InterpretErrorKind::Transient);
+    assert!(error.to_string().contains("between input reads and write"));
+    let block_501_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events WHERE chain_id = $1 AND block_number = 501",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(block_501_events, 0);
+    engine_pool.close().await;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn cached_prior_state_reloads_when_an_earlier_dependency_is_repaired() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_prior_dependency_repair").await?;
     let chain = "interpret-prior-dependency-repair";

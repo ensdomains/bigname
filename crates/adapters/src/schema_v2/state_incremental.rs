@@ -2,7 +2,7 @@ use imbl::{ordmap::OrdMap, ordset::OrdSet};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::State;
+use super::{State, StateCacheCapacity, StateResidency};
 use crate::schema_v2::{model::PriorEventInput, state_key::interpreter_state_key};
 
 impl State {
@@ -10,8 +10,17 @@ impl State {
         prior: Vec<PriorEventInput>,
         v2_suffix_anchors: Vec<(String, String, Vec<String>)>,
     ) -> Self {
+        Self::with_cache_capacity(prior, v2_suffix_anchors, StateCacheCapacity::Unlimited)
+    }
+
+    pub(in crate::schema_v2) fn with_cache_capacity(
+        prior: Vec<PriorEventInput>,
+        v2_suffix_anchors: Vec<(String, String, Vec<String>)>,
+        cache_capacity: StateCacheCapacity,
+    ) -> Self {
         let mut state = Self {
-            values: OrdMap::new(),
+            values: StateResidency::new(cache_capacity),
+            provisional_values: OrdMap::new(),
             v1_names: OrdMap::new(),
             v1_wrapper_data: OrdMap::new(),
             v1_registrars: OrdMap::new(),
@@ -47,14 +56,33 @@ impl State {
     }
 
     fn restore_prior_events(&mut self, prior: Vec<PriorEventInput>) {
-        self.apply_prior_events(prior, true);
+        self.apply_prior_events(prior, true, true);
     }
 
     pub(in crate::schema_v2) fn apply_prior_event_delta(&mut self, prior: Vec<PriorEventInput>) {
-        self.apply_prior_events(prior, false);
+        self.apply_prior_events(prior, false, false);
     }
 
-    fn apply_prior_events(&mut self, prior: Vec<PriorEventInput>, full_restore: bool) {
+    pub(in crate::schema_v2) fn restore_prior_event_chunk(&mut self, prior: Vec<PriorEventInput>) {
+        self.apply_prior_events(prior, true, false);
+    }
+
+    pub(in crate::schema_v2) fn finish_prior_event_restore(&mut self) {
+        if let Some(timestamp) = self.latest_v2_timestamp {
+            // Replaying prior events reconstructs topology before the next raw-log batch. The
+            // resulting transitions already exist in normalized_events, so only retain the
+            // reconstructed name state here.
+            self.refresh_v2_names(timestamp);
+        }
+        self.prune_unbacked_surfaces();
+    }
+
+    fn apply_prior_events(
+        &mut self,
+        prior: Vec<PriorEventInput>,
+        full_restore: bool,
+        finish_restore: bool,
+    ) {
         for token_lineage_id in prior.iter().filter_map(|event| {
             event
                 .after_state
@@ -102,13 +130,8 @@ impl State {
             self.restoring_state_key = None;
         }
         self.latest_v2_timestamp = previous_v2_timestamp.max(latest_delta_timestamp);
-        if full_restore {
-            if let Some(timestamp) = self.latest_v2_timestamp {
-                // Replaying prior events reconstructs topology before the next raw-log batch. The
-                // resulting transitions already exist in normalized_events, so only retain the
-                // reconstructed name state here.
-                self.refresh_v2_names(timestamp);
-            }
+        if full_restore && finish_restore {
+            self.finish_prior_event_restore();
         } else if let Some(delta_timestamp) = latest_delta_timestamp {
             self.capture_crossed_v2_expiries(
                 previous_v2_timestamp,
@@ -122,7 +145,9 @@ impl State {
                     .expect("a timestamped ENSv2 delta sets the retained timestamp"),
             );
         }
-        self.prune_unbacked_surfaces();
+        if !full_restore {
+            self.prune_unbacked_surfaces();
+        }
     }
 
     fn capture_v2_refresh_targets(&self, event: &PriorEventInput, targets: &mut V2RefreshTargets) {

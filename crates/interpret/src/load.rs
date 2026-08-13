@@ -2,7 +2,7 @@ use bigname_adapters::SchemaV2AdapterSession;
 use bigname_adapters::schema_v2::seam::{ADMISSION_DISCOVERY_EDGE_KINDS, OBSERVATION_KEY};
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, DiscoveryRuleInput, ManifestInput, RawBlockInput,
-    RawLogInput,
+    RawLogInput, StateCacheCapacity, begin_schema_v2_adapter_restore,
 };
 use sqlx::{PgConnection, PgPool, types::Uuid};
 
@@ -13,6 +13,7 @@ mod migration;
 mod prior;
 
 pub(crate) use cache::{PriorCache, fold as fold_prior_cache};
+pub(crate) use prior::prior_state_values;
 
 pub(crate) struct CachedPrior {
     pub cache: PriorCache,
@@ -23,6 +24,7 @@ pub(crate) struct LoadedBatch {
     pub input: BatchInput,
     pub prior_cache: PriorCache,
     pub adapter_session: Option<SchemaV2AdapterSession>,
+    pub restored_event_count: usize,
 }
 
 type ManifestRow = (i64, i64, String, String, String, String, String, String);
@@ -47,6 +49,7 @@ pub(crate) async fn batch_input(
     to_block: i64,
     resume_marker: Option<(i64, &str)>,
     cached_prior: Option<CachedPrior>,
+    state_cache_capacity: StateCacheCapacity,
 ) -> Result<LoadedBatch> {
     let mut transaction = pool.begin().await.map_err(|error| {
         InterpretError::database("failed to begin interpret input snapshot", error)
@@ -59,7 +62,7 @@ pub(crate) async fn batch_input(
         })?;
     validate_snapshot_resume_marker(&mut transaction, chain_id, resume_marker).await?;
     let orphaning_epoch = cache::orphaning_epoch(&mut transaction, chain_id).await?;
-    let (restored, adapter_session) = match cached_prior {
+    let cached = match cached_prior {
         Some(CachedPrior {
             cache: prior_cache,
             adapter_session,
@@ -67,32 +70,14 @@ pub(crate) async fn batch_input(
             match cache::revalidate(&mut transaction, chain_id, prior_cache, orphaning_epoch)
                 .await?
             {
-                Some(prior_cache) => (
-                    cache::PriorRestore {
-                        events: Vec::new(),
-                        cache: prior_cache,
-                    },
-                    Some(adapter_session),
-                ),
+                Some(prior_cache) => Some((prior_cache, adapter_session)),
                 None => {
                     drop(adapter_session);
-                    (
-                        cache::freshly_loaded(
-                            prior::events(&mut transaction, chain_id, from_block).await?,
-                            orphaning_epoch,
-                        ),
-                        None,
-                    )
+                    None
                 }
             }
         }
-        None => (
-            cache::freshly_loaded(
-                prior::events(&mut transaction, chain_id, from_block).await?,
-                orphaning_epoch,
-            ),
-            None,
-        ),
+        None => None,
     };
     let manifests = load_manifests(&mut transaction, chain_id).await?;
     if manifests.is_empty() {
@@ -105,6 +90,30 @@ pub(crate) async fn batch_input(
     admissions.extend(migration::admissions(&mut transaction, chain_id, from_block).await?);
     let blocks = load_blocks(&mut transaction, chain_id, from_block, to_block).await?;
     let raw_logs = load_raw_logs(&mut transaction, chain_id, from_block, to_block).await?;
+    let (prior_cache, adapter_session, restored_event_count) = match cached {
+        Some((prior_cache, adapter_session)) => (prior_cache, adapter_session, 0),
+        None => {
+            let mut restore = begin_schema_v2_adapter_restore(
+                chain_id.to_owned(),
+                manifests.clone(),
+                discovery_rules.clone(),
+                admissions.clone(),
+                state_cache_capacity,
+            )
+            .map_err(|error| {
+                InterpretError::data_integrity(format!(
+                    "failed to begin adapter state restore: {error:#}"
+                ))
+            })?;
+            let restored_event_count =
+                prior::restore_events(&mut transaction, chain_id, from_block, &mut restore).await?;
+            (
+                cache::freshly_loaded(orphaning_epoch),
+                restore.finish(),
+                restored_event_count,
+            )
+        }
+    };
     transaction.commit().await.map_err(|error| {
         InterpretError::database("failed to commit interpret input snapshot", error)
     })?;
@@ -113,13 +122,14 @@ pub(crate) async fn batch_input(
             chain_id: chain_id.to_owned(),
             discovery_rules,
             admissions,
-            prior_events: restored.events,
+            prior_events: Vec::new(),
             blocks,
             raw_logs,
             manifests,
         },
-        prior_cache: restored.cache,
-        adapter_session,
+        prior_cache,
+        adapter_session: Some(adapter_session),
+        restored_event_count,
     })
 }
 

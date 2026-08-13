@@ -5,8 +5,10 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use bigname_adapters::schema_v2::{
-    AddressAdmissionInput, BatchInput, BatchOutput, interpret_schema_v2_batch,
-    interpret_schema_v2_batch_incremental, seam, seam::ADMISSION_DISCOVERY_EDGE_KINDS,
+    AddressAdmissionInput, BatchInput, BatchOutput, InterpreterStateRequest, InterpreterStateValue,
+    PriorEventInput, StateCacheCapacity, interpret_schema_v2_batch,
+    interpret_schema_v2_batch_incremental, prepare_schema_v2_batch_incremental, seam,
+    seam::ADMISSION_DISCOVERY_EDGE_KINDS,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -540,6 +542,7 @@ pub struct Converged {
     /// The same sequence interpreted as one batch — the shape a backfill runs.
     pub whole: Replayed,
     pub artifacts: BatchBoundaryArtifacts,
+    pub tiny_cache_misses: usize,
 }
 
 /// Runs the same sequence three ways — one fresh pass, one incremental pass, and one pass split
@@ -570,6 +573,7 @@ pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> R
     let mut prior = Vec::new();
     let mut replayed = BatchOutput::default();
     let mut outputs = Vec::new();
+    let mut tiny_cache_misses = 0_usize;
     // Production persists a discovery edge and its contract address, then loads them as admissions
     // for every later batch (`crates/interpret/src/load.rs`). Replaying each batch from the original
     // input instead would drop any later-batch log from a resolver or registry an earlier batch
@@ -588,6 +592,7 @@ pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> R
             .filter(|log| hashes.contains(log.block_hash.as_str()))
             .cloned()
             .collect::<Vec<_>>();
+        let prior_before_batch = prior.clone();
         let restored_input = BatchInput {
             prior_events: prior.clone(),
             blocks: blocks.clone(),
@@ -608,8 +613,32 @@ pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> R
         if resumed_output != restored_output {
             bail!("{context}: split batch {index} resumed output differs from a restored pass");
         }
+        let tiny_prepared = prepare_schema_v2_batch_incremental(
+            restored_input.clone(),
+            None,
+            StateCacheCapacity::Entries(3),
+        )
+        .with_context(|| format!("{context}: split batch {index} tiny-cache restore failed"))?;
+        tiny_cache_misses =
+            tiny_cache_misses.saturating_add(tiny_prepared.state_value_requests().len());
+        let tiny_loaded = requested_state_values(&prior, tiny_prepared.state_value_requests());
+        let (tiny_output, _) = tiny_prepared
+            .finish(tiny_loaded)
+            .with_context(|| format!("{context}: split batch {index} tiny-cache reload failed"))?;
+        if tiny_output != resumed_output {
+            bail!(
+                "{context}: split batch {index} tiny-cache output differs from unlimited capacity"
+            );
+        }
         absorb_discovered_admissions(&mut admitted, &resumed_output);
         prior = seam::fold_prior_events(prior, &resumed_output.normalized_events, &blocks)?;
+        let tiny_prior =
+            seam::fold_prior_events(prior_before_batch, &tiny_output.normalized_events, &blocks)?;
+        if tiny_prior != prior {
+            bail!(
+                "{context}: split batch {index} tiny-cache persisted state tails differ from unlimited capacity"
+            );
+        }
         let (_, restored_session) = interpret_schema_v2_batch_incremental(
             BatchInput {
                 prior_events: prior.clone(),
@@ -650,7 +679,34 @@ pub fn converge(context: &str, input: BatchInput, split: Vec<Range<usize>>) -> R
             output: fresh,
         },
         artifacts,
+        tiny_cache_misses,
     })
+}
+
+fn requested_state_values(
+    prior: &[PriorEventInput],
+    requested: &[InterpreterStateRequest],
+) -> Vec<InterpreterStateValue> {
+    let tails = prior
+        .iter()
+        .filter_map(|event| {
+            event
+                .retained_state_key
+                .strip_prefix("state:")
+                .map(|key| (key, &event.after_state))
+        })
+        .collect::<BTreeMap<_, _>>();
+    requested
+        .iter()
+        .filter_map(|request| {
+            tails
+                .get(request.state_key.as_str())
+                .map(|after_state| InterpreterStateValue {
+                    state_key: request.state_key.clone(),
+                    after_state: (*after_state).clone(),
+                })
+        })
+        .collect()
 }
 
 /// Turns the contract addresses a batch admitted into the admissions the next batch starts from,

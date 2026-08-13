@@ -546,7 +546,9 @@ those defaults; their ENSv1→ENSv2 relationships live only in the diagnostic
 `migration_event_associations` table.
 
 Normalized events are schema-v2 interpreter transitions. Interpretation loads
-canonical raw facts in chain order and carries the compact prior state needed
+canonical raw facts in chain order. Persisted normalized events are the working
+store for per-key before/after state; the process carries protocol state and a
+bounded [cache of recently used persisted values](storage.md#interpret-process-memory)
 across physical batches. A redo is an explicit bounded operation: it prepares
 the selected derived range, replays it through the same interpreter, and heals
 identities the replay did not reproduce. Preparation restages only identities
