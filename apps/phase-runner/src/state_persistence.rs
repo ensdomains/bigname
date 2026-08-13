@@ -9,6 +9,7 @@ use crate::{
     config::SourceConfig,
     error::{RunnerError, RunnerResult},
     heads::BlockMarker,
+    ingest_cursor_config,
     phase::{IngestCursor, PhaseName, PhaseProgress, PhaseResume, VerificationLevel},
 };
 
@@ -209,7 +210,7 @@ pub(crate) async fn update_ingest_cursors(
         .map(|source| (source.source_key.as_str(), source))
         .collect::<BTreeMap<_, _>>();
     for source in sources {
-        ensure_ingest_cursor(pool, source).await?;
+        ingest_cursor_config::ensure(pool, source).await?;
     }
     if progress.source_progress.is_empty() {
         for source in sources {
@@ -247,73 +248,6 @@ pub(crate) async fn update_ingest_cursors(
             source_progress.target.as_ref(),
         )
         .await?;
-    }
-    Ok(())
-}
-
-async fn ensure_ingest_cursor(pool: &PgPool, source: &SourceConfig) -> RunnerResult<()> {
-    sqlx::query(
-        "
-        INSERT INTO ingest_cursors (
-            chain_id,
-            source_key,
-            source_kind,
-            seed_basis,
-            start_block_number,
-            next_block_number
-        )
-        VALUES ($1, $2, $3, $4, $5, $5)
-        ON CONFLICT (chain_id, source_key) DO NOTHING
-        ",
-    )
-    .bind(&source.chain_id)
-    .bind(&source.source_key)
-    .bind(&source.source_kind)
-    .bind(source.seed_basis.as_str())
-    .bind(source.start_block_number)
-    .execute(pool)
-    .await
-    .map_err(|error| {
-        RunnerError::database(
-            format!(
-                "failed to initialize ingest cursor {} for chain {}",
-                source.source_key, source.chain_id
-            ),
-            error,
-        )
-    })?;
-    let stored: (String, i64) = sqlx::query_as(
-        "
-        SELECT seed_basis, start_block_number
-        FROM ingest_cursors
-        WHERE chain_id = $1
-          AND source_key = $2
-        ",
-    )
-    .bind(&source.chain_id)
-    .bind(&source.source_key)
-    .fetch_one(pool)
-    .await
-    .map_err(|error| {
-        RunnerError::database(
-            format!(
-                "failed to check ingest cursor {} for chain {}",
-                source.source_key, source.chain_id
-            ),
-            error,
-        )
-    })?;
-    if stored
-        != (
-            source.seed_basis.as_str().to_owned(),
-            source.start_block_number,
-        )
-    {
-        return Err(RunnerError::data_integrity(format!(
-            "persisted ingest seed configuration for source {} on chain {} differs from runtime \
-             configuration",
-            source.source_key, source.chain_id
-        )));
     }
     Ok(())
 }
@@ -359,8 +293,7 @@ pub(crate) async fn upsert_ingest_cursor(
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ON CONFLICT (chain_id, source_key) DO UPDATE
-        SET source_kind = EXCLUDED.source_kind,
-            next_block_number = GREATEST(
+        SET next_block_number = GREATEST(
                 ingest_cursors.next_block_number,
                 EXCLUDED.next_block_number
             ),

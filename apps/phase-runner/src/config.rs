@@ -67,6 +67,10 @@ impl SourceConfig {
     }
 }
 
+pub(crate) fn normalized_source_kind(kind: &str) -> String {
+    kind.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 impl fmt::Debug for SourceConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter

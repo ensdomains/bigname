@@ -101,6 +101,31 @@ Adapters provide interpretation behavior. They do not write projections. API
 code reads projections and lookup output only, except for the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) write.
 
+A non-retryable validation failure on an already-completed Ingest or Verify
+row changes its lifecycle status from `completed` to `failed` without clearing
+the retained range markers, source provenance, verification level, or content
+hash. A retained row may be restored without replay only from structural
+evidence: Ingest requires matching current, target, and live-handoff markers;
+Verify requires matching current and target markers plus a verification level.
+The next accepted start repeats the checks for the retained completion and
+moves that row through `failed` to `completed`. Error text alone never
+authorizes that transition. This preserved evidence is diagnostic state, not
+permission to publish: provider-trusted Sepolia readiness requires both Ingest
+and Verify to remain completed.
+
+At runner startup, a `running` or `paused` Interpret, Project, or Verify row
+with no explicit redo is resolved only while its advisory lock remains held.
+A saved Interpret or Project final checkpoint is recorded as `completed`; an
+earlier checkpoint is recorded as `failed` so ordinary phase execution can
+resume it. A saved Verify final checkpoint stays `failed` until current
+configuration and retained verification evidence pass the completed-Verify
+checks. A lock still held by another runner, or a lost lock connection during
+the state update, stops the new runner. The update and lock use one database
+connection. If the client cannot tell whether PostgreSQL committed the update
+before that connection failed, the next start reads the durable phase state
+again. An unlock or connection-close error after an acknowledged update is also
+reported.
+
 ### ENSv1→ENSv2 correlation visibility
 
 The slice-1 ENSv1→ENSv2 intake persists the
@@ -328,7 +353,11 @@ Project range; it is never a row-local patch or API-only configuration change.
 Interpret redo proves raw-data presence without pretending that Live extended
 each finite ingest source. Each `ingest_cursors` row proves that the source
 reached from its configured start through its persisted target; Live does not
-advance those source cursors. The redo guard also requires exactly one readable
+advance those source cursors. Before checking range coverage, the redo guard
+requires the configured source-key set and every source's normalized kind,
+seed basis, and start block to match the persisted cursor identities. A runtime
+start above the redo range does not bypass that identity check. The guard also
+requires exactly one readable
 `chain_lineage` row at every height in the full execution range. Cursors and
 lineage both prove only the facts selected by the [watch
 plan](glossary.md#watch-plan--watched-tuple) active when each block was loaded;

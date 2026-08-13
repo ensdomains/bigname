@@ -446,7 +446,8 @@ source re-walk, and one Project publication
 decision for `ethereum-sepolia`. Other chains retain
 independent publication decisions. That Project publication remains unready and
 traffic-drained until the production Verify phase's reviewed
-`ethereum-sepolia` reference path passes. There is no production interval serving candidate-only data:
+`ethereum-sepolia` provider-trusted verification path passes. There is no
+production interval serving candidate-only data:
 candidate-versus-activated behavior is exercised in the test environment against
 the boundary fixture corpus. The ordinary announcement edge above remains a
 watch-plan input and ensures this one-boundary plan creates no ingest gap.

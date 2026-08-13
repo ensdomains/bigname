@@ -1,6 +1,7 @@
 use std::{error::Error, fmt};
 
 pub(crate) const VERIFICATION_MISMATCH_PREFIX: &str = "verification mismatch: ";
+pub(crate) const COMPLETED_VALIDATION_FAILURE_PREFIX: &str = "completed phase validation failed: ";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErrorKind {

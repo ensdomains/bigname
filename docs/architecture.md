@@ -372,8 +372,9 @@ Phases per chain:
    canonical-head [hydration](glossary.md#hydration) after publication
 4. `verify` — read-only [stored-history verification](glossary.md#stored-history-verification)
    through a finalized boundary; Base compares its Coinbase-loaded range with
-   dRPC through the ingest seam and Ethereum compares with local reth through
-   the finalized head
+   dRPC through the ingest seam, Ethereum Mainnet compares with local reth, and
+   Ethereum Sepolia records its provider-trusted ingested extent without
+   selecting a configured intake source as an independent reference
 5. `live` — continuous provider-head walk, bounded gap fill, chain-head
    publication, and downstream re-derivation after a reorg
 
@@ -393,9 +394,11 @@ cannot advance past the ingested boundary.
 ### Stage B runtime boundary
 
 The checked-in phase runner contains real `ingest`, `interpret`, `project`,
-`verify`, and `live` implementations. Verification reads canonical selected
-raw logs and the manifest-derived watch set through a separately credentialed,
-SELECT-only database handle. Startup requires that login to be directly
+`verify`, and `live` implementations. Independent-comparison verification reads
+canonical selected raw logs and the manifest-derived watch set through a
+separately credentialed, SELECT-only database handle. Provider-trusted Sepolia
+verification instead requires its exact configured intake cursor to cover the
+finalized target. Startup requires the reader login to be directly
 authenticated (the session user and active role must match) and rejects one that has
 application-relation write privileges, schema/database creation authority,
 elevated role attributes, or another role membership; the verifier never
@@ -403,9 +406,23 @@ receives the phase runner's writer pool. The reader and writer connections must
 also report the same PostgreSQL system identifier, database OID, and database
 name. It compares Base's Coinbase-loaded
 range with dRPC through the fixed block `48,428,000` ingest seam and records
-`cross_checked`; the later dRPC-ingested suffix does not inherit
-that level. It compares Ethereum with local reth and records `node_checked`.
-Provider typing prevents a dRPC-backed chain from recording `node_checked`. A
+`cross_checked`; the later dRPC-ingested suffix does not inherit that level. A
+Base `reth_db` reference is explicitly unsupported: the pinned reader uses
+reth's Ethereum node type, whose signed transaction and receipt types are the
+Ethereum primitives (upstream: .refs/reth/crates/ethereum/node/src/node.rs:L121 @ reth@88505c7f)
+(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L27 @ reth@88505c7f)
+(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L51 @ reth@88505c7f). Bigname does not
+implement a separate OP Stack transaction and receipt reader.
+Base-aware local database verification is tracked by
+[issue #433](https://github.com/ensdomains/bigname/issues/433). It compares
+Ethereum Mainnet with local reth and records `node_checked`. Ethereum Sepolia
+validates the durable ingested extent through its finalized marker and records
+`quick_synced`: the configured dRPC is the intake provider, not an independent
+reference. Source-role separation and an independent Sepolia comparison are deferred to
+[issue #411](https://github.com/ensdomains/bigname/issues/411); that work will
+upgrade the chain to `cross_checked`. The phase runner rejects a verification
+level stronger than the chain-specific verification path can earn before persisting
+the level or proceeding to Live. On a reference-comparison path, a
 mismatch records its block, field, stored value, and reference value, then stops
 only that chain. Normal verification starts at the durable ingest-cursor extent,
 not a replacement command-line start, and a resumed scan retains the weaker of
