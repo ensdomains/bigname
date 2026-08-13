@@ -693,11 +693,12 @@ async fn send(client: &Client, request: &RequestSpec) -> Result<reqwest::Respons
 
 async fn sample_request(client: &Client, request: &RequestSpec) -> Sample {
     let started = Instant::now();
-    let (success, outcome) = match send(client, request).await {
+    let (elapsed_micros, success, outcome) = match send(client, request).await {
         Ok(response) => {
             let status = response.status();
             match response.bytes().await {
                 Ok(body) => {
+                    let elapsed_micros = started.elapsed().as_micros();
                     let success = status.is_success();
                     let mut outcome = status.as_u16().to_string();
                     if !success
@@ -720,15 +721,23 @@ async fn sample_request(client: &Client, request: &RequestSpec) -> Sample {
                             ":records_empty"
                         });
                     }
-                    (success, outcome)
+                    (elapsed_micros, success, outcome)
                 }
-                Err(_) => (false, "response_body_error".to_owned()),
+                Err(_) => (
+                    started.elapsed().as_micros(),
+                    false,
+                    "response_body_error".to_owned(),
+                ),
             }
         }
-        Err(_) => (false, "transport_error".to_owned()),
+        Err(_) => (
+            started.elapsed().as_micros(),
+            false,
+            "transport_error".to_owned(),
+        ),
     };
     Sample {
-        elapsed_micros: started.elapsed().as_micros(),
+        elapsed_micros,
         success,
         outcome,
     }

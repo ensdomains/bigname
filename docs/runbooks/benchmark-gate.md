@@ -145,9 +145,11 @@ SQL
 Do not create this table in production or include it in a production backup.
 Restoring production alone therefore never produces the marker required for
 writes. Prepare the marker immediately before the indexing run: it expires 12
-hours after `prepared_at`, so a durable marker left on an old copy cannot
-authorize a later run. A timestamp more than five minutes ahead of the database
-clock is also refused; correct clock skew instead of widening this window.
+hours after `prepared_at` for purposes of starting the gate, so a durable marker
+left on an old copy cannot authorize a later run. A timestamp more than five
+minutes ahead of the database clock is also refused; correct clock skew instead
+of widening this window. Once that startup check passes, marker age places no
+limit on how long the measurement may run.
 
 ```sh
 BIGNAME_BENCHMARK_DATABASE_URL="postgres://benchmark-writer@copy-host/$DISPOSABLE_DATABASE" \
@@ -167,13 +169,23 @@ BIGNAME_BENCHMARK_DATABASE_URL="postgres://benchmark-writer@copy-host/$DISPOSABL
 The acknowledgement flag, expected database name, disposable marker UUID, and
 hydration RPC URL are required. Without them, argument parsing stops before
 opening PostgreSQL. After connecting, the harness compares `current_database()`
-with the typed name, requires the marker table, and requires a row whose UUID
-and database name both match. It refuses writes before Interpret or Project on
-any mismatch. The connection carries the same interpreter content-hash setting
-as the phase runner, so ENSv1→ENSv2 migration correlation writes behave
-normally. Every new pooled connection repeats the expected-name and fresh-marker
+with the typed name, requires the marker table, requires a row whose UUID and
+database name both match, and checks marker freshness on one direct preflight
+connection before creating the pool. Startup refusal therefore returns its
+specific reason immediately rather than waiting for the pool deadline. It
+refuses writes before Interpret or Project on any mismatch. The connection
+carries the same interpreter content-hash setting as the phase runner, so
+ENSv1→ENSv2 migration correlation writes behave normally. Every new pooled
+connection repeats the expected-name, marker-table, UUID, and database-name
 checks before it can issue a query, so losing or retargeting a database
-connection cannot bypass the preflight. The incremental tick runs first, the
+connection cannot bypass the preflight. Freshness is not repeated because a
+passing production run may legitimately exceed 12 hours; the report's pre/post
+database-instance check still makes a restart, failover, or retargeted listener
+red. It does not claim to detect an in-place logical restore that preserves the
+database instance identity. A
+mid-run replacement connection that fails its marker check is safely retried
+until the pool deadline, so that failure may surface as a pool timeout rather
+than the startup check's specific message. The incremental tick runs first, the
 Interpret redo runs second, and
 the full Project rebuild runs last so the rebuilt projections match the
 interpreted copy. The report records the opaque database identity token before

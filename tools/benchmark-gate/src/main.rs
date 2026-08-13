@@ -137,7 +137,6 @@ async fn main() -> Result<()> {
             let database_name = database::database_identity(&pool).await?;
             let database_host = database::database_host(&pool).await?;
             database::require_database_identity(&database_name, &args.expected_database_name)?;
-            database::require_disposable_marker(&pool, args.disposable_marker).await?;
             let rpc_urls = bigname_lookup::ChainRpcUrls::from_entries(&[format!(
                 "{}={}",
                 args.chain, args.chain_rpc_url

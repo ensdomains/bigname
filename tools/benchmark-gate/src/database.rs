@@ -2,12 +2,13 @@ use std::{str::FromStr, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use sqlx::{
-    PgConnection, PgPool,
+    Connection, PgConnection, PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 use uuid::Uuid;
 
 const DISPOSABLE_MARKER_MAX_AGE: &str = "12 hours";
+const DISPOSABLE_MARKER_MAX_FUTURE_SKEW: &str = "5 minutes";
 
 const DATABASE_INSTANCE_IDENTITY_SQL: &str = "SELECT database.oid::text,
             extract(epoch FROM pg_postmaster_start_time())::text,
@@ -56,6 +57,13 @@ pub async fn connect_disposable_copy(
                 bigname_content_hash::INTERPRETER_CONTENT_HASH.to_owned(),
             ),
         ]);
+    preflight_disposable_copy(
+        &options,
+        expected_database_name,
+        expected_marker,
+        Duration::from_secs(30),
+    )
+    .await?;
     let expected_database_name = expected_database_name.to_owned();
     let pool = PgPoolOptions::new()
         .max_connections(maximum_connections)
@@ -63,9 +71,13 @@ pub async fn connect_disposable_copy(
         .after_connect(move |connection, _metadata| {
             let expected_database_name = expected_database_name.clone();
             Box::pin(async move {
-                validate_disposable_connection(connection, &expected_database_name, expected_marker)
-                    .await
-                    .map_err(|error| sqlx::Error::Protocol(error.to_string()))
+                validate_disposable_runtime_connection(
+                    connection,
+                    &expected_database_name,
+                    expected_marker,
+                )
+                .await
+                .map_err(|error| sqlx::Error::Protocol(error.to_string()))
             })
         })
         .connect_with(options)
@@ -80,6 +92,36 @@ pub async fn connect_disposable_copy(
         "disposable-copy benchmark target is read-only; indexing measurements require writes"
     );
     Ok(pool)
+}
+
+async fn preflight_disposable_copy(
+    options: &PgConnectOptions,
+    expected_database_name: &str,
+    expected_marker: Uuid,
+    timeout: Duration,
+) -> Result<()> {
+    let timeout_ms = timeout.as_millis();
+    tokio::time::timeout(timeout, async {
+        let mut preflight = PgConnection::connect_with(options)
+            .await
+            .context("failed to open the disposable-copy preflight connection")?;
+        validate_disposable_startup_connection(
+            &mut preflight,
+            expected_database_name,
+            expected_marker,
+        )
+        .await?;
+        preflight
+            .close()
+            .await
+            .context("failed to close the disposable-copy preflight connection")?;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .with_context(|| {
+        format!("disposable-copy preflight did not complete within {timeout_ms}ms")
+    })??;
+    Ok(())
 }
 
 pub async fn database_identity(pool: &PgPool) -> Result<String> {
@@ -123,13 +165,63 @@ pub fn require_database_identity(actual: &str, expected: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn require_disposable_marker(pool: &PgPool, expected: Uuid) -> Result<()> {
+async fn validate_disposable_startup_connection(
+    connection: &mut PgConnection,
+    expected_database_name: &str,
+    expected_marker: Uuid,
+) -> Result<()> {
+    validate_disposable_runtime_connection(connection, expected_database_name, expected_marker)
+        .await?;
+    let marker_is_fresh: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM bigname_benchmark.disposable_copy_marker
+             WHERE marker = $1
+               AND database_name = current_database()
+               AND prepared_at >= now() - $2::interval
+               AND prepared_at <= now() + $3::interval
+         )",
+    )
+    .bind(expected_marker)
+    .bind(DISPOSABLE_MARKER_MAX_AGE)
+    .bind(DISPOSABLE_MARKER_MAX_FUTURE_SKEW)
+    .fetch_one(&mut *connection)
+    .await
+    .context("failed to verify disposable-copy marker freshness")?;
+    ensure!(
+        marker_is_fresh,
+        "disposable-copy marker is older than {DISPOSABLE_MARKER_MAX_AGE} or more than {DISPOSABLE_MARKER_MAX_FUTURE_SKEW} in the future; refusing indexing writes"
+    );
+    Ok(())
+}
+
+async fn validate_disposable_runtime_connection(
+    connection: &mut PgConnection,
+    expected_database_name: &str,
+    expected_marker: Uuid,
+) -> Result<()> {
+    // Marker freshness authorizes the gate start. Replacement connections keep
+    // checking the marker identity, but do not expire a legitimate long run;
+    // the indexing report separately makes a database-instance change red.
+    let database_name: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(&mut *connection)
+        .await
+        .context("failed to identify a disposable-copy connection")?;
+    require_database_identity(&database_name, expected_database_name)?;
+    let read_only: String = sqlx::query_scalar("SHOW transaction_read_only")
+        .fetch_one(&mut *connection)
+        .await
+        .context("failed to inspect a disposable-copy connection")?;
+    ensure!(
+        read_only == "off",
+        "disposable-copy connection is read-only; refusing indexing writes"
+    );
     let marker_table_exists: bool = sqlx::query_scalar(
         "SELECT to_regclass('bigname_benchmark.disposable_copy_marker') IS NOT NULL",
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await
-    .context("failed to inspect the disposable-copy marker")?;
+    .context("failed to inspect the disposable-copy connection marker")?;
     ensure!(
         marker_table_exists,
         "database has no disposable-copy marker table; refusing indexing writes"
@@ -140,66 +232,15 @@ pub async fn require_disposable_marker(pool: &PgPool, expected: Uuid) -> Result<
              FROM bigname_benchmark.disposable_copy_marker
              WHERE marker = $1
                AND database_name = current_database()
-               AND prepared_at >= now() - interval '12 hours'
-               AND prepared_at <= now() + interval '5 minutes'
-         )",
-    )
-    .bind(expected)
-    .fetch_one(pool)
-    .await
-    .context("failed to verify the disposable-copy marker")?;
-    ensure!(
-        marker_matches,
-        "disposable-copy marker does not match this database, is older than {DISPOSABLE_MARKER_MAX_AGE}, or is more than 5 minutes in the future; refusing indexing writes"
-    );
-    Ok(())
-}
-
-async fn validate_disposable_connection(
-    connection: &mut PgConnection,
-    expected_database_name: &str,
-    expected_marker: Uuid,
-) -> Result<()> {
-    let database_name: String = sqlx::query_scalar("SELECT current_database()")
-        .fetch_one(&mut *connection)
-        .await
-        .context("failed to identify a disposable-copy pooled connection")?;
-    require_database_identity(&database_name, expected_database_name)?;
-    let read_only: String = sqlx::query_scalar("SHOW transaction_read_only")
-        .fetch_one(&mut *connection)
-        .await
-        .context("failed to inspect a disposable-copy pooled connection")?;
-    ensure!(
-        read_only == "off",
-        "disposable-copy pooled connection is read-only; refusing indexing writes"
-    );
-    let marker_table_exists: bool = sqlx::query_scalar(
-        "SELECT to_regclass('bigname_benchmark.disposable_copy_marker') IS NOT NULL",
-    )
-    .fetch_one(&mut *connection)
-    .await
-    .context("failed to inspect a disposable-copy pooled connection marker")?;
-    ensure!(
-        marker_table_exists,
-        "database has no disposable-copy marker table; refusing pooled indexing writes"
-    );
-    let marker_matches: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-             SELECT 1
-             FROM bigname_benchmark.disposable_copy_marker
-             WHERE marker = $1
-               AND database_name = current_database()
-               AND prepared_at >= now() - interval '12 hours'
-               AND prepared_at <= now() + interval '5 minutes'
          )",
     )
     .bind(expected_marker)
     .fetch_one(&mut *connection)
     .await
-    .context("failed to validate a disposable-copy pooled connection marker")?;
+    .context("failed to validate the disposable-copy connection marker")?;
     ensure!(
         marker_matches,
-        "disposable-copy marker does not match this database, is older than {DISPOSABLE_MARKER_MAX_AGE}, or is more than 5 minutes in the future; refusing pooled indexing writes"
+        "disposable-copy marker UUID or database name does not match; refusing indexing writes"
     );
     Ok(())
 }
@@ -222,11 +263,113 @@ mod tests {
         url.into()
     }
 
+    async fn validate_startup(pool: &PgPool, database_name: &str, marker: Uuid) -> Result<()> {
+        let mut connection = pool.acquire().await.unwrap();
+        validate_disposable_startup_connection(&mut connection, database_name, marker).await
+    }
+
+    async fn validate_runtime(pool: &PgPool, database_name: &str, marker: Uuid) -> Result<()> {
+        let mut connection = pool.acquire().await.unwrap();
+        validate_disposable_runtime_connection(&mut connection, database_name, marker).await
+    }
+
     #[test]
     fn disposable_database_identity_must_match_exactly() {
         assert!(require_database_identity("bigname-copy", "bigname-copy").is_ok());
         assert!(require_database_identity("bigname", "bigname-copy").is_err());
         assert!(require_database_identity("bigname", "").is_err());
+    }
+
+    #[tokio::test]
+    async fn disposable_copy_startup_reports_the_missing_marker() {
+        let database =
+            TestDatabase::create(TestDatabaseConfig::new("benchmark_named_marker_startup"))
+                .await
+                .unwrap();
+        let database_url = scratch_database_url(database.database_name());
+        let started = std::time::Instant::now();
+
+        let error = connect_disposable_copy(
+            &database_url,
+            1,
+            Duration::from_secs(30),
+            database.database_name(),
+            Uuid::new_v4(),
+        )
+        .await
+        .expect_err("an unprepared database must be refused");
+
+        let elapsed = started.elapsed();
+        database.cleanup().await.unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("no disposable-copy marker table"),
+            "startup refusal lost its named reason after {elapsed:?}: {error:#}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "startup refusal was not fast"
+        );
+    }
+
+    #[tokio::test]
+    async fn disposable_copy_preflight_bounds_a_blocked_marker_query() {
+        let database =
+            TestDatabase::create(TestDatabaseConfig::new("benchmark_blocked_marker_startup"))
+                .await
+                .unwrap();
+        let marker = Uuid::new_v4();
+        sqlx::query("CREATE SCHEMA bigname_benchmark")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE bigname_benchmark.disposable_copy_marker (
+                 marker uuid PRIMARY KEY,
+                 database_name text NOT NULL,
+                 prepared_at timestamptz NOT NULL DEFAULT now()
+             )",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO bigname_benchmark.disposable_copy_marker (marker, database_name)
+             VALUES ($1, current_database())",
+        )
+        .bind(marker)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let mut lock = database.pool().acquire().await.unwrap();
+        sqlx::query("BEGIN").execute(&mut *lock).await.unwrap();
+        sqlx::query("LOCK TABLE bigname_benchmark.disposable_copy_marker IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *lock)
+            .await
+            .unwrap();
+        let database_url = scratch_database_url(database.database_name());
+        let options = common_options(&database_url, "benchmark-blocked-preflight").unwrap();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            preflight_disposable_copy(
+                &options,
+                database.database_name(),
+                marker,
+                Duration::from_millis(100),
+            ),
+        )
+        .await;
+
+        sqlx::query("ROLLBACK").execute(&mut *lock).await.unwrap();
+        drop(lock);
+        database.cleanup().await.unwrap();
+        let error = result
+            .expect("preflight ignored its own short timeout")
+            .expect_err("a blocked marker query must be refused")
+            .to_string();
+        assert!(error.contains("did not complete within 100ms"));
     }
 
     #[tokio::test]
@@ -240,8 +383,11 @@ mod tests {
             .unwrap();
         let marker = Uuid::new_v4();
 
-        let absent = require_disposable_marker(database.pool(), marker).await;
-        assert!(absent.is_err(), "an unprepared database must be refused");
+        let absent = validate_startup(database.pool(), database.database_name(), marker)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(absent.contains("no disposable-copy marker table"));
 
         sqlx::query(
             "CREATE TABLE bigname_benchmark.disposable_copy_marker (
@@ -262,12 +408,12 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(
-            require_disposable_marker(database.pool(), Uuid::new_v4())
+        let wrong_marker =
+            validate_startup(database.pool(), database.database_name(), Uuid::new_v4())
                 .await
-                .is_err(),
-            "a marker value not prepared on this copy must be refused"
-        );
+                .unwrap_err()
+                .to_string();
+        assert!(wrong_marker.contains("marker UUID or database name does not match"));
         sqlx::query(
             "UPDATE bigname_benchmark.disposable_copy_marker
              SET database_name = 'production-name'",
@@ -275,12 +421,11 @@ mod tests {
         .execute(database.pool())
         .await
         .unwrap();
-        assert!(
-            require_disposable_marker(database.pool(), marker)
-                .await
-                .is_err(),
-            "a marker prepared for a different database name must be refused"
-        );
+        let wrong_name = validate_startup(database.pool(), database.database_name(), marker)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(wrong_name.contains("marker UUID or database name does not match"));
         sqlx::query(
             "UPDATE bigname_benchmark.disposable_copy_marker
              SET database_name = current_database()",
@@ -288,7 +433,7 @@ mod tests {
         .execute(database.pool())
         .await
         .unwrap();
-        require_disposable_marker(database.pool(), marker)
+        validate_startup(database.pool(), database.database_name(), marker)
             .await
             .unwrap();
         database.cleanup().await.unwrap();
@@ -324,7 +469,7 @@ mod tests {
         .await
         .unwrap();
 
-        let result = require_disposable_marker(database.pool(), marker).await;
+        let result = validate_startup(database.pool(), database.database_name(), marker).await;
         database.cleanup().await.unwrap();
         let error = result.expect_err("a stale marker must not authorize writes");
         assert!(error.to_string().contains("older than 12 hours"));
@@ -360,19 +505,17 @@ mod tests {
         .await
         .unwrap();
 
-        let result = require_disposable_marker(database.pool(), marker).await;
-        let mut connection = database.pool().acquire().await.unwrap();
-        let pooled_result =
-            validate_disposable_connection(&mut connection, database.database_name(), marker).await;
-        drop(connection);
+        let result = validate_startup(database.pool(), database.database_name(), marker).await;
+        let runtime_result =
+            validate_runtime(database.pool(), database.database_name(), marker).await;
         database.cleanup().await.unwrap();
         assert!(
             result.is_err(),
             "a future-dated marker must not extend write authorization"
         );
         assert!(
-            pooled_result.is_err(),
-            "a new pooled connection accepted a future-dated marker"
+            runtime_result.is_ok(),
+            "mid-run validation must not reapply startup freshness"
         );
     }
 
@@ -414,7 +557,6 @@ mod tests {
         )
         .await
         .unwrap();
-        require_disposable_marker(&pool, marker).await.unwrap();
         let held = pool.acquire().await.unwrap();
         sqlx::query("DELETE FROM bigname_benchmark.disposable_copy_marker")
             .execute(database.pool())
@@ -428,6 +570,65 @@ mod tests {
         pool.close().await;
         database.cleanup().await.unwrap();
         assert!(refused, "a new connection accepted a removed marker");
+    }
+
+    #[tokio::test]
+    async fn marker_age_does_not_expire_an_active_run() {
+        let database = TestDatabase::create(TestDatabaseConfig::new("benchmark_marker_age"))
+            .await
+            .unwrap();
+        let marker = Uuid::new_v4();
+        sqlx::query("CREATE SCHEMA bigname_benchmark")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE bigname_benchmark.disposable_copy_marker (
+                 marker uuid PRIMARY KEY,
+                 database_name text NOT NULL,
+                 prepared_at timestamptz NOT NULL DEFAULT now()
+             )",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO bigname_benchmark.disposable_copy_marker (marker, database_name)
+             VALUES ($1, current_database())",
+        )
+        .bind(marker)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let database_url = scratch_database_url(database.database_name());
+        let pool = connect_disposable_copy(
+            &database_url,
+            1,
+            Duration::from_secs(30),
+            database.database_name(),
+            marker,
+        )
+        .await
+        .unwrap();
+        let held = pool.acquire().await.unwrap();
+        sqlx::query(
+            "UPDATE bigname_benchmark.disposable_copy_marker
+             SET prepared_at = now() - interval '13 hours'",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        held.close().await.unwrap();
+
+        let replacement = tokio::time::timeout(Duration::from_secs(2), pool.acquire()).await;
+        let accepted = matches!(replacement, Ok(Ok(_)));
+        drop(replacement);
+        pool.close().await;
+        database.cleanup().await.unwrap();
+        assert!(
+            accepted,
+            "a marker that ages during the run must not block replacement connections"
+        );
     }
 
     #[tokio::test]

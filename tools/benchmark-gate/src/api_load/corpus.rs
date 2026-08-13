@@ -134,7 +134,7 @@ impl Corpus {
         }
 
         require_active_namespace_coverage(&namespaces, &names_by_namespace)?;
-        require_minimum_corpus_size("name", names.len(), budgets.api_corpus_size)?;
+        require_name_corpus_size(names.len(), budgets.api_corpus_size, &names_by_namespace)?;
         require_minimum_corpus_size("address", address_names.len(), budgets.api_corpus_size)?;
         for (label, actual) in [
             ("subname parent", parents.len()),
@@ -166,6 +166,23 @@ fn require_minimum_corpus_size(label: &str, actual: usize, minimum: usize) -> Re
     ensure!(
         actual >= minimum,
         "{label} corpus has {actual} rows; release profile requires {minimum}"
+    );
+    Ok(())
+}
+
+fn require_name_corpus_size(
+    actual: usize,
+    minimum: usize,
+    names_by_namespace: &BTreeMap<String, usize>,
+) -> Result<()> {
+    let contributions = names_by_namespace
+        .iter()
+        .map(|(namespace, count)| format!("{namespace}={count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    ensure!(
+        actual >= minimum,
+        "name corpus has {actual} rows; release profile requires {minimum}; namespace contributions: {contributions}"
     );
     Ok(())
 }
@@ -282,6 +299,18 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("active namespace \"ens\""));
+    }
+
+    #[test]
+    fn name_corpus_shortfall_names_namespace_contributions() {
+        let counts = [("basenames".to_owned(), 5_000), ("ens".to_owned(), 1_000)]
+            .into_iter()
+            .collect();
+        let error = require_name_corpus_size(6_000, 10_000, &counts)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("basenames=5000"));
+        assert!(error.contains("ens=1000"));
     }
 
     #[tokio::test]
