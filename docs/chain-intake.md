@@ -143,15 +143,25 @@ block provider from that
 already-validated set. Verification uses local reth for Ethereum Mainnet and
 dRPC as the independent reference for Base facts loaded from Coinbase. The dRPC
 source kind is capped at `cross_checked`, and its independent extent cannot pass
-the `48,428,000` seam because dRPC supplies intake after that block; only a
-local reth source can report `node_checked`. Sepolia's dRPC is not an independent
+the `48,428,000` seam because dRPC supplies intake after that block. A Base
+`reth_db` reference is unsupported because the pinned reader uses reth's
+Ethereum node type, whose signed transaction and receipt types are the Ethereum
+primitives (upstream: .refs/reth/crates/ethereum/node/src/node.rs:L121 @ reth@88505c7f)
+(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L27 @ reth@88505c7f)
+(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L51 @ reth@88505c7f). Bigname does not
+implement a separate OP Stack transaction and receipt reader.
+Base-aware local database verification is tracked by
+[issue #433](https://github.com/ensdomains/bigname/issues/433). Sepolia's dRPC is not an independent
 reference because it also supplied intake, so the chain records `quick_synced`.
 Its persisted cursor must match the configured source key, kind, seed basis,
 and start block and must cover the finalized verification target. Verify checks
 the binding and coverage when it completes, and the returned final marker must
-exactly match the frozen target marker. On every runner start, it checks the
-current configuration and cursor against the completion-time target and leaves
-the recorded `quick_synced` extent unchanged when finality has moved.
+exactly match the frozen target marker. The cursor's retained tip may later be
+orphaned by a reorg above that target, but its stored parent chain must still
+reach the exact frozen target hash. A fork at or below that block fails the
+check. On every runner start, Verify repeats this check once against the
+completion-time target and leaves the recorded `quick_synced` extent unchanged
+when finality has moved.
 Source-role separation and a Sepolia `cross_checked` path are deferred to
 [issue #411](https://github.com/ensdomains/bigname/issues/411). Unsupported
 combinations fail as configuration errors rather than falling back to another
@@ -305,10 +315,11 @@ cargo phase -- redo \
 ```
 
 Ingest and `all` require a `--source` descriptor for every selected chain.
-Base and Ethereum Mainnet Verify require exactly one `drpc` or `reth_db`
-reference source respectively. Sepolia Verify validates the exact intake shape
-above, uses its durable ingest extent, and does not select the source as a
-reference. Verify and `all` also
+For `--phase verify`, Base and Ethereum Mainnet require exactly one `drpc` or
+`reth_db` reference source respectively. Base with `reth_db` is rejected during
+configuration validation rather than starting a database walk. Sepolia validates
+the exact intake shape above, uses its durable ingest extent, and does not select
+the source as a reference. Verify and `all` also
 require the SELECT-only verification database URL. More than one `--chain` may
 be supplied. `--all-chains` is separate sugar that discovers every chain with
 an active synchronized manifest and applies the same phase selection and range

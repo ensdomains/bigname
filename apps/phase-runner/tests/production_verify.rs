@@ -468,6 +468,96 @@ async fn completed_sepolia_verify_survives_live_finality_past_ingest_cursor() ->
 }
 
 #[tokio::test]
+async fn completed_sepolia_verify_survives_a_reorg_of_the_frozen_ingest_tip() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_sepolia_reorged_ingest_tip").await?;
+    seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
+    seed_ingest_cursor(scratch.pool(), SEPOLIA, "drpc-intake", 8).await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, 8).await?;
+
+    let first_live_calls = Arc::new(AtomicUsize::new(0));
+    let first_runner = sepolia_verifier_runner(&scratch, Arc::clone(&first_live_calls)).await?;
+    first_runner
+        .run_chain(
+            &sepolia_chain_with_key("drpc-intake")?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert_eq!(first_live_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        verify_state(scratch.pool()).await?,
+        ("completed".to_owned(), "quick_synced".to_owned(), 5, 5)
+    );
+    drop(first_runner);
+
+    let replacement_tip = format!("{SEPOLIA}-winning-block-8");
+    sqlx::query(
+        "UPDATE chain_heads
+         SET latest_block_number = 7, latest_block_hash = $2
+         WHERE chain_id = $1",
+    )
+    .bind(SEPOLIA)
+    .bind(block_hash(SEPOLIA, 7))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'orphaned'
+         WHERE chain_id = $1 AND block_hash = $2",
+    )
+    .bind(SEPOLIA)
+    .bind(block_hash(SEPOLIA, 8))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state
+         ) VALUES ($1, $2, $3, 8, to_timestamp(8), 'canonical')",
+    )
+    .bind(SEPOLIA)
+    .bind(&replacement_tip)
+    .bind(block_hash(SEPOLIA, 7))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_heads
+         SET latest_block_number = 8, latest_block_hash = $2,
+             lineage_orphaning_epoch = lineage_orphaning_epoch + 1
+         WHERE chain_id = $1",
+    )
+    .bind(SEPOLIA)
+    .bind(&replacement_tip)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET current_block_hash = $2, target_block_hash = $2
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
+    )
+    .bind(SEPOLIA)
+    .bind(&replacement_tip)
+    .execute(scratch.pool())
+    .await?;
+
+    let restarted_live_calls = Arc::new(AtomicUsize::new(0));
+    let restarted = sepolia_verifier_runner(&scratch, Arc::clone(&restarted_live_calls)).await?;
+    restarted
+        .run_chain(
+            &sepolia_chain_with_key("drpc-intake")?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert_eq!(restarted_live_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        verify_state(scratch.pool()).await?,
+        ("completed".to_owned(), "quick_synced".to_owned(), 5, 5)
+    );
+
+    drop(restarted);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn completed_sepolia_verify_rejects_a_corrupted_completion_target() -> Result<()> {
     let scratch = ScratchDatabase::create("production_verify_corrupt_completion_target").await?;
     seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
@@ -891,44 +981,14 @@ async fn completed_verify_rejects_a_missing_retained_verification_level() -> Res
 
 #[tokio::test]
 async fn sepolia_requires_its_configured_intake_cursor_through_finality() -> Result<()> {
-    for (prefix, cursor_key, cursor_through, orphan_cursor, message) in [
-        (
-            "changed_key",
-            "previous-drpc-intake",
-            8,
-            false,
-            "matching cursor",
-        ),
-        (
-            "below_finality",
-            "drpc-intake",
-            4,
-            false,
-            "durable ingest cursor",
-        ),
-        (
-            "orphan_hash",
-            "drpc-intake",
-            8,
-            true,
-            "durable ingest cursor",
-        ),
+    for (prefix, cursor_key, cursor_through, message) in [
+        ("changed_key", "previous-drpc-intake", 8, "matching cursor"),
+        ("below_finality", "drpc-intake", 4, "durable ingest cursor"),
     ] {
         let scratch =
             ScratchDatabase::create(&format!("production_verify_sepolia_cursor_{prefix}")).await?;
         seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
         seed_ingest_cursor(scratch.pool(), SEPOLIA, cursor_key, cursor_through).await?;
-        if orphan_cursor {
-            sqlx::query(
-                "UPDATE ingest_cursors
-                 SET last_processed_block_hash = 'orphaned-sepolia-block-8'
-                 WHERE chain_id = $1 AND source_key = $2",
-            )
-            .bind(SEPOLIA)
-            .bind(cursor_key)
-            .execute(scratch.pool())
-            .await?;
-        }
         seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, 8).await?;
         let live_calls = Arc::new(AtomicUsize::new(0));
         let phases = PhaseSet::new([
@@ -963,6 +1023,136 @@ async fn sepolia_requires_its_configured_intake_cursor_through_finality() -> Res
         scratch.cleanup().await?;
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn sepolia_rejects_a_cursor_whose_numeric_extent_ends_below_finality() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_sepolia_inconsistent_cursor").await?;
+    seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
+    seed_ingest_cursor(scratch.pool(), SEPOLIA, "drpc-intake", 8).await?;
+    sqlx::query(
+        "UPDATE ingest_cursors
+         SET target_block_number = 4,
+             last_processed_block_number = 4,
+             last_processed_block_hash = $2
+         WHERE chain_id = $1 AND source_key = 'drpc-intake'",
+    )
+    .bind(SEPOLIA)
+    .bind(block_hash(SEPOLIA, 4))
+    .execute(scratch.pool())
+    .await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, 8).await?;
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let runner = sepolia_verifier_runner(&scratch, Arc::clone(&live_calls)).await?;
+
+    let error = runner
+        .run_chain(&sepolia_chain()?, CancellationToken::new())
+        .await
+        .expect_err("Sepolia verification must reject cursor extent below finality");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error.to_string().contains("durable ingest cursor"),
+        "{error}"
+    );
+    assert_eq!(live_calls.load(Ordering::SeqCst), 0);
+
+    drop(runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn sepolia_rejects_a_cursor_whose_tip_diverged_below_finality() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_sepolia_divergent_cursor").await?;
+    seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
+    seed_ingest_cursor(scratch.pool(), SEPOLIA, "drpc-intake", 8).await?;
+    let mut parent_hash = block_hash(SEPOLIA, 4);
+    for number in 5..=8 {
+        let fork_hash = format!("{SEPOLIA}-losing-block-{number}");
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, parent_hash, block_number,
+                 block_timestamp, canonicality_state
+             ) VALUES ($1, $2, $3, $4, to_timestamp($4), 'orphaned')",
+        )
+        .bind(SEPOLIA)
+        .bind(&fork_hash)
+        .bind(&parent_hash)
+        .bind(number)
+        .execute(scratch.pool())
+        .await?;
+        parent_hash = fork_hash;
+    }
+    sqlx::query(
+        "UPDATE ingest_cursors
+         SET last_processed_block_hash = $2
+         WHERE chain_id = $1 AND source_key = 'drpc-intake'",
+    )
+    .bind(SEPOLIA)
+    .bind(parent_hash)
+    .execute(scratch.pool())
+    .await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, 8).await?;
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let runner = sepolia_verifier_runner(&scratch, Arc::clone(&live_calls)).await?;
+
+    let error = runner
+        .run_chain(&sepolia_chain()?, CancellationToken::new())
+        .await
+        .expect_err("Sepolia verification must reject a tip that forked below finality");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error.to_string().contains("durable ingest cursor"),
+        "{error}"
+    );
+    assert_eq!(live_calls.load(Ordering::SeqCst), 0);
+
+    drop(runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn sepolia_rejects_an_observed_cursor_tip() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_sepolia_observed_cursor").await?;
+    seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
+    seed_ingest_cursor(scratch.pool(), SEPOLIA, "drpc-intake", 8).await?;
+    let observed_tip = format!("{SEPOLIA}-observed-block-8");
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state
+         ) VALUES ($1, $2, $3, 8, to_timestamp(8), 'observed')",
+    )
+    .bind(SEPOLIA)
+    .bind(&observed_tip)
+    .bind(block_hash(SEPOLIA, 7))
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE ingest_cursors
+         SET last_processed_block_hash = $2
+         WHERE chain_id = $1 AND source_key = 'drpc-intake'",
+    )
+    .bind(SEPOLIA)
+    .bind(observed_tip)
+    .execute(scratch.pool())
+    .await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, 8).await?;
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let runner = sepolia_verifier_runner(&scratch, Arc::clone(&live_calls)).await?;
+
+    let error = runner
+        .run_chain(&sepolia_chain()?, CancellationToken::new())
+        .await
+        .expect_err("Sepolia verification must reject an observed-only cursor tip");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error.to_string().contains("durable ingest cursor"),
+        "{error}"
+    );
+    assert_eq!(live_calls.load(Ordering::SeqCst), 0);
+
+    drop(runner);
+    scratch.cleanup().await
 }
 
 #[tokio::test]
@@ -1649,6 +1839,102 @@ async fn verify_redo_rechecks_the_requested_range_and_persists_its_level() -> Re
 }
 
 #[tokio::test]
+async fn sepolia_verify_redo_rejects_an_extra_persisted_ingest_source() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_redo_extra_ingest_source").await?;
+    seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
+    seed_ingest_cursor(scratch.pool(), SEPOLIA, "drpc-intake", 8).await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, 8).await?;
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let runner = sepolia_verifier_runner(&scratch, Arc::clone(&live_calls)).await?;
+    let chain = sepolia_chain_with_key("drpc-intake")?;
+    runner.run_chain(&chain, CancellationToken::new()).await?;
+    assert_eq!(live_calls.load(Ordering::SeqCst), 1);
+
+    seed_ingest_cursor(scratch.pool(), SEPOLIA, "retired-drpc-intake", 8).await?;
+    let result = runner
+        .redo(
+            &chain,
+            RedoPhase::Phase(PhaseName::Verify),
+            BlockRange::new(0, 5)?,
+            CancellationToken::new(),
+        )
+        .await;
+
+    let error = result.expect_err("Verify redo must reject an extra persisted intake source");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error.to_string().contains("persisted ingest source keys"),
+        "{error}"
+    );
+
+    drop(runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn partial_sepolia_verify_redo_revalidates_the_retained_completion_target() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_partial_redo_retained_target").await?;
+    seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
+    seed_ingest_cursor(scratch.pool(), SEPOLIA, "drpc-intake", 8).await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, 8).await?;
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let runner = sepolia_verifier_runner(&scratch, Arc::clone(&live_calls)).await?;
+    let chain = sepolia_chain()?;
+    runner.run_chain(&chain, CancellationToken::new()).await?;
+
+    let mut parent_hash = block_hash(SEPOLIA, 3);
+    for number in 4..=8 {
+        let fork_hash = format!("{SEPOLIA}-partial-redo-fork-{number}");
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, parent_hash, block_number,
+                 block_timestamp, canonicality_state
+             ) VALUES ($1, $2, $3, $4, to_timestamp($4), 'orphaned')",
+        )
+        .bind(SEPOLIA)
+        .bind(&fork_hash)
+        .bind(&parent_hash)
+        .bind(number)
+        .execute(scratch.pool())
+        .await?;
+        parent_hash = fork_hash;
+    }
+    sqlx::query(
+        "UPDATE ingest_cursors
+         SET last_processed_block_hash = $2
+         WHERE chain_id = $1 AND source_key = 'drpc-intake'",
+    )
+    .bind(SEPOLIA)
+    .bind(parent_hash)
+    .execute(scratch.pool())
+    .await?;
+
+    let error = runner
+        .redo(
+            &chain,
+            RedoPhase::Phase(PhaseName::Verify),
+            BlockRange::new(0, 3)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a partial redo must revalidate the retained full Verify target");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(error.to_string().contains("finalized block 5"), "{error}");
+    let redo_in_progress: bool = sqlx::query_scalar(
+        "SELECT redo_in_progress
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(redo_in_progress);
+
+    drop(runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn full_verify_redo_updates_the_full_extent_level() -> Result<()> {
     let scratch = ScratchDatabase::create("production_verify_full_redo_level").await?;
     seed_chain(scratch.pool(), BASE, 5, 5, 5, 1).await?;
@@ -1683,6 +1969,53 @@ async fn full_verify_redo_updates_the_full_extent_level() -> Result<()> {
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(state, ("cross_checked".to_owned(), 5, false));
+
+    drop(runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn base_reth_reference_is_rejected_before_verify_redo_begins() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_base_reth_unsupported").await?;
+    seed_chain(scratch.pool(), BASE, 5, 5, 5, 1).await?;
+    let reference = Arc::new(FixtureReferences::new([reference_log(BASE, 1)]));
+    let runner = verifier_runner(&scratch, reference.clone(), Arc::new(CompleteLivePhase)).await?;
+    runner
+        .run_chain(&base_chain(true)?, CancellationToken::new())
+        .await?;
+    reference.clear_calls();
+
+    let error = runner
+        .redo(
+            &base_chain_with_reth_reference()?,
+            RedoPhase::Phase(PhaseName::Verify),
+            BlockRange::new(0, 5)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("Base local-reth verification must fail during configuration validation");
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert!(
+        error.to_string().contains("base-mainnet with reth_db"),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("OP Stack") && error.to_string().contains("Ethereum-primitives"),
+        "{error}"
+    );
+    assert!(reference.calls().is_empty());
+    let state: (String, String, bool) = sqlx::query_as(
+        "SELECT phase_status, verification_level, redo_in_progress
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(BASE)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        state,
+        ("completed".to_owned(), "cross_checked".to_owned(), false)
+    );
 
     drop(runner);
     scratch.cleanup().await
@@ -2366,6 +2699,31 @@ fn base_chain_with_endpoints() -> RunnerResult<ChainConfig> {
                 SeedBasis::BaseSeam,
                 BASE_COINBASE_SEAM_BLOCK,
                 "https://rotated-drpc.invalid",
+            )?,
+        ],
+        true,
+    )
+}
+
+fn base_chain_with_reth_reference() -> RunnerResult<ChainConfig> {
+    ChainConfig::new(
+        BASE,
+        vec![
+            SourceConfig::new(
+                BASE,
+                "coinbase-history",
+                "coinbase_sql",
+                SeedBasis::BaseSeam,
+                0,
+                "https://coinbase.invalid",
+            )?,
+            SourceConfig::new(
+                BASE,
+                "reth-reference",
+                "reth_db",
+                SeedBasis::BaseSeam,
+                0,
+                "/fixture/reth",
             )?,
         ],
         true,

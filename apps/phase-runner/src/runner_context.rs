@@ -26,6 +26,13 @@ impl PhaseRunner {
         chain: &ChainConfig,
         mode: &RunMode,
     ) -> RunnerResult<()> {
+        if phase == PhaseName::Verify
+            && crate::verify_phase::provider_trusted_verify_chain(&chain.chain_id)
+        {
+            self.store
+                .validate_completed_ingest_sources(&chain.chain_id, &chain.sources)
+                .await?;
+        }
         if phase == PhaseName::Ingest {
             let status = self.store.status(&chain.chain_id, phase).await?;
             if matches!(mode, RunMode::Normal) && status == crate::state::PhaseStatus::Completed {

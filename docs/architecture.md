@@ -406,12 +406,19 @@ receives the phase runner's writer pool. The reader and writer connections must
 also report the same PostgreSQL system identifier, database OID, and database
 name. It compares Base's Coinbase-loaded
 range with dRPC through the fixed block `48,428,000` ingest seam and records
-`cross_checked`; the later dRPC-ingested suffix does not inherit
-that level. It compares Ethereum Mainnet with local reth and records
-`node_checked`. Ethereum Sepolia validates the durable ingested extent through
-its finalized marker and records `quick_synced`: the configured dRPC is the
-intake provider, not an independent reference. Source-role separation and an
-independent Sepolia comparison are deferred to
+`cross_checked`; the later dRPC-ingested suffix does not inherit that level. A
+Base `reth_db` reference is explicitly unsupported: the pinned reader uses
+reth's Ethereum node type, whose signed transaction and receipt types are the
+Ethereum primitives (upstream: .refs/reth/crates/ethereum/node/src/node.rs:L121 @ reth@88505c7f)
+(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L27 @ reth@88505c7f)
+(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L51 @ reth@88505c7f). Bigname does not
+implement a separate OP Stack transaction and receipt reader.
+Base-aware local database verification is tracked by
+[issue #433](https://github.com/ensdomains/bigname/issues/433). It compares
+Ethereum Mainnet with local reth and records `node_checked`. Ethereum Sepolia
+validates the durable ingested extent through its finalized marker and records
+`quick_synced`: the configured dRPC is the intake provider, not an independent
+reference. Source-role separation and an independent Sepolia comparison are deferred to
 [issue #411](https://github.com/ensdomains/bigname/issues/411); that work will
 upgrade the chain to `cross_checked`. The phase runner rejects a verification
 level stronger than the chain-specific verification path can earn before persisting

@@ -85,10 +85,12 @@ walk derives.
 stored extent through a finalized block and, when the chain has an independent
 reference, compares canonical selected raw logs with it. Base uses dRPC to
 cross-check the Coinbase-loaded history and cannot extend that independent
-comparison past the Coinbase-to-dRPC ingest seam. Ethereum Mainnet uses local
-reth for a node check. Ethereum Sepolia validates its durable ingested extent
-and records provider trust without an independent comparison; source-role
-separation is deferred to
+comparison past the Coinbase-to-dRPC ingest seam. Base `reth_db` verification
+is unsupported and tracked by
+[issue #433](https://github.com/ensdomains/bigname/issues/433). Ethereum Mainnet
+uses local reth for a node check. Ethereum Sepolia validates its durable
+ingested extent and records provider trust without an independent comparison;
+source-role separation is deferred to
 [issue #411](https://github.com/ensdomains/bigname/issues/411). The phase records
 only its block extent, trust level, and any fatal mismatch in phase state. It
 does not write coverage attestations or repair raw data.

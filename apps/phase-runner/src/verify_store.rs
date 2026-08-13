@@ -220,34 +220,52 @@ impl VerificationStore {
         chain_id: &str,
         source: &SourceConfig,
         target: &BlockMarker,
+        redo_restores_retained_target: bool,
     ) -> RunnerResult<()> {
-        type CursorRow = (
-            String,
-            String,
-            i64,
-            i64,
-            Option<i64>,
-            Option<i64>,
-            Option<String>,
-            bool,
-        );
+        let target = if redo_restores_retained_target {
+            self.retained_finalized_target(chain_id).await?
+        } else {
+            target.clone()
+        };
+        type CursorRow = (String, String, i64, i64, Option<i64>, Option<i64>, bool);
         let row: Option<CursorRow> = sqlx::query_as(
             "SELECT source_kind, seed_basis, start_block_number, next_block_number,
                     target_block_number, last_processed_block_number,
-                    last_processed_block_hash,
-                    EXISTS (
-                        SELECT 1
-                        FROM chain_lineage lineage
-                        WHERE lineage.chain_id = cursor.chain_id
-                          AND lineage.block_number = cursor.last_processed_block_number
-                          AND lineage.block_hash = cursor.last_processed_block_hash
-                          AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+                    (
+                        WITH RECURSIVE cursor_ancestry (
+                            block_hash, parent_hash, block_number
+                        ) AS (
+                            SELECT lineage.block_hash, lineage.parent_hash,
+                                   lineage.block_number
+                            FROM chain_lineage lineage
+                            WHERE lineage.chain_id = cursor.chain_id
+                              AND lineage.block_number = cursor.last_processed_block_number
+                              AND lineage.block_hash = cursor.last_processed_block_hash
+                              AND lineage.canonicality_state <> 'observed'
+                            UNION ALL
+                            SELECT parent.block_hash, parent.parent_hash,
+                                   parent.block_number
+                            FROM chain_lineage parent
+                            JOIN cursor_ancestry child
+                              ON parent.chain_id = cursor.chain_id
+                             AND parent.block_hash = child.parent_hash
+                             AND parent.block_number = child.block_number - 1
+                            WHERE child.block_number > $3
+                              AND parent.canonicality_state <> 'observed'
+                        )
+                        SELECT EXISTS (
+                            SELECT 1
+                            FROM cursor_ancestry
+                            WHERE block_number = $3 AND block_hash = $4
+                        )
                     )
              FROM ingest_cursors cursor
              WHERE chain_id = $1 AND source_key = $2",
         )
         .bind(chain_id)
         .bind(&source.source_key)
+        .bind(target.number)
+        .bind(&target.hash)
         .fetch_optional(self.database.pool())
         .await
         .map_err(|error| {
@@ -266,8 +284,7 @@ impl VerificationStore {
             next,
             cursor_target,
             processed,
-            processed_hash,
-            processed_is_readable,
+            processed_descends_from_target,
         )) = row
         else {
             return Err(RunnerError::data_integrity(format!(
@@ -279,12 +296,13 @@ impl VerificationStore {
             == normalized_source_kind(&source.source_kind)
             && seed == source.seed_basis.as_str()
             && start == source.start_block_number;
+        // The numeric fields must agree that intake reached the frozen target. The last processed
+        // hash may later be orphaned, but its retained ancestry must still contain this already-
+        // frozen finalized block.
         let covers_target = next > target.number
             && cursor_target.is_some_and(|number| number >= target.number)
             && processed.is_some_and(|number| number >= target.number)
-            && processed_is_readable
-            && (processed != Some(target.number)
-                || processed_hash.as_deref() == Some(target.hash.as_str()));
+            && processed_descends_from_target;
         if configuration_matches && covers_target {
             return Ok(());
         }
@@ -293,6 +311,37 @@ impl VerificationStore {
              have a matching durable ingest cursor through finalized block {}",
             source.source_key, target.number
         )))
+    }
+
+    async fn retained_finalized_target(&self, chain_id: &str) -> RunnerResult<BlockMarker> {
+        let row: Option<(Option<i64>, Option<String>)> = sqlx::query_as(
+            "SELECT target_block_number, target_block_hash
+             FROM chain_phase_state
+             WHERE chain_id = $1 AND phase_name = 'verify'",
+        )
+        .bind(chain_id)
+        .fetch_optional(self.database.pool())
+        .await
+        .map_err(|error| {
+            RunnerError::database(
+                format!("failed to load retained verification target for chain {chain_id}"),
+                error,
+            )
+        })?;
+        let Some((Some(number), Some(hash))) = row else {
+            return Err(RunnerError::data_integrity(format!(
+                "provider-trusted verification redo for chain {chain_id} has no retained target"
+            )));
+        };
+        let retained = BlockMarker::new(number, hash)?;
+        let finalized = self.finalized_marker(chain_id, number).await?;
+        if retained != finalized {
+            return Err(RunnerError::data_integrity(format!(
+                "provider-trusted verification redo target for chain {chain_id} does not match \
+                 finalized lineage at block {number}"
+            )));
+        }
+        Ok(retained)
     }
 
     pub(crate) async fn level_for_redo(

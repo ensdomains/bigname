@@ -165,11 +165,18 @@ hydration URL map. Its reth overlay bind-mounts `RETH_DATA_DIR` read-only at the
 same container path. Add any differently named provider environment variable
 to the phase-runner service explicitly; `docker compose --env-file` supplies
 interpolation values but does not expose arbitrary variables to a container.
-For production verification, `base-mainnet` must configure its independent RPC
-source with kind `drpc`; that source can record only `cross_checked`, and its
-start block and independent verification extent are fixed at the block
-`48,428,000` Coinbase-to-dRPC ingest seam. A moved source start or verify redo
-above that seam is rejected before redo state is created.
+Base Verify requires exactly one `drpc` reference. Its independent reference
+records `cross_checked`; its start block and independent verification extent
+are fixed at the block `48,428,000` Coinbase-to-dRPC ingest seam. A moved dRPC
+source start or Verify redo above that seam is rejected before redo state is
+created. Base with `reth_db` is also rejected during configuration validation:
+the pinned reader uses reth's Ethereum node type and Ethereum transaction and
+receipt primitives (upstream: .refs/reth/crates/ethereum/node/src/node.rs:L121 @ reth@88505c7f)
+(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L27 @ reth@88505c7f)
+(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L51 @ reth@88505c7f). Bigname does not
+implement a separate OP Stack transaction and receipt reader.
+Base-aware local database verification is tracked by
+[issue #433](https://github.com/ensdomains/bigname/issues/433).
 `ethereum-mainnet` must configure one `reth_db` source; that source records
 `node_checked`. `ethereum-sepolia` must configure exactly one `drpc` intake
 source with `ethereum_head` seed basis and start block zero. Because that dRPC
@@ -179,13 +186,15 @@ validates the durable ingested extent through its finalized marker and records
 configuration and covers the finalized target. That binding and coverage are
 checked when verification completes, and the returned final block-number/hash
 marker must equal the frozen target before completion is recorded or Live can
-run. The runner validates this exact Sepolia source shape before Ingest creates
-the source cursor or contacts the provider. Because that shape selects the
-provider-trusted verification path, the runner always completes Verify before
-starting Live even if Sepolia is omitted from `verify-before-live`. On every
-runner start, Verify checks the current configuration and cursor
-against the completion-time target without changing the recorded
-`quick_synced` extent as Live finality moves. Separating
+run. A later reorg may orphan the retained cursor tip above that target, but
+the stored parent chain must still reach the exact frozen target hash; a fork
+at or below the target is rejected. The runner validates this exact Sepolia
+source shape before Ingest creates the source cursor or contacts the provider.
+Because that shape selects the provider-trusted verification path, the runner
+always completes Verify before starting Live even if Sepolia is omitted from
+`verify-before-live`. On every runner start, Verify checks the current
+configuration and cursor once against the completion-time target without
+changing the recorded `quick_synced` extent as Live finality moves. Separating
 intake and verification source roles, then upgrading Sepolia to `cross_checked`, is deferred to
 [issue #411](https://github.com/ensdomains/bigname/issues/411). A generic RPC
 kind is not accepted as Base verification authority

@@ -120,11 +120,14 @@ cargo phase -- redo \
 Use `--phase verify` with the same `reth_db` descriptor to recheck a finalized
 Ethereum range; it also requires
 `BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL` (or
-`--verification-database-url`). Base verify redo uses its `drpc` descriptor and
-can record only `cross_checked`; the descriptor must retain the fixed
-`48,428,000` source start, and a range above that seam is rejected before the
-redo marker is written. A partial redo retains the level for the
-whole recorded extent, while a full-extent redo can change it.
+`--verification-database-url`). Base Verify redo requires one `drpc` reference.
+It records `cross_checked`, must retain the fixed `48,428,000` source start, and
+rejects a range above that seam before writing the redo marker. A Base
+`reth_db` reference is explicitly unsupported and tracked by
+[issue #433](https://github.com/ensdomains/bigname/issues/433); the operator
+rationale and pinned reth evidence are in [deployment](deployment.md). A partial
+redo retains the level for the whole recorded extent, while a full-extent redo
+can change it.
 Sepolia verify redo does not select an intake descriptor as a reference and
 records `quick_synced` for the finalized durable extent.
 The reader URL must authenticate the dedicated role directly and resolve to the

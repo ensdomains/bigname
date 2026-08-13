@@ -362,3 +362,27 @@ fn validate_datadir(datadir: &Path) -> Result<()> {
         .with_context(|| format!("Reth lock file {} must be writable", lock_file.display()))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base_database_access_remains_explicitly_unsupported() {
+        let reader = RethDbReader {
+            chain: "base-mainnet".to_owned(),
+            datadir: PathBuf::from("/unused-base-reth"),
+            factory: OnceLock::new(),
+        };
+
+        let error = reader
+            .factory()
+            .expect_err("the Ethereum-only reader must reject Base before opening its database");
+        assert!(
+            error
+                .to_string()
+                .contains("Reth DB ingest supports ethereum-mainnet only, got base-mainnet"),
+            "{error:#}"
+        );
+    }
+}

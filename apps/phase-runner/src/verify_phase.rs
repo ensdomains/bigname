@@ -60,24 +60,19 @@ impl VerificationSource {
     pub fn chain_id(&self) -> &str {
         &self.chain_id
     }
-
     pub fn source_key(&self) -> &str {
         &self.source_key
     }
-
     pub fn source_kind(&self) -> &str {
         &self.source_kind
     }
-
     pub const fn provider_kind(&self) -> VerificationProviderKind {
         self.provider_kind
     }
-
     pub const fn verification_level(&self) -> VerificationLevel {
         self.level
     }
 }
-
 pub struct VerifyPhase {
     store: VerificationStore,
     reference: Arc<dyn VerificationReferenceProvider>,
@@ -135,15 +130,23 @@ impl Phase for VerifyPhase {
             } else {
                 normal_extent_level(&context, verification.verification_level())?
             };
+            let completes_target = plan.to == plan.target.number;
             let end = match &verification {
                 VerificationPlan::ProviderTrusted { source, .. } => {
                     let end = self
                         .store
                         .finalized_marker(&context.chain_id, plan.to)
                         .await?;
-                    self.store
-                        .require_provider_trusted_extent(&context.chain_id, source, &end)
-                        .await?;
+                    if completes_target {
+                        self.store
+                            .require_provider_trusted_extent(
+                                &context.chain_id,
+                                source,
+                                &end,
+                                context.mode.is_redo(),
+                            )
+                            .await?;
+                    }
                     end
                 }
                 VerificationPlan::Compared(source) => {
@@ -178,7 +181,6 @@ impl Phase for VerifyPhase {
                     stored.end
                 }
             };
-
             if matches!(verification, VerificationPlan::ProviderTrusted { .. }) {
                 info!(
                     chain_id = context.chain_id,
@@ -188,7 +190,6 @@ impl Phase for VerifyPhase {
                     "provider-trusted stored history extent accepted without an independent reference"
                 );
             }
-            let completes_target = plan.to == plan.target.number;
             if completes_target {
                 completed::require_frozen_target(&context.chain_id, &end, &plan.target)?;
             }
@@ -205,7 +206,6 @@ impl Phase for VerifyPhase {
             }
         })
     }
-
     fn revalidates_completed(
         &self,
         chain_id: &str,
@@ -213,7 +213,6 @@ impl Phase for VerifyPhase {
     ) -> RunnerResult<bool> {
         completed::is_required(chain_id, sources)
     }
-
     fn revalidate_completed(&self, context: PhaseContext) -> CompletedPhaseFuture<'_> {
         Box::pin(completed::revalidate(self, context))
     }
@@ -381,14 +380,12 @@ impl VerificationPlan {
             Self::Compared(source) => source.verification_level(),
         }
     }
-
     const fn cross_check_through(&self) -> Option<i64> {
         match self {
             Self::ProviderTrusted { .. } => None,
             Self::Compared(source) => source.cross_check_through,
         }
     }
-
     fn provider_trusted_source_key(&self) -> Option<&str> {
         match self {
             Self::ProviderTrusted { source, .. } => Some(&source.source_key),
@@ -455,12 +452,10 @@ impl ProductionReferences {
         Ok(provider)
     }
 }
-
 impl VerificationReferenceProvider for ProductionReferences {
     fn preflight(&self, source: &VerificationSource) -> RunnerResult<()> {
         self.provider(source).map(|_| ())
     }
-
     fn fetch<'a>(
         &'a self,
         source: &'a VerificationSource,
@@ -523,8 +518,15 @@ fn select_source(chain_id: &str, sources: &[SourceConfig]) -> RunnerResult<Verif
     }
     match (chain_id, provider_kind) {
         ("base-mainnet", VerificationProviderKind::IndependentRpc)
-        | ("base-mainnet", VerificationProviderKind::LocalReth)
         | ("ethereum-mainnet", VerificationProviderKind::LocalReth) => {}
+        ("base-mainnet", VerificationProviderKind::LocalReth) => {
+            return Err(RunnerError::new(
+                ErrorKind::Configuration,
+                "base-mainnet with reth_db is unsupported: bigname's pinned reader implements \
+                 only Ethereum-primitives transaction and receipt decoding; OP Stack decoding is \
+                 not implemented; use dRPC for Base verification (tracked by issue #433)",
+            ));
+        }
         ("ethereum-mainnet", VerificationProviderKind::IndependentRpc) => {
             return Err(RunnerError::new(
                 ErrorKind::Configuration,
@@ -580,7 +582,6 @@ pub(crate) fn validate_reported_level(
         declared.as_str()
     )))
 }
-
 const fn verification_level_rank(level: VerificationLevel) -> u8 {
     match level {
         VerificationLevel::QuickSynced => 0,

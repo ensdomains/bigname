@@ -76,7 +76,7 @@ pub(super) async fn revalidate(
     require_frozen_target(&context.chain_id, &current, &target)?;
     phase
         .store
-        .require_provider_trusted_extent(&context.chain_id, &source, &target)
+        .require_provider_trusted_extent(&context.chain_id, &source, &target, false)
         .await?;
     Ok(Some(PhaseProgress {
         current: Some(current),
