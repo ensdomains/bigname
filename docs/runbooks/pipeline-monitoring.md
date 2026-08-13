@@ -195,13 +195,14 @@ deliberately not rewritten, which is why they must be resolved before removal.
 Do not update statuses, clear repair markers, or delete rows merely to silence
 an alert.
 
-If the chain is configured again later, the runner checks the stored completion
-evidence rather than trusting the rewritten `completed` status alone. It resumes
-Ingest when the current block or live handoff does not match the target, and
-resumes Verify when its final block pair or [verification
-level](../glossary.md#verification-level) is missing. Settling an active Ingest
-row clears its live handoff but preserves its source cursors, so re-adding the
-chain resumes even if an older runner stopped between its formerly separate
+If the chain is configured again later, the runner resumes from preserved
+cursors and re-runs any Ingest or Verify phase whose completion evidence is
+incomplete, rather than trusting the rewritten `completed` status alone. It
+resumes Ingest when the current block or live handoff does not match the target,
+and resumes Verify unless it has a matching current/target block pair and a
+[verification level](../glossary.md#verification-level). Settling an active
+Ingest row clears its live handoff but preserves its source cursors, so re-adding
+the chain resumes even if an older runner stopped between its formerly separate
 summary and cursor writes.
 
 ## First-response checks
@@ -224,3 +225,22 @@ healthy. For head lag, compare Live progress with its observed provider target
 and check provider and database latency. Follow
 [`production-docker.md`](production-docker.md#recovery-plays) for recovery; do
 not clear phase rows or mark work complete by hand.
+
+For `BignamePhaseRunnerCapacityPaused`:
+
+1. Find the runner warning `phase paused until storage capacity recovers` and
+   read its `breach_reasons` and `free_disk_bytes` fields to identify which
+   bound stopped work.
+2. If `breach_reasons` contains `database_size` and the host has storage
+   headroom, raise `database_max_bytes` by passing
+   `BIGNAME_PHASE_RUNNER_DATABASE_MAX_BYTES` to the phase-runner container, then
+   recreate it because the setting is read only at startup. The checked-in
+   Compose service does not forward this variable, so adding it only to
+   `.env.server` has no effect; use a reviewed deployment configuration or
+   Compose override that passes it into the container. If `breach_reasons`
+   contains `free_disk`, free disk space or lower usage on the filesystem that
+   contains the configured `writable_path`. `minimum_free_disk_bytes`, plus the
+   most recently completed batch's reserved-write estimate (zero before the
+   first batch), is the floor the runner is protecting.
+3. Once the capacity check clears, the phase resumes from its stored cursor.
+   No phase-state edit or manual phase restart is needed.
