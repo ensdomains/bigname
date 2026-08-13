@@ -19,7 +19,7 @@ use crate::{
         Backoff, HeartbeatThrottle, PhaseLoopResult, cancelled_redo_error,
         finish_failed_redo_start, record_live_mismatch_with_lock, redo_outcome,
     },
-    state::{PhaseStore, StartDisposition},
+    state::PhaseStore,
     state_persistence::{record_live_verification_mismatch, validate_progress},
 };
 
@@ -131,9 +131,9 @@ impl PhaseRunner {
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
         self.store.initialize_chain(&chain.chain_id).await?;
+        self.recover_stopped_live(chain).await?;
         self.run_spine_phase(chain, PhaseName::Ingest, cancellation.clone())
             .await?;
-        self.recover_stopped_live(chain).await?;
         self.catch_up_for_required_redo(chain, cancellation.clone())
             .await?;
         for phase in [PhaseName::Interpret, PhaseName::Project] {
@@ -302,7 +302,17 @@ impl PhaseRunner {
         phase_lock: &mut PhaseLock,
     ) -> RunnerResult<()> {
         let phase_name = phase.name();
-        self.check_ingest_identity(phase_name, chain, &mode).await?;
+        if let Err(error) = self.check_ingest_identity(phase_name, chain, &mode).await {
+            return self
+                .record_phase_validation_failure(
+                    &chain.chain_id,
+                    phase_name,
+                    &mode,
+                    phase_lock,
+                    error,
+                )
+                .await;
+        }
         let supplied_manifest_authority_generation = (phase_name == PhaseName::Interpret)
             .then(|| self.supplied_manifest_attestation_generation(&chain.chain_id))
             .flatten();
@@ -326,21 +336,11 @@ impl PhaseRunner {
             }
             Some(session)
         } else {
-            match self
-                .store
-                .start_phase(&chain.chain_id, phase_name, &mode)
+            if !self
+                .start_normal_phase(chain, Arc::clone(&phase), phase_lock)
                 .await?
             {
-                StartDisposition::AlreadyCompleted => {
-                    self.validate_completed_config(chain, phase_name).await?;
-                    if !phase.revalidates_completed(&chain.chain_id, &chain.sources)? {
-                        return Ok(());
-                    }
-                    return self
-                        .revalidate_completed_phase(chain, phase, phase_lock)
-                        .await;
-                }
-                StartDisposition::Started => {}
+                return Ok(());
             }
             None
         };

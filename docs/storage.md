@@ -101,6 +101,18 @@ Adapters provide interpretation behavior. They do not write projections. API
 code reads projections and lookup output only, except for the guarded
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger) write.
 
+A non-retryable validation failure on an already-completed Ingest or Verify
+row changes its lifecycle status from `completed` to `failed` without clearing
+the retained range markers, source provenance, verification level, or content
+hash. A retained row may be restored without replay only from structural
+evidence: Ingest requires matching current, target, and live-handoff markers;
+Verify requires matching current and target markers plus a verification level.
+The next accepted start repeats the checks for the retained completion and
+moves that row through `failed` to `completed`. Error text alone never
+authorizes that transition. This preserved evidence is diagnostic state, not
+permission to publish: provider-trusted Sepolia readiness requires both Ingest
+and Verify to remain completed.
+
 ### ENSv1→ENSv2 correlation visibility
 
 The slice-1 ENSv1→ENSv2 intake persists the

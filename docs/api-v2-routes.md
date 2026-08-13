@@ -236,10 +236,11 @@ Field ownership:
   `bigname_phase.service_heartbeats` timestamp.
   Ethereum Sepolia is not eligible for `ready` until its
   [provider-trusted](glossary.md#verification-level) `verify` phase is
-  `completed` with `quick_synced` evidence. A failed Verify or a completed
-  Verify without that evidence is `stale`; an idle, running, paused, or missing
-  Verify is `degraded`. An expired runner heartbeat remains `stale` while
-  Verify is incomplete. Chains without this requirement keep the Project-only
+  `completed` with `quick_synced` evidence and its `ingest` phase remains
+  `completed`. A failed Ingest or Verify, or a completed Verify without that
+  evidence, is `stale`; an idle, running, paused, or missing Ingest or Verify is
+  `degraded`. An expired runner heartbeat remains `stale` while either required
+  phase is incomplete. Chains without this requirement keep the Project-only
   lifecycle rule below.
   The most recent completed `project` publication remains the indexed position
   while the next live-follow pass is running. A running phase is therefore

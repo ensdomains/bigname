@@ -46,6 +46,17 @@ never fetches missing provider data or calls an old adapter; its input is the
 raw-fact range already admitted by `ingest`. The project phase likewise reads
 only canonical identity and normalized-event input.
 
+When a non-retryable check of an already-completed Ingest or Verify phase
+fails, the runner changes that phase from `completed` to `failed` and keeps its
+completed range, source provenance, and verification evidence for diagnosis.
+Only Ingest rows that still hold equal current, target, and live-handoff
+markers, and Verify rows that still hold equal current and target markers plus
+a verification level, may be restored without replay. After the operator
+restores the accepted source configuration or evidence, the next start repeats
+the checks for the retained completion and records the phase `completed` again
+without replaying its completed range. Other failed rows resume their ordinary
+phase work and cannot take this path based only on matching error text.
+
 Per-source cursors remain bounded by the finite ingest snapshot. Live reuses
 the intake write path but does not claim that it extended every historical
 source, so it does not advance those cursors. For later replay, a source cursor

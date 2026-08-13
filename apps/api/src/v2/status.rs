@@ -179,26 +179,31 @@ fn phase_readiness(
     if row.project_phase_status.as_deref() == Some("failed") {
         return StatusReadiness::Stale;
     }
-    let verify_incomplete = if row.provider_trusted_verification_required {
+    let (ingest_incomplete, verify_incomplete) = if row.provider_trusted_verification_required {
+        let ingest_incomplete = match row.ingest_phase_status.as_deref() {
+            Some("completed") => false,
+            Some("idle" | "running" | "paused") | None => true,
+            Some("failed") | Some(_) => return StatusReadiness::Stale,
+        };
         match (
             row.verify_phase_status.as_deref(),
             row.verify_verification_level.as_deref(),
         ) {
-            (Some("completed"), Some("quick_synced")) => false,
-            (Some("idle" | "running" | "paused") | None, _) => true,
+            (Some("completed"), Some("quick_synced")) => (ingest_incomplete, false),
+            (Some("idle" | "running" | "paused") | None, _) => (ingest_incomplete, true),
             (Some("completed" | "failed"), _) | (Some(_), _) => {
                 return StatusReadiness::Stale;
             }
         }
     } else {
-        false
+        (false, false)
     };
     match row.phase_runner_heartbeat_age_seconds {
         Some(age) if age > heartbeat_max_age_seconds => return StatusReadiness::Stale,
         None => return StatusReadiness::Degraded,
         Some(_) => {}
     }
-    if verify_incomplete {
+    if ingest_incomplete || verify_incomplete {
         return StatusReadiness::Degraded;
     }
     if !row.project_generation_current {
@@ -498,6 +503,7 @@ mod tests {
             canonical_timestamp: canonical_block.map(timestamp_for_block),
             latest_projected_block,
             latest_projected_timestamp: latest_projected_block.map(timestamp_for_block),
+            ingest_phase_status: None,
             project_phase_status: Some("completed".to_owned()),
             verify_phase_status: None,
             verify_verification_level: None,

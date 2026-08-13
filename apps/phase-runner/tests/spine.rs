@@ -103,6 +103,12 @@ async fn phase_transitions_are_legal_and_persisted() -> Result<()> {
         .complete_phase(chain, PhaseName::Live, &PhaseProgress::default())
         .await?;
 
+    let error = store
+        .fail_phase(chain, PhaseName::Project, "late generic failure")
+        .await
+        .expect_err("the general failure path cannot demote a completed Project");
+    assert_eq!(error.kind(), ErrorKind::InvalidTransition);
+
     assert_eq!(
         store
             .start_phase(chain, PhaseName::Project, &RunMode::Normal)
@@ -118,6 +124,41 @@ async fn phase_transitions_are_legal_and_persisted() -> Result<()> {
         .await
         .expect_err("redo transitions must use the runner so prior state can be restored");
     assert_eq!(error.kind(), ErrorKind::Configuration);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn ordinary_failure_text_cannot_authorize_completed_recovery() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_recovery_marker_collision").await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    let chain_id = "recovery-marker-collision";
+    store.initialize_chain(chain_id).await?;
+    mark_completed(scratch.pool(), chain_id, PhaseName::Ingest, None).await?;
+    mark_completed(
+        scratch.pool(),
+        chain_id,
+        PhaseName::Interpret,
+        Some(phase_runner::INTERPRETER_CONTENT_HASH),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'failed',
+             last_error = 'completed phase validation failed: ordinary project failure',
+             started_at = now(), finished_at = now(), updated_at = now()
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+
+    assert_eq!(
+        store
+            .start_phase(chain_id, PhaseName::Project, &RunMode::Normal)
+            .await?,
+        StartDisposition::Started,
+        "free-form failure text must not impersonate retained completion evidence"
+    );
     scratch.cleanup().await
 }
 

@@ -78,6 +78,7 @@ impl FromStr for PhaseStatus {
 pub enum StartDisposition {
     Started,
     AlreadyCompleted,
+    RecoveringCompleted,
 }
 
 #[derive(Clone)]
@@ -136,6 +137,8 @@ impl PhaseStore {
         let rows = lock_chain_phase_state(&mut transaction, chain_id).await?;
         let row = row_for(&rows, phase)?;
         let status = row.status()?;
+        let recovering_completed = status == PhaseStatus::Failed
+            && crate::completed_phase_recovery::locked_completed_validation_recovery(row, phase);
         let restarts_completed = if phase == PhaseName::Live {
             true
         } else if status == PhaseStatus::Completed
@@ -155,6 +158,15 @@ impl PhaseStore {
             return Ok(StartDisposition::AlreadyCompleted);
         }
         require_start(&rows, chain_id, phase, mode)?;
+        if recovering_completed {
+            transaction.commit().await.map_err(|error| {
+                RunnerError::transient(format!(
+                    "failed to finish revalidation recovery check for chain {chain_id} phase \
+                     {phase}: {error}"
+                ))
+            })?;
+            return Ok(StartDisposition::RecoveringCompleted);
+        }
         if !status.can_transition_to(PhaseStatus::Running, restarts_completed) {
             return Err(invalid_transition(
                 chain_id,

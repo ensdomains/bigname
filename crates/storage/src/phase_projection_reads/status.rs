@@ -34,6 +34,7 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
             latest_lineage.block_timestamp AS latest_timestamp,
             project.current_block_number AS latest_projected_block,
             projected_lineage.block_timestamp AS latest_projected_timestamp,
+            ingest.phase_status AS ingest_phase_status,
             project.phase_status AS project_phase_status,
             verify.phase_status AS verify_phase_status,
             verify.verification_level AS verify_verification_level,
@@ -55,6 +56,9 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
         LEFT JOIN chain_phase_state project
           ON project.chain_id = known_chains.chain_id
          AND project.phase_name = 'project'
+        LEFT JOIN chain_phase_state ingest
+          ON ingest.chain_id = known_chains.chain_id
+         AND ingest.phase_name = 'ingest'
         LEFT JOIN chain_phase_state verify
           ON verify.chain_id = known_chains.chain_id
          AND verify.phase_name = 'verify'
@@ -103,6 +107,7 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
                     &row,
                     "latest_projected_timestamp",
                 )?,
+                ingest_phase_status: crate::sql_row::get(&row, "ingest_phase_status")?,
                 project_phase_status: crate::sql_row::get(&row, "project_phase_status")?,
                 verify_phase_status: crate::sql_row::get(&row, "verify_phase_status")?,
                 verify_verification_level: crate::sql_row::get(&row, "verify_verification_level")?,

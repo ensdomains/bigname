@@ -1,5 +1,6 @@
 pub mod capacity;
 pub mod cli;
+mod completed_phase_recovery;
 pub mod config;
 pub mod database;
 pub mod error;
