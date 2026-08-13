@@ -25,12 +25,19 @@ if [ "$profile" = "release" ]; then
   fi
 fi
 
-build_artifacts="$(
+build_artifacts=""
+if ! build_artifacts="$(
   cargo build "${profile_args[@]}" \
     -p bigname-benchmark-gate \
     -p bigname-api \
     --message-format=json
-)"
+)"; then
+  jq -r '
+    select(.reason == "compiler-message")
+    | .message.rendered // empty
+  ' <<<"$build_artifacts" >&2
+  exit 1
+fi
 
 artifact_path() {
   local target="$1"
