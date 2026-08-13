@@ -13,8 +13,12 @@ const REGISTRAR: &str = "0x0000000000000000000000000000000000000042";
 const REGISTRAR_ROLE: &str = "legacy_registrar_controller";
 const SENDER: &str = "0x0000000000000000000000000000000000000043";
 const REGISTRY: &str = "0x0000000000000000000000000000000000000044";
+const REGISTRY_ROLE: &str = "registry";
 const NORMALIZER: &str = "ensip15@ens-normalize-0.1.1";
 const REGISTRATION_EVENT_FRAGMENT: &str = "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 cost, uint256 expires)";
+const REGISTRY_EVENT_FRAGMENT: &str = "event NewResolver(bytes32 indexed node, address resolver)";
+const RESOLVER_EVENT_FRAGMENT: &str =
+    "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)";
 
 sol! {
     event NameRegistered(
@@ -60,11 +64,11 @@ pub(super) async fn seed(pool: &PgPool) -> Result<()> {
     insert_manifest(
         pool,
         "ens_v1_registry_l1",
-        "registry",
+        REGISTRY_ROLE,
         REGISTRY,
         "NewResolver",
-        "event NewResolver(bytes32 indexed node, address resolver)",
-        &["registry"],
+        REGISTRY_EVENT_FRAGMENT,
+        &[REGISTRY_ROLE],
         &["ResolverChanged", "PermissionChanged"],
     )
     .await?;
@@ -74,7 +78,7 @@ pub(super) async fn seed(pool: &PgPool) -> Result<()> {
         "public_resolver",
         RESOLVER,
         "TextChanged",
-        "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+        RESOLVER_EVENT_FRAGMENT,
         &[],
         &["RecordChanged"],
     )
@@ -381,28 +385,58 @@ pub(super) fn block_hash(number: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{REGISTRAR_ROLE, REGISTRATION_EVENT_FRAGMENT};
+    use super::{
+        REGISTRAR_ROLE, REGISTRATION_EVENT_FRAGMENT, REGISTRY_EVENT_FRAGMENT, REGISTRY_ROLE,
+        RESOLVER_EVENT_FRAGMENT,
+    };
+
+    fn manifest_admits_event(manifest: &str, fragment: &str, emitter_role: Option<&str>) -> bool {
+        let parsed: toml::Value = toml::from_str(manifest).unwrap();
+        parsed["abi"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| {
+                event["fragment"].as_str() == Some(fragment)
+                    && emitter_role.is_none_or(|expected_role| {
+                        event["emitter_roles"].as_array().is_some_and(|roles| {
+                            roles
+                                .iter()
+                                .any(|role| role.as_str() == Some(expected_role))
+                        })
+                    })
+            })
+    }
 
     #[test]
     fn production_manifest_admits_smoke_registration_fragment() {
         let manifest =
             include_str!("../../../../manifests/mainnet/ethereum/ens/ens_v1_registrar_l1/v1.toml");
-        let parsed: toml::Value = toml::from_str(manifest).unwrap();
-        let admitted = parsed["abi"]["events"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|event| {
-                event["fragment"].as_str() == Some(REGISTRATION_EVENT_FRAGMENT)
-                    && event["emitter_roles"].as_array().is_some_and(|roles| {
-                        roles
-                            .iter()
-                            .any(|role| role.as_str() == Some(REGISTRAR_ROLE))
-                    })
-            });
+        let admitted =
+            manifest_admits_event(manifest, REGISTRATION_EVENT_FRAGMENT, Some(REGISTRAR_ROLE));
         assert!(
             admitted,
             "smoke registrar fragment and role are not admitted together by the production ENSv1 manifest"
+        );
+    }
+
+    #[test]
+    fn production_manifest_admits_smoke_registry_fragment() {
+        let manifest =
+            include_str!("../../../../manifests/mainnet/ethereum/ens/ens_v1_registry_l1/v3.toml");
+        assert!(
+            manifest_admits_event(manifest, REGISTRY_EVENT_FRAGMENT, Some(REGISTRY_ROLE)),
+            "smoke registry fragment and role are not admitted together by the production ENSv1 manifest"
+        );
+    }
+
+    #[test]
+    fn production_manifest_admits_smoke_resolver_fragment() {
+        let manifest =
+            include_str!("../../../../manifests/mainnet/ethereum/ens/ens_v1_resolver_l1/v1.toml");
+        assert!(
+            manifest_admits_event(manifest, RESOLVER_EVENT_FRAGMENT, None),
+            "smoke resolver fragment is not admitted by the production ENSv1 manifest"
         );
     }
 }

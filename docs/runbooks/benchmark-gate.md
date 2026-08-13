@@ -17,6 +17,9 @@ build, passes the captured commit into the binary, and the binary rechecks it
 before and after measurement. The binary derives the reported Cargo build
 profile from its compiled assertion mode, while production commands also
 require the wrapper to attest that it selected the release Cargo build profile.
+The wrapper requires `jq` and resolves both executables from Cargo's JSON
+artifact output, so `CARGO_TARGET_DIR` and Cargo `build.target-dir` settings are
+honored for the harness and the smoke API.
 
 ## What the gate measures
 
@@ -55,9 +58,10 @@ address/name/relation combinations from the target projections, plus at least
 1,000 populated subname parents, permission subjects, and successful primary
 name claims. Before sampling that corpus, it counts the complete
 `name_current` and `address_names_current` tables and requires at least 3
-million rows in each. These floors leave headroom below the roughly 3.5 million
-names in the production dataset while excluding staging-sized databases. The
-JSON report records both actual totals and both floors. It varies names, addresses,
+million supported rows in each. Unsupported rows are excluded because the gate
+cannot use them as request seeds. These floors leave headroom below the roughly
+3.5 million names in the production dataset while excluding staging-sized
+databases. The JSON report records both supported-row totals and both floors. It varies names, addresses,
 search text, relations, history scopes, sort order, page size, and any cursors
 returned by seed requests, and uses the real resolver and namespace rows. The
 lookup mix covers 1, 10, 100, 250, and 1,000 inputs per batch, with large
@@ -243,7 +247,7 @@ the production indexing command requires and measures it.
 ```sh
 BIGNAME_BENCHMARK_CARGO_PROFILE=dev \
   scripts/test-db -- \
-  scripts/benchmark-gate smoke --api-binary target/debug/bigname-api
+  scripts/benchmark-gate smoke
 ```
 
 The smoke budget set is intentionally too small to support a release decision.

@@ -86,7 +86,11 @@ struct ApiArgs {
 
 #[derive(Debug, Args)]
 struct SmokeArgs {
-    #[arg(long, default_value = "target/release/bigname-api")]
+    #[arg(
+        long,
+        env = "BIGNAME_BENCHMARK_API_BINARY",
+        default_value = "target/release/bigname-api"
+    )]
     api_binary: PathBuf,
 }
 

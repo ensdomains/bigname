@@ -772,7 +772,10 @@ mod tests {
         let probe = prime_cursor_variants(&Client::new(), "events", &mut requests, 2)
             .await
             .unwrap();
-        server.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("cursor-exhaustion mock did not receive the bounded corpus within two seconds")
+            .unwrap();
 
         assert!(probe.populated);
         assert_eq!(served.load(std::sync::atomic::Ordering::Relaxed), 3);

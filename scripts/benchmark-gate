@@ -6,13 +6,15 @@ cd "$ROOT"
 
 profile="${BIGNAME_BENCHMARK_CARGO_PROFILE:-release}"
 profile_args=(--release)
-target_dir="release"
 if [ "$profile" = "dev" ]; then
   profile_args=()
-  target_dir="debug"
 elif [ "$profile" != "release" ]; then
   profile_args=(--profile "$profile")
-  target_dir="$profile"
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "benchmark wrapper requires jq to resolve Cargo executable paths" >&2
+  exit 1
 fi
 
 source_head="$(git rev-parse HEAD)"
@@ -23,7 +25,36 @@ if [ "$profile" = "release" ]; then
   fi
 fi
 
-cargo build "${profile_args[@]}" -p bigname-benchmark-gate -p bigname-api
+build_artifacts="$(
+  cargo build "${profile_args[@]}" \
+    -p bigname-benchmark-gate \
+    -p bigname-api \
+    --message-format=json
+)"
+
+artifact_path() {
+  local target="$1"
+  local paths=()
+  mapfile -t paths < <(
+    jq -r --arg target "$target" '
+      select(
+        .reason == "compiler-artifact"
+        and (.target.kind | index("bin"))
+        and .target.name == $target
+        and .executable != null
+      )
+      | .executable
+    ' <<<"$build_artifacts"
+  )
+  if [ "${#paths[@]}" -ne 1 ] || [ ! -x "${paths[0]:-}" ]; then
+    echo "cargo did not report exactly one executable for $target" >&2
+    exit 1
+  fi
+  printf '%s\n' "${paths[0]}"
+}
+
+benchmark_binary="$(artifact_path bigname-benchmark-gate)"
+api_binary="$(artifact_path bigname-api)"
 if [ "$profile" = "release" ]; then
   if [ "$(git rev-parse HEAD)" != "$source_head" ] || \
      [ -n "$(git status --porcelain=v1 --untracked-files=normal)" ]; then
@@ -33,4 +64,5 @@ if [ "$profile" = "release" ]; then
 fi
 exec env BIGNAME_BENCHMARK_BUILT_HEAD="$source_head" \
   BIGNAME_BENCHMARK_CARGO_PROFILE="$profile" \
-  "target/$target_dir/bigname-benchmark-gate" "$@"
+  BIGNAME_BENCHMARK_API_BINARY="$api_binary" \
+  "$benchmark_binary" "$@"

@@ -3,7 +3,7 @@ use sqlx::PgPool;
 
 use crate::budgets::GateBudgets;
 
-const PARENT_CORPUS_SQL: &str = "SELECT DISTINCT surface.namespace, surface.raw_name FROM children_current child JOIN name_surfaces surface ON surface.logical_name_id = child.parent_logical_name_id WHERE surface.raw_name <> '' ORDER BY surface.namespace, surface.raw_name LIMIT $1";
+const PARENT_CORPUS_SQL: &str = "SELECT DISTINCT surface.namespace, surface.raw_name FROM children_current child JOIN name_current surface ON surface.logical_name_id = child.parent_logical_name_id WHERE surface.support_status = 'supported' AND surface.raw_name <> '' ORDER BY surface.namespace, surface.raw_name LIMIT $1";
 
 #[derive(Clone, Debug)]
 pub(super) struct Corpus {
@@ -154,12 +154,12 @@ fn table_scale_failures(
     let mut failures = Vec::new();
     if name_rows < min_name_rows {
         failures.push(format!(
-            "name_current has {name_rows} rows; release profile requires {min_name_rows}"
+            "name_current has {name_rows} supported rows; release profile requires {min_name_rows}"
         ));
     }
     if address_rows < min_address_rows {
         failures.push(format!(
-                "address_names_current has {address_rows} rows; release profile requires {min_address_rows}"
+                "address_names_current has {address_rows} supported rows; release profile requires {min_address_rows}"
             ));
     }
     failures
@@ -168,14 +168,18 @@ fn table_scale_failures(
 async fn table_count(pool: &PgPool, table: &str) -> Result<u64> {
     let count: i64 = match table {
         "name_current" => {
-            sqlx::query_scalar("SELECT count(*) FROM name_current")
-                .fetch_one(pool)
-                .await
+            sqlx::query_scalar(
+                "SELECT count(*) FROM name_current WHERE support_status = 'supported'",
+            )
+            .fetch_one(pool)
+            .await
         }
         "address_names_current" => {
-            sqlx::query_scalar("SELECT count(*) FROM address_names_current")
-                .fetch_one(pool)
-                .await
+            sqlx::query_scalar(
+                "SELECT count(*) FROM address_names_current WHERE support_status = 'supported'",
+            )
+            .fetch_one(pool)
+            .await
         }
         _ => unreachable!("benchmark table names are fixed"),
     }
@@ -186,6 +190,7 @@ async fn table_count(pool: &PgPool, table: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 
     #[test]
     fn production_scale_rejects_staging_sized_tables() {
@@ -196,5 +201,50 @@ mod tests {
     #[test]
     fn subname_parent_corpus_excludes_the_empty_root() {
         assert!(PARENT_CORPUS_SQL.contains("surface.raw_name <> ''"));
+        assert!(PARENT_CORPUS_SQL.contains("surface.support_status = 'supported'"));
+    }
+
+    #[tokio::test]
+    async fn unsupported_rows_fail_the_supported_scale_preflight() {
+        let database = TestDatabase::create(TestDatabaseConfig::new(
+            "benchmark_supported_scale_preflight",
+        ))
+        .await
+        .unwrap();
+        sqlx::query("CREATE TABLE name_current (support_status text NOT NULL)")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE address_names_current (support_status text NOT NULL)")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        for table in ["name_current", "address_names_current"] {
+            sqlx::query(&format!(
+                "INSERT INTO {table} SELECT 'unsupported' FROM generate_series(1, 8)"
+            ))
+            .execute(database.pool())
+            .await
+            .unwrap();
+        }
+
+        let scale = load_table_scale(database.pool()).await.unwrap();
+        let failures = table_scale_failures(
+            scale.name_current_rows,
+            scale.address_names_current_rows,
+            8,
+            8,
+        );
+
+        assert_eq!(scale.name_current_rows, 0);
+        assert_eq!(scale.address_names_current_rows, 0);
+        assert_eq!(
+            failures,
+            [
+                "name_current has 0 supported rows; release profile requires 8",
+                "address_names_current has 0 supported rows; release profile requires 8",
+            ]
+        );
+        database.cleanup().await.unwrap();
     }
 }
