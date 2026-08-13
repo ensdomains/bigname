@@ -252,6 +252,68 @@ async fn sepolia_provider_trusted_verify_reports_quick_synced_without_reference_
 }
 
 #[tokio::test]
+async fn sepolia_provider_trusted_verify_finishes_before_live_when_serial_flag_is_omitted()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_sepolia_forced_serial").await?;
+    seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
+    seed_ingest_cursor(scratch.pool(), SEPOLIA, "drpc-intake", 8).await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, 8).await?;
+    let verify_gate = VerificationGate::default();
+    let live_entered = Arc::new(Notify::new());
+    let phases = PhaseSet::new([
+        Arc::new(UnexpectedPhase::new(PhaseName::Ingest)) as Arc<dyn Phase>,
+        Arc::new(UnexpectedPhase::new(PhaseName::Interpret)),
+        Arc::new(UnexpectedPhase::new(PhaseName::Project)),
+        Arc::new(GatedQuickSyncVerifyPhase {
+            gate: verify_gate.clone(),
+        }),
+        Arc::new(SignalingLivePhase {
+            entered: Arc::clone(&live_entered),
+        }),
+    ])?;
+    let runner = Arc::new(PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-verify-sepolia-forced-serial",
+        test_timing(),
+    )?);
+    let mut chain = ChainConfig::new(
+        SEPOLIA,
+        vec![SourceConfig::new(
+            SEPOLIA,
+            "drpc-intake",
+            "drpc",
+            SeedBasis::EthereumHead,
+            0,
+            "https://drpc.invalid",
+        )?],
+        false,
+    )?;
+    chain.verify_before_live = false;
+
+    let task = {
+        let runner = Arc::clone(&runner);
+        tokio::spawn(async move { runner.run_chain(&chain, CancellationToken::new()).await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), verify_gate.entered.notified()).await?;
+    let live_started_before_verify_completed =
+        tokio::time::timeout(Duration::from_millis(250), live_entered.notified())
+            .await
+            .is_ok();
+    verify_gate.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), task).await???;
+
+    drop(runner);
+    scratch.cleanup().await?;
+    assert!(
+        !live_started_before_verify_completed,
+        "Live started while provider-trusted Verify was still running"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn completed_sepolia_verify_revalidates_source_binding_at_completion_extent() -> Result<()> {
     let scratch = ScratchDatabase::create("production_verify_sepolia_restart").await?;
     seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
@@ -609,11 +671,11 @@ async fn progressed_ingest_cursor_rejects_source_kind_change_before_verify() -> 
     )?;
     let stage_a_error = stage_a_runner
         .run_chain(
-            &sepolia_chain_with_kind("intake", "rpc")?,
+            &sepolia_chain_with_kind("intake", "drpc")?,
             CancellationToken::new(),
         )
         .await
-        .expect_err("the fixture must stop after persisting the rpc prefix");
+        .expect_err("the fixture must stop after persisting the dRPC prefix");
     assert_eq!(stage_a_error.kind(), ErrorKind::DataIntegrity);
     assert_eq!(stage_a_live_calls.load(Ordering::SeqCst), 0);
     drop(stage_a_runner);
@@ -623,7 +685,7 @@ async fn progressed_ingest_cursor_rejects_source_kind_change_before_verify() -> 
     assert_eq!(
         before,
         (
-            "rpc".to_owned(),
+            "drpc".to_owned(),
             "ethereum_head".to_owned(),
             0,
             5,
@@ -660,7 +722,7 @@ async fn progressed_ingest_cursor_rejects_source_kind_change_before_verify() -> 
     )?;
     let result = stage_b_runner
         .run_chain(
-            &sepolia_chain_with_kind("intake", "drpc")?,
+            &sepolia_chain_with_kind("intake", "rpc")?,
             CancellationToken::new(),
         )
         .await;
@@ -1794,6 +1856,51 @@ impl Phase for CountingLivePhase {
     fn run_batch(&self, _context: PhaseContext) -> PhaseFuture<'_> {
         Box::pin(async move {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(PhaseBatchOutcome::Complete(PhaseProgress::default()))
+        })
+    }
+}
+
+struct GatedQuickSyncVerifyPhase {
+    gate: VerificationGate,
+}
+
+impl Phase for GatedQuickSyncVerifyPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Verify
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            self.gate.entered.notify_one();
+            self.gate.release.notified().await;
+            let marker = context
+                .available_heads
+                .as_ref()
+                .and_then(|heads| heads.finalized.clone())
+                .ok_or_else(|| RunnerError::data_integrity("verify fixture has no finality"))?;
+            Ok(PhaseBatchOutcome::Complete(PhaseProgress {
+                current: Some(marker.clone()),
+                target: Some(marker),
+                verification_level: Some(VerificationLevel::QuickSynced),
+                ..PhaseProgress::default()
+            }))
+        })
+    }
+}
+
+struct SignalingLivePhase {
+    entered: Arc<Notify>,
+}
+
+impl Phase for SignalingLivePhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Live
+    }
+
+    fn run_batch(&self, _context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            self.entered.notify_one();
             Ok(PhaseBatchOutcome::Complete(PhaseProgress::default()))
         })
     }

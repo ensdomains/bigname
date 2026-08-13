@@ -27,6 +27,15 @@ pub(crate) async fn validate_existing_kinds(
     Ok(())
 }
 
+pub(crate) async fn validate_existing(pool: &PgPool, sources: &[SourceConfig]) -> RunnerResult<()> {
+    for source in sources {
+        if let Some(stored) = load(pool, source).await? {
+            validate(source, stored)?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn ensure(pool: &PgPool, source: &SourceConfig) -> RunnerResult<()> {
     let stored = initialize(pool, source).await?;
     validate(source, stored)

@@ -264,44 +264,44 @@ async fn source_kind_change_after_first_batch_crash_is_rejected_at_phase_entry()
     let scratch = ScratchDatabase::create("production_ingest_crash_kind_change").await?;
     seed_watch_set(scratch.pool(), SEPOLIA).await?;
 
-    let (rpc_endpoint, rpc_server, rpc_requests) = spawn_crash_window_rpc(false).await?;
+    let (drpc_endpoint, drpc_server, drpc_requests) = spawn_crash_window_rpc(false).await?;
     let first_live_calls = Arc::new(AtomicUsize::new(0));
     let first_runner = crash_window_runner(&scratch, Arc::clone(&first_live_calls))?;
     let first_error = first_runner
-        .run_chain(
-            &sepolia_ingest_chain("rpc", &rpc_endpoint)?,
-            CancellationToken::new(),
-        )
-        .await
-        .expect_err("the fixture must stop after the raw-fact commit");
-    assert_eq!(first_error.kind(), ErrorKind::DataIntegrity);
-    assert!(rpc_requests.load(Ordering::SeqCst) > 0);
-    assert_eq!(first_live_calls.load(Ordering::SeqCst), 0);
-    drop(first_runner);
-    rpc_server.abort();
-
-    assert_eq!(stored_log_indexes(scratch.pool()).await?, vec![0, 1]);
-    let identity_after_crash = ingest_identity(scratch.pool()).await?;
-
-    let (drpc_endpoint, drpc_server, drpc_requests) = spawn_crash_window_rpc(true).await?;
-    let restarted_live_calls = Arc::new(AtomicUsize::new(0));
-    let restarted = complete_ingest_runner(&scratch, Arc::clone(&restarted_live_calls)).await?;
-    let error = restarted
         .run_chain(
             &sepolia_ingest_chain("drpc", &drpc_endpoint)?,
             CancellationToken::new(),
         )
         .await
-        .expect_err("a persisted rpc source identity must reject an in-place drpc relabel");
+        .expect_err("the fixture must stop after the raw-fact commit");
+    assert_eq!(first_error.kind(), ErrorKind::DataIntegrity);
+    assert!(drpc_requests.load(Ordering::SeqCst) > 0);
+    assert_eq!(first_live_calls.load(Ordering::SeqCst), 0);
+    drop(first_runner);
+    drpc_server.abort();
+
+    assert_eq!(stored_log_indexes(scratch.pool()).await?, vec![0, 1]);
+    let identity_after_crash = ingest_identity(scratch.pool()).await?;
+
+    let (rpc_endpoint, rpc_server, rpc_requests) = spawn_crash_window_rpc(true).await?;
+    let restarted_live_calls = Arc::new(AtomicUsize::new(0));
+    let restarted = complete_ingest_runner(&scratch, Arc::clone(&restarted_live_calls)).await?;
+    let error = restarted
+        .run_chain(
+            &sepolia_ingest_chain("rpc", &rpc_endpoint)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a persisted dRPC source identity must reject an in-place RPC relabel");
     assert_eq!(error.kind(), ErrorKind::DataIntegrity);
     assert!(error.to_string().contains("source kind"), "{error}");
     assert!(error.to_string().contains("explicit reset"), "{error}");
-    assert_eq!(drpc_requests.load(Ordering::SeqCst), 0);
+    assert_eq!(rpc_requests.load(Ordering::SeqCst), 0);
     assert_eq!(restarted_live_calls.load(Ordering::SeqCst), 0);
     assert_eq!(
         identity_after_crash,
         Some((
-            "rpc".to_owned(),
+            "drpc".to_owned(),
             "ethereum_head".to_owned(),
             0,
             0,
@@ -330,37 +330,37 @@ async fn source_kind_change_after_first_batch_crash_is_rejected_at_phase_entry()
     assert_eq!(stored_log_indexes(scratch.pool()).await?, vec![0, 1]);
 
     drop(restarted);
-    drpc_server.abort();
+    rpc_server.abort();
     scratch.cleanup().await
 }
 
 #[tokio::test]
-async fn source_key_and_kind_change_after_first_batch_crash_is_rejected_at_phase_entry()
--> Result<()> {
+async fn source_key_change_after_first_batch_crash_is_rejected_at_phase_entry() -> Result<()> {
     let scratch = ScratchDatabase::create("production_ingest_crash_source_replacement").await?;
     seed_watch_set(scratch.pool(), SEPOLIA).await?;
 
-    let (rpc_endpoint, rpc_server, rpc_requests) = spawn_crash_window_rpc(false).await?;
+    let (drpc_endpoint, drpc_server, drpc_requests) = spawn_crash_window_rpc(false).await?;
     let first_runner = crash_window_runner(&scratch, Arc::new(AtomicUsize::new(0)))?;
     first_runner
         .run_chain(
             &sepolia_ingest_chain_with(
                 "original",
-                "rpc",
+                "drpc",
                 SeedBasis::EthereumHead,
                 0,
-                &rpc_endpoint,
+                &drpc_endpoint,
             )?,
             CancellationToken::new(),
         )
         .await
         .expect_err("the fixture must stop after the raw-fact commit");
-    assert!(rpc_requests.load(Ordering::SeqCst) > 0);
+    assert!(drpc_requests.load(Ordering::SeqCst) > 0);
     drop(first_runner);
-    rpc_server.abort();
+    drpc_server.abort();
     assert_eq!(stored_log_indexes(scratch.pool()).await?, vec![0, 1]);
 
-    let (drpc_endpoint, drpc_server, drpc_requests) = spawn_crash_window_rpc(true).await?;
+    let (replacement_endpoint, replacement_server, replacement_requests) =
+        spawn_crash_window_rpc(true).await?;
     let live_calls = Arc::new(AtomicUsize::new(0));
     let restarted = complete_ingest_runner(&scratch, Arc::clone(&live_calls)).await?;
     let error = restarted
@@ -370,7 +370,7 @@ async fn source_key_and_kind_change_after_first_batch_crash_is_rejected_at_phase
                 "drpc",
                 SeedBasis::EthereumHead,
                 0,
-                &drpc_endpoint,
+                &replacement_endpoint,
             )?,
             CancellationToken::new(),
         )
@@ -378,7 +378,7 @@ async fn source_key_and_kind_change_after_first_batch_crash_is_rejected_at_phase
         .expect_err("retained facts cannot be assigned to a replacement source identity");
     assert_eq!(error.kind(), ErrorKind::DataIntegrity);
     assert!(error.to_string().contains("explicit reset"), "{error}");
-    assert_eq!(drpc_requests.load(Ordering::SeqCst), 0);
+    assert_eq!(replacement_requests.load(Ordering::SeqCst), 0);
     assert_eq!(live_calls.load(Ordering::SeqCst), 0);
     let identities: Vec<(String, String, Option<i64>)> = sqlx::query_as(
         "SELECT source_key, source_kind, last_processed_block_number
@@ -389,12 +389,12 @@ async fn source_key_and_kind_change_after_first_batch_crash_is_rejected_at_phase
     .await?;
     assert_eq!(
         identities,
-        vec![("original".to_owned(), "rpc".to_owned(), None)]
+        vec![("original".to_owned(), "drpc".to_owned(), None)]
     );
     assert_eq!(stored_log_indexes(scratch.pool()).await?, vec![0, 1]);
 
     drop(restarted);
-    drpc_server.abort();
+    replacement_server.abort();
     scratch.cleanup().await
 }
 
@@ -655,6 +655,40 @@ async fn fresh_sources_persist_any_kind_before_ingest_runs() -> Result<()> {
         drop(runner);
         scratch.cleanup().await?;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn fresh_sepolia_rejects_invalid_intake_shape_before_raw_facts_are_written() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_ingest_fresh_sepolia_rpc").await?;
+    seed_watch_set(scratch.pool(), SEPOLIA).await?;
+    let (rpc_endpoint, rpc_server, rpc_requests) = spawn_crash_window_rpc(false).await?;
+    let runner = crash_window_runner(&scratch, Arc::new(AtomicUsize::new(0)))?;
+
+    let result = runner
+        .run_chain(
+            &sepolia_ingest_chain("rpc", &rpc_endpoint)?,
+            CancellationToken::new(),
+        )
+        .await;
+    let raw_log_indexes = stored_log_indexes(scratch.pool()).await?;
+    let observed_rpc_requests = rpc_requests.load(Ordering::SeqCst);
+
+    drop(runner);
+    rpc_server.abort();
+    scratch.cleanup().await?;
+    assert!(
+        raw_log_indexes.is_empty(),
+        "invalid Sepolia intake persisted raw logs: {raw_log_indexes:?}"
+    );
+    let error = result.expect_err("invalid Sepolia intake must fail before Ingest");
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert!(
+        error
+            .to_string()
+            .contains("requires one dRPC intake source")
+    );
+    assert_eq!(observed_rpc_requests, 0);
     Ok(())
 }
 

@@ -407,6 +407,23 @@ fn verification_plan(chain_id: &str, sources: &[SourceConfig]) -> RunnerResult<V
     select_source(chain_id, sources).map(VerificationPlan::Compared)
 }
 
+pub(crate) fn provider_trusted_verify_required(
+    chain_id: &str,
+    sources: &[SourceConfig],
+) -> RunnerResult<bool> {
+    if !provider_trusted_verify_chain(chain_id) {
+        return Ok(false);
+    }
+    Ok(matches!(
+        verification_plan(chain_id, sources)?,
+        VerificationPlan::ProviderTrusted { .. }
+    ))
+}
+
+pub(crate) fn provider_trusted_verify_chain(chain_id: &str) -> bool {
+    chain_id == "ethereum-sepolia"
+}
+
 fn validate_sepolia_intake_source(sources: &[SourceConfig]) -> RunnerResult<()> {
     let valid = sources.len() == 1
         && normalized_source_kind(&sources[0].source_kind) == "drpc"

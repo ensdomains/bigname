@@ -25,6 +25,15 @@ impl PhaseRunner {
                     .validate_existing_ingest_source_kinds(&chain.sources)
                     .await?;
             } else {
+                if crate::verify_phase::provider_trusted_verify_chain(&chain.chain_id) {
+                    self.store
+                        .validate_existing_ingest_sources(&chain.sources)
+                        .await?;
+                    crate::verify_phase::provider_trusted_verify_required(
+                        &chain.chain_id,
+                        &chain.sources,
+                    )?;
+                }
                 self.store.ensure_ingest_sources(&chain.sources).await?;
             }
         }

@@ -131,6 +131,8 @@ pub struct IndexingStatusChainRow {
     pub latest_projected_block: Option<i64>,
     pub latest_projected_timestamp: Option<sqlx::types::time::OffsetDateTime>,
     pub project_phase_status: Option<String>,
+    pub verify_phase_status: Option<String>,
+    pub provider_trusted_verification_required: bool,
     pub project_generation_current: bool,
     pub project_redo_in_progress: bool,
     pub phase_runner_heartbeat_age_seconds: Option<i64>,

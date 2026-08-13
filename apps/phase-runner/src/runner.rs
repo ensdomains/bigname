@@ -141,7 +141,12 @@ impl PhaseRunner {
                 .await?;
         }
 
-        if chain.verify_before_live {
+        let verify_before_live = chain.verify_before_live
+            || crate::verify_phase::provider_trusted_verify_required(
+                &chain.chain_id,
+                &chain.sources,
+            )?;
+        if verify_before_live {
             self.phases.get(PhaseName::Verify).preflight(
                 &chain.chain_id,
                 &chain.sources,

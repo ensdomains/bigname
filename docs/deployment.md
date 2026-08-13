@@ -30,7 +30,8 @@ persist ingest-through-project output and continuously follow provider heads,
 including reorg-driven downstream redo and canonical-head hydration. Its
 read-only verification phase compares Base's Coinbase-loaded range with dRPC
 through the `48,428,000` ingest seam and Ethereum Mainnet with local reth.
-Ethereum Sepolia instead records the provider-trusted durable ingested extent
+Ethereum Sepolia instead records the
+[provider-trusted](glossary.md#verification-level) durable ingested extent
 through the finalized head. V2, GraphQL, and operational paths consume its
 phase projections and lookup output. Apply append-only SQLx schema-migrations
 through deployment automation; there is no application schema-migration command
@@ -170,7 +171,11 @@ validates the durable ingested extent through its finalized marker and records
 configuration and covers the finalized target. That binding and coverage are
 checked when verification completes, and the returned final block-number/hash
 marker must equal the frozen target before completion is recorded or Live can
-run. On every runner start, Verify checks the current configuration and cursor
+run. The runner validates this exact Sepolia source shape before Ingest creates
+the source cursor or contacts the provider. Because that shape selects the
+provider-trusted verification path, the runner always completes Verify before
+starting Live even if Sepolia is omitted from `verify-before-live`. On every
+runner start, Verify checks the current configuration and cursor
 against the completion-time target without changing the recorded
 `quick_synced` extent as Live finality moves. Separating
 intake and verification source roles, then upgrading Sepolia to `cross_checked`, is deferred to

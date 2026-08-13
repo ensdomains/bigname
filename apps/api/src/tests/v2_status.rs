@@ -295,6 +295,112 @@ async fn v2_status_maps_phase_lifecycle_and_heartbeat_to_readiness() -> Result<(
 }
 
 #[tokio::test]
+async fn v2_status_keeps_sepolia_unready_until_provider_trusted_verify_completes() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    sqlx::raw_sql(
+        r#"
+        INSERT INTO bigname_phase.chain_lineage (
+            chain_id, block_hash, block_number, block_timestamp,
+            canonicality_state
+        ) VALUES (
+            'ethereum-sepolia', '0xsepolia-published', 120,
+            '2026-08-06T00:00:20Z', 'finalized'
+        );
+        INSERT INTO chain_heads (
+            chain_id, latest_block_hash, latest_block_number,
+            safe_block_hash, safe_block_number,
+            finalized_block_hash, finalized_block_number
+        ) VALUES (
+            'ethereum-sepolia', '0xsepolia-published', 120,
+            '0xsepolia-published', 120, '0xsepolia-published', 120
+        );
+        "#,
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO chain_phase_state (
+            chain_id, phase_name, phase_status, current_block_number,
+            current_block_hash, target_block_number, target_block_hash,
+            input_content_hash, started_at, finished_at
+        ) VALUES (
+            'ethereum-sepolia', 'project', 'completed', 120,
+            '0xsepolia-published', 120, '0xsepolia-published', $1,
+            now() - interval '2 seconds', now() - interval '1 second'
+        )
+        "#,
+    )
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::raw_sql(
+        r#"
+        INSERT INTO chain_phase_state (
+            chain_id, phase_name, phase_status, started_at
+        ) VALUES (
+            'ethereum-sepolia', 'verify', 'running', now() - interval '1 second'
+        );
+        INSERT INTO service_heartbeats (
+            service_name, instance_id, chain_id, phase_name,
+            started_at, heartbeat_at
+        ) VALUES (
+            'phase-runner', 'sepolia-status-test', 'ethereum-sepolia', 'verify',
+            now() - interval '1 second', now()
+        )
+        "#,
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let chain_rpc_urls = bigname_lookup::ChainRpcUrls::from_entries(&[
+        "ethereum-sepolia=http://rpc.test".to_owned(),
+    ])?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
+    state
+        .status_freshness
+        .seed_success(
+            "ethereum-sepolia",
+            120,
+            sqlx::types::time::OffsetDateTime::now_utc(),
+        )
+        .await;
+
+    let while_verify_runs = sepolia_status_value(state.clone()).await?;
+    sqlx::query(
+        r#"
+        UPDATE chain_phase_state
+        SET phase_status = 'failed', last_error = 'verification failed',
+            finished_at = now()
+        WHERE chain_id = 'ethereum-sepolia' AND phase_name = 'verify'
+        "#,
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let after_verify_fails = sepolia_status_value(state.clone()).await?;
+    sqlx::query(
+        r#"
+        UPDATE chain_phase_state
+        SET phase_status = 'completed', verification_level = 'quick_synced',
+            current_block_number = 120, current_block_hash = '0xsepolia-published',
+            target_block_number = 120, target_block_hash = '0xsepolia-published',
+            last_error = NULL, finished_at = now()
+        WHERE chain_id = 'ethereum-sepolia' AND phase_name = 'verify'
+        "#,
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let after_verify_completes = sepolia_status_value(state).await?;
+
+    database.cleanup().await?;
+    assert_eq!(while_verify_runs, json!("degraded"));
+    assert_eq!(after_verify_fails, json!("stale"));
+    assert_eq!(after_verify_completes, json!("ready"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn startup_and_v2_status_tolerate_an_absent_phase_schema() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     sqlx::query("DROP SCHEMA bigname_phase CASCADE")
@@ -344,4 +450,13 @@ async fn status_value(state: AppState) -> Result<Value> {
     assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
     Ok(payload["data"]["chains"]["1"]["status"].clone())
+}
+
+async fn sepolia_status_value(state: AppState) -> Result<Value> {
+    let response = app_router(state)
+        .oneshot(Request::builder().uri("/v2/status").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    Ok(payload["data"]["chains"]["11155111"]["status"].clone())
 }

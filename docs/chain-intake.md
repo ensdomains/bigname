@@ -79,8 +79,11 @@ path.
 
 The `verify` reader may overlap the live loop. It freezes its target at the
 finalized marker while live continues toward the latest head. A chain
-configured with `verify-before-live` instead completes that finite scan before
-entering live follow. A mismatch is non-retryable and stops only that chain.
+configured with `verify-before-live` completes that finite scan before entering
+live follow. Sepolia's [provider-trusted verification
+level](glossary.md#verification-level) always takes this serial path even when
+the chain is omitted from that setting. A mismatch is non-retryable and stops
+only that chain.
 
 Manifest synchronization uses the schema-v2 repository and checks the selected
 [deployment profile](glossary.md#deployment-profile) fingerprint against the
@@ -124,8 +127,10 @@ repair](deployment.md#verification-mismatch-repair), not an ordinary redo.
 Production source shape is exact: `ethereum-mainnet` has one local Reth DB
 source, while `base-mainnet` has one Coinbase SQL historical source and one
 dRPC source meeting at block `48,428,000`; `ethereum-sepolia` has exactly one
-dRPC intake source with `ethereum_head` seed basis and start block zero. Live
-follow uses only the chain block provider from that
+dRPC intake source with `ethereum_head` seed basis and start block zero. The
+runner validates the Sepolia rule before Ingest creates a source cursor,
+contacts the provider, or writes raw facts. Live follow uses only the chain
+block provider from that
 already-validated set. Verification uses local reth for Ethereum Mainnet and
 dRPC as the independent reference for Base facts loaded from Coinbase. The dRPC
 source kind is capped at `cross_checked`, and its independent extent cannot pass

@@ -179,6 +179,14 @@ fn phase_readiness(
     if row.project_phase_status.as_deref() == Some("failed") {
         return StatusReadiness::Stale;
     }
+    if row.provider_trusted_verification_required {
+        match row.verify_phase_status.as_deref() {
+            Some("completed") => {}
+            Some("failed") => return StatusReadiness::Stale,
+            Some("idle" | "running" | "paused") | None => return StatusReadiness::Degraded,
+            Some(_) => return StatusReadiness::Stale,
+        }
+    }
     match row.phase_runner_heartbeat_age_seconds {
         Some(age) if age > heartbeat_max_age_seconds => return StatusReadiness::Stale,
         None => return StatusReadiness::Degraded,
@@ -482,6 +490,8 @@ mod tests {
             latest_projected_block,
             latest_projected_timestamp: latest_projected_block.map(timestamp_for_block),
             project_phase_status: Some("completed".to_owned()),
+            verify_phase_status: None,
+            provider_trusted_verification_required: false,
             project_generation_current: true,
             project_redo_in_progress: false,
             phase_runner_heartbeat_age_seconds: Some(0),
