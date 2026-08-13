@@ -39,8 +39,17 @@ linked name or resource does not create a resolver row.
 rows, again without expanding either resolver to its other names.
 Only a resolver `Upgraded` event or stale resolver classification caused by the
 active manifest set expands through resources whose current resolver pointer
-matches that resolver. Before event staging, Project expands child scope until
-no more connected topology is found. The expansion follows both current
+matches that resolver. Whenever a resolver row must be rebuilt rather than
+carried forward unchanged, Project also scopes only resources whose readable
+`PermissionChanged` history names that resolver. It repeats this resource and
+resolver expansion until no new resources enter scope. This stages both live
+and fully revoked resolver-scoped permission partitions, so incremental
+candidate selection matches a full rebuild without expanding record-only
+resolver updates through unrelated permissions. The same rebuilt resolver
+scope stages readable `ResolverChanged` history that names the resolver, even
+when an event is not linked to a projected name or resource. Before event
+staging, Project expands child scope until no more connected topology is found.
+The expansion follows both current
 `children_current` rows and activated canonical `SubregistryChanged` history
 through the target. Normalized rows with `node` and `child_node` fields define
 direct edges. Rows with a `subregistry` field join each logical parent through
@@ -138,6 +147,10 @@ coverage, and display context for one logical name. Ordinary lifecycle changes
 within the same authority anchor preserve `resource_id`; wrap, unwrap,
 re-registration, or another authority-anchor change follows the identity rules
 in [`architecture.md`](architecture.md#identity-strategy).
+Its projection provenance stores the [source family](glossary.md#source-family)
+of the event that selected the current resolver pointer. Resolver binding
+summaries use that stored event provenance rather than a prior resolver row's
+classification.
 
 ENSv1 wrapper lifecycle and fuse effects are projected from canonical wrapper
 facts. During registrar grace, the holder and lifecycle state remain visible,

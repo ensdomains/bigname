@@ -9,8 +9,9 @@ pub(super) async fn stage(
     full_rebuild: bool,
 ) -> Result<()> {
     // Resolver bindings depend on each name's current pointer, not its historical pointers.
-    // Merge untouched name_current rows with the rebuilt name slice; both expose that pointer in
-    // declared_summary, so a resolver row never needs every dependent's ResolverChanged history.
+    // Merge untouched name_current rows with the rebuilt name slice; both store the
+    // [source family](../../../../../docs/glossary.md#source-family) of the event that selected the
+    // pointer.
     sqlx::query(
         r#"
         CREATE TEMP TABLE project_resolver_binding_summary ON COMMIT DROP AS
@@ -23,14 +24,18 @@ pub(super) async fn stage(
                    current.surface_binding_id,
                    lower(current.declared_summary #>> '{resolver,address}')
                        AS resolver_address,
-                   resolver.declared_summary #>> '{classification,source_family}'
-                       AS source_family
+                   CASE
+                       WHEN current.provenance ->> 'resolver_pointer_source_family'
+                                LIKE 'ens_v2_%' THEN 'ens_v2_resolver_l1'
+                       WHEN current.provenance ->> 'resolver_pointer_source_family'
+                                LIKE 'basenames_%' THEN 'basenames_base_resolver'
+                       ELSE 'ens_v1_resolver_l1'
+                   END AS source_family
             FROM name_current current
-            LEFT JOIN resolver_current resolver
-              ON resolver.chain_id = current.declared_summary #>> '{resolver,chain_id}'
-             AND lower(resolver.resolver_address) =
-                 lower(current.declared_summary #>> '{resolver,address}')
             WHERE NOT $2
+              -- A changed Project binary requires a full rebuild before incremental work, so a
+              -- retained row from this binary always carries its pointer-event family.
+              AND current.provenance ->> 'resolver_pointer_source_family' IS NOT NULL
               AND current.declared_summary #>> '{resolver,chain_id}' = $3
               AND EXISTS (
                   SELECT 1 FROM project_scope_resolvers scope
@@ -60,37 +65,16 @@ pub(super) async fn stage(
                    staged.surface_binding_id,
                    lower(staged.declared_summary #>> '{resolver,address}')
                        AS resolver_address,
-                   COALESCE(
-                       resolver.declared_summary #>> '{classification,source_family}',
-                       pointer.source_family
-                   ) AS source_family
+                   CASE
+                       WHEN staged.provenance ->> 'resolver_pointer_source_family'
+                                LIKE 'ens_v2_%' THEN 'ens_v2_resolver_l1'
+                       WHEN staged.provenance ->> 'resolver_pointer_source_family'
+                                LIKE 'basenames_%' THEN 'basenames_base_resolver'
+                       ELSE 'ens_v1_resolver_l1'
+                   END AS source_family
             FROM project_stage_name_current staged
-            LEFT JOIN resolver_current resolver
-              ON resolver.chain_id = staged.declared_summary #>> '{resolver,chain_id}'
-             AND lower(resolver.resolver_address) =
-                 lower(staged.declared_summary #>> '{resolver,address}')
-            LEFT JOIN LATERAL (
-                SELECT CASE
-                           WHEN event.source_family LIKE 'ens_v2_%'
-                               THEN 'ens_v2_resolver_l1'
-                           WHEN event.source_family LIKE 'basenames_%'
-                               THEN 'basenames_base_resolver'
-                           ELSE 'ens_v1_resolver_l1'
-                       END AS source_family
-                FROM project_events event
-                WHERE event.logical_name_id = staged.logical_name_id
-                  AND event.event_kind = 'ResolverChanged'
-                  AND (
-                      staged.resource_id IS NULL
-                      OR event.resource_id = staged.resource_id
-                  )
-                ORDER BY event.block_number DESC NULLS LAST,
-                         event.transaction_index DESC NULLS LAST,
-                         event.log_index DESC NULLS LAST,
-                         event.normalized_event_id DESC
-                LIMIT 1
-            ) pointer ON TRUE
             WHERE staged.declared_summary #>> '{resolver,chain_id}' = $3
+              AND staged.provenance ->> 'resolver_pointer_source_family' IS NOT NULL
               AND (
                     $2 OR EXISTS (
                         SELECT 1 FROM project_scope_names name_scope

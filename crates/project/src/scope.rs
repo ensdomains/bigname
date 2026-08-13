@@ -60,8 +60,20 @@ pub(crate) async fn initialize(
     // Topology must consume that final name set before event-history staging begins.
     // Scope predicates are intentionally wider than create_events: membership means delete-and-rebuild candidacy, while project_events remains the single serving filter.
     include_topology_scope(transaction, chain_id, target.number).await?;
-    resolver::include_resource_pointers(transaction, chain_id, target.number).await?;
-    resolver::classify_unchanged(transaction, chain_id).await?;
+    loop {
+        resolver::include_resource_pointers(transaction, chain_id, target.number).await?;
+        resolver::classify_unchanged(transaction, chain_id).await?;
+        if resolver::include_permission_resources(transaction, chain_id, target.number).await? == 0
+        {
+            break;
+        }
+        // A newly scoped grantor can add bound names and pointer resolvers. Close those edges
+        // before freezing event IDs, then repeat until every rebuilt resolver has its history.
+        close_binding_scope(transaction, chain_id, target).await?;
+        include_alias_and_wildcard_scope(transaction, chain_id, target).await?;
+        close_binding_scope(transaction, chain_id, target).await?;
+        include_topology_scope(transaction, chain_id, target.number).await?;
+    }
     Ok(())
 }
 

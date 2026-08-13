@@ -197,6 +197,13 @@ async fn seed_resolvers(transaction: &mut Transaction<'_, Postgres>, chain_id: &
                        (row.provenance ->> 'upgrade_event_id')
             ) citation(event_id)
             WHERE row.chain_id = $1
+            UNION ALL
+            SELECT row.resolver_address, citation.event_id
+            FROM resolver_current row
+            CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(
+                row.provenance -> 'candidate_event_ids', '[]'::jsonb
+            )) citation(event_id)
+            WHERE row.chain_id = $1
         )
         INSERT INTO project_scope_resolvers
         SELECT DISTINCT lower(citation.resolver_address)

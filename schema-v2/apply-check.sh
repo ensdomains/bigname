@@ -127,6 +127,89 @@ done
 apply_baseline
 apply_baseline
 
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+DO $$
+DECLARE
+    invalid_indexes text;
+BEGIN
+    SELECT string_agg(required.index_name, ', ' ORDER BY required.index_name)
+    INTO invalid_indexes
+    FROM (
+        VALUES
+            (
+                'normalized_events_pointer_after_resolver_history_idx',
+                '%chain_id%lower%after_state%resolver%block_number%block_hash%INCLUDE%normalized_event_id%',
+                'ResolverChanged',
+                NULL,
+                false
+            ),
+            (
+                'normalized_events_pointer_before_resolver_history_idx',
+                '%chain_id%lower%before_state%resolver%block_number%block_hash%INCLUDE%normalized_event_id%',
+                'ResolverChanged',
+                NULL,
+                false
+            ),
+            (
+                'normalized_events_permission_after_resolver_history_idx',
+                '%chain_id%lower%after_state%scope%resolver_address%block_number%block_hash%INCLUDE%resource_id%',
+                'PermissionChanged',
+                '%after_state%scope%kind%resolver%',
+                true
+            ),
+            (
+                'normalized_events_permission_before_resolver_history_idx',
+                '%chain_id%lower%before_state%scope%resolver_address%block_number%block_hash%INCLUDE%resource_id%',
+                'PermissionChanged',
+                '%before_state%scope%kind%resolver%',
+                true
+            )
+    ) AS required(
+        index_name, definition_pattern, event_kind, scope_pattern, resource_required
+    )
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM pg_class index_relation
+        JOIN pg_namespace namespace
+          ON namespace.oid = index_relation.relnamespace
+        JOIN pg_index index_state
+          ON index_state.indexrelid = index_relation.oid
+        WHERE namespace.nspname = current_schema()
+          AND index_relation.relname = required.index_name
+          AND index_state.indisvalid
+          AND index_state.indisready
+          AND index_state.indislive
+          AND pg_get_indexdef(index_relation.oid) LIKE required.definition_pattern
+          AND pg_get_expr(index_state.indpred, index_state.indrelid, true)
+              LIKE format('%%event_kind%%%s%%', required.event_kind)
+          AND pg_get_expr(index_state.indpred, index_state.indrelid, true)
+              LIKE '%consumer_visibility%activated%'
+          AND pg_get_expr(index_state.indpred, index_state.indrelid, true)
+              LIKE '%canonicality_state%canonical%safe%finalized%'
+          AND (
+              required.scope_pattern IS NULL
+              OR pg_get_expr(index_state.indpred, index_state.indrelid, true)
+                  LIKE required.scope_pattern
+          )
+          AND (
+              NOT required.resource_required
+              OR pg_get_expr(index_state.indpred, index_state.indrelid, true)
+                  LIKE '%resource_id%IS NOT NULL%'
+          )
+    );
+
+    IF invalid_indexes IS NOT NULL THEN
+        RAISE EXCEPTION
+            'resolver history indexes do not match the baseline: %',
+            invalid_indexes;
+    END IF;
+END
+$$;
+SQL
+} | run_psql
+
 # TestDatabase installs the current baseline before SQLx applies reviewed
 # migrations. The same three files must be idempotent on that baseline-first
 # path, including the validation and metadata-swap steps.

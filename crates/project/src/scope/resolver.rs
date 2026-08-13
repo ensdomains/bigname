@@ -2,6 +2,74 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{ProjectError, Result, resolver_address::PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES};
 
+pub(super) async fn include_permission_resources(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    target_block: i64,
+) -> Result<u64> {
+    // Candidate selection reads all PermissionChanged history for a scoped resource. Scope only
+    // resources whose readable resolver-scoped history names a resolver already being rebuilt so
+    // an incremental build sees the same live and revoked family partitions as a full rebuild.
+    let result = sqlx::query(
+        "WITH matching_resources AS (
+             SELECT event.resource_id
+             FROM normalized_events event
+             JOIN chain_lineage lineage
+               ON lineage.chain_id = event.chain_id
+              AND lineage.block_hash = event.block_hash
+              AND lineage.block_number = event.block_number
+             JOIN project_scope_resolvers scope
+               ON lower(scope.resolver_address) = lower(
+                   event.after_state #>> '{scope,resolver_address}'
+               )
+             LEFT JOIN project_scope_resolver_passthrough passthrough
+               ON lower(passthrough.resolver_address) = lower(scope.resolver_address)
+             WHERE event.chain_id = $1
+               AND event.event_kind = 'PermissionChanged'
+               AND event.resource_id IS NOT NULL
+               AND event.consumer_visibility = 'activated'
+               AND event.block_number <= $2
+               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND event.after_state #>> '{scope,kind}' = 'resolver'
+               AND passthrough.resolver_address IS NULL
+             UNION
+             SELECT event.resource_id
+             FROM normalized_events event
+             JOIN chain_lineage lineage
+               ON lineage.chain_id = event.chain_id
+              AND lineage.block_hash = event.block_hash
+              AND lineage.block_number = event.block_number
+             JOIN project_scope_resolvers scope
+               ON lower(scope.resolver_address) = lower(
+                   event.before_state #>> '{scope,resolver_address}'
+               )
+             LEFT JOIN project_scope_resolver_passthrough passthrough
+               ON lower(passthrough.resolver_address) = lower(scope.resolver_address)
+             WHERE event.chain_id = $1
+               AND event.event_kind = 'PermissionChanged'
+               AND event.resource_id IS NOT NULL
+               AND event.consumer_visibility = 'activated'
+               AND event.block_number <= $2
+               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND event.before_state #>> '{scope,kind}' = 'resolver'
+               AND passthrough.resolver_address IS NULL
+         )
+         INSERT INTO project_scope_resources
+         SELECT resource_id FROM matching_resources
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(chain_id)
+    .bind(target_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database("failed to scope resolver permission resources", error)
+    })?;
+    Ok(result.rows_affected())
+}
+
 pub(super) async fn include_resource_pointers(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -113,6 +181,12 @@ pub(super) async fn classify_unchanged(
     // also needs only its pointer resolver's existing classification. In either case, republish
     // the existing resolver summary at the new target without staging unrelated history. Redo and
     // resolver-entity changes are excluded because their keys are in resolver_dependents.
+    sqlx::query("DELETE FROM project_scope_resolver_passthrough")
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            ProjectError::database("failed to reset record-only resolver scope", error)
+        })?;
     let passthrough_scope = format!(
         "INSERT INTO project_scope_resolver_passthrough
          SELECT lower(current.resolver_address)

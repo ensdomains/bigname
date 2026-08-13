@@ -250,6 +250,21 @@ async fn create_scoped_event_ids(
         SELECT event.normalized_event_id
         FROM project_scope_resolvers scope
         JOIN normalized_events event
+          ON lower(event.after_state ->> 'resolver') = lower(scope.resolver_address)
+          OR lower(event.before_state ->> 'resolver') = lower(scope.resolver_address)
+        WHERE event.chain_id = $1 AND event.block_number <= $2
+          AND event.event_kind = 'ResolverChanged'
+          AND event.consumer_visibility = 'activated'
+          AND NOT EXISTS (
+              SELECT 1 FROM project_scope_resolver_passthrough passthrough
+              WHERE lower(passthrough.resolver_address) =
+                    lower(scope.resolver_address)
+          )
+          AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+        UNION
+        SELECT event.normalized_event_id
+        FROM project_scope_resolvers scope
+        JOIN normalized_events event
           ON lower(COALESCE(
                  event.after_state ->> 'resolver',
                  event.before_state ->> 'resolver',

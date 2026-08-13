@@ -121,6 +121,38 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_resolver_upgrade_histo
         block_number DESC, normalized_event_id DESC)
     WHERE event_kind = 'Upgraded'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_pointer_after_resolver_history_idx
+    ON bigname_phase.normalized_events
+       (chain_id, lower(after_state ->> 'resolver'), block_number, block_hash)
+       INCLUDE (normalized_event_id)
+    WHERE event_kind = 'ResolverChanged'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_pointer_before_resolver_history_idx
+    ON bigname_phase.normalized_events
+       (chain_id, lower(before_state ->> 'resolver'), block_number, block_hash)
+       INCLUDE (normalized_event_id)
+    WHERE event_kind = 'ResolverChanged'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_permission_after_resolver_history_idx
+    ON bigname_phase.normalized_events
+       (chain_id, lower(after_state #>> '{scope,resolver_address}'),
+        block_number, block_hash) INCLUDE (resource_id)
+    WHERE event_kind = 'PermissionChanged'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND after_state #>> '{scope,kind}' = 'resolver'
+      AND resource_id IS NOT NULL;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_permission_before_resolver_history_idx
+    ON bigname_phase.normalized_events
+       (chain_id, lower(before_state #>> '{scope,resolver_address}'),
+        block_number, block_hash) INCLUDE (resource_id)
+    WHERE event_kind = 'PermissionChanged'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND before_state #>> '{scope,kind}' = 'resolver'
+      AND resource_id IS NOT NULL;
 CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_subregistry_registration_history_idx
     ON bigname_phase.normalized_events
        (chain_id, (after_state ->> 'registry_contract_instance_id'),
