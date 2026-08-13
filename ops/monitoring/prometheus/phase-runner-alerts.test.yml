@@ -57,31 +57,94 @@ tests:
               severity: page
               threshold_seconds: "900"
             exp_annotations:
-              threshold: "A running or capacity-paused phase has no heartbeat, or its heartbeat is older than the configured 900 seconds, for 2 minutes."
-              meaning: "The named chain phase is no longer completing work often enough to prove that it is alive."
+              threshold: "An active phase has no heartbeat, or its heartbeat is older than the configured 900 seconds, for 2 minutes."
+              meaning: "The runner is no longer refreshing database liveness for the named active phase."
 
-  - name: capacity-paused phase pages on stale heartbeat
-    interval: 15s
+  - name: capacity-paused phase pages while liveness stays fresh
+    interval: 1m
     input_series:
-      - series: 'phase_runner_phase_status{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live",status="paused"}'
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet",phase="live",status="paused"}'
         values: '1x20'
-      - series: 'phase_runner_heartbeat_age_seconds{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live"}'
-        values: '1200x20'
-      - series: 'phase_runner_heartbeat_stale_threshold_seconds{job="bigname-phase-runner",threshold_seconds="900"}'
+      - series: 'phase_runner_heartbeat_age_seconds{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet",phase="live"}'
+        values: '5x20'
+      - series: 'phase_runner_loop_heartbeat_age_seconds{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet"}'
+        values: '1x20'
+      - series: 'phase_runner_heartbeat_stale_threshold_seconds{job="bigname-phase-runner",instance="phase-runner:9465",threshold_seconds="900"}'
         values: '900x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BignamePhaseRunnerCapacityPaused
+        exp_alerts:
+          - exp_labels:
+              chain: ethereum-mainnet
+              instance: phase-runner:9465
+              job: bigname-phase-runner
+              phase: live
+              severity: page
+              status: paused
+            exp_annotations:
+              threshold: "A phase remains continuously capacity-paused for 15 minutes."
+              meaning: "Storage capacity has prevented the named chain phase from doing pipeline work."
+      - eval_time: 15m
+        alertname: BignamePhaseRunnerHeartbeatStale
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: BignamePhaseRunnerLoopStale
+        exp_alerts: []
+
+  - name: short capacity pause does not page
+    interval: 1m
+    input_series:
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet",phase="live",status="paused"}'
+        values: '1x20'
+      - series: 'phase_runner_heartbeat_age_seconds{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet",phase="live"}'
+        values: '5x20'
+      - series: 'phase_runner_loop_heartbeat_age_seconds{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet"}'
+        values: '1x20'
+      - series: 'phase_runner_heartbeat_stale_threshold_seconds{job="bigname-phase-runner",instance="phase-runner:9465",threshold_seconds="900"}'
+        values: '900x20'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: BignamePhaseRunnerCapacityPaused
+        exp_alerts: []
+
+  - name: capacity probe wedged after pausing pages on stale liveness
+    interval: 30s
+    input_series:
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet",phase="live",status="paused"}'
+        values: '1x12'
+      - series: 'phase_runner_heartbeat_age_seconds{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet",phase="live"}'
+        values: '1200x12'
+      - series: 'phase_runner_loop_heartbeat_age_seconds{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet"}'
+        values: '1200x12'
+      - series: 'phase_runner_heartbeat_stale_threshold_seconds{job="bigname-phase-runner",instance="phase-runner:9465",threshold_seconds="900"}'
+        values: '900x12'
     alert_rule_test:
       - eval_time: 2m
         alertname: BignamePhaseRunnerHeartbeatStale
         exp_alerts:
           - exp_labels:
               chain: ethereum-mainnet
+              instance: phase-runner:9465
               job: bigname-phase-runner
               phase: live
               severity: page
               threshold_seconds: "900"
             exp_annotations:
-              threshold: "A running or capacity-paused phase has no heartbeat, or its heartbeat is older than the configured 900 seconds, for 2 minutes."
-              meaning: "The named chain phase is no longer completing work often enough to prove that it is alive."
+              threshold: "An active phase has no heartbeat, or its heartbeat is older than the configured 900 seconds, for 2 minutes."
+              meaning: "The runner is no longer refreshing database liveness for the named active phase."
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerLoopStale
+        exp_alerts:
+          - exp_labels:
+              chain: ethereum-mainnet
+              instance: phase-runner:9465
+              job: bigname-phase-runner
+              severity: page
+              threshold_seconds: "900"
+            exp_annotations:
+              threshold: "The runner loop for the named chain makes no observable progress for the configured 900 seconds, plus 2 minutes."
+              meaning: "The runner is scrapeable, but its loop for the named chain is wedged between phase work opportunities."
 
   - name: running phase with no recorded heartbeat pages
     interval: 15s
@@ -103,8 +166,8 @@ tests:
               severity: page
               threshold_seconds: "900"
             exp_annotations:
-              threshold: "A running or capacity-paused phase has no heartbeat, or its heartbeat is older than the configured 900 seconds, for 2 minutes."
-              meaning: "The named chain phase is no longer completing work often enough to prove that it is alive."
+              threshold: "An active phase has no heartbeat, or its heartbeat is older than the configured 900 seconds, for 2 minutes."
+              meaning: "The runner is no longer refreshing database liveness for the named active phase."
 
   - name: two runner instances retain phase and loop staleness paging
     interval: 30s
@@ -137,8 +200,8 @@ tests:
               severity: page
               threshold_seconds: "900"
             exp_annotations:
-              threshold: "A running or capacity-paused phase has no heartbeat, or its heartbeat is older than the configured 900 seconds, for 2 minutes."
-              meaning: "The named chain phase is no longer completing work often enough to prove that it is alive."
+              threshold: "An active phase has no heartbeat, or its heartbeat is older than the configured 900 seconds, for 2 minutes."
+              meaning: "The runner is no longer refreshing database liveness for the named active phase."
           - exp_labels:
               chain: ethereum-mainnet
               instance: runner-b:9465
@@ -147,8 +210,8 @@ tests:
               severity: page
               threshold_seconds: "1800"
             exp_annotations:
-              threshold: "A running or capacity-paused phase has no heartbeat, or its heartbeat is older than the configured 1800 seconds, for 2 minutes."
-              meaning: "The named chain phase is no longer completing work often enough to prove that it is alive."
+              threshold: "An active phase has no heartbeat, or its heartbeat is older than the configured 1800 seconds, for 2 minutes."
+              meaning: "The runner is no longer refreshing database liveness for the named active phase."
       - eval_time: 2m
         alertname: BignamePhaseRunnerLoopStale
         exp_alerts:
@@ -196,8 +259,8 @@ tests:
               severity: page
               threshold_seconds: "1800"
             exp_annotations:
-              threshold: "A running or capacity-paused phase has no heartbeat, or its heartbeat is older than the configured 1800 seconds, for 2 minutes."
-              meaning: "The named chain phase is no longer completing work often enough to prove that it is alive."
+              threshold: "An active phase has no heartbeat, or its heartbeat is older than the configured 1800 seconds, for 2 minutes."
+              meaning: "The runner is no longer refreshing database liveness for the named active phase."
       - eval_time: 2m
         alertname: BignamePhaseRunnerLoopStale
         exp_alerts:
@@ -406,7 +469,23 @@ tests:
               severity: page
             exp_annotations:
               threshold: "Prometheus cannot scrape the runner for 2 minutes."
-              meaning: "The runner process or metrics listener has remained continuously unavailable; brief successful scrapes reset this alert."
+              meaning: "The runner target, process, or metrics listener has remained continuously unavailable; brief successful scrapes reset this alert."
+
+  - name: missing runner target pages
+    interval: 30s
+    input_series:
+      - series: 'up{job="another-job",instance="another-service:9090"}'
+        values: '1x6'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerDown
+        exp_alerts:
+          - exp_labels:
+              job: bigname-phase-runner
+              severity: page
+            exp_annotations:
+              threshold: "Prometheus cannot scrape the runner for 2 minutes."
+              meaning: "The runner target, process, or metrics listener has remained continuously unavailable; brief successful scrapes reset this alert."
 
   - name: phase runner container crash loop pages
     interval: 1m

@@ -10,13 +10,24 @@ groups:
           meaning: "The named chain phase stored an error; it may be retrying or may have stopped."
 
       - alert: BignamePhaseRunnerDown
-        expr: up{job="bigname-phase-runner"} == 0
+        expr: |
+          up{job="bigname-phase-runner"} == 0
+          or absent(up{job="bigname-phase-runner"})
         for: 2m
         labels:
           severity: page
         annotations:
           threshold: "Prometheus cannot scrape the runner for 2 minutes."
-          meaning: "The runner process or metrics listener has remained continuously unavailable; brief successful scrapes reset this alert."
+          meaning: "The runner target, process, or metrics listener has remained continuously unavailable; brief successful scrapes reset this alert."
+
+      - alert: BignamePhaseRunnerCapacityPaused
+        expr: phase_runner_phase_status{job="bigname-phase-runner",status="paused"} == 1
+        for: 15m
+        labels:
+          severity: page
+        annotations:
+          threshold: "A phase remains continuously capacity-paused for 15 minutes."
+          meaning: "Storage capacity has prevented the named chain phase from doing pipeline work."
 
       - alert: BignamePhaseRunnerContainerRestarting
         expr: |
@@ -102,8 +113,8 @@ groups:
         labels:
           severity: page
         annotations:
-          threshold: "A running or capacity-paused phase has no heartbeat, or its heartbeat is older than the configured {{ $labels.threshold_seconds }} seconds, for 2 minutes."
-          meaning: "The named chain phase is no longer completing work often enough to prove that it is alive."
+          threshold: "An active phase has no heartbeat, or its heartbeat is older than the configured {{ $labels.threshold_seconds }} seconds, for 2 minutes."
+          meaning: "The runner is no longer refreshing database liveness for the named active phase."
 
       - alert: BignamePhaseRunnerHeadLagHigh
         expr: |

@@ -150,6 +150,10 @@ END
 $$;
 SQL
 } | run_psql
+# Comment-only upgrades must also tolerate SQLx running before init-schema.
+sed "s/bigname_phase/$scratch_schema/g" \
+    "$ROOT/migrations/20260813120000_phase_heartbeat_liveness_comment.sql" \
+    | run_psql
 
 apply_baseline
 apply_baseline
@@ -314,6 +318,34 @@ DELETE FROM normalized_events
 WHERE event_identity = 'redo-handoff-upgrade-sentinel';
 SQL
 } | run_psql
+
+# Exercise and verify the in-place comment upgrade on an initialized schema.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "COMMENT ON COLUMN service_heartbeats.heartbeat_at IS" \
+        "    'This time records the latest completed work unit.';"
+} | run_psql
+for ignored in 1 2; do
+    sed "s/bigname_phase/$scratch_schema/g" \
+        "$ROOT/migrations/20260813120000_phase_heartbeat_liveness_comment.sql" \
+        | run_psql
+done
+heartbeat_comment_check="$({
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "SELECT CASE WHEN col_description('service_heartbeats'::regclass," \
+        "    (SELECT attnum FROM pg_attribute" \
+        "     WHERE attrelid = 'service_heartbeats'::regclass" \
+        "       AND attname = 'heartbeat_at')) =" \
+        "    'This time records runner liveness, including refreshes during storage-capacity waits.'" \
+        "THEN 'heartbeat_liveness_comment_exact'" \
+        "ELSE 'heartbeat_liveness_comment_wrong' END;"
+} | run_psql)"
+if [[ "$heartbeat_comment_check" != *heartbeat_liveness_comment_exact* ]]; then
+    printf '%s\n' "heartbeat liveness comment upgrade was not applied" >&2
+    exit 1
+fi
 
 # Exercise the initialized-schema upgrade against the preceding closed
 # vocabularies. Rewrite only the qualified schema name so the checked-in

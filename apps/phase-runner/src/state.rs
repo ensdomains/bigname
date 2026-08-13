@@ -348,25 +348,54 @@ impl PhaseStore {
         .await
     }
 
-    pub(crate) async fn complete_stopped_live(&self, chain_id: &str) -> RunnerResult<()> {
+    pub(crate) async fn active_normal_phases(&self) -> RunnerResult<Vec<(String, PhaseName)>> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT chain_id, phase_name
+             FROM chain_phase_state
+             WHERE phase_status IN ('running', 'paused')
+               AND NOT redo_in_progress
+             ORDER BY chain_id, phase_name",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| {
+            RunnerError::database("failed to load active normal phase state", error)
+        })?;
+        rows.into_iter()
+            .map(|(chain_id, phase)| Ok((chain_id, phase.parse()?)))
+            .collect()
+    }
+
+    pub(crate) async fn complete_stopped_phase(
+        &self,
+        chain_id: &str,
+        phase: PhaseName,
+    ) -> RunnerResult<bool> {
         sqlx::query(
             "UPDATE chain_phase_state
              SET phase_status = 'completed', last_error = NULL,
                  finished_at = now(), updated_at = now()
-             WHERE chain_id = $1 AND phase_name = 'live'
+             WHERE chain_id = $1 AND phase_name = $2
                AND phase_status IN ('running', 'paused')
                AND NOT redo_in_progress",
         )
         .bind(chain_id)
+        .bind(phase.as_str())
         .execute(&self.pool)
         .await
+        .map(|result| result.rows_affected() == 1)
         .map_err(|error| {
             RunnerError::database(
-                format!("failed to complete stopped live phase for chain {chain_id}"),
+                format!("failed to complete stopped phase {phase} for chain {chain_id}"),
                 error,
             )
-        })?;
-        Ok(())
+        })
+    }
+
+    pub(crate) async fn complete_stopped_live(&self, chain_id: &str) -> RunnerResult<()> {
+        self.complete_stopped_phase(chain_id, PhaseName::Live)
+            .await
+            .map(|_| ())
     }
 
     pub async fn fail_phase(

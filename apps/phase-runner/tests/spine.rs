@@ -4,7 +4,7 @@ mod support;
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -507,6 +507,7 @@ async fn capacity_breach_pauses_and_then_resumes_the_phase() -> Result<()> {
     .execute(scratch.pool())
     .await?;
     let probe = Arc::new(GatedCapacityProbe::default());
+    let loop_heartbeat = RunnerLoopHeartbeat::default();
     let capacity = CapacityGuard::new(
         CapacityConfig {
             database_max_bytes: None,
@@ -523,7 +524,8 @@ async fn capacity_breach_pauses_and_then_resumes_the_phase() -> Result<()> {
         PhaseSet::loopback(),
         capacity,
         "capacity-runner",
-    )?;
+    )?
+    .with_loop_heartbeat(loop_heartbeat.clone());
     let chain = chain("capacity-chain")?;
     let task = tokio::spawn(async move {
         runner
@@ -544,9 +546,9 @@ async fn capacity_breach_pauses_and_then_resumes_the_phase() -> Result<()> {
         "paused",
     )
     .await?;
-    let heartbeat_count: i64 = sqlx::query_scalar(
+    let initial_heartbeat: f64 = sqlx::query_scalar(
         "
-        SELECT count(*)
+        SELECT extract(epoch FROM heartbeat_at)::double precision
         FROM service_heartbeats
         WHERE chain_id = 'capacity-chain'
           AND phase_name = 'verify'
@@ -554,9 +556,29 @@ async fn capacity_breach_pauses_and_then_resumes_the_phase() -> Result<()> {
     )
     .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(heartbeat_count, 1);
+    tokio::time::sleep(Duration::from_millis(5_200)).await;
+    let refreshed_heartbeat: f64 = sqlx::query_scalar(
+        "
+        SELECT extract(epoch FROM heartbeat_at)::double precision
+        FROM service_heartbeats
+        WHERE chain_id = 'capacity-chain'
+          AND phase_name = 'verify'
+        ",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(refreshed_heartbeat > initial_heartbeat);
+    assert!(
+        loop_heartbeat
+            .age_seconds("capacity-chain")
+            .is_some_and(|age| age <= 1)
+    );
+    assert_eq!(
+        store.status("capacity-chain", PhaseName::Verify).await?,
+        PhaseStatus::Paused
+    );
 
-    probe.release.notify_one();
+    probe.released.store(true, Ordering::SeqCst);
     task.await??;
     let status: String = sqlx::query_scalar(
         "
@@ -661,6 +683,51 @@ async fn fatal_error_stops_only_its_chain_supervisor() -> Result<()> {
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(good_status, "running");
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn startup_settles_active_phase_for_unconfigured_chain() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_unconfigured_recovery").await?;
+    let removed_chain = "removed-chain";
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(removed_chain).await?;
+    sqlx::query(
+        "
+        UPDATE chain_phase_state
+        SET phase_status = 'running',
+            started_at = now(),
+            finished_at = NULL,
+            updated_at = now()
+        WHERE chain_id = $1
+          AND phase_name = 'live'
+        ",
+    )
+    .bind(removed_chain)
+    .execute(scratch.pool())
+    .await?;
+
+    let runtime = RuntimeConfig::new(
+        "unconfigured-recovery-runner",
+        vec![chain("retained-chain")?],
+        CapacityConfig::default(),
+        test_timing(),
+    )?;
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    Arc::new(runner(
+        scratch.runner(),
+        complete_phase_set(None),
+        available_capacity(),
+        "unconfigured-recovery-runner",
+    )?)
+    .run(&runtime, cancellation)
+    .await?;
+
+    assert_eq!(
+        store.status(removed_chain, PhaseName::Live).await?,
+        PhaseStatus::Completed
+    );
     scratch.cleanup().await
 }
 
@@ -2230,7 +2297,7 @@ impl CapacityProbe for AlwaysAvailable {
 struct GatedCapacityProbe {
     calls: AtomicUsize,
     breached: Notify,
-    release: Notify,
+    released: AtomicBool,
 }
 
 impl CapacityProbe for GatedCapacityProbe {
@@ -2242,15 +2309,15 @@ impl CapacityProbe for GatedCapacityProbe {
         Box::pin(async move {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 self.breached.notify_one();
-                return Ok(CapacityMeasurement {
-                    database_size_bytes: 0,
-                    free_disk_bytes: 0,
-                });
             }
-            self.release.notified().await;
+            let free_disk_bytes = if self.released.load(Ordering::SeqCst) {
+                u64::MAX
+            } else {
+                0
+            };
             Ok(CapacityMeasurement {
                 database_size_bytes: 0,
-                free_disk_bytes: u64::MAX,
+                free_disk_bytes,
             })
         })
     }

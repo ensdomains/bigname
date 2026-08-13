@@ -3,7 +3,9 @@
 This runbook adds the phase runner to an existing Prometheus and Grafana stack.
 It uses only checked-in configuration. Applying it restarts or reloads the
 operator's monitoring services and recreates the phase-runner container; it
-does not change phase state or add database writes.
+does not add database writes for metrics. Runner startup can settle active
+`running` or `paused` rows with no unfinished explicit repair for chains that
+are no longer configured, as described below.
 
 The artifacts are:
 
@@ -148,11 +150,12 @@ is `bigname-phase-runner`, so a later import updates the same dashboard.
 | Alert | Threshold | Plain-language meaning |
 | --- | --- | --- |
 | `BignamePhaseFailed` | A phase reports `failed` on one rule evaluation. | This intentionally trades pages during retryable transient backoff for guaranteed visibility of terminal errors and crash loops. Use the logs and subsequent state to distinguish them. |
-| `BignamePhaseRunnerDown` | The target remains continuously unresponsive for 2 minutes. | The runner process or metrics listener stayed unavailable. A successful scrape resets the timer, so this rule does not catch a flapping crash loop. |
+| `BignamePhaseRunnerDown` | The target reports `up=0`, or no `up` series exists for the job, continuously for 2 minutes. | The runner process, metrics listener, or Prometheus target definition stayed unavailable. A successful scrape resets the timer, so this rule does not catch a flapping crash loop. The absent-target branch has only the `job` label because no target exists to supply an `instance`. |
+| `BignamePhaseRunnerCapacityPaused` | A phase remains continuously `paused` for 15 minutes. | Storage capacity has stopped pipeline work for the named chain phase. Short capacity waits do not page, while the runner continues refreshing its liveness signals during the wait. |
 | `BignamePhaseRunnerContainerRestarting` | The runner's process-start value changes at least 3 times within 10 minutes. | The container is crash-looping, including fresh-deployment failures that happen before a phase failure can be stored. Prometheus must successfully scrape each start that it counts. |
 | `BignamePhaseRunnerHeartbeatThresholdMissing` | The configured heartbeat-threshold series is absent for 2 minutes. | The runner image and rules are incompatible, so the age-based alerts cannot be evaluated safely. |
 | `BignamePhaseRunnerLoopHeartbeatMissing` | The runner is scrapeable and exports the heartbeat threshold, but its runner-loop heartbeat series is absent for 2 minutes. | The runner image predates the loop-liveness rule, so between-phase stalls cannot be evaluated safely. |
-| `BignamePhaseRunnerHeartbeatStale` | A running or capacity-paused phase has no heartbeat, or exceeds `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS` (900 seconds by default), for 2 minutes. | A batch or capacity wait has exceeded the deployment's longest expected heartbeat interval. |
+| `BignamePhaseRunnerHeartbeatStale` | An active phase has no database liveness heartbeat, or exceeds `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS` (900 seconds by default), for 2 minutes. | The runner stopped refreshing phase liveness. Capacity waits keep this heartbeat fresh and instead page through `BignamePhaseRunnerCapacityPaused` after 15 minutes. |
 | `BignamePhaseRunnerLoopStale` | The runner loop for a configured chain crosses no phase or batch boundary for the heartbeat threshold, plus 2 minutes. | The process is scrapeable, but work for that chain may be wedged while every phase row rests. |
 | `BignamePhaseRunnerHeadLagHigh` | Live lag exceeds 30 blocks and Live is observed running at least once in every 2-minute window for 10 minutes. | The chain is persistently falling behind new blocks; brief completed-state zeroes do not reset the alert, while a failed or resting phase does not keep it active without new running samples. |
 | `BignamePhaseRunnerMetricsRefreshStale` | The database read fails, or the last successful refresh becomes older than 60 seconds, for 2 minutes. | The endpoint is reachable but is serving an old view of pipeline state. |
@@ -178,20 +181,19 @@ alerting is tracked in [issue #429](https://github.com/ensdomains/bigname/issues
 
 ## Removing a configured chain
 
-Removing a chain from the runner configuration does not rewrite its stored
-phase rows. This is intentional: if its last stored state is `running`,
-`paused`, or `failed`, the exporter continues to report that abandoned state;
-the corresponding phase heartbeat or failure alert continues paging. The
-in-process runner-loop series is emitted only for currently configured chains,
-so it does not keep a properly settled removed chain paging.
+Before removal, use the normal runner or reviewed recovery procedure to recover
+every `failed` phase to `completed` and finish every explicit repair. If either
+condition cannot be met, keep the chain configured and escalate to the
+phase-runner and storage owners for a separately reviewed decommission cleanup.
 
-Settle a chain before removing it: use the normal runner or reviewed recovery
-procedure until no phase row claims `running`, `paused`, or `failed`, failed
-phases have been recovered to `completed`, and no unfinished repair marker
-remains. If the supported lifecycle cannot reach that state, keep the chain
-configured and escalate to the phase-runner and storage owners for a separately
-reviewed decommission cleanup. Do not update statuses, clear repair markers, or
-delete rows merely to silence an alert.
+Then stop the runner, remove the chain from configuration, and restart it. At
+startup, the runner acquires the same per-phase lock used for normal recovery
+and changes any `running` or `paused` row with no unfinished explicit repair for
+an unconfigured chain to `completed`; it logs the chain and phase it settled and
+never starts work for that chain. Failed rows and unfinished repair markers are
+deliberately not rewritten, which is why they must be resolved before removal.
+Do not update statuses, clear repair markers, or delete rows merely to silence
+an alert.
 
 ## First-response checks
 

@@ -43,4 +43,4 @@ COMMENT ON COLUMN service_heartbeats.phase_name IS
 COMMENT ON COLUMN service_heartbeats.started_at IS
     'This time records the phase start.';
 COMMENT ON COLUMN service_heartbeats.heartbeat_at IS
-    'This time records the latest completed work unit.';
+    'This time records runner liveness, including refreshes during storage-capacity waits.';
