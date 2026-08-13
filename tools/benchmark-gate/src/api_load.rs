@@ -18,7 +18,7 @@ mod corpus;
 mod preflight;
 mod workload;
 use corpus::{Corpus, TableScale, load_table_scale};
-use preflight::interpret_redo_preflight_failures;
+use preflight::{ApiBoundaryPreflight, load_interpret_redo_snapshot, recheck_api_boundary};
 use workload::{RequestSpec, get, normalized_base_url, request_variants};
 #[derive(Clone, Debug, Serialize)]
 pub struct ApiReport {
@@ -153,10 +153,17 @@ pub async fn run(
         .context("failed to build API benchmark client")?;
     let identity = load_api_target_identity(&client, &base).await?;
     let database_identity = database::database_instance_identity(pool).await?;
+    let redo_snapshot = load_interpret_redo_snapshot(pool).await?;
+    let boundary_preflight = ApiBoundaryPreflight::new(
+        &identity,
+        &redo_snapshot,
+        expected_build_sha,
+        &database_identity,
+    );
     let scale = load_table_scale(pool).await?;
     let mut preflight_failures =
         api_identity_failures(&identity, expected_build_sha, &database_identity);
-    preflight_failures.extend(interpret_redo_preflight_failures(pool).await?);
+    preflight_failures.extend(redo_snapshot.active_failures());
     preflight_failures.extend(scale.failures(budgets));
     if !preflight_failures.is_empty() {
         return Ok(preflight_failure_report(
@@ -216,16 +223,7 @@ pub async fn run(
         );
         endpoint_reports.push(report);
         let (boundary_identity, boundary_database_identity, boundary_failures) =
-            recheck_api_boundary(
-                &client,
-                &base,
-                pool,
-                &endpoint.name,
-                &identity,
-                expected_build_sha,
-                &database_identity,
-            )
-            .await;
+            recheck_api_boundary(&client, &base, pool, &endpoint.name, &boundary_preflight).await;
         failures.extend(boundary_failures);
         postflight_identity = boundary_identity;
         postflight_database_identity = boundary_database_identity;
@@ -300,29 +298,6 @@ fn api_boundary_failures(
     failures
         .map(|failure| format!("after {endpoint} endpoint: {failure}"))
         .collect()
-}
-
-async fn recheck_api_boundary(
-    client: &Client,
-    base: &reqwest::Url,
-    pool: &PgPool,
-    endpoint: &str,
-    preflight: &ApiTargetIdentity,
-    expected_build_sha: Option<&str>,
-    preflight_database_identity: &str,
-) -> (Option<ApiTargetIdentity>, Option<String>, Vec<String>) {
-    let (target, database) = tokio::join!(
-        load_api_target_identity(client, base),
-        database::database_instance_identity(pool)
-    );
-    classify_api_boundary(
-        endpoint,
-        preflight,
-        expected_build_sha,
-        preflight_database_identity,
-        target,
-        database,
-    )
 }
 
 fn classify_api_boundary(

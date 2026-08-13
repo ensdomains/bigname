@@ -269,7 +269,11 @@ ENS chain, or the Basenames `base-mainnet` serving-authority chain, when its
 `chain_phase_state.interpret.redo_in_progress` flag is set. Complete or roll
 back the Interpret redo, take a fresh copy, and rerun the gate; otherwise
 address-mode lookup can omit the affected namespace.
-The harness also checks `/healthz` and requires
+The same namespace/chain pairs, flag, and PostgreSQL row version (`xmin`) are
+rechecked after every timed endpoint window. An Interpret redo started during
+the API half therefore makes the run red at the next boundary, even if it
+completed and cleared the flag inside the endpoint window, instead of silently
+narrowing lookup requests. The harness also checks `/healthz` and requires
 the target build SHA to match the clean harness checkout's `HEAD`, and requires
 the interpreter content hash to match the harness.
 It also requires the API-reported opaque database identity to match the
@@ -285,8 +289,10 @@ serving database. Cursor seed requests cover top-level list cursors,
 per-result reverse-lookup cursors, and the resolver route's nested bound-name
 cursor.
 
-After every timed endpoint window, the harness repeats the API build, content
-hash, and running-database identity checks and rechecks the corpus connection.
+After every timed endpoint window, the harness repeats the Interpret namespace
+and chain membership, redo flag, PostgreSQL row-version, API build,
+content-hash, and running-database identity checks and rechecks the corpus
+connection.
 A build or database-identity change during the run is red even when every
 individual request succeeded. A failed boundary probe is recorded as a red,
 endpoint-named report failure rather than discarding the run's evidence. The
@@ -316,9 +322,10 @@ populated share and its checked-in floor.
 
 Per-request namespace readiness cannot be fully precomputed by the corpus SQL.
 Restricting address and primary-name seeds to active public namespaces, plus the
-Interpret-redo preflight above, closes the confirmed state that silently
-narrowed address-mode lookup. The remaining serving-side readiness asymmetry is
-tracked in [issue #449](https://github.com/ensdomains/bigname/issues/449).
+Interpret-redo preflight and endpoint-boundary checks above, closes the
+confirmed state that silently narrowed address-mode lookup. The remaining
+serving-side readiness asymmetry is tracked in
+[issue #449](https://github.com/ensdomains/bigname/issues/449).
 
 ## Decide green or red
 

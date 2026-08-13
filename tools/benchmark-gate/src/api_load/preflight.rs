@@ -1,9 +1,21 @@
+use super::{ApiTargetIdentity, classify_api_boundary, load_api_target_identity};
+use crate::database;
 use anyhow::{Context, Result};
+use reqwest::Client;
 use sqlx::PgPool;
 
-pub(super) async fn interpret_redo_preflight_failures(pool: &PgPool) -> Result<Vec<String>> {
-    let blocked: Vec<(String, String)> = sqlx::query_as(
-        "SELECT DISTINCT manifest.namespace, interpret.chain_id
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct InterpretRedoSnapshot {
+    rows: Vec<(String, String, bool, String)>,
+}
+
+pub(super) async fn load_interpret_redo_snapshot(pool: &PgPool) -> Result<InterpretRedoSnapshot> {
+    let rows = sqlx::query_as(
+        "SELECT DISTINCT
+             manifest.namespace,
+             interpret.chain_id,
+             interpret.redo_in_progress,
+             interpret.xmin::text
          FROM bigname_phase.manifest_versions manifest
          JOIN bigname_phase.chain_phase_state interpret
            ON interpret.chain_id = manifest.chain_id
@@ -16,26 +28,172 @@ pub(super) async fn interpret_redo_preflight_failures(pool: &PgPool) -> Result<V
                    AND manifest.chain_id = 'base-mainnet'
                )
            )
-           AND interpret.redo_in_progress = true
          ORDER BY manifest.namespace, interpret.chain_id",
     )
     .fetch_all(pool)
     .await
     .context("failed to inspect Interpret redo state before API benchmarking")?;
-    Ok(blocked
-        .into_iter()
-        .map(|(namespace, chain_id)| {
+    Ok(InterpretRedoSnapshot { rows })
+}
+
+#[cfg(test)]
+async fn interpret_redo_preflight_failures(pool: &PgPool) -> Result<Vec<String>> {
+    Ok(load_interpret_redo_snapshot(pool).await?.active_failures())
+}
+
+pub(super) struct ApiBoundaryPreflight<'a> {
+    target: &'a ApiTargetIdentity,
+    redo: &'a InterpretRedoSnapshot,
+    expected_build_sha: Option<&'a str>,
+    database_identity: &'a str,
+}
+
+impl<'a> ApiBoundaryPreflight<'a> {
+    pub(super) fn new(
+        target: &'a ApiTargetIdentity,
+        redo: &'a InterpretRedoSnapshot,
+        expected_build_sha: Option<&'a str>,
+        database_identity: &'a str,
+    ) -> Self {
+        Self {
+            target,
+            redo,
+            expected_build_sha,
+            database_identity,
+        }
+    }
+}
+
+impl InterpretRedoSnapshot {
+    pub(super) fn active_failures(&self) -> Vec<String> {
+        self.rows
+        .iter()
+        .filter(|(_, _, redo_in_progress, _)| *redo_in_progress)
+        .map(|(namespace, chain_id, _, _)| {
             format!(
                 "chain_phase_state.interpret.redo_in_progress=true for active public namespace {namespace:?} on chain {chain_id:?}; complete or roll back the Interpret redo, re-copy the database, and rerun the gate"
             )
         })
-        .collect())
+        .collect()
+    }
+
+    fn boundary_failures(&self, preflight: &Self) -> Vec<String> {
+        let mut failures = self.active_failures();
+        for (namespace, chain_id, _, _) in &preflight.rows {
+            let still_watched =
+                self.rows
+                    .iter()
+                    .any(|(current_namespace, current_chain_id, _, _)| {
+                        current_namespace == namespace && current_chain_id == chain_id
+                    });
+            if !still_watched {
+                failures.push(format!(
+                    "Interpret redo state for active public namespace {namespace:?} on chain {chain_id:?} is no longer watched after preflight; keep active manifests and phase state fixed, re-copy the database, and rerun the gate"
+                ));
+            }
+        }
+        for (namespace, chain_id, redo_in_progress, generation) in &self.rows {
+            let Some((_, _, _, before_generation)) =
+                preflight
+                    .rows
+                    .iter()
+                    .find(|(before_namespace, before_chain_id, _, _)| {
+                        before_namespace == namespace && before_chain_id == chain_id
+                    })
+            else {
+                failures.push(format!(
+                    "Interpret redo state for active public namespace {namespace:?} on chain {chain_id:?} is newly watched after preflight; keep active manifests and phase state fixed, re-copy the database, and rerun the gate"
+                ));
+                continue;
+            };
+            if *redo_in_progress {
+                continue;
+            }
+            if before_generation != generation {
+                failures.push(format!(
+                    "chain_phase_state.interpret row generation changed for active public namespace {namespace:?} on chain {chain_id:?}; an Interpret redo may have started or completed during the API benchmark; complete or roll back the Interpret redo, re-copy the database, and rerun the gate"
+                ));
+            }
+        }
+        failures
+    }
+}
+
+pub(super) async fn recheck_api_boundary(
+    client: &Client,
+    base: &reqwest::Url,
+    pool: &PgPool,
+    endpoint: &str,
+    preflight: &ApiBoundaryPreflight<'_>,
+) -> (Option<ApiTargetIdentity>, Option<String>, Vec<String>) {
+    let (target, database, redo) = tokio::join!(
+        load_api_target_identity(client, base),
+        database::database_instance_identity(pool),
+        load_interpret_redo_snapshot(pool),
+    );
+    let mut result = classify_api_boundary(
+        endpoint,
+        preflight.target,
+        preflight.expected_build_sha,
+        preflight.database_identity,
+        target,
+        database,
+    );
+    match redo {
+        Ok(snapshot) => result.2.extend(
+            snapshot
+                .boundary_failures(preflight.redo)
+                .into_iter()
+                .map(|failure| format!("after {endpoint} endpoint: {failure}")),
+        ),
+        Err(error) => result.2.push(format!(
+            "after {endpoint} endpoint: Interpret redo state recheck failed: {error:#}"
+        )),
+    }
+    result
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::ApiTargetIdentity;
     use super::*;
+    use crate::database;
     use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+    use reqwest::Client;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn boundary_recheck_rejects_redo_watch_membership_changes() {
+        let ens = (
+            "ens".to_owned(),
+            "ethereum-mainnet".to_owned(),
+            false,
+            "1".to_owned(),
+        );
+        let basenames = (
+            "basenames".to_owned(),
+            "base-mainnet".to_owned(),
+            false,
+            "2".to_owned(),
+        );
+        let preflight = InterpretRedoSnapshot {
+            rows: vec![ens.clone()],
+        };
+        let removed = InterpretRedoSnapshot { rows: Vec::new() };
+        let added = InterpretRedoSnapshot {
+            rows: vec![ens, basenames],
+        };
+
+        let removed_failures = removed.boundary_failures(&preflight);
+        let added_failures = added.boundary_failures(&preflight);
+
+        assert_eq!(removed_failures.len(), 1);
+        assert!(removed_failures[0].contains("namespace \"ens\""));
+        assert!(removed_failures[0].contains("no longer watched"));
+        assert_eq!(added_failures.len(), 1);
+        assert!(added_failures[0].contains("namespace \"basenames\""));
+        assert!(added_failures[0].contains("newly watched"));
+    }
 
     async fn preflight_database(name: &str, redo_in_progress: bool) -> TestDatabase {
         let database = TestDatabase::create(TestDatabaseConfig::new(name))
@@ -138,5 +296,151 @@ mod tests {
         assert_eq!(failures.len(), 1);
         assert!(failures[0].contains("namespace \"basenames\""));
         assert!(failures[0].contains("chain \"base-mainnet\""));
+    }
+
+    #[tokio::test]
+    async fn boundary_recheck_refuses_a_redo_started_after_preflight() {
+        let database = preflight_database("benchmark_api_boundary_redo", false).await;
+        let redo_snapshot = load_interpret_redo_snapshot(database.pool()).await.unwrap();
+        assert!(redo_snapshot.active_failures().is_empty());
+        let database_identity = database::database_instance_identity(database.pool())
+            .await
+            .unwrap();
+        let identity = ApiTargetIdentity {
+            build_sha: "release".to_owned(),
+            interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH.to_owned(),
+            database_identity: database_identity.clone(),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base =
+            reqwest::Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let body = serde_json::json!({
+            "identity": {
+                "build_sha": identity.build_sha,
+                "interpreter_content_hash": identity.interpreter_content_hash,
+            },
+            "database": {"identity": identity.database_identity},
+        })
+        .to_string();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        sqlx::query(
+            "UPDATE bigname_phase.chain_phase_state
+             SET redo_in_progress = true
+             WHERE chain_id = 'ethereum-mainnet'",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let boundary_preflight = ApiBoundaryPreflight::new(
+            &identity,
+            &redo_snapshot,
+            Some("release"),
+            &database_identity,
+        );
+
+        let (_, _, failures) = recheck_api_boundary(
+            &Client::new(),
+            &base,
+            database.pool(),
+            "lookup",
+            &boundary_preflight,
+        )
+        .await;
+
+        server.await.unwrap();
+        database.cleanup().await.unwrap();
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].starts_with("after lookup endpoint:"));
+        assert!(failures[0].contains("interpret.redo_in_progress=true"));
+        assert!(failures[0].contains("namespace \"ens\""));
+        assert!(failures[0].contains("complete or roll back the Interpret redo"));
+    }
+
+    #[tokio::test]
+    async fn boundary_recheck_detects_a_redo_completed_inside_the_window() {
+        let database = preflight_database("benchmark_api_transient_boundary_redo", false).await;
+        let redo_snapshot = load_interpret_redo_snapshot(database.pool()).await.unwrap();
+        let database_identity = database::database_instance_identity(database.pool())
+            .await
+            .unwrap();
+        let identity = ApiTargetIdentity {
+            build_sha: "release".to_owned(),
+            interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH.to_owned(),
+            database_identity: database_identity.clone(),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base =
+            reqwest::Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let body = serde_json::json!({
+            "identity": {
+                "build_sha": identity.build_sha,
+                "interpreter_content_hash": identity.interpreter_content_hash,
+            },
+            "database": {"identity": identity.database_identity},
+        })
+        .to_string();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        for redo_in_progress in [true, false] {
+            sqlx::query(
+                "UPDATE bigname_phase.chain_phase_state
+                 SET redo_in_progress = $1
+                 WHERE chain_id = 'ethereum-mainnet'",
+            )
+            .bind(redo_in_progress)
+            .execute(database.pool())
+            .await
+            .unwrap();
+        }
+        let boundary_preflight = ApiBoundaryPreflight::new(
+            &identity,
+            &redo_snapshot,
+            Some("release"),
+            &database_identity,
+        );
+
+        let (_, _, failures) = recheck_api_boundary(
+            &Client::new(),
+            &base,
+            database.pool(),
+            "lookup",
+            &boundary_preflight,
+        )
+        .await;
+
+        server.await.unwrap();
+        database.cleanup().await.unwrap();
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].starts_with("after lookup endpoint:"));
+        assert!(failures[0].contains("row generation changed"));
+        assert!(failures[0].contains("namespace \"ens\""));
+        assert!(failures[0].contains("complete or roll back the Interpret redo"));
     }
 }
