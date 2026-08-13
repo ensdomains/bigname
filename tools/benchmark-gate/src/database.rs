@@ -57,7 +57,7 @@ pub async fn connect_disposable_copy(
                 bigname_content_hash::INTERPRETER_CONTENT_HASH.to_owned(),
             ),
         ]);
-    preflight_disposable_copy(
+    let expected_database_instance_identity = preflight_disposable_copy(
         &options,
         expected_database_name,
         expected_marker,
@@ -70,11 +70,13 @@ pub async fn connect_disposable_copy(
         .acquire_timeout(Duration::from_secs(30))
         .after_connect(move |connection, _metadata| {
             let expected_database_name = expected_database_name.clone();
+            let expected_database_instance_identity = expected_database_instance_identity.clone();
             Box::pin(async move {
                 validate_disposable_runtime_connection(
                     connection,
                     &expected_database_name,
                     expected_marker,
+                    &expected_database_instance_identity,
                 )
                 .await
                 .map_err(|error| sqlx::Error::Protocol(error.to_string()))
@@ -99,9 +101,9 @@ async fn preflight_disposable_copy(
     expected_database_name: &str,
     expected_marker: Uuid,
     timeout: Duration,
-) -> Result<()> {
+) -> Result<String> {
     let timeout_ms = timeout.as_millis();
-    tokio::time::timeout(timeout, async {
+    let database_instance_identity = tokio::time::timeout(timeout, async {
         let mut preflight = PgConnection::connect_with(options)
             .await
             .context("failed to open the disposable-copy preflight connection")?;
@@ -111,17 +113,19 @@ async fn preflight_disposable_copy(
             expected_marker,
         )
         .await?;
+        let database_instance_identity =
+            connection_database_instance_identity(&mut preflight).await?;
         preflight
             .close()
             .await
             .context("failed to close the disposable-copy preflight connection")?;
-        Ok::<(), anyhow::Error>(())
+        Ok::<String, anyhow::Error>(database_instance_identity)
     })
     .await
     .with_context(|| {
         format!("disposable-copy preflight did not complete within {timeout_ms}ms")
     })??;
-    Ok(())
+    Ok(database_instance_identity)
 }
 
 pub async fn database_identity(pool: &PgPool) -> Result<String> {
@@ -139,22 +143,38 @@ pub async fn database_host(pool: &PgPool) -> Result<String> {
 }
 
 pub async fn database_instance_identity(pool: &PgPool) -> Result<String> {
-    let (database_oid, postmaster_started_at, server_address, server_port): (
-        String,
-        String,
-        String,
-        String,
-    ) = sqlx::query_as(DATABASE_INSTANCE_IDENTITY_SQL)
+    let identity = sqlx::query_as(DATABASE_INSTANCE_IDENTITY_SQL)
         .fetch_one(pool)
         .await
         .context("failed to identify benchmark database instance")?;
-    Ok(format!(
+    Ok(format_database_instance_identity(identity))
+}
+
+async fn connection_database_instance_identity(connection: &mut PgConnection) -> Result<String> {
+    let identity = sqlx::query_as(DATABASE_INSTANCE_IDENTITY_SQL)
+        .fetch_one(&mut *connection)
+        .await
+        .context("failed to identify disposable-copy database instance")?;
+    Ok(format_database_instance_identity(identity))
+}
+
+fn format_database_instance_identity(
+    (database_oid, postmaster_started_at, server_address, server_port): (
+        String,
+        String,
+        String,
+        String,
+    ),
+) -> String {
+    // Unix-socket connections consistently use the local-socket placeholders;
+    // the postmaster start epoch still distinguishes concurrent server instances.
+    format!(
         "keccak256:{:#x}",
         alloy_primitives::keccak256(format!(
             "{database_oid}:{postmaster_started_at}:{server_address}:{server_port}"
         ))
     )
-    .replace("keccak256:0x", "keccak256:"))
+    .replace("keccak256:0x", "keccak256:")
 }
 
 pub fn require_database_identity(actual: &str, expected: &str) -> Result<()> {
@@ -170,8 +190,12 @@ async fn validate_disposable_startup_connection(
     expected_database_name: &str,
     expected_marker: Uuid,
 ) -> Result<()> {
-    validate_disposable_runtime_connection(connection, expected_database_name, expected_marker)
-        .await?;
+    validate_disposable_connection_authorization(
+        connection,
+        expected_database_name,
+        expected_marker,
+    )
+    .await?;
     let marker_is_fresh: bool = sqlx::query_scalar(
         "SELECT EXISTS (
              SELECT 1
@@ -199,10 +223,32 @@ async fn validate_disposable_runtime_connection(
     connection: &mut PgConnection,
     expected_database_name: &str,
     expected_marker: Uuid,
+    expected_database_instance_identity: &str,
 ) -> Result<()> {
     // Marker freshness authorizes the gate start. Replacement connections keep
-    // checking the marker identity, but do not expire a legitimate long run;
-    // the indexing report separately makes a database-instance change red.
+    // checking authorization and must match the preflighted database instance,
+    // but they do not expire a legitimate long run. A mid-run restart or
+    // retarget is therefore refused before a replacement connection can query.
+    validate_disposable_connection_authorization(
+        connection,
+        expected_database_name,
+        expected_marker,
+    )
+    .await?;
+    let actual_database_instance_identity =
+        connection_database_instance_identity(connection).await?;
+    ensure!(
+        actual_database_instance_identity == expected_database_instance_identity,
+        "disposable-copy database instance identity changed from {expected_database_instance_identity:?} to {actual_database_instance_identity:?}; refusing indexing writes"
+    );
+    Ok(())
+}
+
+async fn validate_disposable_connection_authorization(
+    connection: &mut PgConnection,
+    expected_database_name: &str,
+    expected_marker: Uuid,
+) -> Result<()> {
     let database_name: String = sqlx::query_scalar("SELECT current_database()")
         .fetch_one(&mut *connection)
         .await
@@ -268,9 +314,45 @@ mod tests {
         validate_disposable_startup_connection(&mut connection, database_name, marker).await
     }
 
-    async fn validate_runtime(pool: &PgPool, database_name: &str, marker: Uuid) -> Result<()> {
+    async fn validate_runtime(
+        pool: &PgPool,
+        database_name: &str,
+        marker: Uuid,
+        expected_database_instance_identity: &str,
+    ) -> Result<()> {
         let mut connection = pool.acquire().await.unwrap();
-        validate_disposable_runtime_connection(&mut connection, database_name, marker).await
+        validate_disposable_runtime_connection(
+            &mut connection,
+            database_name,
+            marker,
+            expected_database_instance_identity,
+        )
+        .await
+    }
+
+    async fn install_disposable_marker(pool: &PgPool, marker: Uuid) {
+        sqlx::query("CREATE SCHEMA bigname_benchmark")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE bigname_benchmark.disposable_copy_marker (
+                 marker uuid PRIMARY KEY,
+                 database_name text NOT NULL,
+                 prepared_at timestamptz NOT NULL DEFAULT now()
+             )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO bigname_benchmark.disposable_copy_marker (marker, database_name)
+             VALUES ($1, current_database())",
+        )
+        .bind(marker)
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     #[test]
@@ -278,6 +360,29 @@ mod tests {
         assert!(require_database_identity("bigname-copy", "bigname-copy").is_ok());
         assert!(require_database_identity("bigname", "bigname-copy").is_err());
         assert!(require_database_identity("bigname", "").is_err());
+    }
+
+    #[test]
+    fn local_socket_identity_is_stable_for_one_running_instance() {
+        let identity = || {
+            (
+                "42".to_owned(),
+                "1234.5".to_owned(),
+                "local-socket".to_owned(),
+                "local-socket".to_owned(),
+            )
+        };
+        let first = format_database_instance_identity(identity());
+        let second = format_database_instance_identity(identity());
+        let restarted = format_database_instance_identity((
+            "42".to_owned(),
+            "1235.5".to_owned(),
+            "local-socket".to_owned(),
+            "local-socket".to_owned(),
+        ));
+
+        assert_eq!(first, second);
+        assert_ne!(first, restarted);
     }
 
     #[tokio::test]
@@ -506,8 +611,14 @@ mod tests {
         .unwrap();
 
         let result = validate_startup(database.pool(), database.database_name(), marker).await;
-        let runtime_result =
-            validate_runtime(database.pool(), database.database_name(), marker).await;
+        let database_instance_identity = database_instance_identity(database.pool()).await.unwrap();
+        let runtime_result = validate_runtime(
+            database.pool(),
+            database.database_name(),
+            marker,
+            &database_instance_identity,
+        )
+        .await;
         database.cleanup().await.unwrap();
         assert!(
             result.is_err(),
@@ -570,6 +681,85 @@ mod tests {
         pool.close().await;
         database.cleanup().await.unwrap();
         assert!(refused, "a new connection accepted a removed marker");
+    }
+
+    #[tokio::test]
+    async fn pooled_connection_to_a_second_database_instance_is_rejected() {
+        let first = TestDatabase::create(TestDatabaseConfig::new("benchmark_instance_first"))
+            .await
+            .unwrap();
+        let second = TestDatabase::create(TestDatabaseConfig::new("benchmark_instance_second"))
+            .await
+            .unwrap();
+        let marker = Uuid::new_v4();
+        install_disposable_marker(first.pool(), marker).await;
+        install_disposable_marker(second.pool(), marker).await;
+        let first_url = scratch_database_url(first.database_name());
+        let first_options = common_options(&first_url, "benchmark-instance-preflight").unwrap();
+        let first_identity = preflight_disposable_copy(
+            &first_options,
+            first.database_name(),
+            marker,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let second_identity = database_instance_identity(second.pool()).await.unwrap();
+        assert_ne!(first_identity, second_identity);
+
+        let result = validate_runtime(
+            second.pool(),
+            second.database_name(),
+            marker,
+            &first_identity,
+        )
+        .await;
+
+        first.cleanup().await.unwrap();
+        second.cleanup().await.unwrap();
+        let error = result.expect_err(
+            "a pooled connection to a different preflighted database instance must be refused",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("database instance identity changed"),
+            "instance refusal lost its named reason: {error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn all_eight_disposable_pool_connections_match_the_preflight_instance() {
+        let database = TestDatabase::create(TestDatabaseConfig::new("benchmark_instance_pool"))
+            .await
+            .unwrap();
+        let marker = Uuid::new_v4();
+        install_disposable_marker(database.pool(), marker).await;
+        let database_url = scratch_database_url(database.database_name());
+        let pool = connect_disposable_copy(
+            &database_url,
+            8,
+            Duration::from_secs(30),
+            database.database_name(),
+            marker,
+        )
+        .await
+        .unwrap();
+
+        let mut connections = Vec::with_capacity(8);
+        for _ in 0..8 {
+            let mut connection = pool.acquire().await.unwrap();
+            let database_name: String = sqlx::query_scalar("SELECT current_database()")
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap();
+            assert_eq!(database_name, database.database_name());
+            connections.push(connection);
+        }
+
+        drop(connections);
+        pool.close().await;
+        database.cleanup().await.unwrap();
     }
 
     #[tokio::test]

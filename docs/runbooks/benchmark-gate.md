@@ -201,22 +201,31 @@ connection before creating the pool. Startup refusal therefore returns its
 specific reason immediately rather than waiting for the pool deadline. It
 refuses writes before Interpret or Project on any mismatch. The connection
 carries the same interpreter content-hash setting as the phase runner, so
-ENSv1→ENSv2 migration correlation writes behave normally. Every new pooled
-connection repeats the expected-name, marker-table, UUID, and database-name
-checks before it can issue a query, so losing or retargeting a database
-connection cannot bypass the preflight. Freshness is not repeated because a
-passing production run may legitimately exceed 12 hours; the report's pre/post
-database-instance check still makes a restart, failover, or retargeted listener
-red. It does not claim to detect an in-place logical restore that preserves the
-database instance identity. A
-mid-run replacement connection that fails its marker check is safely retried
-until the pool deadline, so that failure may surface as a pool timeout rather
-than the startup check's specific message. The incremental tick runs first, the
-Interpret redo runs second, and
+ENSv1→ENSv2 migration correlation writes behave normally.
+
+The writable database URL must connect directly or through a session-affine
+proxy, meaning each open client connection remains on one PostgreSQL backend
+until it disconnects. Do not use transaction or statement pooling, or a
+failover proxy that can silently move an open client connection between
+backends; a connection-setup check cannot observe that kind of switch.
+
+Every new pooled connection repeats the expected-name, marker-table, UUID, and
+database-name checks and requires its opaque database-instance token to exactly
+match the direct preflight connection before it can issue a query. Losing or
+retargeting a database connection therefore cannot bypass the preflight.
+Freshness is not repeated because a passing production run may legitimately
+exceed 12 hours. A restart, failover, or retargeted listener changes the token,
+so a replacement connection is refused before it can query. The pool retries a
+refused replacement until its deadline, so a mid-run instance or marker
+mismatch may surface as a pool timeout rather than the startup check's specific
+message. It does not claim to detect an in-place logical restore that preserves
+the database instance identity. The incremental tick runs first, the Interpret
+redo runs second, and
 the full Project rebuild runs last so the rebuilt projections match the
 interpreted copy. The report records the opaque database identity token before
 and after those measurements; a restart, failover, or listener change during
-the indexing run is red.
+the indexing run is red, and the per-connection check also rejects a transient
+switch away and back between those two report samples.
 
 ## Run the API half
 
