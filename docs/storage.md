@@ -113,6 +113,19 @@ authorizes that transition. This preserved evidence is diagnostic state, not
 permission to publish: provider-trusted Sepolia readiness requires both Ingest
 and Verify to remain completed.
 
+At runner startup, a `running` or `paused` Interpret, Project, or Verify row
+with no explicit redo is resolved only while its advisory lock remains held.
+A saved Interpret or Project final checkpoint is recorded as `completed`; an
+earlier checkpoint is recorded as `failed` so ordinary phase execution can
+resume it. A saved Verify final checkpoint stays `failed` until current
+configuration and retained verification evidence pass the completed-Verify
+checks. A lock still held by another runner, or a lost lock connection during
+the state update, stops the new runner. The update and lock use one database
+connection. If the client cannot tell whether PostgreSQL committed the update
+before that connection failed, the next start reads the durable phase state
+again. An unlock or connection-close error after an acknowledged update is also
+reported.
+
 ### ENSv1→ENSv2 correlation visibility
 
 The slice-1 ENSv1→ENSv2 intake persists the

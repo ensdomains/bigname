@@ -128,7 +128,7 @@ async fn phase_transitions_are_legal_and_persisted() -> Result<()> {
 }
 
 #[tokio::test]
-async fn ordinary_failure_text_cannot_authorize_completed_recovery() -> Result<()> {
+async fn completed_project_cannot_enter_ingest_verify_retained_recovery() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_recovery_marker_collision").await?;
     let store = PhaseStore::new(scratch.runner().pool().clone());
     let chain_id = "recovery-marker-collision";
@@ -141,10 +141,19 @@ async fn ordinary_failure_text_cannot_authorize_completed_recovery() -> Result<(
         Some(phase_runner::INTERPRETER_CONTENT_HASH),
     )
     .await?;
+    mark_completed(
+        scratch.pool(),
+        chain_id,
+        PhaseName::Project,
+        Some(phase_runner::INTERPRETER_CONTENT_HASH),
+    )
+    .await?;
     sqlx::query(
         "UPDATE chain_phase_state
          SET phase_status = 'failed',
              last_error = 'completed phase validation failed: ordinary project failure',
+             current_block_number = 42, current_block_hash = 'project-block-42',
+             target_block_number = 42, target_block_hash = 'project-block-42',
              started_at = now(), finished_at = now(), updated_at = now()
          WHERE chain_id = $1 AND phase_name = 'project'",
     )
@@ -157,7 +166,7 @@ async fn ordinary_failure_text_cannot_authorize_completed_recovery() -> Result<(
             .start_phase(chain_id, PhaseName::Project, &RunMode::Normal)
             .await?,
         StartDisposition::Started,
-        "free-form failure text must not impersonate retained completion evidence"
+        "a completed-looking Project must not enter Ingest/Verify retained-completion recovery"
     );
     scratch.cleanup().await
 }

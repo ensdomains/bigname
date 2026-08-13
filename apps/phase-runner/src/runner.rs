@@ -131,7 +131,7 @@ impl PhaseRunner {
         cancellation: CancellationToken,
     ) -> RunnerResult<()> {
         self.store.initialize_chain(&chain.chain_id).await?;
-        self.recover_stopped_live(chain).await?;
+        self.recover_stopped_phases(chain).await?;
         self.run_spine_phase(chain, PhaseName::Ingest, cancellation.clone())
             .await?;
         self.catch_up_for_required_redo(chain, cancellation.clone())

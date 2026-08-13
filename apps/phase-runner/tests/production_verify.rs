@@ -33,6 +33,7 @@ use phase_runner::{
         BlockRange, IngestCursor, LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext,
         PhaseFuture, PhaseName, PhaseProgress, PhaseSet, SourceProgress, VerificationLevel,
     },
+    phase_lock::PhaseLock,
     runner::{PhaseRunner, RedoPhase},
     state::PhaseStore,
     verify_phase::{
@@ -377,6 +378,313 @@ async fn completed_sepolia_ingest_revalidates_source_binding_and_recovers() -> R
 
     drop(recovered);
     scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn completed_sepolia_ingest_recovery_heals_stopped_sibling_phases() -> Result<()> {
+    for (sibling, stale_status) in [
+        (PhaseName::Verify, "running"),
+        (PhaseName::Interpret, "paused"),
+    ] {
+        let scratch = ScratchDatabase::create(&format!(
+            "production_verify_ingest_recovery_stopped_{sibling}"
+        ))
+        .await?;
+        seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
+        seed_ingest_cursor(scratch.pool(), SEPOLIA, "drpc-intake", 8).await?;
+        seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, 8).await?;
+        sqlx::query(
+            "UPDATE chain_phase_state
+             SET phase_status = $3, started_at = COALESCE(started_at, now()),
+                 current_block_number = NULL, current_block_hash = NULL,
+                 target_block_number = NULL, target_block_hash = NULL,
+                 verification_level = NULL,
+                 finished_at = NULL, updated_at = now()
+             WHERE chain_id = $1 AND phase_name = $2",
+        )
+        .bind(SEPOLIA)
+        .bind(sibling.as_str())
+        .bind(stale_status)
+        .execute(scratch.pool())
+        .await?;
+
+        let invalid_live_calls = Arc::new(AtomicUsize::new(0));
+        let invalid = sepolia_verifier_runner(&scratch, Arc::clone(&invalid_live_calls)).await?;
+        let error = invalid
+            .run_chain(
+                &sepolia_chain_with_key("rotated-drpc-intake")?,
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("the invalid source must demote completed Ingest");
+        assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+        assert!(error.to_string().contains("matching cursor"), "{error}");
+        assert_eq!(invalid_live_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            PhaseStore::new(scratch.pool().clone())
+                .status(SEPOLIA, PhaseName::Ingest)
+                .await?,
+            phase_runner::state::PhaseStatus::Failed
+        );
+        drop(invalid);
+
+        let recovered_live_calls = Arc::new(AtomicUsize::new(0));
+        let recovered =
+            sepolia_verifier_runner(&scratch, Arc::clone(&recovered_live_calls)).await?;
+        recovered
+            .run_chain(
+                &sepolia_chain_with_key("drpc-intake")?,
+                CancellationToken::new(),
+            )
+            .await?;
+        assert_eq!(recovered_live_calls.load(Ordering::SeqCst), 1);
+        for phase in [PhaseName::Ingest, sibling] {
+            assert_eq!(
+                PhaseStore::new(scratch.pool().clone())
+                    .status(SEPOLIA, phase)
+                    .await?,
+                phase_runner::state::PhaseStatus::Completed
+            );
+        }
+
+        drop(recovered);
+        scratch.cleanup().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn stopped_phase_recovery_refuses_a_genuinely_held_verify_lock() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_held_stopped_phase_lock").await?;
+    seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
+    seed_ingest_cursor(scratch.pool(), SEPOLIA, "drpc-intake", 8).await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, 8).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running', started_at = now(), finished_at = NULL, updated_at = now()
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .execute(scratch.pool())
+    .await?;
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let runner = sepolia_verifier_runner(&scratch, Arc::clone(&live_calls)).await?;
+    let verify_lock =
+        PhaseLock::acquire(scratch.writer_connect_options(), SEPOLIA, PhaseName::Verify).await?;
+
+    let error = runner
+        .run_chain(
+            &sepolia_chain_with_key("drpc-intake")?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a held Verify lock must not be treated as a stopped phase");
+    assert_eq!(error.kind(), ErrorKind::LockHeld);
+    assert_eq!(live_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        PhaseStore::new(scratch.pool().clone())
+            .status(SEPOLIA, PhaseName::Verify)
+            .await?,
+        phase_runner::state::PhaseStatus::Running
+    );
+
+    verify_lock.release().await?;
+    drop(runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn stopped_phase_recovery_stops_if_its_advisory_lock_connection_is_lost() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_stopped_recovery_lock_loss").await?;
+    seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
+    seed_ingest_cursor(scratch.pool(), SEPOLIA, "drpc-intake", 8).await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, 8).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running', started_at = now(), finished_at = NULL, updated_at = now()
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .execute(scratch.pool())
+    .await?;
+
+    let mut blocked_row = scratch.pool().begin().await?;
+    sqlx::query(
+        "SELECT phase_name FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'verify' FOR UPDATE",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(&mut *blocked_row)
+    .await?;
+
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let runner = sepolia_verifier_runner(&scratch, Arc::clone(&live_calls)).await?;
+    let chain = sepolia_chain_with_key("drpc-intake")?;
+    let mut run =
+        tokio::spawn(async move { runner.run_chain(&chain, CancellationToken::new()).await });
+    let lock_pid = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let pid: Option<i32> = sqlx::query_scalar(
+                "SELECT advisory.pid
+                 FROM pg_locks advisory
+                 WHERE advisory.locktype = 'advisory'
+                   AND advisory.granted
+                   AND advisory.database = (
+                       SELECT oid FROM pg_database WHERE datname = current_database()
+                   )
+                   AND EXISTS (
+                       SELECT 1 FROM pg_stat_activity activity
+                       WHERE activity.datname = current_database()
+                         AND activity.wait_event_type = 'Lock'
+                         AND activity.query LIKE '%UPDATE chain_phase_state%'
+                   )
+                 LIMIT 1",
+            )
+            .fetch_optional(scratch.pool())
+            .await?;
+            if let Some(pid) = pid {
+                return Ok::<i32, anyhow::Error>(pid);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+        .bind(lock_pid)
+        .fetch_one(scratch.pool())
+        .await?;
+    assert!(terminated);
+
+    let stopped = tokio::time::timeout(Duration::from_millis(250), &mut run).await;
+    blocked_row.rollback().await?;
+    let joined = match stopped {
+        Ok(joined) => joined,
+        Err(_) => {
+            run.abort();
+            let _ = run.await;
+            scratch.cleanup().await?;
+            anyhow::bail!("stopped-phase recovery kept writing after its advisory lock was lost");
+        }
+    }?;
+    let error = joined.expect_err("lock loss must stop the blocked recovery update");
+    assert_eq!(error.kind(), ErrorKind::Transient);
+    assert!(
+        error
+            .to_string()
+            .contains("advisory-lock connection was lost")
+    );
+    assert_eq!(live_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        PhaseStore::new(scratch.pool().clone())
+            .status(SEPOLIA, PhaseName::Verify)
+            .await?,
+        phase_runner::state::PhaseStatus::Running
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn stopped_verify_at_its_final_checkpoint_completes_on_restart() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_stopped_at_final_checkpoint").await?;
+    seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
+    seed_ingest_cursor(scratch.pool(), SEPOLIA, "drpc-intake", 8).await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, 8).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running', verification_level = 'quick_synced',
+             current_block_number = 5, current_block_hash = $2,
+             target_block_number = 5, target_block_hash = $2,
+             started_at = now(), finished_at = NULL, updated_at = now()
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .bind(block_hash(SEPOLIA, 5))
+    .execute(scratch.pool())
+    .await?;
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let runner = sepolia_verifier_runner(&scratch, Arc::clone(&live_calls)).await?;
+
+    runner
+        .run_chain(
+            &sepolia_chain_with_key("drpc-intake")?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert_eq!(live_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        verify_state(scratch.pool()).await?,
+        ("completed".to_owned(), "quick_synced".to_owned(), 5, 5)
+    );
+
+    drop(runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn stopped_verify_checkpoint_stays_failed_until_current_config_is_revalidated() -> Result<()>
+{
+    let scratch =
+        ScratchDatabase::create("production_verify_stopped_checkpoint_revalidation").await?;
+    seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
+    seed_ingest_cursor(scratch.pool(), SEPOLIA, "drpc-intake", 8).await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, 8).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running', verification_level = 'quick_synced',
+             current_block_number = 5, current_block_hash = $2,
+             target_block_number = 5, target_block_hash = $2,
+             started_at = now(), finished_at = NULL, updated_at = now()
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .bind(block_hash(SEPOLIA, 5))
+    .execute(scratch.pool())
+    .await?;
+
+    let mut blocked_ingest = scratch.pool().begin().await?;
+    sqlx::query(
+        "SELECT phase_name FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest' FOR UPDATE",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(&mut *blocked_ingest)
+    .await?;
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let runner = sepolia_verifier_runner(&scratch, Arc::clone(&live_calls)).await?;
+    let invalid_chain = sepolia_chain_with_key("rotated-drpc-intake")?;
+    let run = tokio::spawn(async move {
+        runner
+            .run_chain(&invalid_chain, CancellationToken::new())
+            .await
+    });
+
+    let recovered_status = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let status = PhaseStore::new(scratch.pool().clone())
+                .status(SEPOLIA, PhaseName::Verify)
+                .await?;
+            if status != phase_runner::state::PhaseStatus::Running {
+                return Ok::<_, phase_runner::error::RunnerError>(status);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    blocked_ingest.rollback().await?;
+    let error = run
+        .await?
+        .expect_err("the rotated source must fail completed-Ingest validation");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert_eq!(live_calls.load(Ordering::SeqCst), 0);
+
+    scratch.cleanup().await?;
+    assert_eq!(
+        recovered_status,
+        phase_runner::state::PhaseStatus::Failed,
+        "Verify must stay non-ready until current source configuration is revalidated"
+    );
+    Ok(())
 }
 
 #[tokio::test]

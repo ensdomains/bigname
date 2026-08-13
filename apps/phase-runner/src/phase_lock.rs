@@ -70,6 +70,10 @@ impl PhaseLock {
             })
     }
 
+    pub(crate) fn connection(&mut self) -> &mut PgConnection {
+        &mut self.connection
+    }
+
     pub async fn run_while_alive<T>(
         &mut self,
         check_interval: Duration,
