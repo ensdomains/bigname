@@ -2408,6 +2408,167 @@ async fn ingest_cursor_records_the_distinct_source_target() -> Result<()> {
 }
 
 #[tokio::test]
+async fn ingest_redo_does_not_rewrite_a_cursor_past_its_range() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_redo_cursor_past_range").await?;
+    let chain_id = "redo-cursor-past-range-chain";
+    let configured_chain = chain(chain_id)?;
+    let block_2 = BlockMarker::new(2, format!("{chain_id}-block-2"))?;
+    seed_completed_ingest_cursor(
+        &scratch,
+        &configured_chain,
+        block_2.clone(),
+        block_2.clone(),
+        block_2,
+    )
+    .await?;
+
+    let redo_boundary = BlockMarker::new(1, format!("{chain_id}-replacement-block-1"))?;
+    let redo_progress = PhaseProgress {
+        current: Some(redo_boundary.clone()),
+        target: Some(redo_boundary.clone()),
+        source_progress: vec![SourceProgress {
+            source_key: "source".to_owned(),
+            current: Some(redo_boundary.clone()),
+            target: Some(redo_boundary),
+        }],
+        ..PhaseProgress::default()
+    };
+    runner(
+        scratch.runner(),
+        phase_set_replacing(
+            PhaseName::Ingest,
+            Arc::new(FunctionPhase {
+                name: PhaseName::Ingest,
+                handler: Arc::new(move |_| Ok(PhaseBatchOutcome::Complete(redo_progress.clone()))),
+            }),
+        )?,
+        available_capacity(),
+        "redo-cursor-past-range-runner",
+    )?
+    .redo(
+        &configured_chain,
+        RedoPhase::Phase(PhaseName::Ingest),
+        BlockRange::new(1, 1)?,
+        CancellationToken::new(),
+    )
+    .await?;
+
+    let cursor: (i64, Option<i64>, Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT next_block_number, target_block_number,
+                last_processed_block_number, last_processed_block_hash
+         FROM ingest_cursors
+         WHERE chain_id = $1 AND source_key = 'source'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        cursor,
+        (3, Some(2), Some(2), Some(format!("{chain_id}-block-2")),),
+        "redoing block 1 must not pair its replacement hash with the cursor at block 2"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn ingest_redo_does_not_reconcile_incomplete_source_progress() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_redo_incomplete_source_cursor").await?;
+    let chain_id = "redo-incomplete-source-cursor-chain";
+    let configured_chain = chain(chain_id)?;
+    let block_1 = BlockMarker::new(1, format!("{chain_id}-block-1"))?;
+    let block_2 = BlockMarker::new(2, format!("{chain_id}-block-2"))?;
+    seed_completed_ingest_cursor(
+        &scratch,
+        &configured_chain,
+        block_2.clone(),
+        block_1.clone(),
+        block_2.clone(),
+    )
+    .await?;
+
+    let unverified_block_1 =
+        BlockMarker::new(1, format!("{chain_id}-unverified-replacement-block-1"))?;
+    let redo_progress = PhaseProgress {
+        current: Some(block_2.clone()),
+        target: Some(block_2.clone()),
+        source_progress: vec![SourceProgress {
+            source_key: "source".to_owned(),
+            current: Some(unverified_block_1),
+            target: Some(block_2),
+        }],
+        ..PhaseProgress::default()
+    };
+    runner(
+        scratch.runner(),
+        phase_set_replacing(
+            PhaseName::Ingest,
+            Arc::new(FunctionPhase {
+                name: PhaseName::Ingest,
+                handler: Arc::new(move |_| Ok(PhaseBatchOutcome::Complete(redo_progress.clone()))),
+            }),
+        )?,
+        available_capacity(),
+        "redo-incomplete-source-cursor-runner",
+    )?
+    .redo(
+        &configured_chain,
+        RedoPhase::Phase(PhaseName::Ingest),
+        BlockRange::new(1, 2)?,
+        CancellationToken::new(),
+    )
+    .await?;
+
+    let cursor: (i64, Option<i64>, Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT next_block_number, target_block_number,
+                last_processed_block_number, last_processed_block_hash
+         FROM ingest_cursors
+         WHERE chain_id = $1 AND source_key = 'source'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        cursor,
+        (2, Some(2), Some(1), Some(format!("{chain_id}-block-1")),),
+        "incomplete redo progress must not replace the cursor's proven boundary hash"
+    );
+    scratch.cleanup().await
+}
+
+async fn seed_completed_ingest_cursor(
+    scratch: &ScratchDatabase,
+    chain: &ChainConfig,
+    summary: BlockMarker,
+    source_current: BlockMarker,
+    source_target: BlockMarker,
+) -> Result<()> {
+    seed_readable_lineage(scratch.pool(), &chain.chain_id, summary.number).await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(&chain.chain_id).await?;
+    store
+        .start_phase(&chain.chain_id, PhaseName::Ingest, &RunMode::Normal)
+        .await?;
+    let progress = PhaseProgress {
+        current: Some(summary.clone()),
+        target: Some(summary.clone()),
+        live_handoff: Some(summary),
+        source_progress: vec![SourceProgress {
+            source_key: "source".to_owned(),
+            current: Some(source_current),
+            target: Some(source_target),
+        }],
+        ..PhaseProgress::default()
+    };
+    store
+        .record_ingest_progress(&chain.chain_id, &chain.sources, &progress)
+        .await?;
+    store
+        .complete_phase(&chain.chain_id, PhaseName::Ingest, &progress)
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn ingest_cursors_record_independent_source_progress() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_source_cursors").await?;
     let chain = ChainConfig::new(
