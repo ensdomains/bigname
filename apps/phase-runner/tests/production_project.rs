@@ -3693,6 +3693,174 @@ async fn incremental_project_revisits_wrapper_timestamp_boundaries() -> Result<(
 }
 
 #[tokio::test]
+async fn event_free_wrapper_boundary_refreshes_resolver_permission_summary() -> Result<()> {
+    let incremental =
+        ScratchDatabase::create("production_project_wrapper_resolver_summary").await?;
+    let full = ScratchDatabase::create("production_project_wrapper_resolver_summary_full").await?;
+    for pool in [incremental.pool(), full.pool()] {
+        seed_project_fixture(pool).await?;
+        extend_incremental_equivalence_fixture(pool).await?;
+        extend_wrapper_resolver_summary_fixture(pool).await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+    let event_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events
+         WHERE chain_id = $1 AND block_number = 5",
+    )
+    .bind(CHAIN)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(event_count, 0, "the expiry transition must be event-free");
+
+    let pre_boundary_powers: Value = sqlx::query_scalar(
+        "SELECT effective_powers
+         FROM permissions_current
+         WHERE resource_id = $1
+           AND scope_kind = 'resolver'
+           AND lower(scope_detail ->> 'resolver_address') = lower($2)",
+    )
+    .bind(Uuid::parse_str(RESOURCE)?)
+    .bind(EQUIVALENCE_V2_RESOLVER)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(pre_boundary_powers, json!(["approve"]));
+    let record_uses_resolver: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM record_inventory_current
+             WHERE resource_id = $1
+               AND lower(provenance ->> 'resolver_address') = lower($2)
+         )",
+    )
+    .bind(Uuid::parse_str(RESOURCE)?)
+    .bind(EQUIVALENCE_V2_RESOLVER)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert!(
+        record_uses_resolver,
+        "the v2 resolver must also serve records"
+    );
+
+    sqlx::query(
+        "UPDATE resolver_current
+         SET declared_summary = jsonb_set(
+             declared_summary, '{passthrough_guard}', 'true'::jsonb
+         )
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(RESOLVER)
+    .execute(incremental.pool())
+    .await?;
+
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 4,
+            hash: block_hash(CHAIN, 4),
+        }),
+        RunMode::Normal,
+        5,
+        5,
+    )
+    .await?;
+    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 5).await?;
+
+    for pool in [incremental.pool(), full.pool()] {
+        let resolver_permission_count: i64 = sqlx::query_scalar(
+            "SELECT count(*)
+             FROM permissions_current
+             WHERE resource_id = $1
+               AND scope_kind = 'resolver'
+               AND lower(scope_detail ->> 'resolver_address') = lower($2)",
+        )
+        .bind(Uuid::parse_str(RESOURCE)?)
+        .bind(EQUIVALENCE_V2_RESOLVER)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(resolver_permission_count, 0);
+    }
+
+    let incremental_counts =
+        resolver_summary_counts(incremental.pool(), CHAIN, EQUIVALENCE_V2_RESOLVER).await?;
+    let full_counts = resolver_summary_counts(full.pool(), CHAIN, EQUIVALENCE_V2_RESOLVER).await?;
+    assert_eq!(full_counts, (0, 0, None));
+    assert_eq!(
+        incremental_counts, full_counts,
+        "an event-free wrapper boundary left a stale resolver permission summary"
+    );
+
+    let incremental_summary: Value = sqlx::query_scalar(
+        "SELECT declared_summary FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(EQUIVALENCE_V2_RESOLVER)
+    .fetch_one(incremental.pool())
+    .await?;
+    let full_summary: Value = sqlx::query_scalar(
+        "SELECT declared_summary FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(EQUIVALENCE_V2_RESOLVER)
+    .fetch_one(full.pool())
+    .await?;
+    assert_eq!(
+        incremental_summary, full_summary,
+        "event-free binding, alias, permission, role, and event summaries diverged"
+    );
+
+    let unscoped_permission_resolver_kept_passthrough: bool = sqlx::query_scalar(
+        "SELECT declared_summary @> '{\"passthrough_guard\":true}'::jsonb
+         FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(RESOLVER)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert!(
+        unscoped_permission_resolver_kept_passthrough,
+        "a boundary-scoped resource without resolver permissions lost passthrough"
+    );
+    let bob_target: i64 = sqlx::query_scalar(
+        "SELECT (chain_positions ->> 'target_block_number')::bigint
+         FROM record_inventory_current WHERE resource_id = $1",
+    )
+    .bind(Uuid::parse_str(EQUIVALENCE_BOB_RESOURCE)?)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(
+        bob_target, 5,
+        "the passthrough guard resource must be scoped"
+    );
+
+    incremental.cleanup().await?;
+    full.cleanup().await
+}
+
+async fn resolver_summary_counts(
+    pool: &PgPool,
+    chain: &str,
+    resolver: &str,
+) -> Result<(i64, i64, Option<String>)> {
+    Ok(sqlx::query_as(
+        "SELECT
+             (declared_summary #>> '{permissions,count}')::bigint,
+             (declared_summary #>> '{role_holders,count}')::bigint,
+             declared_summary #>> '{role_holders,items,0,effective_powers,0}'
+         FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(chain)
+    .bind(resolver)
+    .fetch_one(pool)
+    .await?)
+}
+
+#[tokio::test]
 async fn incremental_resolver_builder_stages_only_the_scoped_discovered_resolver() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_resolver_candidate_scope").await?;
     seed_project_fixture(scratch.pool()).await?;
@@ -7271,6 +7439,117 @@ async fn extend_incremental_equivalence_fixture(pool: &PgPool) -> Result<()> {
         )
         .await?;
     }
+    Ok(())
+}
+
+async fn extend_wrapper_resolver_summary_fixture(pool: &PgPool) -> Result<()> {
+    insert_event(
+        pool,
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "PermissionChanged",
+        "ens_v1_registrar_l1",
+        json!({
+            "subject":OWNER,
+            "scope":{
+                "kind":"resolver",
+                "chain_id":CHAIN,
+                "resolver_address":EQUIVALENCE_V2_RESOLVER
+            },
+            "effective_powers":["approve","resolver_control"],
+            "grant_source":{"kind":"fixture"},
+            "revocation_source":null,
+            "inheritance_path":[],
+            "transfer_behavior":"replace_on_authority_change"
+        }),
+        json!({"emitting_address":EQUIVALENCE_V2_RESOLVER}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "RecordChanged",
+        "ens_v2_resolver_l1",
+        json!({
+            "resolver":EQUIVALENCE_V2_RESOLVER,
+            "record_key":"text:boundary",
+            "record_family":"text",
+            "selector_key":"boundary",
+            "value_retained":true,
+            "value":"before-expiry"
+        }),
+        json!({"emitting_address":EQUIVALENCE_V2_RESOLVER}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        3,
+        None,
+        None,
+        "Upgraded",
+        "ens_v2_resolver_l1",
+        json!({
+            "proxy_address":EQUIVALENCE_V2_RESOLVER,
+            "implementation":EQUIVALENCE_V2_IMPLEMENTATION
+        }),
+        json!({"emitting_address":EQUIVALENCE_V2_RESOLVER}),
+    )
+    .await?;
+
+    insert_event(
+        pool,
+        CHAIN,
+        3,
+        Some("ens:0xbob"),
+        Some(EQUIVALENCE_BOB_RESOURCE),
+        "PermissionChanged",
+        "ens_v1_wrapper_l1",
+        json!({
+            "subject":OWNER,
+            "scope":{"kind":"resource"},
+            "effective_powers":["approve","resolver_control"],
+            "grant_source":{"kind":"fixture"},
+            "revocation_source":null,
+            "inheritance_path":[],
+            "transfer_behavior":"replace_on_authority_change"
+        }),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        3,
+        Some("ens:0xbob"),
+        Some(EQUIVALENCE_BOB_RESOURCE),
+        "ExpiryChanged",
+        "ens_v1_registrar_l1",
+        json!({
+            "source_event":"NameRenewed",
+            "authority_kind":"wrapper",
+            "expiry":7_776_003
+        }),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        3,
+        Some("ens:0xbob"),
+        Some(EQUIVALENCE_BOB_RESOURCE),
+        "PermissionScopeChanged",
+        "ens_v1_wrapper_l1",
+        json!({"fuses":196_608,"wrapper_state":"emancipated"}),
+        json!({}),
+    )
+    .await?;
     Ok(())
 }
 

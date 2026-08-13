@@ -117,8 +117,17 @@ pub(super) async fn classify_unchanged(
                            AND inventory.provenance ->> 'chain_id' = $1
                            AND lower(inventory.provenance ->> 'resolver_address') =
                                lower(current.resolver_address)
-                     )
-                 )
+                   )
+               )
+           )
+           AND NOT EXISTS (
+               SELECT 1
+               FROM permissions_current permission
+               JOIN project_scope_resources resource USING (resource_id)
+               WHERE permission.scope_kind = 'resolver'
+                 AND permission.scope_detail ->> 'chain_id' = $1
+                 AND lower(permission.scope_detail ->> 'resolver_address') =
+                     lower(current.resolver_address)
            )
            AND NOT EXISTS (
                SELECT 1 FROM project_changed_events event
