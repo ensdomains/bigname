@@ -91,11 +91,11 @@ The API half sends each Tier 1 and Tier 2 REST route in
 seconds after a 10-second warmup. It loads 10,000 names and 10,000 distinct
 address/name/relation combinations from the target projections, plus at least
 1,000 populated subname parents, permission subjects, and successful primary
-name claims, plus at least 1,000 supported resolver rows. The name and parent
-samples are divided deterministically across every active public namespace;
-an active namespace with no supported name or parent seed makes the run red.
-Address and successful primary-name samples are restricted to those same
-active public namespaces.
+name claims, plus at least 1,000 supported resolver rows. Name, parent,
+address/name/relation, and successful primary-name samples are divided
+deterministically across every active public namespace. An active namespace
+with no seed of any one of those kinds makes the run red instead of letting
+another namespace consume that corpus's entire limit.
 Name, address, parent, permission, primary-name, and resolver samples use the
 same [read-safe](../glossary.md#readable--read-safe) canonical-block checks for
 each projection and its referenced identity rows as their API reads, so hidden
@@ -112,7 +112,10 @@ production dataset while excluding staging-sized databases. The JSON report
 records both API-visible supported-row totals and both floors. It varies names, addresses,
 search text, relations, history scopes, sort order, page size, and any cursors
 returned by seed requests, and uses the real resolver and namespace rows. The
-lookup mix covers 1, 10, 100, 250, and 1,000 inputs per batch, with large
+search workload keeps explicit-namespace requests for every seed and adds bare
+requests for a deterministic half; both forms cover prefix and contains
+matching, and production mode requires a populated bare-search seed response.
+The lookup mix covers 1, 10, 100, 250, and 1,000 inputs per batch, with large
 batches weighted toward the tail. Timings end only after the complete response
 body has been read. The report contains achieved throughput, success rate, and
 p50, p95, and p99 for each route. Diagnostics, GraphQL compatibility, health, and documentation
@@ -319,6 +322,20 @@ prevents a fast empty-result workload from counting as release evidence. Timed
 records responses are also classified as populated or empty. At least 1 percent
 must contain an `ok` requested record, and the report records the observed
 populated share and its checked-in floor.
+
+The timed primary-name workload always sends `source=indexed`. Omitting
+`source` asks that route for both its indexed answer and live verification; for
+ENS coin type 60, verification can require two or three sequential mainnet RPC
+calls. Sending that shape at 2,000 requests per second would benchmark the RPC
+provider, issue roughly 120,000 live-verification requests and several times
+that number of RPC calls in one timed window, and cannot fit the route's
+checked-in 10/25/50 ms budget. It is deliberately outside the timed release
+measurement. Before the timed windows, the harness instead sends an untimed
+functional check for at most ten ENS/coin-60 tuples with `source` omitted. Each
+check must avoid a 5xx response and return a well-formed success or error
+envelope; a failure names the tuple and makes the run red. Name and records
+requests also send `source=indexed`, which matches those routes' default; only
+the primary-name route has a broader default.
 
 Per-request namespace readiness cannot be fully precomputed by the corpus SQL.
 Restricting address and primary-name seeds to active public namespaces, plus the

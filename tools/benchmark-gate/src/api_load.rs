@@ -16,9 +16,11 @@ use sqlx::PgPool;
 use tokio::task::JoinSet;
 mod corpus;
 mod preflight;
+mod probes;
 mod workload;
 use corpus::{Corpus, TableScale, load_table_scale};
 use preflight::{ApiBoundaryPreflight, load_interpret_redo_snapshot, recheck_api_boundary};
+use probes::require_seed_probe;
 use workload::{RequestSpec, get, normalized_base_url, request_variants};
 #[derive(Clone, Debug, Serialize)]
 pub struct ApiReport {
@@ -82,6 +84,7 @@ struct Sample {
 #[derive(Clone, Copy, Debug, Default)]
 struct SeedProbe {
     populated: bool,
+    bare_search_populated: bool,
     cursor_variants: usize,
 }
 
@@ -176,9 +179,8 @@ pub async fn run(
         ));
     }
     let corpus = Corpus::load(pool, budgets).await?;
-
+    let mut failures = probes::probe_default_primary_name(&client, &base, &corpus).await?;
     let mut endpoint_reports = Vec::with_capacity(budgets.endpoints.len());
-    let mut failures = Vec::new();
     let mut postflight_identity = None;
     let mut postflight_database_identity = None;
     for endpoint in &budgets.endpoints {
@@ -355,25 +357,6 @@ fn classify_api_boundary(
     (target.ok(), database.ok(), failures)
 }
 
-fn requires_cursor_probe(budgets: &GateBudgets, endpoint: &str) -> bool {
-    budgets.api_require_cursor_variants
-        || (budgets.api_require_resolver_cursor_variant && endpoint == "resolver")
-}
-
-fn require_seed_probe(budgets: &GateBudgets, endpoint: &str, probe: SeedProbe) -> Result<()> {
-    ensure!(
-        !budgets.api_require_populated_probes || probe.populated,
-        "endpoint {endpoint:?} returned no populated seed response"
-    );
-    ensure!(
-        !requires_cursor_probe(budgets, endpoint)
-            || !endpoint_requires_cursor(endpoint)
-            || probe.cursor_variants > 0,
-        "endpoint {endpoint:?} produced no real continuation cursor"
-    );
-    Ok(())
-}
-
 fn preflight_failure_report(
     scale: TableScale,
     budgets: &GateBudgets,
@@ -445,10 +428,13 @@ async fn prime_cursor_variants(
     let seeds = requests.clone();
     let mut cursors = Vec::new();
     let mut populated = false;
+    let mut bare_search_populated = false;
     for (index, seed) in seeds.into_iter().enumerate() {
         let prefix_complete = index >= limit;
         let cursor_requirement_met = !endpoint_requires_cursor(endpoint) || !cursors.is_empty();
-        if prefix_complete && populated && cursor_requirement_met {
+        let population_requirement_met =
+            populated && (endpoint != "search" || bare_search_populated);
+        if prefix_complete && population_requirement_met && cursor_requirement_met {
             break;
         }
         let response = send(client, &seed).await?;
@@ -459,13 +445,18 @@ async fn prime_cursor_variants(
             .json()
             .await
             .context("failed to parse cursor-seed response")?;
-        populated |= response_is_populated(endpoint, &body);
+        let response_populated = response_is_populated(endpoint, &body);
+        populated |= response_populated;
+        if endpoint == "search" && !seed.url.query_pairs().any(|(key, _)| key == "namespace") {
+            bare_search_populated |= response_populated;
+        }
         cursors.extend(cursor_variants(&seed, &body));
     }
     let cursor_variants = cursors.len();
     requests.extend(cursors);
     Ok(SeedProbe {
         populated,
+        bare_search_populated,
         cursor_variants,
     })
 }

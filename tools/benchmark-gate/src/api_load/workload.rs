@@ -81,16 +81,33 @@ pub(super) fn request_variants(
         "search" => {
             for (index, (namespace, name)) in corpus.names.iter().enumerate() {
                 let query = search_term(name);
+                let match_mode = if index % 2 == 0 { "prefix" } else { "contains" };
                 requests.push(get(
                     base,
                     &["v2", "search"],
                     &[
-                        ("q", &query),
-                        ("match", if index % 2 == 0 { "prefix" } else { "contains" }),
+                        ("q", query.as_str()),
+                        ("match", match_mode),
                         ("namespace", namespace),
                         ("page_size", page_size(index)),
                     ],
                 )?);
+                if index % 2 == 0 {
+                    let bare_match = if (index / 2) % 2 == 0 {
+                        "prefix"
+                    } else {
+                        "contains"
+                    };
+                    requests.push(get(
+                        base,
+                        &["v2", "search"],
+                        &[
+                            ("q", query.as_str()),
+                            ("match", bare_match),
+                            ("page_size", page_size(index)),
+                        ],
+                    )?);
+                }
             }
         }
         "events" => {
@@ -480,5 +497,63 @@ mod tests {
                 .into_iter()
                 .collect()
         );
+    }
+
+    #[test]
+    fn search_variants_include_bare_and_explicit_namespace_requests() {
+        let base = normalized_base_url("http://127.0.0.1:3000").unwrap();
+        let mut corpus = corpus_with_ens_base_eth_name();
+        for name in ["second.eth", "third.eth", "fourth.eth"] {
+            corpus.names.push(("ens".to_owned(), name.to_owned()));
+        }
+
+        let requests = request_variants(&base, &corpus, "search").unwrap();
+        let combinations = requests
+            .iter()
+            .map(|request| {
+                let pairs = request.url.query_pairs().collect::<Vec<_>>();
+                let match_mode = pairs
+                    .iter()
+                    .find(|(key, _)| key == "match")
+                    .unwrap()
+                    .1
+                    .to_string();
+                let explicit_namespace = pairs.iter().any(|(key, _)| key == "namespace");
+                (match_mode, explicit_namespace)
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(
+            combinations,
+            [
+                ("contains".to_owned(), false),
+                ("contains".to_owned(), true),
+                ("prefix".to_owned(), false),
+                ("prefix".to_owned(), true),
+            ]
+            .into_iter()
+            .collect(),
+            "bare and explicit search must each cover prefix and contains"
+        );
+    }
+
+    #[test]
+    fn timed_primary_name_requests_are_indexed_only() {
+        let base = normalized_base_url("http://127.0.0.1:3000").unwrap();
+        let mut corpus = corpus_with_ens_base_eth_name();
+        corpus.primary_names.push((
+            "0x0000000000000000000000000000000000000001".to_owned(),
+            "60".to_owned(),
+            "ens".to_owned(),
+        ));
+
+        let requests = request_variants(&base, &corpus, "primary_name").unwrap();
+        assert!(!requests.is_empty());
+        assert!(requests.iter().all(|request| {
+            request
+                .url
+                .query_pairs()
+                .any(|(key, value)| key == "source" && value == "indexed")
+        }));
     }
 }

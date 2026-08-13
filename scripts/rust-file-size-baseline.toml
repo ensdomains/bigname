@@ -22,13 +22,13 @@ justification = "Snapshot admission, anchor fallback, and canonical-lineage proo
 
 [[files]]
 path = "tools/benchmark-gate/src/api_load.rs"
-loc = 1173
+loc = 1164
 justification = "The benchmark API orchestrator keeps target-identity boundaries, seed probes, timed sampling, and the single report contract together so a release gate cannot omit a validation phase."
 review_justification = "Reviewed as non-serving release tooling: the file is below the 1200 LOC ceiling, its route workload builders and corpus loading are split into child modules, and its remaining code is one auditable gate sequence plus focused tests."
 
 [[files]]
 path = "tools/benchmark-gate/src/api_load/corpus.rs"
-loc = 1092
+loc = 1086
 justification = "Production-scale corpus queries, their shared API-visibility filters, scale floors, namespace coverage, and database regressions remain together so the sampled and counted populations cannot drift apart."
 review_justification = "Reviewed as non-serving release tooling: the file remains below the 1200 LOC ceiling, production query assembly is compact, and most of its size is database-backed coverage proving every sampled corpus family follows its serving-read visibility predicate."
 

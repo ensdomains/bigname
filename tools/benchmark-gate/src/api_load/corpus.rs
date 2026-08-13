@@ -5,12 +5,17 @@ use bigname_storage::{
     DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
     DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS, DEFAULT_CHILDREN_CURRENT_READ_FILTER,
     DEFAULT_NAME_CURRENT_LINEAGE_JOINS, DEFAULT_NAME_CURRENT_READ_FILTER,
-    DEFAULT_PERMISSIONS_CURRENT_READ_FILTER, DEFAULT_PRIMARY_NAME_CURRENT_READ_FILTER,
-    DEFAULT_RESOLVER_CURRENT_READ_FILTER,
+    DEFAULT_PERMISSIONS_CURRENT_READ_FILTER, DEFAULT_RESOLVER_CURRENT_READ_FILTER,
 };
 use sqlx::PgPool;
 
 use crate::budgets::GateBudgets;
+
+mod stratified;
+use stratified::{
+    address_corpus_sql, address_namespace_counts, primary_name_corpus_sql,
+    primary_namespace_counts, require_active_namespace_coverage,
+};
 
 const ACTIVE_NAMESPACES_SQL: &str = "SELECT DISTINCT namespace FROM manifest_versions WHERE rollout_status = 'active' AND namespace IN ('ens', 'basenames') ORDER BY namespace";
 fn name_corpus_sql() -> String {
@@ -149,9 +154,23 @@ impl Corpus {
             .context("failed to load resolver benchmark corpus")?;
         let names_by_namespace = namespace_counts(&names);
         let parents_by_namespace = namespace_counts(&parents);
+        let addresses_by_namespace = address_namespace_counts(&address_names);
+        let primary_names_by_namespace = primary_namespace_counts(&primary_names);
 
         require_active_namespace_coverage(&namespaces, &names_by_namespace, "supported names")?;
         require_active_namespace_coverage(&namespaces, &parents_by_namespace, "supported parents")?;
+        require_active_namespace_coverage(
+            &namespaces,
+            &addresses_by_namespace,
+            "supported address/name relations",
+        )?;
+        if budgets.api_min_specialized_corpus_size > 0 {
+            require_active_namespace_coverage(
+                &namespaces,
+                &primary_names_by_namespace,
+                "successful primary names",
+            )?;
+        }
         require_name_corpus_size(names.len(), budgets.api_corpus_size, &names_by_namespace)?;
         require_minimum_corpus_size("address", address_names.len(), budgets.api_corpus_size)?;
         for (label, actual) in [
@@ -181,25 +200,6 @@ impl Corpus {
     }
 }
 
-fn address_corpus_sql() -> String {
-    format!(
-        r#"SELECT anc.address, min(anc.raw_name), anc.namespace, anc.relation
-           FROM bigname_phase.address_names_current anc
-           {DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS}
-           JOIN (
-               SELECT DISTINCT namespace
-               FROM bigname_phase.manifest_versions
-               WHERE rollout_status = 'active'
-                 AND namespace IN ('ens', 'basenames')
-           ) active ON active.namespace = anc.namespace
-           WHERE anc.support_status = 'supported'
-             {DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER}
-           GROUP BY anc.address, anc.namespace, anc.relation
-           ORDER BY anc.address, anc.namespace, anc.relation
-           LIMIT $1"#
-    )
-}
-
 fn resolver_corpus_sql() -> String {
     format!(
         r#"SELECT resolver.chain_id, resolver.resolver_address
@@ -219,23 +219,6 @@ fn permission_subject_corpus_sql() -> String {
              {DEFAULT_PERMISSIONS_CURRENT_READ_FILTER}
            GROUP BY pc.subject
            ORDER BY pc.subject
-           LIMIT $1"#
-    )
-}
-
-fn primary_name_corpus_sql() -> String {
-    format!(
-        r#"SELECT pnc.address, pnc.coin_type, pnc.namespace
-           FROM bigname_phase.primary_names_current pnc
-           JOIN (
-               SELECT DISTINCT namespace
-               FROM bigname_phase.manifest_versions
-               WHERE rollout_status = 'active'
-                 AND namespace IN ('ens', 'basenames')
-           ) active ON active.namespace = pnc.namespace
-           WHERE pnc.claim_status = 'success'
-             {DEFAULT_PRIMARY_NAME_CURRENT_READ_FILTER}
-           ORDER BY pnc.address, pnc.coin_type, pnc.namespace
            LIMIT $1"#
     )
 }
@@ -270,28 +253,6 @@ fn require_name_corpus_size(
         actual >= minimum,
         "name corpus has {actual} rows; release profile requires {minimum}; namespace contributions: {contributions}"
     );
-    Ok(())
-}
-
-fn require_active_namespace_coverage(
-    namespaces: &[String],
-    counts_by_namespace: &BTreeMap<String, usize>,
-    seed_kind: &str,
-) -> Result<()> {
-    ensure!(
-        !namespaces.is_empty(),
-        "benchmark database has no active public namespace"
-    );
-    for namespace in namespaces {
-        ensure!(
-            counts_by_namespace
-                .get(namespace)
-                .copied()
-                .unwrap_or_default()
-                > 0,
-            "active namespace {namespace:?} contributed no {seed_kind} to the benchmark corpus"
-        );
-    }
     Ok(())
 }
 
@@ -749,19 +710,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inactive_namespace_rows_are_excluded_from_address_and_primary_corpora() {
+    async fn address_and_primary_corpora_are_stratified_across_active_namespaces() {
         let database = TestDatabase::create(
             TestDatabaseConfig::new("benchmark_active_public_corpus").pool_max_connections(1),
         )
         .await
         .unwrap();
         install_name_visibility_schema(database.pool()).await;
-        sqlx::query("INSERT INTO manifest_versions VALUES ('ens', 'active')")
-            .execute(database.pool())
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO manifest_versions VALUES
+                 ('basenames', 'active'), ('ens', 'active')",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
         sqlx::raw_sql(
             "INSERT INTO chain_lineage VALUES
+                 ('base-mainnet', 'base-surface', 'canonical'),
+                 ('base-mainnet', 'base-resource', 'canonical'),
+                 ('base-mainnet', 'base-binding', 'canonical'),
+                 ('base-mainnet', 'base-projection', 'canonical'),
+                 ('base-mainnet', 'base-primary-projection', 'canonical'),
                  ('ethereum-mainnet', 'ens-surface', 'canonical'),
                  ('ethereum-mainnet', 'ens-resource', 'canonical'),
                  ('ethereum-mainnet', 'ens-binding', 'canonical'),
@@ -773,15 +742,24 @@ mod tests {
                  ('ethereum-mainnet', 'ens-primary-projection', 'canonical'),
                  ('ethereum-sepolia', 'sepolia-primary-projection', 'canonical');
              INSERT INTO name_surfaces VALUES
+                 ('basenames:visible-address', 'base-mainnet', 'base-surface', 'canonical'),
                  ('ens:visible-address', 'ethereum-mainnet', 'ens-surface', 'canonical'),
                  ('ens-sepolia:inactive-address', 'ethereum-sepolia', 'sepolia-surface', 'canonical');
              INSERT INTO resources VALUES
+                 ('00000000-0000-0000-0000-000000000060', 'base-mainnet', 'base-resource', 'canonical'),
                  ('00000000-0000-0000-0000-000000000061', 'ethereum-mainnet', 'ens-resource', 'canonical'),
                  ('00000000-0000-0000-0000-000000000062', 'ethereum-sepolia', 'sepolia-resource', 'canonical');
              INSERT INTO surface_bindings VALUES
+                 ('00000000-0000-0000-0000-000000000070', 'base-mainnet', 'base-binding', 'canonical', NULL),
                  ('00000000-0000-0000-0000-000000000071', 'ethereum-mainnet', 'ens-binding', 'canonical', NULL),
                  ('00000000-0000-0000-0000-000000000072', 'ethereum-sepolia', 'sepolia-binding', 'canonical', NULL);
              INSERT INTO address_names_current VALUES
+                 ('0x0000000000000000000000000000000000000001', 'base-one.base.eth', 'basenames', 'effective_controller', 'basenames:visible-address', 'supported',
+                  '00000000-0000-0000-0000-000000000070', '00000000-0000-0000-0000-000000000060', NULL,
+                  '{\"chain_id\":\"base-mainnet\"}', '{\"target_block_hash\":\"base-projection\"}', '{\"state\":\"canonical_lineage\"}'),
+                 ('0x0000000000000000000000000000000000000002', 'base-two.base.eth', 'basenames', 'effective_controller', 'basenames:visible-address', 'supported',
+                  '00000000-0000-0000-0000-000000000070', '00000000-0000-0000-0000-000000000060', NULL,
+                  '{\"chain_id\":\"base-mainnet\"}', '{\"target_block_hash\":\"base-projection\"}', '{\"state\":\"canonical_lineage\"}'),
                  ('0x0000000000000000000000000000000000000061', 'visible.eth', 'ens', 'effective_controller', 'ens:visible-address', 'supported',
                   '00000000-0000-0000-0000-000000000071', '00000000-0000-0000-0000-000000000061', NULL,
                   '{\"chain_id\":\"ethereum-mainnet\"}', '{\"target_block_hash\":\"ens-projection\"}', '{\"state\":\"canonical_lineage\"}'),
@@ -789,6 +767,10 @@ mod tests {
                   '00000000-0000-0000-0000-000000000072', '00000000-0000-0000-0000-000000000062', NULL,
                   '{\"chain_id\":\"ethereum-sepolia\"}', '{\"target_block_hash\":\"sepolia-projection\"}', '{\"state\":\"canonical_lineage\"}');
              INSERT INTO primary_names_current VALUES
+                 ('0x0000000000000000000000000000000000000001', '60', 'basenames', 'success',
+                  '{\"chain_id\":\"base-mainnet\",\"target_block_hash\":\"base-primary-projection\"}'),
+                 ('0x0000000000000000000000000000000000000002', '60', 'basenames', 'success',
+                  '{\"chain_id\":\"base-mainnet\",\"target_block_hash\":\"base-primary-projection\"}'),
                  ('0x0000000000000000000000000000000000000061', '60', 'ens', 'success',
                   '{\"chain_id\":\"ethereum-mainnet\",\"target_block_hash\":\"ens-primary-projection\"}'),
                  ('0x0000000000000000000000000000000000000062', '60', 'ens-sepolia', 'success',
@@ -800,24 +782,36 @@ mod tests {
 
         let addresses: Vec<(String, String, String, String)> =
             sqlx::query_as(&address_corpus_sql())
-                .bind(10_i64)
+                .bind(2_i64)
                 .fetch_all(database.pool())
                 .await
                 .unwrap();
         let primary_names: Vec<(String, String, String)> =
             sqlx::query_as(&primary_name_corpus_sql())
-                .bind(10_i64)
+                .bind(2_i64)
                 .fetch_all(database.pool())
                 .await
                 .unwrap();
         let scale = load_table_scale(database.pool()).await.unwrap();
 
         database.cleanup().await.unwrap();
-        assert_eq!(addresses.len(), 1);
-        assert_eq!(addresses[0].2, "ens");
-        assert_eq!(primary_names.len(), 1);
-        assert_eq!(primary_names[0].2, "ens");
-        assert_eq!(scale.address_names_current_rows, 1);
+        assert_eq!(addresses.len(), 2);
+        assert_eq!(
+            addresses
+                .iter()
+                .map(|row| row.2.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["basenames", "ens"].into_iter().collect()
+        );
+        assert_eq!(primary_names.len(), 2);
+        assert_eq!(
+            primary_names
+                .iter()
+                .map(|row| row.2.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["basenames", "ens"].into_iter().collect()
+        );
+        assert_eq!(scale.address_names_current_rows, 3);
     }
 
     #[tokio::test]
