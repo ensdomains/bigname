@@ -31,6 +31,7 @@ mod runner_support;
 pub mod schema;
 pub mod state;
 mod state_heartbeat;
+mod state_ingest_progress;
 mod state_persistence;
 mod supervisor;
 mod transitions;

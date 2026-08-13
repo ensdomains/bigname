@@ -8,9 +8,9 @@ use crate::{
     heads::BlockMarker,
     phase::{PhaseName, PhaseProgress, PhaseResume, RunMode},
     redo_state::{self, RedoOutcome, RedoSession},
+    state_ingest_progress::{update_ingest_cursors, update_ingest_progress},
     state_persistence::{
-        load_phase_resume, load_redo_resume, update_ingest_cursors, update_progress,
-        update_redo_progress,
+        load_phase_resume, load_redo_resume, update_progress, update_redo_progress,
     },
     transitions::{invalid_transition, lock_chain_phase_state, require_start, row_for},
 };
@@ -139,14 +139,25 @@ impl PhaseStore {
         let status = row.status()?;
         let recovering_completed = status == PhaseStatus::Failed
             && crate::completed_phase_recovery::locked_completed_validation_recovery(row, phase);
-        let restarts_completed = if phase == PhaseName::Live {
-            true
-        } else if status == PhaseStatus::Completed
-            && matches!(phase, PhaseName::Interpret | PhaseName::Project)
-        {
-            completed_phase_is_behind(&mut transaction, chain_id, phase, row).await?
-        } else {
-            false
+        let restarts_completed = match (status, phase) {
+            (_, PhaseName::Live) => true,
+            (PhaseStatus::Completed, PhaseName::Ingest) => {
+                row.live_handoff_block_number.is_none()
+                    || row.live_handoff_block_number != row.target_block_number
+                    || row.live_handoff_block_hash != row.target_block_hash
+                    || row.current_block_number != row.target_block_number
+                    || row.current_block_hash != row.target_block_hash
+            }
+            (PhaseStatus::Completed, PhaseName::Interpret | PhaseName::Project) => {
+                completed_phase_is_behind(&mut transaction, chain_id, phase, row).await?
+            }
+            (PhaseStatus::Completed, PhaseName::Verify) => {
+                row.verification_level.is_none()
+                    || row.current_block_number.is_none()
+                    || row.current_block_number != row.target_block_number
+                    || row.current_block_hash != row.target_block_hash
+            }
+            _ => false,
         };
         if status == PhaseStatus::Completed && !restarts_completed {
             transaction.commit().await.map_err(|error| {
@@ -374,6 +385,14 @@ impl PhaseStore {
         sqlx::query(
             "UPDATE chain_phase_state
              SET phase_status = 'completed', last_error = NULL,
+                 live_handoff_block_number = CASE
+                     WHEN phase_name = 'ingest' THEN NULL
+                     ELSE live_handoff_block_number
+                 END,
+                 live_handoff_block_hash = CASE
+                     WHEN phase_name = 'ingest' THEN NULL
+                     ELSE live_handoff_block_hash
+                 END,
                  finished_at = now(), updated_at = now()
              WHERE chain_id = $1 AND phase_name = $2
                AND phase_status IN ('running', 'paused')
@@ -505,6 +524,15 @@ impl PhaseStore {
         progress: &PhaseProgress,
     ) -> RunnerResult<()> {
         update_ingest_cursors(&self.pool, sources, progress).await
+    }
+
+    pub async fn record_ingest_progress(
+        &self,
+        chain_id: &str,
+        sources: &[SourceConfig],
+        progress: &PhaseProgress,
+    ) -> RunnerResult<()> {
+        update_ingest_progress(&self.pool, chain_id, sources, progress).await
     }
 
     pub async fn ensure_ingest_sources(

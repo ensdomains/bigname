@@ -195,6 +195,15 @@ deliberately not rewritten, which is why they must be resolved before removal.
 Do not update statuses, clear repair markers, or delete rows merely to silence
 an alert.
 
+If the chain is configured again later, the runner checks the stored completion
+evidence rather than trusting the rewritten `completed` status alone. It resumes
+Ingest when the current block or live handoff does not match the target, and
+resumes Verify when its final block pair or [verification
+level](../glossary.md#verification-level) is missing. Settling an active Ingest
+row clears its live handoff but preserves its source cursors, so re-adding the
+chain resumes even if an older runner stopped between its formerly separate
+summary and cursor writes.
+
 ## First-response checks
 
 Keep diagnosis read-only until the failure is understood:

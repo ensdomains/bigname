@@ -534,13 +534,14 @@ impl PhaseRunner {
                 publish_heads(self.store.pool(), &chain.chain_id, heads).await?;
             }
             phase_lock.check_alive().await?;
-            self.store
-                .record_progress(&chain.chain_id, phase_name, &mode, &progress)
-                .await?;
             if phase_name == PhaseName::Ingest && matches!(mode, RunMode::Normal) {
                 phase_lock.check_alive().await?;
                 self.store
-                    .update_ingest_cursors(&chain.sources, &progress)
+                    .record_ingest_progress(&chain.chain_id, &chain.sources, &progress)
+                    .await?;
+            } else {
+                self.store
+                    .record_progress(&chain.chain_id, phase_name, &mode, &progress)
                     .await?;
             }
             phase_lock.check_alive().await?;

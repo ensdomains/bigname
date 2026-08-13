@@ -732,6 +732,490 @@ async fn startup_settles_active_phase_for_unconfigured_chain() -> Result<()> {
 }
 
 #[tokio::test]
+async fn readding_chain_restarts_ingest_settled_before_handoff() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_readd_partial_ingest").await?;
+    let chain_id = "readded-ingest-chain";
+    let configured_chain = chain(chain_id)?;
+    seed_lineage(scratch.pool(), chain_id, 3).await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    store
+        .start_phase(chain_id, PhaseName::Ingest, &RunMode::Normal)
+        .await?;
+    let partial = PhaseProgress {
+        current: Some(BlockMarker::new(1, format!("{chain_id}-block-1"))?),
+        target: Some(BlockMarker::new(3, format!("{chain_id}-block-3"))?),
+        source_progress: vec![SourceProgress {
+            source_key: "source".to_owned(),
+            current: Some(BlockMarker::new(1, format!("{chain_id}-block-1"))?),
+            target: Some(BlockMarker::new(3, format!("{chain_id}-block-3"))?),
+        }],
+        ..PhaseProgress::default()
+    };
+    store
+        .record_progress(chain_id, PhaseName::Ingest, &RunMode::Normal, &partial)
+        .await?;
+    store
+        .update_ingest_cursors(&configured_chain.sources, &partial)
+        .await?;
+
+    settle_active_rows_for_removed_chain(&scratch).await?;
+    assert_eq!(
+        store.status(chain_id, PhaseName::Ingest).await?,
+        PhaseStatus::Completed
+    );
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let cancellation = CancellationToken::new();
+    let phases = PhaseName::ALL.map(|name| {
+        let calls = Arc::clone(&calls);
+        let cancellation = cancellation.clone();
+        Arc::new(FunctionPhase {
+            name,
+            handler: Arc::new(move |context| {
+                calls.lock().expect("phase calls lock").push(name);
+                let progress = match name {
+                    PhaseName::Ingest => {
+                        assert_eq!(
+                            context.resume.current.as_ref().map(|marker| marker.number),
+                            Some(1)
+                        );
+                        assert_eq!(
+                            context.resume.target.as_ref().map(|marker| marker.number),
+                            Some(3)
+                        );
+                        assert_eq!(context.resume.ingest_cursors.len(), 1);
+                        assert_eq!(context.resume.ingest_cursors[0].next_block_number, 2);
+                        let marker = BlockMarker::new(3, format!("{chain_id}-block-3"))?;
+                        PhaseProgress {
+                            current: Some(marker.clone()),
+                            target: Some(marker.clone()),
+                            live_handoff: Some(marker.clone()),
+                            heads: Some(HeadMarkers {
+                                latest: marker.clone(),
+                                safe: None,
+                                finalized: None,
+                            }),
+                            source_progress: vec![SourceProgress {
+                                source_key: "source".to_owned(),
+                                current: Some(marker.clone()),
+                                target: Some(marker),
+                            }],
+                            ..PhaseProgress::default()
+                        }
+                    }
+                    PhaseName::Verify => PhaseProgress {
+                        verification_level: Some(VerificationLevel::QuickSynced),
+                        ..PhaseProgress::default()
+                    },
+                    PhaseName::Live => {
+                        cancellation.cancel();
+                        return Ok(PhaseBatchOutcome::Idle(PhaseProgress::default()));
+                    }
+                    PhaseName::Interpret | PhaseName::Project => PhaseProgress::default(),
+                };
+                Ok(PhaseBatchOutcome::Complete(progress))
+            }),
+        }) as Arc<dyn Phase>
+    });
+    let mut configured_chain = configured_chain;
+    configured_chain.verify_before_live = true;
+    let result = runner(
+        scratch.runner(),
+        PhaseSet::new(phases)?,
+        available_capacity(),
+        "readded-ingest-runner",
+    )?
+    .run_chain(&configured_chain, cancellation)
+    .await;
+    let observed_calls = calls.lock().expect("phase calls lock").clone();
+    assert!(
+        result.is_ok(),
+        "re-added chain failed after phase calls {observed_calls:?}: {result:?}"
+    );
+    assert_eq!(
+        observed_calls,
+        vec![
+            PhaseName::Ingest,
+            PhaseName::Interpret,
+            PhaseName::Project,
+            PhaseName::Verify,
+            PhaseName::Live,
+        ]
+    );
+    let ingest: (String, Option<i64>, Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT phase_status, current_block_number, target_block_number,
+                live_handoff_block_number
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(ingest, ("completed".to_owned(), Some(3), Some(3), Some(3)));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn readding_chain_restarts_ingest_settled_with_wrong_handoff() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_readd_wrong_ingest_handoff").await?;
+    let chain_id = "readded-wrong-ingest-handoff-chain";
+    seed_lineage(scratch.pool(), chain_id, 3).await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    store
+        .start_phase(chain_id, PhaseName::Ingest, &RunMode::Normal)
+        .await?;
+    let target = BlockMarker::new(3, format!("{chain_id}-block-3"))?;
+    store
+        .record_progress(
+            chain_id,
+            PhaseName::Ingest,
+            &RunMode::Normal,
+            &PhaseProgress {
+                current: Some(target.clone()),
+                target: Some(target),
+                live_handoff: Some(BlockMarker::new(2, format!("{chain_id}-block-2"))?),
+                ..PhaseProgress::default()
+            },
+        )
+        .await?;
+
+    settle_active_rows_for_removed_chain(&scratch).await?;
+    assert_eq!(
+        store
+            .start_phase(chain_id, PhaseName::Ingest, &RunMode::Normal)
+            .await?,
+        StartDisposition::Started,
+        "a settled Ingest handoff that differs from its target must resume on re-add"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn readding_chain_restarts_after_legacy_torn_ingest_progress() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_readd_torn_ingest_progress").await?;
+    let chain_id = "readded-torn-ingest-chain";
+    let configured_chain = chain(chain_id)?;
+    seed_lineage(scratch.pool(), chain_id, 3).await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    store
+        .start_phase(chain_id, PhaseName::Ingest, &RunMode::Normal)
+        .await?;
+    let partial = PhaseProgress {
+        current: Some(BlockMarker::new(1, format!("{chain_id}-block-1"))?),
+        target: Some(BlockMarker::new(3, format!("{chain_id}-block-3"))?),
+        source_progress: vec![SourceProgress {
+            source_key: "source".to_owned(),
+            current: Some(BlockMarker::new(1, format!("{chain_id}-block-1"))?),
+            target: Some(BlockMarker::new(3, format!("{chain_id}-block-3"))?),
+        }],
+        ..PhaseProgress::default()
+    };
+    store
+        .update_ingest_cursors(&configured_chain.sources, &partial)
+        .await?;
+    let target = BlockMarker::new(3, format!("{chain_id}-block-3"))?;
+    store
+        .record_progress(
+            chain_id,
+            PhaseName::Ingest,
+            &RunMode::Normal,
+            &PhaseProgress {
+                current: Some(target.clone()),
+                target: Some(target.clone()),
+                live_handoff: Some(target),
+                ..PhaseProgress::default()
+            },
+        )
+        .await?;
+
+    settle_active_rows_for_removed_chain(&scratch).await?;
+    let handoff: Option<i64> = sqlx::query_scalar(
+        "SELECT live_handoff_block_number
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(handoff, None, "settlement must invalidate the handoff");
+    assert_eq!(
+        store
+            .start_phase(chain_id, PhaseName::Ingest, &RunMode::Normal)
+            .await?,
+        StartDisposition::Started
+    );
+    let resume = store
+        .phase_resume(chain_id, PhaseName::Ingest, &RunMode::Normal)
+        .await?;
+    assert_eq!(resume.ingest_cursors.len(), 1);
+    assert_eq!(resume.ingest_cursors[0].next_block_number, 2);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn readding_chain_restarts_ingest_settled_without_block_extent() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_readd_ingest_without_extent").await?;
+    let chain_id = "readded-ingest-without-extent-chain";
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    store
+        .start_phase(chain_id, PhaseName::Ingest, &RunMode::Normal)
+        .await?;
+
+    settle_active_rows_for_removed_chain(&scratch).await?;
+    assert_eq!(
+        store
+            .start_phase(chain_id, PhaseName::Ingest, &RunMode::Normal)
+            .await?,
+        StartDisposition::Started,
+        "a settled Ingest phase without a live handoff must resume on re-add"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn readding_chain_restarts_verify_settled_without_level() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_readd_partial_verify").await?;
+    let chain_id = "readded-verify-chain";
+    let configured_chain = chain(chain_id)?;
+    seed_lineage(scratch.pool(), chain_id, 0).await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    let marker = BlockMarker::new(0, format!("{chain_id}-block-0"))?;
+    let ingest_progress = PhaseProgress {
+        current: Some(marker.clone()),
+        target: Some(marker.clone()),
+        live_handoff: Some(marker.clone()),
+        source_progress: vec![SourceProgress {
+            source_key: "source".to_owned(),
+            current: Some(marker.clone()),
+            target: Some(marker.clone()),
+        }],
+        ..PhaseProgress::default()
+    };
+    store
+        .start_phase(chain_id, PhaseName::Ingest, &RunMode::Normal)
+        .await?;
+    store
+        .update_ingest_cursors(&configured_chain.sources, &ingest_progress)
+        .await?;
+    store
+        .complete_phase(chain_id, PhaseName::Ingest, &ingest_progress)
+        .await?;
+    publish_heads(
+        scratch.pool(),
+        chain_id,
+        &HeadMarkers {
+            latest: marker.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?;
+    for phase in [PhaseName::Interpret, PhaseName::Project] {
+        store.start_phase(chain_id, phase, &RunMode::Normal).await?;
+        store
+            .complete_phase(
+                chain_id,
+                phase,
+                &PhaseProgress {
+                    current: Some(marker.clone()),
+                    target: Some(marker.clone()),
+                    ..PhaseProgress::default()
+                },
+            )
+            .await?;
+    }
+    store
+        .start_phase(chain_id, PhaseName::Verify, &RunMode::Normal)
+        .await?;
+
+    settle_active_rows_for_removed_chain(&scratch).await?;
+    assert_eq!(
+        store.status(chain_id, PhaseName::Verify).await?,
+        PhaseStatus::Completed
+    );
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let cancellation = CancellationToken::new();
+    let phases = PhaseName::ALL.map(|name| {
+        let calls = Arc::clone(&calls);
+        let cancellation = cancellation.clone();
+        Arc::new(FunctionPhase {
+            name,
+            handler: Arc::new(move |_| {
+                calls.lock().expect("phase calls lock").push(name);
+                if name == PhaseName::Live {
+                    cancellation.cancel();
+                    return Ok(PhaseBatchOutcome::Idle(PhaseProgress::default()));
+                }
+                let progress = PhaseProgress {
+                    verification_level: (name == PhaseName::Verify)
+                        .then_some(VerificationLevel::QuickSynced),
+                    ..PhaseProgress::default()
+                };
+                Ok(PhaseBatchOutcome::Complete(progress))
+            }),
+        }) as Arc<dyn Phase>
+    });
+    let mut configured_chain = configured_chain;
+    configured_chain.verify_before_live = true;
+    runner(
+        scratch.runner(),
+        PhaseSet::new(phases)?,
+        available_capacity(),
+        "readded-verify-runner",
+    )?
+    .run_chain(&configured_chain, cancellation)
+    .await?;
+
+    let observed_calls = calls.lock().expect("phase calls lock").clone();
+    let verification_level: Option<String> = sqlx::query_scalar(
+        "SELECT verification_level
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        observed_calls,
+        vec![PhaseName::Verify, PhaseName::Live],
+        "Live must not start before a fabricated Verify completion is rerun"
+    );
+    assert_eq!(verification_level.as_deref(), Some("quick_synced"));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn readding_chain_restarts_verify_settled_without_block_extent() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_readd_verify_without_extent").await?;
+    let chain_id = "readded-verify-without-extent-chain";
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    for phase in [PhaseName::Ingest, PhaseName::Interpret, PhaseName::Project] {
+        mark_completed(scratch.pool(), chain_id, phase, None).await?;
+    }
+    store
+        .start_phase(chain_id, PhaseName::Verify, &RunMode::Normal)
+        .await?;
+    store
+        .record_progress(
+            chain_id,
+            PhaseName::Verify,
+            &RunMode::Normal,
+            &PhaseProgress {
+                verification_level: Some(VerificationLevel::QuickSynced),
+                ..PhaseProgress::default()
+            },
+        )
+        .await?;
+
+    settle_active_rows_for_removed_chain(&scratch).await?;
+    assert_eq!(
+        store
+            .start_phase(chain_id, PhaseName::Verify, &RunMode::Normal)
+            .await?,
+        StartDisposition::Started,
+        "a settled Verify level without a block extent must resume on re-add"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn readding_chain_restarts_verify_settled_before_target_with_level() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_readd_partial_verify_with_level").await?;
+    let chain_id = "readded-partial-verify-chain";
+    let configured_chain = chain(chain_id)?;
+    seed_lineage(scratch.pool(), chain_id, 3).await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    let target = BlockMarker::new(3, format!("{chain_id}-block-3"))?;
+    let ingest_progress = PhaseProgress {
+        current: Some(target.clone()),
+        target: Some(target.clone()),
+        live_handoff: Some(target.clone()),
+        source_progress: vec![SourceProgress {
+            source_key: "source".to_owned(),
+            current: Some(target.clone()),
+            target: Some(target.clone()),
+        }],
+        ..PhaseProgress::default()
+    };
+    store
+        .start_phase(chain_id, PhaseName::Ingest, &RunMode::Normal)
+        .await?;
+    store
+        .update_ingest_cursors(&configured_chain.sources, &ingest_progress)
+        .await?;
+    store
+        .complete_phase(chain_id, PhaseName::Ingest, &ingest_progress)
+        .await?;
+    publish_heads(
+        scratch.pool(),
+        chain_id,
+        &HeadMarkers {
+            latest: target.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?;
+    for phase in [PhaseName::Interpret, PhaseName::Project] {
+        store.start_phase(chain_id, phase, &RunMode::Normal).await?;
+        store
+            .complete_phase(
+                chain_id,
+                phase,
+                &PhaseProgress {
+                    current: Some(target.clone()),
+                    target: Some(target.clone()),
+                    ..PhaseProgress::default()
+                },
+            )
+            .await?;
+    }
+    store
+        .start_phase(chain_id, PhaseName::Verify, &RunMode::Normal)
+        .await?;
+    let partial = PhaseProgress {
+        current: Some(BlockMarker::new(1, format!("{chain_id}-block-1"))?),
+        target: Some(target),
+        verification_level: Some(VerificationLevel::QuickSynced),
+        ..PhaseProgress::default()
+    };
+    store
+        .record_progress(chain_id, PhaseName::Verify, &RunMode::Normal, &partial)
+        .await?;
+
+    settle_active_rows_for_removed_chain(&scratch).await?;
+    assert_eq!(
+        store.status(chain_id, PhaseName::Verify).await?,
+        PhaseStatus::Completed
+    );
+    assert_eq!(
+        store
+            .start_phase(chain_id, PhaseName::Verify, &RunMode::Normal)
+            .await?,
+        StartDisposition::Started,
+        "a settled Verify cursor before its target must resume on re-add"
+    );
+    let resume = store
+        .phase_resume(chain_id, PhaseName::Verify, &RunMode::Normal)
+        .await?;
+    assert_eq!(resume.current.as_ref().map(|marker| marker.number), Some(1));
+    assert_eq!(resume.target.as_ref().map(|marker| marker.number), Some(3));
+    assert_eq!(
+        resume.verification_level,
+        Some(VerificationLevel::QuickSynced)
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn panicking_phase_stops_only_its_chain_supervisor() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_panic_isolation").await?;
     seed_identified_lineage(scratch.pool(), "good-panic-chain", 0).await?;
@@ -2116,6 +2600,70 @@ async fn interpret_redo_accepts_a_normalized_equivalent_source_kind() -> Result<
 }
 
 #[tokio::test]
+async fn ingest_summary_rolls_back_when_cursor_persistence_fails() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_atomic_ingest_progress").await?;
+    let chain_id = "atomic-ingest-progress-chain";
+    let configured_chain = chain(chain_id)?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    store
+        .start_phase(chain_id, PhaseName::Ingest, &RunMode::Normal)
+        .await?;
+    sqlx::raw_sql(
+        "
+        CREATE FUNCTION reject_atomic_ingest_cursor()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            RAISE EXCEPTION 'forced cursor persistence failure'
+                USING ERRCODE = '23514';
+        END
+        $$;
+        CREATE TRIGGER reject_atomic_ingest_cursor
+        BEFORE INSERT OR UPDATE ON ingest_cursors
+        FOR EACH ROW
+        EXECUTE FUNCTION reject_atomic_ingest_cursor();
+        ",
+    )
+    .execute(scratch.pool())
+    .await?;
+    let current = BlockMarker::new(1, format!("{chain_id}-block-1"))?;
+    let target = BlockMarker::new(3, format!("{chain_id}-block-3"))?;
+    let progress = PhaseProgress {
+        current: Some(current.clone()),
+        target: Some(target.clone()),
+        source_progress: vec![SourceProgress {
+            source_key: "source".to_owned(),
+            current: Some(current),
+            target: Some(target),
+        }],
+        ..PhaseProgress::default()
+    };
+    store
+        .record_ingest_progress(chain_id, &configured_chain.sources, &progress)
+        .await
+        .expect_err("cursor failure must roll back the ingest summary");
+
+    let position: (Option<i64>, Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT current_block_number, target_block_number, live_handoff_block_number
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(position, (None, None, None));
+    let cursor_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM ingest_cursors WHERE chain_id = $1")
+            .bind(chain_id)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(cursor_count, 0);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn verify_phase_records_its_trust_level() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_verify_level").await?;
     let phases = PhaseName::ALL.map(|name| {
@@ -2274,6 +2822,26 @@ async fn seed_identified_lineage(pool: &sqlx::PgPool, chain_id: &str, through: i
 
 fn available_capacity() -> CapacityGuard {
     CapacityGuard::new(CapacityConfig::default(), Arc::new(AlwaysAvailable))
+}
+
+async fn settle_active_rows_for_removed_chain(scratch: &ScratchDatabase) -> Result<()> {
+    let runtime = RuntimeConfig::new(
+        "removed-chain-settlement-runner",
+        vec![chain("retained-chain")?],
+        CapacityConfig::default(),
+        test_timing(),
+    )?;
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    Arc::new(runner(
+        scratch.runner(),
+        complete_phase_set(None),
+        available_capacity(),
+        "removed-chain-settlement-runner",
+    )?)
+    .run(&runtime, cancellation)
+    .await?;
+    Ok(())
 }
 
 struct AlwaysAvailable;

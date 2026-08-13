@@ -23,6 +23,21 @@ tests:
               threshold: "A phase reports status=failed on one evaluation."
               meaning: "The named chain phase stored an error; it may be retrying or may have stopped."
 
+  - name: inactive one-hot phase states do not page
+    interval: 1m
+    input_series:
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet",phase="interpret",status="failed"}'
+        values: '0x20'
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet",phase="live",status="paused"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BignamePhaseFailed
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: BignamePhaseRunnerCapacityPaused
+        exp_alerts: []
+
   - name: healthy long batch stays below its configured stale threshold
     interval: 15s
     input_series:

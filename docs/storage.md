@@ -344,6 +344,18 @@ selected readable head. Equal-height admission requires the selected block hash
 to match. Name, relation, inventory, primary-name, and GraphQL reads all apply
 this rule against phase lineage.
 
+When a chain is removed from runtime configuration, recovery may change its
+active phase row to the non-paging `completed` state without claiming that the
+phase finished its work. If the chain is configured again, a completed Ingest
+row resumes unless its current block and live handoff match its target. A
+completed Verify row resumes unless it has a matching current/target block pair
+and a [verification level](glossary.md#verification-level). Ingest persists its
+summary and every source cursor in one transaction, so those completion markers
+cannot survive without the matching source progress. Recovery also clears the
+live handoff when it changes an active Ingest row to `completed`; this makes a
+later re-add resume from the preserved source cursors even if an older runner
+stopped between its formerly separate summary and cursor writes.
+
 ## Interpretation replay
 
 Interpretation is deterministic for a fixed manifest set, interpreter content
