@@ -14,6 +14,7 @@ pub mod inspect;
 pub mod interpret_phase;
 pub mod label_preimages;
 pub mod live_phase;
+pub mod metrics;
 pub mod phase;
 pub mod phase_lock;
 pub mod project_phase;
@@ -38,3 +39,9 @@ pub mod verify_phase;
 mod verify_store;
 
 pub use bigname_content_hash::INTERPRETER_CONTENT_HASH;
+
+pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const BUILD_SHA: &str = match option_env!("BIGNAME_BUILD_SHA") {
+    Some(build_sha) => build_sha,
+    None => "unknown",
+};

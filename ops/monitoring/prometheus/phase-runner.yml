@@ -1,0 +1,10 @@
+rule_files:
+  - phase-runner-alerts.yml
+
+scrape_configs:
+  - job_name: bigname-phase-runner
+    scrape_interval: 15s
+    scrape_timeout: 5s
+    static_configs:
+      - targets:
+          - phase-runner:9465

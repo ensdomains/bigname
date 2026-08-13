@@ -1,0 +1,140 @@
+rule_files:
+  - phase-runner-alerts.yml
+
+evaluation_interval: 15s
+
+tests:
+  - name: terminal phase failure pages
+    interval: 15s
+    input_series:
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",chain="ethereum-mainnet",phase="interpret",status="failed"}'
+        values: '1x12'
+    alert_rule_test:
+      - eval_time: 15s
+        alertname: BignamePhaseFailed
+        exp_alerts:
+          - exp_labels:
+              chain: ethereum-mainnet
+              job: bigname-phase-runner
+              phase: interpret
+              severity: page
+              status: failed
+            exp_annotations:
+              threshold: "A phase reports status=failed on one evaluation."
+              meaning: "The named chain phase stored an error; it may be retrying or may have stopped."
+
+  - name: healthy long batch stays below its configured stale threshold
+    interval: 15s
+    input_series:
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live",status="running"}'
+        values: '1x20'
+      - series: 'phase_runner_heartbeat_age_seconds{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live"}'
+        values: '180x20'
+      - series: 'phase_runner_heartbeat_stale_threshold_seconds{job="bigname-phase-runner",threshold_seconds="900"}'
+        values: '900x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: BignamePhaseRunnerHeartbeatStale
+        exp_alerts: []
+
+  - name: stalled live batch pages on stale heartbeat
+    interval: 15s
+    input_series:
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live",status="running"}'
+        values: '1x20'
+      - series: 'phase_runner_heartbeat_age_seconds{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live"}'
+        values: '1200x20'
+      - series: 'phase_runner_heartbeat_stale_threshold_seconds{job="bigname-phase-runner",threshold_seconds="900"}'
+        values: '900x20'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerHeartbeatStale
+        exp_alerts:
+          - exp_labels:
+              chain: ethereum-mainnet
+              job: bigname-phase-runner
+              phase: live
+              severity: page
+              threshold_seconds: "900"
+            exp_annotations:
+              threshold: "A running or capacity-paused phase has no heartbeat, or its heartbeat is older than the configured 900 seconds, for 2 minutes."
+              meaning: "The named chain phase is no longer completing work often enough to prove that it is alive."
+
+  - name: running phase with no recorded heartbeat pages
+    interval: 15s
+    input_series:
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live",status="running"}'
+        values: '1x20'
+      - series: 'phase_runner_heartbeat_age_seconds{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live"}'
+        values: '-1x20'
+      - series: 'phase_runner_heartbeat_stale_threshold_seconds{job="bigname-phase-runner",threshold_seconds="900"}'
+        values: '900x20'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerHeartbeatStale
+        exp_alerts:
+          - exp_labels:
+              chain: ethereum-mainnet
+              job: bigname-phase-runner
+              phase: live
+              severity: page
+              threshold_seconds: "900"
+            exp_annotations:
+              threshold: "A running or capacity-paused phase has no heartbeat, or its heartbeat is older than the configured 900 seconds, for 2 minutes."
+              meaning: "The named chain phase is no longer completing work often enough to prove that it is alive."
+
+  - name: sustained live head lag pages
+    interval: 1m
+    input_series:
+      - series: 'phase_runner_head_lag_blocks{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live"}'
+        values: '31x15'
+      - series: 'phase_runner_phase_status{job="bigname-phase-runner",chain="ethereum-mainnet",phase="live",status="running"}'
+        values: '1x15'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BignamePhaseRunnerHeadLagHigh
+        exp_alerts:
+          - exp_labels:
+              chain: ethereum-mainnet
+              job: bigname-phase-runner
+              phase: live
+              severity: page
+            exp_annotations:
+              threshold: "Live processing remains more than 30 blocks behind its latest observed provider target for 10 minutes."
+              meaning: "The named chain is persistently falling behind new blocks."
+
+  - name: runner target down pages
+    interval: 30s
+    input_series:
+      - series: 'up{job="bigname-phase-runner",instance="phase-runner:9465"}'
+        values: '0x6'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerDown
+        exp_alerts:
+          - exp_labels:
+              instance: phase-runner:9465
+              job: bigname-phase-runner
+              severity: page
+            exp_annotations:
+              threshold: "Prometheus cannot scrape the runner for 2 minutes."
+              meaning: "The runner process or its metrics listener is unavailable."
+
+  - name: stale database refresh pages
+    interval: 30s
+    input_series:
+      - series: 'phase_runner_metrics_refresh_success{job="bigname-phase-runner",instance="phase-runner:9465"}'
+        values: '0x6'
+      - series: 'phase_runner_metrics_last_refresh_timestamp_seconds{job="bigname-phase-runner",instance="phase-runner:9465"}'
+        values: '0x6'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BignamePhaseRunnerMetricsRefreshStale
+        exp_alerts:
+          - exp_labels:
+              instance: phase-runner:9465
+              job: bigname-phase-runner
+              severity: page
+            exp_annotations:
+              threshold: "The metrics database read fails, or no successful refresh occurs for 60 seconds, for 2 minutes."
+              meaning: "The endpoint is reachable but its view of pipeline state is no longer current."

@@ -896,9 +896,13 @@ discovery/observed-answer based rather than exhaustively enumerable.
 
 ## Operations
 
-API metrics remain available. The live phase records its phase state,
-exact block-hash progress, and heartbeat through the shared runner control
-plane; dedicated chain-lag and reorg metrics remain deferred.
+API metrics remain available. The phase runner also exposes a read-only metrics
+endpoint built from its phase state, heartbeat, chain-head, verification, and
+redo records. These metrics include each phase's current and target block and
+the live phase's lag behind the latest provider head it observed and stored as
+that phase's target.
+The endpoint does not write additional operating state. Dedicated reorg metrics
+remain deferred.
 
 The phase runner owns the current schema-v2 operator tools. None expose public
 API routes:

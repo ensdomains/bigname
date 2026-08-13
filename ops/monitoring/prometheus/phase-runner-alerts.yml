@@ -1,0 +1,83 @@
+groups:
+  - name: bigname-phase-runner
+    rules:
+      - alert: BignamePhaseFailed
+        expr: phase_runner_phase_status{job="bigname-phase-runner",status="failed"} == 1
+        labels:
+          severity: page
+        annotations:
+          threshold: "A phase reports status=failed on one evaluation."
+          meaning: "The named chain phase stored an error; it may be retrying or may have stopped."
+
+      - alert: BignamePhaseRunnerDown
+        expr: up{job="bigname-phase-runner"} == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          threshold: "Prometheus cannot scrape the runner for 2 minutes."
+          meaning: "The runner process or its metrics listener is unavailable."
+
+      - alert: BignamePhaseRunnerHeartbeatStale
+        expr: |
+          (
+            (
+              (
+                phase_runner_heartbeat_age_seconds{
+                  job="bigname-phase-runner"
+                } < bool 0
+              )
+              * on () group_left (threshold_seconds)
+              phase_runner_heartbeat_stale_threshold_seconds{
+                job="bigname-phase-runner"
+              }
+            ) > 0
+            or
+            (
+              phase_runner_heartbeat_age_seconds{job="bigname-phase-runner"}
+              > on () group_left (threshold_seconds)
+              phase_runner_heartbeat_stale_threshold_seconds{
+                job="bigname-phase-runner"
+              }
+            )
+          )
+          and on (chain, phase)
+          phase_runner_phase_status{
+            job="bigname-phase-runner",status=~"running|paused"
+          } == 1
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          threshold: "A running or capacity-paused phase has no heartbeat, or its heartbeat is older than the configured {{ $labels.threshold_seconds }} seconds, for 2 minutes."
+          meaning: "The named chain phase is no longer completing work often enough to prove that it is alive."
+
+      - alert: BignamePhaseRunnerHeadLagHigh
+        expr: |
+          phase_runner_head_lag_blocks{
+            job="bigname-phase-runner",phase="live"
+          } > 30
+          and on (chain, phase)
+          phase_runner_phase_status{
+            job="bigname-phase-runner",phase="live",status="running"
+          } == 1
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          threshold: "Live processing remains more than 30 blocks behind its latest observed provider target for 10 minutes."
+          meaning: "The named chain is persistently falling behind new blocks."
+
+      - alert: BignamePhaseRunnerMetricsRefreshStale
+        expr: |
+          phase_runner_metrics_refresh_success{job="bigname-phase-runner"} == 0
+          or
+          time() - phase_runner_metrics_last_refresh_timestamp_seconds{
+            job="bigname-phase-runner"
+          } > 60
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          threshold: "The metrics database read fails, or no successful refresh occurs for 60 seconds, for 2 minutes."
+          meaning: "The endpoint is reachable but its view of pipeline state is no longer current."

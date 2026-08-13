@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    net::SocketAddr,
     path::PathBuf,
     str::FromStr,
     time::Duration,
@@ -10,8 +11,7 @@ use uuid::Uuid;
 
 use crate::{
     config::{
-        CapacityConfig, ChainConfig, RuntimeConfig, SeedBasis, SourceConfig, TimingConfig,
-        group_sources,
+        CapacityConfig, ChainConfig, RuntimeConfig, SourceConfig, TimingConfig, group_sources,
     },
     error::{ErrorKind, RunnerError, RunnerResult},
     phase::{BlockRange, PhaseName},
@@ -22,8 +22,12 @@ use crate::{
 mod inspect_resolution;
 #[path = "cli_label_preimages.rs"]
 mod label_preimages;
+#[path = "cli_source.rs"]
+mod source;
 #[path = "cli_attestation.rs"]
 mod watch_set_attestation;
+
+use source::parse_source;
 
 #[cfg(test)]
 #[path = "cli/tests.rs"]
@@ -134,6 +138,20 @@ struct RunArgs {
 
     #[arg(long, env = "BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL")]
     verification_database_url: String,
+
+    #[arg(
+        long,
+        env = "BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR",
+        default_value = "127.0.0.1:9465"
+    )]
+    metrics_bind_addr: SocketAddr,
+
+    #[arg(
+        long,
+        env = "BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS",
+        default_value_t = 900
+    )]
+    heartbeat_stale_after_secs: i64,
 
     #[command(flatten)]
     capacity: CapacityArgs,
@@ -266,6 +284,8 @@ pub enum ResolvedCommand {
     Run {
         database_url: String,
         verification_database_url: String,
+        metrics_bind_addr: SocketAddr,
+        heartbeat_stale_after_secs: i64,
         manifests_root: PathBuf,
         runtime: RuntimeConfig,
         hydration_rpc_urls: bigname_lookup::ChainRpcUrls,
@@ -340,6 +360,12 @@ fn resolve_run(args: RunArgs) -> RunnerResult<ResolvedCommand> {
             "at least one --chain must be configured",
         ));
     }
+    if args.heartbeat_stale_after_secs <= 0 {
+        return Err(RunnerError::new(
+            ErrorKind::Configuration,
+            "heartbeat stale threshold must be positive",
+        ));
+    }
     let sources = args
         .sources
         .iter()
@@ -363,6 +389,8 @@ fn resolve_run(args: RunArgs) -> RunnerResult<ResolvedCommand> {
     Ok(ResolvedCommand::Run {
         database_url: args.connection.database_url,
         verification_database_url: args.verification_database_url,
+        metrics_bind_addr: args.metrics_bind_addr,
+        heartbeat_stale_after_secs: args.heartbeat_stale_after_secs,
         manifests_root: args.manifests.manifests_root,
         runtime,
         hydration_rpc_urls,
@@ -547,54 +575,4 @@ pub fn validate_redo_attestation_chains(
     chains: &[ChainConfig],
 ) -> RunnerResult<()> {
     watch_set_attestation::validate_resolved_chains(attestations, chains)
-}
-
-fn parse_source(specification: &str) -> RunnerResult<SourceConfig> {
-    let (descriptor, environment_name) = specification
-        .split_once('=')
-        .ok_or_else(|| invalid_source("missing =URL_ENV", specification))?;
-    if environment_name.trim().is_empty() {
-        return Err(invalid_source(
-            "URL environment name is empty",
-            specification,
-        ));
-    }
-    let fields = descriptor.split(':').collect::<Vec<_>>();
-    if fields.len() != 5 {
-        return Err(invalid_source(
-            "expected CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV",
-            specification,
-        ));
-    }
-    let endpoint = std::env::var(environment_name).map_err(|_| {
-        RunnerError::new(
-            ErrorKind::Configuration,
-            format!(
-                "source {} for chain {} requires environment variable {environment_name}",
-                fields[1], fields[0]
-            ),
-        )
-    })?;
-    let start_block_number = fields[4]
-        .parse::<i64>()
-        .map_err(|_| invalid_source("START_BLOCK is not an integer", specification))?;
-    SourceConfig::new(
-        fields[0],
-        fields[1],
-        fields[2],
-        SeedBasis::parse(fields[3])?,
-        start_block_number,
-        endpoint,
-    )
-}
-
-fn invalid_source(reason: &str, specification: &str) -> RunnerError {
-    let descriptor = specification
-        .split_once('=')
-        .map(|(descriptor, _)| descriptor)
-        .unwrap_or(specification);
-    RunnerError::new(
-        ErrorKind::Configuration,
-        format!("invalid source descriptor {descriptor:?}: {reason}"),
-    )
 }

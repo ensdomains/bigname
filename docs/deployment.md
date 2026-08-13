@@ -86,6 +86,8 @@ The implemented phases use:
 - `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS`
 - `BIGNAME_PHASE_RUNNER_INSTANCE_ID`
 - `BIGNAME_PHASE_RUNNER_INTERPRETER_STATE_CACHE_ENTRIES`
+- `BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR`
+- `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS`
 
 `BIGNAME_DATABASE_URL` is the writer credential. Supervised `run` and a
 `verify` redo also require
@@ -106,6 +108,26 @@ values reduce process memory and cause more indexed reads from
 `normalized_events`; zero is valid and forces every required pre-batch value
 through that read path. The setting does not change stored output or the
 [interpreter content hash](glossary.md#interpreter-content-hash).
+
+`BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR` configures the runner's Prometheus
+listener. It defaults to `127.0.0.1:9465` for a directly launched binary. The
+server Compose file sets the container listener to `0.0.0.0:9465` and publishes
+it on host loopback by default; `BIGNAME_PHASE_RUNNER_METRICS_HOST` and
+`BIGNAME_PHASE_RUNNER_METRICS_PORT` change only that Compose port mapping. The
+listener serves `GET /metrics`. Every five seconds it reads phase progress,
+heartbeats, verification, unfinished repair work, and the published chain head
+from the runner-owned tables. It does not write metric state to PostgreSQL.
+Missing block positions and heartbeats are exported as `-1`, rather than being
+silently omitted. See the
+[pipeline monitoring runbook](runbooks/pipeline-monitoring.md) for the checked-in
+Prometheus rules and Grafana dashboard.
+
+`BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS` is exported for the checked-in
+heartbeat alert. It defaults to 900 seconds. Set it above the slowest healthy
+batch or inter-phase transition observed in the deployment: heartbeats record
+completed work opportunities between batches, not proof that a long batch is
+still executing. The alert then requires the configured age to remain exceeded
+for another two minutes before paging.
 
 Point both database URLs at the writer primary. Never point the verification
 URL at a replica, standby, physical basebackup clone, or a pooler that can route
