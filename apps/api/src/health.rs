@@ -68,12 +68,17 @@ pub(crate) async fn health(
     State(state): State<AppState>,
     axum::Extension(health_pool): axum::Extension<HealthDatabasePool>,
 ) -> (StatusCode, Json<HealthResponse>) {
-    let readiness_identity = match tokio::time::timeout(
-        HEALTH_DATABASE_CHECK_TIMEOUT,
-        load_database_instance_identity(&health_pool.0),
-    )
-    .await
-    {
+    let (readiness_probe, serving_probe) = tokio::join!(
+        tokio::time::timeout(
+            HEALTH_DATABASE_CHECK_TIMEOUT,
+            load_database_instance_identity(&health_pool.0),
+        ),
+        tokio::time::timeout(
+            HEALTH_DATABASE_CHECK_TIMEOUT,
+            load_database_instance_identity(&state.pool),
+        ),
+    );
+    let readiness_identity = match readiness_probe {
         Ok(Ok(identity)) => Some(identity),
         Ok(Err(error)) => {
             warn!(
@@ -94,12 +99,7 @@ pub(crate) async fn health(
             None
         }
     };
-    let serving_identity = match tokio::time::timeout(
-        HEALTH_DATABASE_CHECK_TIMEOUT,
-        load_database_instance_identity(&state.pool),
-    )
-    .await
-    {
+    let serving_identity = match serving_probe {
         Ok(Ok(identity)) => Some(identity),
         Ok(Err(error)) => {
             warn!(

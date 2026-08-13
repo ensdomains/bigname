@@ -14,7 +14,9 @@ runbook and the harness. Production runs require a clean worktree, including no
 untracked files, relative to the reported `HEAD`. Write reports outside the
 checkout as shown below. The wrapper checks before and after its release-profile
 build, passes the captured commit into the binary, and the binary rechecks it
-before and after measurement.
+before and after measurement. The binary derives the reported Cargo build
+profile from its compiled assertion mode, while production commands also
+require the wrapper to attest that it selected the release Cargo build profile.
 
 ## What the gate measures
 
@@ -156,7 +158,9 @@ any mismatch. The connection carries the same interpreter content-hash setting
 as the phase runner, so ENSv1→ENSv2 migration correlation writes behave
 normally. The incremental tick runs first, the Interpret redo runs second, and
 the full Project rebuild runs last so the rebuilt projections match the
-interpreted copy.
+interpreted copy. The report records the opaque database identity token before
+and after those measurements; a restart, failover, or listener change during
+the indexing run is red.
 
 ## Run the API half
 
@@ -199,9 +203,13 @@ is not distinguished from a continuously running process.
 
 Before timed load begins, production mode sends seed requests and refuses to
 run unless every route returns at least one populated result. Every paginated
-route must also return a real continuation cursor; the resumed request becomes
-part of the timed workload. This prevents a fast empty-result workload from
-counting as release evidence.
+route must also return a real continuation cursor. If the initial seed prefix
+does not produce the required populated result or cursor, the harness continues
+through the bounded target-database corpus before declaring the route red; a resumed
+cursor request becomes part of the timed workload. For the records route,
+populated means at least one requested key has an `ok` answer, not merely that
+the name exists. This prevents a fast empty-result workload from counting as
+release evidence.
 
 ## Decide green or red
 

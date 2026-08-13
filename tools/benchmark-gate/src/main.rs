@@ -254,14 +254,24 @@ fn begin_release_run() -> Result<String> {
     Ok(head)
 }
 
+const fn cargo_profile_for_debug_assertions(debug_assertions: bool) -> &'static str {
+    if debug_assertions { "dev" } else { "release" }
+}
+
 fn cargo_profile() -> String {
-    std::env::var("BIGNAME_BENCHMARK_CARGO_PROFILE").unwrap_or_else(|_| "unknown".to_owned())
+    cargo_profile_for_debug_assertions(cfg!(debug_assertions)).to_owned()
 }
 
 fn require_release_profile() -> Result<()> {
     ensure!(
         cargo_profile() == "release",
         "production benchmark commands require the release Cargo profile"
+    );
+    let launched_profile = std::env::var("BIGNAME_BENCHMARK_CARGO_PROFILE")
+        .context("production benchmark must be launched by scripts/benchmark-gate")?;
+    ensure!(
+        launched_profile == "release",
+        "production benchmark wrapper used Cargo profile {launched_profile:?}; release is required"
     );
     Ok(())
 }
@@ -325,5 +335,20 @@ mod tests {
             "http://127.0.0.1:8545",
         ]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn reported_cargo_profile_comes_from_compiled_assertion_mode() {
+        assert_eq!(cargo_profile_for_debug_assertions(true), "dev");
+        assert_eq!(cargo_profile_for_debug_assertions(false), "release");
+        assert_eq!(
+            cargo_profile(),
+            cargo_profile_for_debug_assertions(cfg!(debug_assertions))
+        );
+    }
+
+    #[test]
+    fn a_binary_not_launched_by_the_release_wrapper_is_rejected() {
+        assert!(require_release_profile().is_err());
     }
 }

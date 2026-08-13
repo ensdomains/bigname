@@ -21,12 +21,16 @@ pub(super) fn request_variants(
         "lookup" => lookup_requests(base, corpus, &mut requests)?,
         "status" => requests.push(get(base, &["v2", "status"], &[])?),
         "name" => {
-            for name in &corpus.names {
-                requests.push(get(base, &["v2", "names", name], &[("source", "indexed")])?);
+            for (namespace, name) in &corpus.names {
+                requests.push(get(
+                    base,
+                    &["v2", "names", name],
+                    &[("source", "indexed"), ("namespace", namespace)],
+                )?);
             }
         }
         "records" => {
-            for (index, name) in corpus.names.iter().enumerate() {
+            for (index, (namespace, name)) in corpus.names.iter().enumerate() {
                 let keys = if index % 2 == 0 {
                     "addr:60"
                 } else {
@@ -35,7 +39,11 @@ pub(super) fn request_variants(
                 requests.push(get(
                     base,
                     &["v2", "names", name, "records"],
-                    &[("source", "indexed"), ("keys", keys)],
+                    &[
+                        ("source", "indexed"),
+                        ("keys", keys),
+                        ("namespace", namespace),
+                    ],
                 )?);
             }
         }
@@ -45,22 +53,23 @@ pub(super) fn request_variants(
             } else {
                 &corpus.parents
             };
-            for (index, parent) in parents.iter().enumerate() {
+            for (index, (namespace, parent)) in parents.iter().enumerate() {
                 requests.push(get(
                     base,
                     &["v2", "names", parent, "subnames"],
-                    &[("page_size", page_size(index))],
+                    &[("page_size", page_size(index)), ("namespace", namespace)],
                 )?);
             }
         }
         "name_history" => {
-            for (index, name) in corpus.names.iter().enumerate() {
+            for (index, (namespace, name)) in corpus.names.iter().enumerate() {
                 requests.push(get(
                     base,
                     &["v2", "names", name, "history"],
                     &[
                         ("scope", history_scope(index)),
                         ("page_size", page_size(index)),
+                        ("namespace", namespace),
                     ],
                 )?);
             }
@@ -70,7 +79,7 @@ pub(super) fn request_variants(
         "primary_name" => primary_name_requests(base, corpus, &mut requests)?,
         "address_history" => address_history_requests(base, corpus, &mut requests)?,
         "search" => {
-            for (index, name) in corpus.names.iter().enumerate() {
+            for (index, (namespace, name)) in corpus.names.iter().enumerate() {
                 let query = search_term(name);
                 requests.push(get(
                     base,
@@ -78,20 +87,20 @@ pub(super) fn request_variants(
                     &[
                         ("q", &query),
                         ("match", if index % 2 == 0 { "prefix" } else { "contains" }),
-                        ("namespace", namespace_for_name(name)),
+                        ("namespace", namespace),
                         ("page_size", page_size(index)),
                     ],
                 )?);
             }
         }
         "events" => {
-            for (index, name) in corpus.names.iter().enumerate() {
+            for (index, (namespace, name)) in corpus.names.iter().enumerate() {
                 requests.push(get(
                     base,
                     &["v2", "events"],
                     &[
                         ("name", name),
-                        ("namespace", namespace_for_name(name)),
+                        ("namespace", namespace),
                         ("page_size", page_size(index)),
                     ],
                 )?);
@@ -123,8 +132,18 @@ pub(super) fn request_variants(
 fn lookup_requests(base: &Url, corpus: &Corpus, requests: &mut Vec<RequestSpec>) -> Result<()> {
     for variant in 0..100 {
         let bucket = variant / 2;
+        let name_samples = if variant % 2 == 0 {
+            let namespace = &corpus.names[bucket % corpus.names.len()].0;
+            corpus
+                .names
+                .iter()
+                .filter(|(sample_namespace, _)| sample_namespace == namespace)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         let corpus_len = if variant % 2 == 0 {
-            corpus.names.len()
+            name_samples.len()
         } else {
             corpus.address_names.len()
         };
@@ -135,7 +154,7 @@ fn lookup_requests(base: &Url, corpus: &Corpus, requests: &mut Vec<RequestSpec>)
                 Ok(if variant % 2 == 0 {
                     json!({
                         "id": format!("name-{variant}-{offset}"),
-                        "name": corpus.names[index],
+                        "name": name_samples[index].1,
                     })
                 } else {
                     json!({
@@ -153,11 +172,11 @@ fn lookup_requests(base: &Url, corpus: &Corpus, requests: &mut Vec<RequestSpec>)
         } else {
             "feed"
         };
-        requests.push(post(
-            base,
-            &["v2", "lookup"],
-            json!({"profile": profile, "inputs": inputs}),
-        )?);
+        let mut body = json!({"profile": profile, "inputs": inputs});
+        if variant % 2 == 0 {
+            body["namespace"] = Value::String(name_samples[0].0.clone());
+        }
+        requests.push(post(base, &["v2", "lookup"], body)?);
     }
     Ok(())
 }
@@ -311,14 +330,6 @@ fn with_path(base: &Url, segments: &[&str]) -> Result<Url> {
     Ok(url)
 }
 
-fn namespace_for_name(name: &str) -> &'static str {
-    if name.ends_with(".base.eth") {
-        "basenames"
-    } else {
-        "ens"
-    }
-}
-
 fn lookup_batch_size(bucket: usize, corpus_len: usize) -> usize {
     let requested = match bucket {
         0..=34 => 1,
@@ -366,6 +377,18 @@ fn numeric_chain_id(chain: &str) -> Result<&'static str> {
 mod tests {
     use super::*;
 
+    fn corpus_with_ens_base_eth_name() -> Corpus {
+        Corpus {
+            names: vec![("ens".to_owned(), "ordinary.base.eth".to_owned())],
+            address_names: Vec::new(),
+            parents: Vec::new(),
+            permission_subjects: Vec::new(),
+            primary_names: Vec::new(),
+            resolvers: Vec::new(),
+            namespaces: vec!["ens".to_owned()],
+        }
+    }
+
     #[test]
     fn path_parameters_are_encoded_as_segments() {
         let base = normalized_base_url("http://127.0.0.1:3000").unwrap();
@@ -394,5 +417,26 @@ mod tests {
         assert_eq!(public_relation("effective_controller").unwrap(), "manager");
         assert_eq!(public_relation("registrant").unwrap(), "registrant");
         assert!(public_relation("invented").is_err());
+    }
+
+    #[test]
+    fn name_shaped_requests_bind_the_sampled_ens_namespace() {
+        let base = normalized_base_url("http://127.0.0.1:3000").unwrap();
+        let corpus = corpus_with_ens_base_eth_name();
+
+        for endpoint in ["name", "records", "subnames", "name_history"] {
+            let requests = request_variants(&base, &corpus, endpoint).unwrap();
+            assert_eq!(
+                requests[0]
+                    .url
+                    .query_pairs()
+                    .find(|(key, _)| key == "namespace")
+                    .map(|(_, value)| value.into_owned()),
+                Some("ens".to_owned()),
+                "{endpoint} must not infer Basenames from an ENS x.base.eth sample"
+            );
+        }
+        let lookup = request_variants(&base, &corpus, "lookup").unwrap();
+        assert_eq!(lookup[0].body.as_ref().unwrap()["namespace"], "ens");
     }
 }

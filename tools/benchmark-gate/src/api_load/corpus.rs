@@ -3,13 +3,13 @@ use sqlx::PgPool;
 
 use crate::budgets::GateBudgets;
 
-const PARENT_CORPUS_SQL: &str = "SELECT DISTINCT surface.raw_name FROM children_current child JOIN name_surfaces surface ON surface.logical_name_id = child.parent_logical_name_id WHERE surface.raw_name <> '' ORDER BY surface.raw_name LIMIT $1";
+const PARENT_CORPUS_SQL: &str = "SELECT DISTINCT surface.namespace, surface.raw_name FROM children_current child JOIN name_surfaces surface ON surface.logical_name_id = child.parent_logical_name_id WHERE surface.raw_name <> '' ORDER BY surface.namespace, surface.raw_name LIMIT $1";
 
 #[derive(Clone, Debug)]
 pub(super) struct Corpus {
-    pub(super) names: Vec<String>,
+    pub(super) names: Vec<(String, String)>,
     pub(super) address_names: Vec<(String, String, String, String)>,
-    pub(super) parents: Vec<String>,
+    pub(super) parents: Vec<(String, String)>,
     pub(super) permission_subjects: Vec<String>,
     pub(super) primary_names: Vec<(String, String, String)>,
     pub(super) resolvers: Vec<(String, String)>,
@@ -26,8 +26,8 @@ impl Corpus {
     pub(super) async fn load(pool: &PgPool, budgets: &GateBudgets) -> Result<Self> {
         let limit = i64::try_from(budgets.api_corpus_size)
             .context("API corpus size exceeds PostgreSQL limit")?;
-        let names: Vec<String> = sqlx::query_scalar(
-            "SELECT raw_name FROM name_current WHERE support_status = 'supported' ORDER BY logical_name_id LIMIT $1",
+        let names: Vec<(String, String)> = sqlx::query_as(
+            "SELECT namespace, raw_name FROM name_current WHERE support_status = 'supported' ORDER BY logical_name_id LIMIT $1",
         )
         .bind(limit)
         .fetch_all(pool)
@@ -45,7 +45,7 @@ impl Corpus {
         .fetch_all(pool)
         .await
         .context("failed to load address benchmark corpus")?;
-        let parents: Vec<String> = sqlx::query_scalar(PARENT_CORPUS_SQL)
+        let parents: Vec<(String, String)> = sqlx::query_as(PARENT_CORPUS_SQL)
             .bind(limit)
             .fetch_all(pool)
             .await

@@ -19,7 +19,7 @@ use bigname_project::{
 use serde::Serialize;
 use sqlx::PgPool;
 
-use crate::budgets::GateBudgets;
+use crate::{budgets::GateBudgets, database};
 
 const PROJECTION_NAME_COUNT_SQL: &str =
     "SELECT count(*) FROM name_current WHERE provenance ->> 'chain_id' = $1";
@@ -36,6 +36,8 @@ pub struct IndexingInput {
 #[derive(Clone, Debug, Serialize)]
 pub struct IndexingReport {
     pub preflight_passed: bool,
+    pub database_instance_identity: String,
+    pub postflight_database_instance_identity: String,
     pub chain_id: String,
     pub head_block: i64,
     pub walk_from_block: i64,
@@ -69,10 +71,19 @@ pub async fn run(
     input: &IndexingInput,
     budgets: &GateBudgets,
 ) -> Result<IndexingReport> {
+    let database_instance_identity = database::database_instance_identity(pool).await?;
     validate_input(pool, input, budgets).await?;
     let name_current_rows = projection_name_count(pool, &input.chain_id).await?;
     if name_current_rows < budgets.project_min_name_current_rows {
-        return Ok(scale_failure_report(input, budgets, name_current_rows));
+        let postflight_database_instance_identity =
+            database::database_instance_identity(pool).await?;
+        return Ok(scale_failure_report(
+            input,
+            budgets,
+            name_current_rows,
+            database_instance_identity,
+            postflight_database_instance_identity,
+        ));
     }
     let walk_blocks = input.walk_to_block - input.walk_from_block + 1;
     let raw_logs: i64 = sqlx::query_scalar(
@@ -122,8 +133,13 @@ pub async fn run(
         Err(_) => (0, false),
     };
     let post_rebuild_name_current_rows = projection_name_count(pool, &input.chain_id).await?;
+    let postflight_database_instance_identity = database::database_instance_identity(pool).await?;
 
     let mut failures = Vec::new();
+    failures.extend(database_instance_identity_failures(
+        &database_instance_identity,
+        &postflight_database_instance_identity,
+    ));
     failures.extend(projection_scale_failures(
         name_current_rows,
         post_rebuild_name_current_rows,
@@ -167,6 +183,8 @@ pub async fn run(
 
     Ok(IndexingReport {
         preflight_passed: true,
+        database_instance_identity,
+        postflight_database_instance_identity,
         chain_id: input.chain_id.clone(),
         head_block: input.head_block,
         walk_from_block: input.walk_from_block,
@@ -200,9 +218,21 @@ fn scale_failure_report(
     input: &IndexingInput,
     budgets: &GateBudgets,
     name_current_rows: u64,
+    database_instance_identity: String,
+    postflight_database_instance_identity: String,
 ) -> IndexingReport {
+    let mut failures = vec![format!(
+        "name_current has {name_current_rows} rows; release profile requires {} before projection benchmarking",
+        budgets.project_min_name_current_rows
+    )];
+    failures.extend(database_instance_identity_failures(
+        &database_instance_identity,
+        &postflight_database_instance_identity,
+    ));
     IndexingReport {
         preflight_passed: false,
+        database_instance_identity,
+        postflight_database_instance_identity,
         chain_id: input.chain_id.clone(),
         head_block: input.head_block,
         walk_from_block: input.walk_from_block,
@@ -228,10 +258,7 @@ fn scale_failure_report(
         interpret_max_peak_rss_mib: budgets.interpret_max_peak_rss_mib,
         interpret_state_cache_entries: budgets.interpret_state_cache_entries,
         green: false,
-        failures: vec![format!(
-            "name_current has {name_current_rows} rows; release profile requires {} before projection benchmarking",
-            budgets.project_min_name_current_rows
-        )],
+        failures,
     }
 }
 
@@ -473,6 +500,14 @@ fn projection_scale_failures(pre_rebuild: u64, post_rebuild: u64, minimum: u64) 
     failures
 }
 
+fn database_instance_identity_failures(preflight: &str, postflight: &str) -> Vec<String> {
+    if preflight == postflight {
+        Vec::new()
+    } else {
+        vec!["database instance identity changed during the indexing benchmark".to_owned()]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,6 +551,8 @@ mod tests {
             },
             budgets.profile(crate::budgets::BudgetProfile::Production),
             50_000,
+            "database-before".to_owned(),
+            "database-before".to_owned(),
         );
         assert!(!report.preflight_passed);
         assert!(!report.green);
@@ -533,5 +570,14 @@ mod tests {
     #[test]
     fn projection_scale_uses_selected_project_ownership() {
         assert!(PROJECTION_NAME_COUNT_SQL.contains("provenance ->> 'chain_id' = $1"));
+    }
+
+    #[test]
+    fn database_instance_change_is_red() {
+        assert!(database_instance_identity_failures("same", "same").is_empty());
+        assert_eq!(
+            database_instance_identity_failures("before", "after"),
+            ["database instance identity changed during the indexing benchmark"]
+        );
     }
 }

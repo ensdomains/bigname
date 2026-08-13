@@ -132,14 +132,20 @@ therefore becomes the route's existing in-band execution-failure result rather
 than consuming an API request indefinitely. The request deadline remains a
 backstop on `/healthz` and `/v2/status`; the status route remains
 bounded by the phase lookup pool's statement timeout. `/healthz` alone bypasses
-the process-wide concurrency limiter and load shedding, and its `SELECT 1` uses
-a persistent one-connection readiness pool with a two-second check limit. The
+the process-wide concurrency limiter and load shedding. It concurrently runs
+the database-identity query through a persistent one-connection readiness pool
+and the normal serving pool; each probe has the same two-second limit, so their
+combined wall-clock remains bounded by roughly two seconds rather than adding
+the limits together. The readiness-pool result determines database
+reachability, while `database.identity` is populated only when both probes
+return the same opaque identity token. The
 phase request pool uses `BIGNAME_DATABASE_MAX_CONNECTIONS`; the readiness
 connection is additional, so the API process can open at most
 `BIGNAME_DATABASE_MAX_CONNECTIONS + 1` PostgreSQL connections.
 HTTP-concurrency saturation and exhaustion of the request pool therefore
-cannot queue the probe past the compose healthcheck's five-second window: a
-healthy but busy process returns `200` with `status="ready"`. A readiness
+cannot queue the readiness probe past the compose healthcheck's five-second
+window: a healthy but busy process returns `200` with `status="ready"`, though
+the serving-pool identity audit can return `null`. A readiness
 connection failure or timeout instead returns `503` with `status="degraded"`,
 preserving the database reachability check for a genuinely unavailable
 PostgreSQL server. The health-specific ceiling prevents unbounded probe work.

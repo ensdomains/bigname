@@ -101,6 +101,56 @@ async fn healthz_identity_works_with_read_only_api_role_privileges() -> Result<(
 }
 
 #[tokio::test]
+async fn healthz_database_identity_probes_share_one_timeout_window() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let config = database.database_config(1)?;
+    let options = PgConnectOptions::from_str(
+        config
+            .database_url
+            .as_deref()
+            .context("health timeout test database URL is missing")?,
+    )?
+    .options([("search_path", "bigname_phase".to_owned())]);
+    let serving_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options.clone())
+        .await?;
+    let readiness_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await?;
+    let serving_connection = serving_pool.acquire().await?;
+    let readiness_connection = readiness_pool.acquire().await?;
+    let state = AppState::new_with_rpc_urls(
+        serving_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    let app = app_router_with_bounds(state, readiness_pool.clone(), &ApiBoundsConfig::default());
+
+    let started = std::time::Instant::now();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .expect("health request must build"),
+        )
+        .await?;
+    let elapsed = started.elapsed();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        elapsed < HEALTH_DATABASE_CHECK_TIMEOUT + std::time::Duration::from_secs(1),
+        "concurrent identity probes took {elapsed:?}"
+    );
+    drop(serving_connection);
+    drop(readiness_connection);
+    serving_pool.close().await;
+    readiness_pool.close().await;
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn healthz_reports_not_started_without_any_phase_runner_heartbeat() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_expected_phase_chains(&database, &["1", "8453"]).await?;

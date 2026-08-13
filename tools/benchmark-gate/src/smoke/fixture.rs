@@ -226,22 +226,32 @@ async fn insert_block_events(
     insert_registration(pool, block, 0, plain_label, owner_bytes).await?;
     insert_registration(pool, block, 1, bound_label, owner_bytes).await?;
 
-    let node = namehash(bound_label);
+    insert_resolver_records(pool, block, 2, bound_label).await?;
+    Ok(())
+}
+
+async fn insert_resolver_records(
+    pool: &PgPool,
+    block: i64,
+    log_index: i64,
+    label: &str,
+) -> Result<()> {
+    let node = namehash(label);
     let resolver = NewResolver {
         node,
         resolver: RESOLVER.parse::<Address>()?,
     }
     .encode_log_data();
-    insert_log(pool, block, 2, REGISTRY, &resolver).await?;
+    insert_log(pool, block, log_index, REGISTRY, &resolver).await?;
 
     let record = TextChanged {
         node,
-        indexedKey: keccak256(b"url"),
-        key: "url".to_owned(),
-        value: format!("https://{bound_label}.example"),
+        indexedKey: keccak256(b"avatar"),
+        key: "avatar".to_owned(),
+        value: format!("https://{label}.example/avatar.png"),
     }
     .encode_log_data();
-    insert_log(pool, block, 3, RESOLVER, &record).await?;
+    insert_log(pool, block, log_index + 1, RESOLVER, &record).await?;
     Ok(())
 }
 

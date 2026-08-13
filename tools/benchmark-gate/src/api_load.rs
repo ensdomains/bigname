@@ -177,18 +177,7 @@ pub async fn run(
             budgets.api_cursor_seed_count,
         )
         .await?;
-        ensure!(
-            !budgets.api_require_populated_probes || probe.populated,
-            "endpoint {:?} returned no populated seed response",
-            endpoint.name
-        );
-        ensure!(
-            !requires_cursor_probe(budgets, &endpoint.name)
-                || !endpoint_requires_cursor(&endpoint.name)
-                || probe.cursor_variants > 0,
-            "endpoint {:?} produced no real continuation cursor",
-            endpoint.name
-        );
+        require_seed_probe(budgets, &endpoint.name, probe)?;
 
         if budgets.api_warmup_seconds > 0 {
             let _ = execute_window(
@@ -277,6 +266,20 @@ fn requires_cursor_probe(budgets: &GateBudgets, endpoint: &str) -> bool {
         || (budgets.api_require_resolver_cursor_variant && endpoint == "resolver")
 }
 
+fn require_seed_probe(budgets: &GateBudgets, endpoint: &str, probe: SeedProbe) -> Result<()> {
+    ensure!(
+        !budgets.api_require_populated_probes || probe.populated,
+        "endpoint {endpoint:?} returned no populated seed response"
+    );
+    ensure!(
+        !requires_cursor_probe(budgets, endpoint)
+            || !endpoint_requires_cursor(endpoint)
+            || probe.cursor_variants > 0,
+        "endpoint {endpoint:?} produced no real continuation cursor"
+    );
+    Ok(())
+}
+
 fn preflight_failure_report(
     scale: TableScale,
     budgets: &GateBudgets,
@@ -342,10 +345,15 @@ async fn prime_cursor_variants(
     requests: &mut Vec<RequestSpec>,
     limit: usize,
 ) -> Result<SeedProbe> {
-    let seeds = requests.iter().take(limit).cloned().collect::<Vec<_>>();
+    let seeds = requests.clone();
     let mut cursors = Vec::new();
     let mut populated = false;
-    for seed in seeds {
+    for (index, seed) in seeds.into_iter().enumerate() {
+        let prefix_complete = index >= limit;
+        let cursor_requirement_met = !endpoint_requires_cursor(endpoint) || !cursors.is_empty();
+        if prefix_complete && populated && cursor_requirement_met {
+            break;
+        }
         let response = send(client, &seed).await?;
         if !response.status().is_success() {
             continue;
@@ -407,7 +415,15 @@ fn response_is_populated(endpoint: &str, body: &Value) -> bool {
             .pointer("/data/address")
             .and_then(Value::as_str)
             .is_some(),
-        "status" | "name" | "records" | "namespace" => body.get("data").is_some(),
+        "records" => body
+            .pointer("/data/records")
+            .and_then(Value::as_object)
+            .is_some_and(|records| {
+                records
+                    .values()
+                    .any(|record| record.get("status").and_then(Value::as_str) == Some("ok"))
+            }),
+        "status" | "name" | "namespace" => body.get("data").is_some(),
         _ => false,
     }
 }
@@ -663,6 +679,113 @@ mod tests {
         assert!(endpoint_requires_cursor("lookup"));
         assert!(endpoint_requires_cursor("resolver"));
         assert!(!endpoint_requires_cursor("primary_name"));
+    }
+
+    #[test]
+    fn records_probe_requires_a_found_requested_record() {
+        assert!(!response_is_populated(
+            "records",
+            &json!({
+                "data": {
+                    "records": {
+                        "addr:60": {"status": "not_found"},
+                        "text:avatar": {"status": "not_found"}
+                    }
+                }
+            })
+        ));
+        assert!(response_is_populated(
+            "records",
+            &json!({
+                "data": {
+                    "records": {
+                        "addr:60": {"status": "not_found"},
+                        "text:avatar": {"status": "ok", "value": "ipfs://avatar"}
+                    }
+                }
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn cursor_priming_continues_past_the_fixed_prefix() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request).await.unwrap();
+                let body = if index < 2 {
+                    r#"{"data":[{"name":"one-page.eth"}]}"#
+                } else {
+                    r#"{"data":[{"name":"paginated.eth"}],"page":{"next_cursor":"later"}}"#
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let base = normalized_base_url(&format!("http://{address}")).unwrap();
+        let mut requests = (0..3)
+            .map(|index| get(&base, &["v2", "events", &index.to_string()], &[]).unwrap())
+            .collect::<Vec<_>>();
+
+        let probe = prime_cursor_variants(&Client::new(), "events", &mut requests, 2)
+            .await
+            .unwrap();
+        server.abort();
+
+        assert!(probe.populated);
+        assert_eq!(probe.cursor_variants, 1);
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests.last().unwrap().url.query(), Some("cursor=later"));
+    }
+
+    #[tokio::test]
+    async fn cursor_priming_exhausts_the_corpus_without_inventing_a_cursor() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let served = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_served = Arc::clone(&served);
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request).await.unwrap();
+                server_served.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let body = r#"{"data":[{"name":"one-page.eth"}]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let base = normalized_base_url(&format!("http://{address}")).unwrap();
+        let mut requests = (0..3)
+            .map(|index| get(&base, &["v2", "events", &index.to_string()], &[]).unwrap())
+            .collect::<Vec<_>>();
+
+        let probe = prime_cursor_variants(&Client::new(), "events", &mut requests, 2)
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        assert!(probe.populated);
+        assert_eq!(served.load(std::sync::atomic::Ordering::Relaxed), 3);
+        assert_eq!(probe.cursor_variants, 0);
+        assert_eq!(requests.len(), 3);
+        let budgets = BudgetsFile::load(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/release-gate.toml"),
+        )
+        .unwrap();
+        assert!(
+            require_seed_probe(budgets.profile(BudgetProfile::Production), "events", probe)
+                .is_err()
+        );
     }
 
     #[test]
