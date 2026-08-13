@@ -115,6 +115,11 @@ returned by seed requests, and uses the real resolver and namespace rows. The
 search workload keeps explicit-namespace requests for every seed and adds bare
 requests for a deterministic half; both forms cover prefix and contains
 matching, and production mode requires a populated bare-search seed response.
+Bare requests are a minority of the mixed search pool, so a regression limited
+to the bare path can move p95 or p99 without moving p50. The first production
+run after this coverage was added may also show higher search tails: bare search
+derives the public namespace set for each request and revalidates it after the
+read, while the earlier workload measured explicit-namespace requests only.
 The lookup mix covers 1, 10, 100, 250, and 1,000 inputs per batch, with large
 batches weighted toward the tail. Timings end only after the complete response
 body has been read. The report contains achieved throughput, success rate, and
@@ -332,10 +337,13 @@ that number of RPC calls in one timed window, and cannot fit the route's
 checked-in 10/25/50 ms budget. It is deliberately outside the timed release
 measurement. Before the timed windows, the harness instead sends an untimed
 functional check for at most ten ENS/coin-60 tuples with `source` omitted. Each
-check must avoid a 5xx response and return a well-formed success or error
-envelope; a failure names the tuple and makes the run red. Name and records
-requests also send `source=indexed`, which matches those routes' default; only
-the primary-name route has a broader default.
+check must return a well-formed `2xx` response with indexed and verified answers
+in that order, or the route's documented whole-request `409 stale` response.
+Any other status or error code names the tuple and makes the run red. Production
+mode also requires at least one ENS coin-type-60 tuple; smoke mode may send zero.
+The JSON report always records the number sent and the HTTP status/error-code
+outcomes. Name and records requests also send `source=indexed`, which matches
+those routes' default; only the primary-name route has a broader default.
 
 Per-request namespace readiness cannot be fully precomputed by the corpus SQL.
 Restricting address and primary-name seeds to active public namespaces, plus the

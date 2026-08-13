@@ -1,4 +1,4 @@
-use super::{ApiTargetIdentity, classify_api_boundary, load_api_target_identity};
+use super::{ApiTargetIdentity, api_identity_failures, load_api_target_identity};
 use crate::database;
 use anyhow::{Context, Result};
 use reqwest::Client;
@@ -117,6 +117,98 @@ impl InterpretRedoSnapshot {
         }
         failures
     }
+}
+
+pub(super) fn api_postflight_failures(
+    preflight: &ApiTargetIdentity,
+    postflight: &ApiTargetIdentity,
+    preflight_database_identity: &str,
+    postflight_database_identity: &str,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    if preflight != postflight {
+        failures.push("target API identity changed during the load benchmark".to_owned());
+    }
+    if preflight_database_identity != postflight_database_identity {
+        failures.push("corpus database identity changed during the load benchmark".to_owned());
+    }
+    failures
+}
+
+pub(super) fn api_boundary_failures(
+    endpoint: &str,
+    preflight: &ApiTargetIdentity,
+    boundary: &ApiTargetIdentity,
+    expected_build_sha: Option<&str>,
+    preflight_database_identity: &str,
+    boundary_database_identity: &str,
+) -> Vec<String> {
+    let failures = api_identity_failures(boundary, expected_build_sha, boundary_database_identity)
+        .into_iter()
+        .chain(api_postflight_failures(
+            preflight,
+            boundary,
+            preflight_database_identity,
+            boundary_database_identity,
+        ));
+    failures
+        .map(|failure| format!("after {endpoint} endpoint: {failure}"))
+        .collect()
+}
+
+pub(super) fn classify_api_boundary(
+    endpoint: &str,
+    preflight: &ApiTargetIdentity,
+    expected_build_sha: Option<&str>,
+    preflight_database_identity: &str,
+    target: Result<ApiTargetIdentity>,
+    database: Result<String>,
+) -> (Option<ApiTargetIdentity>, Option<String>, Vec<String>) {
+    let mut failures = Vec::new();
+    match (&target, &database) {
+        (Ok(target), Ok(database)) => failures.extend(api_boundary_failures(
+            endpoint,
+            preflight,
+            target,
+            expected_build_sha,
+            preflight_database_identity,
+            database,
+        )),
+        (Ok(target), Err(error)) => {
+            failures.extend(
+                api_identity_failures(target, expected_build_sha, preflight_database_identity)
+                    .into_iter()
+                    .map(|failure| format!("after {endpoint} endpoint: {failure}")),
+            );
+            if target != preflight {
+                failures.push(format!(
+                    "after {endpoint} endpoint: target API identity changed during the load benchmark"
+                ));
+            }
+            failures.push(format!(
+                "after {endpoint} endpoint: corpus database identity recheck failed: {error:#}"
+            ));
+        }
+        (Err(error), Ok(database)) => {
+            failures.push(format!(
+                "after {endpoint} endpoint: target API identity recheck failed: {error:#}"
+            ));
+            if database != preflight_database_identity {
+                failures.push(format!(
+                    "after {endpoint} endpoint: corpus database identity changed during the load benchmark"
+                ));
+            }
+        }
+        (Err(target_error), Err(database_error)) => {
+            failures.push(format!(
+                "after {endpoint} endpoint: target API identity recheck failed: {target_error:#}"
+            ));
+            failures.push(format!(
+                "after {endpoint} endpoint: corpus database identity recheck failed: {database_error:#}"
+            ));
+        }
+    }
+    (target.ok(), database.ok(), failures)
 }
 
 pub(super) async fn recheck_api_boundary(

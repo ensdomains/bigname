@@ -171,15 +171,30 @@ impl Corpus {
                 "successful primary names",
             )?;
         }
-        require_name_corpus_size(names.len(), budgets.api_corpus_size, &names_by_namespace)?;
-        require_minimum_corpus_size("address", address_names.len(), budgets.api_corpus_size)?;
+        require_stratified_corpus_size(
+            "name",
+            names.len(),
+            budgets.api_corpus_size,
+            &names_by_namespace,
+        )?;
+        require_stratified_corpus_size(
+            "address",
+            address_names.len(),
+            budgets.api_corpus_size,
+            &addresses_by_namespace,
+        )?;
         for (label, actual) in [
             ("subname parent", parents.len()),
             ("permission subject", permission_subjects.len()),
-            ("successful primary name", primary_names.len()),
         ] {
             require_minimum_corpus_size(label, actual, budgets.api_min_specialized_corpus_size)?;
         }
+        require_stratified_corpus_size(
+            "successful primary-name",
+            primary_names.len(),
+            budgets.api_min_specialized_corpus_size,
+            &primary_names_by_namespace,
+        )?;
         require_minimum_corpus_size(
             "resolver",
             resolvers.len(),
@@ -239,19 +254,20 @@ fn require_minimum_corpus_size(label: &str, actual: usize, minimum: usize) -> Re
     Ok(())
 }
 
-fn require_name_corpus_size(
+fn require_stratified_corpus_size(
+    label: &str,
     actual: usize,
     minimum: usize,
-    names_by_namespace: &BTreeMap<String, usize>,
+    counts_by_namespace: &BTreeMap<String, usize>,
 ) -> Result<()> {
-    let contributions = names_by_namespace
+    let contributions = counts_by_namespace
         .iter()
         .map(|(namespace, count)| format!("{namespace}={count}"))
         .collect::<Vec<_>>()
         .join(", ");
     ensure!(
         actual >= minimum,
-        "name corpus has {actual} rows; release profile requires {minimum}; namespace contributions: {contributions}"
+        "{label} corpus has {actual} rows; release profile requires {minimum}; namespace contributions: {contributions}"
     );
     Ok(())
 }
@@ -349,11 +365,15 @@ fn address_scale_sql() -> String {
 }
 
 #[cfg(test)]
+#[path = "corpus/tests/load.rs"]
+mod load_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 
-    async fn install_name_visibility_schema(pool: &PgPool) {
+    pub(super) async fn install_name_visibility_schema(pool: &PgPool) {
         for statement in [
             "CREATE SCHEMA bigname_phase",
             "CREATE TYPE bigname_phase.canonicality_state AS ENUM ('canonical', 'safe', 'finalized', 'orphaned')",
@@ -375,7 +395,7 @@ mod tests {
         }
     }
 
-    async fn insert_name_with_visibility(
+    pub(super) async fn insert_name_with_visibility(
         pool: &PgPool,
         namespace: &str,
         raw_name: &str,
@@ -424,7 +444,7 @@ mod tests {
         .unwrap();
     }
 
-    async fn insert_visible_child_parent(pool: &PgPool, parent_logical_name_id: &str) {
+    pub(super) async fn insert_visible_child_parent(pool: &PgPool, parent_logical_name_id: &str) {
         let projection_hash = format!("{parent_logical_name_id}-children-projection");
         sqlx::query(
             "INSERT INTO chain_lineage VALUES
@@ -465,28 +485,6 @@ mod tests {
     fn resolver_corpus_has_an_independent_floor() {
         assert!(require_minimum_corpus_size("resolver", 999, 1_000).is_err());
         assert!(require_minimum_corpus_size("resolver", 1_000, 1_000).is_ok());
-    }
-
-    #[test]
-    fn every_active_namespace_must_contribute_supported_names() {
-        let namespaces = vec!["basenames".to_owned(), "ens".to_owned()];
-        let counts = [("basenames".to_owned(), 5_000)].into_iter().collect();
-        let error = require_active_namespace_coverage(&namespaces, &counts, "supported names")
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("active namespace \"ens\""));
-    }
-
-    #[test]
-    fn name_corpus_shortfall_names_namespace_contributions() {
-        let counts = [("basenames".to_owned(), 5_000), ("ens".to_owned(), 1_000)]
-            .into_iter()
-            .collect();
-        let error = require_name_corpus_size(6_000, 10_000, &counts)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("basenames=5000"));
-        assert!(error.contains("ens=1000"));
     }
 
     #[tokio::test]
@@ -782,34 +780,32 @@ mod tests {
 
         let addresses: Vec<(String, String, String, String)> =
             sqlx::query_as(&address_corpus_sql())
-                .bind(2_i64)
+                .bind(3_i64)
                 .fetch_all(database.pool())
                 .await
                 .unwrap();
         let primary_names: Vec<(String, String, String)> =
             sqlx::query_as(&primary_name_corpus_sql())
-                .bind(2_i64)
+                .bind(3_i64)
                 .fetch_all(database.pool())
                 .await
                 .unwrap();
         let scale = load_table_scale(database.pool()).await.unwrap();
 
         database.cleanup().await.unwrap();
-        assert_eq!(addresses.len(), 2);
+        assert_eq!(addresses.len(), 3);
         assert_eq!(
-            addresses
-                .iter()
-                .map(|row| row.2.as_str())
-                .collect::<std::collections::BTreeSet<_>>(),
-            ["basenames", "ens"].into_iter().collect()
+            address_namespace_counts(&addresses),
+            [("basenames".to_owned(), 2), ("ens".to_owned(), 1)]
+                .into_iter()
+                .collect()
         );
-        assert_eq!(primary_names.len(), 2);
+        assert_eq!(primary_names.len(), 3);
         assert_eq!(
-            primary_names
-                .iter()
-                .map(|row| row.2.as_str())
-                .collect::<std::collections::BTreeSet<_>>(),
-            ["basenames", "ens"].into_iter().collect()
+            primary_namespace_counts(&primary_names),
+            [("basenames".to_owned(), 2), ("ens".to_owned(), 1)]
+                .into_iter()
+                .collect()
         );
         assert_eq!(scale.address_names_current_rows, 3);
     }

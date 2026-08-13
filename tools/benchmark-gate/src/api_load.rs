@@ -46,6 +46,8 @@ pub struct ApiReport {
     pub corpus_primary_names: usize,
     pub corpus_resolvers: usize,
     pub min_corpus_resolvers: usize,
+    pub default_primary_name_probe_requests: usize,
+    pub default_primary_name_probe_outcomes: BTreeMap<String, usize>,
     pub endpoints: Vec<EndpointReport>,
     pub green: bool,
     pub failures: Vec<String>,
@@ -179,7 +181,14 @@ pub async fn run(
         ));
     }
     let corpus = Corpus::load(pool, budgets).await?;
-    let mut failures = probes::probe_default_primary_name(&client, &base, &corpus).await?;
+    let default_primary_name_probe = probes::probe_default_primary_name(
+        &client,
+        &base,
+        &corpus,
+        budgets.api_require_populated_probes,
+    )
+    .await?;
+    let mut failures = default_primary_name_probe.failures;
     let mut endpoint_reports = Vec::with_capacity(budgets.endpoints.len());
     let mut postflight_identity = None;
     let mut postflight_database_identity = None;
@@ -259,102 +268,12 @@ pub async fn run(
         corpus_primary_names: corpus.primary_names.len(),
         corpus_resolvers: corpus.resolvers.len(),
         min_corpus_resolvers: budgets.api_min_resolver_corpus_size,
+        default_primary_name_probe_requests: default_primary_name_probe.requests_sent,
+        default_primary_name_probe_outcomes: default_primary_name_probe.outcomes,
         green: failures.is_empty(),
         failures,
         endpoints: endpoint_reports,
     })
-}
-
-fn api_postflight_failures(
-    preflight: &ApiTargetIdentity,
-    postflight: &ApiTargetIdentity,
-    preflight_database_identity: &str,
-    postflight_database_identity: &str,
-) -> Vec<String> {
-    let mut failures = Vec::new();
-    if preflight != postflight {
-        failures.push("target API identity changed during the load benchmark".to_owned());
-    }
-    if preflight_database_identity != postflight_database_identity {
-        failures.push("corpus database identity changed during the load benchmark".to_owned());
-    }
-    failures
-}
-
-fn api_boundary_failures(
-    endpoint: &str,
-    preflight: &ApiTargetIdentity,
-    boundary: &ApiTargetIdentity,
-    expected_build_sha: Option<&str>,
-    preflight_database_identity: &str,
-    boundary_database_identity: &str,
-) -> Vec<String> {
-    let failures = api_identity_failures(boundary, expected_build_sha, boundary_database_identity)
-        .into_iter()
-        .chain(api_postflight_failures(
-            preflight,
-            boundary,
-            preflight_database_identity,
-            boundary_database_identity,
-        ));
-    failures
-        .map(|failure| format!("after {endpoint} endpoint: {failure}"))
-        .collect()
-}
-
-fn classify_api_boundary(
-    endpoint: &str,
-    preflight: &ApiTargetIdentity,
-    expected_build_sha: Option<&str>,
-    preflight_database_identity: &str,
-    target: Result<ApiTargetIdentity>,
-    database: Result<String>,
-) -> (Option<ApiTargetIdentity>, Option<String>, Vec<String>) {
-    let mut failures = Vec::new();
-    match (&target, &database) {
-        (Ok(target), Ok(database)) => failures.extend(api_boundary_failures(
-            endpoint,
-            preflight,
-            target,
-            expected_build_sha,
-            preflight_database_identity,
-            database,
-        )),
-        (Ok(target), Err(error)) => {
-            failures.extend(
-                api_identity_failures(target, expected_build_sha, preflight_database_identity)
-                    .into_iter()
-                    .map(|failure| format!("after {endpoint} endpoint: {failure}")),
-            );
-            if target != preflight {
-                failures.push(format!(
-                    "after {endpoint} endpoint: target API identity changed during the load benchmark"
-                ));
-            }
-            failures.push(format!(
-                "after {endpoint} endpoint: corpus database identity recheck failed: {error:#}"
-            ));
-        }
-        (Err(error), Ok(database)) => {
-            failures.push(format!(
-                "after {endpoint} endpoint: target API identity recheck failed: {error:#}"
-            ));
-            if database != preflight_database_identity {
-                failures.push(format!(
-                    "after {endpoint} endpoint: corpus database identity changed during the load benchmark"
-                ));
-            }
-        }
-        (Err(target_error), Err(database_error)) => {
-            failures.push(format!(
-                "after {endpoint} endpoint: target API identity recheck failed: {target_error:#}"
-            ));
-            failures.push(format!(
-                "after {endpoint} endpoint: corpus database identity recheck failed: {database_error:#}"
-            ));
-        }
-    }
-    (target.ok(), database.ok(), failures)
 }
 
 fn preflight_failure_report(
@@ -388,6 +307,8 @@ fn preflight_failure_report(
         corpus_primary_names: 0,
         corpus_resolvers: 0,
         min_corpus_resolvers: budgets.api_min_resolver_corpus_size,
+        default_primary_name_probe_requests: 0,
+        default_primary_name_probe_outcomes: BTreeMap::new(),
         endpoints: Vec::new(),
         green: false,
         failures,
@@ -1039,10 +960,11 @@ mod tests {
         let mut after = before.clone();
         after.database_identity = "database-after".to_owned();
         assert_eq!(
-            api_postflight_failures(&before, &after, "corpus-before", "corpus-after").len(),
+            preflight::api_postflight_failures(&before, &after, "corpus-before", "corpus-after",)
+                .len(),
             2
         );
-        let boundary = api_boundary_failures(
+        let boundary = preflight::api_boundary_failures(
             "records",
             &before,
             &after,
@@ -1065,7 +987,7 @@ mod tests {
             interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH.to_owned(),
             database_identity: "database".to_owned(),
         };
-        let (target, database, failures) = classify_api_boundary(
+        let (target, database, failures) = preflight::classify_api_boundary(
             "records",
             &preflight,
             Some("release"),
