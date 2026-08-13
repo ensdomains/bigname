@@ -221,6 +221,11 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
                         "source_manifest_id": null
                     }],
                     "normalized_event_ids": [6],
+                    "permission_manifest_versions": [{
+                        "manifest_version": 1,
+                        "source_family": "ens_v1_registrar_l1",
+                        "source_manifest_id": null
+                    }],
                     "raw_fact_refs": [{}]
                 },
                 "resource_id": RESOURCE,
@@ -633,6 +638,23 @@ async fn permission_builder_preserves_grouped_history_output_exactly() -> Result
                         }
                     ],
                     "normalized_event_ids": [6, 13, 14],
+                    "permission_manifest_versions": [
+                        {
+                            "manifest_version": 1,
+                            "source_family": "ens_v1_registrar_l1",
+                            "source_manifest_id": null
+                        },
+                        {
+                            "manifest_version": 3,
+                            "source_family": "ens_v1_registry_l1",
+                            "source_manifest_id": null
+                        },
+                        {
+                            "manifest_version": 2,
+                            "source_family": "ens_v1_registry_l1",
+                            "source_manifest_id": null
+                        }
+                    ],
                     "raw_fact_refs": [
                         {},
                         {"history": "tie_break_winner"},
@@ -6913,6 +6935,447 @@ async fn reorg_below_interpret_cursor_rederives_winning_fork_through_project() -
         ]
     );
     scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn project_redo_retains_permission_only_resolver_with_a_surviving_grant() -> Result<()> {
+    const RESOURCE_A: &str = "00000000-0000-0000-0000-0000000000d0";
+    const RESOURCE_B: &str = "00000000-0000-0000-0000-0000000000d1";
+    const SHARED_RESOLVER: &str = "0x00000000000000000000000000000000000000c9";
+    const RETRACTED_RESOLVER: &str = "0x00000000000000000000000000000000000000ca";
+    const UPGRADED_RESOLVER: &str = "0x00000000000000000000000000000000000000cb";
+
+    let incremental =
+        ScratchDatabase::create("production_project_redo_permission_resolver").await?;
+    let full = ScratchDatabase::create("production_project_redo_permission_resolver_full").await?;
+    for pool in [incremental.pool(), full.pool()] {
+        seed_project_fixture(pool).await?;
+        insert_manifest(
+            pool,
+            CHAIN,
+            "ens_v2_resolver_l1",
+            "tests/project-redo-v2-resolver.toml",
+            json!({
+                "resolver_implementations":[{
+                    "role":"permissioned_resolver",
+                    "address":EQUIVALENCE_V2_IMPLEMENTATION
+                }]
+            }),
+        )
+        .await?;
+        sqlx::query(
+            "INSERT INTO resources (
+                 resource_id, chain_id, block_hash, block_number, canonicality_state
+             ) VALUES
+                 ($1, $3, $4, 1, 'canonical'),
+                 ($2, $3, $5, 2, 'canonical')",
+        )
+        .bind(Uuid::parse_str(RESOURCE_A)?)
+        .bind(Uuid::parse_str(RESOURCE_B)?)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 1))
+        .bind(block_hash(CHAIN, 2))
+        .execute(pool)
+        .await?;
+        for (block, resource, resolver, source_family) in [
+            (1, RESOURCE_A, SHARED_RESOLVER, "ens_v1_registrar_l1"),
+            (1, RESOURCE_A, UPGRADED_RESOLVER, "ens_v2_resolver_l1"),
+            (2, RESOURCE_B, SHARED_RESOLVER, "ens_v1_registrar_l1"),
+            (2, RESOURCE_B, RETRACTED_RESOLVER, "ens_v1_registrar_l1"),
+        ] {
+            insert_event(
+                pool,
+                CHAIN,
+                block,
+                None,
+                Some(resource),
+                "PermissionChanged",
+                source_family,
+                json!({
+                    "subject":OWNER,
+                    "scope":{
+                        "kind":"resolver",
+                        "chain_id":CHAIN,
+                        "resolver_address":resolver
+                    },
+                    "effective_powers":["resolver_control"],
+                    "grant_source":{"kind":"fixture"},
+                    "revocation_source":null,
+                    "inheritance_path":[],
+                    "transfer_behavior":"retain"
+                }),
+                json!({}),
+            )
+            .await?;
+        }
+        insert_event(
+            pool,
+            CHAIN,
+            2,
+            None,
+            None,
+            "Upgraded",
+            "ens_v2_resolver_l1",
+            json!({
+                "proxy_address":UPGRADED_RESOLVER,
+                "implementation":EQUIVALENCE_V2_IMPLEMENTATION
+            }),
+            json!({"emitting_address":UPGRADED_RESOLVER}),
+        )
+        .await?;
+        run_project(pool, CHAIN, None, RunMode::Normal, 0, 3).await?;
+
+        let initial: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT resolver_address, unsupported_reason
+             FROM resolver_current
+             WHERE chain_id = $1 AND resolver_address IN (lower($2), lower($3))
+             ORDER BY resolver_address",
+        )
+        .bind(CHAIN)
+        .bind(SHARED_RESOLVER)
+        .bind(RETRACTED_RESOLVER)
+        .fetch_all(pool)
+        .await?;
+        assert_eq!(
+            initial,
+            vec![
+                (SHARED_RESOLVER.into(), Some("resolver_not_declared".into())),
+                (
+                    RETRACTED_RESOLVER.into(),
+                    Some("resolver_not_declared".into())
+                ),
+            ]
+        );
+        let initial_upgrade: (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT support_status, unsupported_reason,
+                    declared_summary #>> '{classification,role}'
+             FROM resolver_current
+             WHERE chain_id = $1 AND resolver_address = lower($2)",
+        )
+        .bind(CHAIN)
+        .bind(UPGRADED_RESOLVER)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            initial_upgrade,
+            (
+                "supported".into(),
+                None,
+                Some("permissioned_resolver".into())
+            )
+        );
+
+        sqlx::query(
+            "DELETE FROM normalized_events
+             WHERE chain_id = $1 AND resource_id = $2
+               AND event_kind = 'PermissionChanged'",
+        )
+        .bind(CHAIN)
+        .bind(Uuid::parse_str(RESOURCE_B)?)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "DELETE FROM normalized_events
+             WHERE chain_id = $1 AND event_kind = 'Upgraded'
+               AND lower(after_state ->> 'proxy_address') = lower($2)",
+        )
+        .bind(CHAIN)
+        .bind(UPGRADED_RESOLVER)
+        .execute(pool)
+        .await?;
+    }
+
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Redo,
+        2,
+        2,
+    )
+    .await?;
+    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+
+    let incremental_resolvers: Vec<String> = sqlx::query_scalar(
+        "SELECT resolver_address FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address IN (lower($2), lower($3))
+         ORDER BY resolver_address",
+    )
+    .bind(CHAIN)
+    .bind(SHARED_RESOLVER)
+    .bind(RETRACTED_RESOLVER)
+    .fetch_all(incremental.pool())
+    .await?;
+    let full_resolvers: Vec<String> = sqlx::query_scalar(
+        "SELECT resolver_address FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address IN (lower($2), lower($3))
+         ORDER BY resolver_address",
+    )
+    .bind(CHAIN)
+    .bind(SHARED_RESOLVER)
+    .bind(RETRACTED_RESOLVER)
+    .fetch_all(full.pool())
+    .await?;
+    assert_eq!(full_resolvers, vec![SHARED_RESOLVER.to_owned()]);
+    assert_eq!(
+        incremental_resolvers, full_resolvers,
+        "redo deleted a permission-only resolver with a surviving retained grant"
+    );
+
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(full.pool()).await?;
+    let incremental_upgrade: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM resolver_current current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(UPGRADED_RESOLVER)
+    .fetch_one(incremental.pool())
+    .await?;
+    let full_upgrade: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM resolver_current current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(UPGRADED_RESOLVER)
+    .fetch_one(full.pool())
+    .await?;
+    assert_eq!(
+        full_upgrade.pointer("/declared_summary/classification/role"),
+        None
+    );
+    assert_eq!(
+        incremental_upgrade, full_upgrade,
+        "redo retained resolver classification metadata from retracted upgrade evidence"
+    );
+    let incremental_survivors: Vec<Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM resolver_current current
+         WHERE chain_id = $1 AND resolver_address IN (lower($2), lower($3))
+         ORDER BY resolver_address",
+    )
+    .bind(CHAIN)
+    .bind(SHARED_RESOLVER)
+    .bind(RETRACTED_RESOLVER)
+    .fetch_all(incremental.pool())
+    .await?;
+    let full_survivors: Vec<Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM resolver_current current
+         WHERE chain_id = $1 AND resolver_address IN (lower($2), lower($3))
+         ORDER BY resolver_address",
+    )
+    .bind(CHAIN)
+    .bind(SHARED_RESOLVER)
+    .bind(RETRACTED_RESOLVER)
+    .fetch_all(full.pool())
+    .await?;
+    assert_eq!(
+        incremental_survivors, full_survivors,
+        "redo survivor rows did not match a full rebuild"
+    );
+
+    for pool in [incremental.pool(), full.pool()] {
+        let surviving_permission_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM permissions_current
+             WHERE resource_id = $1 AND scope_kind = 'resolver'
+               AND lower(scope_detail ->> 'resolver_address') = lower($2)",
+        )
+        .bind(Uuid::parse_str(RESOURCE_A)?)
+        .bind(SHARED_RESOLVER)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(surviving_permission_count, 1);
+    }
+
+    incremental.cleanup().await?;
+    full.cleanup().await
+}
+
+#[tokio::test]
+async fn project_redo_rederives_permission_only_resolver_family_from_surviving_grant() -> Result<()>
+{
+    const RESOURCE_A: &str = "00000000-0000-0000-0000-0000000000d2";
+    const RESOLVER_ADDRESS: &str = "0x00000000000000000000000000000000000000cc";
+
+    let incremental = ScratchDatabase::create("production_project_redo_permission_family").await?;
+    let full = ScratchDatabase::create("production_project_redo_permission_family_full").await?;
+    for pool in [incremental.pool(), full.pool()] {
+        seed_project_fixture(pool).await?;
+        insert_manifest(
+            pool,
+            CHAIN,
+            "ens_v2_resolver_l1",
+            "tests/project-redo-family-v2-resolver.toml",
+            json!({
+                "resolver_implementations":[{
+                    "role":"permissioned_resolver",
+                    "address":EQUIVALENCE_V2_IMPLEMENTATION
+                }]
+            }),
+        )
+        .await?;
+        sqlx::query(
+            "INSERT INTO resources (
+                 resource_id, chain_id, block_hash, block_number, canonicality_state
+             ) VALUES ($1, $2, $3, 1, 'canonical')",
+        )
+        .bind(Uuid::parse_str(RESOURCE_A)?)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            1,
+            None,
+            Some(RESOURCE_A),
+            "PermissionChanged",
+            "ens_v1_registrar_l1",
+            json!({
+                "subject":OWNER,
+                "scope":{
+                    "kind":"resolver",
+                    "chain_id":CHAIN,
+                    "resolver_address":RESOLVER_ADDRESS
+                },
+                "effective_powers":["resolver_control"],
+                "grant_source":{"kind":"fixture"},
+                "revocation_source":null,
+                "inheritance_path":[],
+                "transfer_behavior":"retain"
+            }),
+            json!({}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            2,
+            Some("ens:0xalice"),
+            Some(RESOURCE),
+            "PermissionChanged",
+            "ens_v2_resolver_l1",
+            json!({
+                "subject":OWNER,
+                "scope":{
+                    "kind":"resolver",
+                    "chain_id":CHAIN,
+                    "resolver_address":RESOLVER_ADDRESS
+                },
+                "effective_powers":["resolver_control"],
+                "grant_source":{"kind":"fixture"},
+                "revocation_source":null,
+                "inheritance_path":[],
+                "transfer_behavior":"retain"
+            }),
+            json!({}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            2,
+            Some("ens:0xalice"),
+            Some(RESOURCE),
+            "ResolverChanged",
+            "ens_v2_registry_l1",
+            json!({"resolver":RESOLVER_ADDRESS}),
+            json!({}),
+        )
+        .await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+    let initial_family: String = sqlx::query_scalar(
+        "SELECT declared_summary #>> '{classification,source_family}'
+         FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(RESOLVER_ADDRESS)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(initial_family, "ens_v2_resolver_l1");
+    let retained_families: Value = sqlx::query_scalar(
+        "SELECT provenance -> 'permission_manifest_versions'
+         FROM permissions_current
+         WHERE resource_id = $1 AND scope_kind = 'resolver'
+           AND lower(scope_detail ->> 'resolver_address') = lower($2)",
+    )
+    .bind(Uuid::parse_str(RESOURCE_A)?)
+    .bind(RESOLVER_ADDRESS)
+    .fetch_one(incremental.pool())
+    .await?;
+    assert_eq!(retained_families.as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        retained_families.pointer("/0/source_family"),
+        Some(&json!("ens_v1_registrar_l1"))
+    );
+
+    for pool in [incremental.pool(), full.pool()] {
+        sqlx::query(
+            "DELETE FROM normalized_events
+             WHERE chain_id = $1 AND resource_id = $2
+               AND event_kind = 'ResolverChanged'
+               AND lower(after_state ->> 'resolver') = lower($3)",
+        )
+        .bind(CHAIN)
+        .bind(Uuid::parse_str(RESOURCE)?)
+        .bind(RESOLVER_ADDRESS)
+        .execute(pool)
+        .await?;
+    }
+
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        }),
+        RunMode::Redo,
+        2,
+        2,
+    )
+    .await?;
+    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(full.pool()).await?;
+    let incremental_resolver: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM resolver_current current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(RESOLVER_ADDRESS)
+    .fetch_one(incremental.pool())
+    .await?;
+    let full_resolver: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM resolver_current current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(RESOLVER_ADDRESS)
+    .fetch_one(full.pool())
+    .await?;
+    assert_eq!(
+        full_resolver.pointer("/declared_summary/classification/source_family"),
+        Some(&json!("ens_v1_resolver_l1"))
+    );
+    assert_eq!(
+        full_resolver.pointer("/declared_summary/classification/role"),
+        None
+    );
+    assert_eq!(
+        incremental_resolver, full_resolver,
+        "redo fallback did not rederive the resolver family from surviving permission evidence"
+    );
+
+    incremental.cleanup().await?;
+    full.cleanup().await
 }
 
 #[tokio::test]

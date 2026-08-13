@@ -5,8 +5,7 @@ pub(super) async fn build(
     chain_id: &str,
     target: &Marker,
 ) -> Result<()> {
-    // Permission rows fold resource-keyed history. Resolver addresses are stored as scope values;
-    // no output follows historical pointers, so the changed resource and resolver row suffice.
+    // Permission rows fold resource-keyed history; no output follows historical resolver pointers.
     sqlx::query(
         r#"
         WITH target_time AS (
@@ -183,6 +182,7 @@ pub(super) async fn build(
                            THEN jsonb_build_array(wrapper_expiry.normalized_event_id)
                        ELSE '[]'::jsonb
                    END,
+                   'permission_manifest_versions', event.manifest_versions,
                    'raw_fact_refs', event.raw_fact_refs || CASE
                        WHEN modifier.normalized_event_id IS NOT NULL
                         AND masked.effective_powers IS DISTINCT FROM

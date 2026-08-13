@@ -117,7 +117,7 @@ pub(super) async fn build(
                        ELSE 'ens_v1_resolver_l1'
                    END,
                    NULL::text,
-                   3
+                   4
             FROM project_events event
             CROSS JOIN LATERAL (VALUES
                 {PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES},
@@ -156,6 +156,34 @@ pub(super) async fn build(
             UNION ALL
             SELECT * FROM resolver_event_candidates
         ),
+        retained_permission_candidates AS (
+            SELECT permission.resolver_address,
+                   CASE
+                       WHEN evidence.item ->> 'source_family' LIKE 'ens_v2_%'
+                           THEN 'ens_v2_resolver_l1'
+                       WHEN evidence.item ->> 'source_family' LIKE 'basenames_%'
+                           THEN 'basenames_base_resolver'
+                       ELSE 'ens_v1_resolver_l1'
+                   END AS source_family,
+                   NULL::text AS classification_role,
+                   4 AS priority
+            FROM project_resolver_permission_rows permission
+            CROSS JOIN LATERAL jsonb_array_elements(COALESCE(
+                permission.provenance -> 'permission_manifest_versions', '[]'::jsonb
+            )) evidence(item)
+            JOIN project_resolver_permission_summary summary
+              ON summary.resolver_address = permission.resolver_address
+             AND summary.item_count > 0
+            WHERE NOT $4
+              AND NOT EXISTS (
+                  SELECT 1 FROM project_scope_resources scope
+                  WHERE scope.resource_id = permission.resource_id
+              )
+            -- A retained permission may be the only surviving resolver evidence during redo.
+            -- Reconstruct family candidates from its PermissionChanged provenance; current
+            -- manifests and readable upgrade history below determine the role without copying
+            -- prior classification.
+        ),
         candidates AS (
             SELECT DISTINCT ON (combined.resolver_address)
                    combined.resolver_address,
@@ -164,6 +192,7 @@ pub(super) async fn build(
             FROM (
                 SELECT * FROM discovered WHERE source_family IS NOT NULL
                 UNION ALL SELECT * FROM observed
+                UNION ALL SELECT * FROM retained_permission_candidates
             ) combined
             WHERE combined.resolver_address <>
                   '0x0000000000000000000000000000000000000000'
