@@ -425,6 +425,8 @@ CREATE INDEX IF NOT EXISTS address_names_current_address_idx
 CREATE INDEX IF NOT EXISTS address_names_current_name_idx
     ON address_names_current (logical_name_id, relation, lower(address));
 
+CREATE SEQUENCE IF NOT EXISTS reverse_hydration_attempt_ordinal_seq AS bigint;
+
 CREATE TABLE IF NOT EXISTS primary_names_current (
     address text NOT NULL,
     coin_type text NOT NULL,
@@ -434,6 +436,9 @@ CREATE TABLE IF NOT EXISTS primary_names_current (
     claim_name_is_normalized boolean NOT NULL DEFAULT false,
     unsupported_reason text,
     claim_provenance jsonb NOT NULL DEFAULT '{}'::jsonb,
+    reverse_hydration_attempted_block_number bigint,
+    reverse_hydration_attempted_block_hash text,
+    reverse_hydration_attempt_ordinal bigint,
     PRIMARY KEY (address, coin_type, namespace),
     CHECK (btrim(address) <> ''),
     CHECK (btrim(coin_type) <> ''),
@@ -467,7 +472,22 @@ CREATE TABLE IF NOT EXISTS primary_names_current (
         unsupported_reason IS NULL
         OR btrim(unsupported_reason) <> ''
     ),
-    CHECK (jsonb_typeof(claim_provenance) = 'object')
+    CHECK (jsonb_typeof(claim_provenance) = 'object'),
+    CONSTRAINT primary_names_current_reverse_hydration_attempt_check CHECK (
+        (
+            reverse_hydration_attempted_block_number IS NULL
+            AND reverse_hydration_attempted_block_hash IS NULL
+            AND reverse_hydration_attempt_ordinal IS NULL
+        )
+        OR (
+            reverse_hydration_attempted_block_number IS NOT NULL
+            AND reverse_hydration_attempted_block_number >= 0
+            AND reverse_hydration_attempted_block_hash IS NOT NULL
+            AND btrim(reverse_hydration_attempted_block_hash) <> ''
+            AND reverse_hydration_attempt_ordinal IS NOT NULL
+            AND reverse_hydration_attempt_ordinal > 0
+        )
+    )
 );
 
 CREATE INDEX IF NOT EXISTS primary_names_current_claim_idx
@@ -745,6 +765,15 @@ COMMENT ON COLUMN primary_names_current.unsupported_reason IS
     'This value explains an unsupported claim.';
 COMMENT ON COLUMN primary_names_current.claim_provenance IS
     'This object identifies the claim source.';
+COMMENT ON COLUMN primary_names_current.reverse_hydration_attempted_block_number IS
+    'This internal reverse-name polling selection value identifies the head height of the latest attempt. Readers never use it as serving data.';
+COMMENT ON COLUMN primary_names_current.reverse_hydration_attempted_block_hash IS
+    'This internal reverse-name polling selection value identifies the head hash of the latest attempt. Readers never use it as serving data.';
+COMMENT ON COLUMN primary_names_current.reverse_hydration_attempt_ordinal IS
+    'This internal value orders reverse-name polling attempts for fair rolling selection. It never records or validates a provider result.';
+
+COMMENT ON SEQUENCE reverse_hydration_attempt_ordinal_seq IS
+    'This sequence assigns durable order to reverse-name polling batches; its values are not serving data.';
 
 COMMENT ON INDEX name_current_lookup_idx IS
     'This bounded index supports namespace and name identity lookup by name hash. Verbatim names remain unbounded payload and are not btree-indexed.';

@@ -411,12 +411,15 @@ only that chain. Normal verification starts at the durable ingest-cursor extent,
 not a replacement command-line start, and a resumed scan retains the weaker of
 its prior whole-extent level and the current reference's level.
 The project phase is the single schema-v2 projection writer and has no claim
-queue, dead-letter referee, watermarks, heartbeat threading, or standing
-hydration planner. When a hydration RPC is configured, the same project run
-refreshes eligible Ethereum legacy reverse-name and text values at the exact
-published canonical head after its event-derived projection work. A redo whose
-event-derived publication target is behind that head defers hydration until
-  project catches up.
+queue, dead-letter referee, heartbeat threading, or separate background
+planner. When a hydration RPC is configured, the same project run refreshes
+eligible Ethereum legacy reverse-name and text values at the exact published
+canonical head after its event-derived projection work. Bounded reverse-name
+polling keeps per-row attempted-head and attempt-order values so a failed page
+cannot occupy every same-head retry. Those internal values are not serving
+state; an affected projection rebuild clears them and selects the rebuilt tuple
+from the event-derived delta. A redo whose event-derived publication target is
+behind the canonical head defers polling until project catches up.
 
 Current ingest, interpretation, projection, live follow, redo, and rewind
 boundaries are described in [`chain-intake.md`](chain-intake.md).

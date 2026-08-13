@@ -21,7 +21,9 @@ use bigname_ingest::{Engine, LiveBatchRequest, Marker, SourceDescriptor, load_wa
 use bigname_lookup::ChainRpcUrls;
 use bigname_manifests::{load_repository, sync_schema_v2_repository};
 use bigname_project::Hydrator;
-use bigname_storage::{PrimaryNameClaimStatus, load_primary_name_current};
+use bigname_storage::{
+    PrimaryNameClaimStatus, load_primary_name_current, load_primary_name_current_snapshot,
+};
 use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     capacity::CapacityGuard,
@@ -2919,6 +2921,152 @@ async fn event_silent_reverse_hydration_bounds_the_rolling_refresh_batch() -> Re
 }
 
 #[tokio::test]
+async fn failed_reverse_hydration_page_does_not_starve_the_next_rolling_row() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_live_reverse_hydration_fairness").await?;
+    seed_branch(scratch.pool(), ETHEREUM, 1, 2, None).await?;
+    publish(scratch.pool(), ETHEREUM, 1, 2, 1, 1).await?;
+    seed_old_reverse_hydration_page(scratch.pool()).await?;
+    let rpc = SelectiveFailureHydrationRpc::spawn(1, 251).await?;
+    let hydrator = Hydrator::new(
+        scratch.pool().clone(),
+        ChainRpcUrls::from_entries(&[format!("{ETHEREUM}={}", rpc.endpoint)])?,
+    );
+
+    let error = hydrator
+        .hydrate_canonical_head(ETHEREUM)
+        .await
+        .expect_err("the poisoned first page must remain retryable");
+    assert_eq!(error.kind(), bigname_project::ErrorKind::Transient);
+    let retry = hydrator
+        .hydrate_canonical_head(ETHEREUM)
+        .await
+        .expect("a same-head retry must advance beyond the failed page");
+    assert_eq!(retry.reverse_candidates, 1);
+
+    let batches = rpc.batches.lock().expect("batch observations").clone();
+    assert_eq!(
+        batches,
+        vec![
+            ObservedHydrationBatch {
+                poisoned: true,
+                call_count: 250,
+                contains_last_row: false,
+            },
+            ObservedHydrationBatch {
+                poisoned: false,
+                call_count: 1,
+                contains_last_row: true,
+            },
+        ]
+    );
+
+    let failed = load_primary_name_current(
+        scratch.pool(),
+        "0x0000000000000000000000000000000000000001",
+        "ens",
+        "60",
+    )
+    .await?
+    .expect("a failed row keeps its event-derived baseline");
+    assert_eq!(failed.claim_status, PrimaryNameClaimStatus::Unsupported);
+    assert_eq!(failed.raw_claim_name, None);
+
+    let attempt_state: Vec<ObservedReverseHydrationAttempt> = sqlx::query_as(
+        "SELECT address,
+                    reverse_hydration_attempted_block_number AS attempted_block_number,
+                    reverse_hydration_attempted_block_hash AS attempted_block_hash,
+                    reverse_hydration_attempt_ordinal AS attempt_ordinal,
+                    claim_provenance ? 'canonical_head_multicall_hydration'
+                        AS has_serving_marker
+             FROM primary_names_current
+             WHERE address IN (
+                 '0x0000000000000000000000000000000000000001',
+                 '0x00000000000000000000000000000000000000fb'
+             )
+             ORDER BY address",
+    )
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(attempt_state.len(), 2);
+    assert_eq!(
+        attempt_state[0].address,
+        "0x0000000000000000000000000000000000000001"
+    );
+    assert_eq!(attempt_state[0].attempted_block_number, Some(2));
+    assert_eq!(
+        attempt_state[0].attempted_block_hash.as_deref(),
+        Some(block_hash(1, 2).as_str())
+    );
+    assert!(
+        !attempt_state[0].has_serving_marker,
+        "a failed call has no serving marker"
+    );
+    assert_eq!(attempt_state[1].attempted_block_number, Some(2));
+    assert_eq!(
+        attempt_state[1].attempted_block_hash.as_deref(),
+        Some(block_hash(1, 2).as_str())
+    );
+    assert!(
+        attempt_state[1].has_serving_marker,
+        "a successful call has a serving marker"
+    );
+    assert!(
+        attempt_state[0].attempt_ordinal < attempt_state[1].attempt_ordinal,
+        "the retry gets a later durable attempt order"
+    );
+
+    let refreshed = load_primary_name_current_snapshot(
+        scratch.pool(),
+        "0x00000000000000000000000000000000000000fb",
+        "ens",
+        "60",
+    )
+    .await?
+    .expect("row 251 remains readable");
+    assert_eq!(refreshed.row.claim_status, PrimaryNameClaimStatus::Success);
+    assert_eq!(refreshed.row.raw_claim_name.as_deref(), Some("new.eth"));
+    assert_eq!(refreshed.normalized_claim_name.as_deref(), Some("new.eth"));
+
+    rpc.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn successful_reverse_hydration_page_reaches_the_next_rolling_row() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_live_reverse_hydration_fair_control").await?;
+    seed_branch(scratch.pool(), ETHEREUM, 1, 2, None).await?;
+    publish(scratch.pool(), ETHEREUM, 1, 2, 1, 1).await?;
+    seed_old_reverse_hydration_page(scratch.pool()).await?;
+    let rpc = SelectiveFailureHydrationRpc::spawn(0, 251).await?;
+    let hydrator = Hydrator::new(
+        scratch.pool().clone(),
+        ChainRpcUrls::from_entries(&[format!("{ETHEREUM}={}", rpc.endpoint)])?,
+    );
+
+    let first = hydrator.hydrate_canonical_head(ETHEREUM).await?;
+    assert_eq!(first.reverse_candidates, 250);
+    hydrator.hydrate_canonical_head(ETHEREUM).await?;
+
+    let batches = rpc.batches.lock().expect("batch observations").clone();
+    assert!(
+        batches.iter().any(|batch| batch.contains_last_row),
+        "a successful first page must reach row 251 on the next tick"
+    );
+    let refreshed = load_primary_name_current_snapshot(
+        scratch.pool(),
+        "0x00000000000000000000000000000000000000fb",
+        "ens",
+        "60",
+    )
+    .await?
+    .expect("row 251 remains readable");
+    assert_eq!(refreshed.normalized_claim_name.as_deref(), Some("new.eth"));
+
+    rpc.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn event_silent_reverse_hydration_does_not_serve_or_starve_an_orphaned_batch() -> Result<()> {
     let scratch =
         ScratchDatabase::create("production_live_reverse_hydration_orphaned_batch").await?;
@@ -2962,14 +3110,7 @@ async fn event_silent_reverse_hydration_does_not_serve_or_starve_an_orphaned_bat
 
     seed_branch(scratch.pool(), ETHEREUM, 2, 2, Some((1, block_hash(1, 1)))).await?;
     publish(scratch.pool(), ETHEREUM, 2, 2, 1, 1).await?;
-    let names = std::iter::repeat_n("new.eth", 250)
-        .collect::<Vec<_>>()
-        .join("|");
-    let rpc = HydrationRpc::spawn(BTreeMap::from([(
-        block_hash(2, 2),
-        format!("{MULTICALL_RESULTS_PREFIX}{names}"),
-    )]))
-    .await?;
+    let rpc = SelectiveFailureHydrationRpc::spawn(0, 251).await?;
     let hydrator = Hydrator::new(
         scratch.pool().clone(),
         ChainRpcUrls::from_entries(&[format!("{ETHEREUM}={}", rpc.endpoint)])?,
@@ -2985,7 +3126,7 @@ async fn event_silent_reverse_hydration_does_not_serve_or_starve_an_orphaned_bat
     assert_eq!(last_read.raw_claim_name, None);
 
     let second = hydrator.hydrate_canonical_head(ETHEREUM).await?;
-    assert_eq!(second.reverse_candidates, 250);
+    assert_eq!(second.reverse_candidates, 1);
     let last_hydration_hash: String = sqlx::query_scalar(
         "SELECT claim_provenance -> 'canonical_head_multicall_hydration' ->> 'block_hash'
          FROM primary_names_current
@@ -4058,6 +4199,45 @@ async fn seed_reverse_candidate_for(
     Ok(())
 }
 
+async fn seed_old_reverse_hydration_page(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO primary_names_current (
+             address, coin_type, namespace, claim_status, raw_claim_name,
+             claim_name_is_normalized, claim_provenance
+         )
+         SELECT '0x' || lpad(to_hex(candidate), 40, '0'),
+                '60', 'ens', 'success', 'old.eth', true,
+                jsonb_build_object(
+                    'chain_id', $1::text,
+                    'reverse_node', '0x' || lpad(to_hex(candidate), 24, '0') || repeat('cafe', 10),
+                    'resolver_address', $2::text,
+                    'target_block_number', 1,
+                    'target_block_hash', $3::text,
+                    'canonical_head_multicall_hydration', jsonb_build_object(
+                        'chain_id', $1::text,
+                        'block_number', 1,
+                        'block_hash', $3::text,
+                        'resolver_address', $2::text,
+                        'reverse_node',
+                            '0x' || lpad(to_hex(candidate), 24, '0') || repeat('cafe', 10),
+                        'baseline', jsonb_build_object(
+                            'claim_status', 'unsupported',
+                            'raw_claim_name', NULL,
+                            'claim_name_is_normalized', false,
+                            'unsupported_reason', 'legacy_resolver_does_not_emit_name'
+                        )
+                    )
+                )
+         FROM generate_series(1, 251) candidate",
+    )
+    .bind(ETHEREUM)
+    .bind(REVERSE_RESOLVER)
+    .bind(block_hash(1, 1))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 async fn assert_primary(
     pool: &PgPool,
     status: &str,
@@ -4394,6 +4574,104 @@ fn rpc_quantity(value: Option<&Value>) -> Option<i64> {
 struct HydrationRpc {
     endpoint: String,
     server: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ObservedHydrationBatch {
+    poisoned: bool,
+    call_count: usize,
+    contains_last_row: bool,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ObservedReverseHydrationAttempt {
+    address: String,
+    attempted_block_number: Option<i64>,
+    attempted_block_hash: Option<String>,
+    attempt_ordinal: Option<i64>,
+    has_serving_marker: bool,
+}
+
+#[derive(Clone)]
+struct SelectiveFailureHydrationRpcState {
+    poison_node_hex: String,
+    last_node_hex: String,
+    batches: Arc<Mutex<Vec<ObservedHydrationBatch>>>,
+}
+
+struct SelectiveFailureHydrationRpc {
+    endpoint: String,
+    server: tokio::task::JoinHandle<()>,
+    batches: Arc<Mutex<Vec<ObservedHydrationBatch>>>,
+}
+
+impl SelectiveFailureHydrationRpc {
+    async fn spawn(poison_candidate: i64, last_candidate: i64) -> Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let batches = Arc::new(Mutex::new(Vec::new()));
+        let state = SelectiveFailureHydrationRpcState {
+            poison_node_hex: reverse_hydration_node_hex(poison_candidate),
+            last_node_hex: reverse_hydration_node_hex(last_candidate),
+            batches: Arc::clone(&batches),
+        };
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/", post(selective_failure_hydration_rpc))
+                    .with_state(state),
+            )
+            .await
+            .expect("selective-failure hydration fixture RPC server");
+        });
+        Ok(Self {
+            endpoint: format!("http://{address}/"),
+            server,
+            batches,
+        })
+    }
+}
+
+fn reverse_hydration_node_hex(candidate: i64) -> String {
+    format!("{candidate:024x}{}", "cafe".repeat(10))
+}
+
+async fn selective_failure_hydration_rpc(
+    State(state): State<SelectiveFailureHydrationRpcState>,
+    Json(request): Json<Value>,
+) -> Json<Value> {
+    let id = request.get("id").cloned().unwrap_or(json!(1));
+    let data = request
+        .pointer("/params/0/data")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let call_count = data.matches("691f3431").count();
+    let poisoned = data.contains(&state.poison_node_hex);
+    let contains_last_row = data.contains(&state.last_node_hex);
+    state
+        .batches
+        .lock()
+        .expect("batch observations")
+        .push(ObservedHydrationBatch {
+            poisoned,
+            call_count,
+            contains_last_row,
+        });
+    if poisoned {
+        return Json(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {"code": -32000, "message": "fixture poisoned hydration page"}
+        }));
+    }
+    let names = std::iter::repeat_n("new.eth", call_count).collect::<Vec<_>>();
+    Json(json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": multicall_string_results(names.iter().copied())
+    }))
 }
 
 impl HydrationRpc {

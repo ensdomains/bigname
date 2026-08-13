@@ -132,7 +132,11 @@ async fn canonical_fixture_builds_all_seven_projection_families() -> Result<()> 
                  ) FROM resolver_current resolver
              ), '[]'::jsonb),
              'primary_names', COALESCE((
-                 SELECT jsonb_agg(to_jsonb(primary_name)
+                 SELECT jsonb_agg(
+                     to_jsonb(primary_name) -
+                         'reverse_hydration_attempted_block_number' -
+                         'reverse_hydration_attempted_block_hash' -
+                         'reverse_hydration_attempt_ordinal'
                      ORDER BY address, coin_type, namespace)
                  FROM primary_names_current primary_name
              ), '[]'::jsonb)
@@ -795,7 +799,12 @@ async fn primary_name_builder_preserves_success_invalid_blank_and_byte_only_clai
 
     run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
     let full_claims: Value = sqlx::query_scalar(
-        "SELECT jsonb_agg(to_jsonb(primary_name) ORDER BY address, coin_type, namespace)
+        "SELECT jsonb_agg(
+             to_jsonb(primary_name) -
+                 'reverse_hydration_attempted_block_number' -
+                 'reverse_hydration_attempted_block_hash' -
+                 'reverse_hydration_attempt_ordinal'
+             ORDER BY address, coin_type, namespace)
          FROM primary_names_current primary_name",
     )
     .fetch_one(scratch.pool())

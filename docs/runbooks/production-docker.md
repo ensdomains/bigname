@@ -80,17 +80,29 @@ ranked scan over all interpreted events. That scan is expensive at production
 scale. Avoid restart loops; investigate the first interruption before restarting
 the walk repeatedly.
 
-The release containing Issue #400 adds baseline indexes without a schema-v2
-schema-migration file. Fresh namespaces receive them from `schema-v2/baseline`.
-For an initialized production namespace, keep the API and every phase-runner or
-one-shot Project process stopped and apply the following statements one at a
-time with the writer role before deploying the new binary. Do not wrap them in
-a transaction: PostgreSQL requires each `CREATE INDEX CONCURRENTLY` to run as a
-top-level statement. The `normalized_events` builds are expected to take hours
-at the production corpus size; monitor them through `pg_stat_progress_create_index`,
-allow each build to finish, and confirm every named index is valid in `pg_index`
-before continuing. A failed concurrent build can leave an invalid index; drop
-only that exact invalid index and retry its reviewed statement before proceeding.
+The release containing Issue #400 adds baseline indexes and the versioned
+schema-migrations
+`20260813120000_reverse_hydration_attempt_state.sql` and
+`20260813120100_reverse_hydration_attempt_state_validate.sql`. Fresh namespaces
+receive the same objects from `schema-v2/baseline`. For an initialized
+production namespace, keep the API and every phase-runner or one-shot Project
+process stopped. Apply and validate the following concurrent indexes as step 3
+below, then apply both schema-migrations in order as step 4. The first adds the
+three internal reverse-name polling selection columns, their sequence, and an
+unvalidated all-null-or-complete constraint; the second validates that
+constraint. Before deploying the new binary, confirm the sequence and all three
+columns exist and that
+`primary_names_current_reverse_hydration_attempt_check` has
+`pg_constraint.convalidated = true`.
+
+Apply the following index statements one at a time with the writer role. Do not
+wrap them in a transaction: PostgreSQL requires each `CREATE INDEX CONCURRENTLY`
+to run as a top-level statement. The `normalized_events` builds are expected to
+take hours at the production corpus size; monitor them through
+`pg_stat_progress_create_index`, allow each build to finish, and confirm every
+named index is valid in `pg_index` before continuing. A failed concurrent build
+can leave an invalid index; drop only that exact invalid index and retry its
+reviewed statement before proceeding.
 
 ```sql
 CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_chain_block_number_idx

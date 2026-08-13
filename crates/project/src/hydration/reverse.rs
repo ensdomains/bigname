@@ -123,14 +123,39 @@ impl Candidates {
                 self.active.len()
             )));
         }
+        let attempt_ordinal = if self.active.is_empty() {
+            None
+        } else {
+            Some(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT nextval('reverse_hydration_attempt_ordinal_seq')",
+                )
+                .fetch_one(&mut **transaction)
+                .await
+                .map_err(|error| {
+                    ProjectError::database(
+                        "failed to allocate reverse hydration attempt order",
+                        error,
+                    )
+                })?,
+            )
+        };
         let mut failures = 0usize;
         for (candidate, result) in self.active.iter().zip(results) {
             failures += usize::from(
-                update_primary(transaction, candidate, head, classify_result(result)).await?,
+                update_primary(
+                    transaction,
+                    candidate,
+                    head,
+                    attempt_ordinal.expect("active candidates have an attempt order"),
+                    classify_result(result),
+                )
+                .await?,
             );
         }
         for candidate in &self.stale {
-            restore_primary_baseline(transaction, &candidate.identity, &candidate.baseline).await?;
+            restore_primary_baseline(transaction, &candidate.identity, &candidate.baseline, None)
+                .await?;
         }
         Ok((self.active.len() + self.stale.len(), failures))
     }
@@ -164,7 +189,17 @@ async fn load_active_candidates(pool: &PgPool, head: &Marker) -> Result<Vec<Reve
                    lower(current.claim_provenance ->> 'resolver_address') AS resolver_address,
                    COALESCE(current.claim_provenance ->> 'target_block_number' = $3::text
                        AND current.claim_provenance ->> 'target_block_hash' = $4, false)
-                       AS delta_scoped
+                       AS delta_scoped,
+                   COALESCE(
+                       current.claim_provenance -> $5 ->> 'block_number' = $3::text
+                       AND current.claim_provenance -> $5 ->> 'block_hash' = $4,
+                       false
+                   ) AS hydrated_at_head,
+                   COALESCE(
+                       current.reverse_hydration_attempted_block_number = $3
+                       AND current.reverse_hydration_attempted_block_hash = $4,
+                       false
+                   ) AS attempted_at_head
             FROM primary_names_current current
             WHERE current.coin_type = '60'
               AND current.namespace = 'ens'
@@ -173,21 +208,43 @@ async fn load_active_candidates(pool: &PgPool, head: &Marker) -> Result<Vec<Reve
               AND lower(current.claim_provenance ->> 'resolver_address') = ANY($1)
         ), delta_scoped AS (
             SELECT * FROM eligible WHERE delta_scoped
-        ), rolling AS (
-            SELECT *
+        ), rolling_priority AS (
+            SELECT hydrated_at_head,
+                   attempted_at_head,
+                   CASE WHEN attempted_at_head
+                        THEN reverse_hydration_attempt_ordinal
+                   END AS attempt_ordinal
             FROM eligible
             WHERE NOT delta_scoped
             ORDER BY
-                COALESCE(
-                    claim_provenance -> $5 ->> 'block_number' = $3::text
-                    AND claim_provenance -> $5 ->> 'block_hash' = $4,
-                    false
-                ),
+                hydrated_at_head,
+                attempted_at_head,
+                CASE WHEN attempted_at_head
+                     THEN reverse_hydration_attempt_ordinal
+                END NULLS FIRST,
                 NULLIF(
                     claim_provenance -> $5 ->> 'block_number',
                     ''
                 )::bigint NULLS FIRST,
                 address, coin_type, namespace
+            LIMIT 1
+        ), rolling AS (
+            SELECT eligible.*
+            FROM eligible
+            JOIN rolling_priority priority
+              ON priority.hydrated_at_head = eligible.hydrated_at_head
+             AND priority.attempted_at_head = eligible.attempted_at_head
+             AND priority.attempt_ordinal IS NOT DISTINCT FROM
+                 CASE WHEN eligible.attempted_at_head
+                      THEN eligible.reverse_hydration_attempt_ordinal
+                 END
+            WHERE NOT eligible.delta_scoped
+            ORDER BY
+                NULLIF(
+                    eligible.claim_provenance -> $5 ->> 'block_number',
+                    ''
+                )::bigint NULLS FIRST,
+                eligible.address, eligible.coin_type, eligible.namespace
             LIMIT $6
         ), selected AS (
             SELECT * FROM delta_scoped
@@ -368,10 +425,17 @@ async fn update_primary(
     transaction: &mut Transaction<'_, Postgres>,
     candidate: &ReverseCandidate,
     head: &Marker,
+    attempt_ordinal: i64,
     claim: Claim,
 ) -> Result<bool> {
     if matches!(claim, Claim::Failed) {
-        restore_primary_baseline(transaction, &candidate.identity, &candidate.baseline).await?;
+        restore_primary_baseline(
+            transaction,
+            &candidate.identity,
+            &candidate.baseline,
+            Some((head, attempt_ordinal)),
+        )
+        .await?;
         return Ok(true);
     }
     let (status, raw_name, is_normalized) = match claim {
@@ -393,7 +457,10 @@ async fn update_primary(
         "UPDATE primary_names_current
          SET claim_status = $4, raw_claim_name = $5,
              claim_name_is_normalized = $6, unsupported_reason = NULL,
-             claim_provenance = (claim_provenance - $7) || jsonb_build_object($7, $8)
+             claim_provenance = (claim_provenance - $7) || jsonb_build_object($7, $8),
+             reverse_hydration_attempted_block_number = $9,
+             reverse_hydration_attempted_block_hash = $10,
+             reverse_hydration_attempt_ordinal = $11
          WHERE address = $1 AND coin_type = $2 AND namespace = $3",
     )
     .bind(&candidate.identity.address)
@@ -404,6 +471,9 @@ async fn update_primary(
     .bind(is_normalized)
     .bind(HYDRATION_KEY)
     .bind(provenance)
+    .bind(head.number)
+    .bind(&head.hash)
+    .bind(attempt_ordinal)
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to publish hydrated reverse name", error))?;
@@ -415,12 +485,19 @@ async fn restore_primary_baseline(
     transaction: &mut Transaction<'_, Postgres>,
     identity: &ReverseIdentity,
     baseline: &ReverseBaseline,
+    attempt: Option<(&Marker, i64)>,
 ) -> Result<()> {
+    let attempted_block_number = attempt.map(|(head, _)| head.number);
+    let attempted_block_hash = attempt.map(|(head, _)| &head.hash);
+    let attempt_ordinal = attempt.map(|(_, ordinal)| ordinal);
     let result = sqlx::query(
         "UPDATE primary_names_current
          SET claim_status = $4, raw_claim_name = $5,
              claim_name_is_normalized = $6, unsupported_reason = $7,
-             claim_provenance = claim_provenance - $8
+             claim_provenance = claim_provenance - $8,
+             reverse_hydration_attempted_block_number = $9,
+             reverse_hydration_attempted_block_hash = $10,
+             reverse_hydration_attempt_ordinal = $11
          WHERE address = $1 AND coin_type = $2 AND namespace = $3",
     )
     .bind(&identity.address)
@@ -431,6 +508,9 @@ async fn restore_primary_baseline(
     .bind(baseline.is_normalized)
     .bind(&baseline.unsupported_reason)
     .bind(HYDRATION_KEY)
+    .bind(attempted_block_number)
+    .bind(attempted_block_hash)
+    .bind(attempt_ordinal)
     .execute(&mut **transaction)
     .await
     .map_err(|error| {

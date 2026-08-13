@@ -261,9 +261,11 @@ profile.
 
 ## Primary names
 
-`primary_names_current` stores declared claim state only. Supported statuses are
-`success`, `not_found`, `unsupported`, and `invalid_name`. A successful row keeps
-the raw claim and whether its bytes already equal the normalized claim. Project
+`primary_names_current` stores declared claim state plus internal rolling
+reverse-name polling selection state. Supported claim statuses are `success`,
+`not_found`, `unsupported`, and `invalid_name`. A successful row keeps the raw
+claim and whether its bytes already equal the normalized claim. The internal
+selection columns are not claim fields and readers never select them. Project
 does not persist a verified-primary result or trace identity.
 
 Current-head hydration for an admitted event-silent ENSv1 reverse resolver may
@@ -272,10 +274,20 @@ does not create a normalized event or verified result. Provider failure restores
 the event-derived row and keeps Project retryable.
 
 Each hydration tick refreshes every eligible reverse tuple rebuilt by the
-Project delta at that head, then at most 250 additional eligible tuples ordered
-by their oldest successful hydration head and stable tuple identity. It also
-restores every newly ineligible delta tuple and at most 250 older ineligible
-hydrated tuples per tick. Thus event-driven changes are visible immediately,
+Project delta at that head, then at most 250 additional eligible tuples. The
+rolling selection first separates exact-current-head matches from mismatches,
+then drains the least-recently-attempted equal-priority group in order of oldest
+successful hydration head and stable tuple identity. Every attempted group gets
+a durable head and ordering value, including after provider failure. A same-head
+retry therefore reaches tuples beyond a failed group before it revisits that
+group. These values belong only to Project's rolling hydration selection:
+readers never use them as claim data, and they cannot make a failed provider
+result readable. They persist across transaction commit, process restart, and
+a same-head retry. Rebuilding an affected primary-name tuple clears them with
+the rest of that projection row; the rebuilt tuple is selected immediately from
+the Project delta, so it does not depend on its prior rolling position. The tick
+also restores every newly ineligible delta tuple and at most 250 older
+ineligible hydrated tuples. Thus event-driven changes are visible immediately,
 while event-silent provider values for the remaining corpus are refreshed in
 bounded rolling batches instead of all being polled at every head.
 If a hydration block becomes noncanonical, readers expose the stored event-derived baseline until

@@ -35,6 +35,94 @@ async fn schema_migrations_apply_to_an_empty_database_before_the_phase_baseline(
 }
 
 #[tokio::test]
+async fn reverse_hydration_attempt_state_migrates_an_initialized_phase_schema() -> Result<()> {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("phase_runner_reverse_hydration_attempt_migration")
+            .pool_max_connections(2)
+            .parse_context("failed to parse reverse hydration schema-migration database URL")
+            .admin_connect_context(
+                "failed to connect reverse hydration schema-migration admin pool",
+            )
+            .pool_connect_context("failed to connect reverse hydration schema-migration pool"),
+    )
+    .await?;
+    initialize_schema_v2(database.pool()).await?;
+    sqlx::raw_sql(
+        "ALTER TABLE bigname_phase.primary_names_current
+             DROP CONSTRAINT primary_names_current_reverse_hydration_attempt_check,
+             DROP COLUMN reverse_hydration_attempted_block_number,
+             DROP COLUMN reverse_hydration_attempted_block_hash,
+             DROP COLUMN reverse_hydration_attempt_ordinal;
+         DROP SEQUENCE bigname_phase.reverse_hydration_attempt_ordinal_seq;",
+    )
+    .execute(database.pool())
+    .await?;
+
+    bigname_storage::MIGRATOR.run(database.pool()).await?;
+
+    let sequence_exists: bool = sqlx::query_scalar(
+        "SELECT to_regclass(
+             'bigname_phase.reverse_hydration_attempt_ordinal_seq'
+         ) IS NOT NULL",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(sequence_exists);
+    let columns: Vec<String> = sqlx::query_scalar(
+        "SELECT column_name
+         FROM information_schema.columns
+         WHERE table_schema = 'bigname_phase'
+           AND table_name = 'primary_names_current'
+           AND column_name IN (
+               'reverse_hydration_attempted_block_number',
+               'reverse_hydration_attempted_block_hash',
+               'reverse_hydration_attempt_ordinal'
+           )
+         ORDER BY column_name",
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        columns,
+        vec![
+            "reverse_hydration_attempt_ordinal",
+            "reverse_hydration_attempted_block_hash",
+            "reverse_hydration_attempted_block_number",
+        ]
+    );
+    let constraint_is_valid: bool = sqlx::query_scalar(
+        "SELECT constraint_row.convalidated
+         FROM pg_constraint constraint_row
+         WHERE constraint_row.conrelid =
+                 'bigname_phase.primary_names_current'::regclass
+           AND constraint_row.conname =
+                 'primary_names_current_reverse_hydration_attempt_check'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(constraint_is_valid);
+    sqlx::query(
+        "SELECT reverse_hydration_attempted_block_number,
+                reverse_hydration_attempted_block_hash,
+                reverse_hydration_attempt_ordinal
+         FROM bigname_phase.primary_names_current
+         LIMIT 0",
+    )
+    .execute(database.pool())
+    .await?;
+    let attempt_ordinal: i64 = sqlx::query_scalar(
+        "SELECT nextval(
+             'bigname_phase.reverse_hydration_attempt_ordinal_seq'
+         )",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(attempt_ordinal > 0);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn audit_schema_migration_applies_on_top_of_the_pre_audit_phase_baseline() -> Result<()> {
     let database = TestDatabase::create(
         TestDatabaseConfig::new("phase_runner_pre_audit_baseline_migration")
