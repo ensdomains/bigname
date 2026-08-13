@@ -60,6 +60,7 @@ pub(super) struct Corpus {
     pub(super) resolvers: Vec<(String, String)>,
     pub(super) namespaces: Vec<String>,
     pub(super) names_by_namespace: BTreeMap<String, usize>,
+    pub(super) parents_by_namespace: BTreeMap<String, usize>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -128,12 +129,11 @@ impl Corpus {
         .fetch_all(pool)
         .await
         .context("failed to load resolver benchmark corpus")?;
-        let mut names_by_namespace = BTreeMap::new();
-        for (namespace, _) in &names {
-            *names_by_namespace.entry(namespace.clone()).or_insert(0) += 1;
-        }
+        let names_by_namespace = namespace_counts(&names);
+        let parents_by_namespace = namespace_counts(&parents);
 
-        require_active_namespace_coverage(&namespaces, &names_by_namespace)?;
+        require_active_namespace_coverage(&namespaces, &names_by_namespace, "supported names")?;
+        require_active_namespace_coverage(&namespaces, &parents_by_namespace, "supported parents")?;
         require_name_corpus_size(names.len(), budgets.api_corpus_size, &names_by_namespace)?;
         require_minimum_corpus_size("address", address_names.len(), budgets.api_corpus_size)?;
         for (label, actual) in [
@@ -158,8 +158,17 @@ impl Corpus {
             resolvers,
             namespaces,
             names_by_namespace,
+            parents_by_namespace,
         })
     }
+}
+
+fn namespace_counts(rows: &[(String, String)]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for (namespace, _) in rows {
+        *counts.entry(namespace.clone()).or_insert(0) += 1;
+    }
+    counts
 }
 
 fn require_minimum_corpus_size(label: &str, actual: usize, minimum: usize) -> Result<()> {
@@ -189,7 +198,8 @@ fn require_name_corpus_size(
 
 fn require_active_namespace_coverage(
     namespaces: &[String],
-    names_by_namespace: &BTreeMap<String, usize>,
+    counts_by_namespace: &BTreeMap<String, usize>,
+    seed_kind: &str,
 ) -> Result<()> {
     ensure!(
         !namespaces.is_empty(),
@@ -197,12 +207,12 @@ fn require_active_namespace_coverage(
     );
     for namespace in namespaces {
         ensure!(
-            names_by_namespace
+            counts_by_namespace
                 .get(namespace)
                 .copied()
                 .unwrap_or_default()
                 > 0,
-            "active namespace {namespace:?} contributed no supported names to the benchmark corpus"
+            "active namespace {namespace:?} contributed no {seed_kind} to the benchmark corpus"
         );
     }
     Ok(())
@@ -270,7 +280,10 @@ async fn table_count(pool: &PgPool, table: &str) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
+    use crate::budgets::{BudgetProfile, BudgetsFile};
     use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 
     #[test]
@@ -295,7 +308,7 @@ mod tests {
     fn every_active_namespace_must_contribute_supported_names() {
         let namespaces = vec!["basenames".to_owned(), "ens".to_owned()];
         let counts = [("basenames".to_owned(), 5_000)].into_iter().collect();
-        let error = require_active_namespace_coverage(&namespaces, &counts)
+        let error = require_active_namespace_coverage(&namespaces, &counts, "supported names")
             .unwrap_err()
             .to_string();
         assert!(error.contains("active namespace \"ens\""));
@@ -427,5 +440,139 @@ mod tests {
         database.cleanup().await.unwrap();
         assert_eq!(names.len(), 4);
         assert_eq!(namespaces, ["basenames", "ens"].into_iter().collect());
+    }
+
+    #[tokio::test]
+    async fn parent_corpus_and_report_counts_cover_active_namespaces() {
+        let database = TestDatabase::create(TestDatabaseConfig::new(
+            "benchmark_parent_namespace_stratification",
+        ))
+        .await
+        .unwrap();
+        for statement in [
+            "CREATE TABLE manifest_versions (namespace text NOT NULL, rollout_status text NOT NULL)",
+            "CREATE TABLE name_current (namespace text NOT NULL, raw_name text NOT NULL, logical_name_id text PRIMARY KEY, support_status text NOT NULL)",
+            "CREATE TABLE children_current (parent_logical_name_id text NOT NULL)",
+        ] {
+            sqlx::query(statement)
+                .execute(database.pool())
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO manifest_versions VALUES
+                 ('basenames', 'active'), ('ens', 'active')",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        for index in 0..4 {
+            for namespace in ["basenames", "ens"] {
+                let logical_name_id = format!("{namespace}:{index:02}");
+                sqlx::query("INSERT INTO name_current VALUES ($1, $2, $3, 'supported')")
+                    .bind(namespace)
+                    .bind(format!("{namespace}-{index}.eth"))
+                    .bind(&logical_name_id)
+                    .execute(database.pool())
+                    .await
+                    .unwrap();
+                sqlx::query("INSERT INTO children_current VALUES ($1)")
+                    .bind(logical_name_id)
+                    .execute(database.pool())
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let parents: Vec<(String, String)> = sqlx::query_as(PARENT_CORPUS_SQL)
+            .bind(4_i64)
+            .fetch_all(database.pool())
+            .await
+            .unwrap();
+        let counts = namespace_counts(&parents);
+
+        database.cleanup().await.unwrap();
+        assert_eq!(parents.len(), 4);
+        assert_eq!(
+            counts,
+            [("basenames".to_owned(), 2), ("ens".to_owned(), 2)]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[tokio::test]
+    async fn every_active_namespace_must_contribute_supported_parents() {
+        let database = TestDatabase::create(TestDatabaseConfig::new(
+            "benchmark_parent_namespace_coverage",
+        ))
+        .await
+        .unwrap();
+        for statement in [
+            "CREATE TABLE manifest_versions (namespace text NOT NULL, rollout_status text NOT NULL)",
+            "CREATE TABLE name_current (namespace text NOT NULL, raw_name text NOT NULL, logical_name_id text PRIMARY KEY, support_status text NOT NULL)",
+            "CREATE TABLE children_current (parent_logical_name_id text NOT NULL)",
+            "CREATE TABLE address_names_current (address text NOT NULL, raw_name text NOT NULL, namespace text NOT NULL, relation text NOT NULL, support_status text NOT NULL)",
+            "CREATE TABLE permissions_current (subject text NOT NULL)",
+            "CREATE TABLE primary_names_current (address text NOT NULL, coin_type text NOT NULL, namespace text NOT NULL, claim_status text NOT NULL)",
+            "CREATE TABLE resolver_current (chain_id text NOT NULL, resolver_address text NOT NULL, support_status text NOT NULL)",
+        ] {
+            sqlx::query(statement)
+                .execute(database.pool())
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO manifest_versions VALUES
+                 ('basenames', 'active'), ('ens', 'active')",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        for index in 0..16 {
+            sqlx::query(
+                "INSERT INTO name_current VALUES
+                     ('basenames', $1, $2, 'supported'),
+                     ('ens', $3, $4, 'supported')",
+            )
+            .bind(format!("base-{index}.base.eth"))
+            .bind(format!("basenames:{index:02}"))
+            .bind(format!("ens-{index}.eth"))
+            .bind(format!("ens:{index:02}"))
+            .execute(database.pool())
+            .await
+            .unwrap();
+        }
+        sqlx::query("INSERT INTO children_current VALUES ('basenames:00')")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        for index in 0..32 {
+            sqlx::query(
+                "INSERT INTO address_names_current VALUES ($1, $2, 'basenames', 'owner', 'supported')",
+            )
+            .bind(format!("0x{index:040x}"))
+            .bind(format!("base-{index}.base.eth"))
+            .execute(database.pool())
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO resolver_current VALUES
+                 ('base-mainnet', '0x0000000000000000000000000000000000000001', 'supported')",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        let budgets_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/release-gate.toml");
+        let budgets = BudgetsFile::load(&budgets_path).unwrap();
+        let result = Corpus::load(database.pool(), budgets.profile(BudgetProfile::Smoke)).await;
+        database.cleanup().await.unwrap();
+
+        let error = result.expect_err("ENS with zero parent seeds must be rejected");
+        assert!(error.to_string().contains("active namespace \"ens\""));
+        assert!(error.to_string().contains("supported parents"));
     }
 }

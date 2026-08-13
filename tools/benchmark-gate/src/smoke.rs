@@ -305,6 +305,15 @@ mod tests {
         .fetch_one(&writer)
         .await
         .unwrap();
+        let projected_children: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM children_current child
+             JOIN name_current parent
+               ON parent.logical_name_id = child.parent_logical_name_id
+             WHERE parent.namespace = 'ens' AND parent.raw_name <> ''",
+        )
+        .fetch_one(&writer)
+        .await
+        .unwrap();
         let manifest_events: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM normalized_events
              WHERE event_kind = 'SourceManifestUpdated'",
@@ -332,6 +341,10 @@ mod tests {
             "Project must publish the admitted resolver"
         );
         assert!(bound_names > 1, "Project must publish pageable bound names");
+        assert!(
+            projected_children >= HEAD,
+            "Project must publish every admitted registry child"
+        );
         assert_eq!(
             corpus_resolver_rows, 0,
             "exact-name smoke corpus must retain its registration-only coverage"

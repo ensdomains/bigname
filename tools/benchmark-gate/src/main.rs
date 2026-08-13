@@ -86,20 +86,18 @@ struct ApiArgs {
 }
 
 #[derive(Debug, Args)]
-struct SmokeArgs {
-    #[arg(
-        long,
-        env = "BIGNAME_BENCHMARK_API_BINARY",
-        default_value = "target/release/bigname-api"
-    )]
-    api_binary: PathBuf,
-}
+struct SmokeArgs {}
 
 #[derive(Debug, Serialize)]
 struct GateReport<T: Serialize> {
     head_sha: String,
     source_tree_clean: bool,
     cargo_profile: String,
+    rustc_version: String,
+    rustflags: String,
+    cargo_encoded_rustflags: String,
+    benchmark_binary_sha256: String,
+    locally_built_api_binary_sha256: String,
     interpreter_content_hash: &'static str,
     budgets: &'static str,
     budget_profile: &'static str,
@@ -108,6 +106,15 @@ struct GateReport<T: Serialize> {
     api_base_url: Option<String>,
     green: bool,
     results: T,
+}
+
+#[derive(Debug)]
+struct WrapperBuildAttestation {
+    rustc_version: String,
+    rustflags: String,
+    cargo_encoded_rustflags: String,
+    benchmark_binary_sha256: String,
+    locally_built_api_binary_sha256: String,
 }
 
 #[tokio::main]
@@ -155,10 +162,16 @@ async fn main() -> Result<()> {
             .await?;
             pool.close().await;
             finish_release_run(&head_sha)?;
+            let build = wrapper_build_attestation()?;
             let report = GateReport {
                 head_sha,
                 source_tree_clean: true,
                 cargo_profile: cargo_profile(),
+                rustc_version: build.rustc_version,
+                rustflags: build.rustflags,
+                cargo_encoded_rustflags: build.cargo_encoded_rustflags,
+                benchmark_binary_sha256: build.benchmark_binary_sha256,
+                locally_built_api_binary_sha256: build.locally_built_api_binary_sha256,
                 interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH,
                 budgets: BUDGETS_PATH,
                 budget_profile: "production",
@@ -185,10 +198,16 @@ async fn main() -> Result<()> {
                 api_load::run(&pool, &args.api_base_url, Some(&head_sha), profile).await?;
             pool.close().await;
             finish_release_run(&head_sha)?;
+            let build = wrapper_build_attestation()?;
             let report = GateReport {
                 head_sha,
                 source_tree_clean: true,
                 cargo_profile: cargo_profile(),
+                rustc_version: build.rustc_version,
+                rustflags: build.rustflags,
+                cargo_encoded_rustflags: build.cargo_encoded_rustflags,
+                benchmark_binary_sha256: build.benchmark_binary_sha256,
+                locally_built_api_binary_sha256: build.locally_built_api_binary_sha256,
                 interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH,
                 budgets: BUDGETS_PATH,
                 budget_profile: "production",
@@ -204,14 +223,25 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Smoke(args) => {
+        Command::Smoke(_) => {
+            let api_binary = std::env::var("BIGNAME_BENCHMARK_API_BINARY")
+                .map(PathBuf::from)
+                .context("benchmark smoke must use the API binary resolved by the wrapper")?;
+            let expected_api_digest = std::env::var("BIGNAME_BENCHMARK_API_BINARY_SHA256")
+                .context("benchmark wrapper did not attest the smoke API binary digest")?;
+            require_file_sha256(&api_binary, &expected_api_digest, "smoke API binary")?;
             let database_host = smoke::configured_database_host()?;
-            let results =
-                smoke::run(&args.api_binary, budgets.profile(BudgetProfile::Smoke)).await?;
+            let results = smoke::run(&api_binary, budgets.profile(BudgetProfile::Smoke)).await?;
+            let build = wrapper_build_attestation()?;
             let report = GateReport {
                 head_sha: git_head(),
                 source_tree_clean: worktree_is_clean()?,
                 cargo_profile: cargo_profile(),
+                rustc_version: build.rustc_version,
+                rustflags: build.rustflags,
+                cargo_encoded_rustflags: build.cargo_encoded_rustflags,
+                benchmark_binary_sha256: build.benchmark_binary_sha256,
+                locally_built_api_binary_sha256: build.locally_built_api_binary_sha256,
                 interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH,
                 budgets: BUDGETS_PATH,
                 budget_profile: "smoke",
@@ -301,6 +331,70 @@ fn require_release_profile() -> Result<()> {
         launched_profile == "release",
         "production benchmark wrapper used Cargo profile {launched_profile:?}; release is required"
     );
+    for name in [
+        "BIGNAME_BENCHMARK_RUSTFLAGS",
+        "BIGNAME_BENCHMARK_CARGO_ENCODED_RUSTFLAGS",
+    ] {
+        let value = std::env::var(name)
+            .with_context(|| format!("production benchmark wrapper did not attest {name}"))?;
+        ensure!(
+            value.is_empty(),
+            "production benchmark wrapper reported non-empty {name}"
+        );
+    }
+    Ok(())
+}
+
+fn wrapper_build_attestation() -> Result<WrapperBuildAttestation> {
+    let required = |name: &str| {
+        std::env::var(name).with_context(|| format!("benchmark wrapper did not attest {name}"))
+    };
+    let rustc_version = required("BIGNAME_BENCHMARK_RUSTC_VERSION")?;
+    ensure!(
+        !rustc_version.trim().is_empty(),
+        "benchmark wrapper reported an empty rustc version"
+    );
+    let benchmark_binary_sha256 = required("BIGNAME_BENCHMARK_BINARY_SHA256")?;
+    let locally_built_api_binary_sha256 = required("BIGNAME_BENCHMARK_API_BINARY_SHA256")?;
+    for (label, digest) in [
+        ("benchmark binary", benchmark_binary_sha256.as_str()),
+        (
+            "locally built API binary",
+            locally_built_api_binary_sha256.as_str(),
+        ),
+    ] {
+        ensure!(
+            digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "benchmark wrapper reported an invalid {label} SHA-256 digest"
+        );
+    }
+    let current_exe = std::env::current_exe().context("failed to identify benchmark executable")?;
+    require_file_sha256(&current_exe, &benchmark_binary_sha256, "benchmark binary")?;
+    Ok(WrapperBuildAttestation {
+        rustc_version,
+        rustflags: required("BIGNAME_BENCHMARK_RUSTFLAGS")?,
+        cargo_encoded_rustflags: required("BIGNAME_BENCHMARK_CARGO_ENCODED_RUSTFLAGS")?,
+        benchmark_binary_sha256,
+        locally_built_api_binary_sha256,
+    })
+}
+
+fn require_file_sha256(path: &Path, expected: &str, label: &str) -> Result<()> {
+    let output = std::process::Command::new("sha256sum")
+        .arg(path)
+        .output()
+        .with_context(|| format!("failed to hash {label} at {}", path.display()))?;
+    ensure!(output.status.success(), "sha256sum failed for {label}");
+    let stdout = String::from_utf8(output.stdout)
+        .with_context(|| format!("sha256sum returned non-UTF-8 output for {label}"))?;
+    let actual = stdout
+        .split_whitespace()
+        .next()
+        .context("sha256sum returned no digest")?;
+    ensure!(
+        actual == expected,
+        "{label} digest {actual} does not match wrapper attestation {expected}"
+    );
     Ok(())
 }
 
@@ -363,6 +457,33 @@ mod tests {
             "http://127.0.0.1:8545",
         ]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn smoke_refuses_a_cli_api_binary_override() {
+        let result = Cli::try_parse_from([
+            "bigname-benchmark-gate",
+            "smoke",
+            "--api-binary",
+            "/tmp/not-the-wrapper-binary",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn executable_digest_must_match_the_wrapper_attestation() {
+        let path = std::env::temp_dir().join(format!(
+            "bigname-benchmark-digest-test-{}",
+            std::process::id()
+        ));
+        fs::write(&path, b"abc").unwrap();
+        let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert!(require_file_sha256(&path, expected, "test binary").is_ok());
+        let error = require_file_sha256(&path, &"0".repeat(64), "test binary")
+            .unwrap_err()
+            .to_string();
+        fs::remove_file(path).unwrap();
+        assert!(error.contains("does not match wrapper attestation"));
     }
 
     #[test]

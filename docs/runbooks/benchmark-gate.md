@@ -17,12 +17,30 @@ build, passes the captured commit into the binary, and the binary rechecks it
 before and after measurement. The binary derives the reported Cargo build
 profile from its compiled assertion mode, while production commands also
 require the wrapper to attest that it selected the release Cargo build profile.
-The wrapper requires `jq` and resolves both executables from Cargo's JSON
-artifact output, so `CARGO_TARGET_DIR` and Cargo `build.target-dir` settings are
-honored for the harness and the smoke API. The wrapper also embeds the captured
-commit in the benchmark binary at compile time. Cargo includes that value in
-its build fingerprint, so a shared target directory cannot reuse benchmark
-bytes built for a different checkout.
+The wrapper requires `jq` and `sha256sum`, resolves both executables from
+Cargo's JSON artifact output, and copies them to digest-addressed snapshots
+before launching the harness or smoke API. The report digests therefore name
+the stable snapshot paths the wrapper actually executes, not Cargo artifact
+paths that a concurrent build can replace. For a release Cargo build, it
+overrides ambient `CARGO_TARGET_DIR` and Cargo `build.target-dir` with
+`target/benchmark-gate/<source-commit>`. The compile-time commit pins the
+benchmark-harness unit, and the commit-keyed target directory pins every linked
+engine crate to the same clean source tree. Development smoke builds continue
+to honor ambient Cargo target-directory settings.
+
+Each report records `rustc_version`, `rustflags`,
+`cargo_encoded_rustflags`, `benchmark_binary_sha256`, and
+`locally_built_api_binary_sha256`. The release wrapper refuses non-empty
+`RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS`; clear either variable instead of
+measuring custom code generation. The harness does not inspect
+`CARGO_BUILD_RUSTFLAGS`, target-specific Cargo flag settings, custom `RUSTC`
+drivers, or Cargo configuration such as `[profile.release]`; capturing every
+effective compiler and Cargo build-profile input is release-infrastructure work
+beyond this harness. The recorded executable digests distinguish the resulting local
+binary bytes. Smoke always runs the locally built API binary named by its
+digest. For a production API run, that digest is a companion build artifact;
+the remote target remains bound to the clean source commit through `/healthz`,
+not to the local executable digest.
 
 ## What the gate measures
 
@@ -61,9 +79,9 @@ address/name/relation combinations from the target projections, plus at least
 1,000 populated subname parents, permission subjects, and successful primary
 name claims, plus at least 1,000 supported resolver rows. The name and parent
 samples are divided deterministically across every active public namespace;
-an active namespace with no supported name seed makes the run red. The report
-records the name count contributed by each namespace, and name-mode lookup
-batches alternate those namespace buckets. Before sampling that corpus, it
+an active namespace with no supported name or parent seed makes the run red.
+The report records the name and parent counts contributed by each namespace,
+and name-mode lookup batches alternate those namespace buckets. Before sampling that corpus, it
 counts the complete
 `name_current` and `address_names_current` tables and requires at least 3
 million supported rows in each. Unsupported rows are excluded because the gate

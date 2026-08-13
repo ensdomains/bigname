@@ -16,9 +16,24 @@ const REGISTRY: &str = "0x0000000000000000000000000000000000000044";
 const REGISTRY_ROLE: &str = "registry";
 const NORMALIZER: &str = "ensip15@ens-normalize-0.1.1";
 const REGISTRATION_EVENT_FRAGMENT: &str = "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 cost, uint256 expires)";
-const REGISTRY_EVENT_FRAGMENT: &str = "event NewResolver(bytes32 indexed node, address resolver)";
+const NEW_OWNER_EVENT_FRAGMENT: &str =
+    "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)";
+const NEW_RESOLVER_EVENT_FRAGMENT: &str =
+    "event NewResolver(bytes32 indexed node, address resolver)";
 const RESOLVER_EVENT_FRAGMENT: &str =
     "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)";
+const REGISTRATION_NORMALIZED_EVENTS: &[&str] = &["RegistrationGranted"];
+const NEW_OWNER_NORMALIZED_EVENTS: &[&str] = &[
+    "SubregistryChanged",
+    "AuthorityTransferred",
+    "PermissionChanged",
+    "SurfaceUnbound",
+    "SurfaceBound",
+    "AuthorityEpochChanged",
+    "ResolverChanged",
+];
+const NEW_RESOLVER_NORMALIZED_EVENTS: &[&str] = &["ResolverChanged", "PermissionChanged"];
+const RESOLVER_NORMALIZED_EVENTS: &[&str] = &["RecordChanged"];
 
 sol! {
     event NameRegistered(
@@ -28,6 +43,7 @@ sol! {
         uint256 cost,
         uint256 expires
     );
+    event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner);
     event NewResolver(bytes32 indexed node, address resolver);
     event TextChanged(
         bytes32 indexed node,
@@ -55,10 +71,12 @@ pub(super) async fn seed(pool: &PgPool) -> Result<()> {
         "ens_v1_registrar_l1",
         REGISTRAR_ROLE,
         REGISTRAR,
-        "NameRegistered",
-        REGISTRATION_EVENT_FRAGMENT,
-        &[REGISTRAR_ROLE],
-        &["RegistrationGranted"],
+        vec![manifest_event(
+            "NameRegistered",
+            REGISTRATION_EVENT_FRAGMENT,
+            &[REGISTRAR_ROLE],
+            REGISTRATION_NORMALIZED_EVENTS,
+        )],
     )
     .await?;
     insert_manifest(
@@ -66,10 +84,20 @@ pub(super) async fn seed(pool: &PgPool) -> Result<()> {
         "ens_v1_registry_l1",
         REGISTRY_ROLE,
         REGISTRY,
-        "NewResolver",
-        REGISTRY_EVENT_FRAGMENT,
-        &[REGISTRY_ROLE],
-        &["ResolverChanged", "PermissionChanged"],
+        vec![
+            manifest_event(
+                "NewOwner",
+                NEW_OWNER_EVENT_FRAGMENT,
+                &[REGISTRY_ROLE],
+                NEW_OWNER_NORMALIZED_EVENTS,
+            ),
+            manifest_event(
+                "NewResolver",
+                NEW_RESOLVER_EVENT_FRAGMENT,
+                &[REGISTRY_ROLE],
+                NEW_RESOLVER_NORMALIZED_EVENTS,
+            ),
+        ],
     )
     .await?;
     insert_manifest(
@@ -77,10 +105,12 @@ pub(super) async fn seed(pool: &PgPool) -> Result<()> {
         "ens_v1_resolver_l1",
         "public_resolver",
         RESOLVER,
-        "TextChanged",
-        RESOLVER_EVENT_FRAGMENT,
-        &[],
-        &["RecordChanged"],
+        vec![manifest_event(
+            "TextChanged",
+            RESOLVER_EVENT_FRAGMENT,
+            &[],
+            RESOLVER_NORMALIZED_EVENTS,
+        )],
     )
     .await?;
 
@@ -96,11 +126,9 @@ async fn insert_manifest(
     source_family: &str,
     role: &str,
     address: &str,
-    event_name: &str,
-    event_fragment: &str,
-    emitter_roles: &[&str],
-    normalized_events: &[&str],
+    events: Vec<serde_json::Value>,
 ) -> Result<()> {
+    let capability_flags = fixture_capability_flags(source_family);
     let payload = json!({
         "manifest_version": 1,
         "namespace": "ens",
@@ -109,7 +137,7 @@ async fn insert_manifest(
         "deployment_epoch": "benchmark-smoke",
         "rollout_status": "active",
         "normalizer_version": NORMALIZER,
-        "capability_flags": {},
+        "capability_flags": capability_flags,
         "roots": [],
         "contracts": [{
             "role": role,
@@ -119,12 +147,7 @@ async fn insert_manifest(
             "start_block": 0
         }],
         "discovery_rules": [],
-        "abi": {"events": [{
-            "name": event_name,
-            "fragment": event_fragment,
-            "emitter_roles": emitter_roles,
-            "normalized_events": normalized_events
-        }], "calls": []}
+        "abi": {"events": events, "calls": []}
     });
     let manifest_id: i64 = sqlx::query_scalar(
         "INSERT INTO manifest_versions (
@@ -203,6 +226,28 @@ async fn insert_manifest(
     Ok(())
 }
 
+fn fixture_capability_flags(source_family: &str) -> serde_json::Value {
+    if source_family == "ens_v1_registry_l1" {
+        json!({"declared_children": {"status": "supported"}})
+    } else {
+        json!({})
+    }
+}
+
+fn manifest_event(
+    name: &str,
+    fragment: &str,
+    emitter_roles: &[&str],
+    normalized_events: &[&str],
+) -> serde_json::Value {
+    json!({
+        "name": name,
+        "fragment": fragment,
+        "emitter_roles": emitter_roles,
+        "normalized_events": normalized_events
+    })
+}
+
 async fn insert_block_events(
     pool: &PgPool,
     block: i64,
@@ -229,9 +274,26 @@ async fn insert_block_events(
     owner_bytes[12..].copy_from_slice(&(block as u64).to_be_bytes());
     insert_registration(pool, block, 0, plain_label, owner_bytes).await?;
     insert_registration(pool, block, 1, bound_label, owner_bytes).await?;
-
-    insert_resolver_records(pool, block, 2, bound_label).await?;
+    insert_subname(pool, block, 2, plain_label, bound_label, owner_bytes).await?;
+    insert_resolver_records(pool, block, 3, bound_label).await?;
     Ok(())
+}
+
+async fn insert_subname(
+    pool: &PgPool,
+    block: i64,
+    log_index: i64,
+    parent_label: &str,
+    child_label: &str,
+    owner_bytes: [u8; 20],
+) -> Result<()> {
+    let event = NewOwner {
+        node: namehash(parent_label),
+        label: B256::from(keccak256(child_label.as_bytes())),
+        owner: Address::from(owner_bytes),
+    }
+    .encode_log_data();
+    insert_log(pool, block, log_index, REGISTRY, &event).await
 }
 
 async fn insert_resolver_records(
@@ -386,11 +448,18 @@ pub(super) fn block_hash(number: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        REGISTRAR_ROLE, REGISTRATION_EVENT_FRAGMENT, REGISTRY_EVENT_FRAGMENT, REGISTRY_ROLE,
-        RESOLVER_EVENT_FRAGMENT,
+        NEW_OWNER_EVENT_FRAGMENT, NEW_OWNER_NORMALIZED_EVENTS, NEW_RESOLVER_EVENT_FRAGMENT,
+        NEW_RESOLVER_NORMALIZED_EVENTS, REGISTRAR_ROLE, REGISTRATION_EVENT_FRAGMENT,
+        REGISTRATION_NORMALIZED_EVENTS, REGISTRY_ROLE, RESOLVER_EVENT_FRAGMENT,
+        RESOLVER_NORMALIZED_EVENTS, fixture_capability_flags,
     };
 
-    fn manifest_admits_event(manifest: &str, fragment: &str, emitter_role: Option<&str>) -> bool {
+    fn manifest_admits_event(
+        manifest: &str,
+        fragment: &str,
+        emitter_role: Option<&str>,
+        normalized_events: &[&str],
+    ) -> bool {
         let parsed: toml::Value = toml::from_str(manifest).unwrap();
         parsed["abi"]["events"]
             .as_array()
@@ -405,6 +474,11 @@ mod tests {
                                 .any(|role| role.as_str() == Some(expected_role))
                         })
                     })
+                    && event["normalized_events"].as_array().is_some_and(|actual| {
+                        normalized_events.iter().all(|expected| {
+                            actual.iter().any(|value| value.as_str() == Some(expected))
+                        })
+                    })
             })
     }
 
@@ -412,8 +486,12 @@ mod tests {
     fn production_manifest_admits_smoke_registration_fragment() {
         let manifest =
             include_str!("../../../../manifests/mainnet/ethereum/ens/ens_v1_registrar_l1/v1.toml");
-        let admitted =
-            manifest_admits_event(manifest, REGISTRATION_EVENT_FRAGMENT, Some(REGISTRAR_ROLE));
+        let admitted = manifest_admits_event(
+            manifest,
+            REGISTRATION_EVENT_FRAGMENT,
+            Some(REGISTRAR_ROLE),
+            REGISTRATION_NORMALIZED_EVENTS,
+        );
         assert!(
             admitted,
             "smoke registrar fragment and role are not admitted together by the production ENSv1 manifest"
@@ -424,9 +502,34 @@ mod tests {
     fn production_manifest_admits_smoke_registry_fragment() {
         let manifest =
             include_str!("../../../../manifests/mainnet/ethereum/ens/ens_v1_registry_l1/v3.toml");
+        let parsed: toml::Value = toml::from_str(manifest).unwrap();
+        assert_eq!(
+            parsed["capability_flags"]["declared_children"]["status"].as_str(),
+            Some("supported"),
+            "smoke child projection requires the production declared-children capability"
+        );
+        assert_eq!(
+            fixture_capability_flags("ens_v1_registry_l1")["declared_children"]["status"],
+            "supported",
+            "smoke registry capability must match the production manifest"
+        );
         assert!(
-            manifest_admits_event(manifest, REGISTRY_EVENT_FRAGMENT, Some(REGISTRY_ROLE)),
-            "smoke registry fragment and role are not admitted together by the production ENSv1 manifest"
+            manifest_admits_event(
+                manifest,
+                NEW_OWNER_EVENT_FRAGMENT,
+                Some(REGISTRY_ROLE),
+                NEW_OWNER_NORMALIZED_EVENTS,
+            ),
+            "smoke NewOwner fragment and role are not admitted together by the production ENSv1 manifest"
+        );
+        assert!(
+            manifest_admits_event(
+                manifest,
+                NEW_RESOLVER_EVENT_FRAGMENT,
+                Some(REGISTRY_ROLE),
+                NEW_RESOLVER_NORMALIZED_EVENTS,
+            ),
+            "smoke NewResolver fragment and role are not admitted together by the production ENSv1 manifest"
         );
     }
 
@@ -435,7 +538,12 @@ mod tests {
         let manifest =
             include_str!("../../../../manifests/mainnet/ethereum/ens/ens_v1_resolver_l1/v1.toml");
         assert!(
-            manifest_admits_event(manifest, RESOLVER_EVENT_FRAGMENT, None),
+            manifest_admits_event(
+                manifest,
+                RESOLVER_EVENT_FRAGMENT,
+                None,
+                RESOLVER_NORMALIZED_EVENTS,
+            ),
             "smoke resolver fragment is not admitted by the production ENSv1 manifest"
         );
     }

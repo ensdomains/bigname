@@ -12,10 +12,12 @@ elif [ "$profile" != "release" ]; then
   profile_args=(--profile "$profile")
 fi
 
-if ! command -v jq >/dev/null 2>&1; then
-  echo "benchmark wrapper requires jq to resolve Cargo executable paths" >&2
-  exit 1
-fi
+for dependency in jq sha256sum; do
+  if ! command -v "$dependency" >/dev/null 2>&1; then
+    echo "benchmark wrapper requires $dependency" >&2
+    exit 1
+  fi
+done
 
 source_head="$(git rev-parse HEAD)"
 if [ "$profile" = "release" ]; then
@@ -23,7 +25,23 @@ if [ "$profile" = "release" ]; then
     echo "release-profile benchmark commands require a clean worktree before build" >&2
     exit 1
   fi
+  if [ -n "${RUSTFLAGS:-}" ]; then
+    echo "release-profile benchmark builds refuse non-empty RUSTFLAGS; clear it before running the gate" >&2
+    exit 1
+  fi
+  if [ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]; then
+    echo "release-profile benchmark builds refuse non-empty CARGO_ENCODED_RUSTFLAGS; clear it before running the gate" >&2
+    exit 1
+  fi
+  # Cargo can otherwise reuse path-dependency artifacts from another checkout
+  # when both checkouts share a target directory. A clean commit-specific
+  # directory binds every linked engine crate to the attested source tree.
+  export CARGO_TARGET_DIR="$ROOT/target/benchmark-gate/$source_head"
 fi
+
+rustc_version="$(rustc -Vv)"
+captured_rustflags="${RUSTFLAGS:-}"
+captured_cargo_encoded_rustflags="${CARGO_ENCODED_RUSTFLAGS:-}"
 
 build_artifacts=""
 if ! build_artifacts="$(
@@ -63,6 +81,38 @@ artifact_path() {
 
 benchmark_binary="$(artifact_path bigname-benchmark-gate)"
 api_binary="$(artifact_path bigname-api)"
+
+snapshot_binary() {
+  local source="$1"
+  local name="$2"
+  local store
+  local temporary
+  local digest
+  local snapshot
+  store="$(dirname "$source")/benchmark-gate-artifacts"
+  mkdir -p "$store"
+  temporary="$(mktemp "$store/.${name}.XXXXXX")"
+  cp -- "$source" "$temporary"
+  chmod 0555 "$temporary"
+  digest="$(sha256sum "$temporary" | awk '{print $1}')"
+  snapshot="$store/${name}-${digest}"
+  if [ -e "$snapshot" ]; then
+    if [ "$(sha256sum "$snapshot" | awk '{print $1}')" != "$digest" ]; then
+      echo "existing digest-addressed snapshot for $name has unexpected bytes" >&2
+      rm -f -- "$temporary"
+      exit 1
+    fi
+    rm -f -- "$temporary"
+  else
+    mv -- "$temporary" "$snapshot"
+  fi
+  printf '%s\n' "$snapshot"
+}
+
+benchmark_binary="$(snapshot_binary "$benchmark_binary" bigname-benchmark-gate)"
+api_binary="$(snapshot_binary "$api_binary" bigname-api)"
+benchmark_binary_sha256="$(sha256sum "$benchmark_binary" | awk '{print $1}')"
+api_binary_sha256="$(sha256sum "$api_binary" | awk '{print $1}')"
 if [ "$profile" = "release" ]; then
   if [ "$(git rev-parse HEAD)" != "$source_head" ] || \
      [ -n "$(git status --porcelain=v1 --untracked-files=normal)" ]; then
@@ -72,5 +122,10 @@ if [ "$profile" = "release" ]; then
 fi
 exec env BIGNAME_BENCHMARK_BUILT_HEAD="$source_head" \
   BIGNAME_BENCHMARK_CARGO_PROFILE="$profile" \
+  BIGNAME_BENCHMARK_RUSTC_VERSION="$rustc_version" \
+  BIGNAME_BENCHMARK_RUSTFLAGS="$captured_rustflags" \
+  BIGNAME_BENCHMARK_CARGO_ENCODED_RUSTFLAGS="$captured_cargo_encoded_rustflags" \
+  BIGNAME_BENCHMARK_BINARY_SHA256="$benchmark_binary_sha256" \
+  BIGNAME_BENCHMARK_API_BINARY_SHA256="$api_binary_sha256" \
   BIGNAME_BENCHMARK_API_BINARY="$api_binary" \
   "$benchmark_binary" "$@"
