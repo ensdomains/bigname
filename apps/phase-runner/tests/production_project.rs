@@ -6162,6 +6162,150 @@ async fn topology_staged_sibling_is_not_double_counted_in_resolver_bindings() ->
 }
 
 #[tokio::test]
+async fn topology_staged_sibling_is_not_double_counted_in_resolver_permissions() -> Result<()> {
+    let incremental =
+        ScratchDatabase::create("production_project_topology_permission_probe").await?;
+    let full = ScratchDatabase::create("production_project_topology_permission_probe_full").await?;
+
+    for pool in [incremental.pool(), full.pool()] {
+        seed_project_fixture(pool).await?;
+        extend_incremental_equivalence_fixture(pool).await?;
+        insert_event(
+            pool,
+            CHAIN,
+            6,
+            Some("ens:0xbob"),
+            Some(EQUIVALENCE_BOB_RESOURCE),
+            "PermissionChanged",
+            "ens_v2_resolver_l1",
+            json!({
+                "subject":OWNER,
+                "scope":{
+                    "kind":"resolver",
+                    "chain_id":CHAIN,
+                    "resolver_address":EQUIVALENCE_V2_RESOLVER
+                },
+                "effective_powers":["record_write"],
+                "grant_source":{"kind":"fixture"},
+                "inheritance_path":[],
+                "transfer_behavior":"retain"
+            }),
+            json!({"emitting_address":EQUIVALENCE_V2_RESOLVER}),
+        )
+        .await?;
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, parent_hash, block_number,
+                 block_timestamp, canonicality_state
+             ) VALUES ($1, $2, $3, 9, to_timestamp(7776008), 'canonical')",
+        )
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 9))
+        .bind(block_hash(CHAIN, 8))
+        .execute(pool)
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            9,
+            Some("ens:0xalice"),
+            Some(RESOURCE),
+            "SubregistryChanged",
+            "ens_v1_registry_l1",
+            json!({
+                "node":"0xeth",
+                "child_node":"0xalice",
+                "labelhash":"0xalice-label",
+                "owner":OWNER
+            }),
+            json!({}),
+        )
+        .await?;
+        insert_event(
+            pool,
+            CHAIN,
+            9,
+            Some("ens:0xalice"),
+            Some(RESOURCE),
+            "PermissionChanged",
+            "ens_v2_resolver_l1",
+            json!({
+                "subject":OWNER,
+                "scope":{
+                    "kind":"resolver",
+                    "chain_id":CHAIN,
+                    "resolver_address":EQUIVALENCE_V2_RESOLVER
+                },
+                "effective_powers":["record_write"],
+                "grant_source":{"kind":"fixture"},
+                "inheritance_path":[],
+                "transfer_behavior":"retain"
+            }),
+            json!({"emitting_address":EQUIVALENCE_V2_RESOLVER}),
+        )
+        .await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 8).await?;
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 8,
+            hash: block_hash(CHAIN, 8),
+        }),
+        RunMode::Normal,
+        9,
+        9,
+    )
+    .await?;
+    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 9).await?;
+
+    let incremental_summary: Value = sqlx::query_scalar(
+        "SELECT declared_summary FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(EQUIVALENCE_V2_RESOLVER)
+    .fetch_one(incremental.pool())
+    .await?;
+    let full_summary: Value = sqlx::query_scalar(
+        "SELECT declared_summary FROM resolver_current
+         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    )
+    .bind(CHAIN)
+    .bind(EQUIVALENCE_V2_RESOLVER)
+    .fetch_one(full.pool())
+    .await?;
+
+    assert_eq!(full_summary["permissions"]["count"], json!(1));
+    assert_eq!(
+        incremental_summary["permissions"]["count"], full_summary["permissions"]["count"],
+        "topology-only staging double-counted a retained resolver permission"
+    );
+    assert_eq!(
+        incremental_summary, full_summary,
+        "topology-only staging changed resolver permission, event, or role summaries"
+    );
+
+    for pool in [incremental.pool(), full.pool()] {
+        let durable_permissions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM permissions_current
+             WHERE resource_id = $1 AND scope_kind = 'resolver'
+               AND lower(scope_detail ->> 'resolver_address') = lower($2)",
+        )
+        .bind(Uuid::parse_str(EQUIVALENCE_BOB_RESOURCE)?)
+        .bind(EQUIVALENCE_V2_RESOLVER)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(durable_permissions, 1);
+    }
+
+    incremental.cleanup().await?;
+    full.cleanup().await
+}
+
+#[tokio::test]
 async fn atomic_swap_never_exposes_a_partially_replaced_projection_set() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_atomic_swap").await?;
     seed_project_fixture(scratch.pool()).await?;

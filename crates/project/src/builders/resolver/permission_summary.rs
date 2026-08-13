@@ -34,7 +34,12 @@ pub(super) async fn stage(
          ), projected_permissions AS (
              SELECT * FROM retained_permissions
              UNION ALL
-             SELECT * FROM project_stage_permissions_current
+             SELECT staged.*
+             FROM project_stage_permissions_current staged
+             WHERE $2 OR EXISTS (
+                 SELECT 1 FROM project_scope_resources scope
+                 WHERE scope.resource_id = staged.resource_id
+             )
          )
          SELECT permission.*,
                 lower(permission.scope_detail ->> 'resolver_address') AS resolver_address
