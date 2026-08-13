@@ -161,9 +161,16 @@ The two hand-detected failure cases from issue #327 map directly to paging: a
 terminal phase error triggers `BignamePhaseFailed` while the runner remains
 reachable, or `BignamePhaseRunnerDown` if the process exits and remains down
 for 2 minutes. Repeated exits with successful scrapes between them trigger
-`BignamePhaseRunnerContainerRestarting`. A stalled batch that crosses the
-deployment's configured maximum healthy duration triggers
+`BignamePhaseRunnerContainerRestarting` reliably for restart periods under
+about three minutes, intermittently for periods from roughly three to five
+minutes, and not for periods of five minutes or longer. A stalled batch that
+crosses the deployment's configured maximum healthy duration triggers
 `BignamePhaseRunnerHeartbeatStale`.
+
+A slow crash loop remains unpaged when its restart period is five minutes or
+longer, each outage lasts less than two minutes, and no phase failure has yet
+been stored; one concrete case is a fresh deployment that is OOM-killed several
+minutes into every startup.
 
 A non-Live phase that repeatedly completes batches without advancing its
 cursor keeps its heartbeats fresh and is not yet detected; progress-delta
