@@ -356,6 +356,13 @@ live handoff when it changes an active Ingest row to `completed`; this makes a
 later re-add resume from the preserved source cursors even if an older runner
 stopped between its formerly separate summary and cursor writes.
 
+When a bounded Ingest redo replaces the hash at a source cursor's latest stored
+height, and the per-source progress proves that height was inside the completed
+redo range, redo completion updates that cursor hash in the same transaction as
+the phase summary. The previous live handoff remains in place until the next
+normal Ingest pass confirms the reconciled cursor and publishes the replacement
+handoff.
+
 ## Interpretation replay
 
 Interpretation is deterministic for a fixed manifest set, interpreter content

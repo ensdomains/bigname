@@ -26,6 +26,16 @@ pub(crate) enum CompletionCoverage {
 
 type ActiveMarkerRow = (bool, Option<String>, Option<i64>, Option<i64>);
 
+pub(crate) fn replacement_hash<'a>(
+    recorded_number: Option<i64>,
+    recorded_hash: Option<&'a str>,
+    progress: Option<&'a crate::heads::BlockMarker>,
+) -> Option<&'a str> {
+    progress
+        .filter(|marker| Some(marker.number) == recorded_number)
+        .map_or(recorded_hash, |marker| Some(marker.hash.as_str()))
+}
+
 pub(crate) async fn lock_completion_coverage(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,

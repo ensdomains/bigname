@@ -6,7 +6,7 @@ use crate::{
     config::SourceConfig,
     error::{RunnerError, RunnerResult},
     heads::BlockMarker,
-    phase::{PhaseName, PhaseProgress},
+    phase::{BlockRange, PhaseName, PhaseProgress},
     state_persistence::{update_progress_in_transaction, validate_progress},
 };
 
@@ -106,6 +106,46 @@ async fn update_ingest_cursors_in_transaction(
             source_progress.target.as_ref(),
         )
         .await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn reconcile_redo_boundary_cursors(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    range: BlockRange,
+    progress: &PhaseProgress,
+) -> RunnerResult<()> {
+    for source in &progress.source_progress {
+        let (Some(current), Some(target)) = (&source.current, &source.target) else {
+            continue;
+        };
+        if current != target || current.number < range.from || current.number > range.to {
+            continue;
+        }
+        sqlx::query(
+            "UPDATE ingest_cursors
+             SET last_processed_block_hash = $4,
+                 updated_at = now()
+             WHERE chain_id = $1
+               AND source_key = $2
+               AND last_processed_block_number = $3",
+        )
+        .bind(chain_id)
+        .bind(&source.source_key)
+        .bind(current.number)
+        .bind(&current.hash)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            RunnerError::database(
+                format!(
+                    "failed to reconcile ingest cursor {} after redo for chain {chain_id}",
+                    source.source_key
+                ),
+                error,
+            )
+        })?;
     }
     Ok(())
 }

@@ -4,7 +4,7 @@ mod support;
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -24,10 +24,10 @@ use phase_runner::{
     ingest_phase::IngestPhase,
     interpret_phase::InterpretPhase,
     phase::{
-        LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName,
+        BlockRange, LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName,
         PhaseProgress, PhaseSet,
     },
-    runner::PhaseRunner,
+    runner::{PhaseRunner, RedoPhase},
     state::PhaseStore,
     verify_phase::{
         VerificationReferenceFuture, VerificationReferenceProvider, VerificationSource, VerifyPhase,
@@ -42,8 +42,11 @@ use support::ScratchDatabase;
 
 const BLOCK_0: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
 const BLOCK_1: &str = "0x0000000000000000000000000000000000000000000000000000000000000002";
+const BLOCK_1_REORG: &str = "0x0000000000000000000000000000000000000000000000000000000000000012";
 const BLOCK_2: &str = "0x0000000000000000000000000000000000000000000000000000000000000007";
 const TRANSACTION: &str = "0x0000000000000000000000000000000000000000000000000000000000000003";
+const REORG_TRANSACTION: &str =
+    "0x0000000000000000000000000000000000000000000000000000000000000013";
 const ANNOUNCEMENT_TRANSACTION: &str =
     "0x0000000000000000000000000000000000000000000000000000000000000008";
 const REGISTRATION_TRANSACTION: &str =
@@ -258,6 +261,199 @@ async fn production_ingest_writes_raw_facts_cursors_heads_and_handoff() -> Resul
     );
     assert_eq!(finalized_lineage_count, 2);
     scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn ingest_boundary_redo_reconciles_cursor_before_normal_restart() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_ingest_boundary_redo_cursor").await?;
+    let chain_id = "rpc-ingest-boundary-redo";
+    seed_watch_set(scratch.pool(), chain_id).await?;
+    let (endpoint, reorged, server) = spawn_hash_switchable_rpc().await?;
+    let configured_chain = ChainConfig::new(
+        chain_id,
+        vec![SourceConfig::new(
+            chain_id,
+            "rpc",
+            "rpc",
+            SeedBasis::NewSignatureRange,
+            0,
+            endpoint,
+        )?],
+        false,
+    )?;
+    let runner = production_ingest_runner(scratch.runner(), "boundary-redo-runner")?;
+
+    run_until_ingest_handoff(
+        runner.clone(),
+        configured_chain.clone(),
+        scratch.pool(),
+        BLOCK_1,
+    )
+    .await?;
+    assert_eq!(
+        load_ingest_boundary_state(scratch.pool(), chain_id).await?,
+        (
+            "completed".to_owned(),
+            Some(BLOCK_1.to_owned()),
+            Some(BLOCK_1.to_owned()),
+            Some(BLOCK_1.to_owned()),
+            2,
+            Some(1),
+            Some(1),
+            Some(BLOCK_1.to_owned()),
+        )
+    );
+
+    reorged.store(true, Ordering::SeqCst);
+    runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert_eq!(
+        load_ingest_boundary_state(scratch.pool(), chain_id).await?,
+        (
+            "completed".to_owned(),
+            Some(BLOCK_1_REORG.to_owned()),
+            Some(BLOCK_1_REORG.to_owned()),
+            Some(BLOCK_1.to_owned()),
+            2,
+            Some(1),
+            Some(1),
+            Some(BLOCK_1_REORG.to_owned()),
+        ),
+        "the redo must reconcile the cursor while preserving the old handoff until restart"
+    );
+
+    run_until_ingest_handoff(runner, configured_chain, scratch.pool(), BLOCK_1_REORG).await?;
+    assert_eq!(
+        load_ingest_boundary_state(scratch.pool(), chain_id).await?,
+        (
+            "completed".to_owned(),
+            Some(BLOCK_1_REORG.to_owned()),
+            Some(BLOCK_1_REORG.to_owned()),
+            Some(BLOCK_1_REORG.to_owned()),
+            2,
+            Some(1),
+            Some(1),
+            Some(BLOCK_1_REORG.to_owned()),
+        )
+    );
+    server.abort();
+    scratch.cleanup().await
+}
+
+fn production_ingest_runner(
+    database: phase_runner::database::RunnerDatabase,
+    instance_id: &str,
+) -> Result<PhaseRunner> {
+    let phases = PhaseSet::new([
+        Arc::new(IngestPhase::new(database.pool().clone())),
+        Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(LoopbackPhase::new(PhaseName::Verify)),
+        Arc::new(LoopbackPhase::new(PhaseName::Live)),
+    ])?;
+    Ok(PhaseRunner::new(
+        database,
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        instance_id,
+        TimingConfig {
+            initial_backoff: Duration::from_millis(1),
+            maximum_backoff: Duration::from_millis(4),
+            live_poll_interval: Duration::from_millis(1),
+        },
+    )?)
+}
+
+async fn run_until_ingest_handoff(
+    runner: PhaseRunner,
+    chain: ChainConfig,
+    pool: &sqlx::PgPool,
+    expected_hash: &str,
+) -> Result<()> {
+    let chain_id = chain.chain_id.clone();
+    let cancellation = CancellationToken::new();
+    let task_cancellation = cancellation.clone();
+    let mut task = tokio::spawn(async move { runner.run_chain(&chain, task_cancellation).await });
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let state: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+                "SELECT phase_status, live_handoff_block_hash, last_error
+                 FROM chain_phase_state
+                 WHERE chain_id = $1 AND phase_name = 'ingest'",
+            )
+            .bind(&chain_id)
+            .fetch_optional(pool)
+            .await?;
+            match state {
+                Some((status, Some(handoff), _))
+                    if status == "completed" && handoff == expected_hash =>
+                {
+                    return Ok::<_, anyhow::Error>(());
+                }
+                Some((status, _, error)) if status == "failed" => {
+                    anyhow::bail!(
+                        "production ingest failed: {}",
+                        error.unwrap_or_else(|| "no failure reason".to_owned())
+                    );
+                }
+                _ => {}
+            }
+            if task.is_finished() {
+                let result = (&mut task)
+                    .await
+                    .context("production ingest restart task panicked")?;
+                result.context("production ingest restart exited before convergence")?;
+                anyhow::bail!("production ingest restart exited before convergence");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("production ingest restart did not converge")??;
+    cancellation.cancel();
+    task.await??;
+    Ok(())
+}
+
+type IngestBoundaryState = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    i64,
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+);
+
+async fn load_ingest_boundary_state(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+) -> Result<IngestBoundaryState> {
+    Ok(sqlx::query_as(
+        "SELECT phase.phase_status,
+                phase.current_block_hash,
+                phase.target_block_hash,
+                phase.live_handoff_block_hash,
+                cursor.next_block_number,
+                cursor.target_block_number,
+                cursor.last_processed_block_number,
+                cursor.last_processed_block_hash
+         FROM chain_phase_state phase
+         JOIN ingest_cursors cursor USING (chain_id)
+         WHERE phase.chain_id = $1
+           AND phase.phase_name = 'ingest'
+           AND cursor.source_key = 'rpc'",
+    )
+    .bind(chain_id)
+    .fetch_one(pool)
+    .await?)
 }
 
 #[tokio::test]
@@ -1930,6 +2126,159 @@ fn crash_window_logs(omit_second_log: bool) -> Vec<Value> {
         }));
     }
     logs
+}
+
+async fn spawn_hash_switchable_rpc()
+-> Result<(String, Arc<AtomicBool>, tokio::task::JoinHandle<()>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let reorged = Arc::new(AtomicBool::new(false));
+    let server_state = Arc::clone(&reorged);
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/", post(hash_switchable_rpc))
+                .with_state(server_state),
+        )
+        .await
+        .expect("hash-switchable test RPC server");
+    });
+    Ok((format!("http://{address}/"), reorged, server))
+}
+
+async fn hash_switchable_rpc(
+    State(reorged): State<Arc<AtomicBool>>,
+    Json(request): Json<Value>,
+) -> Json<Value> {
+    let reorged = reorged.load(Ordering::SeqCst);
+    if let Some(requests) = request.as_array() {
+        return Json(Value::Array(
+            requests
+                .iter()
+                .map(|request| hash_switchable_rpc_response(request, reorged))
+                .collect::<Vec<_>>(),
+        ));
+    }
+    Json(hash_switchable_rpc_response(&request, reorged))
+}
+
+fn hash_switchable_rpc_response(request: &Value, reorged: bool) -> Value {
+    let id = request.get("id").cloned().unwrap_or(json!(1));
+    let method = request["method"].as_str().unwrap_or_default();
+    let params = request["params"].as_array().cloned().unwrap_or_default();
+    let boundary_hash = if reorged { BLOCK_1_REORG } else { BLOCK_1 };
+    let transaction_hash = if reorged {
+        REORG_TRANSACTION
+    } else {
+        TRANSACTION
+    };
+    let result = match method {
+        "eth_getBlockByNumber" => {
+            let selection = params.first().and_then(Value::as_str).unwrap_or_default();
+            match selection {
+                "latest" | "0x1" => Some(switchable_block(
+                    1,
+                    boundary_hash,
+                    transaction_hash,
+                    params.get(1) == Some(&Value::Bool(true)),
+                )),
+                "safe" | "finalized" | "0x0" => {
+                    Some(block(0, params.get(1) == Some(&Value::Bool(true))))
+                }
+                _ => None,
+            }
+        }
+        "eth_getBlockByHash" => {
+            let full = params.get(1) == Some(&Value::Bool(true));
+            match params.first().and_then(Value::as_str).unwrap_or_default() {
+                BLOCK_0 => Some(block(0, full)),
+                hash if hash == boundary_hash => {
+                    Some(switchable_block(1, boundary_hash, transaction_hash, full))
+                }
+                _ => None,
+            }
+        }
+        "eth_getLogs" => {
+            let filter = params.first().cloned().unwrap_or_default();
+            match filter.get("blockHash").and_then(Value::as_str) {
+                Some(BLOCK_0) => Some(json!([])),
+                Some(hash) if hash == boundary_hash => {
+                    Some(json!([switchable_log(boundary_hash, transaction_hash)]))
+                }
+                _ => Some(json!([])),
+            }
+        }
+        "eth_getBlockReceipts" => match params.first().and_then(Value::as_str) {
+            Some(hash) if hash == boundary_hash => {
+                Some(json!([switchable_receipt(boundary_hash, transaction_hash)]))
+            }
+            Some(BLOCK_0) => Some(json!([])),
+            _ => None,
+        },
+        _ => None,
+    };
+    json!({"jsonrpc": "2.0", "id": id, "result": result})
+}
+
+fn switchable_block(
+    number: i64,
+    hash: &str,
+    transaction_hash: &str,
+    full_transactions: bool,
+) -> Value {
+    let transactions = if full_transactions {
+        json!([{
+            "hash": transaction_hash,
+            "blockHash": hash,
+            "blockNumber": format!("0x{number:x}"),
+            "transactionIndex": "0x0",
+            "from": SENDER,
+            "to": CONTRACT,
+            "input": "0xdead",
+            "value": "0x7"
+        }])
+    } else {
+        json!([transaction_hash])
+    };
+    json!({
+        "hash": hash,
+        "parentHash": BLOCK_0,
+        "number": format!("0x{number:x}"),
+        "timestamp": format!("0x{:x}", number + 100),
+        "logsBloom": "0x",
+        "transactions": transactions
+    })
+}
+
+fn switchable_log(block_hash: &str, transaction_hash: &str) -> Value {
+    json!({
+        "blockHash": block_hash,
+        "blockNumber": "0x1",
+        "transactionHash": transaction_hash,
+        "transactionIndex": "0x0",
+        "logIndex": "0x0",
+        "address": CONTRACT,
+        "topics": [
+            TRANSFER_TOPIC,
+            format!("0x{}", "00".repeat(32)),
+            format!("0x{}", "00".repeat(32))
+        ],
+        "data": "0x"
+    })
+}
+
+fn switchable_receipt(block_hash: &str, transaction_hash: &str) -> Value {
+    json!({
+        "transactionHash": transaction_hash,
+        "blockHash": block_hash,
+        "blockNumber": "0x1",
+        "transactionIndex": "0x0",
+        "status": "0x1",
+        "cumulativeGasUsed": "0x5208",
+        "gasUsed": "0x5208",
+        "logsBloom": "0x"
+    })
 }
 
 async fn spawn_rpc(

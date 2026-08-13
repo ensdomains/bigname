@@ -426,12 +426,12 @@ pub(crate) async fn finish(
     } else {
         previous.input_content_hash.as_deref()
     };
-    let restored_current_hash = replacement_hash(
+    let restored_current_hash = crate::redo_completion::replacement_hash(
         previous.current_block_number,
         previous.current_block_hash.as_deref(),
         progress.current.as_ref(),
     );
-    let restored_target_hash = replacement_hash(
+    let restored_target_hash = crate::redo_completion::replacement_hash(
         previous.target_block_number,
         previous.target_block_hash.as_deref(),
         progress.target.as_ref(),
@@ -560,6 +560,15 @@ pub(crate) async fn finish(
             "redo completion requires phase state for chain {chain_id} phase {phase}"
         )));
     }
+    if phase == PhaseName::Ingest {
+        crate::state_ingest_progress::reconcile_redo_boundary_cursors(
+            &mut transaction,
+            chain_id,
+            range,
+            progress,
+        )
+        .await?;
+    }
     if phase == PhaseName::Interpret && !recompute_flags {
         crate::redo_stamp::stamp_required_in_transaction(
             &mut transaction,
@@ -587,14 +596,4 @@ pub(crate) async fn finish(
     })?;
     crate::redo_recompute::report(chain_id, recompute_summary, &stamped_ranges);
     Ok(())
-}
-
-fn replacement_hash<'a>(
-    recorded_number: Option<i64>,
-    recorded_hash: Option<&'a str>,
-    progress: Option<&'a crate::heads::BlockMarker>,
-) -> Option<&'a str> {
-    progress
-        .filter(|marker| Some(marker.number) == recorded_number)
-        .map_or(recorded_hash, |marker| Some(marker.hash.as_str()))
 }
