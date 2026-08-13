@@ -41,41 +41,7 @@ pub(crate) async fn inputs(
     full_rebuild: bool,
 ) -> Result<()> {
     create_events(transaction, chain_id, target.number, full_rebuild).await?;
-    if !full_rebuild {
-        close_staged_topology_scope(transaction).await?;
-    }
     create_identity_views(transaction, chain_id, target, full_rebuild).await?;
-    Ok(())
-}
-
-async fn close_staged_topology_scope(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO project_scope_children
-         SELECT event.namespace || ':' || lower(candidate.node)
-         FROM project_events event
-         CROSS JOIN LATERAL (
-             VALUES (event.after_state ->> 'node'),
-                    (event.after_state ->> 'child_node')
-         ) candidate(node)
-         WHERE event.event_kind = 'SubregistryChanged'
-           AND candidate.node IS NOT NULL
-           AND EXISTS (
-               SELECT 1
-               FROM (
-                   SELECT logical_name_id FROM project_scope_names
-                   UNION
-                   SELECT logical_name_id FROM project_scope_children
-               ) scope
-               WHERE scope.logical_name_id IN (
-                   event.namespace || ':' || lower(event.after_state ->> 'node'),
-                   event.namespace || ':' || lower(event.after_state ->> 'child_node')
-               )
-           )
-         ON CONFLICT DO NOTHING",
-    )
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to close staged topology scope", error))?;
     Ok(())
 }
 

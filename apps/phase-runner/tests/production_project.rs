@@ -2572,6 +2572,452 @@ async fn incremental_v2_child_renewal_retains_sibling_edges() -> Result<()> {
 }
 
 #[tokio::test]
+async fn incremental_topology_closure_rebuilds_the_whole_v1_subtree() -> Result<()> {
+    let incremental = ScratchDatabase::create("production_project_v1_topology_fixpoint").await?;
+    let full = ScratchDatabase::create("production_project_v1_topology_fixpoint_full").await?;
+    for pool in [incremental.pool(), full.pool()] {
+        seed_project_fixture(pool).await?;
+        seed_deep_v1_topology_fixture(pool).await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 6).await?;
+    assert_eq!(
+        deep_v1_topology_edges(incremental.pool()).await?,
+        expected_deep_v1_topology_edges(),
+        "the initial full build must contain the complete v1 subtree"
+    );
+
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 6,
+            hash: block_hash(CHAIN, 6),
+        }),
+        RunMode::Normal,
+        7,
+        7,
+    )
+    .await?;
+    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 7).await?;
+
+    let incremental_edges = deep_v1_topology_edges(incremental.pool()).await?;
+    let full_edges = deep_v1_topology_edges(full.pool()).await?;
+    assert_eq!(full_edges, expected_deep_v1_topology_edges());
+    assert_eq!(
+        incremental_edges, full_edges,
+        "a narrow topology tick dropped an edge outside its frozen event set"
+    );
+
+    incremental.cleanup().await?;
+    full.cleanup().await
+}
+
+#[tokio::test]
+async fn candidate_topology_cannot_widen_incremental_child_scope() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_candidate_topology_scope").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    seed_deep_v1_topology_fixture(scratch.pool()).await?;
+    seed_candidate_topology_bridge(scratch.pool()).await?;
+
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 6).await?;
+    let before: i64 = sqlx::query_scalar(
+        "SELECT (chain_positions ->> 'target_block_number')::bigint
+         FROM children_current
+         WHERE parent_logical_name_id = 'ens:0xremote-parent'
+           AND child_logical_name_id = 'ens:0xremote-child'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(before, 6);
+
+    run_project(
+        scratch.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 6,
+            hash: block_hash(CHAIN, 6),
+        }),
+        RunMode::Normal,
+        7,
+        7,
+    )
+    .await?;
+
+    let after: i64 = sqlx::query_scalar(
+        "SELECT (chain_positions ->> 'target_block_number')::bigint
+         FROM children_current
+         WHERE parent_logical_name_id = 'ens:0xremote-parent'
+           AND child_logical_name_id = 'ens:0xremote-child'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        after, 6,
+        "candidate-only topology evidence changed an unrelated projection row"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn orphaned_topology_cannot_widen_incremental_child_scope() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_project_orphaned_topology_scope").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    seed_deep_v1_topology_fixture(scratch.pool()).await?;
+    seed_orphaned_topology_bridge(scratch.pool()).await?;
+
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 6).await?;
+    run_project(
+        scratch.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 6,
+            hash: block_hash(CHAIN, 6),
+        }),
+        RunMode::Normal,
+        7,
+        7,
+    )
+    .await?;
+
+    let target: i64 = sqlx::query_scalar(
+        "SELECT (chain_positions ->> 'target_block_number')::bigint
+         FROM children_current
+         WHERE parent_logical_name_id = 'ens:0xremote-parent'
+           AND child_logical_name_id = 'ens:0xremote-child'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        target, 6,
+        "orphaned topology evidence changed an unrelated projection row"
+    );
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn current_window_orphaned_topology_cannot_widen_child_scope() -> Result<()> {
+    const ORPHANED_HASH: &str = "project-fixture-orphaned-block-7";
+    let scratch =
+        ScratchDatabase::create("production_project_current_orphaned_topology_scope").await?;
+    seed_project_fixture(scratch.pool()).await?;
+    seed_deep_v1_topology_fixture(scratch.pool()).await?;
+    seed_candidate_topology_bridge(scratch.pool()).await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state
+         ) VALUES ($1, $2, $3, 7, to_timestamp(7), 'orphaned')",
+    )
+    .bind(CHAIN)
+    .bind(ORPHANED_HASH)
+    .bind(block_hash(CHAIN, 6))
+    .execute(scratch.pool())
+    .await?;
+    insert_event(
+        scratch.pool(),
+        CHAIN,
+        7,
+        Some("ens:0xremote-parent"),
+        None,
+        "SubregistryChanged",
+        "ens_v1_registry_l1",
+        json!({
+            "node":"0xn1",
+            "child_node":"0xremote-parent",
+            "labelhash":"0xremote-parent-label",
+            "owner":OWNER
+        }),
+        json!({}),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET block_hash = $2
+         WHERE chain_id = $1
+           AND block_number = 7
+           AND event_kind = 'SubregistryChanged'
+           AND after_state ->> 'node' = '0xn1'",
+    )
+    .bind(CHAIN)
+    .bind(ORPHANED_HASH)
+    .execute(scratch.pool())
+    .await?;
+
+    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 6).await?;
+    run_project(
+        scratch.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 6,
+            hash: block_hash(CHAIN, 6),
+        }),
+        RunMode::Normal,
+        7,
+        7,
+    )
+    .await?;
+
+    let target: i64 = sqlx::query_scalar(
+        "SELECT (chain_positions ->> 'target_block_number')::bigint
+         FROM children_current
+         WHERE parent_logical_name_id = 'ens:0xremote-parent'
+           AND child_logical_name_id = 'ens:0xremote-child'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        target, 6,
+        "current-window orphaned topology changed an unrelated projection row"
+    );
+
+    scratch.cleanup().await
+}
+
+fn expected_deep_v1_topology_edges() -> Vec<(String, String)> {
+    (0..4)
+        .map(|index| {
+            let parent = if index == 0 {
+                "ens:0xeth".to_owned()
+            } else {
+                format!("ens:0xn{index}")
+            };
+            (parent, format!("ens:0xn{}", index + 1))
+        })
+        .collect()
+}
+
+async fn deep_v1_topology_edges(pool: &PgPool) -> Result<Vec<(String, String)>> {
+    Ok(sqlx::query_as(
+        "SELECT parent_logical_name_id, child_logical_name_id
+         FROM children_current
+         WHERE parent_logical_name_id IN (
+             'ens:0xeth', 'ens:0xn1', 'ens:0xn2', 'ens:0xn3'
+         )
+           AND child_logical_name_id IN (
+             'ens:0xn1', 'ens:0xn2', 'ens:0xn3', 'ens:0xn4'
+         )
+         ORDER BY parent_logical_name_id, child_logical_name_id",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+async fn seed_deep_v1_topology_fixture(pool: &PgPool) -> Result<()> {
+    for block in 4..=7 {
+        insert_lineage_block(pool, CHAIN, block).await?;
+    }
+    for index in 1..=4 {
+        let node = format!("0xn{index}");
+        let logical_name_id = format!("ens:{node}");
+        let raw_name = format!("n{index}.eth");
+        sqlx::query(
+            "INSERT INTO name_surfaces (
+                 logical_name_id, namespace, raw_name, raw_labels,
+                 dns_encoded_name, namehash, labelhashes, normalizer_version,
+                 visibility_state, chain_id, block_hash, block_number,
+                 canonicality_state
+             ) VALUES (
+                 $1, 'ens', $2, ARRAY[$2], decode('00', 'hex'), $3,
+                 ARRAY[$3], $4, 'active', $5, $6, 1, 'canonical'
+             )",
+        )
+        .bind(logical_name_id)
+        .bind(raw_name)
+        .bind(node)
+        .bind(NORMALIZER)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
+    }
+    for index in 1..=4 {
+        let labelhash = format!("0xn{index}-label");
+        let label = format!("n{index}");
+        sqlx::query(
+            "INSERT INTO label_preimages (
+                 labelhash, raw_label, decoded_label, normalizer_version,
+                 normalized_under_version, source_kind, source_priority
+             ) VALUES ($1, convert_to($2, 'UTF8'), $2, $3, true, 'fixture', 1)",
+        )
+        .bind(labelhash)
+        .bind(label)
+        .bind(NORMALIZER)
+        .execute(pool)
+        .await?;
+    }
+    for index in 0..4 {
+        let parent = if index == 0 {
+            "0xeth".to_owned()
+        } else {
+            format!("0xn{index}")
+        };
+        let child = format!("0xn{}", index + 1);
+        insert_event(
+            pool,
+            CHAIN,
+            index + 3,
+            Some(&format!("ens:{parent}")),
+            None,
+            "SubregistryChanged",
+            "ens_v1_registry_l1",
+            json!({
+                "node":parent,
+                "child_node":child,
+                "labelhash":format!("0xn{}-label", index + 1),
+                "owner":OWNER
+            }),
+            json!({}),
+        )
+        .await?;
+    }
+    insert_event(
+        pool,
+        CHAIN,
+        7,
+        Some("ens:0xeth"),
+        None,
+        "SubregistryChanged",
+        "ens_v1_registry_l1",
+        json!({
+            "node":"0xeth",
+            "child_node":"0xn1",
+            "labelhash":"0xn1-label",
+            "owner":OWNER
+        }),
+        json!({}),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn seed_candidate_topology_bridge(pool: &PgPool) -> Result<()> {
+    seed_remote_topology_bridge(pool).await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET consumer_visibility = 'candidate',
+             migration_correlation_ids = ARRAY['candidate-topology']::text[]
+         WHERE chain_id = $1
+           AND block_number = 2
+           AND event_kind = 'SubregistryChanged'
+           AND after_state ->> 'node' = '0xn1'",
+    )
+    .bind(CHAIN)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn seed_orphaned_topology_bridge(pool: &PgPool) -> Result<()> {
+    const ORPHANED_HASH: &str = "project-fixture-orphaned-block-2";
+    seed_remote_topology_bridge(pool).await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state
+         ) VALUES ($1, $2, $3, 2, to_timestamp(2), 'orphaned')",
+    )
+    .bind(CHAIN)
+    .bind(ORPHANED_HASH)
+    .bind(block_hash(CHAIN, 1))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET block_hash = $2
+         WHERE chain_id = $1
+           AND block_number = 2
+           AND event_kind = 'SubregistryChanged'
+           AND after_state ->> 'node' = '0xn1'",
+    )
+    .bind(CHAIN)
+    .bind(ORPHANED_HASH)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn seed_remote_topology_bridge(pool: &PgPool) -> Result<()> {
+    for (logical_name_id, raw_name, namehash) in [
+        ("ens:0xremote-parent", "remote.eth", "0xremote-parent"),
+        ("ens:0xremote-child", "child.remote.eth", "0xremote-child"),
+    ] {
+        sqlx::query(
+            "INSERT INTO name_surfaces (
+                 logical_name_id, namespace, raw_name, raw_labels,
+                 dns_encoded_name, namehash, labelhashes, normalizer_version,
+                 visibility_state, chain_id, block_hash, block_number,
+                 canonicality_state
+             ) VALUES (
+                 $1, 'ens', $2, ARRAY[$2], decode('00', 'hex'), $3,
+                 ARRAY[$3], $4, 'active', $5, $6, 1, 'canonical'
+             )",
+        )
+        .bind(logical_name_id)
+        .bind(raw_name)
+        .bind(namehash)
+        .bind(NORMALIZER)
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, 1))
+        .execute(pool)
+        .await?;
+    }
+    for (labelhash, label) in [
+        ("0xremote-parent-label", "remote"),
+        ("0xremote-child-label", "child"),
+    ] {
+        sqlx::query(
+            "INSERT INTO label_preimages (
+                 labelhash, raw_label, decoded_label, normalizer_version,
+                 normalized_under_version, source_kind, source_priority
+             ) VALUES ($1, convert_to($2, 'UTF8'), $2, $3, true, 'fixture', 1)",
+        )
+        .bind(labelhash)
+        .bind(label)
+        .bind(NORMALIZER)
+        .execute(pool)
+        .await?;
+    }
+    insert_event(
+        pool,
+        CHAIN,
+        2,
+        Some("ens:0xremote-parent"),
+        None,
+        "SubregistryChanged",
+        "ens_v1_registry_l1",
+        json!({
+            "node":"0xremote-parent",
+            "child_node":"0xremote-child",
+            "labelhash":"0xremote-child-label",
+            "owner":OWNER
+        }),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        2,
+        Some("ens:0xn1"),
+        None,
+        "SubregistryChanged",
+        "ens_v1_registry_l1",
+        json!({
+            "node":"0xn1",
+            "child_node":"0xremote-parent",
+            "labelhash":"0xremote-parent-label",
+            "owner":OWNER
+        }),
+        json!({}),
+    )
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn incremental_v2_subregistry_flip_replaces_children_in_both_directions() -> Result<()> {
     let incremental = ScratchDatabase::create("production_project_v2_subregistry_flip").await?;
     let full = ScratchDatabase::create("production_project_v2_subregistry_flip_full").await?;

@@ -23,8 +23,8 @@ scope in connection-local tables and publishes the related projection rows and
 phase state transactionally.
 
 Normal incremental Project work starts from events and identity rows in the
-`(previous, target]` block window. Name- or resource-local events rebuild only
-that name or resource. `RecordChanged`, `RecordVersionChanged`,
+`(previous, target]` block window. Name- or resource-local events initially
+select only that name or resource. `RecordChanged`, `RecordVersionChanged`,
 and `AliasChanged` also rebuild the emitting resolver's own `resolver_current`
 row. `PermissionChanged` rebuilds every resolver identified by
 `scope.resolver_address` in its before or after state and, for a resolver
@@ -39,12 +39,18 @@ linked name or resource does not create a resolver row.
 rows, again without expanding either resolver to its other names.
 Only a resolver `Upgraded` event or stale resolver classification caused by the
 active manifest set expands through resources whose current resolver pointer
-matches that resolver. Registrar-label changes and already projected topology
-expand through `children_current`. For a scoped ENSv2 name, Project also reads
-only that name's canonical `SubregistryChanged` history through the target,
-resolves the previous and new registry instances, and expands through the
-indexed registration histories for those instances. It does not scan unrelated
-topology or registration history.
+matches that resolver. Before event staging, Project expands child scope until
+no more connected topology is found. The expansion follows both current
+`children_current` rows and activated canonical `SubregistryChanged` history
+through the target. Normalized rows with `node` and `child_node` fields define
+direct edges. Rows with a `subregistry` field join each logical parent through
+its previous and current referenced contract instances to the normalized
+registration histories for those instances. This transitive step can rebuild a
+whole connected topology component: every child edge whose parent or child
+enters deletion scope must have its complete per-name event history staged
+before publication. Candidate events and events whose block is no longer on
+readable canonical lineage never widen this scope. `project_events` remains the
+single filter for data that builders may serve.
 
 Rows outside an incremental tick's affected scope keep the target block number,
 hash, and timestamp from the last tick that rebuilt them. Readers require each

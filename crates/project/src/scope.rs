@@ -58,6 +58,7 @@ pub(crate) async fn initialize(
     close_binding_scope(transaction, chain_id, target).await?;
     // Time-bound resource boundaries and resolver expansion add names through binding closure.
     // Topology must consume that final name set before event-history staging begins.
+    // Scope predicates are intentionally wider than create_events: membership means delete-and-rebuild candidacy, while project_events remains the single serving filter.
     include_topology_scope(transaction, chain_id, target.number).await?;
     resolver::include_resource_pointers(transaction, chain_id, target.number).await?;
     resolver::classify_unchanged(transaction, chain_id).await?;
@@ -92,8 +93,14 @@ async fn stage_changed_events(
         "CREATE TEMP TABLE project_changed_events ON COMMIT DROP AS
          SELECT event.*
          FROM normalized_events event
+         JOIN chain_lineage lineage
+           ON lineage.chain_id = event.chain_id
+          AND lineage.block_number = event.block_number
+          AND lineage.block_hash = event.block_hash
          WHERE event.chain_id = $1
            AND event.consumer_visibility = 'activated'
+           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
            AND event.block_number BETWEEN $2 AND $3",
     )
     .bind(chain_id)
@@ -153,6 +160,20 @@ async fn seed_direct_scope(
                     (event.before_state ->> 'child_node')
          ) candidate(node)
          WHERE event.event_kind = 'SubregistryChanged'
+           AND event.source_family IN (
+               'ens_v1_registry_l1', 'basenames_base_registry'
+           )
+           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND EXISTS (
+               SELECT 1
+               FROM chain_lineage lineage
+               WHERE lineage.chain_id = event.chain_id
+                 AND lineage.block_number = event.block_number
+                 AND lineage.block_hash = event.block_hash
+                 AND lineage.canonicality_state IN (
+                     'canonical', 'safe', 'finalized'
+                 )
+           )
            AND candidate.node IS NOT NULL AND btrim(candidate.node) <> ''
          ON CONFLICT DO NOTHING",
     )
@@ -267,53 +288,13 @@ async fn include_topology_scope(
     chain_id: &str,
     target_block: i64,
 ) -> Result<()> {
-    topology::include_referenced_registrations(transaction, chain_id, target_block).await?;
-
-    sqlx::query(
-        "INSERT INTO project_scope_children
-         SELECT child.parent_logical_name_id
-         FROM children_current child
-         JOIN (
-             SELECT logical_name_id FROM project_scope_names
-             UNION
-             SELECT logical_name_id FROM project_scope_children
-         ) scope
-           ON scope.logical_name_id IN (
-               child.parent_logical_name_id, child.child_logical_name_id
-           )
-         WHERE child.provenance ->> 'chain_id' = $1
-         UNION
-         SELECT child.child_logical_name_id
-         FROM children_current child
-         JOIN (
-             SELECT logical_name_id FROM project_scope_names
-             UNION
-             SELECT logical_name_id FROM project_scope_children
-         ) scope
-           ON scope.logical_name_id IN (
-               child.parent_logical_name_id, child.child_logical_name_id
-           )
-         WHERE child.provenance ->> 'chain_id' = $1
-         UNION
-         SELECT child.parent_logical_name_id
-         FROM children_current child
-         JOIN project_changed_events changed
-           ON changed.namespace = child.namespace
-          AND lower(changed.after_state ->> 'labelhash') = lower(child.labelhash)
-         WHERE child.provenance ->> 'chain_id' = $1
-         UNION
-         SELECT child.child_logical_name_id
-         FROM children_current child
-         JOIN project_changed_events changed
-           ON changed.namespace = child.namespace
-          AND lower(changed.after_state ->> 'labelhash') = lower(child.labelhash)
-         WHERE child.provenance ->> 'chain_id' = $1
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(chain_id)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to close child topology scope", error))?;
+    loop {
+        let inserted = topology::include_current_edges(transaction, chain_id).await?
+            + topology::include_event_edges(transaction, chain_id, target_block).await?;
+        if inserted == 0 {
+            break;
+        }
+    }
     Ok(())
 }
 

@@ -292,9 +292,10 @@ pick up the new preimages through Project:
 - On a populated database, run the import and then redo Project over each
   chain's full retained range, for example
   `phase-runner redo --chain ethereum-mainnet --phase project --from-block <first retained block> --to-block <head>`.
-  A windowed or incremental Project run re-derives only the names touched by
-  events in its window, so it does not pick up preimages for older child edges;
-  the full-range redo is the required sequence.
+  A windowed or incremental Project run re-derives only its affected scope.
+  Child-topology closure can add a connected component, but it does not cover
+  older disconnected child edges; the full-range redo is the required
+  sequence.
 
 [^graph-ens-rainbow-table]: (upstream: .refs/ens_rainbow/src/main.rs:L36 @ ens_rainbow@bc44492)
 [^graph-ens-rainbow-hash]: (upstream: .refs/ens_rainbow/src/main.rs:L50 @ ens_rainbow@bc44492)
