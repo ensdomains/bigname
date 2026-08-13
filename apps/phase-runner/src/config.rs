@@ -67,6 +67,10 @@ impl SourceConfig {
     }
 }
 
+pub(crate) fn normalized_source_kind(kind: &str) -> String {
+    kind.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 impl fmt::Debug for SourceConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -169,6 +173,7 @@ pub struct CapacityConfig {
     pub minimum_free_disk_bytes: u64,
     pub writable_path: PathBuf,
     pub poll_interval: Duration,
+    pub interpreter_state_cache_entries: usize,
 }
 
 impl Default for CapacityConfig {
@@ -178,6 +183,8 @@ impl Default for CapacityConfig {
             minimum_free_disk_bytes: 0,
             writable_path: PathBuf::from("."),
             poll_interval: Duration::from_secs(5),
+            interpreter_state_cache_entries:
+                bigname_interpret::DEFAULT_INTERPRETER_STATE_CACHE_ENTRIES,
         }
     }
 }

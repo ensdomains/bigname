@@ -81,13 +81,19 @@ whole-walk versus split-walk output but is not a boundary-carry artifact —
 the uninterrupted walk under-derives a wrapper authority lapse that a split
 walk derives.
 
-**Stored-history verification** — the read-only phase that compares canonical
-selected raw logs with the chain's configured reference source through a
-finalized block. Base uses dRPC to cross-check the Coinbase-loaded history and
-cannot extend that independent comparison past the Coinbase-to-dRPC ingest seam.
-Ethereum uses local reth for a node check. The phase records only its block
-extent, trust level, and any fatal mismatch in phase state. It does not write
-coverage attestations or repair raw data.
+**Stored-history verification** — the read-only phase that validates a chain's
+stored extent through a finalized block and, when the chain has an independent
+reference, compares canonical selected raw logs with it. Base uses dRPC to
+cross-check the Coinbase-loaded history and cannot extend that independent
+comparison past the Coinbase-to-dRPC ingest seam. Base `reth_db` verification
+is unsupported and tracked by
+[issue #433](https://github.com/ensdomains/bigname/issues/433). Ethereum Mainnet
+uses local reth for a node check. Ethereum Sepolia validates its durable
+ingested extent and records provider trust without an independent comparison;
+source-role separation is deferred to
+[issue #411](https://github.com/ensdomains/bigname/issues/411). The phase records
+only its block extent, trust level, and any fatal mismatch in phase state. It
+does not write coverage attestations or repair raw data.
 
 **Verification level** — the source-bounded trust label for a chain's stored
 history through its reported verification extent: `quick_synced` is
@@ -780,6 +786,19 @@ dependency inputs as detailed under [interpretation
 replay](storage.md#interpretation-replay). It is not an Ethereum contract
 bytecode hash.
 
+**Interpreter session** — the in-process state carried between consecutive
+physical Interpret batches for one chain (`AdapterSession` in code). It holds
+protocol topology and current authority needed by the next batch, plus a
+bounded cache of persisted event values. It is disposable: a cold restore
+rebuilds it from readable `normalized_events` rows.
+
+**Interpreter state key** — the opaque string an adapter derives for one
+before/after state stream. It combines the ENS namespace, source family, name
+or resource identity, [state facet](#state-facet), and source-specific scope.
+The exact key is stored in each current normalized event so a cache miss can
+retrieve the latest readable `after_state` for that stream without replaying an
+event range.
+
 **Block-revision evidence floor** — the schema-migration-era lower bound used by the
 old runtime's raw-log revision evidence. Its tables remain historical; the
 Stage B runtime no longer computes or consumes this floor.
@@ -799,9 +818,17 @@ deleted in Stage B.
 
 **Lineage orphaning epoch** — the per-chain counter on the current head row
 that increases whenever head publication moves previously readable blocks to
-`orphaned`. Interpretation uses an unchanged value to reuse prior-state
-lineage checks; a changed value requires every retained prior-state block
-anchor to be checked again.
+`orphaned`. Interpretation uses an unchanged value to reuse an interpreter
+session. A changed value discards that session and rebuilds it from readable
+rows. The value loaded with Interpret inputs is checked again in the write
+transaction, fencing lineage changes between the input snapshot, any bounded
+state-cache reload, and the final write even if the same block hashes become
+readable again.
+
+**State facet** — the part of an interpreter state key that groups normalized
+event kinds which update one logical value stream. For example, registrar
+grants, renewals, releases, and reservations share the `registration` facet;
+permission grants and revocations share the `permission` facet.
 
 **Logical discovery-edge identity** (`logical_edge_identity`) — the
 rebuild-stable Keccak-256 identity of one fact-derived discovery-edge epoch. It

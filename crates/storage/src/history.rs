@@ -59,6 +59,9 @@ pub struct HistoryEvent {
     pub canonicality_state: CanonicalityState,
     pub before_state: Value,
     pub after_state: Value,
+    pub migration_correlation_ids: Vec<String>,
+    pub consumer_visibility: String,
+    pub migration_associations: Value,
     pub provenance: Value,
     pub coverage: Value,
 }
@@ -184,6 +187,7 @@ pub async fn load_name_history_page(
         cursor,
         page_size,
         summary_mode,
+        false,
     )
     .await
     .with_context(|| {
@@ -222,13 +226,14 @@ pub async fn load_event_history(
     filter: EventHistoryFilter,
     canonical_only: bool,
 ) -> Result<Vec<HistoryEvent>> {
-    let read_filter = event_history_read_filter(pool, filter, canonical_only).await?;
+    let read_filter = event_history_read_filter(pool, filter, canonical_only, false).await?;
     load_event_history_rows(pool, read_filter, canonical_only)
         .await
         .context("failed to load app-facing event history")
 }
 
-/// Load one SQL-keyset page for app-facing event history filters.
+/// Load one SQL-keyset page for event-history filters, optionally including rows whose
+/// `consumer_visibility` is `candidate`.
 pub async fn load_event_history_page(
     pool: &PgPool,
     filter: EventHistoryFilter,
@@ -236,8 +241,10 @@ pub async fn load_event_history_page(
     cursor: Option<&HistoryCursor>,
     page_size: u64,
     summary_mode: HistorySummaryMode,
+    include_candidates: bool,
 ) -> Result<HistoryPage> {
-    let read_filter = event_history_read_filter(pool, filter, canonical_only).await?;
+    let read_filter =
+        event_history_read_filter(pool, filter, canonical_only, include_candidates).await?;
     paging::load_history_page(
         pool,
         read_filter,
@@ -245,6 +252,7 @@ pub async fn load_event_history_page(
         cursor,
         page_size,
         summary_mode,
+        include_candidates,
     )
     .await
     .context("failed to load app-facing event history page")
@@ -298,6 +306,7 @@ pub async fn load_resource_history_page(
         cursor,
         page_size,
         summary_mode,
+        false,
     )
     .await
     .with_context(|| {
@@ -340,6 +349,7 @@ pub async fn load_address_history_for_relations(
         relations,
         scope,
         canonical_only,
+        false,
     )
     .await?;
 
@@ -415,6 +425,7 @@ pub async fn load_address_history_page_for_relations(
         relations,
         scope,
         canonical_only,
+        false,
     )
     .await?;
 
@@ -428,6 +439,7 @@ pub async fn load_address_history_page_for_relations(
         cursor,
         page_size,
         summary_mode,
+        false,
     )
     .await
     .with_context(|| {
@@ -454,6 +466,7 @@ async fn event_history_read_filter(
     pool: &PgPool,
     filter: EventHistoryFilter,
     canonical_only: bool,
+    include_candidates: bool,
 ) -> Result<EventHistoryReadFilter> {
     let mut selectors = Vec::new();
 
@@ -501,6 +514,7 @@ async fn event_history_read_filter(
                 relations,
                 HistoryScope::Both,
                 canonical_only,
+                include_candidates,
             )
             .await
             .with_context(|| {

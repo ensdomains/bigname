@@ -67,7 +67,10 @@ async fn main() -> Result<()> {
             let ingest_engine = Arc::new(bigname_ingest::Engine::new(database.pool().clone()));
             let phases = PhaseSet::with_ingest_interpret_project_and_live(
                 Arc::new(IngestPhase::with_engine(Arc::clone(&ingest_engine))),
-                Arc::new(InterpretPhase::new(database.pool().clone())),
+                Arc::new(InterpretPhase::with_state_cache_capacity(
+                    database.pool().clone(),
+                    runtime.capacity.interpreter_state_cache_entries,
+                )),
                 Arc::new(ProjectPhase::with_hydration(
                     database.pool().clone(),
                     hydration_rpc_urls,
@@ -110,7 +113,10 @@ async fn main() -> Result<()> {
             validate_redo_attestation_chains(&watch_set_coverage_attestations, &chains)?;
             let ingest_engine = Arc::new(bigname_ingest::Engine::new(database.pool().clone()));
             let ingest = Arc::new(IngestPhase::with_engine(ingest_engine));
-            let interpret = Arc::new(InterpretPhase::new(database.pool().clone()));
+            let interpret = Arc::new(InterpretPhase::with_state_cache_capacity(
+                database.pool().clone(),
+                capacity.interpreter_state_cache_entries,
+            ));
             let project = Arc::new(ProjectPhase::with_hydration(
                 database.pool().clone(),
                 hydration_rpc_urls,

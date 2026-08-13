@@ -784,9 +784,136 @@ async fn interpret_redo_stops_at_the_recorded_processed_head() -> Result<()> {
 }
 
 #[tokio::test]
+async fn interpret_redo_rejects_a_removed_persisted_ingest_source_before_writes() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_redo_removed_ingest_source").await?;
+    let chain_id = "redo-removed-ingest-source-chain";
+    let store = PhaseStore::new(scratch.pool().clone());
+    store.initialize_chain(chain_id).await?;
+    seed_ingest_extent(scratch.pool(), chain_id, 0, 1).await?;
+    sqlx::query(
+        "INSERT INTO ingest_cursors (
+             chain_id, source_key, source_kind, seed_basis,
+             start_block_number, next_block_number, target_block_number,
+             last_processed_block_number, last_processed_block_hash
+         ) VALUES ($1, 'removed', 'test', 'base_seam', 0, 2, 1, 1, $2)",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-extent-block-1"))
+    .execute(scratch.pool())
+    .await?;
+    mark_phase_with_extent(
+        scratch.pool(),
+        chain_id,
+        PhaseName::Interpret,
+        1,
+        Some(phase_runner::INTERPRETER_CONTENT_HASH),
+    )
+    .await?;
+    let interpret_calls = Arc::new(AtomicUsize::new(0));
+    let observed_calls = Arc::clone(&interpret_calls);
+    let interpret = Arc::new(FunctionPhase {
+        name: PhaseName::Interpret,
+        handler: Arc::new(move |_| {
+            observed_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(PhaseBatchOutcome::Complete(PhaseProgress::default()))
+        }),
+    });
+    let runner = runner(
+        scratch.runner(),
+        phase_set_replacing(PhaseName::Interpret, interpret)?,
+        "redo-removed-ingest-source-runner",
+    )?;
+
+    let result = runner
+        .redo(
+            &chain(chain_id, SeedBasis::BaseSeam)?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 1)?,
+            CancellationToken::new(),
+        )
+        .await;
+    let observed_calls = interpret_calls.load(Ordering::SeqCst);
+
+    drop(runner);
+    scratch.cleanup().await?;
+    let error = result.expect_err("Interpret redo must reject removal of a persisted source");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error.to_string().contains("persisted ingest source keys"),
+        "{error}"
+    );
+    assert_eq!(observed_calls, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn interpret_redo_rejects_start_drift_even_when_runtime_source_starts_after_range()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_redo_ingest_start_drift").await?;
+    let chain_id = "redo-ingest-start-drift-chain";
+    let store = PhaseStore::new(scratch.pool().clone());
+    store.initialize_chain(chain_id).await?;
+    seed_ingest_extent(scratch.pool(), chain_id, 0, 1).await?;
+    mark_phase_with_extent(
+        scratch.pool(),
+        chain_id,
+        PhaseName::Interpret,
+        1,
+        Some(phase_runner::INTERPRETER_CONTENT_HASH),
+    )
+    .await?;
+    let interpret_calls = Arc::new(AtomicUsize::new(0));
+    let observed_calls = Arc::clone(&interpret_calls);
+    let interpret = Arc::new(FunctionPhase {
+        name: PhaseName::Interpret,
+        handler: Arc::new(move |_| {
+            observed_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(PhaseBatchOutcome::Complete(PhaseProgress::default()))
+        }),
+    });
+    let runner = runner(
+        scratch.runner(),
+        phase_set_replacing(PhaseName::Interpret, interpret)?,
+        "redo-ingest-start-drift-runner",
+    )?;
+    let changed = ChainConfig::new(
+        chain_id,
+        vec![source(chain_id, "source", SeedBasis::BaseSeam, 2)?],
+        false,
+    )?;
+
+    let result = runner
+        .redo(
+            &changed,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 1)?,
+            CancellationToken::new(),
+        )
+        .await;
+    let observed_calls = interpret_calls.load(Ordering::SeqCst);
+
+    drop(runner);
+    scratch.cleanup().await?;
+    let error = result.expect_err("Interpret redo must reject persisted source start drift");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error
+            .to_string()
+            .contains("does not match the configured source"),
+        "{error}"
+    );
+    assert_eq!(observed_calls, 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn killed_advisory_lock_connection_stops_before_batch_progress_writes() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_lock_liveness").await?;
     let chain_id = "lock-liveness-chain";
+    let configured_chain = chain(chain_id, SeedBasis::BaseSeam)?;
+    PhaseStore::new(scratch.pool().clone())
+        .update_ingest_cursors(&configured_chain.sources, &PhaseProgress::default())
+        .await?;
     seed_lineage(scratch.pool(), chain_id, 0).await?;
     sqlx::query("CREATE TABLE lock_liveness_writes (marker text PRIMARY KEY)")
         .execute(scratch.pool())
@@ -811,7 +938,6 @@ async fn killed_advisory_lock_connection_stops_before_batch_progress_writes() ->
     )?;
     let cancellation = CancellationToken::new();
     let run_cancellation = cancellation.clone();
-    let configured_chain = chain(chain_id, SeedBasis::BaseSeam)?;
     let task =
         tokio::spawn(async move { runner.run_chain(&configured_chain, run_cancellation).await });
     entered.notified().await;
@@ -846,11 +972,14 @@ async fn killed_advisory_lock_connection_stops_before_batch_progress_writes() ->
         .bind(chain_id)
         .fetch_one(scratch.pool())
         .await?;
-    let cursors: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM ingest_cursors WHERE chain_id = $1")
-            .bind(chain_id)
-            .fetch_one(scratch.pool())
-            .await?;
+    let cursor: (i64, i64, Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT start_block_number, next_block_number,
+                target_block_number, last_processed_block_number
+         FROM ingest_cursors WHERE chain_id = $1 AND source_key = 'source'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
     let state: (String, Option<i64>) = sqlx::query_as(
         "
         SELECT phase_status, current_block_number
@@ -864,7 +993,7 @@ async fn killed_advisory_lock_connection_stops_before_batch_progress_writes() ->
     .await?;
     assert_eq!(phase_owned_writes, 0);
     assert_eq!(heads, 0);
-    assert_eq!(cursors, 0);
+    assert_eq!(cursor, (0, 0, None, None));
     assert_eq!(state, ("running".to_owned(), None));
     scratch.cleanup().await
 }
@@ -1099,8 +1228,8 @@ async fn verification_mismatch_cancels_live_for_that_chain_but_not_other_chains(
     require_live_lock_for_mismatch_failure(scratch.pool()).await?;
     let bad_chain = "overlap-bad-chain";
     let good_chain = "overlap-good-chain";
-    seed_lineage(scratch.pool(), bad_chain, 0).await?;
-    seed_lineage(scratch.pool(), good_chain, 0).await?;
+    seed_identified_lineage(scratch.pool(), bad_chain, 0).await?;
+    seed_identified_lineage(scratch.pool(), good_chain, 0).await?;
 
     let bad_live_entered = Arc::new(Notify::new());
     let release_bad_live = Arc::new(Notify::new());
@@ -1193,7 +1322,7 @@ async fn verification_mismatch_replaces_a_live_retry_error_during_backoff() -> R
     let scratch = ScratchDatabase::create("phase_runner_verify_live_backoff").await?;
     require_live_lock_for_mismatch_failure(scratch.pool()).await?;
     let chain_id = "verify-live-backoff-chain";
-    seed_lineage(scratch.pool(), chain_id, 0).await?;
+    seed_identified_lineage(scratch.pool(), chain_id, 0).await?;
 
     let live_failed_once = Arc::new(Notify::new());
     let ingest = Arc::new(FunctionPhase {
@@ -1272,7 +1401,7 @@ async fn verification_mismatch_reports_live_failure_persistence_errors() -> Resu
     let scratch = ScratchDatabase::create("phase_runner_verify_live_record_failure").await?;
     reject_live_mismatch_failure(scratch.pool()).await?;
     let chain_id = "verify-live-record-failure-chain";
-    seed_lineage(scratch.pool(), chain_id, 0).await?;
+    seed_identified_lineage(scratch.pool(), chain_id, 0).await?;
 
     let bad_live_entered = Arc::new(Notify::new());
     let release_bad_live = Arc::new(Notify::new());
@@ -1310,7 +1439,7 @@ async fn verification_mismatch_remains_terminal_when_failure_recording_fails() -
     let scratch = ScratchDatabase::create("phase_runner_verify_record_failure").await?;
     reject_verify_mismatch_failure(scratch.pool()).await?;
     let chain_id = "verify-record-failure-chain";
-    seed_lineage(scratch.pool(), chain_id, 0).await?;
+    seed_identified_lineage(scratch.pool(), chain_id, 0).await?;
 
     let mismatch_emitted = Arc::new(Notify::new());
     let phases = overlap_phase_set(
@@ -1442,12 +1571,23 @@ async fn multi_source_ingest_completion_requires_every_configured_source() -> Re
             .contains("missing source progress for rpc")
     );
 
-    let cursor_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM ingest_cursors WHERE chain_id = $1")
-            .bind(chain_id)
-            .fetch_one(scratch.pool())
-            .await?;
-    assert_eq!(cursor_count, 0);
+    type EmptyCursor = (String, i64, i64, Option<i64>, Option<i64>);
+    let cursors: Vec<EmptyCursor> = sqlx::query_as(
+        "SELECT source_key, start_block_number, next_block_number,
+                target_block_number, last_processed_block_number
+         FROM ingest_cursors WHERE chain_id = $1 ORDER BY source_key",
+    )
+    .bind(chain_id)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        cursors,
+        vec![
+            ("bulk".to_owned(), 0, 0, None, None),
+            ("rpc".to_owned(), 0, 0, None, None),
+        ],
+        "invalid completion must leave only the phase-entry identities"
+    );
     scratch.cleanup().await
 }
 
@@ -1486,12 +1626,19 @@ async fn ingest_completion_requires_each_source_to_reach_its_target() -> Result<
             .contains("source source cannot complete at block 1 before target block 3")
     );
 
-    let cursor_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM ingest_cursors WHERE chain_id = $1")
-            .bind(chain_id)
-            .fetch_one(scratch.pool())
-            .await?;
-    assert_eq!(cursor_count, 0);
+    let cursor: (i64, i64, Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT start_block_number, next_block_number,
+                target_block_number, last_processed_block_number
+         FROM ingest_cursors WHERE chain_id = $1 AND source_key = 'source'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        cursor,
+        (0, 0, None, None),
+        "invalid completion must leave only the phase-entry identity"
+    );
     scratch.cleanup().await
 }
 
@@ -1836,7 +1983,7 @@ async fn continue_batches_skip_the_live_poll_sleep() -> Result<()> {
 async fn verify_phase_cannot_complete_without_a_verification_level() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_verify_level_required").await?;
     let chain_id = "verify-level-required-chain";
-    seed_lineage(scratch.pool(), chain_id, 0).await?;
+    seed_identified_lineage(scratch.pool(), chain_id, 0).await?;
     let configured_chain = ChainConfig::new(
         chain_id,
         vec![source(chain_id, "source", SeedBasis::BaseSeam, 0)?],
@@ -2033,6 +2180,14 @@ fn progress_at(current: i64, target: i64, prefix: &str) -> PhaseProgress {
 
 fn marker(chain_id: &str, number: i64) -> RunnerResult<BlockMarker> {
     BlockMarker::new(number, format!("{chain_id}-block-{number}"))
+}
+
+async fn seed_identified_lineage(pool: &sqlx::PgPool, chain_id: &str, through: i64) -> Result<()> {
+    let configured_chain = chain(chain_id, SeedBasis::BaseSeam)?;
+    PhaseStore::new(pool.clone())
+        .ensure_ingest_sources(chain_id, &configured_chain.sources)
+        .await?;
+    seed_lineage(pool, chain_id, through).await
 }
 
 async fn seed_ingest_extent(pool: &sqlx::PgPool, chain_id: &str, from: i64, to: i64) -> Result<()> {

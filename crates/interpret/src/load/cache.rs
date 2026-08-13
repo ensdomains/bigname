@@ -1,35 +1,25 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
-use bigname_adapters::schema_v2::seam::{INTERPRETER_STATE_KEY, retained_prior_state_key};
-use bigname_adapters::schema_v2::{NormalizedEvent, PriorEventInput};
+use bigname_adapters::schema_v2::NormalizedEvent;
+#[cfg(test)]
+use bigname_adapters::schema_v2::seam::INTERPRETER_STATE_KEY;
 use sqlx::PgConnection;
 
 use crate::{InterpretError, Result};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PriorDependency {
-    pub block_number: i64,
-    pub block_hash: String,
-}
-
 #[derive(Debug)]
 pub(crate) struct PriorCache {
-    // The adapter owns the retained values. Interpretation keeps only their canonical block
-    // anchors so epoch changes can invalidate the opaque adapter session without cloning it.
-    pub dependencies: BTreeMap<String, PriorDependency>,
     pub(crate) validated_orphaning_epoch: i64,
+    // Only anchors added since the latest validation are retained. An epoch change discards the
+    // whole retained in-process state and reloads it from the database.
     pub(crate) pending_dependencies: BTreeSet<(i64, String)>,
 }
 
-pub(crate) struct PriorRestore {
-    pub events: Vec<PriorEventInput>,
-    pub cache: PriorCache,
-}
-
-pub(super) fn freshly_loaded(mut restored: PriorRestore, orphaning_epoch: i64) -> PriorRestore {
-    restored.cache.validated_orphaning_epoch = orphaning_epoch;
-    restored.cache.pending_dependencies.clear();
-    restored
+pub(super) fn freshly_loaded(orphaning_epoch: i64) -> PriorCache {
+    PriorCache {
+        validated_orphaning_epoch: orphaning_epoch,
+        pending_dependencies: BTreeSet::new(),
+    }
 }
 
 pub(super) async fn orphaning_epoch(connection: &mut PgConnection, chain_id: &str) -> Result<i64> {
@@ -59,8 +49,10 @@ pub(super) async fn revalidate(
     mut cache: PriorCache,
     orphaning_epoch: i64,
 ) -> Result<Option<PriorCache>> {
-    let full_revalidation = cache.validated_orphaning_epoch != orphaning_epoch;
-    let expected = validation_candidates(&mut cache, full_revalidation);
+    if cache.validated_orphaning_epoch != orphaning_epoch {
+        return Ok(None);
+    }
+    let expected = std::mem::take(&mut cache.pending_dependencies);
     if expected.is_empty() {
         cache.validated_orphaning_epoch = orphaning_epoch;
         cache.pending_dependencies.clear();
@@ -103,40 +95,11 @@ pub(super) async fn revalidate(
     Ok(Some(cache))
 }
 
-fn validation_candidates(
-    cache: &mut PriorCache,
-    full_revalidation: bool,
-) -> BTreeSet<(i64, String)> {
-    if full_revalidation {
-        cache
-            .dependencies
-            .values()
-            .map(|dependency| (dependency.block_number, dependency.block_hash.clone()))
-            .collect()
-    } else {
-        std::mem::take(&mut cache.pending_dependencies)
-    }
-}
-
 pub(crate) fn fold(mut cache: PriorCache, normalized_events: &[NormalizedEvent]) -> PriorCache {
     for event in normalized_events {
         let (Some(block_number), Some(block_hash)) = (event.block_number, &event.block_hash) else {
             continue;
         };
-        let key = retained_prior_state_key(
-            event
-                .raw_fact_ref
-                .get(INTERPRETER_STATE_KEY)
-                .and_then(serde_json::Value::as_str),
-            &event.event_identity,
-        );
-        cache.dependencies.insert(
-            key,
-            PriorDependency {
-                block_number,
-                block_hash: block_hash.clone(),
-            },
-        );
         cache
             .pending_dependencies
             .insert((block_number, block_hash.clone()));
@@ -179,7 +142,6 @@ mod tests {
 
     fn cache() -> PriorCache {
         PriorCache {
-            dependencies: BTreeMap::new(),
             validated_orphaning_epoch: 7,
             pending_dependencies: BTreeSet::new(),
         }
@@ -190,33 +152,19 @@ mod tests {
         let mut cache = fold(cache(), &[event("new")]);
 
         assert_eq!(
-            validation_candidates(&mut cache, false),
+            std::mem::take(&mut cache.pending_dependencies),
             BTreeSet::from([(10, "block-10".to_owned())])
         );
-        assert!(validation_candidates(&mut cache, false).is_empty());
+        assert!(cache.pending_dependencies.is_empty());
     }
 
     #[test]
-    fn changed_epoch_checks_every_retained_anchor() {
-        let mut cache = cache();
-        cache.dependencies.insert(
-            "old".to_owned(),
-            PriorDependency {
-                block_number: 3,
-                block_hash: "block-3".to_owned(),
-            },
-        );
-        cache.dependencies.insert(
-            "new".to_owned(),
-            PriorDependency {
-                block_number: 10,
-                block_hash: "block-10".to_owned(),
-            },
-        );
+    fn fold_retains_only_distinct_batch_anchors() {
+        let cache = fold(cache(), &[event("first"), event("second")]);
 
         assert_eq!(
-            validation_candidates(&mut cache, true),
-            BTreeSet::from([(3, "block-3".to_owned()), (10, "block-10".to_owned())])
+            cache.pending_dependencies,
+            BTreeSet::from([(10, "block-10".to_owned())])
         );
     }
 }

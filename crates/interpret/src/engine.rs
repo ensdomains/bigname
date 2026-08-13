@@ -1,11 +1,12 @@
 use std::{collections::HashMap, sync::Mutex, time::Instant};
 
-use bigname_adapters::SchemaV2AdapterSession;
+use bigname_adapters::{SchemaV2AdapterSession, StateCacheCapacity};
 use sqlx::PgPool;
 
 use crate::{InterpretError, Result, load, recompute, write};
 
 const CANONICAL_BLOCKS_PER_BATCH: i64 = 500;
+pub const DEFAULT_INTERPRETER_STATE_CACHE_ENTRIES: usize = 65_536;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Marker {
@@ -39,6 +40,7 @@ pub struct BatchOutcome {
 
 pub struct Engine {
     pool: PgPool,
+    state_cache_capacity: StateCacheCapacity,
     prior_sessions: Mutex<HashMap<String, PriorSession>>,
 }
 
@@ -58,8 +60,13 @@ struct PriorSession {
 
 impl Engine {
     pub fn new(pool: PgPool) -> Self {
+        Self::with_state_cache_capacity(pool, DEFAULT_INTERPRETER_STATE_CACHE_ENTRIES)
+    }
+
+    pub fn with_state_cache_capacity(pool: PgPool, entries: usize) -> Self {
         Self {
             pool,
+            state_cache_capacity: StateCacheCapacity::Entries(entries),
             prior_sessions: Mutex::new(HashMap::new()),
         }
     }
@@ -141,9 +148,10 @@ impl Engine {
                 .as_ref()
                 .map(|marker| (marker.number, marker.hash.as_str())),
             cached_prior,
+            self.state_cache_capacity,
         )
         .await?;
-        let restored_event_count = loaded.input.prior_events.len();
+        let restored_event_count = loaded.restored_event_count;
         profile_phase(
             profile,
             "batch_input",
@@ -151,6 +159,7 @@ impl Engine {
             Some(restored_event_count),
         );
         let prior_cache = loaded.prior_cache;
+        let expected_orphaning_epoch = prior_cache.validated_orphaning_epoch;
         let adapter_session = loaded.adapter_session;
         let input = loaded.input;
         let loaded_markers = input
@@ -167,13 +176,28 @@ impl Engine {
         }
         write_lineage.extend(loaded_markers.iter().cloned());
         let phase_started = Instant::now();
-        let (output, adapter_session) =
-            bigname_adapters::interpret_schema_v2_batch_incremental(input, adapter_session)
-                .map_err(|error| {
-                    InterpretError::data_integrity(format!(
-                        "hash-covered adapter interpretation failed: {error:#}"
-                    ))
-                })?;
+        let prepared = bigname_adapters::prepare_schema_v2_batch_incremental(
+            input,
+            adapter_session,
+            self.state_cache_capacity,
+        )
+        .map_err(|error| {
+            InterpretError::data_integrity(format!(
+                "hash-covered adapter interpretation failed: {error:#}"
+            ))
+        })?;
+        let state_values = load::prior_state_values(
+            &self.pool,
+            &request.chain_id,
+            *batch_from,
+            prepared.state_value_requests(),
+        )
+        .await?;
+        let (output, adapter_session) = prepared.finish(state_values).map_err(|error| {
+            InterpretError::data_integrity(format!(
+                "hash-covered adapter state reload failed: {error:#}"
+            ))
+        })?;
         profile_phase(
             profile,
             "adapter_restore_and_batch",
@@ -182,7 +206,7 @@ impl Engine {
         );
         let phase_started = Instant::now();
         let next_prior_cache = load::fold_prior_cache(prior_cache, &output.normalized_events);
-        let retained_state_count = next_prior_cache.dependencies.len();
+        let retained_state_count = next_prior_cache.pending_dependencies.len();
         profile_phase(
             profile,
             "fold_prior_cache_delta",
@@ -200,6 +224,7 @@ impl Engine {
             redo_range,
             prepare_redo_range,
             complete,
+            expected_orphaning_epoch,
             &write_lineage,
             &output,
         )

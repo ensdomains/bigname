@@ -234,6 +234,14 @@ Field ownership:
 - The existing per-chain `status` field also maps the `project` phase
   lifecycle, redo marker, and newest per-chain
   `bigname_phase.service_heartbeats` timestamp.
+  Ethereum Sepolia is not eligible for `ready` until its
+  [provider-trusted](glossary.md#verification-level) `verify` phase is
+  `completed` with `quick_synced` evidence and its `ingest` phase remains
+  `completed`. A failed Ingest or Verify, or a completed Verify without that
+  evidence, is `stale`; an idle, running, paused, or missing Ingest or Verify is
+  `degraded`. An expired runner heartbeat remains `stale` while either required
+  phase is incomplete. Chains without this requirement keep the Project-only
+  lifecycle rule below.
   The most recent completed `project` publication remains the indexed position
   while the next live-follow pass is running. A running phase is therefore
   eligible for `ready` when that completed publication is present and its
@@ -878,8 +886,8 @@ Field ownership:
   to `permission`. Mapping is per normalized source event and resource anchor,
   not per transaction: one synchronized renewal transaction can therefore
   contain three `renewal` rows and two `expiry` rows; no synthetic collapsed
-  renewal is created. The planned `MigrationApplied` and `ContractDiscovered`
-  kinds have no product event type. During slice 1, every
+  renewal is created. The candidate `MigrationApplied` and
+  `ContractDiscovered` kinds have no product event type. During slice 1, every
   correlation-dependent row carrying `consumer_visibility=candidate` is excluded
   even if its familiar event kind would otherwise map above or its source family
   is `ens_v2_registry_l1`. An event admitted independently by an existing family
@@ -1126,7 +1134,7 @@ so there is no persisted artifact to explain. See
   event_kind, source_family, manifest_version?, source_manifest_id?,
   chain_position, transaction_hash, log_index, raw_fact_ref, derivation_kind,
   canonicality_state, before_state?, after_state?, provenance, coverage}`. The
-  planned slice-1 diagnostics extension adds `consumer_visibility`,
+  slice-1 diagnostics extension adds `consumer_visibility`,
   `migration_correlation_ids`, and `migration_associations?`; each
   `migration_associations` entry is
   `{migration_correlation_ids, correlation_kind, consumer_visibility}`. A
@@ -1134,15 +1142,27 @@ so there is no persisted artifact to explain. See
   fields. An independently admitted ordinary row reports top-level
   `consumer_visibility=activated` and an empty ID set; its separate candidate or
   activated correlation relationships appear only in `migration_associations`.
+  `migration_associations` is raw diagnostic evidence: each association remains
+  anchored to the chain lineage where it was derived, while the lookup attaches
+  every association with the same `event_identity`. The top-level
+  `canonicality_state` applies only to the returned normalized-event row; it does
+  not filter its associations. Retained associations from replaced forks can
+  therefore appear beside a canonical event. Consumers that require canonical-only
+  correlation must not treat association presence as a current relationship.
+  When `address` is present, diagnostics derives its name/resource anchor set
+  from both activated and candidate address-relation evidence. Candidate
+  evidence never contributes anchors to `/v2/events` or product history routes.
   A full re-walk may assign a different numeric `normalized_event_id` to a
   pre-existing row. Its `event_identity` and pre-existing semantic fields remain
-  stable; the numeric ID change and the planned candidate fields are explicit
+  stable; the numeric ID change and the candidate fields are explicit
   diagnostic-only deltas.
 - Pagination behavior: standard collection pagination.
-- Snapshot behavior: diagnostic event rows come from current state. The
-  response omits `meta.as_of` and `meta.as_of_token`, and its cursor carries no
-  snapshot validity claim. True as-of/finality row-bounding is deferred to the
-  revision-bound storage follow-up.
+- Snapshot behavior: diagnostic event rows come from current state, but their
+  `migration_associations` are the raw lineage evidence described above, not
+  assertions of current correlation. The response omits `meta.as_of` and
+  `meta.as_of_token`, and its cursor carries no snapshot validity claim. True
+  as-of/finality row-bounding is deferred to the revision-bound storage
+  follow-up.
 - Status semantics: no matching rows returns `200` with empty `data`.
 - Replaces (v1): `view=full` on `GET /v1/history/names/{namespace}/{name}`,
   `GET /v1/history/resources/{resource_id}`, and

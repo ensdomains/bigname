@@ -70,6 +70,8 @@ struct ConnectionArgs {
 
 #[derive(Clone, Debug, Args)]
 struct CapacityArgs {
+    #[arg(long, env = "BIGNAME_PHASE_RUNNER_INTERPRETER_STATE_CACHE_ENTRIES")]
+    interpreter_state_cache_entries: Option<usize>,
     #[arg(long, env = "BIGNAME_PHASE_RUNNER_DATABASE_MAX_BYTES")]
     database_max_bytes: Option<u64>,
 
@@ -448,6 +450,9 @@ fn resolve_capacity(args: CapacityArgs) -> RunnerResult<CapacityConfig> {
         minimum_free_disk_bytes: args.minimum_free_disk_bytes,
         writable_path: args.writable_path,
         poll_interval: Duration::from_millis(args.capacity_poll_ms),
+        interpreter_state_cache_entries: args
+            .interpreter_state_cache_entries
+            .unwrap_or(bigname_interpret::DEFAULT_INTERPRETER_STATE_CACHE_ENTRIES),
     })
 }
 

@@ -1,11 +1,13 @@
 pub mod capacity;
 pub mod cli;
+mod completed_phase_recovery;
 pub mod config;
 pub mod database;
 pub mod error;
 mod head_finality;
 mod head_observed;
 pub mod heads;
+mod ingest_cursor_config;
 pub mod ingest_phase;
 mod ingest_progress;
 pub mod inspect;

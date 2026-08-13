@@ -207,13 +207,21 @@ additive; rollback may leave them in place.
    stopped;
 9. start the long-running phase runner only after those one-shot redos succeed,
    let the production Verify phase complete for every affected chain, and require
-   its reviewed reference path rather than omitting or bypassing Verify;
+   its reviewed verification path rather than omitting or bypassing Verify;
+   `ethereum-sepolia` must finish `quick_synced` over the selected durable
+   ingested extent after accepting exactly one `drpc` intake source with
+   `ethereum_head` seed basis and start block zero. That dRPC is the intake
+   provider; confirm its persisted cursor matches that configured source and
+   covers the finalized Verify target. This release
+   performs no independent Sepolia comparison; source-role separation and the
+   `cross_checked` upgrade are tracked in
+   [issue #411](https://github.com/ensdomains/bigname/issues/411);
 10. confirm the phase state directly in the database while the API is still
    stopped — the `project` row in `chain_phase_state` current with no pending
    redo, and Verify success from the `verify` row for each affected chain plus
-   the supervisor's Verify completion output (`/v2/status` cannot be used
-   here: the API is stopped, and the route reads only the Project row's
-   lifecycle, redo, and heartbeat state — it does not expose Verify);
+   the supervisor's Verify completion output (`/v2/status` cannot be used here
+   because the API is stopped; after startup, it reads the required Sepolia
+   Verify status and `quick_synced` evidence as part of publication readiness);
 11. start the API built from the same commit and confirm `/v2/status` reports
    current phase state and no pending redo; and
 12. run the release smoke and public-edge checks before undraining traffic.

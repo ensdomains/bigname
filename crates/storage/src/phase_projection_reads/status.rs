@@ -34,7 +34,11 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
             latest_lineage.block_timestamp AS latest_timestamp,
             project.current_block_number AS latest_projected_block,
             projected_lineage.block_timestamp AS latest_projected_timestamp,
+            ingest.phase_status AS ingest_phase_status,
             project.phase_status AS project_phase_status,
+            verify.phase_status AS verify_phase_status,
+            verify.verification_level AS verify_verification_level,
+            known_chains.chain_id = $2 AS provider_trusted_verification_required,
             COALESCE(
                 project.input_content_hash = $1
                 AND project.current_block_number <= head.latest_block_number
@@ -52,6 +56,12 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
         LEFT JOIN chain_phase_state project
           ON project.chain_id = known_chains.chain_id
          AND project.phase_name = 'project'
+        LEFT JOIN chain_phase_state ingest
+          ON ingest.chain_id = known_chains.chain_id
+         AND ingest.phase_name = 'ingest'
+        LEFT JOIN chain_phase_state verify
+          ON verify.chain_id = known_chains.chain_id
+         AND verify.phase_name = 'verify'
         LEFT JOIN bigname_phase.chain_lineage latest_lineage
           ON latest_lineage.chain_id = head.chain_id
          AND latest_lineage.block_number = head.latest_block_number
@@ -78,6 +88,7 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
         "#
     ))
     .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .bind(bigname_domain::vocabulary::ChainId::EthereumSepolia.as_str())
     .fetch_all(pool)
     .await
     .context("failed to load schema-v2 indexing status")?;
@@ -96,7 +107,14 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
                     &row,
                     "latest_projected_timestamp",
                 )?,
+                ingest_phase_status: crate::sql_row::get(&row, "ingest_phase_status")?,
                 project_phase_status: crate::sql_row::get(&row, "project_phase_status")?,
+                verify_phase_status: crate::sql_row::get(&row, "verify_phase_status")?,
+                verify_verification_level: crate::sql_row::get(&row, "verify_verification_level")?,
+                provider_trusted_verification_required: crate::sql_row::get(
+                    &row,
+                    "provider_trusted_verification_required",
+                )?,
                 project_generation_current: crate::sql_row::get(
                     &row,
                     "project_generation_current",

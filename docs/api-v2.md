@@ -295,13 +295,19 @@ The lookup route uses the common record shape and in-band per-result statuses.
 head and finality fields come from `chain_heads`; indexed progress is the
 `project` phase's most recent completed publication. Readiness also uses that
 phase's lifecycle state, redo marker, and newest per-chain heartbeat in
-`service_heartbeats`. A failed phase or expired heartbeat maps to `stale`; a
-paused, redoing, or missing-heartbeat phase maps to `degraded`. A running phase
-with a completed publication remains eligible for `ready` when its block and
-time lag are within the configured thresholds, its interpreter content hash
-matches this API build, and a same-height publication has the stored head's
-exact block hash. A generation mismatch or running without a completed
-publication is `degraded`. The schema-v2 project phase has no
+`service_heartbeats`. For Ethereum Sepolia, readiness also requires its
+[provider-trusted](glossary.md#verification-level) `verify` phase to be
+`completed` with `quick_synced` evidence and its `ingest` phase to remain
+`completed`. A failed Ingest or Verify, or a completed Verify without that
+evidence, maps to `stale`. An idle, running, paused, or missing Ingest or Verify
+maps to `degraded`. An expired runner heartbeat remains `stale` while either
+required phase is incomplete. Chains without this requirement are unaffected. A
+failed Project or expired heartbeat maps to `stale`; a paused, redoing, or missing-heartbeat Project maps
+to `degraded`. A running Project with a completed publication remains eligible
+for `ready` when its block and time lag are within the configured thresholds,
+its interpreter content hash matches this API build, and a same-height
+publication has the stored head's exact block hash. A generation mismatch or
+running without a completed publication is `degraded`. The schema-v2 project phase has no
 invalidation queue or dead-letter table, so the retained response fields map
 to `pending_invalidation_count=0`,
 `pending_invalidation_count_capped=false`, and `dead_letter_count=0`.

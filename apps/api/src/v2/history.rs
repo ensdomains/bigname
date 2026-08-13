@@ -436,5 +436,7 @@ mod tests {
         );
         assert_eq!(history_event_type("SurfaceBound"), None);
         assert_eq!(history_event_type("PreimageObserved"), None);
+        assert_eq!(history_event_type("MigrationApplied"), None);
+        assert_eq!(history_event_type("ContractDiscovered"), None);
     }
 }

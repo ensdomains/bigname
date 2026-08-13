@@ -29,7 +29,9 @@ in-place change cannot preserve durable state. `phases` then invokes
 persist ingest-through-project output and continuously follow provider heads,
 including reorg-driven downstream redo and canonical-head hydration. Its
 read-only verification phase compares Base's Coinbase-loaded range with dRPC
-through the `48,428,000` ingest seam and compares Ethereum with local reth only
+through the `48,428,000` ingest seam and Ethereum Mainnet with local reth.
+Ethereum Sepolia instead records the
+[provider-trusted](glossary.md#verification-level) durable ingested extent
 through the finalized head. V2, GraphQL, and operational paths consume its
 phase projections and lookup output. Apply append-only SQLx schema-migrations
 through deployment automation; there is no application schema-migration command
@@ -83,6 +85,7 @@ The implemented phases use:
 - `BIGNAME_PHASE_RUNNER_SOURCES`
 - `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS`
 - `BIGNAME_PHASE_RUNNER_INSTANCE_ID`
+- `BIGNAME_PHASE_RUNNER_INTERPRETER_STATE_CACHE_ENTRIES`
 
 `BIGNAME_DATABASE_URL` is the writer credential. Supervised `run` and a
 `verify` redo also require
@@ -95,6 +98,14 @@ directly: startup rejects a writer session that assumes the reader role. A
 reader is accepted only when its PostgreSQL system identifier, database OID,
 and database name match the writer connection. A non-verification redo does
 not require the reader URL.
+
+`BIGNAME_PHASE_RUNNER_INTERPRETER_STATE_CACHE_ENTRIES` bounds the number of
+persisted per-key interpreter values held by each active [interpreter
+session](glossary.md#interpreter-session). It defaults to 65,536 entries. Lower
+values reduce process memory and cause more indexed reads from
+`normalized_events`; zero is valid and forces every required pre-batch value
+through that read path. The setting does not change stored output or the
+[interpreter content hash](glossary.md#interpreter-content-hash).
 
 Point both database URLs at the writer primary. Never point the verification
 URL at a replica, standby, physical basebackup clone, or a pooler that can route
@@ -137,22 +148,72 @@ that role's write authority, and startup rejects it.
 
 Each `BIGNAME_PHASE_RUNNER_SOURCES` entry has the form
 `CHAIN:KEY:KIND:SEED_BASIS:START_BLOCK=URL_ENV`; the named environment variable
-contains the provider URL. Capacity, retry, and polling controls use the
+contains the provider URL. Before Ingest can make its first provider write, the
+runner persists each configured source's cursor row with its kind, seed basis,
+and start block and with empty progress fields. On every chain, changing a
+source's normalized kind after that row exists is a data-integrity error checked
+before Ingest runs. Case-only changes, surrounding whitespace, and
+hyphen/underscore spelling changes are equivalent. Before a runnable Ingest
+phase contacts a provider, each row's seed basis and start block must also match
+the runtime source. A restart that skips an already-completed Ingest phase still
+requires every configured source's persisted key, kind, seed basis, and start
+block to match, and the configured source-key set must exactly match the
+persisted cursor keys. Interpret redo checks the same source-key set before it
+rewrites derived data. Any change to a persisted identity field—source key,
+normalized kind, seed basis, or start block—requires an explicitly reviewed
+reset that removes the cursor and every durable Ingest output that may have come
+from the source, followed by a [full source
+re-walk](glossary.md#re-derivation-boundary); never relabel the row in place.
+Changing only the provider endpoint is allowed because endpoints are not part
+of persisted source identity. Retained raw facts, chain lineage, or header-audit rows block initialization of
+any missing configured source row. Lineage and header rows can remain after a
+range with no watched transactions, receipts, or logs, and none of this output
+identifies its provider. The runner therefore cannot distinguish a safe source
+addition from replacement of the source that supplied it. Use the affected-chain
+wipe and resync under [verification mismatch repair](#verification-mismatch-repair)
+unless a narrower reset procedure has been separately reviewed. An ordinary
+redo is not that reset. Capacity, retry, and polling controls use the
 `BIGNAME_PHASE_RUNNER_*` names exposed by `phase-runner --help`.
 The server Compose file forwards the documented `RETH_DATA_DIR` source and the
 hydration URL map. Its reth overlay bind-mounts `RETH_DATA_DIR` read-only at the
 same container path. Add any differently named provider environment variable
 to the phase-runner service explicitly; `docker compose --env-file` supplies
 interpolation values but does not expose arbitrary variables to a container.
-For production verification, `base-mainnet` must configure its independent RPC
-source with kind `drpc`; that source can record only `cross_checked`, and its
-start block and independent verification extent are fixed at the block
-`48,428,000` Coinbase-to-dRPC ingest seam. A moved source start or verify redo
-above that seam is rejected before redo state is created.
+Base Verify requires exactly one `drpc` reference. Its independent reference
+records `cross_checked`; its start block and independent verification extent
+are fixed at the block `48,428,000` Coinbase-to-dRPC ingest seam. A moved dRPC
+source start or Verify redo above that seam is rejected before redo state is
+created. Base with `reth_db` is also rejected during configuration validation:
+the pinned reader uses reth's Ethereum node type and Ethereum transaction and
+receipt primitives (upstream: .refs/reth/crates/ethereum/node/src/node.rs:L121 @ reth@88505c7f)
+(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L27 @ reth@88505c7f)
+(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L51 @ reth@88505c7f). Bigname does not
+implement a separate OP Stack transaction and receipt reader.
+Base-aware local database verification is tracked by
+[issue #433](https://github.com/ensdomains/bigname/issues/433).
 `ethereum-mainnet` must configure one `reth_db` source; that source records
-`node_checked`. A generic RPC kind is not accepted as Base verification
-authority because it does not identify the ratified independent provider.
-Each completed verification batch logs its actual dRPC request count, including
+`node_checked`. `ethereum-sepolia` must configure exactly one `drpc` intake
+source with `ethereum_head` seed basis and start block zero. Because that dRPC
+is the intake provider, Verify does not select it as a reference. Verify
+validates the durable ingested extent through its finalized marker and records
+`quick_synced` only when that exact source's persisted cursor matches its
+configuration and covers the finalized target. That binding and coverage are
+checked when verification completes, and the returned final block-number/hash
+marker must equal the frozen target before completion is recorded or Live can
+run. A later reorg may orphan the retained cursor tip above that target, but
+the stored parent chain must still reach the exact frozen target hash; a fork
+at or below the target is rejected. The runner validates this exact Sepolia
+source shape before Ingest creates the source cursor or contacts the provider.
+Because that shape selects the provider-trusted verification path, the runner
+always completes Verify before starting Live even if Sepolia is omitted from
+`verify-before-live`. On every runner start, Verify checks the current
+configuration and cursor once against the completion-time target without
+changing the recorded `quick_synced` extent as Live finality moves. Separating
+intake and verification source roles, then upgrading Sepolia to `cross_checked`, is deferred to
+[issue #411](https://github.com/ensdomains/bigname/issues/411). A generic RPC
+kind is not accepted as Base verification authority
+because it does not identify the ratified independent provider.
+Each completed dRPC comparison batch logs its actual request count, including
 transport retries, range-splitting attempts, and target-marker checks. The count
 is log-only: `chain_phase_state` does not persist it. At sweep time, copy every
 structured `INFO` event with

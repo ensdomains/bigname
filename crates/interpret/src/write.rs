@@ -14,12 +14,14 @@ use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::Result;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn batch(
     pool: &PgPool,
     chain_id: &str,
     redo_range: Option<(i64, i64)>,
     prepare_redo: bool,
     complete: bool,
+    expected_orphaning_epoch: i64,
     expected_lineage: &[(i64, String)],
     output: &BatchOutput,
 ) -> Result<u64> {
@@ -27,7 +29,13 @@ pub(crate) async fn batch(
     let mut transaction = pool.begin().await.map_err(|error| {
         crate::InterpretError::database("failed to begin interpret write transaction", error)
     })?;
-    revalidate_canonical_lineage(&mut transaction, chain_id, expected_lineage).await?;
+    revalidate_canonical_lineage(
+        &mut transaction,
+        chain_id,
+        expected_orphaning_epoch,
+        expected_lineage,
+    )
+    .await?;
     if let Some((from_block, to_block)) = redo_range.filter(|_| prepare_redo) {
         prepare_redo_range(&mut transaction, chain_id, from_block, to_block).await?;
     }
@@ -47,8 +55,29 @@ pub(crate) async fn batch(
 async fn revalidate_canonical_lineage(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
+    expected_orphaning_epoch: i64,
     expected: &[(i64, String)],
 ) -> Result<()> {
+    let orphaning_epoch: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(
+             (SELECT lineage_orphaning_epoch FROM chain_heads WHERE chain_id = $1 FOR SHARE),
+             0
+         )",
+    )
+    .bind(chain_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|error| {
+        crate::InterpretError::database(
+            "failed to revalidate interpret lineage-orphaning epoch",
+            error,
+        )
+    })?;
+    if orphaning_epoch != expected_orphaning_epoch {
+        return Err(crate::InterpretError::transient(format!(
+            "interpret lineage changed between input reads and write for chain {chain_id}; retry with reloaded state"
+        )));
+    }
     let block_numbers = expected
         .iter()
         .map(|(number, _)| *number)

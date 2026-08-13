@@ -95,6 +95,7 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
     let mut event_kinds: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     let mut derived = Vec::new();
     let mut burst_reach: BTreeMap<&str, BurstReach> = BTreeMap::new();
+    let mut forced_cache_misses = 0_usize;
     for world in WORLDS {
         let wiring = Wiring::build(world, &checked_in)?;
         let declared = wiring.declared_instances();
@@ -166,6 +167,8 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
                         ));
                     }
                     events += outcome.events;
+                    forced_cache_misses =
+                        forced_cache_misses.saturating_add(outcome.tiny_cache_misses);
                     event_kinds
                         .entry(world.label)
                         .or_default()
@@ -210,6 +213,10 @@ fn generated_interpreter_permutations_hold_identity_and_replay_invariants() -> R
             failures.join("\n\n")
         );
     }
+    if forced_cache_misses == 0 {
+        bail!("permutation lane forced no tiny-cache database reloads");
+    }
+    eprintln!("permutation_lane tiny_cache_misses={forced_cache_misses}");
     // Guards against one world going dark: the other world's events would keep an aggregate count
     // positive while every invariant here passed over empty vectors.
     for (label, events, logs) in &derived {
@@ -477,6 +484,7 @@ struct Outcome {
     subregistry_detaches: usize,
     burst_derivations: [usize; BurstPhase::COUNT],
     artifacts: BatchBoundaryArtifacts,
+    tiny_cache_misses: usize,
 }
 
 fn check(
@@ -541,6 +549,7 @@ fn check(
         subregistry_detaches,
         burst_derivations,
         artifacts: converged.artifacts,
+        tiny_cache_misses: converged.tiny_cache_misses,
     })
 }
 

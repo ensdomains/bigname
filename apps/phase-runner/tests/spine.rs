@@ -103,6 +103,12 @@ async fn phase_transitions_are_legal_and_persisted() -> Result<()> {
         .complete_phase(chain, PhaseName::Live, &PhaseProgress::default())
         .await?;
 
+    let error = store
+        .fail_phase(chain, PhaseName::Project, "late generic failure")
+        .await
+        .expect_err("the general failure path cannot demote a completed Project");
+    assert_eq!(error.kind(), ErrorKind::InvalidTransition);
+
     assert_eq!(
         store
             .start_phase(chain, PhaseName::Project, &RunMode::Normal)
@@ -118,6 +124,86 @@ async fn phase_transitions_are_legal_and_persisted() -> Result<()> {
         .await
         .expect_err("redo transitions must use the runner so prior state can be restored");
     assert_eq!(error.kind(), ErrorKind::Configuration);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn completed_project_cannot_enter_ingest_verify_retained_recovery() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_recovery_marker_collision").await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    let chain_id = "recovery-marker-collision";
+    store.initialize_chain(chain_id).await?;
+    mark_completed(scratch.pool(), chain_id, PhaseName::Ingest, None).await?;
+    mark_completed(
+        scratch.pool(),
+        chain_id,
+        PhaseName::Interpret,
+        Some(phase_runner::INTERPRETER_CONTENT_HASH),
+    )
+    .await?;
+    mark_completed(
+        scratch.pool(),
+        chain_id,
+        PhaseName::Project,
+        Some(phase_runner::INTERPRETER_CONTENT_HASH),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'failed',
+             last_error = 'completed phase validation failed: ordinary project failure',
+             current_block_number = 42, current_block_hash = 'project-block-42',
+             target_block_number = 42, target_block_hash = 'project-block-42',
+             started_at = now(), finished_at = now(), updated_at = now()
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+
+    assert_eq!(
+        store
+            .start_phase(chain_id, PhaseName::Project, &RunMode::Normal)
+            .await?,
+        StartDisposition::Started,
+        "a completed-looking Project must not enter Ingest/Verify retained-completion recovery"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn failure_prefix_without_structural_evidence_cannot_authorize_ingest_recovery() -> Result<()>
+{
+    let scratch = ScratchDatabase::create("phase_runner_recovery_prefix_without_evidence").await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    let chain_id = "recovery-prefix-without-evidence";
+    store.initialize_chain(chain_id).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'failed',
+             last_error = 'completed phase validation failed: text without retained evidence',
+             current_block_number = NULL, current_block_hash = NULL,
+             target_block_number = NULL, target_block_hash = NULL,
+             live_handoff_block_number = NULL, live_handoff_block_hash = NULL,
+             started_at = now(), finished_at = now(), updated_at = now()
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+
+    assert_eq!(
+        store
+            .start_phase(chain_id, PhaseName::Ingest, &RunMode::Normal)
+            .await?,
+        StartDisposition::Started,
+        "the completed-validation prefix cannot replace retained Ingest evidence"
+    );
+    assert_eq!(
+        store.status(chain_id, PhaseName::Ingest).await?,
+        PhaseStatus::Running,
+        "the failed Ingest row must take the ordinary restart path"
+    );
     scratch.cleanup().await
 }
 
@@ -238,7 +324,7 @@ async fn derived_write_refuses_a_recorded_content_hash_mismatch() -> Result<()> 
 async fn runner_writes_transitions_cursors_heads_and_heartbeats() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_writes").await?;
     let chain_id = "write-chain";
-    seed_lineage(scratch.pool(), chain_id, 3).await?;
+    seed_identified_lineage(scratch.pool(), chain_id, 3).await?;
     let heads = HeadMarkers {
         latest: BlockMarker::new(3, format!("{chain_id}-block-3"))?,
         safe: Some(BlockMarker::new(2, format!("{chain_id}-block-2"))?),
@@ -366,6 +452,8 @@ async fn capacity_breach_pauses_and_then_resumes_the_phase() -> Result<()> {
             minimum_free_disk_bytes: 1,
             writable_path: ".".into(),
             poll_interval: Duration::from_millis(1),
+            interpreter_state_cache_entries:
+                bigname_interpret::DEFAULT_INTERPRETER_STATE_CACHE_ENTRIES,
         },
         probe.clone(),
     );
@@ -475,7 +563,7 @@ async fn transient_phase_error_restarts_with_backoff() -> Result<()> {
 #[tokio::test]
 async fn fatal_error_stops_only_its_chain_supervisor() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_isolation").await?;
-    seed_lineage(scratch.pool(), "good-chain", 0).await?;
+    seed_identified_lineage(scratch.pool(), "good-chain", 0).await?;
     let good_live = Arc::new(Notify::new());
     let phases = routing_phase_set(Arc::clone(&good_live))?;
     let runner = Arc::new(runner(
@@ -518,7 +606,7 @@ async fn fatal_error_stops_only_its_chain_supervisor() -> Result<()> {
 #[tokio::test]
 async fn panicking_phase_stops_only_its_chain_supervisor() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_panic_isolation").await?;
-    seed_lineage(scratch.pool(), "good-panic-chain", 0).await?;
+    seed_identified_lineage(scratch.pool(), "good-panic-chain", 0).await?;
     let good_live = Arc::new(Notify::new());
     let panic_trigger = Arc::new(Notify::new());
     let phases = panic_routing_phase_set(Arc::clone(&good_live), panic_trigger)?;
@@ -1813,6 +1901,93 @@ async fn changed_ingest_seed_configuration_fails_loudly() -> Result<()> {
 }
 
 #[tokio::test]
+async fn progress_free_ingest_cursor_rejects_source_kind_change() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_cursor_progress_free_kind").await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    let original = SourceConfig::new(
+        "cursor-kind-chain",
+        "source",
+        "rpc",
+        SeedBasis::EthereumHead,
+        0,
+        "http://source.invalid",
+    )?;
+    store
+        .update_ingest_cursors(&[original], &PhaseProgress::default())
+        .await?;
+    let changed = SourceConfig::new(
+        "cursor-kind-chain",
+        "source",
+        "drpc",
+        SeedBasis::EthereumHead,
+        0,
+        "http://source.invalid",
+    )?;
+    let error = store
+        .update_ingest_cursors(&[changed], &PhaseProgress::default())
+        .await
+        .expect_err("a progress-free cursor still carries immutable source provenance");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(error.to_string().contains("explicit reset"), "{error}");
+
+    let row: (String, i64, Option<i64>) = sqlx::query_as(
+        "SELECT source_kind, next_block_number, last_processed_block_number
+         FROM ingest_cursors
+         WHERE chain_id = 'cursor-kind-chain' AND source_key = 'source'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(row, ("rpc".to_owned(), 0, None));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn interpret_redo_accepts_a_normalized_equivalent_source_kind() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_redo_normalized_source_kind").await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    let chain_id = "redo-normalized-source-kind-chain";
+    store.initialize_chain(chain_id).await?;
+    mark_completed(scratch.pool(), chain_id, PhaseName::Ingest, None).await?;
+    mark_completed(
+        scratch.pool(),
+        chain_id,
+        PhaseName::Interpret,
+        Some(phase_runner::INTERPRETER_CONTENT_HASH),
+    )
+    .await?;
+    set_phase_extent(scratch.pool(), chain_id, PhaseName::Interpret, 1).await?;
+    seed_interpret_redo_presence(scratch.pool(), chain_id, 1).await?;
+    let configured = ChainConfig::new(
+        chain_id,
+        vec![SourceConfig::new(
+            chain_id,
+            "source",
+            "TEST",
+            SeedBasis::EthereumHead,
+            0,
+            "http://source.invalid",
+        )?],
+        false,
+    )?;
+
+    runner(
+        scratch.runner(),
+        PhaseSet::loopback(),
+        available_capacity(),
+        "redo-normalized-source-kind-runner",
+    )?
+    .redo(
+        &configured,
+        RedoPhase::Phase(PhaseName::Interpret),
+        BlockRange::new(0, 1)?,
+        CancellationToken::new(),
+    )
+    .await?;
+
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn verify_phase_records_its_trust_level() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_verify_level").await?;
     let phases = PhaseName::ALL.map(|name| {
@@ -1866,7 +2041,7 @@ async fn verify_phase_records_its_trust_level() -> Result<()> {
 async fn verify_phase_cannot_publish_chain_heads() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_verify_heads").await?;
     let chain_id = "verify-heads-chain";
-    seed_lineage(scratch.pool(), chain_id, 2).await?;
+    seed_identified_lineage(scratch.pool(), chain_id, 2).await?;
     let ingest_heads = HeadMarkers {
         latest: BlockMarker::new(1, format!("{chain_id}-block-1"))?,
         safe: None,
@@ -1959,6 +2134,14 @@ fn chain(chain_id: &str) -> RunnerResult<ChainConfig> {
         )?],
         false,
     )
+}
+
+async fn seed_identified_lineage(pool: &sqlx::PgPool, chain_id: &str, through: i64) -> Result<()> {
+    let configured_chain = chain(chain_id)?;
+    PhaseStore::new(pool.clone())
+        .ensure_ingest_sources(chain_id, &configured_chain.sources)
+        .await?;
+    seed_lineage(pool, chain_id, through).await
 }
 
 fn available_capacity() -> CapacityGuard {
