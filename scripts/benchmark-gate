@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+profile="${BIGNAME_BENCHMARK_CARGO_PROFILE:-release}"
+profile_args=(--release)
+target_dir="release"
+if [ "$profile" = "dev" ]; then
+  profile_args=()
+  target_dir="debug"
+elif [ "$profile" != "release" ]; then
+  profile_args=(--profile "$profile")
+  target_dir="$profile"
+fi
+
+cargo build "${profile_args[@]}" -p bigname-benchmark-gate -p bigname-api
+exec "target/$target_dir/bigname-benchmark-gate" "$@"

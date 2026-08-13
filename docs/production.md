@@ -215,6 +215,9 @@ For hostname/TLS deployments, replace `127.0.0.1` with the public hostname and
 - Use [`runbooks/production-docker.md`](runbooks/production-docker.md) for
   current-host Docker operations, monitoring, pause/resume, and recovery
   checklists.
+- Use the [production-scale benchmark gate](runbooks/benchmark-gate.md) before
+  restoring traffic to a new generation and at every planned re-derivation
+  release.
 - Use host firewall or cloud security groups to allow public `80/tcp` and
   `443/tcp`. Allow `443/udp` when HTTP/3 should be available. Do not publish
   database or execution-node admin ports.

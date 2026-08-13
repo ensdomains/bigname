@@ -1,0 +1,500 @@
+use std::{
+    collections::BTreeMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use anyhow::{Context, Result, ensure};
+use reqwest::{Client, Method};
+use serde::Serialize;
+use serde_json::Value;
+use sqlx::PgPool;
+use tokio::task::JoinSet;
+
+use crate::budgets::{EndpointBudget, GateBudgets};
+
+mod workload;
+use workload::{Corpus, RequestSpec, normalized_base_url, request_variants};
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ApiReport {
+    pub corpus_names: usize,
+    pub corpus_addresses: usize,
+    pub corpus_parents: usize,
+    pub corpus_permission_subjects: usize,
+    pub corpus_primary_names: usize,
+    pub corpus_resolvers: usize,
+    pub endpoints: Vec<EndpointReport>,
+    pub green: bool,
+    pub failures: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct EndpointReport {
+    pub endpoint: String,
+    pub target_qps: u64,
+    pub min_achieved_qps: u64,
+    pub requests: usize,
+    pub successful_requests: usize,
+    pub min_success_percent: f64,
+    pub success_percent: f64,
+    pub achieved_qps: f64,
+    pub target_p50_ms: u64,
+    pub p50_ms: f64,
+    pub target_p95_ms: u64,
+    pub p95_ms: f64,
+    pub target_p99_ms: u64,
+    pub p99_ms: f64,
+    pub request_variants: usize,
+    pub outcomes: BTreeMap<String, usize>,
+    pub green: bool,
+    pub failures: Vec<String>,
+}
+
+#[derive(Debug)]
+struct Sample {
+    elapsed_micros: u128,
+    success: bool,
+    outcome: String,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SeedProbe {
+    populated: bool,
+    cursor_variants: usize,
+}
+
+pub async fn run(pool: &PgPool, api_base_url: &str, budgets: &GateBudgets) -> Result<ApiReport> {
+    let base = normalized_base_url(api_base_url)?;
+    let corpus = Corpus::load(
+        pool,
+        budgets.api_corpus_size,
+        budgets.api_min_specialized_corpus_size,
+    )
+    .await?;
+    let client = Client::builder()
+        .pool_max_idle_per_host((budgets.api_target_qps / 2).clamp(32, 1_024) as usize)
+        .tcp_nodelay(true)
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("failed to build API benchmark client")?;
+
+    let mut endpoint_reports = Vec::with_capacity(budgets.endpoints.len());
+    let mut failures = Vec::new();
+    for endpoint in &budgets.endpoints {
+        let mut requests = request_variants(&base, &corpus, &endpoint.name)?;
+        ensure!(
+            !requests.is_empty(),
+            "endpoint {:?} has no request variants",
+            endpoint.name
+        );
+        let probe = prime_cursor_variants(
+            &client,
+            &endpoint.name,
+            &mut requests,
+            budgets.api_cursor_seed_count,
+        )
+        .await?;
+        ensure!(
+            !budgets.api_require_populated_probes || probe.populated,
+            "endpoint {:?} returned no populated seed response",
+            endpoint.name
+        );
+        ensure!(
+            !budgets.api_require_cursor_variants
+                || !endpoint_requires_cursor(&endpoint.name)
+                || probe.cursor_variants > 0,
+            "endpoint {:?} produced no real continuation cursor",
+            endpoint.name
+        );
+
+        if budgets.api_warmup_seconds > 0 {
+            let _ = execute_window(
+                &client,
+                Arc::from(requests.clone()),
+                budgets.api_target_qps,
+                budgets.api_warmup_seconds,
+            )
+            .await?;
+        }
+        let request_variants = requests.len();
+        let (samples, elapsed) = execute_window(
+            &client,
+            Arc::from(requests),
+            budgets.api_target_qps,
+            budgets.api_duration_seconds,
+        )
+        .await?;
+        let report = build_endpoint_report(endpoint, request_variants, samples, elapsed, budgets);
+        failures.extend(
+            report
+                .failures
+                .iter()
+                .map(|failure| format!("{}: {failure}", endpoint.name)),
+        );
+        endpoint_reports.push(report);
+    }
+
+    Ok(ApiReport {
+        corpus_names: corpus.names.len(),
+        corpus_addresses: corpus.address_names.len(),
+        corpus_parents: corpus.parents.len(),
+        corpus_permission_subjects: corpus.permission_subjects.len(),
+        corpus_primary_names: corpus.primary_names.len(),
+        corpus_resolvers: corpus.resolvers.len(),
+        green: failures.is_empty(),
+        failures,
+        endpoints: endpoint_reports,
+    })
+}
+
+async fn prime_cursor_variants(
+    client: &Client,
+    endpoint: &str,
+    requests: &mut Vec<RequestSpec>,
+    limit: usize,
+) -> Result<SeedProbe> {
+    let seeds = requests.iter().take(limit).cloned().collect::<Vec<_>>();
+    let mut cursors = Vec::new();
+    let mut populated = false;
+    for seed in seeds {
+        let response = send(client, &seed).await?;
+        if !response.status().is_success() {
+            continue;
+        }
+        let body: Value = response
+            .json()
+            .await
+            .context("failed to parse cursor-seed response")?;
+        populated |= response_is_populated(endpoint, &body);
+        cursors.extend(cursor_variants(&seed, &body));
+    }
+    let cursor_variants = cursors.len();
+    requests.extend(cursors);
+    Ok(SeedProbe {
+        populated,
+        cursor_variants,
+    })
+}
+
+fn endpoint_requires_cursor(endpoint: &str) -> bool {
+    matches!(
+        endpoint,
+        "lookup"
+            | "subnames"
+            | "name_history"
+            | "permissions"
+            | "address_names"
+            | "address_history"
+            | "search"
+            | "events"
+            | "resolver"
+    )
+}
+
+fn response_is_populated(endpoint: &str, body: &Value) -> bool {
+    match endpoint {
+        "lookup" => body
+            .get("data")
+            .and_then(Value::as_array)
+            .is_some_and(|results| {
+                results
+                    .iter()
+                    .any(|result| result.get("status").and_then(Value::as_str) == Some("ok"))
+            }),
+        "subnames" | "name_history" | "permissions" | "address_names" | "address_history"
+        | "search" | "events" => body
+            .get("data")
+            .and_then(Value::as_array)
+            .is_some_and(|rows| !rows.is_empty()),
+        "primary_name" => body
+            .pointer("/data/answers")
+            .and_then(Value::as_array)
+            .is_some_and(|answers| {
+                answers
+                    .iter()
+                    .any(|answer| answer.get("status").and_then(Value::as_str) == Some("ok"))
+            }),
+        "resolver" => body
+            .pointer("/data/address")
+            .and_then(Value::as_str)
+            .is_some(),
+        "status" | "name" | "records" | "namespace" => body.get("data").is_some(),
+        _ => false,
+    }
+}
+
+async fn execute_window(
+    client: &Client,
+    requests: Arc<[RequestSpec]>,
+    target_qps: u64,
+    duration_seconds: u64,
+) -> Result<(Vec<Sample>, Duration)> {
+    let total = target_qps.saturating_mul(duration_seconds);
+    let total = usize::try_from(total).context("API request count exceeds platform size")?;
+    let tick = Duration::from_millis(10);
+    let tick_count = duration_seconds.saturating_mul(100);
+    let started = Instant::now();
+    let mut tasks = JoinSet::new();
+    let mut samples = Vec::with_capacity(total);
+    let mut sent = 0usize;
+    for tick_number in 1..=tick_count {
+        let expected_sent = usize::try_from(
+            u64::try_from(total)
+                .unwrap_or(u64::MAX)
+                .saturating_mul(tick_number)
+                / tick_count,
+        )
+        .unwrap_or(total)
+        .min(total);
+        let batch = expected_sent.saturating_sub(sent);
+        for _ in 0..batch {
+            let request = requests[sent % requests.len()].clone();
+            let client = client.clone();
+            tasks.spawn(async move { sample_request(&client, &request).await });
+            sent += 1;
+        }
+        while let Some(joined) = tasks.try_join_next() {
+            samples.push(joined.context("API benchmark request task panicked")?);
+        }
+        tokio::time::sleep_until(
+            tokio::time::Instant::from_std(started)
+                + tick * u32::try_from(tick_number).unwrap_or(u32::MAX),
+        )
+        .await;
+    }
+    while let Some(joined) = tasks.join_next().await {
+        samples.push(joined.context("API benchmark request task panicked")?);
+    }
+    Ok((samples, started.elapsed()))
+}
+
+fn build_endpoint_report(
+    endpoint: &EndpointBudget,
+    request_variants: usize,
+    samples: Vec<Sample>,
+    elapsed: Duration,
+    budgets: &GateBudgets,
+) -> EndpointReport {
+    let requests = samples.len();
+    let successful_requests = samples.iter().filter(|sample| sample.success).count();
+    let success_percent = successful_requests as f64 * 100.0 / requests.max(1) as f64;
+    let achieved_qps = requests as f64 / elapsed.as_secs_f64().max(0.000_001);
+    let mut outcomes = BTreeMap::new();
+    for sample in &samples {
+        *outcomes.entry(sample.outcome.clone()).or_insert(0) += 1;
+    }
+    let mut durations = samples
+        .into_iter()
+        .map(|sample| sample.elapsed_micros)
+        .collect::<Vec<_>>();
+    durations.sort_unstable();
+    let p50_ms = percentile(&durations, 50.0) / 1_000.0;
+    let p95_ms = percentile(&durations, 95.0) / 1_000.0;
+    let p99_ms = percentile(&durations, 99.0) / 1_000.0;
+    let mut failures = Vec::new();
+    if success_percent < budgets.api_min_success_percent {
+        failures.push(format!(
+            "success rate {success_percent:.3}% is below {:.3}%",
+            budgets.api_min_success_percent
+        ));
+    }
+    if achieved_qps < budgets.api_min_achieved_qps as f64 {
+        failures.push(format!(
+            "achieved {achieved_qps:.1} QPS; floor is {}",
+            budgets.api_min_achieved_qps
+        ));
+    }
+    for (name, actual, budget) in [
+        ("p50", p50_ms, endpoint.p50_ms),
+        ("p95", p95_ms, endpoint.p95_ms),
+        ("p99", p99_ms, endpoint.p99_ms),
+    ] {
+        if actual > budget as f64 {
+            failures.push(format!("{name} is {actual:.3}ms; budget is {budget}ms"));
+        }
+    }
+    EndpointReport {
+        endpoint: endpoint.name.clone(),
+        target_qps: budgets.api_target_qps,
+        min_achieved_qps: budgets.api_min_achieved_qps,
+        requests,
+        successful_requests,
+        min_success_percent: budgets.api_min_success_percent,
+        success_percent,
+        achieved_qps,
+        target_p50_ms: endpoint.p50_ms,
+        p50_ms,
+        target_p95_ms: endpoint.p95_ms,
+        p95_ms,
+        target_p99_ms: endpoint.p99_ms,
+        p99_ms,
+        request_variants,
+        outcomes,
+        green: failures.is_empty(),
+        failures,
+    }
+}
+
+fn percentile(sorted_micros: &[u128], percentile: f64) -> f64 {
+    if sorted_micros.is_empty() {
+        return 0.0;
+    }
+    let rank = ((percentile / 100.0) * sorted_micros.len() as f64).ceil() as usize;
+    sorted_micros[rank.saturating_sub(1).min(sorted_micros.len() - 1)] as f64
+}
+
+async fn send(client: &Client, request: &RequestSpec) -> Result<reqwest::Response> {
+    let mut builder = client.request(request.method.clone(), request.url.clone());
+    if let Some(body) = &request.body {
+        builder = builder.json(body);
+    }
+    builder.send().await.context("API benchmark request failed")
+}
+
+async fn sample_request(client: &Client, request: &RequestSpec) -> Sample {
+    let started = Instant::now();
+    let (success, outcome) = match send(client, request).await {
+        Ok(response) => {
+            let status = response.status();
+            match response.bytes().await {
+                Ok(body) => {
+                    let success = status.is_success();
+                    let mut outcome = status.as_u16().to_string();
+                    if !success
+                        && let Ok(body) = serde_json::from_slice::<Value>(&body)
+                        && let Some(code) = body
+                            .pointer("/error/code")
+                            .or_else(|| body.get("code"))
+                            .and_then(Value::as_str)
+                    {
+                        outcome.push(':');
+                        outcome.push_str(code);
+                    }
+                    (success, outcome)
+                }
+                Err(_) => (false, "response_body_error".to_owned()),
+            }
+        }
+        Err(_) => (false, "transport_error".to_owned()),
+    };
+    Sample {
+        elapsed_micros: started.elapsed().as_micros(),
+        success,
+        outcome,
+    }
+}
+
+fn cursor_variants(seed: &RequestSpec, body: &Value) -> Vec<RequestSpec> {
+    if seed.method == Method::POST && seed.url.path().ends_with("/v2/lookup") {
+        let Some(results) = body.get("data").and_then(Value::as_array) else {
+            return Vec::new();
+        };
+        return results
+            .iter()
+            .enumerate()
+            .find_map(|(index, result)| {
+                let cursor = result.pointer("/page/next_cursor")?.as_str()?;
+                let mut resumed = seed.clone();
+                resumed
+                    .body
+                    .as_mut()?
+                    .pointer_mut(&format!("/inputs/{index}"))?
+                    .as_object_mut()?
+                    .insert("cursor".to_owned(), Value::String(cursor.to_owned()));
+                Some(vec![resumed])
+            })
+            .unwrap_or_default();
+    }
+
+    let cursor = body
+        .pointer("/page/next_cursor")
+        .or_else(|| body.pointer("/data/bound_names/page/next_cursor"))
+        .and_then(Value::as_str);
+    let Some(cursor) = cursor else {
+        return Vec::new();
+    };
+    let mut resumed = seed.clone();
+    resumed.url.query_pairs_mut().append_pair("cursor", cursor);
+    vec![resumed]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use workload::{get, post};
+
+    #[test]
+    fn percentile_uses_nearest_rank() {
+        let values = [1, 2, 3, 4, 5];
+        assert_eq!(percentile(&values, 50.0), 3.0);
+        assert_eq!(percentile(&values, 99.0), 5.0);
+    }
+
+    #[test]
+    fn cursor_variants_cover_lookup_and_nested_resolver_pages() {
+        let base = normalized_base_url("http://127.0.0.1:3000").unwrap();
+        let lookup = post(
+            &base,
+            &["v2", "lookup"],
+            json!({"inputs": [{"address": "0x01"}]}),
+        )
+        .unwrap();
+        let resumed = cursor_variants(
+            &lookup,
+            &json!({"data": [{"page": {"next_cursor": "lookup-next"}}]}),
+        );
+        assert_eq!(
+            resumed[0].body.as_ref().unwrap()["inputs"][0]["cursor"],
+            "lookup-next"
+        );
+
+        let resolver = get(&base, &["v2", "resolvers", "1", "0x01"], &[]).unwrap();
+        let resumed = cursor_variants(
+            &resolver,
+            &json!({"data": {"bound_names": {"page": {"next_cursor": "resolver-next"}}}}),
+        );
+        assert_eq!(resumed[0].url.query(), Some("cursor=resolver-next"));
+    }
+
+    #[test]
+    fn production_probe_classifies_populated_rows_and_cursor_routes() {
+        assert!(response_is_populated(
+            "permissions",
+            &json!({"data": [{"address": "0x01"}]})
+        ));
+        assert!(!response_is_populated("permissions", &json!({"data": []})));
+        assert!(response_is_populated(
+            "primary_name",
+            &json!({"data": {"answers": [{"status": "ok"}]}})
+        ));
+        assert!(endpoint_requires_cursor("lookup"));
+        assert!(endpoint_requires_cursor("resolver"));
+        assert!(!endpoint_requires_cursor("primary_name"));
+    }
+
+    #[tokio::test]
+    async fn response_timing_includes_the_complete_body() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n")
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            stream.write_all(b"done").await.unwrap();
+        });
+        let base = normalized_base_url(&format!("http://{address}")).unwrap();
+        let request = get(&base, &["slow"], &[]).unwrap();
+        let sample = sample_request(&Client::new(), &request).await;
+        server.await.unwrap();
+        assert!(sample.success);
+        assert!(sample.elapsed_micros >= 40_000);
+    }
+}
