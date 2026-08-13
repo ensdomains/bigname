@@ -732,6 +732,195 @@ async fn startup_settles_active_phase_for_unconfigured_chain() -> Result<()> {
 }
 
 #[tokio::test]
+async fn unconfigured_settlement_stops_without_writing_after_lock_connection_loss() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_unconfigured_settlement_lock_loss").await?;
+    let removed_chain = "removed-chain-lock-loss";
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(removed_chain).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running', started_at = now(), finished_at = NULL, updated_at = now()
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(removed_chain)
+    .execute(scratch.pool())
+    .await?;
+
+    let mut blocked_row = scratch.pool().begin().await?;
+    sqlx::query(
+        "SELECT phase_name FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'verify' FOR UPDATE",
+    )
+    .bind(removed_chain)
+    .fetch_one(&mut *blocked_row)
+    .await?;
+    let runtime = RuntimeConfig::new(
+        "unconfigured-settlement-lock-loss-runner",
+        vec![chain("retained-chain")?],
+        CapacityConfig::default(),
+        test_timing(),
+    )?;
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let settlement_runner = Arc::new(runner(
+        scratch.runner(),
+        complete_phase_set(None),
+        available_capacity(),
+        "unconfigured-settlement-lock-loss-runner",
+    )?);
+    let mut run = tokio::spawn(async move { settlement_runner.run(&runtime, cancellation).await });
+
+    let lock_pid = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let pid: Option<i32> = sqlx::query_scalar(
+                "SELECT advisory.pid
+                 FROM pg_locks advisory
+                 WHERE advisory.locktype = 'advisory'
+                   AND advisory.granted
+                   AND advisory.database = (
+                       SELECT oid FROM pg_database WHERE datname = current_database()
+                   )
+                   AND EXISTS (
+                       SELECT 1 FROM pg_stat_activity activity
+                       WHERE activity.datname = current_database()
+                         AND activity.wait_event_type = 'Lock'
+                         AND activity.query LIKE '%UPDATE chain_phase_state%'
+                   )
+                 LIMIT 1",
+            )
+            .fetch_optional(scratch.pool())
+            .await?;
+            if let Some(pid) = pid {
+                return Ok::<i32, anyhow::Error>(pid);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+        .bind(lock_pid)
+        .fetch_one(scratch.pool())
+        .await?;
+    assert!(terminated);
+    blocked_row.rollback().await?;
+
+    let error = tokio::time::timeout(Duration::from_secs(2), &mut run)
+        .await??
+        .expect_err("losing the settlement lock connection must fail startup");
+    assert!(
+        error.to_string().contains("settle stopped phase")
+            || error.to_string().contains("advisory lock"),
+        "{error}"
+    );
+    let state: (String, Option<bool>) = sqlx::query_as(
+        "SELECT phase_status, settled_while_unconfigured
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(removed_chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        state,
+        ("running".to_owned(), None),
+        "a stale settlement attempt must not change the row after losing its lock"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn unconfigured_settlement_refuses_a_phase_changed_after_discovery() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_unconfigured_settlement_revision").await?;
+    let removed_chain = "removed-chain-revision";
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(removed_chain).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running', started_at = now(), finished_at = NULL, updated_at = now()
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(removed_chain)
+    .execute(scratch.pool())
+    .await?;
+
+    let mut blocked_row = scratch.pool().begin().await?;
+    sqlx::query(
+        "SELECT phase_name FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'verify' FOR UPDATE",
+    )
+    .bind(removed_chain)
+    .fetch_one(&mut *blocked_row)
+    .await?;
+    let runtime = RuntimeConfig::new(
+        "unconfigured-settlement-revision-runner",
+        vec![chain("retained-chain")?],
+        CapacityConfig::default(),
+        test_timing(),
+    )?;
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let settlement_runner = Arc::new(runner(
+        scratch.runner(),
+        complete_phase_set(None),
+        available_capacity(),
+        "unconfigured-settlement-revision-runner",
+    )?);
+    let run = tokio::spawn(async move { settlement_runner.run(&runtime, cancellation).await });
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                     SELECT 1 FROM pg_stat_activity
+                     WHERE datname = current_database()
+                       AND wait_event_type = 'Lock'
+                       AND query LIKE '%UPDATE chain_phase_state%'
+                 )",
+            )
+            .fetch_one(scratch.pool())
+            .await?;
+            if waiting {
+                return Ok::<(), anyhow::Error>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET updated_at = updated_at + interval '1 second'
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(removed_chain)
+    .execute(&mut *blocked_row)
+    .await?;
+    blocked_row.commit().await?;
+    let error = run
+        .await?
+        .expect_err("startup must report a phase changed after settlement discovery");
+    assert_eq!(error.kind(), ErrorKind::Transient);
+    assert!(
+        error
+            .to_string()
+            .contains("changed after startup discovery"),
+        "{error}"
+    );
+
+    let state: (String, Option<bool>) = sqlx::query_as(
+        "SELECT phase_status, settled_while_unconfigured
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(removed_chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        state,
+        ("running".to_owned(), None),
+        "settlement must refuse a row changed after the startup scan"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn readding_chain_restarts_ingest_settled_before_handoff() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_readd_partial_ingest").await?;
     let chain_id = "readded-ingest-chain";
@@ -2404,6 +2593,67 @@ async fn ingest_cursor_records_the_distinct_source_target() -> Result<()> {
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(cursor, (2, Some(3), Some(1)));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn missing_mid_run_ingest_cursor_is_not_recreated_over_durable_data() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_missing_mid_run_cursor").await?;
+    let chain_id = "missing-mid-run-cursor-chain";
+    let configured_chain = chain(chain_id)?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    store
+        .ensure_ingest_sources(chain_id, &configured_chain.sources)
+        .await?;
+    assert_eq!(
+        store
+            .start_phase(chain_id, PhaseName::Ingest, &RunMode::Normal)
+            .await?,
+        StartDisposition::Started
+    );
+    seed_lineage(scratch.pool(), chain_id, 1).await?;
+    sqlx::query("DELETE FROM ingest_cursors WHERE chain_id = $1 AND source_key = 'source'")
+        .bind(chain_id)
+        .execute(scratch.pool())
+        .await?;
+
+    let marker = BlockMarker::new(1, format!("{chain_id}-block-1"))?;
+    let error = store
+        .record_ingest_progress(
+            chain_id,
+            &configured_chain.sources,
+            &PhaseProgress {
+                current: Some(marker.clone()),
+                target: Some(marker),
+                ..PhaseProgress::default()
+            },
+        )
+        .await
+        .expect_err("a vanished cursor must not be recreated over durable ingest data");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(error.to_string().contains("durable ingest data"), "{error}");
+    let cursor_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM ingest_cursors WHERE chain_id = $1")
+            .bind(chain_id)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(
+        cursor_count, 0,
+        "the rejected transaction must stay rolled back"
+    );
+    let phase_state: (String, Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT phase_status, current_block_number, target_block_number
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        phase_state,
+        ("running".to_owned(), None, None),
+        "the folded guard must roll back the production phase-state update with the cursor write"
+    );
     scratch.cleanup().await
 }
 

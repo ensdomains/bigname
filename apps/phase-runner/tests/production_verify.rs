@@ -25,7 +25,7 @@ use bigname_ingest::{
 };
 use phase_runner::{
     capacity::CapacityGuard,
-    config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
+    config::{CapacityConfig, ChainConfig, RuntimeConfig, SeedBasis, SourceConfig, TimingConfig},
     database::VerificationDatabase,
     error::{ErrorKind, RunnerError, RunnerResult},
     heads::{BlockMarker, HeadMarkers},
@@ -2249,6 +2249,310 @@ async fn verify_redo_rechecks_the_requested_range_and_persists_its_level() -> Re
 }
 
 #[tokio::test]
+async fn successful_verify_redo_clears_unconfigured_settlement_without_normal_pass() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_redo_clears_settlement").await?;
+    seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
+    seed_ingest_cursor(scratch.pool(), SEPOLIA, "drpc-intake", 8).await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, 8).await?;
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let runner = sepolia_verifier_runner(&scratch, Arc::clone(&live_calls)).await?;
+    let chain = sepolia_chain()?;
+    runner.run_chain(&chain, CancellationToken::new()).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running', started_at = now(), finished_at = NULL, updated_at = now()
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .execute(scratch.pool())
+    .await?;
+
+    let runtime = RuntimeConfig::new(
+        "production-verify-redo-settlement",
+        vec![base_chain(false)?],
+        CapacityConfig::default(),
+        test_timing(),
+    )?;
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    Arc::new(runner.clone()).run(&runtime, cancellation).await?;
+    let settled: (String, Option<bool>) = sqlx::query_as(
+        "SELECT phase_status, settled_while_unconfigured
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(settled, ("completed".to_owned(), Some(true)));
+
+    runner
+        .redo(
+            &chain,
+            RedoPhase::Phase(PhaseName::Verify),
+            BlockRange::new(0, 5)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    let completed: (String, Option<bool>, bool, Option<String>) = sqlx::query_as(
+        "SELECT phase_status, settled_while_unconfigured,
+                redo_in_progress, verification_level
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        completed,
+        (
+            "completed".to_owned(),
+            None,
+            false,
+            Some("quick_synced".to_owned()),
+        ),
+        "successful Verify redo must clear settlement provenance atomically"
+    );
+    let status = bigname_storage::load_phase_indexing_status(scratch.pool()).await?;
+    let sepolia = status
+        .chains
+        .iter()
+        .find(|row| row.chain_id == SEPOLIA)
+        .expect("Sepolia status row");
+    assert!(!sepolia.verify_settled_while_unconfigured);
+
+    drop(runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn verify_redo_finalization_uses_the_phase_lock_connection() -> Result<()> {
+    const FINISH_BLOCK_LOCK_CLASS: i32 = 427;
+    const FINISH_BLOCK_LOCK_ID: i32 = 3;
+    let scratch = ScratchDatabase::create("production_verify_redo_settlement_lock_loss").await?;
+    seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
+    seed_ingest_cursor(scratch.pool(), SEPOLIA, "drpc-intake", 8).await?;
+    seed_completed_spine_prerequisites(scratch.pool(), SEPOLIA, 8).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'completed', verification_level = 'quick_synced',
+             current_block_number = 5, current_block_hash = $2,
+             target_block_number = 5, target_block_hash = $2,
+             settled_while_unconfigured = TRUE,
+             started_at = now(), finished_at = now()
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .bind(block_hash(SEPOLIA, 5))
+    .execute(scratch.pool())
+    .await?;
+    let phases = PhaseSet::new([
+        Arc::new(LoopbackPhase::new(PhaseName::Ingest)) as Arc<dyn Phase>,
+        Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(FixedQuickSyncVerifyPhase),
+        Arc::new(LoopbackPhase::new(PhaseName::Live)),
+    ])?;
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-verify-redo-settlement-lock-loss",
+        test_timing(),
+    )?;
+    let chain = sepolia_chain()?;
+    sqlx::query(
+        "CREATE FUNCTION test_block_verify_redo_finish() RETURNS trigger
+         LANGUAGE plpgsql AS $$
+         BEGIN
+             IF OLD.chain_id = 'ethereum-sepolia'
+                AND OLD.phase_name = 'verify'
+                AND OLD.redo_in_progress
+                AND NOT NEW.redo_in_progress THEN
+                 PERFORM pg_advisory_lock(427, 3);
+             END IF;
+             RETURN NEW;
+         END
+         $$",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "CREATE TRIGGER test_block_verify_redo_finish
+         BEFORE UPDATE ON chain_phase_state
+         FOR EACH ROW EXECUTE FUNCTION test_block_verify_redo_finish()",
+    )
+    .execute(scratch.pool())
+    .await?;
+    let mut finish_blocker = scratch.pool().acquire().await?;
+    sqlx::query("SELECT pg_advisory_lock($1, $2)")
+        .bind(FINISH_BLOCK_LOCK_CLASS)
+        .bind(FINISH_BLOCK_LOCK_ID)
+        .execute(&mut *finish_blocker)
+        .await?;
+
+    let redo_runner = Arc::new(runner.clone());
+    let mut redo = tokio::spawn(async move {
+        redo_runner
+            .redo(
+                &chain,
+                RedoPhase::Phase(PhaseName::Verify),
+                BlockRange::new(0, 5)?,
+                CancellationToken::new(),
+            )
+            .await
+    });
+    tokio::select! {
+        result = &mut redo => {
+            let result = result?;
+            anyhow::bail!("redo finished before its finalization write was blocked: {result:?}");
+        }
+        waiting = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (
+                         SELECT 1 FROM pg_locks
+                         WHERE locktype = 'advisory'
+                           AND NOT granted
+                           AND classid = 427
+                           AND objid = 3
+                           AND objsubid = 2
+                     )",
+                )
+                .fetch_one(scratch.pool())
+                .await?;
+                if waiting {
+                    return Ok::<(), anyhow::Error>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        }) => waiting??,
+    }
+    let phase_lock_pid: i32 = sqlx::query_scalar(
+        "SELECT pid FROM pg_locks
+         WHERE locktype = 'advisory' AND NOT granted
+           AND classid = 427 AND objid = 3 AND objsubid = 2
+         LIMIT 1",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    let finalizer_holds_phase_lock: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM pg_locks
+             WHERE pid = $1
+               AND locktype = 'advisory'
+               AND granted
+         )",
+    )
+    .bind(phase_lock_pid)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(
+        finalizer_holds_phase_lock,
+        "the blocked redo finalizer must be the advisory-lock owner"
+    );
+    let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1, $2)")
+        .bind(FINISH_BLOCK_LOCK_CLASS)
+        .bind(FINISH_BLOCK_LOCK_ID)
+        .fetch_one(&mut *finish_blocker)
+        .await?;
+    assert!(unlocked);
+    drop(finish_blocker);
+
+    tokio::time::timeout(Duration::from_secs(2), redo).await???;
+    let completed: (String, Option<bool>, bool) = sqlx::query_as(
+        "SELECT phase_status, settled_while_unconfigured, redo_in_progress
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        completed,
+        ("completed".to_owned(), None, false),
+        "successful finalization on the lock connection must clear the marker atomically"
+    );
+
+    drop(runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn partial_verify_redo_keeps_unconfigured_settlement_until_normal_resume() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_partial_redo_settlement").await?;
+    seed_incomplete_completed_verify(scratch.pool(), true).await?;
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let runner = sepolia_verifier_runner(&scratch, Arc::clone(&live_calls)).await?;
+    let chain = sepolia_chain()?;
+
+    runner
+        .redo(
+            &chain,
+            RedoPhase::Phase(PhaseName::Verify),
+            BlockRange::new(0, 4)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    let after_partial_redo: (String, Option<bool>, i64, i64, Option<String>) = sqlx::query_as(
+        "SELECT phase_status, settled_while_unconfigured,
+                    current_block_number, target_block_number, verification_level
+             FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        after_partial_redo,
+        (
+            "completed".to_owned(),
+            Some(true),
+            4,
+            5,
+            Some("quick_synced".to_owned()),
+        ),
+        "redoing an already-processed prefix must retain evidence that Verify is incomplete"
+    );
+    let status_after_partial_redo =
+        bigname_storage::load_phase_indexing_status(scratch.pool()).await?;
+    let sepolia_after_partial_redo = status_after_partial_redo
+        .chains
+        .iter()
+        .find(|row| row.chain_id == SEPOLIA)
+        .expect("Sepolia status row after partial redo");
+    assert!(sepolia_after_partial_redo.verify_settled_while_unconfigured);
+
+    runner.run_chain(&chain, CancellationToken::new()).await?;
+    let after_resume: (String, Option<bool>, i64, i64, Option<String>) = sqlx::query_as(
+        "SELECT phase_status, settled_while_unconfigured,
+                current_block_number, target_block_number, verification_level
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(SEPOLIA)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        after_resume,
+        (
+            "completed".to_owned(),
+            None,
+            5,
+            5,
+            Some("quick_synced".to_owned()),
+        ),
+        "the next normal pass must resume Verify and clear settlement evidence only at completion"
+    );
+    assert_eq!(live_calls.load(Ordering::SeqCst), 1);
+    let status_after_resume = bigname_storage::load_phase_indexing_status(scratch.pool()).await?;
+    let sepolia_after_resume = status_after_resume
+        .chains
+        .iter()
+        .find(|row| row.chain_id == SEPOLIA)
+        .expect("Sepolia status row after resume");
+    assert!(!sepolia_after_resume.verify_settled_while_unconfigured);
+
+    drop(runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn sepolia_verify_redo_rejects_an_extra_persisted_ingest_source() -> Result<()> {
     let scratch = ScratchDatabase::create("production_verify_redo_extra_ingest_source").await?;
     seed_lineage_and_heads(scratch.pool(), SEPOLIA, 8, 7, 5).await?;
@@ -2951,6 +3255,26 @@ impl Phase for HeadFollowingLivePhase {
 
 struct ClaimingVerifyPhase {
     level: VerificationLevel,
+}
+
+struct FixedQuickSyncVerifyPhase;
+
+impl Phase for FixedQuickSyncVerifyPhase {
+    fn name(&self) -> PhaseName {
+        PhaseName::Verify
+    }
+
+    fn run_batch(&self, _context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            let marker = BlockMarker::new(5, block_hash(SEPOLIA, 5))?;
+            Ok(PhaseBatchOutcome::Complete(PhaseProgress {
+                current: Some(marker.clone()),
+                target: Some(marker),
+                verification_level: Some(VerificationLevel::QuickSynced),
+                ..PhaseProgress::default()
+            }))
+        })
+    }
 }
 
 impl Phase for ClaimingVerifyPhase {

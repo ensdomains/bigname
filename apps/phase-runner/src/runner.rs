@@ -372,6 +372,7 @@ impl PhaseRunner {
             if let Some(session) = redo_session {
                 return finish_failed_redo_start(
                     &self.store,
+                    phase_lock.connection(),
                     &chain.chain_id,
                     phase_name,
                     session,
@@ -407,7 +408,13 @@ impl PhaseRunner {
             phase_lock.check_alive().await?;
             let restore = self
                 .store
-                .finish_redo(&chain.chain_id, phase_name, session, redo_outcome(&result))
+                .finish_redo(
+                    phase_lock.connection(),
+                    &chain.chain_id,
+                    phase_name,
+                    session,
+                    redo_outcome(&result),
+                )
                 .await;
             return match (result, restore) {
                 (Ok(_), Ok(())) => Ok(()),
@@ -422,7 +429,12 @@ impl PhaseRunner {
             Ok(PhaseLoopResult::Completed(progress)) => {
                 phase_lock.check_alive().await?;
                 self.store
-                    .complete_phase(&chain.chain_id, phase_name, &progress)
+                    .complete_phase_on_connection(
+                        phase_lock.connection(),
+                        &chain.chain_id,
+                        phase_name,
+                        &progress,
+                    )
                     .await
             }
             Ok(PhaseLoopResult::Cancelled) => {

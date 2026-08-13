@@ -1,4 +1,4 @@
-use sqlx::PgPool;
+use sqlx::{Connection, PgConnection, PgPool};
 
 use crate::{
     config::SourceConfig,
@@ -350,7 +350,7 @@ async fn require_full_hash_redo(
 }
 
 pub(crate) async fn finish(
-    pool: &PgPool,
+    lock_connection: &mut PgConnection,
     chain_id: &str,
     phase: PhaseName,
     session: RedoSession,
@@ -389,7 +389,7 @@ pub(crate) async fn finish(
             .bind(crate::redo_stamp::REQUIRED_REDO_PREFIX)
             .bind(crate::redo_stamp::REQUIRED_REDO_ACTIVE_PREFIX)
             .bind(crate::redo_stamp::required_redo_owner_pattern())
-            .execute(pool)
+            .execute(&mut *lock_connection)
             .await
             .map_err(|database_error| {
                 RunnerError::database(
@@ -436,7 +436,7 @@ pub(crate) async fn finish(
         previous.target_block_hash.as_deref(),
         progress.target.as_ref(),
     );
-    let mut transaction = pool.begin().await.map_err(|error| {
+    let mut transaction = lock_connection.begin().await.map_err(|error| {
         RunnerError::database(
             format!("failed to begin redo completion for chain {chain_id} phase {phase}"),
             error,
@@ -502,6 +502,7 @@ pub(crate) async fn finish(
         UPDATE chain_phase_state
         SET phase_status = CASE WHEN $15 THEN 'failed' ELSE $3 END,
             verification_level = $4,
+            settled_while_unconfigured = CASE WHEN phase_name = 'verify' AND NOT $15 AND $4 IS NOT NULL AND $5 IS NOT NULL AND $7 IS NOT NULL AND $5 = $7 AND $6 IS NOT NULL AND $8 IS NOT NULL AND $6 = $8 THEN NULL ELSE settled_while_unconfigured END,
             current_block_number = $5,
             current_block_hash = $6,
             target_block_number = $7,

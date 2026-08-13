@@ -33,6 +33,7 @@ pub mod state;
 mod state_heartbeat;
 mod state_ingest_progress;
 mod state_persistence;
+mod state_settlement;
 mod supervisor;
 mod transitions;
 mod verify_compare;

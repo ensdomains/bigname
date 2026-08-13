@@ -5,7 +5,7 @@ use tracing::info;
 
 use crate::{
     config::{ChainConfig, RuntimeConfig},
-    error::RunnerResult,
+    error::{RunnerError, RunnerResult},
     phase::{PhaseName, RunMode},
     phase_lock::PhaseLock,
 };
@@ -28,13 +28,21 @@ impl PhaseRunner {
             .iter()
             .map(|chain| chain.chain_id.as_str())
             .collect::<BTreeSet<_>>();
-        for (chain_id, phase) in self.store.active_normal_phases().await? {
+        for (chain_id, phase, observed_updated_at) in self.store.active_normal_phases().await? {
             if configured.contains(chain_id.as_str()) {
                 continue;
             }
-            let phase_lock =
+            let mut phase_lock =
                 PhaseLock::acquire(self.database.connect_options(), &chain_id, phase).await?;
-            let result = self.store.complete_stopped_phase(&chain_id, phase).await;
+            let result = self
+                .store
+                .complete_unconfigured_phase(
+                    phase_lock.connection(),
+                    &chain_id,
+                    phase,
+                    observed_updated_at,
+                )
+                .await;
             let release = phase_lock.release().await;
             let settled = match (result, release) {
                 (Ok(settled), Ok(())) => settled,
@@ -52,6 +60,10 @@ impl PhaseRunner {
                     phase = %phase,
                     "settled active phase for unconfigured chain during startup"
                 );
+            } else {
+                return Err(RunnerError::transient(format!(
+                    "refused to settle chain {chain_id} phase {phase} because its state changed after startup discovery; retry startup"
+                )));
             }
         }
         Ok(())

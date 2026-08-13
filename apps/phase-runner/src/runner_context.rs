@@ -87,7 +87,20 @@ impl PhaseRunner {
             if recovering {
                 phase_lock.check_alive().await?;
                 self.store
-                    .complete_revalidated_phase(&chain.chain_id, phase_name)
+                    .complete_revalidated_phase(
+                        phase_lock.connection(),
+                        &chain.chain_id,
+                        phase_name,
+                    )
+                    .await?;
+            } else {
+                phase_lock.check_alive().await?;
+                self.store
+                    .clear_unconfigured_settlement(
+                        phase_lock.connection(),
+                        &chain.chain_id,
+                        phase_name,
+                    )
                     .await?;
             }
             Ok(())

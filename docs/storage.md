@@ -132,6 +132,26 @@ before that connection failed, the next start reads the durable phase state
 again. An unlock or connection-close error after an acknowledged update is also
 reported.
 
+Startup settlement for a chain absent from runtime configuration records
+`settled_while_unconfigured = true` only on its Verify row. This nullable
+marker distinguishes an incomplete row deliberately changed to `completed`
+during chain removal from an ordinary completed row whose retained evidence is
+damaged. Settlement requires the row's `updated_at` revision to remain exactly
+the one observed by the startup scan; if it changes before the locked update,
+startup reports a transient error and its retry scans the durable state again.
+When that chain is configured again, incomplete Verify evidence with the marker
+resumes normal verification; the same incomplete row with a NULL marker follows
+completed-evidence validation and is recorded as failed with its diagnosis.
+Existing rows remain NULL and therefore take the latter path. Only
+unconfigured-chain startup settlement writes the marker. It remains present
+through a resumed attempt or retry, then successful completed-evidence
+revalidation, a successful Verify redo that leaves matching current and target
+block evidence, or genuine normal Verify completion clears it so the recovered
+row is indistinguishable from an ordinary completion. These clearing writes use
+the phase advisory-lock connection, so losing phase ownership aborts the write.
+While the marker is present, Ethereum Sepolia is not eligible for `ready` on the
+status endpoint.
+
 ### ENSv1→ENSv2 correlation visibility
 
 The slice-1 ENSv1→ENSv2 intake persists the

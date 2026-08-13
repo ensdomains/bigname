@@ -1,6 +1,6 @@
 use std::{fmt, str::FromStr};
 
-use sqlx::PgPool;
+use sqlx::{Connection, PgConnection, PgPool};
 
 use crate::{
     config::SourceConfig,
@@ -10,7 +10,8 @@ use crate::{
     redo_state::{self, RedoOutcome, RedoSession},
     state_ingest_progress::{update_ingest_cursors, update_ingest_progress},
     state_persistence::{
-        load_phase_resume, load_redo_resume, update_progress, update_redo_progress,
+        load_phase_resume, load_redo_resume, update_progress, update_progress_in_transaction,
+        update_redo_progress,
     },
     transitions::{invalid_transition, lock_chain_phase_state, require_start, row_for},
 };
@@ -258,12 +259,13 @@ impl PhaseStore {
 
     pub(crate) async fn finish_redo(
         &self,
+        lock_connection: &mut PgConnection,
         chain_id: &str,
         phase: PhaseName,
         session: RedoSession,
         outcome: RedoOutcome<'_>,
     ) -> RunnerResult<()> {
-        redo_state::finish(&self.pool, chain_id, phase, session, outcome).await
+        redo_state::finish(lock_connection, chain_id, phase, session, outcome).await
     }
 
     pub(crate) async fn required_redo_range(
@@ -339,7 +341,31 @@ impl PhaseStore {
         phase: PhaseName,
         progress: &PhaseProgress,
     ) -> RunnerResult<()> {
-        let current = self.status(chain_id, phase).await?;
+        let mut connection = self.pool.acquire().await.map_err(|error| {
+            RunnerError::database(
+                format!("failed to acquire completion connection for {chain_id} {phase}"),
+                error,
+            )
+        })?;
+        self.complete_phase_on_connection(&mut connection, chain_id, phase, progress)
+            .await
+    }
+
+    pub(crate) async fn complete_phase_on_connection(
+        &self,
+        lock_connection: &mut PgConnection,
+        chain_id: &str,
+        phase: PhaseName,
+        progress: &PhaseProgress,
+    ) -> RunnerResult<()> {
+        let mut transaction = lock_connection.begin().await.map_err(|error| {
+            RunnerError::database(
+                format!("failed to begin completion for chain {chain_id} phase {phase}"),
+                error,
+            )
+        })?;
+        let rows = lock_chain_phase_state(&mut transaction, chain_id).await?;
+        let current = row_for(&rows, phase)?.status()?;
         if !current.can_transition_to(PhaseStatus::Completed, false) {
             return Err(invalid_transition(
                 chain_id,
@@ -349,72 +375,20 @@ impl PhaseStore {
             ));
         }
         crate::state_persistence::validate_progress(phase, progress, true)?;
-        update_progress(
-            &self.pool,
+        update_progress_in_transaction(
+            &mut transaction,
             chain_id,
             phase,
             progress,
             "phase_status = 'completed', finished_at = now(), updated_at = now()",
         )
-        .await
-    }
-
-    pub(crate) async fn active_normal_phases(&self) -> RunnerResult<Vec<(String, PhaseName)>> {
-        let rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT chain_id, phase_name
-             FROM chain_phase_state
-             WHERE phase_status IN ('running', 'paused')
-               AND NOT redo_in_progress
-             ORDER BY chain_id, phase_name",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| {
-            RunnerError::database("failed to load active normal phase state", error)
-        })?;
-        rows.into_iter()
-            .map(|(chain_id, phase)| Ok((chain_id, phase.parse()?)))
-            .collect()
-    }
-
-    pub(crate) async fn complete_stopped_phase(
-        &self,
-        chain_id: &str,
-        phase: PhaseName,
-    ) -> RunnerResult<bool> {
-        sqlx::query(
-            "UPDATE chain_phase_state
-             SET phase_status = 'completed', last_error = NULL,
-                 live_handoff_block_number = CASE
-                     WHEN phase_name = 'ingest' THEN NULL
-                     ELSE live_handoff_block_number
-                 END,
-                 live_handoff_block_hash = CASE
-                     WHEN phase_name = 'ingest' THEN NULL
-                     ELSE live_handoff_block_hash
-                 END,
-                 finished_at = now(), updated_at = now()
-             WHERE chain_id = $1 AND phase_name = $2
-               AND phase_status IN ('running', 'paused')
-               AND NOT redo_in_progress",
-        )
-        .bind(chain_id)
-        .bind(phase.as_str())
-        .execute(&self.pool)
-        .await
-        .map(|result| result.rows_affected() == 1)
-        .map_err(|error| {
+        .await?;
+        transaction.commit().await.map_err(|error| {
             RunnerError::database(
-                format!("failed to complete stopped phase {phase} for chain {chain_id}"),
+                format!("failed to commit completion for chain {chain_id} phase {phase}"),
                 error,
             )
         })
-    }
-
-    pub(crate) async fn complete_stopped_live(&self, chain_id: &str) -> RunnerResult<()> {
-        self.complete_stopped_phase(chain_id, PhaseName::Live)
-            .await
-            .map(|_| ())
     }
 
     pub async fn fail_phase(

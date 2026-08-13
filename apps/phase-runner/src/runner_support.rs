@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+use sqlx::PgConnection;
+
 use crate::{
     config::TimingConfig,
     database::RunnerDatabase,
@@ -82,13 +84,20 @@ pub(crate) async fn record_live_mismatch_with_lock(
 
 pub(crate) async fn finish_failed_redo_start(
     store: &PhaseStore,
+    lock_connection: &mut PgConnection,
     chain_id: &str,
     phase: PhaseName,
     session: RedoSession,
     error: RunnerError,
 ) -> RunnerResult<()> {
     match store
-        .finish_redo(chain_id, phase, session, RedoOutcome::Failed(&error))
+        .finish_redo(
+            lock_connection,
+            chain_id,
+            phase,
+            session,
+            RedoOutcome::Failed(&error),
+        )
         .await
     {
         Ok(()) => Err(error),
