@@ -20,7 +20,9 @@ fn metric_row(phase: &str) -> PhaseMetricRow {
 
 #[test]
 fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
-    let metrics = PipelineMetrics::new(900)?;
+    let loop_heartbeat = RunnerLoopHeartbeat::default();
+    loop_heartbeat.record_progress("ethereum-mainnet");
+    let metrics = PipelineMetrics::new(900, loop_heartbeat)?;
     metrics.apply_rows(&[metric_row("interpret")])?;
 
     let scrape = metrics.registry.encode()?;
@@ -30,6 +32,7 @@ fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
         "# TYPE phase_runner_phase_status gauge",
         "# TYPE phase_runner_heartbeat_age_seconds gauge",
         "# TYPE phase_runner_heartbeat_stale_threshold_seconds gauge",
+        "# TYPE phase_runner_loop_heartbeat_age_seconds gauge",
         "# TYPE phase_runner_head_lag_blocks gauge",
         "# TYPE phase_runner_reinterpretation_required gauge",
     ] {
@@ -42,7 +45,9 @@ fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
 
 #[test]
 fn updates_failure_freshness_lag_verification_and_redo_signals() -> Result<()> {
-    let metrics = PipelineMetrics::new(900)?;
+    let loop_heartbeat = RunnerLoopHeartbeat::default();
+    loop_heartbeat.record_progress("ethereum-mainnet");
+    let metrics = PipelineMetrics::new(900, loop_heartbeat)?;
     metrics.apply_rows(&[metric_row("interpret")])?;
     assert_eq!(
         metrics
@@ -88,6 +93,13 @@ fn updates_failure_freshness_lag_verification_and_redo_signals() -> Result<()> {
     );
     assert_eq!(
         metrics
+            .loop_heartbeat_age_seconds
+            .with_label_values(&["ethereum-mainnet"])
+            .get(),
+        0
+    );
+    assert_eq!(
+        metrics
             .head_lag_blocks
             .with_label_values(&["ethereum-mainnet", "interpret"])
             .get(),
@@ -125,4 +137,22 @@ fn head_lag_uses_the_observed_provider_target() {
     live.chain_head_block_number = Some(100);
 
     assert_eq!(head_lag(&live), 20);
+}
+
+#[test]
+fn configured_chain_loop_heartbeat_does_not_require_phase_rows() -> Result<()> {
+    let loop_heartbeat = RunnerLoopHeartbeat::default();
+    loop_heartbeat.record_progress("new-chain");
+    let metrics = PipelineMetrics::new(900, loop_heartbeat)?;
+
+    metrics.apply_rows(&[])?;
+
+    assert_eq!(
+        metrics
+            .loop_heartbeat_age_seconds
+            .with_label_values(&["new-chain"])
+            .get(),
+        0
+    );
+    Ok(())
 }

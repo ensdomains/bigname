@@ -116,18 +116,24 @@ it on host loopback by default; `BIGNAME_PHASE_RUNNER_METRICS_HOST` and
 `BIGNAME_PHASE_RUNNER_METRICS_PORT` change only that Compose port mapping. The
 listener serves `GET /metrics`. Every five seconds it reads phase progress,
 heartbeats, verification, unfinished repair work, and the published chain head
-from the runner-owned tables. It does not write metric state to PostgreSQL.
-Missing block positions and heartbeats are exported as `-1`, rather than being
-silently omitted. See the
+from the runner-owned tables. It also reports an in-process heartbeat for the
+runner loop of each configured chain so a stall between phases remains
+observable. It does not write metric state to PostgreSQL. Missing block
+positions and phase heartbeats are exported as `-1`, rather than being silently
+omitted. See the
 [pipeline monitoring runbook](runbooks/pipeline-monitoring.md) for the checked-in
 Prometheus rules and Grafana dashboard.
 
 `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS` is exported for the checked-in
-heartbeat alert. It defaults to 900 seconds. Set it above the slowest healthy
-batch or inter-phase transition observed in the deployment: heartbeats record
-completed work opportunities between batches, not proof that a long batch is
-still executing. The alert then requires the configured age to remain exceeded
-for another two minutes before paging.
+phase and runner-loop heartbeat alerts. It defaults to 900 seconds. Set it
+above the slowest healthy batch or inter-phase transition observed in the
+deployment: heartbeats record completed work opportunities between batches,
+not proof that a long batch is still executing. Rebuild batches during a
+planned [re-derivation boundary](glossary.md#re-derivation-boundary) have
+historically exceeded eight minutes, so calibrate this threshold before the
+full source re-walk rather than after its first false page. The alerts then
+require the configured age to remain exceeded for another two minutes before
+paging.
 
 Point both database URLs at the writer primary. Never point the verification
 URL at a replica, standby, physical basebackup clone, or a pooler that can route

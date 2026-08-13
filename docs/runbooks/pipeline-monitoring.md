@@ -49,7 +49,11 @@ Before enabling paging, set
 `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS` above the slowest healthy
 batch or inter-phase transition measured on this deployment. The checked-in
 default is 900 seconds. The runner writes heartbeats between batches, so a
-lower threshold is not proof that a still-running long batch is stuck.
+single healthy batch longer than 900 seconds will page at the default. Rebuild
+batches during a planned [re-derivation
+boundary](../glossary.md#re-derivation-boundary) have historically exceeded
+eight minutes. Calibrate the threshold before the full source re-walk, not
+after its first false page.
 
 ## Connect Prometheus
 
@@ -116,7 +120,7 @@ is `bigname-phase-runner`, so a later import updates the same dashboard.
 | --- | --- |
 | Phase lifecycle state | The current `idle`, `running`, `paused`, `completed`, or `failed` row for every chain phase. A value of `1` is the active state. |
 | Phase progress | The latest processed block and current target. `-1` means the runner has not recorded that position. |
-| Heartbeat age | Seconds since the newest heartbeat for the chain phase. `-1` means no heartbeat exists. Compare it with the configured stale threshold, which defaults to 900 seconds and must exceed the slowest healthy batch. |
+| Heartbeat age | Seconds since the newest heartbeat for the chain phase, plus the in-process age since the runner loop for each configured chain last crossed a phase or batch boundary. A phase value of `-1` means no database heartbeat exists. Compare both with the configured stale threshold, which defaults to 900 seconds and must exceed the slowest healthy batch or inter-phase transition. |
 | Head lag in blocks | Observed provider target minus the phase's processed block. For Live, the target is the provider head observed at the start of its latest batch. The paging rule applies to Live because historical phases can be far behind during an expected rebuild. |
 | Verification level | The stored `quick_synced`, `cross_checked`, or `node_checked` result. A value of `1` identifies the recorded level. |
 | Repair and reinterpretation state | The active marker and progress for unfinished repair work, plus whether Interpret still needs a repair run because its stored [interpreter content hash](../glossary.md#interpreter-content-hash) differs. Starting the required repair adopts the new hash and clears the requirement gauge; `phase_runner_redo_in_progress` stays at `1` until that work finishes. |
@@ -126,10 +130,13 @@ is `bigname-phase-runner`, so a later import updates the same dashboard.
 
 | Alert | Threshold | Plain-language meaning |
 | --- | --- | --- |
-| `BignamePhaseFailed` | A phase reports `failed` on one rule evaluation. | An error was stored. The runner may be in retry backoff or may have stopped; use the logs and subsequent state to distinguish them. |
+| `BignamePhaseFailed` | A phase reports `failed` on one rule evaluation. | This intentionally trades pages during retryable transient backoff for guaranteed visibility of terminal errors and crash loops. Use the logs and subsequent state to distinguish them. |
 | `BignamePhaseRunnerDown` | The target is not scrapeable for 2 minutes. | The runner process or metrics listener is unavailable. This also covers a single-chain terminal error that ends the process immediately after storing failure state. |
+| `BignamePhaseRunnerHeartbeatThresholdMissing` | The configured heartbeat-threshold series is absent for 2 minutes. | The runner image and rules are incompatible, so the age-based alerts cannot be evaluated safely. |
+| `BignamePhaseRunnerLoopHeartbeatMissing` | The runner is scrapeable and exports the heartbeat threshold, but its runner-loop heartbeat series is absent for 2 minutes. | The runner image predates the loop-liveness rule, so between-phase stalls cannot be evaluated safely. |
 | `BignamePhaseRunnerHeartbeatStale` | A running or capacity-paused phase has no heartbeat, or exceeds `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS` (900 seconds by default), for 2 minutes. | A batch or capacity wait has exceeded the deployment's longest expected heartbeat interval. |
-| `BignamePhaseRunnerHeadLagHigh` | Live processing stays more than 30 blocks behind its observed provider target for 10 minutes. | The chain is persistently falling behind new blocks. |
+| `BignamePhaseRunnerLoopStale` | The runner loop for a configured chain crosses no phase or batch boundary for the heartbeat threshold, plus 2 minutes. | The process is scrapeable, but work for that chain may be wedged while every phase row rests. |
+| `BignamePhaseRunnerHeadLagHigh` | Live lag exceeds 30 blocks and Live is observed running at least once in every 2-minute window for 10 minutes. | The chain is persistently falling behind new blocks; brief completed-state zeroes do not reset the alert, while a failed or resting phase does not keep it active without new running samples. |
 | `BignamePhaseRunnerMetricsRefreshStale` | The database read fails, or the last successful refresh becomes older than 60 seconds, for 2 minutes. | The endpoint is reachable but is serving an old view of pipeline state. |
 
 The two hand-detected failure cases from issue #327 map directly to paging: a
@@ -138,13 +145,29 @@ reachable, or `BignamePhaseRunnerDown` if the process exits; a stalled batch
 that crosses the deployment's configured maximum healthy duration triggers
 `BignamePhaseRunnerHeartbeatStale`.
 
+## Removing a configured chain
+
+Removing a chain from the runner configuration does not rewrite its stored
+phase rows. This is intentional: if its last stored state is `running` or
+`paused`, the exporter continues to report that abandoned state and the phase
+heartbeat alert continues paging as its last heartbeat ages. The in-process
+runner-loop series is emitted only for currently configured chains, so it
+does not keep a properly settled removed chain paging.
+
+Settle a chain before removing it: use the normal runner or reviewed recovery
+procedure until no phase row claims `running` or `paused` and no unfinished
+repair marker remains. If the supported lifecycle cannot reach that state,
+keep the chain configured and escalate to the phase-runner and storage owners
+for a separately reviewed decommission cleanup. Do not update statuses, clear
+repair markers, or delete rows merely to silence an alert.
+
 ## First-response checks
 
 Keep diagnosis read-only until the failure is understood:
 
 ```sh
 curl -fsS http://127.0.0.1:9465/metrics | \
-  grep -E 'phase_runner_(phase_status|heartbeat_age_seconds|head_lag_blocks)'
+  grep -E 'phase_runner_(phase_status|heartbeat_age_seconds|loop_heartbeat_age_seconds|head_lag_blocks)'
 
 docker compose --env-file .env.server \
   -f docker-compose.server.yml \

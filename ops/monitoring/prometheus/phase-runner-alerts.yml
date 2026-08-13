@@ -18,6 +18,40 @@ groups:
           threshold: "Prometheus cannot scrape the runner for 2 minutes."
           meaning: "The runner process or its metrics listener is unavailable."
 
+      - alert: BignamePhaseRunnerHeartbeatThresholdMissing
+        expr: |
+          up{job="bigname-phase-runner"} == 1
+          unless on (job, instance)
+          phase_runner_heartbeat_stale_threshold_seconds{
+            job="bigname-phase-runner"
+          }
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          threshold: "The configured heartbeat threshold metric is absent for 2 minutes."
+          meaning: "The runner image and alert rules are incompatible, so heartbeat-age paging cannot be evaluated safely."
+
+      - alert: BignamePhaseRunnerLoopHeartbeatMissing
+        expr: |
+          (
+            up{job="bigname-phase-runner"} == 1
+            unless on (job, instance)
+            phase_runner_loop_heartbeat_age_seconds{
+              job="bigname-phase-runner"
+            }
+          )
+          and on (job, instance)
+          phase_runner_heartbeat_stale_threshold_seconds{
+            job="bigname-phase-runner"
+          }
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          threshold: "The runner-loop heartbeat metric is absent for 2 minutes."
+          meaning: "The runner image predates the loop-liveness rule, so between-phase stalls cannot be evaluated safely."
+
       - alert: BignamePhaseRunnerHeartbeatStale
         expr: |
           (
@@ -54,19 +88,43 @@ groups:
 
       - alert: BignamePhaseRunnerHeadLagHigh
         expr: |
-          phase_runner_head_lag_blocks{
-            job="bigname-phase-runner",phase="live"
-          } > 30
+          (
+            max_over_time(
+              phase_runner_head_lag_blocks{
+                job="bigname-phase-runner",phase="live"
+              }[2m]
+            ) > 30
+          )
           and on (chain, phase)
-          phase_runner_phase_status{
-            job="bigname-phase-runner",phase="live",status="running"
-          } == 1
+          (
+            max_over_time(
+              phase_runner_phase_status{
+                job="bigname-phase-runner",phase="live",status="running"
+              }[2m]
+            ) == 1
+          )
         for: 10m
         labels:
           severity: page
         annotations:
-          threshold: "Live processing remains more than 30 blocks behind its latest observed provider target for 10 minutes."
+          threshold: "Live lag exceeds 30 blocks and Live is observed running at least once in every 2-minute window for 10 minutes."
           meaning: "The named chain is persistently falling behind new blocks."
+
+      - alert: BignamePhaseRunnerLoopStale
+        expr: |
+          phase_runner_loop_heartbeat_age_seconds{
+            job="bigname-phase-runner"
+          }
+          > on () group_left (threshold_seconds)
+          phase_runner_heartbeat_stale_threshold_seconds{
+            job="bigname-phase-runner"
+          }
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          threshold: "The runner loop for the named chain makes no observable progress for the configured {{ $labels.threshold_seconds }} seconds, plus 2 minutes."
+          meaning: "The runner is scrapeable, but its loop for the named chain is wedged between phase work opportunities."
 
       - alert: BignamePhaseRunnerMetricsRefreshStale
         expr: |

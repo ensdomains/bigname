@@ -16,6 +16,7 @@ use phase_runner::{
     config::{CapacityConfig, ChainConfig, RuntimeConfig, SeedBasis, SourceConfig, TimingConfig},
     error::{ErrorKind, RunnerError, RunnerResult},
     heads::{BlockMarker, HeadMarkers, publish_heads},
+    metrics::RunnerLoopHeartbeat,
     phase::{
         BlockRange, LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName,
         PhaseProgress, PhaseSet, RunMode, SourceProgress, VerificationLevel,
@@ -331,15 +332,25 @@ async fn runner_writes_transitions_cursors_heads_and_heartbeats() -> Result<()> 
         finalized: Some(BlockMarker::new(1, format!("{chain_id}-block-1"))?),
     };
     let phases = complete_phase_set(Some(heads));
+    let loop_heartbeat = RunnerLoopHeartbeat::default();
+    loop_heartbeat.record_progress(chain_id);
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    assert!(
+        loop_heartbeat
+            .age_seconds(chain_id)
+            .is_some_and(|age| age >= 1)
+    );
     let runner = runner(
         scratch.runner(),
         phases,
         available_capacity(),
         "write-runner",
-    )?;
+    )?
+    .with_loop_heartbeat(loop_heartbeat.clone());
     let mut chain = chain(chain_id)?;
     chain.verify_before_live = true;
     runner.run_chain(&chain, CancellationToken::new()).await?;
+    assert_eq!(loop_heartbeat.age_seconds(chain_id), Some(0));
 
     let stored_heads: (i64, String, Option<i64>, Option<i64>) = sqlx::query_as(
         "
@@ -416,6 +427,56 @@ async fn runner_writes_transitions_cursors_heads_and_heartbeats() -> Result<()> 
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(stamped_rows, 5);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn runner_loop_heartbeat_refreshes_across_completed_live_follow_passes() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_live_follow_heartbeat").await?;
+    let chain_id = "live-follow-heartbeat-chain";
+    seed_lineage(scratch.pool(), chain_id, 1).await?;
+    let heads = HeadMarkers {
+        latest: BlockMarker::new(1, format!("{chain_id}-block-1"))?,
+        safe: None,
+        finalized: None,
+    };
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let phases = continuous_complete_phase_set(heads, Arc::clone(&live_calls))?;
+    let loop_heartbeat = RunnerLoopHeartbeat::default();
+    loop_heartbeat.record_progress(chain_id);
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    assert!(
+        loop_heartbeat
+            .age_seconds(chain_id)
+            .is_some_and(|age| age >= 1)
+    );
+
+    let mut timing = test_timing();
+    timing.live_poll_interval = Duration::from_millis(600);
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        available_capacity(),
+        "live-follow-heartbeat-runner",
+        timing,
+    )?
+    .with_loop_heartbeat(loop_heartbeat.clone());
+    let mut chain = chain(chain_id)?;
+    chain.verify_before_live = true;
+    let cancellation = CancellationToken::new();
+    let run_cancellation = cancellation.clone();
+    let task = tokio::spawn(async move { runner.run_chain(&chain, run_cancellation).await });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while live_calls.load(Ordering::SeqCst) < 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(loop_heartbeat.age_seconds(chain_id), Some(0));
+
+    cancellation.cancel();
+    task.await??;
     scratch.cleanup().await
 }
 
@@ -2279,34 +2340,64 @@ fn phase_set_replacing(name: PhaseName, replacement: Arc<dyn Phase>) -> RunnerRe
 }
 
 fn complete_phase_set(ingest_heads: Option<HeadMarkers>) -> PhaseSet {
-    let phases = PhaseName::ALL.map(|name| {
-        let heads = ingest_heads.clone();
-        Arc::new(FunctionPhase {
-            name,
-            handler: Arc::new(move |_| {
-                let progress = match name {
-                    PhaseName::Ingest => {
-                        let marker = heads.as_ref().map(|heads| heads.latest.clone());
-                        PhaseProgress {
-                            current: marker.clone(),
-                            target: marker.clone(),
-                            live_handoff: marker,
-                            heads: heads.clone(),
-                            estimated_write_bytes: 0,
-                            ..PhaseProgress::default()
-                        }
-                    }
-                    PhaseName::Verify => PhaseProgress {
-                        verification_level: Some(VerificationLevel::QuickSynced),
-                        ..PhaseProgress::default()
-                    },
-                    _ => PhaseProgress::default(),
-                };
-                Ok(PhaseBatchOutcome::Complete(progress))
-            }),
-        }) as Arc<dyn Phase>
-    });
+    let phases = PhaseName::ALL.map(|name| complete_phase(name, ingest_heads.clone()));
     PhaseSet::new(phases).expect("phase names are ordered")
+}
+
+fn continuous_complete_phase_set(
+    heads: HeadMarkers,
+    live_calls: Arc<AtomicUsize>,
+) -> RunnerResult<PhaseSet> {
+    let live = Arc::new(FunctionPhase {
+        name: PhaseName::Live,
+        handler: Arc::new(move |context| {
+            live_calls.fetch_add(1, Ordering::SeqCst);
+            let marker = context
+                .available_heads
+                .as_ref()
+                .map(|heads| heads.latest.clone());
+            Ok(PhaseBatchOutcome::Complete(PhaseProgress {
+                current: marker.clone(),
+                target: marker,
+                heads: context.available_heads,
+                ..PhaseProgress::default()
+            }))
+        }),
+    });
+    PhaseSet::with_ingest_interpret_project_and_live(
+        complete_phase(PhaseName::Ingest, Some(heads)),
+        complete_phase(PhaseName::Interpret, None),
+        complete_phase(PhaseName::Project, None),
+        complete_phase(PhaseName::Verify, None),
+        live,
+    )
+}
+
+fn complete_phase(name: PhaseName, heads: Option<HeadMarkers>) -> Arc<dyn Phase> {
+    Arc::new(FunctionPhase {
+        name,
+        handler: Arc::new(move |_| {
+            let progress = match name {
+                PhaseName::Ingest => {
+                    let marker = heads.as_ref().map(|heads| heads.latest.clone());
+                    PhaseProgress {
+                        current: marker.clone(),
+                        target: marker.clone(),
+                        live_handoff: marker,
+                        heads: heads.clone(),
+                        estimated_write_bytes: 0,
+                        ..PhaseProgress::default()
+                    }
+                }
+                PhaseName::Verify => PhaseProgress {
+                    verification_level: Some(VerificationLevel::QuickSynced),
+                    ..PhaseProgress::default()
+                },
+                _ => PhaseProgress::default(),
+            };
+            Ok(PhaseBatchOutcome::Complete(progress))
+        }),
+    })
 }
 
 fn routing_phase_set(good_live: Arc<Notify>) -> RunnerResult<PhaseSet> {

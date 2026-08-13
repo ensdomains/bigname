@@ -1,8 +1,8 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     net::SocketAddr,
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, ensure};
@@ -15,6 +15,43 @@ const PHASE_STATUSES: [&str; 5] = ["idle", "running", "paused", "completed", "fa
 const VERIFICATION_LEVELS: [&str; 3] = ["quick_synced", "cross_checked", "node_checked"];
 const REDO_MODES: [&str; 2] = ["redo", "recompute_flags"];
 
+#[derive(Clone, Default)]
+pub struct RunnerLoopHeartbeat {
+    last_progress: Arc<Mutex<BTreeMap<String, Instant>>>,
+}
+
+impl RunnerLoopHeartbeat {
+    pub fn record_progress(&self, chain: &str) {
+        self.last_progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(chain.to_owned(), Instant::now());
+    }
+
+    pub fn age_seconds(&self, chain: &str) -> Option<i64> {
+        self.last_progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(chain)
+            .map(elapsed_seconds)
+    }
+
+    fn ages_seconds(&self) -> BTreeMap<String, i64> {
+        let last_progress = self
+            .last_progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        last_progress
+            .iter()
+            .map(|(chain, instant)| (chain.clone(), elapsed_seconds(instant)))
+            .collect()
+    }
+}
+
+fn elapsed_seconds(instant: &Instant) -> i64 {
+    i64::try_from(instant.elapsed().as_secs()).unwrap_or(i64::MAX)
+}
+
 #[derive(Clone)]
 struct PipelineMetrics {
     registry: MetricsRegistry,
@@ -22,6 +59,7 @@ struct PipelineMetrics {
     target_block: IntGaugeVec,
     phase_status: IntGaugeVec,
     heartbeat_age_seconds: IntGaugeVec,
+    loop_heartbeat_age_seconds: IntGaugeVec,
     verification_level: IntGaugeVec,
     redo_in_progress: IntGaugeVec,
     redo_mode: IntGaugeVec,
@@ -32,6 +70,7 @@ struct PipelineMetrics {
     head_lag_blocks: IntGaugeVec,
     refresh_success: IntGauge,
     last_refresh_timestamp_seconds: IntGauge,
+    loop_heartbeat: RunnerLoopHeartbeat,
     known: Arc<Mutex<KnownLabels>>,
 }
 
@@ -39,6 +78,7 @@ struct PipelineMetrics {
 struct KnownLabels {
     chains: BTreeSet<String>,
     phases: BTreeSet<(String, String)>,
+    loop_chains: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, FromRow)]
@@ -59,7 +99,7 @@ struct PhaseMetricRow {
 }
 
 impl PipelineMetrics {
-    fn new(heartbeat_stale_after_secs: i64) -> Result<Self> {
+    fn new(heartbeat_stale_after_secs: i64, loop_heartbeat: RunnerLoopHeartbeat) -> Result<Self> {
         ensure!(
             heartbeat_stale_after_secs > 0,
             "heartbeat stale threshold must be positive"
@@ -97,6 +137,11 @@ impl PipelineMetrics {
         heartbeat_stale_threshold_seconds
             .with_label_values(&[&threshold_label])
             .set(heartbeat_stale_after_secs);
+        let loop_heartbeat_age_seconds = registry.int_gauge_vec(
+            "phase_runner_loop_heartbeat_age_seconds",
+            "Seconds since the runner loop for a configured chain last made observable progress.",
+            &["chain"],
+        )?;
         let verification_level = registry.int_gauge_vec(
             "phase_runner_verification_level",
             "Stored verification level as a one-hot gauge.",
@@ -151,6 +196,7 @@ impl PipelineMetrics {
             target_block,
             phase_status,
             heartbeat_age_seconds,
+            loop_heartbeat_age_seconds,
             verification_level,
             redo_in_progress,
             redo_mode,
@@ -161,6 +207,7 @@ impl PipelineMetrics {
             head_lag_blocks,
             refresh_success,
             last_refresh_timestamp_seconds,
+            loop_heartbeat,
             known: Arc::new(Mutex::new(KnownLabels::default())),
         })
     }
@@ -198,6 +245,12 @@ impl PipelineMetrics {
                 .insert((row.chain_id.clone(), row.phase_name.clone()));
             self.apply_row(row);
         }
+        for (chain, age) in self.loop_heartbeat.ages_seconds() {
+            self.loop_heartbeat_age_seconds
+                .with_label_values(&[&chain])
+                .set(age);
+            next.loop_chains.insert(chain);
+        }
 
         let mut known = self
             .known
@@ -208,6 +261,11 @@ impl PipelineMetrics {
         }
         for chain in known.chains.difference(&next.chains) {
             self.remove_chain(chain);
+        }
+        for chain in known.loop_chains.difference(&next.loop_chains) {
+            let _ = self
+                .loop_heartbeat_age_seconds
+                .remove_label_values(&[chain]);
         }
         *known = next;
         Ok(())
@@ -304,8 +362,9 @@ pub async fn start(
     pool: PgPool,
     cancellation: CancellationToken,
     heartbeat_stale_after_secs: i64,
+    loop_heartbeat: RunnerLoopHeartbeat,
 ) -> Result<SocketAddr> {
-    let metrics = PipelineMetrics::new(heartbeat_stale_after_secs)?;
+    let metrics = PipelineMetrics::new(heartbeat_stale_after_secs, loop_heartbeat)?;
     metrics.refresh(&pool).await?;
     let server = MetricsServer::bind(bind_addr, metrics.registry.clone()).await?;
     let local_addr = server.local_addr()?;

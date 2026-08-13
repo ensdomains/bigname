@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use phase_runner::metrics::RunnerLoopHeartbeat;
 use phase_runner::state::PhaseStore;
 use tokio_util::sync::CancellationToken;
 
@@ -22,11 +23,14 @@ async fn endpoint_exports_failed_phase_and_stale_heartbeat_signals() -> Result<(
     seed_metric_state(scratch.pool(), chain).await?;
 
     let cancellation = CancellationToken::new();
+    let loop_heartbeat = RunnerLoopHeartbeat::default();
+    loop_heartbeat.record_progress(chain);
     let address = phase_runner::metrics::start(
         "127.0.0.1:0".parse()?,
         scratch.pool().clone(),
         cancellation.clone(),
         900,
+        loop_heartbeat,
     )
     .await?;
     let response = tokio::task::spawn_blocking(move || scrape(address))
@@ -114,6 +118,14 @@ async fn endpoint_exports_failed_phase_and_stale_heartbeat_signals() -> Result<(
     assert_eq!(
         sample(body, "phase_runner_metrics_refresh_success", &[])?,
         1.0
+    );
+    ensure!(
+        sample(
+            body,
+            "phase_runner_loop_heartbeat_age_seconds",
+            &["chain=\"ethereum-mainnet\""]
+        )? <= 1.0,
+        "the in-process runner-loop heartbeat must be exported"
     );
     assert_eq!(
         sample(

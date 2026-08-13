@@ -130,7 +130,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Seconds since each phase last completed a heartbeat opportunity. The configured paging threshold is plotted alongside the ages and must be set above the slowest expected batch; -1 means no heartbeat exists.",
+      "description": "Seconds since each phase last completed a heartbeat opportunity and since the runner loop for each configured chain last made progress. The configured paging threshold is plotted alongside the ages and must be set above the slowest expected batch; -1 means no phase heartbeat exists yet.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -184,6 +184,13 @@
           "legendFormat": "configured stale threshold ({{threshold_seconds}}s)",
           "range": true,
           "refId": "B"
+        },
+        {
+          "editorMode": "code",
+          "expr": "phase_runner_loop_heartbeat_age_seconds{job=\"bigname-phase-runner\"}",
+          "legendFormat": "{{chain}} / runner loop",
+          "range": true,
+          "refId": "C"
         }
       ],
       "title": "Heartbeat age",
@@ -194,7 +201,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Observed provider target minus each phase's processed block. Live lag above 30 blocks for 10 minutes pages.",
+      "description": "Observed provider target minus each phase's processed block. Live pages when lag exceeds 30 and a running sample appears in every 2-minute window for 10 minutes, so brief batch-completion zeroes do not reset persistent lag while failed or resting phases do not sustain the alert.",
       "fieldConfig": {
         "defaults": {
           "color": {
