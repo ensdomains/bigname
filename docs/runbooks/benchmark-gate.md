@@ -28,6 +28,14 @@ benchmark-harness unit, and the commit-keyed target directory pins every linked
 engine crate to the same clean source tree. Development smoke builds continue
 to honor ambient Cargo target-directory settings.
 
+The commit-keyed directories under `target/benchmark-gate/` and their
+digest-addressed snapshot stores are caches. They are safe to delete entirely
+between runs; the next gate pays one cold rebuild, about one minute on the
+reference host. On a space-constrained host, manually prune directories for
+commits other than the one being gated. The wrapper does not prune them
+automatically because concurrent runs at different commits may still be using
+their own cache directories.
+
 Each report records `rustc_version`, `rustflags`,
 `cargo_encoded_rustflags`, `benchmark_binary_sha256`, and
 `locally_built_api_binary_sha256`. The release wrapper refuses non-empty

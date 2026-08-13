@@ -16,6 +16,7 @@ const REGISTRY: &str = "0x0000000000000000000000000000000000000044";
 const REGISTRY_ROLE: &str = "registry";
 const NORMALIZER: &str = "ensip15@ens-normalize-0.1.1";
 const REGISTRATION_EVENT_FRAGMENT: &str = "event NameRegistered(string name, bytes32 indexed label, address indexed owner, uint256 cost, uint256 expires)";
+// (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L6 @ ens_v1@91c966f)
 const NEW_OWNER_EVENT_FRAGMENT: &str =
     "event NewOwner(bytes32 indexed node, bytes32 indexed label, address owner)";
 const NEW_RESOLVER_EVENT_FRAGMENT: &str =

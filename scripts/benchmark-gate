@@ -87,24 +87,81 @@ snapshot_binary() {
   local name="$2"
   local store
   local temporary
-  local digest
+  local source_digest
+  local copied_digest
+  local installed_digest
   local snapshot
+  if ! source_digest="$(sha256sum -- "$source")"; then
+    echo "failed to hash source binary for $name" >&2
+    exit 1
+  fi
+  source_digest="${source_digest%% *}"
+  if [[ ! "$source_digest" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "source binary for $name produced an invalid SHA-256 digest" >&2
+    exit 1
+  fi
   store="$(dirname "$source")/benchmark-gate-artifacts"
-  mkdir -p "$store"
-  temporary="$(mktemp "$store/.${name}.XXXXXX")"
-  cp -- "$source" "$temporary"
-  chmod 0555 "$temporary"
-  digest="$(sha256sum "$temporary" | awk '{print $1}')"
-  snapshot="$store/${name}-${digest}"
+  mkdir -p "$store" || {
+    echo "failed to create snapshot store for $name" >&2
+    exit 1
+  }
+  temporary="$(mktemp "$store/.${name}.XXXXXX")" || {
+    echo "failed to create temporary snapshot for $name" >&2
+    exit 1
+  }
+  cp -- "$source" "$temporary" || {
+    echo "failed to copy source binary into snapshot for $name" >&2
+    rm -f -- "$temporary" || true
+    exit 1
+  }
+  chmod 0555 "$temporary" || {
+    echo "failed to make temporary snapshot executable for $name" >&2
+    rm -f -- "$temporary" || true
+    exit 1
+  }
+  copied_digest="$(sha256sum -- "$temporary")" || {
+    echo "failed to hash copied snapshot for $name" >&2
+    rm -f -- "$temporary" || true
+    exit 1
+  }
+  copied_digest="${copied_digest%% *}"
+  if [ "$copied_digest" != "$source_digest" ]; then
+    echo "copied snapshot for $name does not match the source binary" >&2
+    rm -f -- "$temporary" || true
+    exit 1
+  fi
+  snapshot="$store/${name}-${source_digest}"
   if [ -e "$snapshot" ]; then
-    if [ "$(sha256sum "$snapshot" | awk '{print $1}')" != "$digest" ]; then
+    installed_digest="$(sha256sum -- "$snapshot")" || {
+      echo "failed to hash existing snapshot for $name" >&2
+      rm -f -- "$temporary" || true
+      exit 1
+    }
+    installed_digest="${installed_digest%% *}"
+    if [ "$installed_digest" != "$source_digest" ]; then
       echo "existing digest-addressed snapshot for $name has unexpected bytes" >&2
-      rm -f -- "$temporary"
+      rm -f -- "$temporary" || true
       exit 1
     fi
-    rm -f -- "$temporary"
+    rm -f -- "$temporary" || {
+      echo "failed to remove redundant temporary snapshot for $name" >&2
+      exit 1
+    }
   else
-    mv -- "$temporary" "$snapshot"
+    mv -- "$temporary" "$snapshot" || {
+      echo "failed to install digest-addressed snapshot for $name" >&2
+      rm -f -- "$temporary" || true
+      exit 1
+    }
+  fi
+  installed_digest="$(sha256sum -- "$snapshot")" || {
+    echo "failed to verify installed snapshot for $name" >&2
+    exit 1
+  }
+  installed_digest="${installed_digest%% *}"
+  if [ "$installed_digest" != "$source_digest" ]; then
+    echo "installed snapshot for $name does not match the source binary" >&2
+    exit 1
   fi
   printf '%s\n' "$snapshot"
 }
