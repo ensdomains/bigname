@@ -2921,6 +2921,88 @@ async fn event_silent_reverse_hydration_bounds_the_rolling_refresh_batch() -> Re
 }
 
 #[tokio::test]
+async fn failed_reverse_hydration_page_keeps_its_place_across_heads() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_live_reverse_hydration_cross_head").await?;
+    seed_branch(scratch.pool(), ETHEREUM, 1, 4, None).await?;
+    seed_cross_head_reverse_hydration_page(scratch.pool()).await?;
+    let rpc = SelectiveFailureHydrationRpc::spawn(1, 251).await?;
+    let hydrator = Hydrator::new(
+        scratch.pool().clone(),
+        ChainRpcUrls::from_entries(&[format!("{ETHEREUM}={}", rpc.endpoint)])?,
+    );
+
+    let mut transient_by_head = Vec::new();
+    for head in 2..=4 {
+        publish(scratch.pool(), ETHEREUM, 1, head, 1, 1).await?;
+        transient_by_head.push(match hydrator.hydrate_canonical_head(ETHEREUM).await {
+            Ok(outcome) => {
+                assert_eq!(outcome.reverse_candidates, 1);
+                false
+            }
+            Err(error) => {
+                assert_eq!(error.kind(), bigname_project::ErrorKind::Transient);
+                true
+            }
+        });
+    }
+
+    assert_eq!(
+        transient_by_head,
+        vec![false, true, false],
+        "the failed group must not re-lead at every new head"
+    );
+
+    let batches = rpc.batches.lock().expect("batch observations").clone();
+    assert_eq!(
+        batches,
+        vec![
+            ObservedHydrationBatch {
+                poisoned: false,
+                call_count: 1,
+                contains_last_row: true,
+            },
+            ObservedHydrationBatch {
+                poisoned: true,
+                call_count: 250,
+                contains_last_row: false,
+            },
+            ObservedHydrationBatch {
+                poisoned: false,
+                call_count: 1,
+                contains_last_row: true,
+            },
+        ],
+        "a failed group must retain its global round-robin position across heads"
+    );
+
+    let failed = load_primary_name_current(
+        scratch.pool(),
+        "0x0000000000000000000000000000000000000001",
+        "ens",
+        "60",
+    )
+    .await?
+    .expect("a failed row keeps its event-derived baseline");
+    assert_eq!(failed.claim_status, PrimaryNameClaimStatus::Unsupported);
+    assert_eq!(failed.raw_claim_name, None);
+
+    let refreshed = load_primary_name_current_snapshot(
+        scratch.pool(),
+        "0x00000000000000000000000000000000000000fb",
+        "ens",
+        "60",
+    )
+    .await?
+    .expect("the waiting row remains readable");
+    assert_eq!(refreshed.row.claim_status, PrimaryNameClaimStatus::Success);
+    assert_eq!(refreshed.row.raw_claim_name.as_deref(), Some("new.eth"));
+    assert_eq!(refreshed.normalized_claim_name.as_deref(), Some("new.eth"));
+
+    rpc.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn failed_reverse_hydration_page_does_not_starve_the_next_rolling_row() -> Result<()> {
     let scratch = ScratchDatabase::create("production_live_reverse_hydration_fairness").await?;
     seed_branch(scratch.pool(), ETHEREUM, 1, 2, None).await?;
@@ -4235,6 +4317,62 @@ async fn seed_old_reverse_hydration_page(pool: &PgPool) -> Result<()> {
     .bind(block_hash(1, 1))
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+async fn seed_cross_head_reverse_hydration_page(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO primary_names_current (
+             address, coin_type, namespace, claim_status, raw_claim_name,
+             claim_name_is_normalized, unsupported_reason, claim_provenance,
+             reverse_hydration_attempted_block_number,
+             reverse_hydration_attempted_block_hash,
+             reverse_hydration_attempt_ordinal
+         )
+         SELECT '0x' || lpad(to_hex(candidate), 40, '0'),
+                '60', 'ens',
+                CASE WHEN candidate = 251 THEN 'success' ELSE 'unsupported' END,
+                CASE WHEN candidate = 251 THEN 'old.eth' ELSE NULL END,
+                candidate = 251,
+                CASE WHEN candidate = 251
+                     THEN NULL
+                     ELSE 'legacy_resolver_does_not_emit_name'
+                END,
+                jsonb_build_object(
+                    'chain_id', $1::text,
+                    'reverse_node', '0x' || lpad(to_hex(candidate), 24, '0') || repeat('cafe', 10),
+                    'resolver_address', $2::text,
+                    'target_block_number', 1,
+                    'target_block_hash', $3::text
+                ) || CASE WHEN candidate = 251 THEN jsonb_build_object(
+                    'canonical_head_multicall_hydration', jsonb_build_object(
+                        'chain_id', $1::text,
+                        'block_number', 1,
+                        'block_hash', $3::text,
+                        'resolver_address', $2::text,
+                        'reverse_node',
+                            '0x' || lpad(to_hex(candidate), 24, '0') || repeat('cafe', 10),
+                        'baseline', jsonb_build_object(
+                            'claim_status', 'unsupported',
+                            'raw_claim_name', NULL,
+                            'claim_name_is_normalized', false,
+                            'unsupported_reason', 'legacy_resolver_does_not_emit_name'
+                        )
+                    )
+                ) ELSE '{}'::jsonb END,
+                1,
+                $3::text,
+                CASE WHEN candidate = 251 THEN 1 ELSE 2 END
+         FROM generate_series(1, 251) candidate",
+    )
+    .bind(ETHEREUM)
+    .bind(REVERSE_RESOLVER)
+    .bind(block_hash(1, 1))
+    .execute(pool)
+    .await?;
+    sqlx::query("SELECT setval('reverse_hydration_attempt_ordinal_seq', 2, true)")
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

@@ -46,6 +46,16 @@ resolves the previous and new registry instances, and expands through the
 indexed registration histories for those instances. It does not scan unrelated
 topology or registration history.
 
+Rows outside an incremental tick's affected scope keep the target block number,
+hash, and timestamp from the last tick that rebuilt them. Readers require each
+stored block hash to remain canonical; they do not require an unaffected row's
+target to equal the latest head, so those rows remain readable. This can
+preserve an older timestamp: when a name's `declared_summary` has neither
+`registration.created_at` nor `history.created_at`, the API derives `created_at`
+from the earliest timestamp in that row's `chain_positions`. Until that name is
+rebuilt, the fallback therefore stays at the timestamp from its last rebuild
+instead of advancing with the chain head.
+
 Wrapper expiry and `.eth` grace transitions read the latest raw fuse word and
 wrapper expiry stored in the affected resource's
 `permissions_current_resource_summary` provenance.[^v1-wrapper-grace-expiry]
@@ -274,25 +284,32 @@ does not create a normalized event or verified result. Provider failure restores
 the event-derived row and keeps Project retryable.
 
 Each hydration tick refreshes every eligible reverse tuple rebuilt by the
-Project delta at that head, then at most 250 additional eligible tuples. The
-rolling selection first separates exact-current-head matches from mismatches,
-then drains the least-recently-attempted equal-priority group in order of oldest
-successful hydration head and stable tuple identity. Every attempted group gets
-a durable head and ordering value, including after provider failure. A same-head
-retry therefore reaches tuples beyond a failed group before it revisits that
-group. These values belong only to Project's rolling hydration selection:
-readers never use them as claim data, and they cannot make a failed provider
-result readable. They persist across transaction commit, process restart, and
-a same-head retry. Rebuilding an affected primary-name tuple clears them with
+Project delta at that head, then at most 250 additional eligible tuples. A tuple
+is attempted at most once at a given head. The rolling selection orders groups
+by their durable attempt order: never-attempted tuples first, then the group
+attempted least recently. Within one group it orders tuples by oldest successful
+hydration head, with missing hydration first, and then by stable tuple identity.
+Every attempted group gets a new durable head and ordering value, including
+after provider failure. Failure removes the
+`canonical_head_multicall_hydration` provenance object that readers require
+before accepting the provider-derived claim, but does not return the group to
+the front; it keeps its place in the global round-robin. A same-head retry
+therefore reaches tuples beyond a failed group, and a new head does not let that
+group repeatedly overtake older waiting groups.
+These values belong only to Project's rolling hydration selection: readers never
+use them as claim data, and they cannot make a failed provider result readable.
+They persist across transaction commit, process restart, same-head retry, and
+head advancement. Rebuilding an affected primary-name tuple clears them with
 the rest of that projection row; the rebuilt tuple is selected immediately from
 the Project delta, so it does not depend on its prior rolling position. The tick
 also restores every newly ineligible delta tuple and at most 250 older
 ineligible hydrated tuples. Thus event-driven changes are visible immediately,
 while event-silent provider values for the remaining corpus are refreshed in
-bounded rolling batches instead of all being polled at every head.
-If a hydration block becomes noncanonical, readers expose the stored event-derived baseline until
-that tuple is refreshed at a readable head. Exact-head mismatches sort before already-refreshed
-tuples, so a same-height fork cannot starve the remaining rolling batch.
+bounded rolling batches instead of all being polled at every head. If a
+hydration block becomes noncanonical, readers expose the stored event-derived
+baseline until that tuple is refreshed at a readable head. A same-height fork
+makes the prior attempt eligible at the replacement hash without changing its
+round-robin position.
 
 Verified ENS/60 primary-name status is computed per request by schema-v2 lookup.
 It requires the declared claim and a matching forward address; tuple presence

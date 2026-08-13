@@ -5036,6 +5036,52 @@ async fn incremental_ticks_match_one_full_rebuild_across_all_eight_serving_table
 }
 
 #[tokio::test]
+async fn narrow_final_tick_matches_full_rebuild_across_all_eight_serving_tables() -> Result<()> {
+    let incremental =
+        ScratchDatabase::create("production_project_narrow_final_equivalence").await?;
+    let full = ScratchDatabase::create("production_project_narrow_final_equivalence_full").await?;
+    for pool in [incremental.pool(), full.pool()] {
+        seed_project_fixture(pool).await?;
+        extend_incremental_equivalence_fixture(pool).await?;
+        extend_equivalence_registrar_transfer_fixture(pool).await?;
+        extend_narrow_final_equivalence_fixture(pool).await?;
+    }
+
+    for target in 1..=10 {
+        let previous = (target > 1).then(|| Marker {
+            number: target - 1,
+            hash: block_hash(CHAIN, target - 1),
+        });
+        run_project(
+            incremental.pool(),
+            CHAIN,
+            previous,
+            RunMode::Normal,
+            target,
+            target,
+        )
+        .await?;
+    }
+    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 10).await?;
+
+    normalize_projection_clocks(incremental.pool()).await?;
+    normalize_projection_clocks(full.pool()).await?;
+    assert_ne!(
+        serving_table_snapshot(incremental.pool()).await?,
+        serving_table_snapshot(full.pool()).await?,
+        "the narrow final tick must leave at least one unscoped row at its prior stamp"
+    );
+    assert_eq!(
+        serving_table_snapshot_without_vintage_stamps(incremental.pool()).await?,
+        serving_table_snapshot_without_vintage_stamps(full.pool()).await?,
+        "narrow incremental Project output diverged semantically from a full rebuild"
+    );
+
+    incremental.cleanup().await?;
+    full.cleanup().await
+}
+
+#[tokio::test]
 async fn topology_staged_sibling_is_not_double_counted_in_resolver_bindings() -> Result<()> {
     let incremental = ScratchDatabase::create("production_project_topology_binding_probe").await?;
     let full = ScratchDatabase::create("production_project_topology_binding_probe_full").await?;
@@ -6015,6 +6061,51 @@ async fn serving_table_snapshot(pool: &PgPool) -> Result<Vec<(String, Value)>> {
     Ok(snapshot)
 }
 
+async fn serving_table_snapshot_without_vintage_stamps(
+    pool: &PgPool,
+) -> Result<Vec<(String, Value)>> {
+    let tables = [
+        ("name_current", "logical_name_id"),
+        (
+            "children_current",
+            "parent_logical_name_id, child_logical_name_id, surface_class",
+        ),
+        ("permissions_current", "resource_id, subject, scope"),
+        ("permissions_current_resource_summary", "resource_id"),
+        (
+            "record_inventory_current",
+            "resource_id, record_version_boundary_key",
+        ),
+        ("resolver_current", "chain_id, resolver_address"),
+        (
+            "address_names_current",
+            "address, logical_name_id, relation",
+        ),
+        ("primary_names_current", "address, coin_type, namespace"),
+    ];
+    let mut snapshot = Vec::with_capacity(tables.len());
+    for (table, order) in tables {
+        let statement = format!(
+            "SELECT COALESCE(jsonb_agg(
+                 (
+                     to_jsonb(row)
+                     - 'chain_positions'
+                     #- '{{canonicality_summary,target_block_number}}'
+                     #- '{{canonicality_summary,target_block_hash}}'
+                     #- '{{claim_provenance,target_block_number}}'
+                     #- '{{claim_provenance,target_block_hash}}'
+                 ) ORDER BY {order}
+             ), '[]'::jsonb)
+             FROM {table} row"
+        );
+        snapshot.push((
+            table.to_owned(),
+            sqlx::query_scalar(&statement).fetch_one(pool).await?,
+        ));
+    }
+    Ok(snapshot)
+}
+
 async fn projection_authority_pair(pool: &PgPool) -> Result<(String, String)> {
     Ok(sqlx::query_as(
         "SELECT
@@ -6140,6 +6231,123 @@ async fn seed_basenames_project_fixture(pool: &PgPool) -> Result<()> {
         json!({}),
     )
     .await?;
+    Ok(())
+}
+
+async fn extend_narrow_final_equivalence_fixture(pool: &PgPool) -> Result<()> {
+    const S1_ADDRESS: &str = "0x0000000000000000000000000000000000000e01";
+    const S2_ADDRESS: &str = "0x0000000000000000000000000000000000000e02";
+
+    for (block, timestamp) in [(9, 7_776_008), (10, 7_776_009)] {
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, parent_hash, block_number,
+                 block_timestamp, canonicality_state
+             ) VALUES ($1, $2, $3, $4, to_timestamp($5), 'canonical')",
+        )
+        .bind(CHAIN)
+        .bind(block_hash(CHAIN, block))
+        .bind(block_hash(CHAIN, block - 1))
+        .bind(block)
+        .bind(timestamp)
+        .execute(pool)
+        .await?;
+    }
+
+    insert_event(
+        pool,
+        CHAIN,
+        9,
+        Some("ens:0xtransfer"),
+        Some(EQUIVALENCE_TRANSFER_RESOURCE),
+        "AliasChanged",
+        "basenames_base_resolver",
+        json!({
+            "resolver":EQUIVALENCE_TRANSFER_RESOLVER,
+            "active":true,
+            "alias_state":"active",
+            "from_name":"transfer.eth",
+            "from_namehash":"0xtransfer",
+            "to_name":"bob.eth",
+            "to_namehash":"0xbob",
+            "to_logical_name_id":"ens:0xbob",
+            "to_resource_id":EQUIVALENCE_BOB_RESOURCE
+        }),
+        json!({"emitting_address":EQUIVALENCE_TRANSFER_RESOLVER}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        10,
+        Some("ens:0xtransfer"),
+        Some(EQUIVALENCE_TRANSFER_RESOURCE),
+        "AliasChanged",
+        "basenames_base_resolver",
+        json!({
+            "resolver":EQUIVALENCE_TRANSFER_RESOLVER,
+            "active":false,
+            "alias_state":"removed",
+            "from_name":"transfer.eth",
+            "from_namehash":"0xtransfer"
+        }),
+        json!({"emitting_address":EQUIVALENCE_TRANSFER_RESOLVER}),
+    )
+    .await?;
+
+    for (block, before, after) in [(9, OWNER, TRANSFER_OWNER), (10, TRANSFER_OWNER, OWNER)] {
+        insert_event(
+            pool,
+            CHAIN,
+            block,
+            Some("ens:0xalice"),
+            Some(RESOURCE),
+            "AuthorityTransferred",
+            "ens_v1_registrar_l1",
+            json!({"owner":after}),
+            json!({}),
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE normalized_events
+             SET before_state = jsonb_build_object('owner', lower($1))
+             WHERE chain_id = $2 AND block_number = $3
+               AND logical_name_id = 'ens:0xalice'
+               AND event_kind = 'AuthorityTransferred'",
+        )
+        .bind(before)
+        .bind(CHAIN)
+        .bind(block)
+        .execute(pool)
+        .await?;
+    }
+
+    for (block, before, after) in [(9, S2_ADDRESS, S1_ADDRESS), (10, S1_ADDRESS, S2_ADDRESS)] {
+        insert_event(
+            pool,
+            CHAIN,
+            block,
+            Some("ens:0xequivalence-parent"),
+            None,
+            "SubregistryChanged",
+            "ens_v2_registry_l1",
+            json!({"subregistry":after}),
+            json!({}),
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE normalized_events
+             SET before_state = jsonb_build_object('subregistry', lower($1))
+             WHERE chain_id = $2 AND block_number = $3
+               AND logical_name_id = 'ens:0xequivalence-parent'
+               AND event_kind = 'SubregistryChanged'",
+        )
+        .bind(before)
+        .bind(CHAIN)
+        .bind(block)
+        .execute(pool)
+        .await?;
+    }
     Ok(())
 }
 

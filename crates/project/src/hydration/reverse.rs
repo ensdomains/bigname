@@ -191,11 +191,6 @@ async fn load_active_candidates(pool: &PgPool, head: &Marker) -> Result<Vec<Reve
                        AND current.claim_provenance ->> 'target_block_hash' = $4, false)
                        AS delta_scoped,
                    COALESCE(
-                       current.claim_provenance -> $5 ->> 'block_number' = $3::text
-                       AND current.claim_provenance -> $5 ->> 'block_hash' = $4,
-                       false
-                   ) AS hydrated_at_head,
-                   COALESCE(
                        current.reverse_hydration_attempted_block_number = $3
                        AND current.reverse_hydration_attempted_block_hash = $4,
                        false
@@ -207,21 +202,15 @@ async fn load_active_candidates(pool: &PgPool, head: &Marker) -> Result<Vec<Reve
               AND current.claim_provenance ->> 'reverse_node' IS NOT NULL
               AND lower(current.claim_provenance ->> 'resolver_address') = ANY($1)
         ), delta_scoped AS (
-            SELECT * FROM eligible WHERE delta_scoped
-        ), rolling_priority AS (
-            SELECT hydrated_at_head,
-                   attempted_at_head,
-                   CASE WHEN attempted_at_head
-                        THEN reverse_hydration_attempt_ordinal
-                   END AS attempt_ordinal
+            SELECT *
             FROM eligible
-            WHERE NOT delta_scoped
+            WHERE delta_scoped AND NOT attempted_at_head
+        ), rolling_priority AS (
+            SELECT reverse_hydration_attempt_ordinal AS attempt_ordinal
+            FROM eligible
+            WHERE NOT delta_scoped AND NOT attempted_at_head
             ORDER BY
-                hydrated_at_head,
-                attempted_at_head,
-                CASE WHEN attempted_at_head
-                     THEN reverse_hydration_attempt_ordinal
-                END NULLS FIRST,
+                reverse_hydration_attempt_ordinal NULLS FIRST,
                 NULLIF(
                     claim_provenance -> $5 ->> 'block_number',
                     ''
@@ -232,13 +221,9 @@ async fn load_active_candidates(pool: &PgPool, head: &Marker) -> Result<Vec<Reve
             SELECT eligible.*
             FROM eligible
             JOIN rolling_priority priority
-              ON priority.hydrated_at_head = eligible.hydrated_at_head
-             AND priority.attempted_at_head = eligible.attempted_at_head
-             AND priority.attempt_ordinal IS NOT DISTINCT FROM
-                 CASE WHEN eligible.attempted_at_head
-                      THEN eligible.reverse_hydration_attempt_ordinal
-                 END
-            WHERE NOT eligible.delta_scoped
+              ON priority.attempt_ordinal IS NOT DISTINCT FROM
+                 eligible.reverse_hydration_attempt_ordinal
+            WHERE NOT eligible.delta_scoped AND NOT eligible.attempted_at_head
             ORDER BY
                 NULLIF(
                     eligible.claim_provenance -> $5 ->> 'block_number',
