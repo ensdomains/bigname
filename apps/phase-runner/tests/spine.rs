@@ -172,6 +172,42 @@ async fn completed_project_cannot_enter_ingest_verify_retained_recovery() -> Res
 }
 
 #[tokio::test]
+async fn failure_prefix_without_structural_evidence_cannot_authorize_ingest_recovery() -> Result<()>
+{
+    let scratch = ScratchDatabase::create("phase_runner_recovery_prefix_without_evidence").await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    let chain_id = "recovery-prefix-without-evidence";
+    store.initialize_chain(chain_id).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'failed',
+             last_error = 'completed phase validation failed: text without retained evidence',
+             current_block_number = NULL, current_block_hash = NULL,
+             target_block_number = NULL, target_block_hash = NULL,
+             live_handoff_block_number = NULL, live_handoff_block_hash = NULL,
+             started_at = now(), finished_at = now(), updated_at = now()
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+
+    assert_eq!(
+        store
+            .start_phase(chain_id, PhaseName::Ingest, &RunMode::Normal)
+            .await?,
+        StartDisposition::Started,
+        "the completed-validation prefix cannot replace retained Ingest evidence"
+    );
+    assert_eq!(
+        store.status(chain_id, PhaseName::Ingest).await?,
+        PhaseStatus::Running,
+        "the failed Ingest row must take the ordinary restart path"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn second_runner_fails_loudly_when_phase_lock_is_held() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_lock").await?;
     let store = PhaseStore::new(scratch.runner().pool().clone());

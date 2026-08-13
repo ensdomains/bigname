@@ -57,17 +57,18 @@ the checks for the retained completion and records the phase `completed` again
 without replaying its completed range. Other failed rows resume their ordinary
 phase work and cannot take this path based only on matching error text.
 At startup, the runner also probes the advisory locks for Interpret, Project,
-and Verify when no explicit redo is active. For a `running` or `paused` row
-whose lock is free, a saved Interpret or Project final checkpoint is recorded
-as `completed`; an earlier checkpoint is marked `failed` and resumes through
-the ordinary phase path. A saved Verify final checkpoint remains `failed`
-until the current verification configuration and retained evidence pass the
-same checks as an already-completed Verify row. A held lock still stops a
-second runner. The state update uses the same database connection that holds
-the lock. If that connection is lost, the runner stops and the next start reads
-the durable phase state again; this covers the case where the client cannot
-tell whether PostgreSQL committed the update before the connection failed. An
-unlock or connection-close error after an acknowledged update is also reported.
+and Verify. A `running` or `paused` row with no explicit redo is resolved only
+while its advisory lock remains held. For such a row, a saved Interpret or
+Project final checkpoint is recorded as `completed`; an earlier checkpoint is
+marked `failed` and resumes through the ordinary phase path. A saved Verify
+final checkpoint remains `failed` until the current verification configuration
+and retained evidence pass the same checks as an already-completed Verify row.
+A held lock still stops a second runner. The state update uses the same database
+connection that holds the lock. If that connection is lost, the runner stops
+and the next start reads the durable phase state again; this covers the case
+where the client cannot tell whether PostgreSQL committed the update before the
+connection failed. An unlock or connection-close error after an acknowledged
+update is also reported.
 After an explicit redo of a demoted Ingest or Verify row succeeds, the row
 still shows `failed` until the next ordinary runner start repeats the retained
 checks and records it `completed`.
