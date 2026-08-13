@@ -28,6 +28,7 @@ use phase_runner::{
         PhaseProgress, PhaseSet,
     },
     runner::PhaseRunner,
+    state::PhaseStore,
     verify_phase::{
         VerificationReferenceFuture, VerificationReferenceProvider, VerificationSource, VerifyPhase,
     },
@@ -524,6 +525,177 @@ async fn cursorless_legacy_raw_facts_require_reset_before_source_initialization(
 }
 
 #[tokio::test]
+async fn completed_ingest_rejects_a_configured_source_without_a_persisted_cursor() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_ingest_completed_missing_cursor").await?;
+    let chain_id = "completed-ingest-source-rotation";
+    seed_completed_ingest(
+        &scratch,
+        SourceConfig::new(
+            chain_id,
+            "original",
+            "rpc",
+            SeedBasis::BaseSeam,
+            0,
+            "https://original.invalid",
+        )?,
+    )
+    .await?;
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let runner = completed_ingest_skip_runner(&scratch, Arc::clone(&live_calls))?;
+    let replacement = ChainConfig::new(
+        chain_id,
+        vec![SourceConfig::new(
+            chain_id,
+            "replacement",
+            "rpc",
+            SeedBasis::BaseSeam,
+            0,
+            "https://replacement.invalid",
+        )?],
+        true,
+    )?;
+
+    let result = runner
+        .run_chain(&replacement, CancellationToken::new())
+        .await;
+    let observed_live_calls = live_calls.load(Ordering::SeqCst);
+
+    drop(runner);
+    scratch.cleanup().await?;
+    let error = result.expect_err("completed Ingest must require every configured source cursor");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(error.to_string().contains("matching cursor"), "{error}");
+    assert_eq!(observed_live_calls, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn completed_ingest_rejects_a_removed_persisted_source_before_downstream_phases() -> Result<()>
+{
+    let scratch = ScratchDatabase::create("production_ingest_completed_removed_source").await?;
+    let chain_id = "completed-ingest-source-removal";
+    let kept = SourceConfig::new(
+        chain_id,
+        "kept",
+        "rpc",
+        SeedBasis::BaseSeam,
+        0,
+        "https://kept.invalid",
+    )?;
+    let removed = SourceConfig::new(
+        chain_id,
+        "removed",
+        "rpc",
+        SeedBasis::BaseSeam,
+        0,
+        "https://removed.invalid",
+    )?;
+    seed_completed_ingest_sources(&scratch, &[kept.clone(), removed]).await?;
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let runner = completed_ingest_skip_runner(&scratch, Arc::clone(&live_calls))?;
+    let reduced = ChainConfig::new(chain_id, vec![kept], true)?;
+
+    let result = runner.run_chain(&reduced, CancellationToken::new()).await;
+    let observed_live_calls = live_calls.load(Ordering::SeqCst);
+
+    drop(runner);
+    scratch.cleanup().await?;
+    let error = result.expect_err("completed Ingest must reject removal of a persisted source");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error.to_string().contains("persisted ingest source keys"),
+        "{error}"
+    );
+    assert_eq!(observed_live_calls, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn completed_ingest_rejects_seed_and_start_drift_before_downstream_phases() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_ingest_completed_seed_drift").await?;
+    let chain_id = "completed-ingest-seed-drift";
+    seed_completed_ingest(
+        &scratch,
+        SourceConfig::new(
+            chain_id,
+            "source",
+            "rpc",
+            SeedBasis::BaseSeam,
+            0,
+            "https://source.invalid",
+        )?,
+    )
+    .await?;
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let runner = completed_ingest_skip_runner(&scratch, Arc::clone(&live_calls))?;
+    let changed = ChainConfig::new(
+        chain_id,
+        vec![SourceConfig::new(
+            chain_id,
+            "source",
+            "rpc",
+            SeedBasis::NewSignatureRange,
+            10,
+            "https://source.invalid",
+        )?],
+        true,
+    )?;
+
+    let result = runner.run_chain(&changed, CancellationToken::new()).await;
+    let observed_live_calls = live_calls.load(Ordering::SeqCst);
+
+    drop(runner);
+    scratch.cleanup().await?;
+    let error = result.expect_err("completed Ingest must revalidate its persisted seed identity");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(error.to_string().contains("seed configuration"), "{error}");
+    assert_eq!(observed_live_calls, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn cursorless_lineage_and_header_audit_require_reset_before_source_initialization()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("production_ingest_cursorless_lineage").await?;
+    let chain_id = "cursorless-lineage-chain";
+    sqlx::raw_sql(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state
+         ) VALUES (
+             'cursorless-lineage-chain', '0xcursorless-lineage', 0,
+             to_timestamp(0), 'canonical'
+         );
+         INSERT INTO chain_header_audit (chain_id, block_hash, state_root)
+         VALUES ('cursorless-lineage-chain', '0xcursorless-lineage', '0xstate-root')",
+    )
+    .execute(scratch.pool())
+    .await?;
+    let store = PhaseStore::new(scratch.pool().clone());
+    let source = SourceConfig::new(
+        chain_id,
+        "source",
+        "drpc",
+        SeedBasis::EthereumHead,
+        0,
+        "https://source.invalid",
+    )?;
+
+    let result = store.ensure_ingest_sources(chain_id, &[source]).await;
+    let cursor_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM ingest_cursors WHERE chain_id = $1")
+            .bind(chain_id)
+            .fetch_one(scratch.pool())
+            .await?;
+
+    scratch.cleanup().await?;
+    let error = result.expect_err("cursorless lineage must remain bound to its original provider");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(error.to_string().contains("durable ingest data"), "{error}");
+    assert_eq!(cursor_count, 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn same_kind_restart_after_first_batch_crash_refetches_and_completes() -> Result<()> {
     let scratch = ScratchDatabase::create("production_ingest_crash_same_kind").await?;
     seed_watch_set(scratch.pool(), SEPOLIA).await?;
@@ -655,6 +827,55 @@ async fn fresh_sources_persist_any_kind_before_ingest_runs() -> Result<()> {
         drop(runner);
         scratch.cleanup().await?;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn fresh_multi_source_initialization_recovers_from_one_empty_persisted_cursor() -> Result<()>
+{
+    let scratch =
+        ScratchDatabase::create("production_ingest_partial_source_initialization").await?;
+    let chain_id = "partial-source-initialization-chain";
+    let sources = vec![
+        SourceConfig::new(
+            chain_id,
+            "first",
+            "rpc",
+            SeedBasis::BaseSeam,
+            0,
+            "https://first.invalid",
+        )?,
+        SourceConfig::new(
+            chain_id,
+            "second",
+            "rpc",
+            SeedBasis::BaseSeam,
+            0,
+            "https://second.invalid",
+        )?,
+    ];
+    let store = PhaseStore::new(scratch.pool().clone());
+    store.initialize_chain(chain_id).await?;
+    sqlx::query(
+        "INSERT INTO ingest_cursors (
+             chain_id, source_key, source_kind, seed_basis,
+             start_block_number, next_block_number
+         ) VALUES ($1, 'first', 'rpc', 'base_seam', 0, 0)",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+
+    store.ensure_ingest_sources(chain_id, &sources).await?;
+    let persisted: Vec<String> = sqlx::query_scalar(
+        "SELECT source_key FROM ingest_cursors WHERE chain_id = $1 ORDER BY source_key",
+    )
+    .bind(chain_id)
+    .fetch_all(scratch.pool())
+    .await?;
+
+    scratch.cleanup().await?;
+    assert_eq!(persisted, vec!["first".to_owned(), "second".to_owned()]);
     Ok(())
 }
 
@@ -1027,6 +1248,54 @@ fn crash_window_runner(
         "production-ingest-crash-window",
         test_timing(),
     )?)
+}
+
+fn completed_ingest_skip_runner(
+    scratch: &ScratchDatabase,
+    live_calls: Arc<AtomicUsize>,
+) -> Result<PhaseRunner> {
+    let phases = PhaseSet::new([
+        Arc::new(UnexpectedPhase::new(PhaseName::Ingest)) as Arc<dyn Phase>,
+        Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
+        Arc::new(LoopbackPhase::new(PhaseName::Project)),
+        Arc::new(LoopbackPhase::new(PhaseName::Verify)),
+        Arc::new(CountingLivePhase { calls: live_calls }),
+    ])?;
+    Ok(PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "production-ingest-completed-skip",
+        test_timing(),
+    )?)
+}
+
+async fn seed_completed_ingest(scratch: &ScratchDatabase, source: SourceConfig) -> Result<()> {
+    seed_completed_ingest_sources(scratch, std::slice::from_ref(&source)).await
+}
+
+async fn seed_completed_ingest_sources(
+    scratch: &ScratchDatabase,
+    sources: &[SourceConfig],
+) -> Result<()> {
+    let store = PhaseStore::new(scratch.pool().clone());
+    let chain_id = &sources[0].chain_id;
+    store.initialize_chain(chain_id).await?;
+    store.ensure_ingest_sources(chain_id, sources).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'completed', current_block_number = 0,
+             current_block_hash = '0xcompleted-ingest', target_block_number = 0,
+             target_block_hash = '0xcompleted-ingest',
+             live_handoff_block_number = 0,
+             live_handoff_block_hash = '0xcompleted-ingest',
+             started_at = now(), finished_at = now()
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+    Ok(())
 }
 
 async fn complete_ingest_runner(

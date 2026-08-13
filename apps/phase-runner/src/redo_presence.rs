@@ -83,10 +83,19 @@ pub(crate) async fn require_interpret_raw_data(
         )));
     }
 
+    let persisted_source_keys: Vec<String> = sqlx::query_scalar(
+        "SELECT source_key FROM ingest_cursors WHERE chain_id = $1 ORDER BY source_key",
+    )
+    .bind(chain_id)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|error| {
+        RunnerError::database(
+            format!("failed to load persisted ingest source keys for chain {chain_id}"),
+            error,
+        )
+    })?;
     for source in sources {
-        if source.start_block_number > range.to {
-            continue;
-        }
         let cursor: Option<(String, String, i64, i64, Option<i64>)> = sqlx::query_as(
             "
             SELECT source_kind, seed_basis, start_block_number, next_block_number,
@@ -128,6 +137,9 @@ pub(crate) async fn require_interpret_raw_data(
                 source.source_key
             )));
         }
+        if source.start_block_number > range.to {
+            continue;
+        }
         let required_from = start.max(range.from);
         let required_to = target.map_or(range.to, |target| target.min(range.to));
         if required_from <= required_to && next <= required_to {
@@ -140,5 +152,6 @@ pub(crate) async fn require_interpret_raw_data(
             )));
         }
     }
+    crate::ingest_cursor_config::validate_source_keys(chain_id, sources, &persisted_source_keys)?;
     Ok(manifest_attestation)
 }

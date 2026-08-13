@@ -112,16 +112,25 @@ kind immutable even while its progress fields are empty. Case-only changes,
 surrounding whitespace, and hyphen/underscore spelling changes are equivalent;
 any other kind change fails before Ingest runs or changes phase progress. Before
 a runnable Ingest phase contacts a provider, the row's seed basis and start block
-must also match the runtime source. A kind change requires an explicitly
-reviewed reset that removes the cursor and every raw fact that may have come from
-that source, followed by a [full source
+must also match the runtime source. A restart that skips an already-completed
+Ingest phase applies the same check to every configured source: its persisted
+key, kind, seed basis, and start block must all still match, and no persisted
+source key may be omitted from configuration. Interpret redo applies that exact
+source-key set check before it rewrites derived data. A change to a persisted
+identity field—source key, normalized kind, seed basis, or start block—requires
+an explicitly reviewed reset that removes the cursor and every durable Ingest
+output that may have come from that source, followed by a [full source
 re-walk](glossary.md#re-derivation-boundary); it is never an in-place cursor
-update. Retained raw facts block creation of any missing configured source row:
-the runner cannot distinguish a safe addition from replacement of the provider
-that supplied those facts, so it treats the facts as unclaimed provider output
-and requires the same reset before Ingest runs. Because retained raw facts do
-not identify which provider supplied them, the checked-in safe procedure is the
-affected-chain wipe and resync in [verification mismatch
+update. Changing only the provider endpoint is allowed because endpoints are
+not persisted source identity. Retained raw facts, chain lineage, or
+header-audit rows block creation
+of any missing configured source row. The lineage and header rows remain even
+when a loaded range contains no watched transactions, receipts, or logs. The
+runner cannot distinguish a safe source addition from replacement of the
+provider that supplied this retained output, so it requires the same reset
+before Ingest runs. Because the retained output does not identify which
+provider supplied it, the checked-in safe procedure is the affected-chain wipe
+and resync in [verification mismatch
 repair](deployment.md#verification-mismatch-repair), not an ordinary redo.
 
 Production source shape is exact: `ethereum-mainnet` has one local Reth DB

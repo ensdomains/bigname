@@ -297,10 +297,11 @@ head and finality fields come from `chain_heads`; indexed progress is the
 phase's lifecycle state, redo marker, and newest per-chain heartbeat in
 `service_heartbeats`. For Ethereum Sepolia, readiness also requires its
 [provider-trusted](glossary.md#verification-level) `verify` phase to be
-`completed`: a failed Verify maps to `stale`, while an idle, running, paused,
-or missing Verify maps to `degraded`. Chains without this requirement are
-unaffected. A failed Project or expired
-heartbeat maps to `stale`; a paused, redoing, or missing-heartbeat Project maps
+`completed` with `quick_synced` evidence. A failed Verify or a completed Verify
+without that evidence maps to `stale`, while an idle, running, paused, or
+missing Verify maps to `degraded`. An expired runner heartbeat remains `stale`
+while Verify is incomplete. Chains without this requirement are unaffected. A
+failed Project or expired heartbeat maps to `stale`; a paused, redoing, or missing-heartbeat Project maps
 to `degraded`. A running Project with a completed publication remains eligible
 for `ready` when its block and time lag are within the configured thresholds,
 its interpreter content hash matches this API build, and a same-height

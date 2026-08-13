@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use sqlx::PgPool;
 
 use crate::{
@@ -7,33 +9,132 @@ use crate::{
 
 type StoredSourceConfig = (String, String, i64);
 
-pub(crate) async fn ensure_all(pool: &PgPool, sources: &[SourceConfig]) -> RunnerResult<()> {
+pub(crate) async fn ensure_all(
+    pool: &PgPool,
+    chain_id: &str,
+    sources: &[SourceConfig],
+) -> RunnerResult<()> {
+    validate_persisted_source_keys(pool, chain_id, sources, true).await?;
     for source in sources {
         let stored = initialize(pool, source).await?;
         validate(source, stored)?;
     }
+    validate_persisted_source_keys(pool, chain_id, sources, false).await?;
     Ok(())
 }
 
-pub(crate) async fn validate_existing_kinds(
+pub(crate) async fn validate_completed(
     pool: &PgPool,
+    chain_id: &str,
     sources: &[SourceConfig],
 ) -> RunnerResult<()> {
     for source in sources {
-        if let Some(stored) = load(pool, source).await? {
-            validate_kind(source, &stored)?;
-        }
+        let stored = load(pool, source).await?.ok_or_else(|| {
+            RunnerError::data_integrity(format!(
+                "completed Ingest source {} on chain {} has no matching cursor; retained ingest \
+                 data requires an explicit reset before the source configuration can change",
+                source.source_key, source.chain_id
+            ))
+        })?;
+        validate(source, stored)?;
     }
-    Ok(())
+    validate_persisted_source_keys(pool, chain_id, sources, false).await
 }
 
-pub(crate) async fn validate_existing(pool: &PgPool, sources: &[SourceConfig]) -> RunnerResult<()> {
+pub(crate) async fn validate_existing(
+    pool: &PgPool,
+    chain_id: &str,
+    sources: &[SourceConfig],
+) -> RunnerResult<()> {
+    validate_persisted_source_keys(pool, chain_id, sources, true).await?;
     for source in sources {
         if let Some(stored) = load(pool, source).await? {
             validate(source, stored)?;
         }
     }
     Ok(())
+}
+
+async fn validate_persisted_source_keys(
+    pool: &PgPool,
+    chain_id: &str,
+    sources: &[SourceConfig],
+    allow_initializing_subset: bool,
+) -> RunnerResult<()> {
+    let persisted: Vec<String> = sqlx::query_scalar(
+        "SELECT source_key FROM ingest_cursors WHERE chain_id = $1 ORDER BY source_key",
+    )
+    .bind(chain_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| {
+        RunnerError::database(
+            format!("failed to load persisted ingest source keys for chain {chain_id}"),
+            error,
+        )
+    })?;
+    if allow_initializing_subset {
+        if persisted.is_empty() {
+            return Ok(());
+        }
+        let configured = sources
+            .iter()
+            .map(|source| source.source_key.as_str())
+            .collect::<BTreeSet<_>>();
+        if persisted
+            .iter()
+            .all(|source_key| configured.contains(source_key.as_str()))
+            && !has_durable_ingest_data(pool, chain_id).await?
+            && !has_progressed_ingest_cursor(pool, chain_id).await?
+        {
+            return Ok(());
+        }
+    }
+    validate_source_keys(chain_id, sources, &persisted)
+}
+
+async fn has_progressed_ingest_cursor(pool: &PgPool, chain_id: &str) -> RunnerResult<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM ingest_cursors
+             WHERE chain_id = $1
+               AND (next_block_number <> start_block_number
+                    OR target_block_number IS NOT NULL
+                    OR last_processed_block_number IS NOT NULL
+                    OR last_processed_block_hash IS NOT NULL)
+         )",
+    )
+    .bind(chain_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| {
+        RunnerError::database(
+            format!("failed to check persisted ingest cursor progress for chain {chain_id}"),
+            error,
+        )
+    })
+}
+
+pub(crate) fn validate_source_keys(
+    chain_id: &str,
+    sources: &[SourceConfig],
+    persisted: &[String],
+) -> RunnerResult<()> {
+    let configured = sources
+        .iter()
+        .map(|source| source.source_key.as_str())
+        .collect::<BTreeSet<_>>();
+    let persisted = persisted
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if configured == persisted {
+        return Ok(());
+    }
+    Err(RunnerError::data_integrity(format!(
+        "persisted ingest source keys for chain {chain_id} differ from the configured source keys; \
+         an explicit reset is required before source configuration can change"
+    )))
 }
 
 pub(crate) async fn ensure(pool: &PgPool, source: &SourceConfig) -> RunnerResult<()> {
@@ -93,6 +194,10 @@ async fn has_durable_ingest_data(pool: &PgPool, chain_id: &str) -> RunnerResult<
              SELECT 1 FROM raw_receipts WHERE chain_id = $1
          ) OR EXISTS (
              SELECT 1 FROM raw_logs WHERE chain_id = $1
+         ) OR EXISTS (
+             SELECT 1 FROM chain_lineage WHERE chain_id = $1
+         ) OR EXISTS (
+             SELECT 1 FROM chain_header_audit WHERE chain_id = $1
          )",
     )
     .bind(chain_id)

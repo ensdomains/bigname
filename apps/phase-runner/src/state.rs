@@ -466,22 +466,28 @@ impl PhaseStore {
         update_ingest_cursors(&self.pool, sources, progress).await
     }
 
-    pub async fn ensure_ingest_sources(&self, sources: &[SourceConfig]) -> RunnerResult<()> {
-        crate::ingest_cursor_config::ensure_all(&self.pool, sources).await
+    pub async fn ensure_ingest_sources(
+        &self,
+        chain_id: &str,
+        sources: &[SourceConfig],
+    ) -> RunnerResult<()> {
+        crate::ingest_cursor_config::ensure_all(&self.pool, chain_id, sources).await
     }
 
     pub async fn validate_existing_ingest_sources(
         &self,
+        chain_id: &str,
         sources: &[SourceConfig],
     ) -> RunnerResult<()> {
-        crate::ingest_cursor_config::validate_existing(&self.pool, sources).await
+        crate::ingest_cursor_config::validate_existing(&self.pool, chain_id, sources).await
     }
 
-    pub async fn validate_existing_ingest_source_kinds(
+    pub async fn validate_completed_ingest_sources(
         &self,
+        chain_id: &str,
         sources: &[SourceConfig],
     ) -> RunnerResult<()> {
-        crate::ingest_cursor_config::validate_existing_kinds(&self.pool, sources).await
+        crate::ingest_cursor_config::validate_completed(&self.pool, chain_id, sources).await
     }
 }
 

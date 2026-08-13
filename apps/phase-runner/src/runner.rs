@@ -140,13 +140,7 @@ impl PhaseRunner {
             self.run_spine_phase(chain, phase, cancellation.clone())
                 .await?;
         }
-
-        let verify_before_live = chain.verify_before_live
-            || crate::verify_phase::provider_trusted_verify_required(
-                &chain.chain_id,
-                &chain.sources,
-            )?;
-        if verify_before_live {
+        if Self::verify_before_live(chain)? {
             self.phases.get(PhaseName::Verify).preflight(
                 &chain.chain_id,
                 &chain.sources,
@@ -338,6 +332,7 @@ impl PhaseRunner {
                 .await?
             {
                 StartDisposition::AlreadyCompleted => {
+                    self.validate_completed_config(chain, phase_name).await?;
                     if !phase.revalidates_completed(&chain.chain_id, &chain.sources)? {
                         return Ok(());
                     }

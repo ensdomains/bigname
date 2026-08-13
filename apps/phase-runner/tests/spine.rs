@@ -238,7 +238,7 @@ async fn derived_write_refuses_a_recorded_content_hash_mismatch() -> Result<()> 
 async fn runner_writes_transitions_cursors_heads_and_heartbeats() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_writes").await?;
     let chain_id = "write-chain";
-    seed_lineage(scratch.pool(), chain_id, 3).await?;
+    seed_identified_lineage(scratch.pool(), chain_id, 3).await?;
     let heads = HeadMarkers {
         latest: BlockMarker::new(3, format!("{chain_id}-block-3"))?,
         safe: Some(BlockMarker::new(2, format!("{chain_id}-block-2"))?),
@@ -475,7 +475,7 @@ async fn transient_phase_error_restarts_with_backoff() -> Result<()> {
 #[tokio::test]
 async fn fatal_error_stops_only_its_chain_supervisor() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_isolation").await?;
-    seed_lineage(scratch.pool(), "good-chain", 0).await?;
+    seed_identified_lineage(scratch.pool(), "good-chain", 0).await?;
     let good_live = Arc::new(Notify::new());
     let phases = routing_phase_set(Arc::clone(&good_live))?;
     let runner = Arc::new(runner(
@@ -518,7 +518,7 @@ async fn fatal_error_stops_only_its_chain_supervisor() -> Result<()> {
 #[tokio::test]
 async fn panicking_phase_stops_only_its_chain_supervisor() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_panic_isolation").await?;
-    seed_lineage(scratch.pool(), "good-panic-chain", 0).await?;
+    seed_identified_lineage(scratch.pool(), "good-panic-chain", 0).await?;
     let good_live = Arc::new(Notify::new());
     let panic_trigger = Arc::new(Notify::new());
     let phases = panic_routing_phase_set(Arc::clone(&good_live), panic_trigger)?;
@@ -1953,7 +1953,7 @@ async fn verify_phase_records_its_trust_level() -> Result<()> {
 async fn verify_phase_cannot_publish_chain_heads() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_verify_heads").await?;
     let chain_id = "verify-heads-chain";
-    seed_lineage(scratch.pool(), chain_id, 2).await?;
+    seed_identified_lineage(scratch.pool(), chain_id, 2).await?;
     let ingest_heads = HeadMarkers {
         latest: BlockMarker::new(1, format!("{chain_id}-block-1"))?,
         safe: None,
@@ -2046,6 +2046,14 @@ fn chain(chain_id: &str) -> RunnerResult<ChainConfig> {
         )?],
         false,
     )
+}
+
+async fn seed_identified_lineage(pool: &sqlx::PgPool, chain_id: &str, through: i64) -> Result<()> {
+    let configured_chain = chain(chain_id)?;
+    PhaseStore::new(pool.clone())
+        .ensure_ingest_sources(chain_id, &configured_chain.sources)
+        .await?;
+    seed_lineage(pool, chain_id, through).await
 }
 
 fn available_capacity() -> CapacityGuard {

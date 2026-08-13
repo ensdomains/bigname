@@ -7,6 +7,20 @@ use crate::{
 
 use super::{VerificationPlan, VerifyPhase, verification_plan};
 
+pub(crate) fn provider_trusted_verify_required(
+    chain_id: &str,
+    sources: &[SourceConfig],
+) -> RunnerResult<bool> {
+    if !provider_trusted_verify_chain(chain_id) {
+        return Ok(false);
+    }
+    is_required(chain_id, sources)
+}
+
+pub(crate) fn provider_trusted_verify_chain(chain_id: &str) -> bool {
+    chain_id == "ethereum-sepolia"
+}
+
 pub(super) fn is_required(chain_id: &str, sources: &[SourceConfig]) -> RunnerResult<bool> {
     Ok(matches!(
         verification_plan(chain_id, sources)?,

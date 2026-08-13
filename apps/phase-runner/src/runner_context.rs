@@ -12,6 +12,14 @@ use crate::{
 use super::PhaseRunner;
 
 impl PhaseRunner {
+    pub(super) fn verify_before_live(chain: &ChainConfig) -> RunnerResult<bool> {
+        Ok(chain.verify_before_live
+            || crate::verify_phase::provider_trusted_verify_required(
+                &chain.chain_id,
+                &chain.sources,
+            )?)
+    }
+
     pub(super) async fn check_ingest_identity(
         &self,
         phase: PhaseName,
@@ -22,20 +30,41 @@ impl PhaseRunner {
             let status = self.store.status(&chain.chain_id, phase).await?;
             if matches!(mode, RunMode::Normal) && status == crate::state::PhaseStatus::Completed {
                 self.store
-                    .validate_existing_ingest_source_kinds(&chain.sources)
+                    .validate_completed_ingest_sources(&chain.chain_id, &chain.sources)
                     .await?;
             } else {
                 if crate::verify_phase::provider_trusted_verify_chain(&chain.chain_id) {
                     self.store
-                        .validate_existing_ingest_sources(&chain.sources)
+                        .validate_existing_ingest_sources(&chain.chain_id, &chain.sources)
                         .await?;
                     crate::verify_phase::provider_trusted_verify_required(
                         &chain.chain_id,
                         &chain.sources,
                     )?;
                 }
-                self.store.ensure_ingest_sources(&chain.sources).await?;
+                self.store
+                    .ensure_ingest_sources(&chain.chain_id, &chain.sources)
+                    .await?;
             }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn validate_completed_config(
+        &self,
+        chain: &ChainConfig,
+        phase: PhaseName,
+    ) -> RunnerResult<()> {
+        if phase == PhaseName::Verify {
+            let resume = self
+                .store
+                .phase_resume(&chain.chain_id, phase, &RunMode::Normal)
+                .await?;
+            crate::verify_phase::validate_reported_level(
+                &chain.chain_id,
+                &chain.sources,
+                resume.verification_level,
+            )?;
         }
         Ok(())
     }

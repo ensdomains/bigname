@@ -141,17 +141,25 @@ source's normalized kind after that row exists is a data-integrity error checked
 before Ingest runs. Case-only changes, surrounding whitespace, and
 hyphen/underscore spelling changes are equivalent. Before a runnable Ingest
 phase contacts a provider, each row's seed basis and start block must also match
-the runtime source. Any other kind change requires an explicitly reviewed reset
-that removes the cursor and every raw fact that may have come from the source,
-followed by a [full source re-walk](glossary.md#re-derivation-boundary); never
-relabel the row in place. Retained raw facts block initialization of any missing
-configured source row because they do not identify their provider, so the
-runner cannot distinguish a safe addition from replacement of the source that
-supplied them. Use the affected-chain wipe and resync under [verification mismatch
-repair](#verification-mismatch-repair) unless a narrower reset procedure has
-been separately reviewed. An ordinary redo is not that reset. Capacity, retry,
-and polling controls use the `BIGNAME_PHASE_RUNNER_*` names exposed by
-`phase-runner --help`.
+the runtime source. A restart that skips an already-completed Ingest phase still
+requires every configured source's persisted key, kind, seed basis, and start
+block to match, and the configured source-key set must exactly match the
+persisted cursor keys. Interpret redo checks the same source-key set before it
+rewrites derived data. Any change to a persisted identity field—source key,
+normalized kind, seed basis, or start block—requires an explicitly reviewed
+reset that removes the cursor and every durable Ingest output that may have come
+from the source, followed by a [full source
+re-walk](glossary.md#re-derivation-boundary); never relabel the row in place.
+Changing only the provider endpoint is allowed because endpoints are not part
+of persisted source identity. Retained raw facts, chain lineage, or header-audit rows block initialization of
+any missing configured source row. Lineage and header rows can remain after a
+range with no watched transactions, receipts, or logs, and none of this output
+identifies its provider. The runner therefore cannot distinguish a safe source
+addition from replacement of the source that supplied it. Use the affected-chain
+wipe and resync under [verification mismatch repair](#verification-mismatch-repair)
+unless a narrower reset procedure has been separately reviewed. An ordinary
+redo is not that reset. Capacity, retry, and polling controls use the
+`BIGNAME_PHASE_RUNNER_*` names exposed by `phase-runner --help`.
 The server Compose file forwards the documented `RETH_DATA_DIR` source and the
 hydration URL map. Its reth overlay bind-mounts `RETH_DATA_DIR` read-only at the
 same container path. Add any differently named provider environment variable

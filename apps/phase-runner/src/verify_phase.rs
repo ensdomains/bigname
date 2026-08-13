@@ -26,6 +26,7 @@ use crate::{
 
 #[path = "verify_completed.rs"]
 mod completed;
+pub(crate) use completed::{provider_trusted_verify_chain, provider_trusted_verify_required};
 
 const VERIFICATION_BATCH_BLOCKS: i64 = 131_072;
 
@@ -407,23 +408,6 @@ fn verification_plan(chain_id: &str, sources: &[SourceConfig]) -> RunnerResult<V
     select_source(chain_id, sources).map(VerificationPlan::Compared)
 }
 
-pub(crate) fn provider_trusted_verify_required(
-    chain_id: &str,
-    sources: &[SourceConfig],
-) -> RunnerResult<bool> {
-    if !provider_trusted_verify_chain(chain_id) {
-        return Ok(false);
-    }
-    Ok(matches!(
-        verification_plan(chain_id, sources)?,
-        VerificationPlan::ProviderTrusted { .. }
-    ))
-}
-
-pub(crate) fn provider_trusted_verify_chain(chain_id: &str) -> bool {
-    chain_id == "ethereum-sepolia"
-}
-
 fn validate_sepolia_intake_source(sources: &[SourceConfig]) -> RunnerResult<()> {
     let valid = sources.len() == 1
         && normalized_source_kind(&sources[0].source_kind) == "drpc"
@@ -576,18 +560,17 @@ pub(crate) fn validate_reported_level(
     sources: &[SourceConfig],
     reported: Option<VerificationLevel>,
 ) -> RunnerResult<()> {
-    let Some(reported) = reported else {
-        return Ok(());
-    };
     let declared = match chain_id {
         "base-mainnet" | "ethereum-mainnet" => {
             verification_plan(chain_id, sources)?.verification_level()
         }
         "ethereum-sepolia" => VerificationLevel::QuickSynced,
-        // Alternate Phase implementations can use the generic runner seam for
-        // other chains. Production Verify rejects those chains in preflight.
+        // Generic Phase implementations use this seam; production rejects other chains.
         _ => return Ok(()),
     };
+    let reported = reported.ok_or_else(|| {
+        RunnerError::data_integrity(format!("chain {chain_id} Verify has no verification level"))
+    })?;
     if verification_level_rank(reported) <= verification_level_rank(declared) {
         return Ok(());
     }

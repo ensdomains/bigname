@@ -328,7 +328,11 @@ Project range; it is never a row-local patch or API-only configuration change.
 Interpret redo proves raw-data presence without pretending that Live extended
 each finite ingest source. Each `ingest_cursors` row proves that the source
 reached from its configured start through its persisted target; Live does not
-advance those source cursors. The redo guard also requires exactly one readable
+advance those source cursors. Before checking range coverage, the redo guard
+requires the configured source-key set and every source's normalized kind,
+seed basis, and start block to match the persisted cursor identities. A runtime
+start above the redo range does not bypass that identity check. The guard also
+requires exactly one readable
 `chain_lineage` row at every height in the full execution range. Cursors and
 lineage both prove only the facts selected by the [watch
 plan](glossary.md#watch-plan--watched-tuple) active when each block was loaded;

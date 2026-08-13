@@ -179,18 +179,27 @@ fn phase_readiness(
     if row.project_phase_status.as_deref() == Some("failed") {
         return StatusReadiness::Stale;
     }
-    if row.provider_trusted_verification_required {
-        match row.verify_phase_status.as_deref() {
-            Some("completed") => {}
-            Some("failed") => return StatusReadiness::Stale,
-            Some("idle" | "running" | "paused") | None => return StatusReadiness::Degraded,
-            Some(_) => return StatusReadiness::Stale,
+    let verify_incomplete = if row.provider_trusted_verification_required {
+        match (
+            row.verify_phase_status.as_deref(),
+            row.verify_verification_level.as_deref(),
+        ) {
+            (Some("completed"), Some("quick_synced")) => false,
+            (Some("idle" | "running" | "paused") | None, _) => true,
+            (Some("completed" | "failed"), _) | (Some(_), _) => {
+                return StatusReadiness::Stale;
+            }
         }
-    }
+    } else {
+        false
+    };
     match row.phase_runner_heartbeat_age_seconds {
         Some(age) if age > heartbeat_max_age_seconds => return StatusReadiness::Stale,
         None => return StatusReadiness::Degraded,
         Some(_) => {}
+    }
+    if verify_incomplete {
+        return StatusReadiness::Degraded;
     }
     if !row.project_generation_current {
         return StatusReadiness::Degraded;
@@ -491,11 +500,31 @@ mod tests {
             latest_projected_timestamp: latest_projected_block.map(timestamp_for_block),
             project_phase_status: Some("completed".to_owned()),
             verify_phase_status: None,
+            verify_verification_level: None,
             provider_trusted_verification_required: false,
             project_generation_current: true,
             project_redo_in_progress: false,
             phase_runner_heartbeat_age_seconds: Some(0),
         }
+    }
+
+    #[test]
+    fn required_verify_completion_without_quick_synced_evidence_is_stale() {
+        let mut row = row("ethereum-sepolia", Some(1), Some(1), Some(1), Some(1));
+        row.provider_trusted_verification_required = true;
+        row.verify_phase_status = Some("completed".to_owned());
+
+        assert_eq!(phase_readiness(&row, 30), StatusReadiness::Stale);
+    }
+
+    #[test]
+    fn expired_heartbeat_outweighs_incomplete_required_verify() {
+        let mut row = row("ethereum-sepolia", Some(1), Some(1), Some(1), Some(1));
+        row.provider_trusted_verification_required = true;
+        row.verify_phase_status = Some("running".to_owned());
+        row.phase_runner_heartbeat_age_seconds = Some(31);
+
+        assert_eq!(phase_readiness(&row, 30), StatusReadiness::Stale);
     }
 
     fn timestamp_for_block(block: i64) -> OffsetDateTime {

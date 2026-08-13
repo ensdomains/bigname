@@ -36,6 +36,7 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
             projected_lineage.block_timestamp AS latest_projected_timestamp,
             project.phase_status AS project_phase_status,
             verify.phase_status AS verify_phase_status,
+            verify.verification_level AS verify_verification_level,
             known_chains.chain_id = $2 AS provider_trusted_verification_required,
             COALESCE(
                 project.input_content_hash = $1
@@ -104,6 +105,7 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
                 )?,
                 project_phase_status: crate::sql_row::get(&row, "project_phase_status")?,
                 verify_phase_status: crate::sql_row::get(&row, "verify_phase_status")?,
+                verify_verification_level: crate::sql_row::get(&row, "verify_verification_level")?,
                 provider_trusted_verification_required: crate::sql_row::get(
                     &row,
                     "provider_trusted_verification_required",
