@@ -108,6 +108,11 @@ impl PipelineMetrics {
             build_sha: crate::BUILD_SHA,
             interpreter_content_hash: crate::INTERPRETER_CONTENT_HASH,
         })?;
+        let process_start_timestamp_milliseconds = registry.int_gauge(
+            "phase_runner_process_start_timestamp_milliseconds",
+            "Unix timestamp in milliseconds when this phase-runner process started.",
+        )?;
+        process_start_timestamp_milliseconds.set(unix_timestamp_milliseconds()?);
         let current_block = registry.int_gauge_vec(
             "phase_runner_phase_current_block",
             "Latest block processed by a phase, or -1 when no position has been recorded.",
@@ -470,6 +475,14 @@ fn unix_timestamp() -> Result<i64> {
         .context("system clock is before the Unix epoch")?
         .as_secs();
     i64::try_from(seconds).context("Unix timestamp does not fit in an i64")
+}
+
+fn unix_timestamp_milliseconds() -> Result<i64> {
+    let milliseconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .as_millis();
+    i64::try_from(milliseconds).context("Unix timestamp in milliseconds does not fit in an i64")
 }
 
 #[cfg(test)]

@@ -118,9 +118,9 @@ listener serves `GET /metrics`. Every five seconds it reads phase progress,
 heartbeats, verification, unfinished repair work, and the published chain head
 from the runner-owned tables. It also reports an in-process heartbeat for the
 runner loop of each configured chain so a stall between phases remains
-observable. It does not write metric state to PostgreSQL. Missing block
-positions and phase heartbeats are exported as `-1`, rather than being silently
-omitted. See the
+observable, plus the process-start timestamp used to detect repeated restarts.
+It does not write metric state to PostgreSQL. Missing block positions and phase
+heartbeats are exported as `-1`, rather than being silently omitted. See the
 [pipeline monitoring runbook](runbooks/pipeline-monitoring.md) for the checked-in
 Prometheus rules and Grafana dashboard.
 

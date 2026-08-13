@@ -122,6 +122,14 @@ async fn endpoint_exports_failed_phase_and_stale_heartbeat_signals() -> Result<(
     ensure!(
         sample(
             body,
+            "phase_runner_process_start_timestamp_milliseconds",
+            &[]
+        )? > 0.0,
+        "the endpoint must export a process-start value for restart detection"
+    );
+    ensure!(
+        sample(
+            body,
             "phase_runner_loop_heartbeat_age_seconds",
             &["chain=\"ethereum-mainnet\""]
         )? <= 1.0,

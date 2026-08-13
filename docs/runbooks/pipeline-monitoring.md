@@ -85,6 +85,23 @@ Merge the `rule_files` and `scrape_configs` entries from
 path resolves. Keep the job name `bigname-phase-runner`; the dashboard and
 alerts select that exact label.
 
+The container-restart rule uses the runner endpoint's process-start gauge. It
+does not depend on cAdvisor container labels, which are unavailable from some
+cAdvisor and Docker storage-driver combinations. Confirm that the runner target
+exports the gauge:
+
+```sh
+curl --get --fail --silent --show-error \
+  'http://127.0.0.1:9090/api/v1/query' \
+  --data-urlencode \
+  'query=phase_runner_process_start_timestamp_milliseconds{job="bigname-phase-runner"}'
+```
+
+The result must contain one sample per runner target. Prometheus keeps the
+target's `job` and `instance` labels stable across container replacements, so
+each new process-start value is observable as a change on the same time series.
+No cAdvisor or additional scrape configuration is needed for this rule.
+
 Validate the fully assembled host files before reloading Prometheus:
 
 ```sh
@@ -131,7 +148,8 @@ is `bigname-phase-runner`, so a later import updates the same dashboard.
 | Alert | Threshold | Plain-language meaning |
 | --- | --- | --- |
 | `BignamePhaseFailed` | A phase reports `failed` on one rule evaluation. | This intentionally trades pages during retryable transient backoff for guaranteed visibility of terminal errors and crash loops. Use the logs and subsequent state to distinguish them. |
-| `BignamePhaseRunnerDown` | The target is not scrapeable for 2 minutes. | The runner process or metrics listener is unavailable. This also covers a single-chain terminal error that ends the process immediately after storing failure state. |
+| `BignamePhaseRunnerDown` | The target remains continuously unresponsive for 2 minutes. | The runner process or metrics listener stayed unavailable. A successful scrape resets the timer, so this rule does not catch a flapping crash loop. |
+| `BignamePhaseRunnerContainerRestarting` | The runner's process-start value changes at least 3 times within 10 minutes. | The container is crash-looping, including fresh-deployment failures that happen before a phase failure can be stored. Prometheus must successfully scrape each start that it counts. |
 | `BignamePhaseRunnerHeartbeatThresholdMissing` | The configured heartbeat-threshold series is absent for 2 minutes. | The runner image and rules are incompatible, so the age-based alerts cannot be evaluated safely. |
 | `BignamePhaseRunnerLoopHeartbeatMissing` | The runner is scrapeable and exports the heartbeat threshold, but its runner-loop heartbeat series is absent for 2 minutes. | The runner image predates the loop-liveness rule, so between-phase stalls cannot be evaluated safely. |
 | `BignamePhaseRunnerHeartbeatStale` | A running or capacity-paused phase has no heartbeat, or exceeds `BIGNAME_PHASE_RUNNER_HEARTBEAT_STALE_AFTER_SECS` (900 seconds by default), for 2 minutes. | A batch or capacity wait has exceeded the deployment's longest expected heartbeat interval. |
@@ -141,25 +159,32 @@ is `bigname-phase-runner`, so a later import updates the same dashboard.
 
 The two hand-detected failure cases from issue #327 map directly to paging: a
 terminal phase error triggers `BignamePhaseFailed` while the runner remains
-reachable, or `BignamePhaseRunnerDown` if the process exits; a stalled batch
-that crosses the deployment's configured maximum healthy duration triggers
+reachable, or `BignamePhaseRunnerDown` if the process exits and remains down
+for 2 minutes. Repeated exits with successful scrapes between them trigger
+`BignamePhaseRunnerContainerRestarting`. A stalled batch that crosses the
+deployment's configured maximum healthy duration triggers
 `BignamePhaseRunnerHeartbeatStale`.
+
+A non-Live phase that repeatedly completes batches without advancing its
+cursor keeps its heartbeats fresh and is not yet detected; progress-delta
+alerting is tracked in [issue #429](https://github.com/ensdomains/bigname/issues/429).
 
 ## Removing a configured chain
 
 Removing a chain from the runner configuration does not rewrite its stored
-phase rows. This is intentional: if its last stored state is `running` or
-`paused`, the exporter continues to report that abandoned state and the phase
-heartbeat alert continues paging as its last heartbeat ages. The in-process
-runner-loop series is emitted only for currently configured chains, so it
-does not keep a properly settled removed chain paging.
+phase rows. This is intentional: if its last stored state is `running`,
+`paused`, or `failed`, the exporter continues to report that abandoned state;
+the corresponding phase heartbeat or failure alert continues paging. The
+in-process runner-loop series is emitted only for currently configured chains,
+so it does not keep a properly settled removed chain paging.
 
 Settle a chain before removing it: use the normal runner or reviewed recovery
-procedure until no phase row claims `running` or `paused` and no unfinished
-repair marker remains. If the supported lifecycle cannot reach that state,
-keep the chain configured and escalate to the phase-runner and storage owners
-for a separately reviewed decommission cleanup. Do not update statuses, clear
-repair markers, or delete rows merely to silence an alert.
+procedure until no phase row claims `running`, `paused`, or `failed`, failed
+phases have been recovered to `completed`, and no unfinished repair marker
+remains. If the supported lifecycle cannot reach that state, keep the chain
+configured and escalate to the phase-runner and storage owners for a separately
+reviewed decommission cleanup. Do not update statuses, clear repair markers, or
+delete rows merely to silence an alert.
 
 ## First-response checks
 

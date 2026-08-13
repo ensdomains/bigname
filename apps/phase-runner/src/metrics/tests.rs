@@ -30,6 +30,7 @@ fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
         "# TYPE build_info gauge",
         "# TYPE phase_runner_phase_current_block gauge",
         "# TYPE phase_runner_phase_status gauge",
+        "# TYPE phase_runner_process_start_timestamp_milliseconds gauge",
         "# TYPE phase_runner_heartbeat_age_seconds gauge",
         "# TYPE phase_runner_heartbeat_stale_threshold_seconds gauge",
         "# TYPE phase_runner_loop_heartbeat_age_seconds gauge",

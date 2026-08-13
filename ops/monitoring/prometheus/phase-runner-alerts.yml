@@ -16,7 +16,20 @@ groups:
           severity: page
         annotations:
           threshold: "Prometheus cannot scrape the runner for 2 minutes."
-          meaning: "The runner process or its metrics listener is unavailable."
+          meaning: "The runner process or metrics listener has remained continuously unavailable; brief successful scrapes reset this alert."
+
+      - alert: BignamePhaseRunnerContainerRestarting
+        expr: |
+          changes(
+            phase_runner_process_start_timestamp_milliseconds{
+              job="bigname-phase-runner"
+            }[10m]
+          ) >= 3
+        labels:
+          severity: page
+        annotations:
+          threshold: "The runner process-start value changes at least 3 times within 10 minutes."
+          meaning: "The runner is repeatedly restarting, including failures that happen before phase state can be recorded."
 
       - alert: BignamePhaseRunnerHeartbeatThresholdMissing
         expr: |
@@ -61,21 +74,27 @@ groups:
                   job="bigname-phase-runner"
                 } < bool 0
               )
-              * on () group_left (threshold_seconds)
-              phase_runner_heartbeat_stale_threshold_seconds{
-                job="bigname-phase-runner"
-              }
+              * on (job, instance) group_left (threshold_seconds)
+              topk by (job, instance) (
+                1,
+                phase_runner_heartbeat_stale_threshold_seconds{
+                  job="bigname-phase-runner"
+                }
+              )
             ) > 0
             or
             (
               phase_runner_heartbeat_age_seconds{job="bigname-phase-runner"}
-              > on () group_left (threshold_seconds)
-              phase_runner_heartbeat_stale_threshold_seconds{
-                job="bigname-phase-runner"
-              }
+              > on (job, instance) group_left (threshold_seconds)
+              topk by (job, instance) (
+                1,
+                phase_runner_heartbeat_stale_threshold_seconds{
+                  job="bigname-phase-runner"
+                }
+              )
             )
           )
-          and on (chain, phase)
+          and on (job, instance, chain, phase)
           phase_runner_phase_status{
             job="bigname-phase-runner",status=~"running|paused"
           } == 1
@@ -95,7 +114,7 @@ groups:
               }[2m]
             ) > 30
           )
-          and on (chain, phase)
+          and on (job, instance, chain, phase)
           (
             max_over_time(
               phase_runner_phase_status{
@@ -115,10 +134,13 @@ groups:
           phase_runner_loop_heartbeat_age_seconds{
             job="bigname-phase-runner"
           }
-          > on () group_left (threshold_seconds)
-          phase_runner_heartbeat_stale_threshold_seconds{
-            job="bigname-phase-runner"
-          }
+          > on (job, instance) group_left (threshold_seconds)
+          topk by (job, instance) (
+            1,
+            phase_runner_heartbeat_stale_threshold_seconds{
+              job="bigname-phase-runner"
+            }
+          )
         for: 2m
         labels:
           severity: page
