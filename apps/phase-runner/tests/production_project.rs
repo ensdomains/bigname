@@ -6,9 +6,15 @@ use std::{sync::Arc, time::Duration};
 use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use anyhow::Result;
+use bigname_adapters::schema_v2::{
+    AddressAdmissionInput, BatchInput as AdapterBatchInput, DiscoveryRuleInput, ManifestInput,
+    RawBlockInput as AdapterRawBlockInput, RawLogInput as AdapterRawLogInput,
+    interpret_schema_v2_batch,
+};
 use bigname_interpret::{
     BatchRequest as InterpretRequest, Engine as InterpretEngine, RunMode as InterpretRunMode,
 };
+use bigname_manifests::load_repository;
 use bigname_project::{BatchRequest, Engine, Marker, RunMode};
 use bigname_storage::{NameCurrentRow, SurfaceBindingKind, resolution_verified_support_boundary};
 use phase_runner::{
@@ -56,7 +62,10 @@ const EQUIVALENCE_TRANSFER_RESOURCE: &str = "00000000-0000-0000-0000-0000000000b
 const EQUIVALENCE_TRANSFER_BINDING: &str = "00000000-0000-0000-0000-0000000000b5";
 const EQUIVALENCE_V2_RESOLVER: &str = "0x00000000000000000000000000000000000000b2";
 const EQUIVALENCE_TRANSFER_RESOLVER: &str = "0x00000000000000000000000000000000000000b3";
+const PERMISSION_ONLY_RESOLVER: &str = "0x00000000000000000000000000000000000000b4";
 const EQUIVALENCE_V2_IMPLEMENTATION: &str = "0x00000000000000000000000000000000000000c2";
+const PERMISSION_ONLY_RESOURCE: &str = "00000000-0000-0000-0000-0000000000c0";
+const PERMISSION_ONLY_BINDING: &str = "00000000-0000-0000-0000-0000000000c1";
 
 type ChildLabelRow = (Vec<u8>, Option<String>, Vec<u8>, Option<String>);
 type OptionalChildLabelRow = (
@@ -99,6 +108,16 @@ sol! {
         string value
     );
     event ReverseClaimed(address indexed addr, bytes32 indexed node);
+    event LabelRegistered(
+        uint256 indexed tokenId,
+        bytes32 indexed labelHash,
+        string label,
+        address owner,
+        uint64 expiry,
+        address indexed sender
+    );
+    event TokenResource(uint256 indexed tokenId, uint256 indexed resource);
+    event LabelUnregistered(uint256 indexed tokenId, address indexed sender);
 }
 
 #[tokio::test]
@@ -3068,6 +3087,188 @@ async fn incremental_v2_subregistry_flip_replaces_children_in_both_directions() 
     full.cleanup().await
 }
 
+#[tokio::test]
+async fn direct_v2_unregister_suppresses_the_selected_registry_child() -> Result<()> {
+    let incremental = ScratchDatabase::create("production_project_v2_direct_unregister").await?;
+    let full = ScratchDatabase::create("production_project_v2_direct_unregister_full").await?;
+    let release_after_state = interpreted_direct_v2_release_after_state()?;
+    assert_eq!(
+        release_after_state
+            .get("registry_contract_instance_id")
+            .and_then(Value::as_str),
+        Some("00000000-0000-0000-0000-000000000f01"),
+        "direct unregister must retain its emitting registry identity"
+    );
+    for pool in [incremental.pool(), full.pool()] {
+        seed_project_fixture(pool).await?;
+        seed_v2_subregistry_flip_fixture(pool).await?;
+        insert_event(
+            pool,
+            CHAIN,
+            3,
+            Some("ens:0xflip-c0"),
+            None,
+            "RegistrationReleased",
+            "ens_v2_registry_l1",
+            release_after_state.clone(),
+            json!({}),
+        )
+        .await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 2).await?;
+    assert!(
+        v2_flip_children(incremental.pool())
+            .await?
+            .contains(&"ens:0xflip-c0".to_owned()),
+        "the directly registered child must exist before unregister"
+    );
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 2,
+            hash: block_hash(CHAIN, 2),
+        }),
+        RunMode::Normal,
+        3,
+        3,
+    )
+    .await?;
+    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+
+    assert_eq!(
+        v2_flip_children(incremental.pool()).await?,
+        Vec::<String>::new(),
+        "incremental Project retained a directly unregistered ENSv2 child"
+    );
+    assert_eq!(
+        v2_flip_children(full.pool()).await?,
+        Vec::<String>::new(),
+        "a full rebuild retained a directly unregistered ENSv2 child"
+    );
+
+    incremental.cleanup().await?;
+    full.cleanup().await
+}
+
+fn interpreted_direct_v2_release_after_state() -> Result<Value> {
+    const ADAPTER_CHAIN: &str = "ethereum-sepolia";
+    const REGISTRY_ADDRESS: &str = "0x00000000000000000000000000000000000020aa";
+    const REGISTRY_INSTANCE: &str = "00000000-0000-0000-0000-000000000f01";
+    let repository = load_repository(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests/sepolia"),
+    )?;
+    let loaded = repository
+        .manifests()
+        .iter()
+        .find(|loaded| {
+            loaded.manifest.chain == ADAPTER_CHAIN
+                && loaded.manifest.source_family == "ens_v2_registry_l1"
+                && loaded.version_tag == "v2"
+        })
+        .expect("the checked-in post-audit ENSv2 registry manifest must exist");
+    let mut payload = serde_json::to_value(&loaded.manifest)?;
+    payload["manifest_version"] = Value::from(1);
+    let manifest = ManifestInput {
+        manifest_id: 1,
+        manifest_version: 1,
+        namespace: loaded.manifest.namespace.clone(),
+        source_family: loaded.manifest.source_family.clone(),
+        chain_id: loaded.manifest.chain.clone(),
+        deployment_label: loaded.manifest.deployment_epoch.clone(),
+        normalizer_version: loaded.manifest.normalizer_version.clone(),
+        payload_json: serde_json::to_string(&payload)?,
+    };
+    let discovery_rules = loaded
+        .manifest
+        .discovery_rules
+        .iter()
+        .map(|rule| DiscoveryRuleInput {
+            manifest_id: 1,
+            edge_kind: rule.edge_kind.clone(),
+            from_role: Some(rule.from_role.clone()),
+            admission: rule.admission.clone(),
+        })
+        .collect();
+    let token_id = U256::from(101_u64);
+    let owner = OWNER.parse::<Address>()?;
+    let sender = TRANSFER_OWNER.parse::<Address>()?;
+    let label = "direct".to_owned();
+    let label_hash = keccak256(label.as_bytes());
+    let logs = [
+        LabelRegistered {
+            tokenId: token_id,
+            labelHash: label_hash,
+            label,
+            owner,
+            expiry: 1_800_000_000,
+            sender,
+        }
+        .encode_log_data(),
+        TokenResource {
+            tokenId: token_id,
+            resource: U256::from(5_001_u64),
+        }
+        .encode_log_data(),
+        LabelUnregistered {
+            tokenId: token_id,
+            sender,
+        }
+        .encode_log_data(),
+    ];
+    let raw_logs = logs
+        .into_iter()
+        .enumerate()
+        .map(|(log_index, log)| AdapterRawLogInput {
+            chain_id: ADAPTER_CHAIN.into(),
+            block_hash: "adapter-direct-unregister-block".into(),
+            block_number: 1,
+            block_timestamp: time::OffsetDateTime::from_unix_timestamp(1_700_000_000)
+                .expect("fixture timestamp must be valid"),
+            canonicality_state: "canonical".into(),
+            transaction_hash: "adapter-direct-unregister-transaction".into(),
+            transaction_index: 0,
+            log_index: i64::try_from(log_index).expect("fixture log index fits i64"),
+            emitting_address: REGISTRY_ADDRESS.into(),
+            topics: log.topics().iter().map(ToString::to_string).collect(),
+            data: log.data.to_vec(),
+        })
+        .collect();
+    let output = interpret_schema_v2_batch(AdapterBatchInput {
+        chain_id: ADAPTER_CHAIN.into(),
+        manifests: vec![manifest],
+        discovery_rules,
+        admissions: vec![AddressAdmissionInput {
+            address: REGISTRY_ADDRESS.into(),
+            contract_instance_id: Uuid::parse_str(REGISTRY_INSTANCE)?,
+            source_manifest_id: Some(1),
+            role: Some("registry".into()),
+            discovery_edge_kind: None,
+            discovery_from_contract_instance_id: None,
+            discovery_observation_key: None,
+            active_from_block: Some(0),
+            active_to_block: None,
+        }],
+        prior_events: Vec::new(),
+        blocks: vec![AdapterRawBlockInput {
+            chain_id: ADAPTER_CHAIN.into(),
+            block_hash: "adapter-direct-unregister-block".into(),
+            block_number: 1,
+            block_timestamp: time::OffsetDateTime::from_unix_timestamp(1_700_000_000)
+                .expect("fixture timestamp must be valid"),
+            canonicality_state: "canonical".into(),
+        }],
+        raw_logs,
+    })?;
+    Ok(output
+        .normalized_events
+        .into_iter()
+        .find(|event| event.event_kind == "RegistrationReleased")
+        .expect("LabelUnregistered must derive RegistrationReleased")
+        .after_state)
+}
+
 async fn v2_flip_children(pool: &PgPool) -> Result<Vec<String>> {
     Ok(sqlx::query_scalar(
         "SELECT child_logical_name_id
@@ -3835,6 +4036,147 @@ async fn event_free_wrapper_boundary_refreshes_resolver_permission_summary() -> 
     assert_eq!(
         bob_target, 5,
         "the passthrough guard resource must be scoped"
+    );
+
+    incremental.cleanup().await?;
+    full.cleanup().await
+}
+
+#[tokio::test]
+async fn event_free_wrapper_boundary_scopes_permission_named_resolver() -> Result<()> {
+    let incremental =
+        ScratchDatabase::create("production_project_permission_only_resolver_scope").await?;
+    let full =
+        ScratchDatabase::create("production_project_permission_only_resolver_scope_full").await?;
+    for pool in [incremental.pool(), full.pool()] {
+        seed_project_fixture(pool).await?;
+        extend_incremental_equivalence_fixture(pool).await?;
+        extend_permission_only_resolver_fixture(pool).await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+    assert_eq!(
+        resolver_summary_counts(incremental.pool(), CHAIN, PERMISSION_ONLY_RESOLVER).await?,
+        (1, 1, Some("approve".into()))
+    );
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 4,
+            hash: block_hash(CHAIN, 4),
+        }),
+        RunMode::Normal,
+        5,
+        5,
+    )
+    .await?;
+    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 5).await?;
+
+    for pool in [incremental.pool(), full.pool()] {
+        let live_rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM permissions_current
+             WHERE resource_id = $1 AND scope_kind = 'resolver'
+               AND lower(scope_detail ->> 'resolver_address') = lower($2)",
+        )
+        .bind(Uuid::parse_str(RESOURCE)?)
+        .bind(PERMISSION_ONLY_RESOLVER)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(live_rows, 0);
+    }
+    let incremental_counts =
+        resolver_summary_counts(incremental.pool(), CHAIN, PERMISSION_ONLY_RESOLVER).await?;
+    let full_counts = resolver_summary_counts(full.pool(), CHAIN, PERMISSION_ONLY_RESOLVER).await?;
+    assert_eq!(full_counts, (0, 0, None));
+    assert_eq!(
+        incremental_counts, full_counts,
+        "a resolver named only by scoped permission history was not rebuilt"
+    );
+
+    incremental.cleanup().await?;
+    full.cleanup().await
+}
+
+#[tokio::test]
+async fn wrapper_renewal_refreshes_resurrected_resolver_permission_summary() -> Result<()> {
+    let incremental =
+        ScratchDatabase::create("production_project_resolver_permission_resurrection").await?;
+    let full =
+        ScratchDatabase::create("production_project_resolver_permission_resurrection_full").await?;
+    for pool in [incremental.pool(), full.pool()] {
+        seed_project_fixture(pool).await?;
+        extend_incremental_equivalence_fixture(pool).await?;
+        extend_wrapper_resolver_summary_fixture(pool).await?;
+        insert_event(
+            pool,
+            CHAIN,
+            6,
+            Some("ens:0xalice"),
+            Some(RESOURCE),
+            "ExpiryChanged",
+            "ens_v1_registrar_l1",
+            json!({
+                "source_event":"NameRenewed",
+                "authority_kind":"wrapper",
+                "expiry":9_000_000
+            }),
+            json!({}),
+        )
+        .await?;
+    }
+
+    run_project(incremental.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 4,
+            hash: block_hash(CHAIN, 4),
+        }),
+        RunMode::Normal,
+        5,
+        5,
+    )
+    .await?;
+    assert_eq!(
+        resolver_summary_counts(incremental.pool(), CHAIN, EQUIVALENCE_V2_RESOLVER).await?,
+        (0, 0, None),
+        "the expiry boundary must clear the resolver summary before renewal"
+    );
+
+    run_project(
+        incremental.pool(),
+        CHAIN,
+        Some(Marker {
+            number: 5,
+            hash: block_hash(CHAIN, 5),
+        }),
+        RunMode::Normal,
+        6,
+        6,
+    )
+    .await?;
+    run_project(full.pool(), CHAIN, None, RunMode::Normal, 0, 6).await?;
+    for pool in [incremental.pool(), full.pool()] {
+        let powers: Value = sqlx::query_scalar(
+            "SELECT effective_powers FROM permissions_current
+             WHERE resource_id = $1 AND scope_kind = 'resolver'
+               AND lower(scope_detail ->> 'resolver_address') = lower($2)",
+        )
+        .bind(Uuid::parse_str(RESOURCE)?)
+        .bind(EQUIVALENCE_V2_RESOLVER)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(powers, json!(["approve"]));
+    }
+    let incremental_counts =
+        resolver_summary_counts(incremental.pool(), CHAIN, EQUIVALENCE_V2_RESOLVER).await?;
+    let full_counts = resolver_summary_counts(full.pool(), CHAIN, EQUIVALENCE_V2_RESOLVER).await?;
+    assert_eq!(full_counts, (1, 1, Some("approve".into())));
+    assert_eq!(
+        incremental_counts, full_counts,
+        "a renewed resolver permission row was absent from its resolver summary"
     );
 
     incremental.cleanup().await?;
@@ -7547,6 +7889,123 @@ async fn extend_wrapper_resolver_summary_fixture(pool: &PgPool) -> Result<()> {
         "PermissionScopeChanged",
         "ens_v1_wrapper_l1",
         json!({"fuses":196_608,"wrapper_state":"emancipated"}),
+        json!({}),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn extend_permission_only_resolver_fixture(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO resources (
+             resource_id, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES ($1, $2, $3, 1, 'canonical')",
+    )
+    .bind(Uuid::parse_str(PERMISSION_ONLY_RESOURCE)?)
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 1))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO name_surfaces (
+             logical_name_id, namespace, raw_name, raw_labels,
+             dns_encoded_name, namehash, labelhashes, normalizer_version,
+             visibility_state, chain_id, block_hash, block_number,
+             canonicality_state
+         ) VALUES (
+             'ens:0xpermission-only', 'ens', 'permission-only.eth',
+             ARRAY['permission-only', 'eth'], decode('00', 'hex'),
+             '0xpermission-only', ARRAY['0xpermission-only-label', '0xeth'], $1,
+             'active', $2, $3, 1, 'canonical'
+         )",
+    )
+    .bind(NORMALIZER)
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 1))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO surface_bindings (
+             surface_binding_id, logical_name_id, resource_id, binding_kind,
+             active_from, chain_id, block_hash, block_number, canonicality_state
+         ) VALUES (
+             $1, 'ens:0xpermission-only', $2, 'declared_registry_path',
+             to_timestamp(1), $3, $4, 1, 'canonical'
+         )",
+    )
+    .bind(Uuid::parse_str(PERMISSION_ONLY_BINDING)?)
+    .bind(Uuid::parse_str(PERMISSION_ONLY_RESOURCE)?)
+    .bind(CHAIN)
+    .bind(block_hash(CHAIN, 1))
+    .execute(pool)
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        2,
+        Some("ens:0xpermission-only"),
+        Some(PERMISSION_ONLY_RESOURCE),
+        "ResolverChanged",
+        "ens_v2_registry_l1",
+        json!({"resolver":PERMISSION_ONLY_RESOLVER}),
+        json!({}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        2,
+        Some("ens:0xpermission-only"),
+        Some(PERMISSION_ONLY_RESOURCE),
+        "RecordChanged",
+        "ens_v2_resolver_l1",
+        json!({
+            "resolver":PERMISSION_ONLY_RESOLVER,
+            "record_key":"text:permission-only",
+            "record_family":"text",
+            "selector_key":"permission-only",
+            "value_retained":true,
+            "value":"outside-boundary-scope"
+        }),
+        json!({"emitting_address":PERMISSION_ONLY_RESOLVER}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        3,
+        None,
+        None,
+        "Upgraded",
+        "ens_v2_resolver_l1",
+        json!({
+            "proxy_address":PERMISSION_ONLY_RESOLVER,
+            "implementation":EQUIVALENCE_V2_IMPLEMENTATION
+        }),
+        json!({"emitting_address":PERMISSION_ONLY_RESOLVER}),
+    )
+    .await?;
+    insert_event(
+        pool,
+        CHAIN,
+        3,
+        Some("ens:0xalice"),
+        Some(RESOURCE),
+        "PermissionChanged",
+        "ens_v1_registrar_l1",
+        json!({
+            "subject":OWNER,
+            "scope":{
+                "kind":"resolver",
+                "chain_id":CHAIN,
+                "resolver_address":PERMISSION_ONLY_RESOLVER
+            },
+            "effective_powers":["approve","resolver_control"],
+            "grant_source":{"kind":"fixture"},
+            "revocation_source":null,
+            "inheritance_path":[],
+            "transfer_behavior":"replace_on_authority_change"
+        }),
         json!({}),
     )
     .await?;

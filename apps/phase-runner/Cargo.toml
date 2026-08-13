@@ -29,4 +29,5 @@ bigname-storage.workspace = true
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 axum.workspace = true
+bigname-adapters.workspace = true
 bigname-test-support.workspace = true

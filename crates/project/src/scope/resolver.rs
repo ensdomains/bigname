@@ -11,6 +11,43 @@ pub(super) async fn include_resource_pointers(
     // Scope both the projected pointer and the latest readable pointer. Redo needs the former to
     // retract losing output and the latter to classify surviving inventory. Unchanged resolver
     // summaries can be republished without staging their unrelated history.
+    sqlx::query("ANALYZE project_scope_resources")
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to analyze resource scope", error))?;
+    let permission_history = format!(
+        "INSERT INTO project_scope_resolver_permission_history
+         SELECT lower(candidate.resolver_address)
+         FROM project_scope_resources scope
+         JOIN normalized_events event USING (resource_id)
+         JOIN chain_lineage lineage
+           ON lineage.chain_id = event.chain_id
+          AND lineage.block_hash = event.block_hash
+          AND lineage.block_number = event.block_number
+         CROSS JOIN LATERAL (VALUES
+             {PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES}
+         ) candidate(resolver_address)
+         WHERE event.chain_id = $1
+           AND event.event_kind = 'PermissionChanged'
+           AND event.consumer_visibility = 'activated'
+           AND event.block_number <= $2
+           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND candidate.resolver_address IS NOT NULL
+           AND btrim(candidate.resolver_address) <> ''
+           AND lower(candidate.resolver_address) <>
+               '0x0000000000000000000000000000000000000000'
+         ON CONFLICT DO NOTHING"
+    );
+    sqlx::query(&permission_history)
+        .bind(chain_id)
+        .bind(target_block)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            ProjectError::database("failed to scope resolver permission history", error)
+        })?;
+
     sqlx::query(
         "INSERT INTO project_scope_resolvers
          SELECT lower(pointer.resolver_address)
@@ -43,6 +80,15 @@ pub(super) async fn include_resource_pointers(
                           event.log_index DESC NULLS LAST,
                           event.normalized_event_id DESC
              ) latest
+             UNION ALL
+             SELECT permission.scope_detail ->> 'resolver_address'
+             FROM permissions_current permission
+             JOIN project_scope_resources scope USING (resource_id)
+             WHERE permission.scope_kind = 'resolver'
+               AND permission.scope_detail ->> 'chain_id' = $1
+             UNION ALL
+             SELECT resolver_address
+             FROM project_scope_resolver_permission_history
          ) pointer
          WHERE pointer.resolver_address IS NOT NULL
            AND btrim(pointer.resolver_address) <> ''
@@ -127,6 +173,12 @@ pub(super) async fn classify_unchanged(
                WHERE permission.scope_kind = 'resolver'
                  AND permission.scope_detail ->> 'chain_id' = $1
                  AND lower(permission.scope_detail ->> 'resolver_address') =
+                     lower(current.resolver_address)
+           )
+           AND NOT EXISTS (
+               SELECT 1
+               FROM project_scope_resolver_permission_history permission
+               WHERE lower(permission.resolver_address) =
                      lower(current.resolver_address)
            )
            AND NOT EXISTS (

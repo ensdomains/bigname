@@ -474,6 +474,13 @@ Execution and coverage: `VerifiedResolutionObserved`, `VerifiedResolutionInvalid
 
 ENSv2 mappings:
 
+- ENSv2 registry `RegistrationGranted`, `RegistrationRenewed`, and
+  `RegistrationReleased` payloads always identify the emitting registry with
+  `registry_contract_instance_id`. A direct `unregister` emits
+  `LabelUnregistered` from that registry, so its normalized release carries the
+  same identity as the corresponding grant or renewal.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L197 @ ens_v2@ccaeb58)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201 @ ens_v2@ccaeb58)
 - The `MigrationApplied` kind records a candidate [ENSv1→ENSv2
   migration boundary](glossary.md#migration-boundary) in slice 1. It is derived
   from the complete admitted per-name transaction shape at the successful ENSv2

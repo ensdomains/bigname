@@ -71,6 +71,7 @@ async fn create_scope_tables(transaction: &mut Transaction<'_, Postgres>) -> Res
         "CREATE TEMP TABLE project_scope_children (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_resolvers (resolver_address text PRIMARY KEY) ON COMMIT DROP",
+        "CREATE TEMP TABLE project_scope_resolver_permission_history (resolver_address text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_resolver_dependents (resolver_address text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_resolver_passthrough (resolver_address text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_primary (address text, coin_type text, namespace text, PRIMARY KEY (address, coin_type, namespace)) ON COMMIT DROP",

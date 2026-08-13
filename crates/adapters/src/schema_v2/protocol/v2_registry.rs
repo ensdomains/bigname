@@ -411,12 +411,20 @@ fn label_unregistered(
     let token_id = u256_word_hex(event.tokenId);
     let linked = state.release_v2_token(&raw.emitting_address, &token_id);
     let transitions = state.refresh_v2_names(raw.block_timestamp.unix_timestamp());
+    // Registration events are partitioned by their emitting registry. PermissionedRegistry emits
+    // LabelUnregistered from that registry's public unregister path.
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L197 @ ens_v2@ccaeb58)
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201 @ ens_v2@ccaeb58)
     let mut output = token_state_event(
         selected,
         "RegistrationReleased",
         event.tokenId,
         linked.as_ref(),
-        json!({"source_event":"LabelUnregistered","sender":address_hex(event.sender)}),
+        json!({
+            "source_event":"LabelUnregistered",
+            "sender":address_hex(event.sender),
+            "registry_contract_instance_id":selected.contract_instance_id.to_string(),
+        }),
     )?;
     append_terminal_boundaries(&mut output, linked.as_ref(), &token_id, "LabelUnregistered");
     append_v2_name_transitions(&mut output, transitions, raw, "LabelUnregistered", None);
