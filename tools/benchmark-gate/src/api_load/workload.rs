@@ -133,7 +133,7 @@ fn lookup_requests(base: &Url, corpus: &Corpus, requests: &mut Vec<RequestSpec>)
     for variant in 0..100 {
         let bucket = variant / 2;
         let name_samples = if variant % 2 == 0 {
-            let namespace = &corpus.names[bucket % corpus.names.len()].0;
+            let namespace = &corpus.namespaces[bucket % corpus.namespaces.len()];
             corpus
                 .names
                 .iter()
@@ -386,6 +386,7 @@ mod tests {
             primary_names: Vec::new(),
             resolvers: Vec::new(),
             namespaces: vec!["ens".to_owned()],
+            names_by_namespace: [("ens".to_owned(), 1)].into_iter().collect(),
         }
     }
 
@@ -438,5 +439,44 @@ mod tests {
         }
         let lookup = request_variants(&base, &corpus, "lookup").unwrap();
         assert_eq!(lookup[0].body.as_ref().unwrap()["namespace"], "ens");
+    }
+
+    #[test]
+    fn name_lookup_variants_cover_every_active_namespace() {
+        let base = normalized_base_url("http://127.0.0.1:3000").unwrap();
+        let mut names = (0..50)
+            .map(|index| ("basenames".to_owned(), format!("base-{index}.base.eth")))
+            .collect::<Vec<_>>();
+        names.extend((0..50).map(|index| ("ens".to_owned(), format!("ens-{index}.eth"))));
+        let corpus = Corpus {
+            names,
+            address_names: vec![(
+                "0x0000000000000000000000000000000000000001".to_owned(),
+                "one.eth".to_owned(),
+                "ens".to_owned(),
+                "token_holder".to_owned(),
+            )],
+            parents: Vec::new(),
+            permission_subjects: Vec::new(),
+            primary_names: Vec::new(),
+            resolvers: Vec::new(),
+            namespaces: vec!["basenames".to_owned(), "ens".to_owned()],
+            names_by_namespace: [("basenames".to_owned(), 50), ("ens".to_owned(), 50)]
+                .into_iter()
+                .collect(),
+        };
+
+        let namespaces = request_variants(&base, &corpus, "lookup")
+            .unwrap()
+            .into_iter()
+            .filter_map(|request| request.body?.get("namespace")?.as_str().map(str::to_owned))
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(
+            namespaces,
+            ["basenames".to_owned(), "ens".to_owned()]
+                .into_iter()
+                .collect()
+        );
     }
 }

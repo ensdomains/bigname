@@ -1,9 +1,54 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result, ensure};
 use sqlx::PgPool;
 
 use crate::budgets::GateBudgets;
 
-const PARENT_CORPUS_SQL: &str = "SELECT DISTINCT surface.namespace, surface.raw_name FROM children_current child JOIN name_current surface ON surface.logical_name_id = child.parent_logical_name_id WHERE surface.support_status = 'supported' AND surface.raw_name <> '' ORDER BY surface.namespace, surface.raw_name LIMIT $1";
+const ACTIVE_NAMESPACES_SQL: &str = "SELECT DISTINCT namespace FROM manifest_versions WHERE rollout_status = 'active' AND namespace IN ('ens', 'basenames') ORDER BY namespace";
+const NAME_CORPUS_SQL: &str = r#"
+WITH active_namespaces AS (
+    SELECT namespace,
+           row_number() OVER (ORDER BY namespace) AS quota_rank,
+           count(*) OVER () AS namespace_count
+    FROM (SELECT DISTINCT namespace FROM manifest_versions WHERE rollout_status = 'active' AND namespace IN ('ens', 'basenames')) active
+), ranked AS (
+    SELECT name.namespace, name.raw_name, name.logical_name_id,
+           row_number() OVER (PARTITION BY name.namespace ORDER BY name.logical_name_id) AS sample_rank,
+           active.quota_rank, active.namespace_count
+    FROM active_namespaces active
+    JOIN name_current name ON name.namespace = active.namespace
+    WHERE name.support_status = 'supported'
+)
+SELECT namespace, raw_name
+FROM ranked
+WHERE sample_rank <= ($1 / namespace_count)
+    + CASE WHEN quota_rank <= ($1 % namespace_count) THEN 1 ELSE 0 END
+ORDER BY namespace, logical_name_id"#;
+const PARENT_CORPUS_SQL: &str = r#"
+WITH active_namespaces AS (
+    SELECT namespace,
+           row_number() OVER (ORDER BY namespace) AS quota_rank,
+           count(*) OVER () AS namespace_count
+    FROM (SELECT DISTINCT namespace FROM manifest_versions WHERE rollout_status = 'active' AND namespace IN ('ens', 'basenames')) active
+), candidates AS (
+    SELECT DISTINCT surface.namespace, surface.raw_name
+    FROM children_current child
+    JOIN name_current surface ON surface.logical_name_id = child.parent_logical_name_id
+    JOIN active_namespaces active ON active.namespace = surface.namespace
+    WHERE surface.support_status = 'supported' AND surface.raw_name <> ''
+), ranked AS (
+    SELECT candidate.namespace, candidate.raw_name,
+           row_number() OVER (PARTITION BY candidate.namespace ORDER BY candidate.raw_name) AS sample_rank,
+           active.quota_rank, active.namespace_count
+    FROM candidates candidate
+    JOIN active_namespaces active ON active.namespace = candidate.namespace
+)
+SELECT namespace, raw_name
+FROM ranked
+WHERE sample_rank <= ($1 / namespace_count)
+    + CASE WHEN quota_rank <= ($1 % namespace_count) THEN 1 ELSE 0 END
+ORDER BY namespace, raw_name"#;
 
 #[derive(Clone, Debug)]
 pub(super) struct Corpus {
@@ -14,6 +59,7 @@ pub(super) struct Corpus {
     pub(super) primary_names: Vec<(String, String, String)>,
     pub(super) resolvers: Vec<(String, String)>,
     pub(super) namespaces: Vec<String>,
+    pub(super) names_by_namespace: BTreeMap<String, usize>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -26,13 +72,15 @@ impl Corpus {
     pub(super) async fn load(pool: &PgPool, budgets: &GateBudgets) -> Result<Self> {
         let limit = i64::try_from(budgets.api_corpus_size)
             .context("API corpus size exceeds PostgreSQL limit")?;
-        let names: Vec<(String, String)> = sqlx::query_as(
-            "SELECT namespace, raw_name FROM name_current WHERE support_status = 'supported' ORDER BY logical_name_id LIMIT $1",
-        )
-        .bind(limit)
-        .fetch_all(pool)
-        .await
-        .context("failed to load name benchmark corpus")?;
+        let namespaces: Vec<String> = sqlx::query_scalar(ACTIVE_NAMESPACES_SQL)
+            .fetch_all(pool)
+            .await
+            .context("failed to load namespace benchmark corpus")?;
+        let names: Vec<(String, String)> = sqlx::query_as(NAME_CORPUS_SQL)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+            .context("failed to load name benchmark corpus")?;
         let address_names: Vec<(String, String, String, String)> = sqlx::query_as(
             "SELECT address, min(raw_name), namespace, relation
              FROM address_names_current
@@ -80,40 +128,26 @@ impl Corpus {
         .fetch_all(pool)
         .await
         .context("failed to load resolver benchmark corpus")?;
-        let namespaces: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT namespace FROM manifest_versions WHERE rollout_status = 'active' AND namespace IN ('ens', 'basenames') ORDER BY namespace",
-        )
-        .fetch_all(pool)
-        .await
-        .context("failed to load namespace benchmark corpus")?;
+        let mut names_by_namespace = BTreeMap::new();
+        for (namespace, _) in &names {
+            *names_by_namespace.entry(namespace.clone()).or_insert(0) += 1;
+        }
 
-        ensure!(
-            names.len() >= budgets.api_corpus_size,
-            "name corpus has {} rows; release profile requires {}",
-            names.len(),
-            budgets.api_corpus_size
-        );
-        ensure!(
-            address_names.len() >= budgets.api_corpus_size,
-            "address corpus has {} rows; release profile requires {}",
-            address_names.len(),
-            budgets.api_corpus_size
-        );
-        ensure!(
-            !namespaces.is_empty(),
-            "benchmark database has no active public namespace"
-        );
+        require_active_namespace_coverage(&namespaces, &names_by_namespace)?;
+        require_minimum_corpus_size("name", names.len(), budgets.api_corpus_size)?;
+        require_minimum_corpus_size("address", address_names.len(), budgets.api_corpus_size)?;
         for (label, actual) in [
             ("subname parent", parents.len()),
             ("permission subject", permission_subjects.len()),
             ("successful primary name", primary_names.len()),
         ] {
-            ensure!(
-                actual >= budgets.api_min_specialized_corpus_size,
-                "{label} corpus has {actual} rows; release profile requires {}",
-                budgets.api_min_specialized_corpus_size
-            );
+            require_minimum_corpus_size(label, actual, budgets.api_min_specialized_corpus_size)?;
         }
+        require_minimum_corpus_size(
+            "resolver",
+            resolvers.len(),
+            budgets.api_min_resolver_corpus_size,
+        )?;
 
         Ok(Self {
             names,
@@ -123,8 +157,38 @@ impl Corpus {
             primary_names,
             resolvers,
             namespaces,
+            names_by_namespace,
         })
     }
+}
+
+fn require_minimum_corpus_size(label: &str, actual: usize, minimum: usize) -> Result<()> {
+    ensure!(
+        actual >= minimum,
+        "{label} corpus has {actual} rows; release profile requires {minimum}"
+    );
+    Ok(())
+}
+
+fn require_active_namespace_coverage(
+    namespaces: &[String],
+    names_by_namespace: &BTreeMap<String, usize>,
+) -> Result<()> {
+    ensure!(
+        !namespaces.is_empty(),
+        "benchmark database has no active public namespace"
+    );
+    for namespace in namespaces {
+        ensure!(
+            names_by_namespace
+                .get(namespace)
+                .copied()
+                .unwrap_or_default()
+                > 0,
+            "active namespace {namespace:?} contributed no supported names to the benchmark corpus"
+        );
+    }
+    Ok(())
 }
 
 pub(super) async fn load_table_scale(pool: &PgPool) -> Result<TableScale> {
@@ -204,6 +268,22 @@ mod tests {
         assert!(PARENT_CORPUS_SQL.contains("surface.support_status = 'supported'"));
     }
 
+    #[test]
+    fn resolver_corpus_has_an_independent_floor() {
+        assert!(require_minimum_corpus_size("resolver", 999, 1_000).is_err());
+        assert!(require_minimum_corpus_size("resolver", 1_000, 1_000).is_ok());
+    }
+
+    #[test]
+    fn every_active_namespace_must_contribute_supported_names() {
+        let namespaces = vec!["basenames".to_owned(), "ens".to_owned()];
+        let counts = [("basenames".to_owned(), 5_000)].into_iter().collect();
+        let error = require_active_namespace_coverage(&namespaces, &counts)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("active namespace \"ens\""));
+    }
+
     #[tokio::test]
     async fn unsupported_rows_fail_the_supported_scale_preflight() {
         let database = TestDatabase::create(TestDatabaseConfig::new(
@@ -246,5 +326,77 @@ mod tests {
             ]
         );
         database.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn name_corpus_is_stratified_across_active_namespaces() {
+        let database = TestDatabase::create(TestDatabaseConfig::new(
+            "benchmark_namespace_stratification",
+        ))
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE name_current (
+                 namespace text NOT NULL,
+                 raw_name text NOT NULL,
+                 logical_name_id text NOT NULL,
+                 support_status text NOT NULL
+             )",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE manifest_versions (
+                 namespace text NOT NULL,
+                 rollout_status text NOT NULL
+             )",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO manifest_versions VALUES
+                 ('basenames', 'active'), ('ens', 'active')",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        for index in 0..4 {
+            sqlx::query(
+                "INSERT INTO name_current VALUES
+                     ('basenames', $1, $2, 'supported')",
+            )
+            .bind(format!("base-{index}.base.eth"))
+            .bind(format!("basenames:{index:02}"))
+            .execute(database.pool())
+            .await
+            .unwrap();
+        }
+        for index in 0..2 {
+            sqlx::query(
+                "INSERT INTO name_current VALUES
+                     ('ens', $1, $2, 'supported')",
+            )
+            .bind(format!("ens-{index}.eth"))
+            .bind(format!("ens:{index:02}"))
+            .execute(database.pool())
+            .await
+            .unwrap();
+        }
+
+        let names: Vec<(String, String)> = sqlx::query_as(NAME_CORPUS_SQL)
+            .bind(4_i64)
+            .fetch_all(database.pool())
+            .await
+            .unwrap();
+        let namespaces = names
+            .iter()
+            .map(|(namespace, _)| namespace.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        database.cleanup().await.unwrap();
+        assert_eq!(names.len(), 4);
+        assert_eq!(namespaces, ["basenames", "ens"].into_iter().collect());
     }
 }

@@ -19,7 +19,10 @@ profile from its compiled assertion mode, while production commands also
 require the wrapper to attest that it selected the release Cargo build profile.
 The wrapper requires `jq` and resolves both executables from Cargo's JSON
 artifact output, so `CARGO_TARGET_DIR` and Cargo `build.target-dir` settings are
-honored for the harness and the smoke API.
+honored for the harness and the smoke API. The wrapper also embeds the captured
+commit in the benchmark binary at compile time. Cargo includes that value in
+its build fingerprint, so a shared target directory cannot reuse benchmark
+bytes built for a different checkout.
 
 ## What the gate measures
 
@@ -36,9 +39,9 @@ database copy because all three operations write derived state:
   per hour;
 - the dense range must contain at least 100,000 consecutive canonical blocks;
 - that range must contain at least 8,000 retained raw logs per 1,000 blocks;
-- the restored copy must contain at least 3 million current name rows before
-  any timed projection work begins, owned by the selected chain's Project
-  output;
+- the restored copy must contain at least 3 million supported current name rows
+  before any timed projection work begins, owned by the selected chain's
+  Project output;
 - the Interpret process must stay at or below 32 GiB peak RSS while using the
   configured 65,536-entry interpreter-state cache.
 
@@ -56,7 +59,12 @@ The API half sends each Tier 1 and Tier 2 REST route in
 seconds after a 10-second warmup. It loads 10,000 names and 10,000 distinct
 address/name/relation combinations from the target projections, plus at least
 1,000 populated subname parents, permission subjects, and successful primary
-name claims. Before sampling that corpus, it counts the complete
+name claims, plus at least 1,000 supported resolver rows. The name and parent
+samples are divided deterministically across every active public namespace;
+an active namespace with no supported name seed makes the run red. The report
+records the name count contributed by each namespace, and name-mode lookup
+batches alternate those namespace buckets. Before sampling that corpus, it
+counts the complete
 `name_current` and `address_names_current` tables and requires at least 3
 million supported rows in each. Unsupported rows are excluded because the gate
 cannot use them as request seeds. These floors leave headroom below the roughly
@@ -136,7 +144,10 @@ SQL
 
 Do not create this table in production or include it in a production backup.
 Restoring production alone therefore never produces the marker required for
-writes.
+writes. Prepare the marker immediately before the indexing run: it expires 12
+hours after `prepared_at`, so a durable marker left on an old copy cannot
+authorize a later run. A timestamp more than five minutes ahead of the database
+clock is also refused; correct clock skew instead of widening this window.
 
 ```sh
 BIGNAME_BENCHMARK_DATABASE_URL="postgres://benchmark-writer@copy-host/$DISPOSABLE_DATABASE" \
@@ -160,7 +171,10 @@ with the typed name, requires the marker table, and requires a row whose UUID
 and database name both match. It refuses writes before Interpret or Project on
 any mismatch. The connection carries the same interpreter content-hash setting
 as the phase runner, so ENSv1→ENSv2 migration correlation writes behave
-normally. The incremental tick runs first, the Interpret redo runs second, and
+normally. Every new pooled connection repeats the expected-name and fresh-marker
+checks before it can issue a query, so losing or retargeting a database
+connection cannot bypass the preflight. The incremental tick runs first, the
+Interpret redo runs second, and
 the full Project rebuild runs last so the rebuilt projections match the
 interpreted copy. The report records the opaque database identity token before
 and after those measurements; a restart, failover, or listener change during
@@ -198,12 +212,17 @@ reach the same serving database. Cursor seed requests cover top-level list curso
 per-result reverse-lookup cursors, and the resolver route's nested bound-name
 cursor.
 
-After the complete timed endpoint sequence, the harness repeats the API build,
-content hash, and running-database identity checks and rechecks the corpus connection.
+After every timed endpoint window, the harness repeats the API build, content
+hash, and running-database identity checks and rechecks the corpus connection.
 A build or database-identity change during the run is red even when every
-individual request succeeded. This detects a PostgreSQL restart or failover
+individual request succeeded. A failed boundary probe is recorded as a red,
+endpoint-named report failure rather than discarding the run's evidence. This
+detects a PostgreSQL restart or failover
 and a deployment roll that changes the build; a same-build API process restart
-is not distinguished from a continuously running process.
+is not distinguished from a continuously running process. A transient
+same-build identity flip entirely inside one endpoint window also cannot be
+distinguished; the boundary checks limit that blind window to one route's
+measurement rather than the complete load sequence.
 
 Before timed load begins, production mode sends seed requests and refuses to
 run unless every route returns at least one populated result. Every paginated
@@ -213,7 +232,9 @@ through the bounded target-database corpus before declaring the route red; a res
 cursor request becomes part of the timed workload. For the records route,
 populated means at least one requested key has an `ok` answer, not merely that
 the name exists. This prevents a fast empty-result workload from counting as
-release evidence.
+release evidence. Timed records responses are also classified as populated or
+empty. At least 1 percent must contain an `ok` requested record, and the report
+records the observed populated share and its checked-in floor.
 
 ## Decide green or red
 
@@ -221,8 +242,10 @@ Both commands must exit zero and both JSON reports must say `"green": true`.
 For indexing, every timing, density, throughput, and memory assertion must pass.
 For API load, every listed route must sustain at least 1,950 completed requests
 per second, return 100 percent successful HTTP responses, and meet all three
-latency percentiles. Missing corpus cardinality or a missing real resolver row
-is red rather than silently reducing request variety.
+latency percentiles. The records route must also meet its 1-percent populated
+response floor. Missing corpus cardinality, a missing active namespace, or an
+undersized resolver corpus is red rather than silently reducing request
+variety.
 
 Attach both reports and the recorded environment facts to the release record.
 Each report includes the database name and the database server address observed

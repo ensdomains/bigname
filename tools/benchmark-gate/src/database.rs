@@ -2,10 +2,12 @@ use std::{str::FromStr, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use sqlx::{
-    PgPool,
+    PgConnection, PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 use uuid::Uuid;
+
+const DISPOSABLE_MARKER_MAX_AGE: &str = "12 hours";
 
 const DATABASE_INSTANCE_IDENTITY_SQL: &str = "SELECT database.oid::text,
             extract(epoch FROM pg_postmaster_start_time())::text,
@@ -41,6 +43,8 @@ pub async fn connect_disposable_copy(
     database_url: &str,
     maximum_connections: u32,
     statement_timeout: Duration,
+    expected_database_name: &str,
+    expected_marker: Uuid,
 ) -> Result<PgPool> {
     let timeout_ms = statement_timeout.as_millis().max(1).to_string();
     let options =
@@ -52,9 +56,18 @@ pub async fn connect_disposable_copy(
                 bigname_content_hash::INTERPRETER_CONTENT_HASH.to_owned(),
             ),
         ]);
+    let expected_database_name = expected_database_name.to_owned();
     let pool = PgPoolOptions::new()
         .max_connections(maximum_connections)
         .acquire_timeout(Duration::from_secs(30))
+        .after_connect(move |connection, _metadata| {
+            let expected_database_name = expected_database_name.clone();
+            Box::pin(async move {
+                validate_disposable_connection(connection, &expected_database_name, expected_marker)
+                    .await
+                    .map_err(|error| sqlx::Error::Protocol(error.to_string()))
+            })
+        })
         .connect_with(options)
         .await
         .context("failed to connect to the disposable benchmark copy")?;
@@ -125,7 +138,10 @@ pub async fn require_disposable_marker(pool: &PgPool, expected: Uuid) -> Result<
         "SELECT EXISTS (
              SELECT 1
              FROM bigname_benchmark.disposable_copy_marker
-             WHERE marker = $1 AND database_name = current_database()
+             WHERE marker = $1
+               AND database_name = current_database()
+               AND prepared_at >= now() - interval '12 hours'
+               AND prepared_at <= now() + interval '5 minutes'
          )",
     )
     .bind(expected)
@@ -134,7 +150,56 @@ pub async fn require_disposable_marker(pool: &PgPool, expected: Uuid) -> Result<
     .context("failed to verify the disposable-copy marker")?;
     ensure!(
         marker_matches,
-        "disposable-copy marker does not match this database; refusing indexing writes"
+        "disposable-copy marker does not match this database, is older than {DISPOSABLE_MARKER_MAX_AGE}, or is more than 5 minutes in the future; refusing indexing writes"
+    );
+    Ok(())
+}
+
+async fn validate_disposable_connection(
+    connection: &mut PgConnection,
+    expected_database_name: &str,
+    expected_marker: Uuid,
+) -> Result<()> {
+    let database_name: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(&mut *connection)
+        .await
+        .context("failed to identify a disposable-copy pooled connection")?;
+    require_database_identity(&database_name, expected_database_name)?;
+    let read_only: String = sqlx::query_scalar("SHOW transaction_read_only")
+        .fetch_one(&mut *connection)
+        .await
+        .context("failed to inspect a disposable-copy pooled connection")?;
+    ensure!(
+        read_only == "off",
+        "disposable-copy pooled connection is read-only; refusing indexing writes"
+    );
+    let marker_table_exists: bool = sqlx::query_scalar(
+        "SELECT to_regclass('bigname_benchmark.disposable_copy_marker') IS NOT NULL",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .context("failed to inspect a disposable-copy pooled connection marker")?;
+    ensure!(
+        marker_table_exists,
+        "database has no disposable-copy marker table; refusing pooled indexing writes"
+    );
+    let marker_matches: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM bigname_benchmark.disposable_copy_marker
+             WHERE marker = $1
+               AND database_name = current_database()
+               AND prepared_at >= now() - interval '12 hours'
+               AND prepared_at <= now() + interval '5 minutes'
+         )",
+    )
+    .bind(expected_marker)
+    .fetch_one(&mut *connection)
+    .await
+    .context("failed to validate a disposable-copy pooled connection marker")?;
+    ensure!(
+        marker_matches,
+        "disposable-copy marker does not match this database, is older than {DISPOSABLE_MARKER_MAX_AGE}, or is more than 5 minutes in the future; refusing pooled indexing writes"
     );
     Ok(())
 }
@@ -150,6 +215,12 @@ mod tests {
     use super::*;
     use bigname_test_support::{TestDatabase, TestDatabaseConfig, database_url_from_env};
     use uuid::Uuid;
+
+    fn scratch_database_url(database_name: &str) -> String {
+        let mut url = url::Url::parse(&database_url_from_env()).unwrap();
+        url.set_path(&format!("/{database_name}"));
+        url.into()
+    }
 
     #[test]
     fn disposable_database_identity_must_match_exactly() {
@@ -221,6 +292,142 @@ mod tests {
             .await
             .unwrap();
         database.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_disposable_marker_is_refused() {
+        let database = TestDatabase::create(TestDatabaseConfig::new("benchmark_stale_marker"))
+            .await
+            .unwrap();
+        let marker = Uuid::new_v4();
+        sqlx::query("CREATE SCHEMA bigname_benchmark")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE bigname_benchmark.disposable_copy_marker (
+                 marker uuid PRIMARY KEY,
+                 database_name text NOT NULL,
+                 prepared_at timestamptz NOT NULL
+             )",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO bigname_benchmark.disposable_copy_marker
+                 (marker, database_name, prepared_at)
+             VALUES ($1, current_database(), now() - interval '13 hours')",
+        )
+        .bind(marker)
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        let result = require_disposable_marker(database.pool(), marker).await;
+        database.cleanup().await.unwrap();
+        let error = result.expect_err("a stale marker must not authorize writes");
+        assert!(error.to_string().contains("older than 12 hours"));
+    }
+
+    #[tokio::test]
+    async fn future_dated_disposable_marker_is_refused() {
+        let database = TestDatabase::create(TestDatabaseConfig::new("benchmark_future_marker"))
+            .await
+            .unwrap();
+        let marker = Uuid::new_v4();
+        sqlx::query("CREATE SCHEMA bigname_benchmark")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE bigname_benchmark.disposable_copy_marker (
+                 marker uuid PRIMARY KEY,
+                 database_name text NOT NULL,
+                 prepared_at timestamptz NOT NULL
+             )",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO bigname_benchmark.disposable_copy_marker
+                 (marker, database_name, prepared_at)
+             VALUES ($1, current_database(), now() + interval '30 days')",
+        )
+        .bind(marker)
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        let result = require_disposable_marker(database.pool(), marker).await;
+        let mut connection = database.pool().acquire().await.unwrap();
+        let pooled_result =
+            validate_disposable_connection(&mut connection, database.database_name(), marker).await;
+        drop(connection);
+        database.cleanup().await.unwrap();
+        assert!(
+            result.is_err(),
+            "a future-dated marker must not extend write authorization"
+        );
+        assert!(
+            pooled_result.is_err(),
+            "a new pooled connection accepted a future-dated marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_new_disposable_pool_connection_revalidates_the_marker() {
+        let database = TestDatabase::create(TestDatabaseConfig::new("benchmark_marker_pool"))
+            .await
+            .unwrap();
+        let marker = Uuid::new_v4();
+        sqlx::query("CREATE SCHEMA bigname_benchmark")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE bigname_benchmark.disposable_copy_marker (
+                 marker uuid PRIMARY KEY,
+                 database_name text NOT NULL,
+                 prepared_at timestamptz NOT NULL DEFAULT now()
+             )",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO bigname_benchmark.disposable_copy_marker (marker, database_name)
+             VALUES ($1, current_database())",
+        )
+        .bind(marker)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let database_url = scratch_database_url(database.database_name());
+        let pool = connect_disposable_copy(
+            &database_url,
+            1,
+            Duration::from_secs(30),
+            database.database_name(),
+            marker,
+        )
+        .await
+        .unwrap();
+        require_disposable_marker(&pool, marker).await.unwrap();
+        let held = pool.acquire().await.unwrap();
+        sqlx::query("DELETE FROM bigname_benchmark.disposable_copy_marker")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        held.close().await.unwrap();
+
+        let fresh = tokio::time::timeout(Duration::from_secs(2), pool.acquire()).await;
+        let refused = !matches!(fresh, Ok(Ok(_)));
+        drop(fresh);
+        pool.close().await;
+        database.cleanup().await.unwrap();
+        assert!(refused, "a new connection accepted a removed marker");
     }
 
     #[tokio::test]

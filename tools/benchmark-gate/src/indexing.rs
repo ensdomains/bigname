@@ -21,8 +21,7 @@ use sqlx::PgPool;
 
 use crate::{budgets::GateBudgets, database};
 
-const PROJECTION_NAME_COUNT_SQL: &str =
-    "SELECT count(*) FROM name_current WHERE provenance ->> 'chain_id' = $1";
+const PROJECTION_NAME_COUNT_SQL: &str = "SELECT count(*) FROM name_current WHERE provenance ->> 'chain_id' = $1 AND support_status = 'supported'";
 
 #[derive(Clone, Debug)]
 pub struct IndexingInput {
@@ -489,12 +488,12 @@ fn projection_scale_failures(pre_rebuild: u64, post_rebuild: u64, minimum: u64) 
     let mut failures = Vec::new();
     if pre_rebuild < minimum {
         failures.push(format!(
-            "name_current had {pre_rebuild} rows before rebuild; release profile requires {minimum}"
+            "name_current had {pre_rebuild} supported rows before rebuild; release profile requires {minimum}"
         ));
     }
     if post_rebuild < minimum {
         failures.push(format!(
-            "name_current has {post_rebuild} rows after rebuild; release profile requires {minimum}"
+            "name_current has {post_rebuild} supported rows after rebuild; release profile requires {minimum}"
         ));
     }
     failures
@@ -511,6 +510,7 @@ fn database_instance_identity_failures(preflight: &str, postflight: &str) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 
     #[test]
     fn dense_walk_cannot_use_a_trivial_range() {
@@ -570,6 +570,47 @@ mod tests {
     #[test]
     fn projection_scale_uses_selected_project_ownership() {
         assert!(PROJECTION_NAME_COUNT_SQL.contains("provenance ->> 'chain_id' = $1"));
+        assert!(PROJECTION_NAME_COUNT_SQL.contains("support_status = 'supported'"));
+    }
+
+    #[tokio::test]
+    async fn unsupported_projection_rows_do_not_satisfy_the_scale_floor() {
+        let database = TestDatabase::create(TestDatabaseConfig::new(
+            "benchmark_supported_projection_scale",
+        ))
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE name_current (
+                 provenance jsonb NOT NULL,
+                 support_status text NOT NULL
+             )",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO name_current
+             SELECT jsonb_build_object('chain_id', 'ethereum-mainnet'), 'unsupported'
+             FROM generate_series(1, 8)",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO name_current VALUES
+                 (jsonb_build_object('chain_id', 'ethereum-mainnet'), 'supported')",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        let count = projection_name_count(database.pool(), "ethereum-mainnet")
+            .await
+            .unwrap();
+
+        database.cleanup().await.unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]

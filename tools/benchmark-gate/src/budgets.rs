@@ -60,9 +60,11 @@ pub struct GateBudgets {
     pub api_warmup_seconds: u64,
     pub api_corpus_size: usize,
     pub api_min_specialized_corpus_size: usize,
+    pub api_min_resolver_corpus_size: usize,
     pub api_min_name_current_rows: u64,
     pub api_min_address_names_current_rows: u64,
     pub api_min_success_percent: f64,
+    pub api_records_min_populated_percent: f64,
     pub api_cursor_seed_count: usize,
     pub api_require_populated_probes: bool,
     pub api_require_cursor_variants: bool,
@@ -160,12 +162,21 @@ impl GateBudgets {
             "{profile}.api_min_success_percent must be between 0 and 100"
         );
         ensure!(
+            (0.0..=100.0).contains(&self.api_records_min_populated_percent),
+            "{profile}.api_records_min_populated_percent must be between 0 and 100"
+        );
+        ensure!(
             self.api_corpus_size > 0,
             "{profile}.api_corpus_size must be positive"
         );
         ensure!(
             self.api_min_specialized_corpus_size <= self.api_corpus_size,
             "{profile}.api_min_specialized_corpus_size exceeds api_corpus_size"
+        );
+        ensure!(
+            self.api_min_resolver_corpus_size > 0
+                && self.api_min_resolver_corpus_size <= self.api_corpus_size,
+            "{profile}.api_min_resolver_corpus_size must be positive and no greater than api_corpus_size"
         );
         ensure!(
             self.interpret_state_cache_entries > 0,
@@ -215,6 +226,8 @@ mod tests {
             budgets.production.api_min_address_names_current_rows,
             3_000_000
         );
+        assert_eq!(budgets.production.api_min_resolver_corpus_size, 1_000);
+        assert_eq!(budgets.production.api_records_min_populated_percent, 1.0);
         assert!(budgets.smoke.api_require_resolver_cursor_variant);
     }
 }

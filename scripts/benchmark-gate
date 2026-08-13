@@ -27,7 +27,8 @@ fi
 
 build_artifacts=""
 if ! build_artifacts="$(
-  cargo build "${profile_args[@]}" \
+  BIGNAME_BENCHMARK_BUILT_HEAD="$source_head" \
+    cargo build "${profile_args[@]}" \
     -p bigname-benchmark-gate \
     -p bigname-api \
     --message-format=json

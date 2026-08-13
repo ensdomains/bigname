@@ -18,6 +18,7 @@ mod smoke;
 use budgets::{BudgetProfile, BudgetsFile};
 
 const BUDGETS_PATH: &str = "benchmarks/release-gate.toml";
+const COMPILED_HEAD: Option<&str> = option_env!("BIGNAME_BENCHMARK_BUILT_HEAD");
 
 #[derive(Debug, Parser)]
 #[command(name = "bigname-benchmark-gate")]
@@ -111,6 +112,7 @@ struct GateReport<T: Serialize> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    require_compiled_head(COMPILED_HEAD)?;
     let cli = Cli::parse();
     let budgets = BudgetsFile::load(Path::new(BUDGETS_PATH))?;
     match cli.command {
@@ -124,7 +126,14 @@ async fn main() -> Result<()> {
             let profile = budgets.profile(BudgetProfile::Production);
             let timeout =
                 Duration::from_secs(profile.project_rebuild_max_seconds.saturating_add(60));
-            let pool = database::connect_disposable_copy(&args.database_url, 8, timeout).await?;
+            let pool = database::connect_disposable_copy(
+                &args.database_url,
+                8,
+                timeout,
+                &args.expected_database_name,
+                args.disposable_marker,
+            )
+            .await?;
             let database_name = database::database_identity(&pool).await?;
             let database_host = database::database_host(&pool).await?;
             database::require_database_identity(&database_name, &args.expected_database_name)?;
@@ -249,13 +258,29 @@ fn begin_release_run() -> Result<String> {
         head != "unknown",
         "production benchmark could not identify HEAD"
     );
-    let built_head = std::env::var("BIGNAME_BENCHMARK_BUILT_HEAD")
+    let compiled_head = require_compiled_head(COMPILED_HEAD)?;
+    let launched_head = std::env::var("BIGNAME_BENCHMARK_BUILT_HEAD")
         .context("production benchmark must be launched by scripts/benchmark-gate")?;
     ensure!(
-        built_head == head,
-        "benchmark binary was built from {built_head}, but runtime HEAD is {head}"
+        launched_head == compiled_head,
+        "benchmark wrapper attested {launched_head}, but the binary embeds {compiled_head}"
+    );
+    ensure!(
+        compiled_head == head,
+        "benchmark binary was compiled from {compiled_head}, but runtime HEAD is {head}"
     );
     Ok(head)
+}
+
+fn require_compiled_head(compiled_head: Option<&str>) -> Result<&str> {
+    let compiled_head = compiled_head.context(
+        "benchmark binary has no compile-time source SHA; build it through scripts/benchmark-gate",
+    )?;
+    ensure!(
+        !compiled_head.trim().is_empty(),
+        "benchmark binary has an empty compile-time source SHA"
+    );
+    Ok(compiled_head)
 }
 
 const fn cargo_profile_for_debug_assertions(debug_assertions: bool) -> &'static str {
@@ -354,5 +379,12 @@ mod tests {
     #[test]
     fn a_binary_not_launched_by_the_release_wrapper_is_rejected() {
         assert!(require_release_profile().is_err());
+    }
+
+    #[test]
+    fn a_binary_without_a_compile_time_source_sha_is_rejected() {
+        assert!(require_compiled_head(None).is_err());
+        assert!(require_compiled_head(Some("")).is_err());
+        assert_eq!(require_compiled_head(Some("abc123")).unwrap(), "abc123");
     }
 }

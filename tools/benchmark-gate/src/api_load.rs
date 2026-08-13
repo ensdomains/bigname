@@ -34,11 +34,13 @@ pub struct ApiReport {
     pub address_names_current_rows: u64,
     pub min_address_names_current_rows: u64,
     pub corpus_names: usize,
+    pub corpus_names_by_namespace: BTreeMap<String, usize>,
     pub corpus_addresses: usize,
     pub corpus_parents: usize,
     pub corpus_permission_subjects: usize,
     pub corpus_primary_names: usize,
     pub corpus_resolvers: usize,
+    pub min_corpus_resolvers: usize,
     pub endpoints: Vec<EndpointReport>,
     pub green: bool,
     pub failures: Vec<String>,
@@ -52,6 +54,9 @@ pub struct EndpointReport {
     pub successful_requests: usize,
     pub min_success_percent: f64,
     pub success_percent: f64,
+    pub populated_responses: Option<usize>,
+    pub min_populated_percent: Option<f64>,
+    pub populated_percent: Option<f64>,
     pub achieved_qps: f64,
     pub target_p50_ms: u64,
     pub p50_ms: f64,
@@ -163,6 +168,8 @@ pub async fn run(
 
     let mut endpoint_reports = Vec::with_capacity(budgets.endpoints.len());
     let mut failures = Vec::new();
+    let mut postflight_identity = None;
+    let mut postflight_database_identity = None;
     for endpoint in &budgets.endpoints {
         let mut requests = request_variants(&base, &corpus, &endpoint.name)?;
         ensure!(
@@ -204,20 +211,21 @@ pub async fn run(
                 .map(|failure| format!("{}: {failure}", endpoint.name)),
         );
         endpoint_reports.push(report);
+        let (boundary_identity, boundary_database_identity, boundary_failures) =
+            recheck_api_boundary(
+                &client,
+                &base,
+                pool,
+                &endpoint.name,
+                &identity,
+                expected_build_sha,
+                &database_identity,
+            )
+            .await;
+        failures.extend(boundary_failures);
+        postflight_identity = boundary_identity;
+        postflight_database_identity = boundary_database_identity;
     }
-    let postflight_identity = load_api_target_identity(&client, &base).await?;
-    let postflight_database_identity = database::database_instance_identity(pool).await?;
-    failures.extend(api_identity_failures(
-        &postflight_identity,
-        expected_build_sha,
-        &postflight_database_identity,
-    ));
-    failures.extend(api_postflight_failures(
-        &identity,
-        &postflight_identity,
-        &database_identity,
-        &postflight_database_identity,
-    ));
 
     Ok(ApiReport {
         api_build_sha: identity.build_sha,
@@ -225,20 +233,27 @@ pub async fn run(
         api_interpreter_content_hash: identity.interpreter_content_hash,
         api_database_identity: identity.database_identity,
         corpus_database_identity: database_identity,
-        postflight_api_build_sha: Some(postflight_identity.build_sha),
-        postflight_api_interpreter_content_hash: Some(postflight_identity.interpreter_content_hash),
-        postflight_api_database_identity: Some(postflight_identity.database_identity),
-        postflight_corpus_database_identity: Some(postflight_database_identity),
+        postflight_api_build_sha: postflight_identity
+            .as_ref()
+            .map(|identity| identity.build_sha.clone()),
+        postflight_api_interpreter_content_hash: postflight_identity
+            .as_ref()
+            .map(|identity| identity.interpreter_content_hash.clone()),
+        postflight_api_database_identity: postflight_identity
+            .map(|identity| identity.database_identity),
+        postflight_corpus_database_identity: postflight_database_identity,
         name_current_rows: scale.name_current_rows,
         min_name_current_rows: budgets.api_min_name_current_rows,
         address_names_current_rows: scale.address_names_current_rows,
         min_address_names_current_rows: budgets.api_min_address_names_current_rows,
         corpus_names: corpus.names.len(),
+        corpus_names_by_namespace: corpus.names_by_namespace,
         corpus_addresses: corpus.address_names.len(),
         corpus_parents: corpus.parents.len(),
         corpus_permission_subjects: corpus.permission_subjects.len(),
         corpus_primary_names: corpus.primary_names.len(),
         corpus_resolvers: corpus.resolvers.len(),
+        min_corpus_resolvers: budgets.api_min_resolver_corpus_size,
         green: failures.is_empty(),
         failures,
         endpoints: endpoint_reports,
@@ -259,6 +274,105 @@ fn api_postflight_failures(
         failures.push("corpus database identity changed during the load benchmark".to_owned());
     }
     failures
+}
+
+fn api_boundary_failures(
+    endpoint: &str,
+    preflight: &ApiTargetIdentity,
+    boundary: &ApiTargetIdentity,
+    expected_build_sha: Option<&str>,
+    preflight_database_identity: &str,
+    boundary_database_identity: &str,
+) -> Vec<String> {
+    let failures = api_identity_failures(boundary, expected_build_sha, boundary_database_identity)
+        .into_iter()
+        .chain(api_postflight_failures(
+            preflight,
+            boundary,
+            preflight_database_identity,
+            boundary_database_identity,
+        ));
+    failures
+        .map(|failure| format!("after {endpoint} endpoint: {failure}"))
+        .collect()
+}
+
+async fn recheck_api_boundary(
+    client: &Client,
+    base: &reqwest::Url,
+    pool: &PgPool,
+    endpoint: &str,
+    preflight: &ApiTargetIdentity,
+    expected_build_sha: Option<&str>,
+    preflight_database_identity: &str,
+) -> (Option<ApiTargetIdentity>, Option<String>, Vec<String>) {
+    let (target, database) = tokio::join!(
+        load_api_target_identity(client, base),
+        database::database_instance_identity(pool)
+    );
+    classify_api_boundary(
+        endpoint,
+        preflight,
+        expected_build_sha,
+        preflight_database_identity,
+        target,
+        database,
+    )
+}
+
+fn classify_api_boundary(
+    endpoint: &str,
+    preflight: &ApiTargetIdentity,
+    expected_build_sha: Option<&str>,
+    preflight_database_identity: &str,
+    target: Result<ApiTargetIdentity>,
+    database: Result<String>,
+) -> (Option<ApiTargetIdentity>, Option<String>, Vec<String>) {
+    let mut failures = Vec::new();
+    match (&target, &database) {
+        (Ok(target), Ok(database)) => failures.extend(api_boundary_failures(
+            endpoint,
+            preflight,
+            target,
+            expected_build_sha,
+            preflight_database_identity,
+            database,
+        )),
+        (Ok(target), Err(error)) => {
+            failures.extend(
+                api_identity_failures(target, expected_build_sha, preflight_database_identity)
+                    .into_iter()
+                    .map(|failure| format!("after {endpoint} endpoint: {failure}")),
+            );
+            if target != preflight {
+                failures.push(format!(
+                    "after {endpoint} endpoint: target API identity changed during the load benchmark"
+                ));
+            }
+            failures.push(format!(
+                "after {endpoint} endpoint: corpus database identity recheck failed: {error:#}"
+            ));
+        }
+        (Err(error), Ok(database)) => {
+            failures.push(format!(
+                "after {endpoint} endpoint: target API identity recheck failed: {error:#}"
+            ));
+            if database != preflight_database_identity {
+                failures.push(format!(
+                    "after {endpoint} endpoint: corpus database identity changed during the load benchmark"
+                ));
+            }
+        }
+        (Err(target_error), Err(database_error)) => {
+            failures.push(format!(
+                "after {endpoint} endpoint: target API identity recheck failed: {target_error:#}"
+            ));
+            failures.push(format!(
+                "after {endpoint} endpoint: corpus database identity recheck failed: {database_error:#}"
+            ));
+        }
+    }
+    (target.ok(), database.ok(), failures)
 }
 
 fn requires_cursor_probe(budgets: &GateBudgets, endpoint: &str) -> bool {
@@ -303,11 +417,13 @@ fn preflight_failure_report(
         address_names_current_rows: scale.address_names_current_rows,
         min_address_names_current_rows: budgets.api_min_address_names_current_rows,
         corpus_names: 0,
+        corpus_names_by_namespace: BTreeMap::new(),
         corpus_addresses: 0,
         corpus_parents: 0,
         corpus_permission_subjects: 0,
         corpus_primary_names: 0,
         corpus_resolvers: 0,
+        min_corpus_resolvers: budgets.api_min_resolver_corpus_size,
         endpoints: Vec::new(),
         green: false,
         failures,
@@ -483,6 +599,14 @@ fn build_endpoint_report(
     let requests = samples.len();
     let successful_requests = samples.iter().filter(|sample| sample.success).count();
     let success_percent = successful_requests as f64 * 100.0 / requests.max(1) as f64;
+    let populated_responses = (endpoint.name == "records").then(|| {
+        samples
+            .iter()
+            .filter(|sample| sample.outcome.ends_with(":records_populated"))
+            .count()
+    });
+    let populated_percent =
+        populated_responses.map(|populated| populated as f64 * 100.0 / requests.max(1) as f64);
     let achieved_qps = requests as f64 / elapsed.as_secs_f64().max(0.000_001);
     let mut outcomes = BTreeMap::new();
     for sample in &samples {
@@ -509,6 +633,13 @@ fn build_endpoint_report(
             budgets.api_min_achieved_qps
         ));
     }
+    if populated_percent.is_some_and(|actual| actual < budgets.api_records_min_populated_percent) {
+        failures.push(format!(
+            "populated records share {:.3}% is below {:.3}%",
+            populated_percent.unwrap_or_default(),
+            budgets.api_records_min_populated_percent
+        ));
+    }
     for (name, actual, budget) in [
         ("p50", p50_ms, endpoint.p50_ms),
         ("p95", p95_ms, endpoint.p95_ms),
@@ -526,6 +657,10 @@ fn build_endpoint_report(
         successful_requests,
         min_success_percent: budgets.api_min_success_percent,
         success_percent,
+        populated_responses,
+        min_populated_percent: (endpoint.name == "records")
+            .then_some(budgets.api_records_min_populated_percent),
+        populated_percent,
         achieved_qps,
         target_p50_ms: endpoint.p50_ms,
         p50_ms,
@@ -574,6 +709,16 @@ async fn sample_request(client: &Client, request: &RequestSpec) -> Sample {
                     {
                         outcome.push(':');
                         outcome.push_str(code);
+                    }
+                    if success && request.url.path().ends_with("/records") {
+                        let populated = serde_json::from_slice::<Value>(&body)
+                            .ok()
+                            .is_some_and(|body| response_is_populated("records", &body));
+                        outcome.push_str(if populated {
+                            ":records_populated"
+                        } else {
+                            ":records_empty"
+                        });
                     }
                     (success, outcome)
                 }
@@ -855,6 +1000,43 @@ mod tests {
             api_postflight_failures(&before, &after, "corpus-before", "corpus-after").len(),
             2
         );
+        let boundary = api_boundary_failures(
+            "records",
+            &before,
+            &after,
+            Some("new-release"),
+            "corpus-before",
+            "corpus-after",
+        );
+        assert!(!boundary.is_empty());
+        assert!(
+            boundary
+                .iter()
+                .all(|failure| failure.starts_with("after records endpoint:"))
+        );
+    }
+
+    #[test]
+    fn boundary_probe_errors_are_endpoint_named_report_failures() {
+        let preflight = ApiTargetIdentity {
+            build_sha: "release".to_owned(),
+            interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH.to_owned(),
+            database_identity: "database".to_owned(),
+        };
+        let (target, database, failures) = classify_api_boundary(
+            "records",
+            &preflight,
+            Some("release"),
+            "database",
+            Err(anyhow::anyhow!("connection closed")),
+            Ok("database".to_owned()),
+        );
+
+        assert!(target.is_none());
+        assert_eq!(database.as_deref(), Some("database"));
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].starts_with("after records endpoint:"));
+        assert!(failures[0].contains("connection closed"));
     }
 
     #[tokio::test]
@@ -878,5 +1060,63 @@ mod tests {
         server.await.unwrap();
         assert!(sample.success);
         assert!(sample.elapsed_micros >= 40_000);
+    }
+
+    #[tokio::test]
+    async fn timed_records_sample_classifies_an_all_not_found_response_as_empty() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            let body = r#"{"data":{"records":{"addr:60":{"status":"not_found"},"text:avatar":{"status":"not_found"}}}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let base = normalized_base_url(&format!("http://{address}")).unwrap();
+        let request = get(&base, &["v2", "names", "empty.eth", "records"], &[]).unwrap();
+
+        let sample = sample_request(&Client::new(), &request).await;
+        server.await.unwrap();
+
+        assert!(sample.success);
+        assert_eq!(sample.outcome, "200:records_empty");
+    }
+
+    #[test]
+    fn timed_records_report_enforces_the_populated_share_floor() {
+        let budgets = BudgetsFile::load(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/release-gate.toml"),
+        )
+        .unwrap();
+        let production = budgets.profile(BudgetProfile::Production);
+        let endpoint = production
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == "records")
+            .unwrap();
+        let samples = (0..100)
+            .map(|_| Sample {
+                elapsed_micros: 1_000,
+                success: true,
+                outcome: "200:records_empty".to_owned(),
+            })
+            .collect();
+
+        let report =
+            build_endpoint_report(endpoint, 100, samples, Duration::from_millis(1), production);
+
+        assert_eq!(report.populated_responses, Some(0));
+        assert_eq!(report.populated_percent, Some(0.0));
+        assert!(
+            report
+                .failures
+                .iter()
+                .any(|failure| failure.contains("populated records share"))
+        );
     }
 }
