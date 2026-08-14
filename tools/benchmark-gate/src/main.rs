@@ -315,7 +315,16 @@ fn require_compiled_head(compiled_head: Option<&str>) -> Result<&str> {
 }
 
 fn require_release_profile() -> Result<()> {
-    compiler_attestation::require_release_profile(cargo_profile(), |name| std::env::var(name).ok())
+    let cargo_profile_overrides = std::env::vars_os().filter_map(|(name, value)| {
+        let name = name.into_string().ok()?;
+        name.starts_with("CARGO_PROFILE_")
+            .then(|| (name, value.to_string_lossy().into_owned()))
+    });
+    compiler_attestation::require_release_profile(
+        cargo_profile(),
+        |name| std::env::var(name).ok(),
+        cargo_profile_overrides,
+    )
 }
 
 fn wrapper_build_attestation() -> Result<WrapperBuildAttestation> {

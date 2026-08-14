@@ -34,6 +34,12 @@ if [ "$profile" = "release" ]; then
     echo "release-profile benchmark builds refuse non-empty CARGO_ENCODED_RUSTFLAGS; clear it before running the gate" >&2
     exit 1
   fi
+  while IFS= read -r profile_override; do
+    if [ -n "${!profile_override:-}" ]; then
+      echo "release-profile benchmark builds refuse non-empty $profile_override; clear it before running the gate" >&2
+      exit 1
+    fi
+  done < <(compgen -e CARGO_PROFILE_)
   release_rustflags_env=(RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS=)
   for compiler_override in RUSTC CARGO_BUILD_RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER; do
     if [ -n "${!compiler_override:-}" ]; then

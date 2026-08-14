@@ -142,18 +142,50 @@ async fn checked_in_mainnet_resolver_manifest_set_satisfies_coverage() {
 
 async fn insert_resolver_manifest(pool: &PgPool, manifest: &CheckedInResolverManifest) {
     ensure_project_state_schema(pool).await;
-    sqlx::query(
+    let manifest_id: i64 = sqlx::query_scalar(
         "INSERT INTO manifest_versions
              (namespace, rollout_status, source_family, chain_id, manifest_payload)
-         VALUES ($1, 'active', $2, $3, $4)",
+         VALUES ($1, 'active', $2, $3, $4)
+         RETURNING manifest_id",
     )
     .bind(&manifest.namespace)
     .bind(&manifest.source_family)
     .bind(&manifest.chain_id)
     .bind(&manifest.payload)
-    .execute(pool)
+    .fetch_one(pool)
     .await
     .unwrap();
+    insert_manifest_event(pool, manifest_id, manifest, &manifest.payload).await;
+}
+
+async fn insert_manifest_event(
+    pool: &PgPool,
+    manifest_id: i64,
+    manifest: &CheckedInResolverManifest,
+    projected_payload: &serde_json::Value,
+) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO normalized_events
+             (event_identity, namespace, event_kind, source_family,
+              manifest_version, source_manifest_id, chain_id,
+              canonicality_state, after_state)
+         VALUES ($1, $2, 'SourceManifestUpdated', $3, 1, $4, $5,
+                 'finalized', jsonb_build_object(
+                     'rollout_status', 'active',
+                     'manifest_version', 1,
+                     'manifest_payload', $6::jsonb
+                 ))
+         RETURNING normalized_event_id",
+    )
+    .bind(format!("manifest-event-{manifest_id}-{}", Uuid::new_v4()))
+    .bind(&manifest.namespace)
+    .bind(&manifest.source_family)
+    .bind(manifest_id)
+    .bind(&manifest.chain_id)
+    .bind(projected_payload)
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }
 
 async fn insert_resolver_row(
@@ -194,7 +226,15 @@ async fn insert_resolver_row_at(
                 jsonb_build_object('target_block_number', $5::bigint,
                                    'target_block_hash', $4::text),
                 '{\"state\":\"canonical_lineage\"}',
-                jsonb_build_object('manifest_id', manifest_id), manifest_version
+                jsonb_build_object(
+                    'manifest_id', manifest_id,
+                    'manifest_event_id', (
+                        SELECT max(event.normalized_event_id)
+                        FROM normalized_events event
+                        WHERE event.source_manifest_id = manifest_id
+                          AND event.event_kind = 'SourceManifestUpdated'
+                    )
+                ), manifest_version
          FROM manifest_versions
          WHERE chain_id = $1 AND rollout_status = 'active'
            AND EXISTS (
@@ -209,6 +249,123 @@ async fn insert_resolver_row_at(
     .bind(support_status)
     .bind(hash)
     .bind(target_block_number)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn insert_upgrade_event(
+    pool: &PgPool,
+    manifest: &CheckedInResolverManifest,
+    proxy_address: &str,
+    implementation: &str,
+    block_number: i64,
+) -> i64 {
+    let block_hash = format!("resolver-upgrade-{block_number}-{proxy_address}");
+    sqlx::query(
+        "INSERT INTO chain_lineage
+             (chain_id, block_hash, canonicality_state, block_number)
+         VALUES ($1, $2, 'canonical', $3)",
+    )
+    .bind(&manifest.chain_id)
+    .bind(&block_hash)
+    .bind(block_number)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query_scalar(
+        "INSERT INTO normalized_events
+             (event_identity, namespace, event_kind, source_family,
+              manifest_version, source_manifest_id, chain_id, block_number,
+              block_hash, transaction_index, log_index, canonicality_state,
+              after_state)
+         SELECT $1, namespace, 'Upgraded', source_family, manifest_version,
+                manifest_id, chain_id, $2, $3, 0, 0, 'canonical',
+                jsonb_build_object('proxy_address', $4::text,
+                                   'implementation', $5::text)
+         FROM manifest_versions
+         WHERE chain_id = $6 AND source_family = $7
+         LIMIT 1
+         RETURNING normalized_event_id",
+    )
+    .bind(format!("upgrade-{}", Uuid::new_v4()))
+    .bind(block_number)
+    .bind(block_hash)
+    .bind(proxy_address)
+    .bind(implementation)
+    .bind(&manifest.chain_id)
+    .bind(&manifest.source_family)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn insert_implementation_resolver_row(
+    pool: &PgPool,
+    manifest: &CheckedInResolverManifest,
+    proxy_address: &str,
+    target_block_number: i64,
+) {
+    let hash = format!("implementation-resolver-{target_block_number}");
+    sqlx::query(
+        "INSERT INTO chain_lineage
+             (chain_id, block_hash, canonicality_state, block_number)
+         VALUES ($1, $2, 'canonical', $3)",
+    )
+    .bind(&manifest.chain_id)
+    .bind(&hash)
+    .bind(target_block_number)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO resolver_current
+             (chain_id, resolver_address, support_status, chain_positions,
+              canonicality_summary, provenance, manifest_version)
+         SELECT chain_id, $1, 'supported',
+                jsonb_build_object('target_block_number', $2::bigint,
+                                   'target_block_hash', $3::text,
+                                   'block_number', (
+                                       SELECT event.block_number
+                                       FROM normalized_events event
+                                       WHERE event.source_manifest_id = manifest_id
+                                         AND event.event_kind = 'Upgraded'
+                                       ORDER BY event.normalized_event_id DESC
+                                       LIMIT 1
+                                   ),
+                                   'block_hash', (
+                                       SELECT event.block_hash
+                                       FROM normalized_events event
+                                       WHERE event.source_manifest_id = manifest_id
+                                         AND event.event_kind = 'Upgraded'
+                                       ORDER BY event.normalized_event_id DESC
+                                       LIMIT 1
+                                   )),
+                '{\"state\":\"canonical_lineage\"}',
+                jsonb_build_object(
+                    'manifest_id', manifest_id,
+                    'manifest_event_id', (
+                        SELECT max(event.normalized_event_id)
+                        FROM normalized_events event
+                        WHERE event.source_manifest_id = manifest_id
+                          AND event.event_kind = 'SourceManifestUpdated'
+                    ),
+                    'upgrade_event_id', (
+                        SELECT max(event.normalized_event_id)
+                        FROM normalized_events event
+                        WHERE event.source_manifest_id = manifest_id
+                          AND event.event_kind = 'Upgraded'
+                    )
+                ), manifest_version
+         FROM manifest_versions
+         WHERE chain_id = $4 AND source_family = $5
+         LIMIT 1",
+    )
+    .bind(proxy_address)
+    .bind(target_block_number)
+    .bind(hash)
+    .bind(&manifest.chain_id)
+    .bind(&manifest.source_family)
     .execute(pool)
     .await
     .unwrap();
@@ -335,31 +492,386 @@ async fn missing_unsupported_or_invisible_declared_resolver_is_named() {
 }
 
 #[tokio::test]
-async fn active_resolver_family_without_contracts_is_reportable_as_zero() {
+async fn ens_v2_implementation_upgrade_derives_the_resolver_corpus() {
     let database = TestDatabase::create(
-        TestDatabaseConfig::new("benchmark_zero_resolver_manifest_coverage")
-            .pool_max_connections(1),
+        TestDatabaseConfig::new("benchmark_ens_v2_implementation_coverage").pool_max_connections(1),
     )
     .await
     .unwrap();
     tests::install_name_visibility_schema(database.pool()).await;
     let manifest =
         checked_in_resolver_manifest("manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml");
+    insert_project_head(database.pool(), &manifest.chain_id, 1_000).await;
     insert_resolver_manifest(database.pool(), &manifest).await;
+    let implementation = manifest.payload["resolver_implementations"][0]["address"]
+        .as_str()
+        .unwrap();
+    let proxy = "0x0000000000000000000000000000000000000200";
+    insert_upgrade_event(database.pool(), &manifest, proxy, implementation, 900).await;
+    insert_implementation_resolver_row(database.pool(), &manifest, proxy, 950).await;
+
+    let coverage = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+
+    assert!(coverage.failures.is_empty(), "{:?}", coverage.failures);
+    assert_eq!(coverage.resolvers.len(), 1);
+    assert_eq!(coverage.resolvers[0].resolver_address, proxy);
+    assert_eq!(coverage.counts.len(), 1);
+    assert_eq!(coverage.counts[0].source_family, "ens_v2_resolver_l1");
+    assert_eq!(coverage.counts[0].declared_addresses, 1);
+    assert_eq!(coverage.counts[0].applicable_addresses, 1);
+    assert_eq!(coverage.counts[0].exercised_addresses, 0);
+    database.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn ens_v2_coverage_binds_the_upgrade_anchor() {
+    for (case, mutation) in [
+        (
+            "target_before_upgrade",
+            "UPDATE resolver_current SET chain_positions = chain_positions || jsonb_build_object('target_block_number', 899, 'target_block_hash', 'before-upgrade-target')",
+        ),
+        (
+            "number",
+            "UPDATE resolver_current SET chain_positions = jsonb_set(chain_positions, '{block_number}', '899'::jsonb)",
+        ),
+        (
+            "hash",
+            "UPDATE resolver_current SET chain_positions = jsonb_set(chain_positions, '{block_hash}', '\"wrong-upgrade\"'::jsonb)",
+        ),
+    ] {
+        let database = TestDatabase::create(
+            TestDatabaseConfig::new(format!("benchmark_ens_v2_upgrade_anchor_{case}"))
+                .pool_max_connections(1),
+        )
+        .await
+        .unwrap();
+        tests::install_name_visibility_schema(database.pool()).await;
+        let manifest = checked_in_resolver_manifest(
+            "manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml",
+        );
+        insert_project_head(database.pool(), &manifest.chain_id, 1_000).await;
+        insert_resolver_manifest(database.pool(), &manifest).await;
+        let implementation = manifest.payload["resolver_implementations"][0]["address"]
+            .as_str()
+            .unwrap();
+        let proxy = "0x0000000000000000000000000000000000000200";
+        insert_upgrade_event(database.pool(), &manifest, proxy, implementation, 900).await;
+        insert_implementation_resolver_row(database.pool(), &manifest, proxy, 950).await;
+        if case == "target_before_upgrade" {
+            sqlx::query(
+                "INSERT INTO chain_lineage
+                     (chain_id, block_hash, canonicality_state, block_number)
+                 VALUES ($1, 'before-upgrade-target', 'canonical', 899)",
+            )
+            .bind(&manifest.chain_id)
+            .execute(database.pool())
+            .await
+            .unwrap();
+        }
+        sqlx::query(mutation)
+            .execute(database.pool())
+            .await
+            .unwrap();
+
+        let coverage = super::resolver_coverage::load(database.pool())
+            .await
+            .unwrap();
+
+        assert!(
+            coverage.failures.iter().any(|failure| failure.contains(
+                "fails the resolver benchmark's canonical-read or chain-anchor integrity checks"
+            )),
+            "{case}: {:?}",
+            coverage.failures
+        );
+        database.cleanup().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn ens_v2_admission_does_not_fall_back_to_concrete_contracts() {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("benchmark_ens_v2_no_contract_fallback").pool_max_connections(1),
+    )
+    .await
+    .unwrap();
+    tests::install_name_visibility_schema(database.pool()).await;
+    insert_project_head(database.pool(), "ethereum-sepolia", 1_000).await;
+    let resolver = "0x0000000000000000000000000000000000000200";
+    let manifest = CheckedInResolverManifest {
+        namespace: "ens".to_owned(),
+        chain_id: "ethereum-sepolia".to_owned(),
+        source_family: "ens_v2_resolver_l1".to_owned(),
+        payload: serde_json::json!({
+            "contracts": [{"address": resolver}],
+            "resolver_implementations": []
+        }),
+        addresses: vec![resolver.to_owned()],
+    };
+    insert_resolver_manifest(database.pool(), &manifest).await;
+    insert_resolver_row(
+        database.pool(),
+        &manifest.chain_id,
+        resolver,
+        "supported",
+        1,
+    )
+    .await;
 
     let coverage = super::resolver_coverage::load(database.pool())
         .await
         .unwrap();
 
     assert!(coverage.resolvers.is_empty());
-    assert_eq!(coverage.counts.len(), 1);
-    assert_eq!(coverage.counts[0].source_family, "ens_v2_resolver_l1");
-    assert_eq!(coverage.counts[0].declared_addresses, 0);
-    assert_eq!(coverage.counts[0].applicable_addresses, 0);
-    assert_eq!(coverage.counts[0].exercised_addresses, 0);
     assert!(
-        coverage.failures[0]
-            .contains("zero currently applicable, supported, API-visible resolver addresses")
+        coverage.failures.iter().any(|failure| {
+            failure.contains("family \"ens_v2_resolver_l1\"")
+                && failure.contains("zero currently applicable")
+        }),
+        "{:?}",
+        coverage.failures
+    );
+    database.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn malformed_ens_v2_implementation_metadata_stays_reportable() {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("benchmark_malformed_ens_v2_implementation_metadata")
+            .pool_max_connections(1),
+    )
+    .await
+    .unwrap();
+    tests::install_name_visibility_schema(database.pool()).await;
+    insert_project_head(database.pool(), "ethereum-sepolia", 1_000).await;
+    let manifest = CheckedInResolverManifest {
+        namespace: "ens".to_owned(),
+        chain_id: "ethereum-sepolia".to_owned(),
+        source_family: "ens_v2_resolver_l1".to_owned(),
+        payload: serde_json::json!({
+            "contracts": [],
+            "resolver_implementations": null
+        }),
+        addresses: Vec::new(),
+    };
+    insert_resolver_manifest(database.pool(), &manifest).await;
+    insert_upgrade_event(
+        database.pool(),
+        &manifest,
+        "0x0000000000000000000000000000000000000200",
+        "0x0000000000000000000000000000000000000999",
+        900,
+    )
+    .await;
+
+    let coverage = super::resolver_coverage::load(database.pool())
+        .await
+        .expect("malformed implementation metadata must remain available in the red report");
+
+    assert!(
+        coverage.failures.iter().any(
+            |failure| failure.contains("resolver_implementations is absent or is not an array")
+        ),
+        "{:?}",
+        coverage.failures
+    );
+    database.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn non_ens_v2_admission_ignores_incidental_implementation_metadata() {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("benchmark_non_ens_v2_contract_admission").pool_max_connections(1),
+    )
+    .await
+    .unwrap();
+    tests::install_name_visibility_schema(database.pool()).await;
+    insert_project_head(database.pool(), "ethereum-mainnet", 1_000).await;
+    let resolver = "0x0000000000000000000000000000000000000100";
+    let manifest = CheckedInResolverManifest {
+        namespace: "ens".to_owned(),
+        chain_id: "ethereum-mainnet".to_owned(),
+        source_family: "ens_v1_resolver_l1".to_owned(),
+        payload: serde_json::json!({
+            "contracts": [{"address": resolver}],
+            "resolver_implementations": [
+                {"address": "0x0000000000000000000000000000000000000999"}
+            ]
+        }),
+        addresses: vec![resolver.to_owned()],
+    };
+    insert_resolver_manifest(database.pool(), &manifest).await;
+    insert_resolver_row(
+        database.pool(),
+        &manifest.chain_id,
+        resolver,
+        "supported",
+        1,
+    )
+    .await;
+
+    let coverage = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+
+    assert!(coverage.failures.is_empty(), "{:?}", coverage.failures);
+    assert_eq!(coverage.resolvers.len(), 1);
+    assert_eq!(coverage.resolvers[0].resolver_address, resolver);
+    database.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn every_active_resolver_family_must_contribute_a_workload_target() {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("benchmark_per_family_resolver_coverage").pool_max_connections(1),
+    )
+    .await
+    .unwrap();
+    tests::install_name_visibility_schema(database.pool()).await;
+    insert_project_head(database.pool(), "ethereum-mainnet", 1_000).await;
+    insert_project_head(database.pool(), "ethereum-sepolia", 1_000).await;
+    let ens_v1 = CheckedInResolverManifest {
+        namespace: "ens".to_owned(),
+        chain_id: "ethereum-mainnet".to_owned(),
+        source_family: "ens_v1_resolver_l1".to_owned(),
+        payload: serde_json::json!({
+            "contracts": [{"address": "0x0000000000000000000000000000000000000100"}]
+        }),
+        addresses: vec!["0x0000000000000000000000000000000000000100".to_owned()],
+    };
+    let ens_v2 =
+        checked_in_resolver_manifest("manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml");
+    insert_resolver_manifest(database.pool(), &ens_v1).await;
+    insert_resolver_manifest(database.pool(), &ens_v2).await;
+    insert_resolver_row(
+        database.pool(),
+        &ens_v1.chain_id,
+        &ens_v1.addresses[0],
+        "supported",
+        1,
+    )
+    .await;
+
+    let coverage = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+
+    assert_eq!(coverage.resolvers.len(), 1);
+    assert!(
+        coverage.failures.iter().any(|failure| {
+            failure.contains("family \"ens_v2_resolver_l1\"")
+                && failure.contains("zero currently applicable")
+        }),
+        "{:?}",
+        coverage.failures
+    );
+    database.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn stored_payload_must_match_the_latest_projected_manifest_event() {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("benchmark_manifest_event_payload_binding").pool_max_connections(1),
+    )
+    .await
+    .unwrap();
+    tests::install_name_visibility_schema(database.pool()).await;
+    insert_project_head(database.pool(), "ethereum-mainnet", 1_000).await;
+    let retained = "0x0000000000000000000000000000000000000100";
+    let removed = "0x0000000000000000000000000000000000000101";
+    let stored_b = CheckedInResolverManifest {
+        namespace: "ens".to_owned(),
+        chain_id: "ethereum-mainnet".to_owned(),
+        source_family: "ens_v1_resolver_l1".to_owned(),
+        payload: serde_json::json!({"contracts": [{"address": retained}]}),
+        addresses: vec![retained.to_owned()],
+    };
+    insert_resolver_manifest(database.pool(), &stored_b).await;
+    let manifest_id: i64 =
+        sqlx::query_scalar("SELECT manifest_id FROM manifest_versions WHERE source_family = $1")
+            .bind(&stored_b.source_family)
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    let projected_a = serde_json::json!({
+        "contracts": [{"address": retained}, {"address": removed}]
+    });
+    // A final A -> B event is content-identical to the first transition and is
+    // swallowed by manifest sync, so Project's newest persisted event remains B -> A.
+    insert_manifest_event(database.pool(), manifest_id, &stored_b, &projected_a).await;
+    insert_resolver_row(
+        database.pool(),
+        &stored_b.chain_id,
+        retained,
+        "supported",
+        1,
+    )
+    .await;
+
+    let coverage = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+
+    assert!(
+        coverage.failures.iter().any(|failure| failure
+            .contains("stored active payload diverges from the latest projected manifest event")),
+        "{:?}",
+        coverage.failures
+    );
+    database.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn resolver_rows_bind_to_the_latest_manifest_event() {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("benchmark_resolver_manifest_event_binding")
+            .pool_max_connections(1),
+    )
+    .await
+    .unwrap();
+    tests::install_name_visibility_schema(database.pool()).await;
+    insert_project_head(database.pool(), "ethereum-mainnet", 100).await;
+    let resolver = "0x0000000000000000000000000000000000000100";
+    let manifest = CheckedInResolverManifest {
+        namespace: "ens".to_owned(),
+        chain_id: "ethereum-mainnet".to_owned(),
+        source_family: "ens_v1_resolver_l1".to_owned(),
+        payload: serde_json::json!({"contracts": [{"address": resolver}]}),
+        addresses: vec![resolver.to_owned()],
+    };
+    insert_resolver_manifest(database.pool(), &manifest).await;
+    insert_resolver_row(
+        database.pool(),
+        &manifest.chain_id,
+        resolver,
+        "supported",
+        1,
+    )
+    .await;
+    let normal = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+    assert!(normal.failures.is_empty(), "{:?}", normal.failures);
+
+    sqlx::query(
+        "UPDATE resolver_current
+         SET provenance = jsonb_set(provenance, '{manifest_event_id}', '999999'::jsonb)",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let mismatched = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+    assert!(
+        mismatched
+            .failures
+            .iter()
+            .any(|failure| failure.contains("does not cite latest projected manifest event")),
+        "{:?}",
+        mismatched.failures
     );
     database.cleanup().await.unwrap();
 }
@@ -797,10 +1309,16 @@ async fn resolver_coverage_uses_the_route_snapshot_bounds() {
             .await
             .unwrap();
 
+        let expected = if case == "wrong_manifest" {
+            "does not cite latest projected manifest event"
+        } else {
+            "fails the resolver benchmark's canonical-read or chain-anchor integrity checks"
+        };
         assert!(
-            coverage.failures.iter().any(|failure| failure.contains(
-                "fails the resolver benchmark's canonical-read or chain-anchor integrity checks"
-            )),
+            coverage
+                .failures
+                .iter()
+                .any(|failure| failure.contains(expected)),
             "{case}: {:?}",
             coverage.failures
         );
@@ -1002,8 +1520,8 @@ async fn addressless_resolver_contracts_report_a_zero_declared_family() {
         database.pool(),
         &CheckedInResolverManifest {
             namespace: "ens".to_owned(),
-            chain_id: "ethereum-sepolia".to_owned(),
-            source_family: "ens_v2_resolver_l1".to_owned(),
+            chain_id: "ethereum-mainnet".to_owned(),
+            source_family: "ens_v1_resolver_l1".to_owned(),
             payload: serde_json::json!({
                 "contracts": [{"role": "resolver", "proxy_kind": "none"}]
             }),
@@ -1043,8 +1561,8 @@ async fn null_resolver_contracts_report_a_zero_declared_family() {
         database.pool(),
         &CheckedInResolverManifest {
             namespace: "ens".to_owned(),
-            chain_id: "ethereum-sepolia".to_owned(),
-            source_family: "ens_v2_resolver_l1".to_owned(),
+            chain_id: "ethereum-mainnet".to_owned(),
+            source_family: "ens_v1_resolver_l1".to_owned(),
             payload: serde_json::json!({"contracts": null}),
             addresses: Vec::new(),
         },

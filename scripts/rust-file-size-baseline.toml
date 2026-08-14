@@ -28,7 +28,7 @@ review_justification = "Reviewed as non-serving release tooling: the file is bel
 
 [[files]]
 path = "tools/benchmark-gate/src/api_load/corpus.rs"
-loc = 1064
+loc = 1065
 justification = "Production-scale corpus queries, their shared API-visibility filters, scale floors, namespace coverage, and database regressions remain together so the sampled and counted populations cannot drift apart."
 review_justification = "Reviewed as non-serving release tooling: the file remains below the 1200 LOC ceiling, production query assembly is compact, and most of its size is database-backed coverage proving every sampled corpus family follows its serving-read visibility predicate."
 

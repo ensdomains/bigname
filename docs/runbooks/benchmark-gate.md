@@ -48,11 +48,13 @@ non-empty `RUSTC`, `CARGO_BUILD_RUSTC`, `RUSTC_WRAPPER`, or
 absolute `rustc` path; and sets both wrapper variables empty, so user-level
 compiler and wrapper configuration cannot select different tools. Compiler or
 compiler-wrapper keys in the workspace `.cargo/config.toml` remain a named
-refusal. The wrapper records the selected compiler's `-Vv` output. Other Cargo
-configuration, notably `[profile.release]` and linker selection, remains
-uninspected; capturing every effective Cargo build input is
-release-infrastructure work. The recorded executable digests distinguish the
-resulting local binary bytes. Smoke always runs the locally built API binary
+refusal. The wrapper also refuses every non-empty ambient `CARGO_PROFILE_*`
+variable, so environment overrides cannot change the release profile selected
+from the workspace manifest. The wrapper records the selected compiler's `-Vv`
+output. Other Cargo configuration, notably linker selection, remains
+uninspected; capturing every effective Cargo build input is release-infrastructure
+work. The recorded executable digests distinguish the resulting local binary
+bytes. Smoke always runs the locally built API binary
 named by its digest. For a production API run, that digest is a companion build
 artifact; the remote target remains bound to the clean source commit through
 `/healthz`, not to the local executable digest.
@@ -98,21 +100,35 @@ The API half sends each Tier 1 and Tier 2 REST route in
 seconds after a 10-second warmup. It loads 10,000 names and 10,000 distinct
 address/name/relation combinations from the target projections, plus at least
 1,000 populated subname parents, permission subjects, and successful primary
-name claims. The resolver corpus is instead the currently applicable subset of
-concrete resolver contract addresses declared by the copy's stored active resolver
-[source-family](../glossary.md) manifests:
+name claims. The resolver corpus is instead derived from the copy's active
+resolver [source-family](../glossary.md) manifests:
 `ens_v1_resolver_l1`, `ens_v2_resolver_l1`, and
-`basenames_base_resolver`. An active family with no concrete contract
-declaration is reported with zero declared and exercised addresses. A valid
-empty `contracts` array is reportable as zero; a non-array value or a contract
-entry without an address is also preserved as a zero-count report row but makes
-the gate red as a malformed stored manifest payload. Every
-concrete declaration is evaluated against the copy's current Project head. The
-head must be a completed publication at the latest published/readable chain head under the
+`basenames_base_resolver`. Before constructing requests, the gate requires each
+stored active payload to equal the payload in the latest canonical
+`SourceManifestUpdated` event that Project could consume at the copy's current
+head. Each projected resolver row must cite that exact event through
+`provenance.manifest_event_id`. A payload or event-ID mismatch is red and names
+the chain, source family, and version; this detects a manifest synchronization
+event/payload split without changing manifest synchronization behavior.
+
+ENSv1 and Basenames families use currently applicable concrete `contracts`
+declarations. ENSv2 families that declare `resolver_implementations` instead use
+the latest canonical `Upgraded` event for each discovered proxy and admit the
+proxy only when that event names a declared implementation. This mirrors
+Project's implementation-based ENSv2 resolver admission and binds the projected
+row to both the manifest event and upgrade event. The row's recorded upgrade
+block number and hash must match that event, and its Project target cannot
+predate the upgrade. A valid empty declaration set is reportable as zero; a
+non-array value or an entry without an address is also preserved as a zero-count
+report row but makes the gate red as a malformed stored manifest payload. Every
+active resolver family must contribute at least one currently applicable,
+supported, API-visible request target; one healthy family cannot conceal zero
+ENSv2 coverage. The head must be a completed
+publication at the latest published/readable chain head under the
 API's [interpreter content hash](../glossary.md#interpreter-content-hash); a
 missing, running, stale, or invalidated head
-makes the gate red. A declaration whose `start_block` is no later than that head
-must have a
+makes the gate red. A concrete declaration whose `start_block` is no later than
+that head must have a
 supported `resolver_current` row from that active manifest version. The row must
 pass the API's canonical-lineage read filter. The gate additionally requires
 the row's declared block hash and number to identify the same readable lineage
@@ -131,8 +147,10 @@ declaration that starts after that head keeps its family visible in
 the report but is not yet demanded. If no declaration is currently applicable,
 the resolver workload cannot be constructed and the gate is red. Request volume
 supplies resolver load scale, so there is no unrelated resolver row-count floor.
-The report records total declared, currently applicable, and exercised resolver
-counts for each chain and [source family](../glossary.md), so future declarations
+The report records total expected, currently applicable, and exercised resolver
+address counts for each chain and [source family](../glossary.md). The existing
+`declared_addresses` field means concrete declarations for ENSv1/Basenames and
+implementation-admitted proxy addresses for ENSv2; future concrete declarations
 remain visible without being treated as request targets.
 `exercised_addresses` stays zero during corpus loading and on an early red
 report. Once the resolver workload is constructed, it counts distinct currently
