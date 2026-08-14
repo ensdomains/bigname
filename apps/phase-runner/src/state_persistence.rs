@@ -5,7 +5,11 @@ use sqlx::{PgPool, Postgres, Transaction};
 use crate::{
     error::{RunnerError, RunnerResult},
     heads::BlockMarker,
-    phase::{IngestCursor, PhaseName, PhaseProgress, PhaseResume, VerificationLevel},
+    phase::{
+        IngestCursor, PhaseName, PhaseProgress, PhaseResume, RedoAttemptFence, RunMode,
+        VerificationLevel,
+    },
+    state::PhaseStore,
 };
 
 type StoredPhasePosition = (
@@ -24,6 +28,32 @@ type StoredRedoPosition = (
     Option<String>,
     Option<serde_json::Value>,
 );
+
+impl PhaseStore {
+    pub async fn record_progress(
+        &self,
+        chain_id: &str,
+        phase: PhaseName,
+        mode: &RunMode,
+        redo_attempt: Option<RedoAttemptFence>,
+        progress: &PhaseProgress,
+    ) -> RunnerResult<()> {
+        match (mode.is_redo(), redo_attempt) {
+            (true, Some(attempt)) => {
+                update_redo_progress(self.pool(), chain_id, phase, mode, attempt, progress).await
+            }
+            (true, None) => Err(RunnerError::data_integrity(format!(
+                "redo progress is missing its attempt fence for chain {chain_id} phase {phase}"
+            ))),
+            (false, None) => {
+                update_progress(self.pool(), chain_id, phase, progress, "updated_at = now()").await
+            }
+            (false, Some(_)) => Err(RunnerError::data_integrity(format!(
+                "normal progress carries a redo attempt fence for chain {chain_id} phase {phase}"
+            ))),
+        }
+    }
+}
 
 pub(crate) async fn update_progress(
     pool: &PgPool,
@@ -115,10 +145,24 @@ pub(crate) async fn update_redo_progress(
     pool: &PgPool,
     chain_id: &str,
     phase: PhaseName,
+    mode: &RunMode,
+    attempt: RedoAttemptFence,
     progress: &PhaseProgress,
 ) -> RunnerResult<()> {
     validate_progress(phase, progress, false)?;
     let loaded_boundaries = loaded_redo_boundaries(phase, progress)?;
+    let expected_mode = match mode {
+        RunMode::Redo(_) => "redo",
+        RunMode::RecomputeFlags(_) => "recompute_flags",
+        RunMode::Normal => {
+            return Err(RunnerError::data_integrity(
+                "normal mode cannot record redo progress",
+            ));
+        }
+    };
+    // Fence this pool-backed progress write to the exact redo begin. This closes the
+    // redo-progress instance of https://github.com/ensdomains/bigname/issues/452;
+    // holistic connection routing remains there.
     let result = sqlx::query(
         "
         UPDATE chain_phase_state
@@ -134,6 +178,10 @@ pub(crate) async fn update_redo_progress(
         WHERE chain_id = $1
           AND phase_name = $2
           AND redo_in_progress
+          AND redo_attempt_generation = $8
+          AND redo_mode = $9
+          AND redo_from_block_number = $10
+          AND redo_to_block_number = $11
         ",
     )
     .bind(chain_id)
@@ -143,6 +191,10 @@ pub(crate) async fn update_redo_progress(
     .bind(progress.target.as_ref().map(|marker| marker.number))
     .bind(progress.target.as_ref().map(|marker| marker.hash.as_str()))
     .bind(loaded_boundaries)
+    .bind(attempt.generation)
+    .bind(expected_mode)
+    .bind(attempt.execution_range.from)
+    .bind(attempt.execution_range.to)
     .execute(pool)
     .await
     .map_err(|error| {
@@ -152,8 +204,10 @@ pub(crate) async fn update_redo_progress(
         )
     })?;
     if result.rows_affected() != 1 {
-        return Err(RunnerError::data_integrity(format!(
-            "redo progress requires an active redo for chain {chain_id} phase {phase}"
+        return Err(RunnerError::redo_attempt_superseded(format!(
+            "redo attempt superseded; progress not recorded for chain {chain_id} phase {phase} \
+             generation {} mode {expected_mode} range {}..={}",
+            attempt.generation, attempt.execution_range.from, attempt.execution_range.to
         )));
     }
     Ok(())

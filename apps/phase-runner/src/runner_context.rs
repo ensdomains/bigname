@@ -4,7 +4,7 @@ use crate::{
     config::ChainConfig,
     error::{RunnerError, RunnerResult},
     heads::{HeadMarkers, load_available_heads, load_marker},
-    phase::{Phase, PhaseContext, PhaseName, RunMode},
+    phase::{Phase, PhaseContext, PhaseName, RedoAttemptFence, RunMode},
     phase_lock::PhaseLock,
     state::{PhaseStatus, StartDisposition},
     state_persistence::validate_progress,
@@ -223,7 +223,7 @@ impl PhaseRunner {
     ) -> RunnerResult<()> {
         let phase_name = phase.name();
         let context = self
-            .phase_context(chain, phase_name, RunMode::Normal)
+            .phase_context(chain, phase_name, RunMode::Normal, None)
             .await?;
         let progress = phase_lock
             .run_while_alive(
@@ -250,7 +250,13 @@ impl PhaseRunner {
         }
         phase_lock.check_alive().await?;
         self.store
-            .record_progress(&chain.chain_id, phase_name, &RunMode::Normal, &progress)
+            .record_progress(
+                &chain.chain_id,
+                phase_name,
+                &RunMode::Normal,
+                None,
+                &progress,
+            )
             .await
     }
 
@@ -259,6 +265,7 @@ impl PhaseRunner {
         chain: &ChainConfig,
         phase: PhaseName,
         mode: RunMode,
+        redo_attempt: Option<RedoAttemptFence>,
     ) -> RunnerResult<PhaseContext> {
         let available_heads = match mode.range() {
             Some(_) if phase == PhaseName::Interpret && matches!(mode, RunMode::Redo(_)) => {
@@ -293,6 +300,7 @@ impl PhaseRunner {
             chain_id: chain.chain_id.clone(),
             phase,
             mode,
+            redo_attempt,
             sources: Arc::clone(&chain.sources),
             available_heads,
             live_handoff,

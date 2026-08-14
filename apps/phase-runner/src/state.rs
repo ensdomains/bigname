@@ -10,10 +10,7 @@ use crate::{
     phase_lock::PhaseLock,
     redo_state::{self, RedoOutcome, RedoSession},
     state_ingest_progress::{update_ingest_cursors, update_ingest_progress},
-    state_persistence::{
-        load_phase_resume, load_redo_resume, update_progress, update_progress_in_transaction,
-        update_redo_progress,
-    },
+    state_persistence::{load_phase_resume, load_redo_resume, update_progress_in_transaction},
     transitions::{invalid_transition, lock_chain_phase_state, require_start, row_for},
 };
 
@@ -315,20 +312,6 @@ impl PhaseStore {
             ))
         })?;
         Ok(())
-    }
-
-    pub async fn record_progress(
-        &self,
-        chain_id: &str,
-        phase: PhaseName,
-        mode: &RunMode,
-        progress: &PhaseProgress,
-    ) -> RunnerResult<()> {
-        if mode.is_redo() {
-            update_redo_progress(&self.pool, chain_id, phase, progress).await
-        } else {
-            update_progress(&self.pool, chain_id, phase, progress, "updated_at = now()").await
-        }
     }
 
     pub async fn complete_phase_with_lock(

@@ -19,7 +19,7 @@ use phase_runner::{
     metrics::RunnerLoopHeartbeat,
     phase::{
         BlockRange, LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName,
-        PhaseProgress, PhaseSet, RunMode, SourceProgress, VerificationLevel,
+        PhaseProgress, PhaseSet, RedoAttemptFence, RunMode, SourceProgress, VerificationLevel,
     },
     phase_lock::PhaseLock,
     runner::{PhaseRunner, RedoPhase},
@@ -1107,7 +1107,13 @@ async fn readding_chain_restarts_ingest_settled_before_handoff() -> Result<()> {
         ..PhaseProgress::default()
     };
     store
-        .record_progress(chain_id, PhaseName::Ingest, &RunMode::Normal, &partial)
+        .record_progress(
+            chain_id,
+            PhaseName::Ingest,
+            &RunMode::Normal,
+            None,
+            &partial,
+        )
         .await?;
     store
         .update_ingest_cursors(&configured_chain.sources, &partial)
@@ -1238,6 +1244,7 @@ async fn readding_chain_restarts_ingest_settled_with_wrong_handoff() -> Result<(
             chain_id,
             PhaseName::Ingest,
             &RunMode::Normal,
+            None,
             &PhaseProgress {
                 current: Some(target.clone()),
                 target: Some(target),
@@ -1289,6 +1296,7 @@ async fn readding_chain_restarts_after_legacy_torn_ingest_progress() -> Result<(
             chain_id,
             PhaseName::Ingest,
             &RunMode::Normal,
+            None,
             &PhaseProgress {
                 current: Some(target.clone()),
                 target: Some(target.clone()),
@@ -1481,6 +1489,7 @@ async fn readding_chain_restarts_verify_settled_without_block_extent() -> Result
             chain_id,
             PhaseName::Verify,
             &RunMode::Normal,
+            None,
             &PhaseProgress {
                 verification_level: Some(VerificationLevel::QuickSynced),
                 ..PhaseProgress::default()
@@ -1569,7 +1578,13 @@ async fn readding_chain_restarts_verify_settled_before_target_with_level() -> Re
         ..PhaseProgress::default()
     };
     store
-        .record_progress(chain_id, PhaseName::Verify, &RunMode::Normal, &partial)
+        .record_progress(
+            chain_id,
+            PhaseName::Verify,
+            &RunMode::Normal,
+            None,
+            &partial,
+        )
         .await?;
 
     settle_active_rows_for_removed_chain(&scratch).await?;
@@ -2682,7 +2697,7 @@ async fn different_writer_phases_cannot_overlap_on_one_chain() -> Result<()> {
 }
 
 #[tokio::test]
-async fn redo_completion_preserves_a_range_widened_while_the_phase_is_running() -> Result<()> {
+async fn redo_progress_refuses_a_range_widened_while_the_phase_is_running() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_redo_concurrent_widening").await?;
     let chain_id = "redo-concurrent-widening-chain";
     let store = PhaseStore::new(scratch.runner().pool().clone());
@@ -2742,7 +2757,15 @@ async fn redo_completion_preserves_a_range_widened_while_the_phase_is_running() 
     .execute(scratch.pool())
     .await?;
     release.notify_one();
-    task.await??;
+    let error = task
+        .await?
+        .expect_err("the batch must not write progress into the widened redo range");
+    assert!(
+        error
+            .to_string()
+            .contains("redo attempt superseded; progress not recorded"),
+        "{error}"
+    );
 
     let marker: (bool, Option<i64>, Option<i64>) = sqlx::query_as(
         "SELECT redo_in_progress, redo_from_block_number, redo_to_block_number
@@ -2817,6 +2840,10 @@ async fn intermediate_ingest_redo_persists_its_loaded_source_boundary() -> Resul
             chain_id,
             PhaseName::Ingest,
             &RunMode::Redo(BlockRange::new(0, 300)?),
+            Some(RedoAttemptFence {
+                generation: 0,
+                execution_range: BlockRange::new(0, 300)?,
+            }),
             &PhaseProgress {
                 current: Some(summary),
                 target: Some(target.clone()),

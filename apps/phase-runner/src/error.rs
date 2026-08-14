@@ -19,6 +19,7 @@ pub struct RunnerError {
     kind: ErrorKind,
     message: String,
     lock_connection_lost: bool,
+    redo_attempt_superseded: bool,
 }
 
 impl RunnerError {
@@ -27,6 +28,7 @@ impl RunnerError {
             kind,
             message: message.into(),
             lock_connection_lost: false,
+            redo_attempt_superseded: false,
         }
     }
 
@@ -72,6 +74,16 @@ impl RunnerError {
             kind: ErrorKind::Transient,
             message: message.into(),
             lock_connection_lost: true,
+            redo_attempt_superseded: false,
+        }
+    }
+
+    pub(crate) fn redo_attempt_superseded(message: impl Into<String>) -> Self {
+        Self {
+            kind: ErrorKind::DataIntegrity,
+            message: message.into(),
+            lock_connection_lost: false,
+            redo_attempt_superseded: true,
         }
     }
 
@@ -84,7 +96,7 @@ impl RunnerError {
     }
 
     pub(crate) fn permits_pool_writes_after_error(&self) -> bool {
-        !self.lock_connection_lost
+        !self.lock_connection_lost && !self.redo_attempt_superseded
     }
 }
 

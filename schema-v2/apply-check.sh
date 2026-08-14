@@ -158,7 +158,8 @@ for migration_file in \
     "$ROOT/migrations/20260811120100_ens_v2_migration_slice_1_validate.sql" \
     "$ROOT/migrations/20260811120200_ens_v2_migration_slice_1_constraints.sql" \
     "$ROOT/migrations/20260814120000_project_redo_resolver_evidence.sql" \
-    "$ROOT/migrations/20260814123000_ingest_redo_source_boundary_markers.sql"
+    "$ROOT/migrations/20260814123000_ingest_redo_source_boundary_markers.sql" \
+    "$ROOT/migrations/20260814124000_redo_attempt_generation.sql"
 do
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file" | run_psql
 done
@@ -513,6 +514,59 @@ SQL
 } | run_psql)"
 if [[ "$redo_source_boundary_upgrade_check" != *redo_source_boundary_upgrade_ok* ]]; then
     printf '%s\n' "Ingest redo source-boundary upgrade was not applied" >&2
+    exit 1
+fi
+
+# Exercise the initialized-schema redo-attempt generation upgrade from its
+# preceding shape, then verify baseline and schema-migration parity.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "ALTER TABLE chain_phase_state" \
+        "    DROP CONSTRAINT chain_phase_state_redo_attempt_generation_check," \
+        "    DROP COLUMN redo_attempt_generation;"
+} | run_psql
+for ignored in 1 2; do
+    sed "s/bigname_phase/$scratch_schema/g" \
+        "$ROOT/migrations/20260814124000_redo_attempt_generation.sql" \
+        | run_psql
+done
+redo_attempt_generation_upgrade_check="$({
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+SELECT CASE WHEN
+    EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'chain_phase_state'
+          AND column_name = 'redo_attempt_generation'
+          AND data_type = 'bigint'
+          AND is_nullable = 'NO'
+          AND column_default = '0'
+    )
+    AND EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'chain_phase_state'::regclass
+          AND conname = 'chain_phase_state_redo_attempt_generation_check'
+          AND convalidated
+          AND pg_get_constraintdef(oid) LIKE '%redo_attempt_generation >= 0%'
+    )
+    AND col_description(
+        'chain_phase_state'::regclass,
+        (SELECT attnum
+         FROM pg_attribute
+         WHERE attrelid = 'chain_phase_state'::regclass
+           AND attname = 'redo_attempt_generation'
+           AND NOT attisdropped)
+    ) = 'This nonnegative counter increments whenever an explicit redo begins and fences its progress writes to that attempt.'
+THEN 'redo_attempt_generation_upgrade_ok'
+ELSE 'redo_attempt_generation_upgrade_wrong' END;
+SQL
+} | run_psql)"
+if [[ "$redo_attempt_generation_upgrade_check" != *redo_attempt_generation_upgrade_ok* ]]; then
+    printf '%s\n' "Redo attempt generation upgrade was not applied" >&2
     exit 1
 fi
 
@@ -924,7 +978,8 @@ BEGIN
     WITH maintainer_authorized_allowlist(table_name, column_name) AS (
         VALUES
             ('chain_heads', 'lineage_orphaning_epoch'),
-            ('manifest_authority_attestations', 'generation_token')
+            ('manifest_authority_attestations', 'generation_token'),
+            ('chain_phase_state', 'redo_attempt_generation')
     )
     SELECT string_agg(
         format('%I.%I', actual.table_name, actual.column_name),

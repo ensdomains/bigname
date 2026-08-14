@@ -412,6 +412,20 @@ one transaction. The previous live handoff remains in place until the next
 normal Ingest pass confirms the reconciled cursor and publishes the replacement
 handoff.
 
+`chain_phase_state.redo_attempt_generation` is a nonnegative, row-local counter
+that increments whenever an explicit redo begins. A batch carries that
+generation together with the persisted redo mode and the actual execution
+range chosen at begin time. Its pool-backed progress update, including the
+per-source boundary-marker map, succeeds only while all three values still
+match the active row. No match means another attempt has superseded the batch;
+the update records nothing and returns `redo attempt superseded; progress not
+recorded`. Completion, failure recording, and downstream redo finalization use
+the connection that owns the phase advisory lock, so losing that connection
+also prevents their writes. This generation fence closes the redo-progress
+instance of [#452](https://github.com/ensdomains/bigname/issues/452); that issue
+continues to track whether every pool-backed phase write should move to its
+lock-owning connection.
+
 Retained lineage alone does not authorize that reconciliation when an
 interrupted redo has already advanced past its last boundary. If the provider
 then reports a different hash at the same boundary height and that older fork

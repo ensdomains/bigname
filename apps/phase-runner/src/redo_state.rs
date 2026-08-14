@@ -3,7 +3,7 @@ use sqlx::{Connection, PgConnection, PgPool};
 use crate::{
     config::SourceConfig,
     error::{RunnerError, RunnerResult},
-    phase::{BlockRange, PhaseName, PhaseProgress, RunMode},
+    phase::{BlockRange, PhaseName, PhaseProgress, RedoAttemptFence, RunMode},
     redo_manifest_audit::{ManifestAuthorityAttestationAudit, matches_active_redo},
     state::PhaseStatus,
     transitions::{
@@ -16,9 +16,19 @@ pub(crate) struct RedoSession {
     previous: PhaseStateRow,
     interrupted_before_redo: bool,
     range: BlockRange,
+    attempt_generation: i64,
     recompute_flags: bool,
     stage_project_refresh_on_completion: bool,
     pub(crate) manifest_authority_audit: Option<ManifestAuthorityAttestationAudit>,
+}
+
+impl RedoSession {
+    pub(crate) const fn attempt_fence(&self) -> RedoAttemptFence {
+        RedoAttemptFence {
+            generation: self.attempt_generation,
+            execution_range: self.range,
+        }
+    }
 }
 pub(crate) enum RedoOutcome<'a> {
     Completed(&'a PhaseProgress),
@@ -129,11 +139,12 @@ pub(crate) async fn begin(
     let resume_same_epoch = same_active_redo
         && (!phase.writes_derived_data() || recorded_hash == Some(current_interpreter_hash));
     let preserve_started_at = resume_same_epoch || same_active_audit;
-    sqlx::query(
+    let attempt_generation = sqlx::query_scalar::<_, i64>(
         "
         UPDATE chain_phase_state
         SET phase_status = 'running',
             redo_in_progress = true,
+            redo_attempt_generation = redo_attempt_generation + 1,
             redo_mode = $3,
             redo_previous_phase_status = CASE
                 WHEN redo_in_progress THEN redo_previous_phase_status
@@ -171,6 +182,7 @@ pub(crate) async fn begin(
             updated_at = now()
         WHERE chain_id = $1
           AND phase_name = $2
+        RETURNING redo_attempt_generation
         ",
     )
     .bind(chain_id)
@@ -185,7 +197,7 @@ pub(crate) async fn begin(
     .bind(format!("{}%", crate::redo_stamp::REQUIRED_REDO_PREFIX))
     .bind(crate::redo_stamp::REQUIRED_REDO_ACTIVE_PREFIX)
     .bind(crate::redo_stamp::REQUIRED_REDO_PREFIX)
-    .execute(&mut *transaction)
+    .fetch_one(&mut *transaction)
     .await
     .map_err(|error| {
         RunnerError::database(
@@ -203,6 +215,7 @@ pub(crate) async fn begin(
         interrupted_before_redo: matches!(status, PhaseStatus::Running | PhaseStatus::Paused),
         previous,
         range: execution_range,
+        attempt_generation,
         recompute_flags: matches!(mode, RunMode::RecomputeFlags(_)),
         stage_project_refresh_on_completion,
         manifest_authority_audit: attestation_audit,

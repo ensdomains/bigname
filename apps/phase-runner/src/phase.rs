@@ -128,10 +128,17 @@ pub struct PhaseContext {
     pub chain_id: String,
     pub phase: PhaseName,
     pub mode: RunMode,
+    pub redo_attempt: Option<RedoAttemptFence>,
     pub sources: Arc<[SourceConfig]>,
     pub available_heads: Option<HeadMarkers>,
     pub live_handoff: Option<crate::heads::BlockMarker>,
     pub resume: PhaseResume,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RedoAttemptFence {
+    pub generation: i64,
+    pub execution_range: BlockRange,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -442,6 +449,7 @@ mod tests {
             chain_id: "test-chain".to_owned(),
             phase: PhaseName::Interpret,
             mode: RunMode::Normal,
+            redo_attempt: None,
             sources: Arc::from([]),
             available_heads: None,
             live_handoff: None,

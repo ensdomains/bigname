@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS chain_phase_state (
     target_block_hash text,
     input_content_hash text,
     redo_in_progress boolean NOT NULL DEFAULT false,
+    redo_attempt_generation bigint NOT NULL DEFAULT 0,
     redo_mode text,
     redo_previous_phase_status text,
     redo_previous_last_error text,
@@ -124,6 +125,8 @@ CREATE TABLE IF NOT EXISTS chain_phase_state (
         redo_mode IS NULL
         OR redo_mode IN ('redo', 'recompute_flags')
     ),
+    CONSTRAINT chain_phase_state_redo_attempt_generation_check
+        CHECK (redo_attempt_generation >= 0),
     CHECK (
         (redo_current_block_number IS NULL)
         = (redo_current_block_hash IS NULL)
@@ -311,6 +314,8 @@ COMMENT ON COLUMN chain_phase_state.input_content_hash IS
     'This value identifies the interpretation inputs.';
 COMMENT ON COLUMN chain_phase_state.redo_in_progress IS
     'This value records an unfinished explicit redo.';
+COMMENT ON COLUMN chain_phase_state.redo_attempt_generation IS
+    'This nonnegative counter increments whenever an explicit redo begins and fences its progress writes to that attempt.';
 COMMENT ON COLUMN chain_phase_state.redo_mode IS
     'This value identifies the explicit redo operation.';
 COMMENT ON COLUMN chain_phase_state.redo_previous_phase_status IS

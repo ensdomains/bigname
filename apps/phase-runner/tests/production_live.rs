@@ -3253,6 +3253,7 @@ async fn missing_hydration_rpc_fails_before_retracting_existing_values() -> Resu
             chain_id: ETHEREUM.to_owned(),
             phase: PhaseName::Project,
             mode: RunMode::Normal,
+            redo_attempt: None,
             sources: Arc::from([]),
             available_heads: Some(HeadMarkers {
                 latest: BlockMarker::new(1, block_hash(1, 1))?,
@@ -3302,6 +3303,7 @@ async fn project_redo_behind_the_canonical_head_defers_hydration() -> Result<()>
             chain_id: ETHEREUM.to_owned(),
             phase: PhaseName::Project,
             mode: RunMode::Redo(BlockRange::new(1, 1)?),
+            redo_attempt: None,
             sources: Arc::from([]),
             available_heads: Some(HeadMarkers {
                 latest: BlockMarker::new(1, block_hash(1, 1))?,
@@ -3879,6 +3881,7 @@ fn live_context(
         chain_id: chain.to_owned(),
         phase: PhaseName::Live,
         mode: RunMode::Normal,
+        redo_attempt: None,
         sources: Arc::from([SourceConfig::new(
             chain,
             "rpc",
