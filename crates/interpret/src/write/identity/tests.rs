@@ -432,10 +432,27 @@ async fn activated_boundary_closes_exactly_one_ens_v1_predecessor() -> TestResul
         json!({"token_id":"0xexpected"}),
     ));
     activate(&mut output)?;
+    // Restart before the successful registration write commits.
     let mut interrupted = pool.begin().await?;
     write_bindings(&mut interrupted, &output, false).await?;
     interrupted.rollback().await?;
     assert_eq!(active_to(pool, 11).await?, None);
+
+    // Restart at the successful registration boundary: identity rows and current-batch
+    // normalized evidence were attempted, but the atomic transaction never reached the close.
+    let mut at_boundary = pool.begin().await?;
+    write_rows(&mut at_boundary, &output, false).await?;
+    crate::write::normalized::events(&mut at_boundary, &output.normalized_events).await?;
+    let closed_in_flight: Option<time::OffsetDateTime> =
+        sqlx::query_scalar("SELECT active_to FROM surface_bindings WHERE surface_binding_id = $1")
+            .bind(Uuid::from_u128(11))
+            .fetch_one(&mut *at_boundary)
+            .await?;
+    assert_eq!(closed_in_flight, None);
+    at_boundary.rollback().await?;
+    assert_eq!(active_to(pool, 11).await?, None);
+
+    // Restart after the transaction: replay is idempotent and keeps the exact successor open.
     apply(pool, &output).await?;
     apply(pool, &output).await?;
     assert_eq!(active_to(pool, 11).await?.unwrap().unix_timestamp(), 2);

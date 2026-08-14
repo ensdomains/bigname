@@ -1230,6 +1230,80 @@ fn migration_registry_association_preserves_the_ordinary_announcement_edge() -> 
         .find(|candidate| candidate.event_identity == full_parent.event_identity)
         .expect("full replay candidate augmentation");
     assert_eq!(live_candidate, full_candidate);
+    assert_eq!(
+        output
+            .normalized_events
+            .iter()
+            .chain(&live_follow.normalized_events)
+            .cloned()
+            .collect::<Vec<_>>(),
+        full.normalized_events,
+        "incremental normalized events differ from a clean replay"
+    );
+    assert_eq!(
+        output
+            .surface_bindings
+            .iter()
+            .chain(&live_follow.surface_bindings)
+            .cloned()
+            .collect::<Vec<_>>(),
+        full.surface_bindings,
+        "incremental binding ranges or canonicality differ from a clean replay"
+    );
+    assert_eq!(
+        output
+            .binding_closures
+            .iter()
+            .chain(&live_follow.binding_closures)
+            .cloned()
+            .collect::<Vec<_>>(),
+        full.binding_closures,
+        "incremental binding closes differ from a clean replay"
+    );
+    assert_eq!(
+        output
+            .migration_candidate_identity_effects
+            .iter()
+            .chain(&live_follow.migration_candidate_identity_effects)
+            .cloned()
+            .collect::<Vec<_>>(),
+        full.migration_candidate_identity_effects,
+        "incremental candidate identity effects differ from a clean replay"
+    );
+    let mut incremental_associations = std::collections::BTreeMap::new();
+    for association in output
+        .migration_event_associations
+        .iter()
+        .chain(&live_follow.migration_event_associations)
+    {
+        let key = (
+            association.event_identity.clone(),
+            association.migration_correlation_id.clone(),
+        );
+        if let Some(existing) = incremental_associations.insert(key, association.clone()) {
+            assert_eq!(
+                existing, *association,
+                "incremental replay produced conflicting migration association evidence"
+            );
+        }
+    }
+    let full_associations = full
+        .migration_event_associations
+        .iter()
+        .map(|association| {
+            (
+                (
+                    association.event_identity.clone(),
+                    association.migration_correlation_id.clone(),
+                ),
+                association.clone(),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(
+        incremental_associations, full_associations,
+        "incremental migration associations differ from a clean replay"
+    );
 
     let control = interpret_test_batch(registry_only_batch(
         vec![registry_created, registration, token_resource, later],
