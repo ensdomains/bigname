@@ -8,29 +8,7 @@ pub(super) fn validate_boundaries(output: &BatchOutput) -> Result<()> {
         let matching = output
             .normalized_events
             .iter()
-            .filter(|event| {
-                event.event_identity == transition.boundary_event_identity
-                    && event.event_kind == seam::MIGRATION_APPLIED_EVENT_KIND
-                    && event.consumer_visibility == "activated"
-                    && event.migration_correlation_ids
-                        == [transition.migration_correlation_id.clone()]
-                    && event.logical_name_id.as_deref() == Some(transition.logical_name_id.as_str())
-                    && event.chain_id == transition.chain_id
-                    && event.block_number == Some(transition.block_number)
-                    && event.transaction_index == Some(transition.transaction_index)
-                    && event.log_index == Some(transition.log_index)
-                    && matches!(
-                        event.canonicality_state.as_str(),
-                        "canonical" | "safe" | "finalized"
-                    )
-                    && event.after_state["predecessor_binding"] == transition.predecessor_selector
-                    && event.after_state["successor_binding"]["binding_id"]
-                        == transition.successor_surface_binding_id.to_string()
-                    && event.after_state["successor_binding"]["resource_id"]
-                        == transition.successor_resource_id.to_string()
-                    && event.after_state["successor_binding"]["authority_epoch"]
-                        == transition.successor_arm
-            })
+            .filter(|event| exact_boundary(transition, event))
             .count();
         if matching != 1 {
             return Err(InterpretError::data_integrity(format!(
@@ -39,7 +17,52 @@ pub(super) fn validate_boundaries(output: &BatchOutput) -> Result<()> {
             )));
         }
     }
+    for event in output.normalized_events.iter().filter(|event| {
+        event.event_kind == seam::MIGRATION_APPLIED_EVENT_KIND
+            && event.consumer_visibility == "activated"
+            && matches!(
+                event.canonicality_state.as_str(),
+                "canonical" | "safe" | "finalized"
+            )
+    }) {
+        let matching = output
+            .migration_authority_transitions
+            .iter()
+            .filter(|transition| exact_boundary(transition, event))
+            .count();
+        if matching != 1 {
+            return Err(InterpretError::data_integrity(format!(
+                "activated MigrationApplied boundary {} has {matching} exact authority transitions; expected one",
+                event.event_identity,
+            )));
+        }
+    }
     Ok(())
+}
+
+fn exact_boundary(
+    transition: &MigrationAuthorityTransition,
+    event: &bigname_adapters::schema_v2::NormalizedEvent,
+) -> bool {
+    event.event_identity == transition.boundary_event_identity
+        && event.event_kind == seam::MIGRATION_APPLIED_EVENT_KIND
+        && event.consumer_visibility == "activated"
+        && event.migration_correlation_ids == [transition.migration_correlation_id.clone()]
+        && event.logical_name_id.as_deref() == Some(transition.logical_name_id.as_str())
+        && event.chain_id == transition.chain_id
+        && event.block_number == Some(transition.block_number)
+        && event.transaction_index == Some(transition.transaction_index)
+        && event.log_index == Some(transition.log_index)
+        && matches!(
+            event.canonicality_state.as_str(),
+            "canonical" | "safe" | "finalized"
+        )
+        && event.after_state["predecessor_binding"] == transition.predecessor_selector
+        && event.after_state["successor_binding"]["binding_id"]
+            == transition.successor_surface_binding_id.to_string()
+        && event.after_state["successor_binding"]["resource_id"]
+            == transition.successor_resource_id.to_string()
+        && event.after_state["successor_binding"]["authority_epoch"] == transition.successor_arm
 }
 
 pub(super) async fn write(
@@ -110,8 +133,30 @@ pub(super) async fn write(
                    SELECT 1
                    FROM normalized_events evidence
                    WHERE evidence.chain_id = surface_bindings.chain_id
+                     AND evidence.logical_name_id = surface_bindings.logical_name_id
                      AND evidence.resource_id = surface_bindings.resource_id
+                     AND evidence.consumer_visibility = 'activated'
                      AND evidence.canonicality_state IN ('canonical', 'safe', 'finalized')
+                     AND (
+                         evidence.block_number < $4
+                         OR (
+                             evidence.block_number = $4
+                             AND (
+                                 COALESCE(evidence.transaction_index, -1),
+                                 COALESCE(evidence.log_index, -1)
+                             ) < ($5, $6)
+                         )
+                     )
+                     AND EXISTS (
+                         SELECT 1
+                         FROM chain_lineage evidence_lineage
+                         WHERE evidence_lineage.chain_id = evidence.chain_id
+                           AND evidence_lineage.block_hash = evidence.block_hash
+                           AND evidence_lineage.block_number = evidence.block_number
+                           AND evidence_lineage.canonicality_state IN (
+                               'canonical', 'safe', 'finalized'
+                           )
+                     )
                      AND (
                          (
                              $8 = 'registrar_backed_registration'

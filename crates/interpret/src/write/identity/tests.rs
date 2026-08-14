@@ -541,6 +541,178 @@ async fn transition_requires_its_exact_activated_boundary() -> TestResult {
 }
 
 #[tokio::test]
+async fn activated_boundary_requires_its_exact_transition() -> TestResult {
+    let database = database().await?;
+    let pool = database.pool();
+    insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
+    insert_registrar_evidence(pool, 1, "0xexpected").await?;
+    let mut output = ordinary_open(12, 2, "ens_v2", 2);
+    activate(&mut output)?;
+    output.migration_authority_transitions.clear();
+
+    let error = apply(pool, &output).await.unwrap_err().to_string();
+    assert!(error.contains("exact authority transitions"), "{error}");
+    assert_eq!(active_to(pool, 11).await?, None);
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn activated_boundary_rejects_duplicate_exact_transitions() -> TestResult {
+    let database = database().await?;
+    let pool = database.pool();
+    insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
+    insert_registrar_evidence(pool, 1, "0xexpected").await?;
+    let mut output = ordinary_open(12, 2, "ens_v2", 2);
+    activate(&mut output)?;
+    output
+        .migration_authority_transitions
+        .push(output.migration_authority_transitions[0].clone());
+
+    let error = apply(pool, &output).await.unwrap_err().to_string();
+    assert!(error.contains("2 exact authority transitions"), "{error}");
+    assert_eq!(active_to(pool, 11).await?, None);
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn transition_requires_activated_exact_name_predecessor_evidence() -> TestResult {
+    let database = database().await?;
+    let pool = database.pool();
+    insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
+    insert_registrar_evidence(pool, 1, "0xexpected").await?;
+    let mut output = ordinary_open(12, 2, "ens_v2", 2);
+    activate(&mut output)?;
+
+    sqlx::query(
+        "UPDATE normalized_events
+         SET consumer_visibility = 'candidate',
+             migration_correlation_ids = ARRAY['candidate-predecessor-evidence']
+         WHERE event_identity = 'registrar-evidence-1'",
+    )
+    .execute(pool)
+    .await?;
+    let candidate = apply(pool, &output).await.unwrap_err().to_string();
+    assert!(
+        candidate.contains("0 active ENSv1 predecessors"),
+        "{candidate}"
+    );
+    assert_eq!(active_to(pool, 11).await?, None);
+
+    sqlx::query(
+        "UPDATE normalized_events
+         SET consumer_visibility = 'activated',
+             migration_correlation_ids = '{}',
+             logical_name_id = $1
+         WHERE event_identity = 'registrar-evidence-1'",
+    )
+    .bind(CHILD)
+    .execute(pool)
+    .await?;
+    let other_name = apply(pool, &output).await.unwrap_err().to_string();
+    assert!(
+        other_name.contains("0 active ENSv1 predecessors"),
+        "{other_name}"
+    );
+    assert_eq!(active_to(pool, 11).await?, None);
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn transition_rejects_predecessor_evidence_after_boundary() -> TestResult {
+    let database = database().await?;
+    let pool = database.pool();
+    insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
+    insert_registrar_evidence(pool, 1, "0xexpected").await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET block_number = 3, block_hash = '0x03'
+         WHERE event_identity = 'registrar-evidence-1'",
+    )
+    .execute(pool)
+    .await?;
+    let mut output = ordinary_open(12, 2, "ens_v2", 2);
+    activate(&mut output)?;
+
+    let error = apply(pool, &output).await.unwrap_err().to_string();
+    assert!(error.contains("0 active ENSv1 predecessors"), "{error}");
+    assert_eq!(active_to(pool, 11).await?, None);
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn transition_orders_predecessor_evidence_by_full_same_block_position() -> TestResult {
+    for (evidence_log_index, eligible) in [(0_i64, true), (1, false), (2, false)] {
+        let database = database().await?;
+        let pool = database.pool();
+        insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
+        insert_registrar_evidence(pool, 1, "0xexpected").await?;
+        sqlx::query(
+            "UPDATE normalized_events
+             SET block_number = 2,
+                 block_hash = '0x02',
+                 transaction_hash = '0xprior',
+                 transaction_index = 1,
+                 log_index = $1
+             WHERE event_identity = 'registrar-evidence-1'",
+        )
+        .bind(evidence_log_index)
+        .execute(pool)
+        .await?;
+        let mut output = ordinary_open(12, 2, "ens_v2", 2);
+        output.surface_bindings[0].provenance[TRANSACTION_INDEX_KEY] = json!(1);
+        activate(&mut output)?;
+        output.migration_authority_transitions[0].transaction_index = 1;
+        output.migration_authority_transitions[0].log_index = 1;
+        let boundary = output
+            .normalized_events
+            .iter_mut()
+            .find(|event| event.event_kind == MIGRATION_APPLIED_EVENT_KIND)
+            .expect("activated migration boundary");
+        boundary.transaction_index = Some(1);
+        boundary.log_index = Some(1);
+
+        let result = apply(pool, &output).await;
+        if eligible {
+            result?;
+            assert!(active_to(pool, 11).await?.is_some());
+        } else {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("0 active ENSv1 predecessors"), "{error}");
+            assert_eq!(active_to(pool, 11).await?, None);
+        }
+        database.cleanup().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn transition_rejects_predecessor_evidence_on_orphaned_lineage() -> TestResult {
+    let database = database().await?;
+    let pool = database.pool();
+    insert_binding(pool, 11, NAME, 1, "ens_v1").await?;
+    insert_registrar_evidence(pool, 1, "0xexpected").await?;
+    sqlx::query(
+        "UPDATE chain_lineage
+         SET canonicality_state = 'orphaned'
+         WHERE chain_id = 'ethereum' AND block_number = 1",
+    )
+    .execute(pool)
+    .await?;
+    let mut output = ordinary_open(12, 2, "ens_v2", 2);
+    activate(&mut output)?;
+
+    let error = apply(pool, &output).await.unwrap_err().to_string();
+    assert!(error.contains("0 active ENSv1 predecessors"), "{error}");
+    assert_eq!(active_to(pool, 11).await?, None);
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn wrapper_selector_is_enforced_by_the_transition_writer() -> TestResult {
     let database = database().await?;
     let pool = database.pool();
