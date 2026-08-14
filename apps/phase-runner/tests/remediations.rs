@@ -28,6 +28,15 @@ use tokio_util::sync::CancellationToken;
 
 use support::{ScratchDatabase, seed_lineage};
 
+type StoredBoundaryDivergenceState = (
+    bool,
+    Option<i64>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    Option<serde_json::Value>,
+);
+
 #[tokio::test]
 async fn crash_during_hash_redo_blocks_normal_resume_and_still_demands_full_range() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_crash_hash_redo").await?;
@@ -610,6 +619,82 @@ async fn cancelled_redo_is_incomplete_and_returns_the_required_rerun_command() -
         .await
         .expect_err("normal restart must remain blocked");
     assert!(normal_error.to_string().contains(instruction));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn boundary_divergence_clears_resumable_redo_progress_and_source_markers() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_redo_boundary_divergence_clear").await?;
+    let chain_id = "redo-boundary-divergence-clear-chain";
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    seed_ingest_extent(scratch.pool(), chain_id, 0, 9).await?;
+
+    let loaded_boundary = marker(chain_id, 5)?;
+    let redo_target = marker(chain_id, 6)?;
+    let phase_loaded_boundary = loaded_boundary.clone();
+    let phase_redo_target = redo_target.clone();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let phase_calls = Arc::clone(&calls);
+    let phase = Arc::new(FunctionPhase {
+        name: PhaseName::Ingest,
+        handler: Arc::new(move |_| {
+            if phase_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(PhaseBatchOutcome::Continue(PhaseProgress {
+                    current: Some(phase_loaded_boundary.clone()),
+                    target: Some(phase_redo_target.clone()),
+                    source_progress: vec![SourceProgress {
+                        source_key: "source".to_owned(),
+                        current: Some(phase_loaded_boundary.clone()),
+                        target: Some(phase_loaded_boundary.clone()),
+                        redo_loaded_boundary: Some(phase_loaded_boundary.clone()),
+                    }],
+                    ..PhaseProgress::default()
+                }));
+            }
+            Err(RunnerError::data_integrity(format!(
+                "{} for chain {chain_id} source source at block 5: simulated fork change",
+                bigname_ingest::REDO_BOUNDARY_DIVERGENCE_PREFIX
+            )))
+        }),
+    });
+
+    let error = runner(
+        scratch.runner(),
+        phase_set_replacing(PhaseName::Ingest, phase)?,
+        "redo-boundary-divergence-clear-runner",
+    )?
+    .redo(
+        &chain(chain_id, SeedBasis::BaseSeam)?,
+        RedoPhase::Phase(PhaseName::Ingest),
+        BlockRange::new(5, 6)?,
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("the second redo batch must report boundary divergence");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error
+            .to_string()
+            .starts_with(bigname_ingest::REDO_BOUNDARY_DIVERGENCE_PREFIX)
+    );
+
+    let state: StoredBoundaryDivergenceState = sqlx::query_as(
+        "SELECT redo_in_progress,
+                redo_current_block_number, redo_current_block_hash,
+                redo_target_block_number, redo_target_block_hash,
+                redo_source_boundary_markers
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        state,
+        (true, None, None, None, None, None),
+        "boundary divergence must retain the active redo while clearing every resumable marker"
+    );
     scratch.cleanup().await
 }
 
