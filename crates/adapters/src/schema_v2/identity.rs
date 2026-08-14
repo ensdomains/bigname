@@ -115,6 +115,8 @@ pub(super) fn materialize(
         }
         output.binding_closures.push(BindingClosure {
             logical_name_id: closure.logical_name_id.clone(),
+            authority_arm: closure.authority_arm.clone(),
+            chain_id: raw.chain_id.clone(),
             except_surface_binding_id: None,
             active_to: transition_time,
             block_number: raw.block_number,
@@ -156,6 +158,8 @@ pub(super) fn materialize(
             .unwrap_or_else(|| binding_id(&binding.logical_name_id, binding.resource_id, raw));
         output.binding_closures.push(BindingClosure {
             logical_name_id: binding.logical_name_id.clone(),
+            authority_arm: binding.authority_arm.clone(),
+            chain_id: raw.chain_id.clone(),
             except_surface_binding_id: Some(surface_binding_id),
             active_to: transition_time,
             block_number: raw.block_number,
@@ -167,6 +171,7 @@ pub(super) fn materialize(
             logical_name_id: binding.logical_name_id.clone(),
             resource_id: binding.resource_id,
             binding_kind: binding.binding_kind.clone(),
+            authority_arm: binding.authority_arm.clone(),
             active_from: transition_time,
             chain_id: raw.chain_id.clone(),
             block_hash: raw.block_hash.clone(),
@@ -249,6 +254,8 @@ pub(super) fn materialize(
                     .unwrap_or_else(|| binding_id(&logical_name_id, resource_id, raw));
                 output.binding_closures.push(BindingClosure {
                     logical_name_id: logical_name_id.clone(),
+                    authority_arm: name.authority_arm.clone(),
+                    chain_id: raw.chain_id.clone(),
                     except_surface_binding_id: Some(surface_binding_id),
                     active_to: transition_time,
                     block_number: raw.block_number,
@@ -260,6 +267,7 @@ pub(super) fn materialize(
                     logical_name_id: logical_name_id.clone(),
                     resource_id,
                     binding_kind: name.binding_kind.clone(),
+                    authority_arm: name.authority_arm.clone(),
                     active_from: transition_time,
                     chain_id: raw.chain_id.clone(),
                     block_hash: raw.block_hash.clone(),

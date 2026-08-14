@@ -84,6 +84,36 @@ surface-to-resource changes remain reconstructible through `surface_bindings`.
 Canonical display text is derived from verified preimages and normalization
 state; it is never identity.
 
+### Binding intervals and authority arms
+
+Every `surface_bindings` row stores a non-null `authority_arm` with one of the
+closed values `ens_v1`, `ens_v2`, or `basenames`. The value is the persistence
+form of the name's [authority epoch](glossary.md#authority-epoch), not a
+replacement for `binding_kind`: both ENS eras can use
+`declared_registry_path`. Adapters put the arm on each binding or closure draft,
+and Interpret writes it directly. SQL must not infer it from strings or
+provenance.
+
+Ordinary binding interval operations use
+`(chain_id, logical_name_id, authority_arm)` as their conflict domain. Their
+predecessor and successor lookups, explicit closes, and implicit predecessor
+caps cannot affect another chain or arm. The existing ordering and interval
+rules are otherwise unchanged within that domain. This permits an ordinary
+ENSv1 row and an independently admitted ordinary ENSv2 row for the exact same
+logical name to remain simultaneously open until an explicit activated
+[migration boundary](glossary.md#migration-boundary) selects the successor.
+
+The append-numbered phase-schema upgrade adds
+`surface_bindings.authority_arm text NOT NULL` with the closed-value check. It
+ships before the planned production re-walk from block zero, so it does not
+guess arms for historical rows or perform a historical backfill. Fresh replay
+always supplies the value. The fresh phase baseline has the identical column,
+constraint, and comment. At the offline boundary, operators empty only
+`surface_bindings` and its `name_current` and `address_names_current`
+dependents before applying the schema-migration; raw facts, manifest identities,
+normalized-event identities, and unrelated phase rows remain in place for the
+mandatory full Interpret and Project redos.
+
 ## Table ownership
 
 | Family | Writer | Meaning |
@@ -170,7 +200,8 @@ making it consumer-authoritative. A normalized event whose existence depends on
 that correlation stores top-level `migration_correlation_ids` and
 `consumer_visibility`. Ordinary events default to an empty ID set and
 `activated`; a correlation-dependent event has a sorted, duplicate-free,
-nonempty ID set and is `candidate` in slice 1 or `activated` in slice 2.
+nonempty ID set and is `candidate` before consumer activation or `activated`
+after it.
 `MigrationApplied` has exactly one ID. A shared correlation-dependent event
 keeps one event identity and lists every participating per-name ID; a
 name-independent registrar controller event has one stable
@@ -235,26 +266,44 @@ set, `correlation_kind`, evidence references, chain positions, canonicality, and
 `consumer_visibility=candidate`. Those diagnostic rows are not Project input
 and cannot update an ordinary row's columns, provenance, `active_from`, or
 `active_to`. An independently activated ordinary identity or discovery row is
-therefore byte-for-byte unchanged by candidate evidence. Slice 1 also writes no
+therefore byte-for-byte unchanged by candidate evidence. Candidate interpretation writes no
 ENSv1→ENSv2 migration-driven predecessor close or successor open to
 `surface_bindings`.
 
 Consumer activation is a re-derivation semantic, not an in-place serving flag.
-Slice 2 rotates the interpreter content hash and performs the planned full
-Interpret walk, reproducing stable correlation IDs and event identities while
-replacing candidate normalized events and diagnostic effect rows with activated
-normalized events and ordinary materialized identity/discovery output. It
-re-derives `migration_event_associations` and
-`migration_discovery_associations` as activated diagnostics without rewriting
-their independently admitted normalized events or ordinary registry-announcement
-edges. Only an
-`authority_transition` group derives the deferred `SurfaceBinding` transition;
-other group kinds cannot change a binding or authority epoch. The downstream
-full Project walk adopts only that one hash and publishes one coherent Project
-result. A partial candidate and activated mixture is invalid.
+Slice 2A rotates the interpreter content hash for arm-scoped ordinary writes and
+adds an explicit transition value, but the production interpreter continues to
+produce candidate groups only. The test-only activated seam carries the exact
+logical name, full chain position, expected `ens_v1` arm, predecessor selector,
+expected `ens_v2` arm, and concrete successor binding/resource. The writer
+selects current matching predecessors under `FOR UPDATE` and performs the
+cross-arm close and successor retain/open in that same transaction. It never
+ranks multiple predecessors and never applies the transition to descendants.
+There is no runtime or manifest activation flag.
 
-The separately reviewed and separately merged slice-1 and slice-2 implementation
-PRs deploy together at one planned [re-derivation
+For the `.eth` second-level names covered by slice 2A, zero matching ENSv1
+predecessors and multiple matching ENSv1 predecessors are both integrity
+errors. The unlocked ERC-721 entry accepts transfers only from BaseRegistrar,
+whose `ownerOf` rejects a token after its expiry, and both wrapper entry points
+accept transfers only from NameWrapper. NameWrapper treats a `.eth` second-level
+name as expired for transfer at the start of registrar grace.
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92-L103 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L48-L55 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L101-L124 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L35-L50 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L815-L835 @ ens_v1@91c966f)
+Therefore a completed supported second-level migration with no active ENSv1
+predecessor means an ENSv1-from-genesis interpretation is corrupt; it is not a
+valid chain state to tolerate. This rule is deliberately limited to `.eth`
+second-level transitions. An emancipated child is gated by wrapper expiry
+rather than registrar expiry and can migrate while its parent sits in registrar
+grace, so slice 3A must state and prove its own predecessor rule instead of
+inheriting this one.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L820-L823 @ ens_v1@91c966f)
+
+The separately reviewed and separately merged slice-1, slice-2A, slice-2B, and
+slice-2C implementation PRs deploy together at one planned [re-derivation
 boundary](glossary.md#re-derivation-boundary), alongside
 [PR #391](https://github.com/ensdomains/bigname/pull/391). The deployment adopts
 one interpreter content hash, performs one full source re-walk, and makes one
@@ -662,7 +711,7 @@ handoff, `project_redo_resolver_evidence`, contains pre-delete resolver
 references rather than staged projection rows and is consumed by the matching
 redo or later normal catch-up publication.
 
-Consumer slice 2 adds one diagnostic exception to durable staging, not to
+Consumer slice 2C adds one diagnostic exception to durable staging, not to
 projection ownership. A post-reconciliation dual-current invariant makes the
 Project transaction return a structured failure before `publish::swap`; that
 transaction rolls back completely. The phase runner then appends one

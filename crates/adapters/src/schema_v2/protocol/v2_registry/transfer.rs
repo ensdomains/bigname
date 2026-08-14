@@ -77,6 +77,7 @@ pub(super) fn token_resource(
             surface_binding_id: Some(surface_binding_id),
             bind: true,
             binding_kind: "declared_registry_path".to_owned(),
+            authority_arm: "ens_v2".to_owned(),
             source_kind: "TokenResource_name".to_owned(),
             preimage_metadata: None,
         });

@@ -554,6 +554,7 @@ fn families(
         migration_discovery_associations: _,
         migration_candidate_identity_effects: _,
         migration_candidate_discovery_effects: _,
+        migration_authority_transitions: _,
     } = fresh;
     vec![
         (
@@ -640,6 +641,12 @@ fn families(
             migration_candidate_effects(&fresh.migration_candidate_discovery_effects),
             migration_candidate_effects(&replayed.migration_candidate_discovery_effects),
         ),
+        (
+            "migration_authority_transitions",
+            Keeps::Every,
+            migration_authority_transitions(fresh),
+            migration_authority_transitions(replayed),
+        ),
     ]
 }
 
@@ -716,6 +723,31 @@ fn migration_candidate_effects(
                 row.consumer_visibility,
             ),
             anchor: row.block_number.to_string(),
+        })
+        .collect()
+}
+
+fn migration_authority_transitions(output: &BatchOutput) -> Vec<Row> {
+    output
+        .migration_authority_transitions
+        .iter()
+        .map(|row| Row {
+            key: row.boundary_event_identity.clone(),
+            body: format!(
+                "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                row.migration_correlation_id,
+                row.logical_name_id,
+                row.predecessor_selector,
+                row.expected_predecessor_arm,
+                row.successor_surface_binding_id,
+                row.successor_resource_id,
+                row.successor_arm,
+                row.chain_id,
+                row.block_number,
+                row.transaction_index,
+                row.log_index,
+            ),
+            anchor: String::new(),
         })
         .collect()
 }
@@ -798,10 +830,11 @@ fn surface_bindings(output: &BatchOutput) -> Vec<Row> {
         .map(|row| Row {
             key: row.surface_binding_id.to_string(),
             body: format!(
-                "{}:{}:{}:{}:{}:{}",
+                "{}:{}:{}:{}:{}:{}:{}",
                 row.logical_name_id,
                 row.resource_id,
                 row.binding_kind,
+                row.authority_arm,
                 row.chain_id,
                 row.active_from,
                 row.canonicality_state
@@ -820,8 +853,10 @@ fn binding_closures(output: &BatchOutput) -> Vec<Row> {
             // at one position differ only by which binding they spare, and keying without it would
             // compare one of them against the other and drop the rest.
             key: format!(
-                "{}:{}:{}:{}:{:?}",
+                "{}:{}:{}:{}:{}:{}:{:?}",
+                row.chain_id,
                 row.logical_name_id,
+                row.authority_arm,
                 row.block_number,
                 row.transaction_index,
                 row.log_index,

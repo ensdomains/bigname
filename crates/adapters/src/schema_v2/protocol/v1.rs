@@ -47,6 +47,14 @@ pub(super) fn reconcile_same_transaction_setups(output: &mut BatchOutput) {
     reconcile_support::reconcile(output);
 }
 
+fn authority_arm(namespace: &str) -> &'static str {
+    if namespace == "basenames" {
+        "basenames"
+    } else {
+        "ens_v1"
+    }
+}
+
 fn retarget_permission_authority(state: &mut serde_json::Value, authority_key: &str) {
     for field in ["grant_source", "revocation_source"] {
         let Some(source) = state

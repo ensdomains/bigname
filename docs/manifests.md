@@ -266,9 +266,11 @@ every correlation-dependent effect in the per-name
 `consumer_visibility=candidate`; an independently admitted effect retains its
 ordinary activated output and receives a separate candidate association. Every
 consumer staging or direct-history read excludes correlation-dependent candidate
-normalized events and candidate identity/discovery effects until slice 2
-activates the group. `migration_event_associations` remains diagnostics-only
-before and after activation.
+normalized events and candidate identity/discovery effects until the later
+consumer-activation slice activates the group. Slice 2A adds no capability,
+runtime, or manifest flag: production correlations remain candidate.
+`migration_event_associations` remains diagnostics-only before and after
+activation.
 
 The family admission includes a reviewed in-place schema-migration because the
 schema-v2 normalized-event table has closed event-kind and derivation-kind
@@ -309,7 +311,37 @@ Each group carries `correlation_kind`. A synchronized bridge renewal uses
 `synchronized_renewal` and never emits `MigrationApplied`; a later renewal or
 authority transition receives its own stable group ID. Only
 `correlation_kind=authority_transition` with the complete ENSv1→ENSv2 migration
-shape may emit `MigrationApplied`.
+shape may emit `MigrationApplied`. Its completion position is the successful v2
+registry `LabelRegistered` log emitted during `_register`, in the same
+transaction as the v1-side token release. The registry can also emit
+`TokenResource`, `SubregistryUpdated`, and `ResolverUpdated`; the migration
+controllers emit no separate completion event, and the wrapped finish function
+is callable only by the receiver itself.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L476 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L164-L174 @ ens_v2@ccaeb58)
+The claimed token retains the unrevokable `ROLE_WAS_RESERVED` marker.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L447 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47-L48 @ ens_v2@ccaeb58)
+
+The activated form is an exact-name operation. It carries the successful
+registration's block number, transaction index, and log index, never timestamp
+or transaction membership alone; an `ens_v1` predecessor selector; and the
+concrete `ens_v2` binding and resource. A manifest supplies admission evidence
+only and cannot activate that transition. One transaction may contain several
+wrapped names or mix unwrapped, unlocked-wrapped, and locked-wrapped groups, so
+correlation and transition identity remain per logical name.
+(upstream: .refs/ens_v2/contracts/src/migration/AbstractWrapperReceiver.sol:L132-L154 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L89-L135 @ ens_v2@ccaeb58)
+The registrant is not a predecessor selector: an approved operator can drive
+the transfer, while the v2 owner is caller-supplied payload data and may differ
+from the v1 registrant.
+(upstream: .refs/ens_v2/contracts/src/migration/MigrationHelper.sol:L102-L114 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/libraries/LibMigration.sol:L20-L31 @ ens_v2@ccaeb58)
+Slice 2A covers only `.eth` second-level names: the unlocked path verifies a
+label token and derives its name under `ETH_NODE`, and the locked controller
+returns `ETH_NODE` as its wrapped root. No non-`.eth` transition is admitted.
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L108-L113 @ ens_v2@ccaeb58)
+(upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L80-L83 @ ens_v2@ccaeb58)
 
 A name-independent controller change outside a per-name synchronized-renewal
 group uses `correlation_kind=controller_configuration`. Its stable derivation
@@ -342,7 +374,7 @@ event around a multi-label
 every participating name; it is not duplicated per name and remains candidate
 until all referenced groups activate. A controller event outside such a batch
 uses the name-independent `controller_configuration` derivation group above.
-(upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2@ccaeb58) The correlated bridge, ENSv1 registrar, and ENSv2 registry renewal observations remain separate normalized rows anchored to their own resources; no transaction-level synthetic renewal is created. In slice 1 the bridge row uses the already-materialized ENSv2 `resource_id`, while a launch-bounded BaseRegistrar row carries a deterministic candidate registrar-resource selector in `after_state.resource_anchor`; it does not materialize an ordinary ENSv1 resource or token lineage before slice-2 activation. This scoped declaration supplies ENSv1→ENSv2 correlation; it does not transfer ordinary ENSv1 registrar authority to the ENSv2 migration family.
+(upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L9 @ ens_v1@91c966f) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L106 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L107 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registrar/ETHRenewerV1.sol:L111 @ ens_v2@ccaeb58) The correlated bridge, ENSv1 registrar, and ENSv2 registry renewal observations remain separate normalized rows anchored to their own resources; no transaction-level synthetic renewal is created. In slice 1 the bridge row uses the already-materialized ENSv2 `resource_id`, while a launch-bounded BaseRegistrar row carries a deterministic candidate registrar-resource selector in `after_state.resource_anchor`; it does not materialize an ordinary ENSv1 resource or token lineage before later consumer activation. This scoped declaration supplies ENSv1→ENSv2 correlation; it does not transfer ordinary ENSv1 registrar authority to the ENSv2 migration family.
 
 `MigrationHelper` at `0xd54a53c1567b26f9653c8565dccc39bceb6ab327`,
 starting at block `11163415`,
@@ -367,7 +399,7 @@ event and edge. That association does not make the edge candidate. The edge
 records only indexability: it creates no suffix, parent relation, name binding,
 or current authority. Correlation-dependent identity, parent, role,
 registration, renewal, topology, and normalized-event effects from the registry
-inherit `consumer_visibility=candidate` until slice 2 activation, including
+inherit `consumer_visibility=candidate` until later consumer activation, including
 effects in later transactions or blocks. The association alone cannot
 reclassify an effect: a `ParentUpdated`, role, registration, renewal, topology,
 or normalized-event output that `ens_v2_registry_l1` derives from the ordinary
@@ -400,10 +432,11 @@ does not duplicate, suppress, or reclassify the ordinary event. Project staging
 and product event/history readers exclude correlation-dependent candidate rows
 and never consume `migration_event_associations` or the diagnostic identity and
 discovery effect tables. Unrelated existing-family facts in the same transaction
-remain normally eligible. Slice 2 materializes candidate-only normalized,
-identity, and discovery effects as activated ordinary output in one
-re-derivation pass; event associations may become activated diagnostics
-but never become consumer input.
+remain normally eligible. Slice 2A only establishes arm-scoped ordinary binding
+behavior and the explicit activated transition write exercised by tests;
+candidate-only normalized, identity, and discovery effects remain diagnostic.
+When a later slice activates them, event associations may become activated
+diagnostics but never become consumer input.
 
 Slice 1 requires a restart boundary fixture, not only a same-transaction ordering
 test. At block N, a migration-created proxy emits `RegistryCreated`; after an
@@ -437,8 +470,8 @@ the slice-1 acceptance publication has no consumer-visible semantic delta
 from that re-walk; the comparison in the consumer contract is a release gate,
 not an optional fixture check.
 
-The separately reviewed and separately merged slice-1 and slice-2 implementation
-PRs deploy together at this same planned [re-derivation
+The separately reviewed and separately merged slice-1, slice-2A, slice-2B, and
+slice-2C implementation PRs deploy together at this same planned [re-derivation
 boundary](glossary.md#re-derivation-boundary), which also
 carries [PR #391](https://github.com/ensdomains/bigname/pull/391). They use one
 [interpreter content hash](glossary.md#interpreter-content-hash), one full

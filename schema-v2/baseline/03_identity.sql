@@ -253,6 +253,7 @@ CREATE TABLE IF NOT EXISTS surface_bindings (
     logical_name_id text NOT NULL,
     resource_id uuid NOT NULL,
     binding_kind text NOT NULL,
+    authority_arm text NOT NULL,
     active_from timestamptz NOT NULL,
     active_to timestamptz,
     chain_id text NOT NULL,
@@ -284,12 +285,16 @@ CREATE TABLE IF NOT EXISTS surface_bindings (
                 'observed_only'
             )
         ),
+    CONSTRAINT surface_bindings_authority_arm_check
+        CHECK (authority_arm IN ('ens_v1', 'ens_v2', 'basenames')),
     CHECK (active_to IS NULL OR active_to > active_from),
     CHECK (block_number >= 0),
     CHECK (jsonb_typeof(provenance) = 'object'),
     CONSTRAINT surface_bindings_no_overlap
         EXCLUDE USING gist (
+            chain_id WITH =,
             logical_name_id WITH =,
+            authority_arm WITH =,
             tstzrange(
                 active_from,
                 COALESCE(active_to, 'infinity'::timestamptz),
@@ -495,6 +500,8 @@ COMMENT ON COLUMN surface_bindings.resource_id IS
     'This value identifies the authority object.';
 COMMENT ON COLUMN surface_bindings.binding_kind IS
     'This value states the link kind.';
+COMMENT ON COLUMN surface_bindings.authority_arm IS
+    'This value states which protocol authority arm owns this binding interval.';
 COMMENT ON COLUMN surface_bindings.active_from IS
     'This time starts the active range.';
 COMMENT ON COLUMN surface_bindings.active_to IS

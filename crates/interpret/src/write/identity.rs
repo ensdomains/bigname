@@ -1,6 +1,4 @@
 use bigname_adapters::schema_v2::BatchOutput;
-#[cfg(test)]
-use bigname_adapters::schema_v2::seam::raw_block_provenance;
 use bigname_adapters::schema_v2::seam::{
     BINDING_CLOSE_CLAMP_SQL, LOG_INDEX_KEY, TRANSACTION_INDEX_KEY, binding_open_time,
     is_raw_block_provenance,
@@ -9,15 +7,25 @@ use sqlx::{Postgres, Transaction, types::Uuid};
 
 use crate::{InterpretError, Result};
 
-pub(super) async fn write(
+mod transition;
+
+pub(super) async fn write_rows(
     transaction: &mut Transaction<'_, Postgres>,
     output: &BatchOutput,
     preserve_outside_range_closes: bool,
 ) -> Result<()> {
+    transition::validate_boundaries(output)?;
     super::identity_names::write(transaction, output).await?;
     write_token_lineages(transaction, output).await?;
     write_resources(transaction, output).await?;
     write_bindings(transaction, output, preserve_outside_range_closes).await
+}
+
+pub(super) async fn write_transitions(
+    transaction: &mut Transaction<'_, Postgres>,
+    output: &BatchOutput,
+) -> Result<()> {
+    transition::write(transaction, &output.migration_authority_transitions).await
 }
 
 async fn write_token_lineages(
@@ -181,6 +189,8 @@ async fn write_bindings(
                     SET active_to = {BINDING_CLOSE_CLAMP_SQL},
                         observed_at = now()
                     WHERE logical_name_id = $1
+                      AND chain_id = $7
+                      AND authority_arm = $8
                       AND canonicality_state IN ('canonical', 'safe', 'finalized')
                       AND (
                           block_number < $4
@@ -213,6 +223,8 @@ async fn write_bindings(
                     .bind(closure.block_number)
                     .bind(closure.transaction_index)
                     .bind(closure.log_index)
+                    .bind(&closure.chain_id)
+                    .bind(&closure.authority_arm)
                     .execute(&mut **transaction)
                     .await
                     .map_err(|error| {
@@ -226,6 +238,8 @@ async fn write_bindings(
                     SELECT active_from
                     FROM surface_bindings
                     WHERE logical_name_id = $1
+                      AND chain_id = $6
+                      AND authority_arm = $7
                       AND surface_binding_id <> $2
                       AND canonicality_state IN ('canonical', 'safe', 'finalized')
                       AND (
@@ -261,6 +275,8 @@ async fn write_bindings(
                         .bind(binding.block_number)
                         .bind(transaction_index)
                         .bind(log_index)
+                        .bind(&binding.chain_id)
+                        .bind(&binding.authority_arm)
                         .fetch_optional(&mut **transaction)
                         .await
                         .map_err(|error| {
@@ -275,6 +291,8 @@ async fn write_bindings(
                     SELECT active_from
                     FROM surface_bindings
                     WHERE logical_name_id = $1
+                      AND chain_id = $6
+                      AND authority_arm = $7
                       AND surface_binding_id <> $2
                       AND canonicality_state IN ('canonical', 'safe', 'finalized')
                       AND (
@@ -310,6 +328,8 @@ async fn write_bindings(
                         .bind(binding.block_number)
                         .bind(transaction_index)
                         .bind(log_index)
+                        .bind(&binding.chain_id)
+                        .bind(&binding.authority_arm)
                         .fetch_optional(&mut **transaction)
                         .await
                         .map_err(|error| {
@@ -330,6 +350,8 @@ async fn write_bindings(
                     SET active_to = $3,
                         observed_at = now()
                     WHERE logical_name_id = $1
+                      AND chain_id = $7
+                      AND authority_arm = $8
                       AND surface_binding_id <> $2
                       AND canonicality_state IN ('canonical', 'safe', 'finalized')
                       AND (
@@ -360,6 +382,8 @@ async fn write_bindings(
                     .bind(binding.block_number)
                     .bind(transaction_index)
                     .bind(log_index)
+                    .bind(&binding.chain_id)
+                    .bind(&binding.authority_arm)
                     .execute(&mut **transaction)
                     .await
                     .map_err(|error| {
@@ -372,11 +396,11 @@ async fn write_bindings(
                     "
                     INSERT INTO surface_bindings (
                         surface_binding_id, logical_name_id, resource_id, binding_kind,
-                        active_from, active_to, chain_id, block_hash, block_number,
-                        provenance, canonicality_state
+                        authority_arm, active_from, active_to, chain_id, block_hash,
+                        block_number, provenance, canonicality_state
                     )
-                    VALUES ($1, $2, $3, $4, $5, $11, $6, $7, $8, $9,
-                            $10::canonicality_state)
+                    VALUES ($1, $2, $3, $4, $5, $6, $12, $7, $8, $9, $10,
+                            $11::canonicality_state)
                     ON CONFLICT (surface_binding_id) DO UPDATE
                     SET active_from = CASE
                             WHEN surface_bindings.canonicality_state = 'orphaned'
@@ -385,21 +409,21 @@ async fn write_bindings(
                         END,
                         active_to = CASE
                             WHEN surface_bindings.canonicality_state = 'orphaned'
-                              AND $12
+                              AND $13
                                 THEN CASE
-                                    WHEN surface_bindings.active_to IS NULL THEN $11
-                                    WHEN $11::timestamptz IS NULL
+                                    WHEN surface_bindings.active_to IS NULL THEN $12
+                                    WHEN $12::timestamptz IS NULL
                                         THEN surface_bindings.active_to
-                                    ELSE LEAST(surface_bindings.active_to, $11)
+                                    ELSE LEAST(surface_bindings.active_to, $12)
                                 END
                             WHEN surface_bindings.canonicality_state = 'orphaned'
-                                THEN $11
-                            WHEN $11::timestamptz IS NOT NULL
+                                THEN $12
+                            WHEN $12::timestamptz IS NOT NULL
                               AND (
                                   surface_bindings.active_to IS NULL
-                                  OR surface_bindings.active_to > $11
+                                  OR surface_bindings.active_to > $12
                               )
-                                THEN $11
+                                THEN $12
                             ELSE surface_bindings.active_to
                         END,
                         block_hash = CASE
@@ -434,6 +458,7 @@ async fn write_bindings(
                     WHERE surface_bindings.logical_name_id = EXCLUDED.logical_name_id
                       AND surface_bindings.resource_id = EXCLUDED.resource_id
                       AND surface_bindings.binding_kind = EXCLUDED.binding_kind
+                      AND surface_bindings.authority_arm = EXCLUDED.authority_arm
                       AND (
                           surface_bindings.canonicality_state = 'orphaned'
                           OR surface_bindings.active_from = EXCLUDED.active_from
@@ -446,6 +471,7 @@ async fn write_bindings(
                 .bind(&binding.logical_name_id)
                 .bind(binding.resource_id)
                 .bind(&binding.binding_kind)
+                .bind(&binding.authority_arm)
                 .bind(effective_start)
                 .bind(&binding.chain_id)
                 .bind(&binding.block_hash)
@@ -515,35 +541,4 @@ impl BindingOperation<'_> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn raw_block_binding_open_orders_before_the_first_log() {
-        let binding = bigname_adapters::schema_v2::SurfaceBinding {
-            surface_binding_id: Uuid::nil(),
-            logical_name_id: "ens:0x00".to_owned(),
-            resource_id: Uuid::nil(),
-            binding_kind: "declared_registry_path".to_owned(),
-            active_from: time::OffsetDateTime::UNIX_EPOCH,
-            chain_id: "chain".to_owned(),
-            block_hash: "block".to_owned(),
-            block_number: 7,
-            provenance: raw_block_provenance(),
-            canonicality_state: "canonical".to_owned(),
-        };
-        let closure = bigname_adapters::schema_v2::BindingClosure {
-            logical_name_id: binding.logical_name_id.clone(),
-            except_surface_binding_id: None,
-            active_to: time::OffsetDateTime::UNIX_EPOCH,
-            block_number: 7,
-            transaction_index: 0,
-            log_index: 0,
-        };
-
-        assert!(
-            BindingOperation::Open(&binding).order_key()
-                < BindingOperation::Close(&closure).order_key()
-        );
-    }
-}
+mod tests;

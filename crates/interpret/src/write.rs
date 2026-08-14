@@ -7,9 +7,10 @@ mod redo;
 
 use bigname_adapters::schema_v2::BatchOutput;
 use bigname_adapters::schema_v2::seam::{
-    EVENT_CLOSE_TIME_SQL, LOG_INDEX_KEY, PREIMAGE_OBSERVATION_EVENT_KIND,
-    REDO_BINDING_CLOSE_CLAMP_SQL, SURFACE_BINDING_ID_KEY, SURFACE_BOUND_EVENT_KIND,
-    SURFACE_UNBOUND_EVENT_KIND, TOKEN_LINEAGE_ID_KEY, TRANSACTION_INDEX_KEY,
+    EVENT_CLOSE_TIME_SQL, LOG_INDEX_KEY, MIGRATION_APPLIED_EVENT_KIND,
+    PREIMAGE_OBSERVATION_EVENT_KIND, REDO_BINDING_CLOSE_CLAMP_SQL, SURFACE_BINDING_ID_KEY,
+    SURFACE_BOUND_EVENT_KIND, SURFACE_UNBOUND_EVENT_KIND, TOKEN_LINEAGE_ID_KEY,
+    TRANSACTION_INDEX_KEY,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 
@@ -40,9 +41,10 @@ pub(crate) async fn batch(
     if let Some((from_block, to_block)) = redo_range.filter(|_| prepare_redo) {
         prepare_redo_range(&mut transaction, chain_id, from_block, to_block).await?;
     }
-    identity::write(&mut transaction, output, preserve_outside_range_closes).await?;
+    identity::write_rows(&mut transaction, output, preserve_outside_range_closes).await?;
     discovery::write(&mut transaction, output, preserve_outside_range_closes).await?;
     normalized::events(&mut transaction, &output.normalized_events).await?;
+    identity::write_transitions(&mut transaction, output).await?;
     migration::write(&mut transaction, output).await?;
     if let Some((from_block, to_block)) = redo_range.filter(|_| complete) {
         reanchor_stable_identities(&mut transaction, chain_id, from_block, to_block).await?;
@@ -352,7 +354,10 @@ async fn reopen_bindings_closed_in_range(
                    COALESCE(event.transaction_index, -1) AS transaction_index,
                    COALESCE(event.log_index, -1) AS log_index,
                    {EVENT_CLOSE_TIME_SQL} AS closed_at,
-                   event.after_state ->> '{SURFACE_BINDING_ID_KEY}' AS opened_binding_id
+                   COALESCE(
+                       event.after_state ->> '{SURFACE_BINDING_ID_KEY}',
+                       event.after_state #>> '{{successor_binding,binding_id}}'
+                   ) AS opened_binding_id
             FROM normalized_events event
             JOIN chain_lineage lineage
               ON lineage.chain_id = event.chain_id
@@ -361,7 +366,13 @@ async fn reopen_bindings_closed_in_range(
             WHERE event.chain_id = $1
               AND event.block_number BETWEEN $2 AND $3
               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-              AND event.event_kind IN ('{SURFACE_BOUND_EVENT_KIND}', '{SURFACE_UNBOUND_EVENT_KIND}')
+              AND (
+                  event.event_kind IN ('{SURFACE_BOUND_EVENT_KIND}', '{SURFACE_UNBOUND_EVENT_KIND}')
+                  OR (
+                      event.event_kind = '{MIGRATION_APPLIED_EVENT_KIND}'
+                      AND event.consumer_visibility = 'activated'
+                  )
+              )
               AND event.logical_name_id IS NOT NULL
         ),
         targets AS (
@@ -378,7 +389,7 @@ async fn reopen_bindings_closed_in_range(
                         AND event.resource_id = binding.resource_id
                     )
                     OR (
-                        event.event_kind = '{SURFACE_BOUND_EVENT_KIND}'
+                        event.event_kind IN ('{SURFACE_BOUND_EVENT_KIND}', '{MIGRATION_APPLIED_EVENT_KIND}')
                         AND (
                             event.opened_binding_id IS NULL
                             OR event.opened_binding_id <> binding.surface_binding_id::text
@@ -390,6 +401,7 @@ async fn reopen_bindings_closed_in_range(
                 FROM surface_bindings candidate
                 WHERE candidate.chain_id = binding.chain_id
                   AND candidate.logical_name_id = binding.logical_name_id
+                  AND candidate.authority_arm = binding.authority_arm
                   AND candidate.surface_binding_id <> binding.surface_binding_id
                   AND candidate.canonicality_state IN ('canonical', 'safe', 'finalized')
                   AND (

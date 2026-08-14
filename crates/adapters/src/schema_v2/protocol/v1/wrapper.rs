@@ -364,6 +364,7 @@ fn name_wrapped(
     }
     append_authority_transition(
         &mut output,
+        super::authority_arm(&selected.source.namespace),
         previous.as_ref(),
         state
             .v1_name(&selected.source.namespace, &raw_namehash)
@@ -384,6 +385,7 @@ fn name_wrapped(
             ))),
             bind: false,
             binding_kind: "observed_only".to_owned(),
+            authority_arm: "ens_v1".to_owned(),
             source_kind: "NameWrapped_name".to_owned(),
             preimage_metadata: None,
         });
@@ -430,6 +432,7 @@ fn name_unwrapped(
     let mut output = Interpreted::new();
     append_authority_transition(
         &mut output,
+        super::authority_arm(&selected.source.namespace),
         linked.as_ref(),
         reactivated.as_ref(),
         raw,

@@ -111,6 +111,7 @@ pub struct SurfaceBinding {
     pub logical_name_id: String,
     pub resource_id: Uuid,
     pub binding_kind: SurfaceBindingKind,
+    pub authority_arm: String,
     pub active_from: OffsetDateTime,
     pub active_to: Option<OffsetDateTime>,
     pub chain_id: String,

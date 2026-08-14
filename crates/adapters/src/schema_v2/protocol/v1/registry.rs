@@ -252,6 +252,7 @@ pub(super) fn interpret(
     }
     append_authority_transition(
         &mut output,
+        super::authority_arm(&selected.source.namespace),
         previous.as_ref(),
         linked.as_ref(),
         raw,
@@ -319,6 +320,7 @@ pub(super) fn interpret(
 
 pub(super) fn append_authority_transition(
     output: &mut Interpreted,
+    authority_arm: &str,
     previous: Option<&V1NameState>,
     linked: Option<&V1NameState>,
     raw: &RawLogInput,
@@ -341,6 +343,7 @@ pub(super) fn append_authority_transition(
             logical_name_id: linked.logical_name_id.clone(),
             resource_id: linked.resource_id,
             binding_kind: "declared_registry_path".to_owned(),
+            authority_arm: authority_arm.to_owned(),
             surface_binding_id: linked.authority_key.as_ref().map(|authority_key| {
                 stable_uuid(&format!(
                     "binding:{authority_key}:{}",
@@ -351,6 +354,7 @@ pub(super) fn append_authority_transition(
     } else if let Some(previous) = previous.filter(|authority| authority.surface_known) {
         output.binding_closures.push(BindingClosureDraft {
             logical_name_id: previous.logical_name_id.clone(),
+            authority_arm: authority_arm.to_owned(),
         });
     }
     let logical_name_id = linked

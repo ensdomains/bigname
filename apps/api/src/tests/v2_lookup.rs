@@ -2829,11 +2829,11 @@ async fn seed_phase_lookup_scan_rows(
         r#"
         INSERT INTO surface_bindings (
             surface_binding_id, logical_name_id, resource_id, binding_kind,
-            active_from, chain_id, block_hash, block_number, provenance,
+            authority_arm, active_from, chain_id, block_hash, block_number, provenance,
             canonicality_state
         )
         SELECT surface_binding_id, logical_name_id, resource_id,
-               'declared_registry_path', now(), 'ethereum-mainnet',
+               'declared_registry_path', 'ens_v1', now(), 'ethereum-mainnet',
                '0xlookup-scan-head', 10000, '{}'::jsonb,
                'finalized'::bigname_phase.canonicality_state
         FROM UNNEST($1::UUID[], $2::TEXT[], $3::UUID[])

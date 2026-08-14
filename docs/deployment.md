@@ -489,6 +489,10 @@ or schema-wide write grants as a shortcut.
 The current installer cannot upgrade a nonempty `bigname_phase` schema. When a
 reviewed versioned schema-migration cannot preserve an existing initialized
 database, the cutover requires an offline replacement and full pipeline walk:
+This procedure is not used for
+`20260814130000_surface_binding_authority_arm.sql`; that shared boundary must
+preserve sequence-assigned manifest IDs and instead uses the targeted binding
+reset in the production runbook.
 
 1. Build `phase-runner` and `bigname-api` from the same commit. Stop the
    phase runner and every API process that can open the phase schema, and retain
@@ -503,8 +507,12 @@ database, the cutover requires an offline replacement and full pipeline walk:
    COMMIT;
    ```
 
-3. Run the new binary's `phase-runner init-schema` with `--database-url
-   "$BIGNAME_DATABASE_URL"`. Reapply the verification-role `USAGE`/`SELECT`
+3. Run `sqlx migrate run --source migrations --database-url
+   "$BIGNAME_DATABASE_URL"` from the deployed commit while the replacement
+   namespace is empty, then run the new binary's `phase-runner init-schema`
+   with the same database URL. This order lets an append-numbered schema-migration
+   record its version when its phase table is absent before the fresh baseline
+   creates the current table shape. Reapply the verification-role `USAGE`/`SELECT`
    grants and the exact API-role relation/function grant block above; schema
    rename and replacement do not carry those grants to the new namespace.
 4. Run the configured `phase-runner run` from each admitted source's historical

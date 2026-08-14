@@ -430,10 +430,11 @@ pub fn assert_upsert_guards_agree(context: &str, output: &BatchOutput) -> Result
             "surface_bindings",
             row.surface_binding_id.to_string(),
             format!(
-                "{}:{}:{}:{}:{}",
+                "{}:{}:{}:{}:{}:{}",
                 row.logical_name_id,
                 row.resource_id,
                 row.binding_kind,
+                row.authority_arm,
                 row.chain_id,
                 row.active_from
             ),
@@ -789,6 +790,7 @@ fn absorb_rows(into: &mut BatchOutput, from: BatchOutput) {
         migration_discovery_associations,
         migration_candidate_identity_effects,
         migration_candidate_discovery_effects,
+        migration_authority_transitions,
     } = from;
     into.normalized_events.extend(normalized_events);
     into.label_preimages.extend(label_preimages);
@@ -809,6 +811,8 @@ fn absorb_rows(into: &mut BatchOutput, from: BatchOutput) {
         .extend(migration_candidate_identity_effects);
     into.migration_candidate_discovery_effects
         .extend(migration_candidate_discovery_effects);
+    into.migration_authority_transitions
+        .extend(migration_authority_transitions);
 }
 
 pub fn split(len: usize, seed: u64) -> Vec<Range<usize>> {

@@ -1237,6 +1237,7 @@ impl TestDatabase {
                 logical_name_id: logical_name_id.to_owned(),
                 resource_id,
                 binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+                authority_arm: "ens_v1".to_owned(),
                 active_from: timestamp(1_717_171_700),
                 active_to: None,
                 chain_id: chain_id.to_owned(),
@@ -1865,9 +1866,9 @@ async fn seed_schema_v2_ens_record_lookup(
     .await?;
     sqlx::query(
         "INSERT INTO surface_bindings
-            (surface_binding_id, logical_name_id, resource_id, binding_kind, active_from,
+            (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm, active_from,
              chain_id, block_hash, block_number, canonicality_state)
-         VALUES ($1, $2, $3, 'declared_registry_path', $4::timestamptz,
+         VALUES ($1, $2, $3, 'declared_registry_path', 'ens_v1', $4::timestamptz,
                  'ethereum-mainnet', $5, $6, 'canonical')",
     )
     .bind(binding_id)
@@ -2076,9 +2077,9 @@ async fn seed_schema_v2_basenames_record_lookup(
     .await?;
     sqlx::query(
         "INSERT INTO surface_bindings
-            (surface_binding_id, logical_name_id, resource_id, binding_kind, active_from,
+            (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm, active_from,
              chain_id, block_hash, block_number, canonicality_state)
-         VALUES ($1, $2, $3, 'declared_registry_path', $4::timestamptz,
+         VALUES ($1, $2, $3, 'declared_registry_path', 'basenames', $4::timestamptz,
                  'base-mainnet', $5, $6, 'canonical')",
     )
     .bind(binding_id)
@@ -2527,11 +2528,11 @@ async fn upsert_test_surface_bindings(
             r#"
             INSERT INTO bigname_phase.surface_bindings (
                 surface_binding_id, logical_name_id, resource_id, binding_kind,
-                active_from, active_to, chain_id, block_hash, block_number, provenance,
+                authority_arm, active_from, active_to, chain_id, block_hash, block_number, provenance,
                 canonicality_state
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                    $11::bigname_phase.canonicality_state)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                    $12::bigname_phase.canonicality_state)
             ON CONFLICT (surface_binding_id) DO UPDATE SET
                 active_to = EXCLUDED.active_to,
                 provenance = EXCLUDED.provenance,
@@ -2542,6 +2543,7 @@ async fn upsert_test_surface_bindings(
         .bind(logical_name_id)
         .bind(row.resource_id)
         .bind(row.binding_kind.as_str())
+        .bind(&row.authority_arm)
         .bind(row.active_from)
         .bind(row.active_to)
         .bind(&row.chain_id)
@@ -2625,6 +2627,7 @@ fn surface_binding(
         logical_name_id: logical_name_id.to_owned(),
         resource_id,
         binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+        authority_arm: "ens_v1".to_owned(),
         active_from,
         active_to: None,
         chain_id: "ethereum-mainnet".to_owned(),
@@ -3478,6 +3481,7 @@ fn address_name_surface_binding(
         logical_name_id: logical_name_id.to_owned(),
         resource_id,
         binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+        authority_arm: "ens_v1".to_owned(),
         active_from: timestamp(active_from),
         active_to: None,
         chain_id: "ethereum-mainnet".to_owned(),
@@ -3899,10 +3903,10 @@ async fn seed_phase_identity_name(
         r#"
         INSERT INTO surface_bindings (
             surface_binding_id, logical_name_id, resource_id, binding_kind,
-            active_from, chain_id, block_hash, block_number, provenance,
+            authority_arm, active_from, chain_id, block_hash, block_number, provenance,
             canonicality_state
         ) VALUES (
-            $1, $2, $3, 'declared_registry_path', $4, $5, $6, $7,
+            $1, $2, $3, 'declared_registry_path', 'ens_v1', $4, $5, $6, $7,
             '{}'::jsonb, 'finalized'
         ) ON CONFLICT (surface_binding_id) DO NOTHING
         "#,

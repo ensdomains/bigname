@@ -474,6 +474,7 @@ fn name_draft(
         surface_binding_id: None,
         bind,
         binding_kind: "resolver_alias_path".to_owned(),
+        authority_arm: "ens_v2".to_owned(),
         source_kind: "resolver_dns_name".to_owned(),
         preimage_metadata,
     }

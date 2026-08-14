@@ -454,6 +454,9 @@ async fn create_identity_views(
                    WHERE chain_id = $1 AND block_hash = $3 AND block_number = $2
                )
            )
+         -- Interim for #318 slice 2A (docs/consumer-capabilities.md): when ENSv1 and
+         -- ENSv2 bindings are both open, recency selects the prior winner; slice 2C
+         -- replaces it with current-authority selection for the exact name.
          ORDER BY binding.logical_name_id, binding.active_from DESC,
                   binding.surface_binding_id DESC",
     )

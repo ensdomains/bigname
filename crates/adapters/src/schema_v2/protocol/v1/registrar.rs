@@ -139,6 +139,7 @@ fn transfer(
     );
     append_authority_transition(
         &mut output,
+        super::authority_arm(&selected.source.namespace),
         previous_active.as_ref(),
         active_after.as_ref(),
         raw,
@@ -439,6 +440,7 @@ fn name_event(
     if registration || synthetic_grant {
         append_authority_transition(
             &mut output,
+            super::authority_arm(&selected.source.namespace),
             previous_active.as_ref(),
             active_after.as_ref(),
             raw,
@@ -460,6 +462,7 @@ fn name_event(
             }),
             bind: false,
             binding_kind: "declared_registry_path".to_owned(),
+            authority_arm: super::authority_arm(&selected.source.namespace).to_owned(),
             source_kind: format!("{}_name", selected.event.name),
             preimage_metadata: None,
         });
