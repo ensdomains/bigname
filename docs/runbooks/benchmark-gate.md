@@ -95,18 +95,38 @@ The API half sends each Tier 1 and Tier 2 REST route in
 seconds after a 10-second warmup. It loads 10,000 names and 10,000 distinct
 address/name/relation combinations from the target projections, plus at least
 1,000 populated subname parents, permission subjects, and successful primary
-name claims. The resolver corpus is instead the exact set of concrete resolver
-contract addresses declared by the copy's stored active resolver
+name claims. The resolver corpus is instead the currently applicable subset of
+concrete resolver contract addresses declared by the copy's stored active resolver
 [source-family](../glossary.md) manifests:
 `ens_v1_resolver_l1`, `ens_v2_resolver_l1`, and
 `basenames_base_resolver`. An active family with no concrete contract
-declaration is reported with zero declared and exercised addresses. Every
-declared address must have a
-supported, API-visible `resolver_current` row; a missing, unsupported, or
-canonically hidden declaration makes the run red and names its chain and source
-family. Request volume supplies resolver load scale, so there is no unrelated
-resolver row-count floor. The report records declared and exercised resolver
-counts for each chain and [source family](../glossary.md). Name, parent,
+declaration is reported with zero declared and exercised addresses. A valid
+empty `contracts` array is reportable as zero; a non-array value or a contract
+entry without an address is also preserved as a zero-count report row but makes
+the gate red as a malformed stored manifest payload. Every
+concrete declaration is evaluated against the copy's current Project head. The
+head must be a completed publication at the latest published/readable chain head under the
+API's [interpreter content hash](../glossary.md#interpreter-content-hash); a
+missing, running, stale, or invalidated head
+makes the gate red. A declaration whose `start_block` is no later than that head
+must have a
+supported, API-visible `resolver_current` row from that active manifest version.
+The row's publication target cannot be before the latest applicable
+`start_block` for that address. A missing or unsupported row, a row from another
+manifest version, a row published before `start_block`, or a canonically hidden
+declaration makes the run red and names its chain and source family. A
+declaration that starts after that head keeps its family visible in
+the report but is not yet demanded. If no declaration is currently applicable,
+the resolver workload cannot be constructed and the gate is red. Request volume
+supplies resolver load scale, so there is no unrelated resolver row-count floor.
+The report records total declared, currently applicable, and exercised resolver
+counts for each chain and [source family](../glossary.md), so future declarations
+remain visible without being treated as request targets.
+`exercised_addresses` stays zero during corpus loading and on an early red
+report. Once the resolver workload is constructed, it counts distinct currently
+applicable declared addresses for which the endpoint has built and validated a
+request variant; it is construction evidence, while the resolver endpoint's
+request outcomes carry the timed send evidence. Name, parent,
 address/name/relation, and successful primary-name samples are divided
 deterministically across every active public namespace. An active namespace
 with no seed of any one of those kinds makes the run red instead of letting
@@ -376,10 +396,11 @@ per second, return 100 percent successful HTTP responses, and meet all three
 latency percentiles. The records route must also meet its 1-percent populated
 response floor. Missing corpus cardinality or a missing active namespace is red
 rather than silently reducing request variety. Resolver coverage is red when a
-stored active declaration is missing, unsupported, or canonically hidden, or
-when the active resolver families contribute no concrete contract address. The
-red JSON report retains the per-chain and per-family resolver counts and the
-named refusal.
+stored active declaration is missing, unsupported, or not API-visible at the
+current Project head through canonical lineage, or when the active resolver
+families contribute no currently applicable resolver address. The red JSON
+report retains the per-chain and per-family resolver counts and the named
+refusal.
 
 Attach both reports and the recorded environment facts to the release record.
 Each report includes the database name and the database server address observed

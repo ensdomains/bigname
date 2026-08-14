@@ -4,6 +4,9 @@ use serde_json::{Value, json};
 
 use super::corpus::Corpus;
 
+mod resolver;
+pub(in crate::api_load) use resolver::{ResolverTarget, endpoint_requests};
+
 #[derive(Clone, Debug)]
 pub(super) struct RequestSpec {
     pub(super) method: Method,
@@ -128,10 +131,15 @@ pub(super) fn request_variants(
                 !corpus.resolvers.is_empty(),
                 "resolver endpoint has no real resolver corpus"
             );
-            for (index, (chain, resolver)) in corpus.resolvers.iter().enumerate() {
+            for (index, target) in corpus.resolvers.iter().enumerate() {
                 requests.push(get(
                     base,
-                    &["v2", "resolvers", numeric_chain_id(chain)?, resolver],
+                    &[
+                        "v2",
+                        "resolvers",
+                        numeric_chain_id(&target.chain_id)?,
+                        &target.resolver_address,
+                    ],
                     &[("page_size", page_size(index))],
                 )?);
             }
@@ -371,7 +379,7 @@ fn history_scope(index: usize) -> &'static str {
     ["name", "registration", "both"][index % 3]
 }
 
-fn page_size(index: usize) -> &'static str {
+pub(super) fn page_size(index: usize) -> &'static str {
     ["1", "5", "20"][index % 3]
 }
 
@@ -380,7 +388,7 @@ fn search_term(name: &str) -> String {
     label.chars().take(3).collect::<String>().to_lowercase()
 }
 
-fn numeric_chain_id(chain: &str) -> Result<&'static str> {
+pub(super) fn numeric_chain_id(chain: &str) -> Result<&'static str> {
     match chain {
         "ethereum-mainnet" => Ok("1"),
         "ethereum-sepolia" => Ok("11155111"),

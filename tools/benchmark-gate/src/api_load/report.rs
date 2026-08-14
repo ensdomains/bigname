@@ -13,6 +13,7 @@ pub struct ResolverManifestCoverage {
     pub chain_id: String,
     pub source_family: String,
     pub declared_addresses: usize,
+    pub applicable_addresses: usize,
     pub exercised_addresses: usize,
 }
 
@@ -120,6 +121,14 @@ pub(super) fn corpus_failure_report(
     corpus: Corpus,
     failures: Vec<String>,
 ) -> ApiReport {
+    let resolver_manifest_coverage = corpus
+        .resolver_manifest_coverage
+        .into_iter()
+        .map(|mut count| {
+            count.exercised_addresses = 0;
+            count
+        })
+        .collect();
     ApiReport {
         api_build_sha: identity.build_sha,
         expected_api_build_sha: expected_build_sha.map(str::to_owned),
@@ -142,7 +151,7 @@ pub(super) fn corpus_failure_report(
         corpus_permission_subjects: corpus.permission_subjects.len(),
         corpus_primary_names: corpus.primary_names.len(),
         corpus_resolvers: corpus.resolvers.len(),
-        resolver_manifest_coverage: corpus.resolver_manifest_coverage,
+        resolver_manifest_coverage,
         default_primary_name_probe_requests: 0,
         default_primary_name_probe_outcomes: BTreeMap::new(),
         endpoints: Vec::new(),
@@ -189,7 +198,8 @@ mod tests {
                     chain_id: "ethereum-sepolia".to_owned(),
                     source_family: "ens_v2_resolver_l1".to_owned(),
                     declared_addresses: 0,
-                    exercised_addresses: 0,
+                    applicable_addresses: 0,
+                    exercised_addresses: 7,
                 }],
             },
             vec!["resolver coverage is empty".to_owned()],
@@ -199,6 +209,7 @@ mod tests {
         assert_eq!(report.failures, ["resolver coverage is empty"]);
         assert_eq!(report.corpus_resolvers, 0);
         assert_eq!(report.resolver_manifest_coverage.len(), 1);
+        assert_eq!(report.resolver_manifest_coverage[0].exercised_addresses, 0);
         assert_eq!(
             report.resolver_manifest_coverage[0].source_family,
             "ens_v2_resolver_l1"

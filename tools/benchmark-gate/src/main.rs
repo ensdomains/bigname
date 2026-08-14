@@ -315,29 +315,7 @@ fn require_compiled_head(compiled_head: Option<&str>) -> Result<&str> {
 }
 
 fn require_release_profile() -> Result<()> {
-    ensure!(
-        cargo_profile() == "release",
-        "production benchmark commands require the release Cargo profile"
-    );
-    let launched_profile = std::env::var("BIGNAME_BENCHMARK_CARGO_PROFILE")
-        .context("production benchmark must be launched by scripts/benchmark-gate")?;
-    ensure!(
-        launched_profile == "release",
-        "production benchmark wrapper used Cargo profile {launched_profile:?}; release is required"
-    );
-    for name in [
-        "BIGNAME_BENCHMARK_RUSTFLAGS",
-        "BIGNAME_BENCHMARK_CARGO_ENCODED_RUSTFLAGS",
-    ] {
-        let value = std::env::var(name)
-            .with_context(|| format!("production benchmark wrapper did not attest {name}"))?;
-        ensure!(
-            value.is_empty(),
-            "production benchmark wrapper reported non-empty {name}"
-        );
-    }
-    compiler_attestation::require_no_compiler_overrides(|name| std::env::var(name).ok())?;
-    Ok(())
+    compiler_attestation::require_release_profile(cargo_profile(), |name| std::env::var(name).ok())
 }
 
 fn wrapper_build_attestation() -> Result<WrapperBuildAttestation> {

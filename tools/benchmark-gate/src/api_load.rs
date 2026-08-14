@@ -24,7 +24,7 @@ use preflight::{ApiBoundaryPreflight, load_interpret_redo_snapshot, recheck_api_
 use probes::require_seed_probe;
 pub use report::{ApiReport, EndpointReport, ResolverManifestCoverage};
 use report::{corpus_failure_report, preflight_failure_report};
-use workload::{RequestSpec, get, normalized_base_url, request_variants};
+use workload::{RequestSpec, endpoint_requests, get, normalized_base_url};
 #[derive(Debug)]
 struct Sample {
     elapsed_micros: u128,
@@ -129,7 +129,7 @@ pub async fn run(
             preflight_failures,
         ));
     }
-    let (corpus, resolver_manifest_failures) = Corpus::load(pool, budgets).await?;
+    let (mut corpus, resolver_manifest_failures) = Corpus::load(pool, budgets).await?;
     if !resolver_manifest_failures.is_empty() {
         return Ok(corpus_failure_report(
             scale,
@@ -148,7 +148,7 @@ pub async fn run(
     let mut postflight_identity = None;
     let mut postflight_database_identity = None;
     for endpoint in &budgets.endpoints {
-        let mut requests = request_variants(&base, &corpus, &endpoint.name)?;
+        let mut requests = endpoint_requests(&base, &mut corpus, &endpoint.name)?;
         ensure!(
             !requests.is_empty(),
             "endpoint {:?} has no request variants",

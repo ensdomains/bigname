@@ -89,17 +89,20 @@ async fn checked_in_mainnet_resolver_manifest_set_satisfies_coverage() {
     .await
     .unwrap();
     tests::install_name_visibility_schema(database.pool()).await;
+    insert_project_head(database.pool(), "ethereum-mainnet", 30_000_000).await;
+    insert_project_head(database.pool(), "base-mainnet", 30_000_000).await;
     let manifests = checked_in_mainnet_resolver_manifests();
     let mut address_count = 0;
     for manifest in &manifests {
         insert_resolver_manifest(database.pool(), manifest).await;
         for address in &manifest.addresses {
-            insert_resolver_row(
+            insert_resolver_row_at(
                 database.pool(),
                 &manifest.chain_id,
                 address,
                 "supported",
                 address_count,
+                29_000_000 + address_count as i64,
             )
             .await;
             address_count += 1;
@@ -113,6 +116,19 @@ async fn checked_in_mainnet_resolver_manifest_set_satisfies_coverage() {
     assert_eq!(coverage.resolvers.len(), 8);
     assert!(coverage.failures.is_empty());
     assert_eq!(coverage.counts.len(), 2);
+    assert!(
+        coverage
+            .counts
+            .iter()
+            .all(|count| count.exercised_addresses == 0),
+        "loading an admitted corpus must not claim that requests were constructed"
+    );
+    assert!(
+        coverage
+            .counts
+            .iter()
+            .all(|count| count.applicable_addresses == count.declared_addresses)
+    );
     assert_eq!(
         coverage
             .counts
@@ -125,6 +141,7 @@ async fn checked_in_mainnet_resolver_manifest_set_satisfies_coverage() {
 }
 
 async fn insert_resolver_manifest(pool: &PgPool, manifest: &CheckedInResolverManifest) {
+    ensure_project_state_schema(pool).await;
     sqlx::query(
         "INSERT INTO manifest_versions
              (namespace, rollout_status, source_family, chain_id, manifest_payload)
@@ -146,25 +163,86 @@ async fn insert_resolver_row(
     support_status: &str,
     index: usize,
 ) {
+    insert_resolver_row_at(pool, chain_id, address, support_status, index, index as i64).await;
+}
+
+async fn insert_resolver_row_at(
+    pool: &PgPool,
+    chain_id: &str,
+    address: &str,
+    support_status: &str,
+    index: usize,
+    target_block_number: i64,
+) {
     let hash = format!("resolver-manifest-{index}");
-    sqlx::query("INSERT INTO chain_lineage VALUES ($1, $2, 'canonical')")
-        .bind(chain_id)
-        .bind(&hash)
-        .execute(pool)
-        .await
-        .unwrap();
     sqlx::query(
-        "INSERT INTO resolver_current VALUES
-             ($1, $2, $3, jsonb_build_object('target_block_hash', $4::text),
-              '{\"state\":\"canonical_lineage\"}')",
+        "INSERT INTO chain_lineage
+             (chain_id, block_hash, canonicality_state, block_number)
+         VALUES ($1, $2, 'canonical', $3)",
+    )
+    .bind(chain_id)
+    .bind(&hash)
+    .bind(target_block_number)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO resolver_current
+             (chain_id, resolver_address, support_status, chain_positions,
+              canonicality_summary, provenance, manifest_version)
+         SELECT $1, $2, $3,
+                jsonb_build_object('target_block_number', $5::bigint,
+                                   'target_block_hash', $4::text),
+                '{\"state\":\"canonical_lineage\"}',
+                jsonb_build_object('manifest_id', manifest_id), manifest_version
+         FROM manifest_versions
+         WHERE chain_id = $1 AND rollout_status = 'active'
+           AND EXISTS (
+               SELECT 1
+               FROM jsonb_array_elements(manifest_payload -> 'contracts') contract
+               WHERE lower(contract ->> 'address') = lower($2)
+           )
+         LIMIT 1",
     )
     .bind(chain_id)
     .bind(address)
     .bind(support_status)
     .bind(hash)
+    .bind(target_block_number)
     .execute(pool)
     .await
     .unwrap();
+}
+
+async fn insert_undeclared_resolver_row(pool: &PgPool, chain_id: &str, address: &str) {
+    sqlx::query(
+        "INSERT INTO chain_lineage
+             (chain_id, block_hash, canonicality_state, block_number)
+         VALUES ($1, 'undeclared-resolver', 'canonical', 29000000)",
+    )
+    .bind(chain_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    let inserted = sqlx::query(
+        "INSERT INTO resolver_current
+             (chain_id, resolver_address, support_status, chain_positions,
+              canonicality_summary, provenance, manifest_version)
+         SELECT $1, $2, 'supported',
+                '{\"target_block_number\":29000000,\"target_block_hash\":\"undeclared-resolver\"}',
+                '{\"state\":\"canonical_lineage\"}',
+                jsonb_build_object('manifest_id', manifest_id), manifest_version
+         FROM manifest_versions
+         WHERE chain_id = $1 AND rollout_status = 'active'
+         ORDER BY manifest_id
+         LIMIT 1",
+    )
+    .bind(chain_id)
+    .bind(address)
+    .execute(pool)
+    .await
+    .unwrap();
+    assert_eq!(inserted.rows_affected(), 1);
 }
 
 #[tokio::test]
@@ -174,7 +252,7 @@ async fn missing_unsupported_or_invisible_declared_resolver_is_named() {
         ("unsupported", "not supported, in resolver_current"),
         (
             "invisible",
-            "is not API-visible through canonical projection lineage",
+            "is not API-visible at the copy's current Project head through canonical projection lineage",
         ),
     ] {
         let database = TestDatabase::create(
@@ -184,6 +262,8 @@ async fn missing_unsupported_or_invisible_declared_resolver_is_named() {
         .await
         .unwrap();
         tests::install_name_visibility_schema(database.pool()).await;
+        insert_project_head(database.pool(), "ethereum-mainnet", 30_000_000).await;
+        insert_project_head(database.pool(), "base-mainnet", 30_000_000).await;
         let manifests = checked_in_mainnet_resolver_manifests();
         for manifest in &manifests {
             insert_resolver_manifest(database.pool(), manifest).await;
@@ -205,12 +285,13 @@ async fn missing_unsupported_or_invisible_declared_resolver_is_named() {
                 } else {
                     "supported"
                 };
-                insert_resolver_row(
+                insert_resolver_row_at(
                     database.pool(),
                     &manifest.chain_id,
                     address,
                     support_status,
                     index,
+                    29_000_000 + index as i64,
                 )
                 .await;
                 if case == "invisible" && address == &missing_address {
@@ -226,12 +307,10 @@ async fn missing_unsupported_or_invisible_declared_resolver_is_named() {
                 index += 1;
             }
         }
-        insert_resolver_row(
+        insert_undeclared_resolver_row(
             database.pool(),
             "ethereum-mainnet",
             "0x00000000000000000000000000000000000000ff",
-            "supported",
-            100,
         )
         .await;
 
@@ -276,8 +355,665 @@ async fn active_resolver_family_without_contracts_is_reportable_as_zero() {
     assert_eq!(coverage.counts.len(), 1);
     assert_eq!(coverage.counts[0].source_family, "ens_v2_resolver_l1");
     assert_eq!(coverage.counts[0].declared_addresses, 0);
+    assert_eq!(coverage.counts[0].applicable_addresses, 0);
     assert_eq!(coverage.counts[0].exercised_addresses, 0);
-    assert!(coverage.failures[0].contains("zero supported, API-visible"));
+    assert!(
+        coverage.failures[0]
+            .contains("zero currently applicable, supported, API-visible resolver addresses")
+    );
+    database.cleanup().await.unwrap();
+}
+
+async fn insert_project_head(pool: &PgPool, chain_id: &str, block_number: i64) {
+    ensure_project_state_schema(pool).await;
+    sqlx::query(
+        "INSERT INTO chain_phase_state
+             (chain_id, phase_name, phase_status, current_block_number,
+              current_block_hash, input_content_hash)
+         VALUES ($1, 'project', 'completed', $2, $3, $4)",
+    )
+    .bind(chain_id)
+    .bind(block_number)
+    .bind(format!("project-head-{block_number}"))
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO chain_heads
+             (chain_id, latest_block_number, latest_block_hash)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(chain_id)
+    .bind(block_number)
+    .bind(format!("project-head-{block_number}"))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn ensure_project_state_schema(pool: &PgPool) {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS chain_phase_state (
+             chain_id text NOT NULL,
+             phase_name text NOT NULL,
+             phase_status text NOT NULL,
+             current_block_number bigint,
+             current_block_hash text,
+             input_content_hash text,
+             PRIMARY KEY (chain_id, phase_name)
+         )",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS chain_heads (
+             chain_id text PRIMARY KEY,
+             latest_block_number bigint NOT NULL,
+             latest_block_hash text NOT NULL
+         )",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn future_resolver_declarations_are_reported_but_not_demanded() {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("benchmark_future_resolver_declaration").pool_max_connections(1),
+    )
+    .await
+    .unwrap();
+    tests::install_name_visibility_schema(database.pool()).await;
+    insert_project_head(database.pool(), "ethereum-mainnet", 101).await;
+    let admitted = "0x0000000000000000000000000000000000000100";
+    let future = "0x0000000000000000000000000000000000000101";
+    insert_resolver_manifest(
+        database.pool(),
+        &CheckedInResolverManifest {
+            namespace: "ens".to_owned(),
+            chain_id: "ethereum-mainnet".to_owned(),
+            source_family: "ens_v1_resolver_l1".to_owned(),
+            payload: serde_json::json!({
+                "contracts": [
+                    {"address": admitted, "start_block": 100},
+                    {"address": future, "start_block": 102}
+                ]
+            }),
+            addresses: vec![admitted.to_owned(), future.to_owned()],
+        },
+    )
+    .await;
+    insert_resolver_row(
+        database.pool(),
+        "ethereum-mainnet",
+        admitted,
+        "supported",
+        100,
+    )
+    .await;
+
+    let coverage = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+
+    assert!(coverage.failures.is_empty(), "{:?}", coverage.failures);
+    assert_eq!(coverage.resolvers.len(), 1);
+    assert_eq!(coverage.counts.len(), 1);
+    assert_eq!(coverage.counts[0].declared_addresses, 2);
+    assert_eq!(coverage.counts[0].applicable_addresses, 1);
+    assert_eq!(coverage.counts[0].exercised_addresses, 0);
+    database.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn duplicate_resolver_roles_count_one_declared_address() {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("benchmark_duplicate_resolver_roles").pool_max_connections(1),
+    )
+    .await
+    .unwrap();
+    tests::install_name_visibility_schema(database.pool()).await;
+    insert_project_head(database.pool(), "ethereum-mainnet", 101).await;
+    let resolver = "0x0000000000000000000000000000000000000100";
+    insert_resolver_manifest(
+        database.pool(),
+        &CheckedInResolverManifest {
+            namespace: "ens".to_owned(),
+            chain_id: "ethereum-mainnet".to_owned(),
+            source_family: "ens_v1_resolver_l1".to_owned(),
+            payload: serde_json::json!({
+                "contracts": [
+                    {"role": "resolver", "address": resolver, "start_block": 100},
+                    {"role": "legacy_resolver", "address": resolver, "start_block": 102}
+                ]
+            }),
+            addresses: vec![resolver.to_owned()],
+        },
+    )
+    .await;
+    insert_resolver_row(
+        database.pool(),
+        "ethereum-mainnet",
+        resolver,
+        "supported",
+        100,
+    )
+    .await;
+
+    let coverage = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+
+    assert!(coverage.failures.is_empty(), "{:?}", coverage.failures);
+    assert_eq!(coverage.resolvers.len(), 1);
+    assert_eq!(coverage.counts[0].declared_addresses, 1);
+    assert_eq!(coverage.counts[0].applicable_addresses, 1);
+
+    sqlx::raw_sql(
+        "UPDATE chain_phase_state
+         SET current_block_number = 103, current_block_hash = 'project-head-103';
+         UPDATE chain_heads
+         SET latest_block_number = 103, latest_block_hash = 'project-head-103'",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let advanced = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+    assert!(
+        advanced.failures.iter().any(
+            |failure| failure.contains("is not API-visible at the copy's current Project head")
+        ),
+        "{:?}",
+        advanced.failures
+    );
+    database.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn future_only_resolver_declarations_name_the_missing_workload() {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("benchmark_future_only_resolver_declaration")
+            .pool_max_connections(1),
+    )
+    .await
+    .unwrap();
+    tests::install_name_visibility_schema(database.pool()).await;
+    insert_project_head(database.pool(), "ethereum-mainnet", 100).await;
+    let future = "0x0000000000000000000000000000000000000101";
+    insert_resolver_manifest(
+        database.pool(),
+        &CheckedInResolverManifest {
+            namespace: "ens".to_owned(),
+            chain_id: "ethereum-mainnet".to_owned(),
+            source_family: "ens_v1_resolver_l1".to_owned(),
+            payload: serde_json::json!({
+                "contracts": [{"address": future, "start_block": 101}]
+            }),
+            addresses: vec![future.to_owned()],
+        },
+    )
+    .await;
+
+    let coverage = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+
+    assert!(coverage.resolvers.is_empty());
+    assert_eq!(coverage.counts[0].declared_addresses, 1);
+    assert_eq!(coverage.counts[0].applicable_addresses, 0);
+    assert!(
+        coverage.failures.iter().any(|failure| failure
+            .contains("zero currently applicable, supported, API-visible resolver addresses")),
+        "{:?}",
+        coverage.failures
+    );
+    database.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn resolver_declarations_require_a_current_project_head() {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("benchmark_resolver_missing_project_head").pool_max_connections(1),
+    )
+    .await
+    .unwrap();
+    tests::install_name_visibility_schema(database.pool()).await;
+    let ens_resolver = "0x0000000000000000000000000000000000000100";
+    insert_resolver_manifest(
+        database.pool(),
+        &CheckedInResolverManifest {
+            namespace: "ens".to_owned(),
+            chain_id: "ethereum-mainnet".to_owned(),
+            source_family: "ens_v1_resolver_l1".to_owned(),
+            payload: serde_json::json!({
+                "contracts": [{"address": ens_resolver, "start_block": 100}]
+            }),
+            addresses: vec![ens_resolver.to_owned()],
+        },
+    )
+    .await;
+
+    let base_resolver = "0x0000000000000000000000000000000000000200";
+    insert_resolver_manifest(
+        database.pool(),
+        &CheckedInResolverManifest {
+            namespace: "basenames".to_owned(),
+            chain_id: "base-mainnet".to_owned(),
+            source_family: "basenames_base_resolver".to_owned(),
+            payload: serde_json::json!({"contracts": [{"address": base_resolver}]}),
+            addresses: vec![base_resolver.to_owned()],
+        },
+    )
+    .await;
+    insert_project_head(database.pool(), "base-mainnet", 100).await;
+    insert_resolver_row(
+        database.pool(),
+        "base-mainnet",
+        base_resolver,
+        "supported",
+        99,
+    )
+    .await;
+
+    let coverage = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+
+    assert!(
+        coverage.failures.iter().any(|failure| failure.contains(
+            "chain \"ethereum-mainnet\" in family \"ens_v1_resolver_l1\" has concrete declarations but no current Project head"
+        )),
+        "{:?}",
+        coverage.failures
+    );
+    database.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn resolver_coverage_requires_a_current_project_publication() {
+    for (case, mutation) in [
+        (
+            "running",
+            "UPDATE chain_phase_state SET phase_status = 'running'",
+        ),
+        (
+            "stale_number",
+            "UPDATE chain_heads SET latest_block_number = latest_block_number + 1",
+        ),
+        (
+            "stale_hash",
+            "UPDATE chain_heads SET latest_block_hash = 'different-head'",
+        ),
+        (
+            "invalidated_input",
+            "UPDATE chain_phase_state SET input_content_hash = 'different-generation'",
+        ),
+    ] {
+        let database = TestDatabase::create(
+            TestDatabaseConfig::new(format!("benchmark_resolver_project_{case}"))
+                .pool_max_connections(1),
+        )
+        .await
+        .unwrap();
+        tests::install_name_visibility_schema(database.pool()).await;
+        let resolver = "0x0000000000000000000000000000000000000100";
+        insert_resolver_manifest(
+            database.pool(),
+            &CheckedInResolverManifest {
+                namespace: "ens".to_owned(),
+                chain_id: "ethereum-mainnet".to_owned(),
+                source_family: "ens_v1_resolver_l1".to_owned(),
+                payload: serde_json::json!({
+                    "contracts": [{"address": resolver, "start_block": 100}]
+                }),
+                addresses: vec![resolver.to_owned()],
+            },
+        )
+        .await;
+        insert_project_head(database.pool(), "ethereum-mainnet", 100).await;
+        insert_resolver_row(
+            database.pool(),
+            "ethereum-mainnet",
+            resolver,
+            "supported",
+            200,
+        )
+        .await;
+        sqlx::query(mutation)
+            .execute(database.pool())
+            .await
+            .unwrap();
+
+        let coverage = super::resolver_coverage::load(database.pool())
+            .await
+            .unwrap();
+
+        assert!(
+            coverage.failures.iter().any(|failure| failure.contains(
+                "chain \"ethereum-mainnet\" in family \"ens_v1_resolver_l1\" has concrete declarations but no current Project head"
+            )),
+            "{case}: {:?}",
+            coverage.failures
+        );
+        database.cleanup().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn resolver_coverage_uses_the_route_snapshot_bounds() {
+    for (case, mutation) in [
+        (
+            "missing_number",
+            "UPDATE resolver_current SET chain_positions = chain_positions - 'target_block_number'",
+        ),
+        (
+            "ahead",
+            "UPDATE resolver_current SET chain_positions = jsonb_set(chain_positions, '{target_block_number}', '101'::jsonb)",
+        ),
+        (
+            "same_height_wrong_hash",
+            "UPDATE resolver_current SET chain_positions = jsonb_build_object('target_block_number', 100, 'target_block_hash', 'other-canonical-head')",
+        ),
+        (
+            "lineage_number_mismatch",
+            "UPDATE resolver_current SET chain_positions = jsonb_set(chain_positions, '{target_block_number}', '50'::jsonb)",
+        ),
+        (
+            "predates_declaration",
+            "UPDATE resolver_current SET chain_positions = jsonb_build_object('target_block_number', 99, 'target_block_hash', 'older-canonical-head')",
+        ),
+        (
+            "wrong_manifest",
+            "UPDATE resolver_current SET provenance = '{\"manifest_id\":999}'::jsonb",
+        ),
+        (
+            "wrong_manifest_version",
+            "UPDATE resolver_current SET manifest_version = manifest_version + 1",
+        ),
+    ] {
+        let database = TestDatabase::create(
+            TestDatabaseConfig::new(format!("benchmark_resolver_snapshot_{case}"))
+                .pool_max_connections(1),
+        )
+        .await
+        .unwrap();
+        tests::install_name_visibility_schema(database.pool()).await;
+        let resolver = "0x0000000000000000000000000000000000000100";
+        insert_resolver_manifest(
+            database.pool(),
+            &CheckedInResolverManifest {
+                namespace: "ens".to_owned(),
+                chain_id: "ethereum-mainnet".to_owned(),
+                source_family: "ens_v1_resolver_l1".to_owned(),
+                payload: serde_json::json!({
+                    "contracts": [{"address": resolver, "start_block": 100}]
+                }),
+                addresses: vec![resolver.to_owned()],
+            },
+        )
+        .await;
+        insert_project_head(database.pool(), "ethereum-mainnet", 100).await;
+        insert_resolver_row(
+            database.pool(),
+            "ethereum-mainnet",
+            resolver,
+            "supported",
+            100,
+        )
+        .await;
+        if case == "same_height_wrong_hash" {
+            sqlx::query(
+                "INSERT INTO chain_lineage
+                     (chain_id, block_hash, canonicality_state, block_number)
+                 VALUES
+                     ('ethereum-mainnet', 'other-canonical-head', 'canonical', 100)",
+            )
+            .execute(database.pool())
+            .await
+            .unwrap();
+        }
+        if case == "predates_declaration" {
+            sqlx::query(
+                "INSERT INTO chain_lineage
+                     (chain_id, block_hash, canonicality_state, block_number)
+                 VALUES
+                     ('ethereum-mainnet', 'older-canonical-head', 'canonical', 99)",
+            )
+            .execute(database.pool())
+            .await
+            .unwrap();
+        }
+        sqlx::query(mutation)
+            .execute(database.pool())
+            .await
+            .unwrap();
+
+        let coverage = super::resolver_coverage::load(database.pool())
+            .await
+            .unwrap();
+
+        assert!(
+            coverage
+                .failures
+                .iter()
+                .any(|failure| failure
+                    .contains("is not API-visible at the copy's current Project head")),
+            "{case}: {:?}",
+            coverage.failures
+        );
+        database.cleanup().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn resolver_coverage_accepts_an_exact_current_head_match() {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("benchmark_resolver_exact_snapshot").pool_max_connections(1),
+    )
+    .await
+    .unwrap();
+    tests::install_name_visibility_schema(database.pool()).await;
+    let resolver = "0x0000000000000000000000000000000000000100";
+    insert_resolver_manifest(
+        database.pool(),
+        &CheckedInResolverManifest {
+            namespace: "ens".to_owned(),
+            chain_id: "ethereum-mainnet".to_owned(),
+            source_family: "ens_v1_resolver_l1".to_owned(),
+            payload: serde_json::json!({
+                "contracts": [{"address": resolver, "start_block": 100}]
+            }),
+            addresses: vec![resolver.to_owned()],
+        },
+    )
+    .await;
+    insert_project_head(database.pool(), "ethereum-mainnet", 100).await;
+    insert_resolver_row(
+        database.pool(),
+        "ethereum-mainnet",
+        resolver,
+        "supported",
+        100,
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO chain_lineage
+             (chain_id, block_hash, canonicality_state, block_number)
+         VALUES ('ethereum-mainnet', 'project-head-100', 'canonical', 100)",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE resolver_current SET chain_positions =
+             jsonb_set(chain_positions, '{target_block_hash}',
+                       '\"project-head-100\"'::jsonb)",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+
+    let coverage = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+
+    assert!(coverage.failures.is_empty(), "{:?}", coverage.failures);
+    assert_eq!(coverage.resolvers.len(), 1);
+    database.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn malformed_resolver_block_numbers_produce_report_failures() {
+    for case in ["manifest_start", "projection_target"] {
+        let database = TestDatabase::create(
+            TestDatabaseConfig::new(format!("benchmark_resolver_bad_block_{case}"))
+                .pool_max_connections(1),
+        )
+        .await
+        .unwrap();
+        tests::install_name_visibility_schema(database.pool()).await;
+        let resolver = "0x0000000000000000000000000000000000000100";
+        let start_block = if case == "manifest_start" {
+            serde_json::json!("later")
+        } else {
+            serde_json::json!(100)
+        };
+        insert_resolver_manifest(
+            database.pool(),
+            &CheckedInResolverManifest {
+                namespace: "ens".to_owned(),
+                chain_id: "ethereum-mainnet".to_owned(),
+                source_family: "ens_v1_resolver_l1".to_owned(),
+                payload: serde_json::json!({
+                    "contracts": [{"address": resolver, "start_block": start_block}]
+                }),
+                addresses: vec![resolver.to_owned()],
+            },
+        )
+        .await;
+        insert_project_head(database.pool(), "ethereum-mainnet", 100).await;
+        if case == "projection_target" {
+            insert_resolver_row(
+                database.pool(),
+                "ethereum-mainnet",
+                resolver,
+                "supported",
+                100,
+            )
+            .await;
+            sqlx::query(
+                "UPDATE resolver_current SET chain_positions =
+                     jsonb_set(chain_positions, '{target_block_number}',
+                               '9223372036854775808'::jsonb)",
+            )
+            .execute(database.pool())
+            .await
+            .unwrap();
+        }
+
+        let coverage = super::resolver_coverage::load(database.pool())
+            .await
+            .expect("malformed stored block numbers must remain reportable");
+        let failures = coverage.failures.join("; ");
+
+        if case == "manifest_start" {
+            assert!(
+                failures.contains("a contract entry has an invalid start_block"),
+                "{failures}"
+            );
+        } else {
+            assert!(
+                failures.contains("is not API-visible at the copy's current Project head"),
+                "{failures}"
+            );
+        }
+        database.cleanup().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn addressless_resolver_contracts_report_a_zero_declared_family() {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("benchmark_addressless_resolver_declaration")
+            .pool_max_connections(1),
+    )
+    .await
+    .unwrap();
+    tests::install_name_visibility_schema(database.pool()).await;
+    insert_resolver_manifest(
+        database.pool(),
+        &CheckedInResolverManifest {
+            namespace: "ens".to_owned(),
+            chain_id: "ethereum-sepolia".to_owned(),
+            source_family: "ens_v2_resolver_l1".to_owned(),
+            payload: serde_json::json!({
+                "contracts": [{"role": "resolver", "proxy_kind": "none"}]
+            }),
+            addresses: Vec::new(),
+        },
+    )
+    .await;
+
+    let coverage = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+
+    assert_eq!(coverage.counts.len(), 1);
+    assert_eq!(coverage.counts[0].declared_addresses, 0);
+    assert_eq!(coverage.counts[0].applicable_addresses, 0);
+    assert_eq!(coverage.counts[0].exercised_addresses, 0);
+    assert!(
+        coverage
+            .failures
+            .iter()
+            .any(|failure| failure.contains("a contract entry has no address")),
+        "{:?}",
+        coverage.failures
+    );
+    database.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn null_resolver_contracts_report_a_zero_declared_family() {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("benchmark_null_resolver_declaration").pool_max_connections(1),
+    )
+    .await
+    .unwrap();
+    tests::install_name_visibility_schema(database.pool()).await;
+    insert_resolver_manifest(
+        database.pool(),
+        &CheckedInResolverManifest {
+            namespace: "ens".to_owned(),
+            chain_id: "ethereum-sepolia".to_owned(),
+            source_family: "ens_v2_resolver_l1".to_owned(),
+            payload: serde_json::json!({"contracts": null}),
+            addresses: Vec::new(),
+        },
+    )
+    .await;
+
+    let coverage = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+
+    assert_eq!(coverage.counts.len(), 1);
+    assert_eq!(coverage.counts[0].declared_addresses, 0);
+    assert_eq!(coverage.counts[0].applicable_addresses, 0);
+    assert_eq!(coverage.counts[0].exercised_addresses, 0);
+    assert!(
+        coverage
+            .failures
+            .iter()
+            .any(|failure| failure.contains("contracts is absent or is not an array")),
+        "{:?}",
+        coverage.failures
+    );
     database.cleanup().await.unwrap();
 }
 
@@ -406,6 +1142,7 @@ async fn insert_primary_name(pool: &PgPool, namespace: &str) {
 }
 
 async fn insert_permission_subjects_and_resolver(pool: &PgPool) {
+    ensure_project_state_schema(pool).await;
     let resource_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO manifest_versions
@@ -449,7 +1186,9 @@ async fn insert_permission_subjects_and_resolver(pool: &PgPool) {
         .unwrap();
     }
     sqlx::query(
-        "INSERT INTO resolver_current VALUES
+        "INSERT INTO resolver_current
+             (chain_id, resolver_address, support_status, chain_positions,
+              canonicality_summary) VALUES
              ('ethereum-mainnet', '0x0000000000000000000000000000000000000082', 'supported',
               '{\"target_block_hash\":\"load-resolver-projection\"}',
               '{\"state\":\"canonical_lineage\"}')",

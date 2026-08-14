@@ -150,11 +150,11 @@ pub use resolution_support::{
 };
 pub use resolver::ResolverCurrentRow;
 pub use snapshot_selection::{
-    ChainPosition, ChainPositions, SelectedSnapshot, SnapshotAt, SnapshotConsistency,
-    SnapshotPositionRequirement, SnapshotProjectionRead, SnapshotSelectionError,
-    SnapshotSelectionErrorKind, SnapshotSelectionResult, SnapshotSelectionScope,
-    SnapshotSelectorInput, ensure_projection_chain_positions_match, parse_rfc3339_utc_timestamp,
-    resolve_exact_name_snapshot_selection, snapshot_chain_has_head,
+    CURRENT_PROJECT_PUBLICATION_JOIN, ChainPosition, ChainPositions, SelectedSnapshot, SnapshotAt,
+    SnapshotConsistency, SnapshotPositionRequirement, SnapshotProjectionRead,
+    SnapshotSelectionError, SnapshotSelectionErrorKind, SnapshotSelectionResult,
+    SnapshotSelectionScope, SnapshotSelectorInput, ensure_projection_chain_positions_match,
+    parse_rfc3339_utc_timestamp, resolve_exact_name_snapshot_selection, snapshot_chain_has_head,
 };
 
 /// Checked-in migrations retained for migration validation and test database construction.
