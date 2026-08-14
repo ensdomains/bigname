@@ -4,6 +4,13 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use sqlx::PgPool;
 
+mod snapshot;
+pub(super) use snapshot::ApiDatabaseSnapshot;
+
+pub(super) async fn load_api_database_snapshot(pool: &PgPool) -> Result<ApiDatabaseSnapshot> {
+    snapshot::load(pool).await
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct InterpretRedoSnapshot {
     rows: Vec<(String, String, bool, String)>,
@@ -43,7 +50,7 @@ async fn interpret_redo_preflight_failures(pool: &PgPool) -> Result<Vec<String>>
 
 pub(super) struct ApiBoundaryPreflight<'a> {
     target: &'a ApiTargetIdentity,
-    redo: &'a InterpretRedoSnapshot,
+    database_snapshot: &'a ApiDatabaseSnapshot,
     expected_build_sha: Option<&'a str>,
     database_identity: &'a str,
 }
@@ -51,13 +58,13 @@ pub(super) struct ApiBoundaryPreflight<'a> {
 impl<'a> ApiBoundaryPreflight<'a> {
     pub(super) fn new(
         target: &'a ApiTargetIdentity,
-        redo: &'a InterpretRedoSnapshot,
+        database_snapshot: &'a ApiDatabaseSnapshot,
         expected_build_sha: Option<&'a str>,
         database_identity: &'a str,
     ) -> Self {
         Self {
             target,
-            redo,
+            database_snapshot,
             expected_build_sha,
             database_identity,
         }
@@ -218,10 +225,10 @@ pub(super) async fn recheck_api_boundary(
     endpoint: &str,
     preflight: &ApiBoundaryPreflight<'_>,
 ) -> (Option<ApiTargetIdentity>, Option<String>, Vec<String>) {
-    let (target, database, redo) = tokio::join!(
+    let (target, database, database_snapshot) = tokio::join!(
         load_api_target_identity(client, base),
         database::database_instance_identity(pool),
-        load_interpret_redo_snapshot(pool),
+        load_api_database_snapshot(pool),
     );
     let mut result = classify_api_boundary(
         endpoint,
@@ -231,15 +238,15 @@ pub(super) async fn recheck_api_boundary(
         target,
         database,
     );
-    match redo {
+    match database_snapshot {
         Ok(snapshot) => result.2.extend(
             snapshot
-                .boundary_failures(preflight.redo)
+                .boundary_failures(preflight.database_snapshot)
                 .into_iter()
                 .map(|failure| format!("after {endpoint} endpoint: {failure}")),
         ),
         Err(error) => result.2.push(format!(
-            "after {endpoint} endpoint: Interpret redo state recheck failed: {error:#}"
+            "after {endpoint} endpoint: database publication/manifest/redo state recheck failed: {error:#}"
         )),
     }
     result
@@ -294,21 +301,56 @@ mod tests {
         sqlx::raw_sql(&format!(
             "CREATE SCHEMA bigname_phase;
              CREATE TABLE bigname_phase.manifest_versions (
+                 manifest_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                  namespace text NOT NULL,
                  chain_id text NOT NULL,
-                 rollout_status text NOT NULL
+                 rollout_status text NOT NULL,
+                 source_family text NOT NULL DEFAULT 'benchmark_registry',
+                 manifest_version bigint NOT NULL DEFAULT 1,
+                 normalizer_version text NOT NULL DEFAULT 'ensip15@ens-normalize-0.1.1',
+                 loaded_at timestamptz NOT NULL DEFAULT now(),
+                 manifest_payload jsonb NOT NULL DEFAULT '{{}}'::jsonb
              );
              CREATE TABLE bigname_phase.chain_phase_state (
                  chain_id text NOT NULL,
                  phase_name text NOT NULL,
-                 redo_in_progress boolean NOT NULL
+                 redo_in_progress boolean NOT NULL,
+                 phase_status text,
+                 current_block_number bigint,
+                 current_block_hash text,
+                 input_content_hash text
              );
-             INSERT INTO bigname_phase.manifest_versions VALUES
+             CREATE TABLE bigname_phase.chain_heads (
+                 chain_id text PRIMARY KEY,
+                 latest_block_number bigint,
+                 latest_block_hash text
+             );
+             CREATE TABLE bigname_phase.normalized_events (
+                 normalized_event_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                 source_manifest_id bigint,
+                 event_kind text NOT NULL,
+                 derivation_kind text NOT NULL DEFAULT 'manifest_sync',
+                 canonicality_state text NOT NULL DEFAULT 'finalized',
+                 event_identity text NOT NULL,
+                 after_state jsonb NOT NULL DEFAULT '{{}}'::jsonb
+             );
+             INSERT INTO bigname_phase.manifest_versions
+                 (namespace, chain_id, rollout_status)
+             VALUES
                  ('ens', 'ethereum-mainnet', 'active'),
                  ('basenames', 'base-mainnet', 'active');
-             INSERT INTO bigname_phase.chain_phase_state VALUES
-                 ('ethereum-mainnet', 'interpret', {redo_in_progress}),
-                 ('base-mainnet', 'interpret', false);"
+             INSERT INTO bigname_phase.chain_heads VALUES
+                 ('ethereum-mainnet', 16, '0x10'),
+                 ('base-mainnet', 16, '0x10');
+             INSERT INTO bigname_phase.chain_phase_state
+                 (chain_id, phase_name, redo_in_progress, phase_status,
+                  current_block_number, current_block_hash, input_content_hash)
+             VALUES
+                 ('ethereum-mainnet', 'interpret', {redo_in_progress}, 'completed', 16, '0x10', NULL),
+                 ('base-mainnet', 'interpret', false, 'completed', 16, '0x10', NULL),
+                 ('ethereum-mainnet', 'project', false, 'completed', 16, '0x10', '{content_hash}'),
+                 ('base-mainnet', 'project', false, 'completed', 16, '0x10', '{content_hash}');",
+            content_hash = bigname_content_hash::INTERPRETER_CONTENT_HASH,
         ))
         .execute(database.pool())
         .await
@@ -350,8 +392,9 @@ mod tests {
         let database = preflight_database("benchmark_api_basenames_redo_scope", false).await;
         sqlx::raw_sql(
             "DELETE FROM bigname_phase.manifest_versions WHERE namespace = 'ens';
-             INSERT INTO bigname_phase.manifest_versions VALUES
-                 ('basenames', 'ethereum-mainnet', 'active');
+             INSERT INTO bigname_phase.manifest_versions
+                 (namespace, chain_id, rollout_status)
+             VALUES ('basenames', 'ethereum-mainnet', 'active');
              UPDATE bigname_phase.chain_phase_state
              SET redo_in_progress = true
              WHERE chain_id = 'ethereum-mainnet';",
@@ -391,10 +434,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn boundary_snapshot_detects_project_and_same_key_manifest_drift() {
+        let database =
+            preflight_database("benchmark_api_publication_manifest_boundary", false).await;
+        let before = load_api_database_snapshot(database.pool()).await.unwrap();
+        sqlx::query(
+            "UPDATE bigname_phase.chain_phase_state
+             SET current_block_number = 17, current_block_hash = '0x11'
+             WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE bigname_phase.manifest_versions
+             SET manifest_payload = '{\"contracts\":[{\"address\":\"0x01\"}]}'::jsonb,
+                 loaded_at = loaded_at + interval '1 second'
+             WHERE namespace = 'ens'",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let after = load_api_database_snapshot(database.pool()).await.unwrap();
+        let failures = after.boundary_failures(&before);
+
+        database.cleanup().await.unwrap();
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("Project publication generation changed"))
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("manifest authority changed"))
+        );
+    }
+
+    #[tokio::test]
     async fn boundary_recheck_refuses_a_redo_started_after_preflight() {
         let database = preflight_database("benchmark_api_boundary_redo", false).await;
-        let redo_snapshot = load_interpret_redo_snapshot(database.pool()).await.unwrap();
-        assert!(redo_snapshot.active_failures().is_empty());
+        let database_snapshot = load_api_database_snapshot(database.pool()).await.unwrap();
+        assert!(database_snapshot.active_failures().is_empty());
         let database_identity = database::database_instance_identity(database.pool())
             .await
             .unwrap();
@@ -432,14 +513,15 @@ mod tests {
         sqlx::query(
             "UPDATE bigname_phase.chain_phase_state
              SET redo_in_progress = true
-             WHERE chain_id = 'ethereum-mainnet'",
+             WHERE chain_id = 'ethereum-mainnet'
+               AND phase_name = 'interpret'",
         )
         .execute(database.pool())
         .await
         .unwrap();
         let boundary_preflight = ApiBoundaryPreflight::new(
             &identity,
-            &redo_snapshot,
+            &database_snapshot,
             Some("release"),
             &database_identity,
         );
@@ -465,7 +547,7 @@ mod tests {
     #[tokio::test]
     async fn boundary_recheck_detects_a_redo_completed_inside_the_window() {
         let database = preflight_database("benchmark_api_transient_boundary_redo", false).await;
-        let redo_snapshot = load_interpret_redo_snapshot(database.pool()).await.unwrap();
+        let database_snapshot = load_api_database_snapshot(database.pool()).await.unwrap();
         let database_identity = database::database_instance_identity(database.pool())
             .await
             .unwrap();
@@ -504,7 +586,8 @@ mod tests {
             sqlx::query(
                 "UPDATE bigname_phase.chain_phase_state
                  SET redo_in_progress = $1
-                 WHERE chain_id = 'ethereum-mainnet'",
+                 WHERE chain_id = 'ethereum-mainnet'
+                   AND phase_name = 'interpret'",
             )
             .bind(redo_in_progress)
             .execute(database.pool())
@@ -513,7 +596,7 @@ mod tests {
         }
         let boundary_preflight = ApiBoundaryPreflight::new(
             &identity,
-            &redo_snapshot,
+            &database_snapshot,
             Some("release"),
             &database_identity,
         );

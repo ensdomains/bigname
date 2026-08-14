@@ -68,9 +68,56 @@ pub struct EndpointReport {
     pub target_p99_ms: u64,
     pub p99_ms: f64,
     pub request_variants: usize,
+    pub base_request_variants: usize,
+    pub unique_resumed_cursor_variants: usize,
+    pub weighted_resumed_cursor_requests: usize,
+    pub target_resumed_cursor_percent: usize,
+    pub actual_resumed_cursor_percent: f64,
+    pub validation_sample_every: Option<usize>,
+    pub validated_responses: usize,
+    pub invalid_sampled_responses: usize,
     pub outcomes: BTreeMap<String, usize>,
     pub green: bool,
     pub failures: Vec<String>,
+}
+
+pub(super) fn endpoint_failure_report(
+    endpoint: &crate::budgets::EndpointBudget,
+    budgets: &GateBudgets,
+    failure: String,
+) -> EndpointReport {
+    EndpointReport {
+        endpoint: endpoint.name.clone(),
+        target_qps: budgets.api_target_qps,
+        min_achieved_qps: budgets.api_min_achieved_qps,
+        requests: 0,
+        successful_requests: 0,
+        min_success_percent: budgets.api_min_success_percent,
+        success_percent: 0.0,
+        populated_responses: (endpoint.name == "records").then_some(0),
+        min_populated_percent: (endpoint.name == "records")
+            .then_some(budgets.api_records_min_populated_percent),
+        populated_percent: (endpoint.name == "records").then_some(0.0),
+        achieved_qps: 0.0,
+        target_p50_ms: endpoint.p50_ms,
+        p50_ms: 0.0,
+        target_p95_ms: endpoint.p95_ms,
+        p95_ms: 0.0,
+        target_p99_ms: endpoint.p99_ms,
+        p99_ms: 0.0,
+        request_variants: 0,
+        base_request_variants: 0,
+        unique_resumed_cursor_variants: 0,
+        weighted_resumed_cursor_requests: 0,
+        target_resumed_cursor_percent: budgets.api_cursor_weight_percent,
+        actual_resumed_cursor_percent: 0.0,
+        validation_sample_every: None,
+        validated_responses: 0,
+        invalid_sampled_responses: 0,
+        outcomes: BTreeMap::new(),
+        green: false,
+        failures: vec![failure],
+    }
 }
 
 pub(super) fn preflight_failure_report(

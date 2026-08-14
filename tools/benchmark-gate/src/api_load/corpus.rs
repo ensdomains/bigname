@@ -1,22 +1,31 @@
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use bigname_storage::{
-    DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
     DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS, DEFAULT_CHILDREN_CURRENT_READ_FILTER,
     DEFAULT_NAME_CURRENT_LINEAGE_JOINS, DEFAULT_NAME_CURRENT_READ_FILTER,
-    DEFAULT_PERMISSIONS_CURRENT_READ_FILTER,
 };
 use sqlx::PgPool;
 
 use crate::budgets::GateBudgets;
 
+mod permissions;
 mod resolver_coverage;
+mod scale;
 mod stratified;
+mod verdict;
+pub(super) use permissions::PermissionTarget;
 use resolver_coverage::load as load_resolver_coverage;
+#[cfg(test)]
+use scale::table_scale_failures;
+pub(super) use scale::{TableScale, load_table_scale};
 use stratified::{
     address_corpus_sql, address_namespace_counts, primary_name_corpus_sql,
     primary_namespace_counts, require_active_namespace_coverage,
+};
+pub(super) use verdict::require_stratified_size as require_stratified_corpus_size;
+use verdict::{
+    collect_failure as collect_corpus_failure, require_minimum_size as require_minimum_corpus_size,
 };
 
 const ACTIVE_NAMESPACES_SQL: &str = "SELECT DISTINCT namespace FROM manifest_versions WHERE rollout_status = 'active' AND namespace IN ('ens', 'basenames') ORDER BY namespace";
@@ -100,19 +109,13 @@ pub(super) struct Corpus {
     pub(super) names: Vec<(String, String)>,
     pub(super) address_names: Vec<(String, String, String, String)>,
     pub(super) parents: Vec<(String, String)>,
-    pub(super) permission_subjects: Vec<String>,
+    pub(super) permission_subjects: Vec<PermissionTarget>,
     pub(super) primary_names: Vec<(String, String, String)>,
     pub(super) resolvers: Vec<super::workload::ResolverTarget>,
     pub(super) namespaces: Vec<String>,
     pub(super) names_by_namespace: BTreeMap<String, usize>,
     pub(super) parents_by_namespace: BTreeMap<String, usize>,
     pub(super) resolver_manifest_coverage: Vec<super::ResolverManifestCoverage>,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(super) struct TableScale {
-    pub(super) name_current_rows: u64,
-    pub(super) address_names_current_rows: u64,
 }
 
 impl Corpus {
@@ -139,11 +142,7 @@ impl Corpus {
             .fetch_all(pool)
             .await
             .context("failed to load subname-parent benchmark corpus")?;
-        let permission_subjects: Vec<String> = sqlx::query_scalar(&permission_subject_corpus_sql())
-            .bind(limit)
-            .fetch_all(pool)
-            .await
-            .context("failed to load permission-subject benchmark corpus")?;
+        let permission_subjects = permissions::load(pool, limit).await?;
         let primary_names: Vec<(String, String, String)> =
             sqlx::query_as(&primary_name_corpus_sql())
                 .bind(limit)
@@ -156,44 +155,83 @@ impl Corpus {
         let addresses_by_namespace = address_namespace_counts(&address_names);
         let primary_names_by_namespace = primary_namespace_counts(&primary_names);
 
-        require_active_namespace_coverage(&namespaces, &names_by_namespace, "supported names")?;
-        require_active_namespace_coverage(&namespaces, &parents_by_namespace, "supported parents")?;
-        require_active_namespace_coverage(
-            &namespaces,
-            &addresses_by_namespace,
-            "supported address/name relations",
-        )?;
-        if budgets.api_min_specialized_corpus_size > 0 {
+        let mut failures = resolver_coverage.failures;
+        if budgets.api_require_populated_probes
+            && !permission_subjects
+                .iter()
+                .any(|target| target.retained_registration)
+        {
+            failures.push(
+                "permission corpus contains no canonical retained registration absent from name_current; restore production-shaped superseded-registration permission history and rerun the gate"
+                    .to_owned(),
+            );
+        }
+        collect_corpus_failure(
+            &mut failures,
+            require_active_namespace_coverage(&namespaces, &names_by_namespace, "supported names"),
+        );
+        collect_corpus_failure(
+            &mut failures,
             require_active_namespace_coverage(
                 &namespaces,
-                &primary_names_by_namespace,
-                "successful primary names",
-            )?;
+                &parents_by_namespace,
+                "supported parents",
+            ),
+        );
+        collect_corpus_failure(
+            &mut failures,
+            require_active_namespace_coverage(
+                &namespaces,
+                &addresses_by_namespace,
+                "supported address/name relations",
+            ),
+        );
+        if budgets.api_min_specialized_corpus_size > 0 {
+            collect_corpus_failure(
+                &mut failures,
+                require_active_namespace_coverage(
+                    &namespaces,
+                    &primary_names_by_namespace,
+                    "successful primary names",
+                ),
+            );
         }
-        require_stratified_corpus_size(
-            "name",
-            names.len(),
-            budgets.api_corpus_size,
-            &names_by_namespace,
-        )?;
-        require_stratified_corpus_size(
-            "address",
-            address_names.len(),
-            budgets.api_corpus_size,
-            &addresses_by_namespace,
-        )?;
+        collect_corpus_failure(
+            &mut failures,
+            require_stratified_corpus_size(
+                "name",
+                names.len(),
+                budgets.api_corpus_size,
+                &names_by_namespace,
+            ),
+        );
+        collect_corpus_failure(
+            &mut failures,
+            require_stratified_corpus_size(
+                "address",
+                address_names.len(),
+                budgets.api_corpus_size,
+                &addresses_by_namespace,
+            ),
+        );
         for (label, actual) in [
             ("subname parent", parents.len()),
             ("permission subject", permission_subjects.len()),
         ] {
-            require_minimum_corpus_size(label, actual, budgets.api_min_specialized_corpus_size)?;
+            collect_corpus_failure(
+                &mut failures,
+                require_minimum_corpus_size(label, actual, budgets.api_min_specialized_corpus_size),
+            );
         }
-        require_stratified_corpus_size(
-            "successful primary-name",
-            primary_names.len(),
-            budgets.api_min_specialized_corpus_size,
-            &primary_names_by_namespace,
-        )?;
+        collect_corpus_failure(
+            &mut failures,
+            require_stratified_corpus_size(
+                "successful primary-name",
+                primary_names.len(),
+                budgets.api_min_specialized_corpus_size,
+                &primary_names_by_namespace,
+            ),
+        );
 
         Ok((
             Self {
@@ -208,21 +246,9 @@ impl Corpus {
                 parents_by_namespace,
                 resolver_manifest_coverage: resolver_coverage.counts,
             },
-            resolver_coverage.failures,
+            failures,
         ))
     }
-}
-
-fn permission_subject_corpus_sql() -> String {
-    format!(
-        r#"SELECT pc.subject
-           FROM bigname_phase.permissions_current pc
-           WHERE pc.subject ~ '^0x[0-9A-Fa-f]{{40}}$'
-             {DEFAULT_PERMISSIONS_CURRENT_READ_FILTER}
-           GROUP BY pc.subject
-           ORDER BY pc.subject
-           LIMIT $1"#
-    )
 }
 
 fn namespace_counts(rows: &[(String, String)]) -> BTreeMap<String, usize> {
@@ -231,124 +257,6 @@ fn namespace_counts(rows: &[(String, String)]) -> BTreeMap<String, usize> {
         *counts.entry(namespace.clone()).or_insert(0) += 1;
     }
     counts
-}
-
-fn require_minimum_corpus_size(label: &str, actual: usize, minimum: usize) -> Result<()> {
-    ensure!(
-        actual >= minimum,
-        "{label} corpus has {actual} rows; release profile requires {minimum}"
-    );
-    Ok(())
-}
-
-fn require_stratified_corpus_size(
-    label: &str,
-    actual: usize,
-    minimum: usize,
-    counts_by_namespace: &BTreeMap<String, usize>,
-) -> Result<()> {
-    let contributions = counts_by_namespace
-        .iter()
-        .map(|(namespace, count)| format!("{namespace}={count}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    ensure!(
-        actual >= minimum,
-        "{label} corpus has {actual} rows; release profile requires {minimum}; namespace contributions: {contributions}"
-    );
-    Ok(())
-}
-
-pub(super) async fn load_table_scale(pool: &PgPool) -> Result<TableScale> {
-    Ok(TableScale {
-        name_current_rows: table_count(pool, "name_current").await?,
-        address_names_current_rows: table_count(pool, "address_names_current").await?,
-    })
-}
-
-impl TableScale {
-    pub(super) fn failures(self, budgets: &GateBudgets) -> Vec<String> {
-        table_scale_failures(
-            self.name_current_rows,
-            self.address_names_current_rows,
-            budgets.api_min_name_current_rows,
-            budgets.api_min_address_names_current_rows,
-        )
-    }
-}
-
-fn table_scale_failures(
-    name_rows: u64,
-    address_rows: u64,
-    min_name_rows: u64,
-    min_address_rows: u64,
-) -> Vec<String> {
-    let mut failures = Vec::new();
-    if name_rows < min_name_rows {
-        failures.push(format!(
-            "name_current has {name_rows} API-visible supported rows in active public namespaces after canonical projection and identity filtering; release profile requires {min_name_rows}"
-        ));
-    }
-    if address_rows < min_address_rows {
-        failures.push(format!(
-                "address_names_current has {address_rows} API-visible supported rows in active public namespaces after canonical projection and identity filtering; release profile requires {min_address_rows}"
-            ));
-    }
-    failures
-}
-
-async fn table_count(pool: &PgPool, table: &str) -> Result<u64> {
-    let count: i64 = match table {
-        "name_current" => sqlx::query_scalar(&name_scale_sql()).fetch_one(pool).await,
-        "address_names_current" => {
-            sqlx::query_scalar(&address_scale_sql())
-                .fetch_one(pool)
-                .await
-        }
-        _ => unreachable!("benchmark table names are fixed"),
-    }
-    .with_context(|| format!("failed to count {table} benchmark rows"))?;
-    u64::try_from(count).with_context(|| format!("{table} returned a negative row count"))
-}
-
-fn name_scale_sql() -> String {
-    format!(
-        r#"SELECT count(*)
-           FROM bigname_phase.name_current nc
-           JOIN bigname_phase.name_surfaces surface
-             ON surface.logical_name_id = nc.logical_name_id
-           LEFT JOIN bigname_phase.resources resource
-             ON resource.resource_id = nc.resource_id
-           LEFT JOIN bigname_phase.surface_bindings binding
-             ON binding.surface_binding_id = nc.surface_binding_id
-           LEFT JOIN bigname_phase.token_lineages token_lineage
-             ON token_lineage.token_lineage_id = nc.token_lineage_id
-           {DEFAULT_NAME_CURRENT_LINEAGE_JOINS}
-           JOIN (
-               SELECT DISTINCT namespace
-               FROM bigname_phase.manifest_versions
-               WHERE rollout_status = 'active'
-                 AND namespace IN ('ens', 'basenames')
-           ) active ON active.namespace = nc.namespace
-           WHERE nc.support_status = 'supported'
-             {DEFAULT_NAME_CURRENT_READ_FILTER}"#
-    )
-}
-
-fn address_scale_sql() -> String {
-    format!(
-        r#"SELECT count(*)
-           FROM bigname_phase.address_names_current anc
-           {DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS}
-           JOIN (
-               SELECT DISTINCT namespace
-               FROM bigname_phase.manifest_versions
-               WHERE rollout_status = 'active'
-                 AND namespace IN ('ens', 'basenames')
-           ) active ON active.namespace = anc.namespace
-           WHERE anc.support_status = 'supported'
-             {DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER}"#
-    )
 }
 
 #[cfg(test)]
@@ -841,7 +749,9 @@ mod tests {
                  ('ethereum-mainnet', 'hidden-parent-name-child-projection', 'canonical'),
                  ('ethereum-mainnet', 'hidden-child-projection', 'orphaned'),
                  ('ethereum-mainnet', 'permission-resource', 'canonical'),
+                 ('ethereum-mainnet', 'historical-permission-resource', 'canonical'),
                  ('ethereum-mainnet', 'visible-permission-projection', 'canonical'),
+                 ('ethereum-mainnet', 'historical-permission-projection', 'canonical'),
                  ('ethereum-mainnet', 'hidden-permission-projection', 'orphaned'),
                  ('ethereum-mainnet', 'visible-primary-projection', 'canonical'),
                  ('ethereum-mainnet', 'hidden-primary-projection', 'orphaned')",
@@ -858,12 +768,18 @@ mod tests {
                  ('ens:hidden-parent', 'ens:missing-hidden-child',
                   '{\"chain_id\":\"ethereum-mainnet\"}', '{\"target_block_hash\":\"hidden-child-projection\"}', '{\"state\":\"canonical\"}');
              INSERT INTO resources VALUES
-                 ('00000000-0000-0000-0000-000000000041', 'ethereum-mainnet', 'permission-resource', 'canonical');
+                 ('00000000-0000-0000-0000-000000000041', 'ethereum-mainnet', 'permission-resource', 'canonical'),
+                 ('00000000-0000-0000-0000-000000000043', 'ethereum-mainnet', 'historical-permission-resource', 'canonical');
+             UPDATE name_current
+             SET resource_id = '00000000-0000-0000-0000-000000000041'
+             WHERE logical_name_id = 'ens:visible-parent';
              INSERT INTO permissions_current VALUES
                  ('0x0000000000000000000000000000000000000041', '00000000-0000-0000-0000-000000000041',
                   '{\"chain_id\":\"ethereum-mainnet\"}', '{\"target_block_hash\":\"visible-permission-projection\"}', '{\"state\":\"canonical\"}'),
                  ('0x0000000000000000000000000000000000000042', '00000000-0000-0000-0000-000000000041',
-                  '{\"chain_id\":\"ethereum-mainnet\"}', '{\"target_block_hash\":\"hidden-permission-projection\"}', '{\"state\":\"canonical\"}');
+                  '{\"chain_id\":\"ethereum-mainnet\"}', '{\"target_block_hash\":\"hidden-permission-projection\"}', '{\"state\":\"canonical\"}'),
+                 ('0x0000000000000000000000000000000000000043', '00000000-0000-0000-0000-000000000043',
+                  '{\"chain_id\":\"ethereum-mainnet\"}', '{\"target_block_hash\":\"historical-permission-projection\"}', '{\"state\":\"canonical\"}');
              INSERT INTO primary_names_current VALUES
                  ('0x0000000000000000000000000000000000000051', '60', 'ens', 'success',
                   '{\"chain_id\":\"ethereum-mainnet\",\"target_block_hash\":\"visible-primary-projection\"}'),
@@ -879,11 +795,12 @@ mod tests {
             .fetch_all(database.pool())
             .await
             .unwrap();
-        let subjects: Vec<String> = sqlx::query_scalar(&permission_subject_corpus_sql())
+        let subjects: Vec<String> = sqlx::query_scalar(&permissions::sql())
             .bind(10_i64)
             .fetch_all(database.pool())
             .await
             .unwrap();
+        let permission_targets = permissions::load(database.pool(), 10).await.unwrap();
         let primary_names: Vec<(String, String, String)> =
             sqlx::query_as(&primary_name_corpus_sql())
                 .bind(10_i64)
@@ -895,6 +812,10 @@ mod tests {
         assert_eq!(parents, [("ens".to_owned(), "visible.eth".to_owned())]);
         assert_eq!(subjects.len(), 1);
         assert_eq!(subjects[0], "0x0000000000000000000000000000000000000041");
+        assert_eq!(
+            permission_targets[0].registration_id, "00000000-0000-0000-0000-000000000043",
+            "registration-id workload must include a canonical retained registration with no current name row"
+        );
         assert_eq!(primary_names.len(), 1);
         assert_eq!(
             primary_names[0].0,

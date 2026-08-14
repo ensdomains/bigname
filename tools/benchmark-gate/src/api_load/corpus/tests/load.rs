@@ -2080,6 +2080,15 @@ async fn insert_permission_subjects_and_resolver(pool: &PgPool) {
     .execute(pool)
     .await
     .unwrap();
+    sqlx::query(
+        "UPDATE name_current
+         SET resource_id = $1
+         WHERE logical_name_id = 'ens:load-0'",
+    )
+    .bind(resource_id)
+    .execute(pool)
+    .await
+    .unwrap();
     for index in 0..3 {
         sqlx::query(
             "INSERT INTO permissions_current VALUES
@@ -2136,12 +2145,59 @@ async fn corpus_load_keeps_each_namespace_coverage_check_load_bearing() {
             .await
             .unwrap();
 
-        let error = Corpus::load(database.pool(), &tiny_budgets())
+        let (_, failures) = Corpus::load(database.pool(), &tiny_budgets())
             .await
-            .expect_err("missing namespace contribution must be named");
-        assert!(error.to_string().contains(expected), "{label}: {error:#}");
+            .expect("corpus shortfalls must return reportable evidence");
+        let error = failures.join("; ");
+        assert!(error.contains(expected), "{label}: {error}");
         database.cleanup().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn production_corpus_requires_retained_registration_audit_evidence() {
+    let database = seeded_database("corpus_load_retained_registration").await;
+    let (_, failures) = Corpus::load(database.pool(), &tiny_budgets())
+        .await
+        .expect("missing retained-registration evidence must stay reportable");
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure.contains("no canonical retained registration")),
+        "{failures:?}"
+    );
+
+    sqlx::raw_sql(
+        "INSERT INTO resources VALUES
+             ('00000000-0000-0000-0000-000000000044', 'ethereum-mainnet',
+              'load-permission-resource', 'canonical');
+         INSERT INTO permissions_current VALUES
+             ('0x0000000000000000000000000000000000000044',
+              '00000000-0000-0000-0000-000000000044',
+              '{\"chain_id\":\"ethereum-mainnet\"}',
+              '{\"target_block_hash\":\"load-permission-projection\"}',
+              '{\"state\":\"canonical\"}')",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+
+    let (corpus, failures) = Corpus::load(database.pool(), &tiny_budgets())
+        .await
+        .expect("retained-registration evidence must load through the public corpus path");
+    assert!(
+        !failures
+            .iter()
+            .any(|failure| failure.contains("no canonical retained registration")),
+        "{failures:?}"
+    );
+    assert!(
+        corpus
+            .permission_subjects
+            .iter()
+            .any(|target| target.retained_registration)
+    );
+    database.cleanup().await.unwrap();
 }
 
 #[tokio::test]
@@ -2166,10 +2222,10 @@ async fn corpus_load_names_aggregate_size_shortfalls() {
         let mut budgets = tiny_budgets();
         budgets.api_corpus_size = 3;
 
-        let error = Corpus::load(database.pool(), &budgets)
+        let (_, failures) = Corpus::load(database.pool(), &budgets)
             .await
-            .expect_err("aggregate corpus shortfall must be named");
-        let error = error.to_string();
+            .expect("aggregate corpus shortfalls must return reportable evidence");
+        let error = failures.join("; ");
         assert!(error.contains(expected), "{label}: {error}");
         assert!(error.contains("basenames=1"), "{label}: {error}");
         assert!(error.contains("ens=1"), "{label}: {error}");
@@ -2189,14 +2245,13 @@ async fn corpus_load_keeps_specialized_size_floors_load_bearing() {
     .unwrap();
     let mut budgets = tiny_budgets();
     budgets.api_min_specialized_corpus_size = 3;
-    let error = Corpus::load(database.pool(), &budgets)
+    let (_, failures) = Corpus::load(database.pool(), &budgets)
         .await
-        .expect_err("subname-parent corpus floor must remain load-bearing");
+        .expect("subname-parent shortfall must return reportable evidence");
+    let error = failures.join("; ");
     assert!(
-        error
-            .to_string()
-            .contains("subname parent corpus has 2 rows; release profile requires 3"),
-        "{error:#}"
+        error.contains("subname parent corpus has 2 rows; release profile requires 3"),
+        "{error}"
     );
     database.cleanup().await.unwrap();
 
@@ -2207,14 +2262,13 @@ async fn corpus_load_keeps_specialized_size_floors_load_bearing() {
         .unwrap();
     let mut budgets = tiny_budgets();
     budgets.api_min_specialized_corpus_size = 2;
-    let error = Corpus::load(database.pool(), &budgets)
+    let (_, failures) = Corpus::load(database.pool(), &budgets)
         .await
-        .expect_err("permission-subject corpus floor must remain load-bearing");
+        .expect("permission-subject shortfall must return reportable evidence");
+    let error = failures.join("; ");
     assert!(
-        error
-            .to_string()
-            .contains("permission subject corpus has 1 rows; release profile requires 2"),
-        "{error:#}"
+        error.contains("permission subject corpus has 1 rows; release profile requires 2"),
+        "{error}"
     );
     database.cleanup().await.unwrap();
 
@@ -2232,10 +2286,10 @@ async fn corpus_load_keeps_specialized_size_floors_load_bearing() {
     let mut budgets = tiny_budgets();
     budgets.api_corpus_size = 4;
     budgets.api_min_specialized_corpus_size = 3;
-    let error = Corpus::load(database.pool(), &budgets)
+    let (_, failures) = Corpus::load(database.pool(), &budgets)
         .await
-        .expect_err("primary-name corpus floor must remain load-bearing");
-    let error = error.to_string();
+        .expect("primary-name shortfall must return reportable evidence");
+    let error = failures.join("; ");
     assert!(
         error.contains("successful primary-name corpus has 2 rows; release profile requires 3"),
         "{error}"

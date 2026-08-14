@@ -67,6 +67,8 @@ pub struct GateBudgets {
     pub api_min_success_percent: f64,
     pub api_records_min_populated_percent: f64,
     pub api_cursor_seed_count: usize,
+    pub api_cursor_weight_percent: usize,
+    pub api_validation_sample_every: usize,
     pub api_require_populated_probes: bool,
     pub api_require_cursor_variants: bool,
     pub api_require_resolver_cursor_variant: bool,
@@ -184,6 +186,14 @@ impl GateBudgets {
         ensure!(
             self.api_min_specialized_corpus_size <= self.api_corpus_size,
             "{profile}.api_min_specialized_corpus_size exceeds api_corpus_size"
+        );
+        ensure!(
+            (1..100).contains(&self.api_cursor_weight_percent),
+            "{profile}.api_cursor_weight_percent must be between 1 and 99"
+        );
+        ensure!(
+            self.api_validation_sample_every > 0,
+            "{profile}.api_validation_sample_every must be positive"
         );
         ensure!(
             self.interpret_state_cache_entries > 0,

@@ -5,7 +5,11 @@ use reqwest::{Client, StatusCode, Url};
 use serde_json::Value;
 
 use super::{
-    SeedProbe, corpus::Corpus, endpoint_requires_cursor, send, workload::RequestSpec, workload::get,
+    corpus::Corpus,
+    seeding::{SeedProbe, endpoint_requires_cursor},
+    send,
+    workload::RequestSpec,
+    workload::get,
 };
 use crate::budgets::GateBudgets;
 
@@ -39,10 +43,35 @@ pub(super) fn require_seed_probe(
         "bare search returned no populated seed response"
     );
     ensure!(
+        !budgets.api_require_populated_probes
+            || endpoint != "lookup"
+            || probe.lookup_name_populated,
+        "lookup returned no populated forward name-kind seed response"
+    );
+    ensure!(
+        !budgets.api_require_populated_probes
+            || endpoint != "lookup"
+            || probe.lookup_address_populated,
+        "lookup returned no populated reverse address-kind seed response"
+    );
+    ensure!(
+        !budgets.api_require_populated_probes
+            || endpoint != "permissions"
+            || !probe.permission_audit_required
+            || probe.permission_audit_populated,
+        "permissions retained-registration audit requests returned no populated seed response"
+    );
+    ensure!(
         !requires_cursor_probe(budgets, endpoint)
             || !endpoint_requires_cursor(endpoint)
             || probe.cursor_variants > 0,
         "endpoint {endpoint:?} produced no real continuation cursor"
+    );
+    ensure!(
+        !requires_cursor_probe(budgets, endpoint)
+            || endpoint != "search"
+            || probe.bare_search_cursor_variants > 0,
+        "bare search produced no populated real continuation cursor"
     );
     Ok(())
 }
@@ -205,7 +234,9 @@ fn valid_primary_name_answer(answer: &Value, source: &str) -> bool {
         return false;
     };
     match source {
-        "indexed" => matches!(status, "ok" | "not_found" | "invalid_name" | "unsupported"),
+        // These probes come from successful indexed claims, so any weaker indexed status
+        // means the default-source route lost evidence the corpus already proved exists.
+        "indexed" => status == "ok",
         "verified" => matches!(
             status,
             "ok" | "not_found" | "mismatch" | "unsupported" | "failed"
@@ -286,9 +317,9 @@ mod tests {
     fn default_source_probe_pins_each_answers_documented_status_vocabulary() {
         let indexed = [
             ("ok", true),
-            ("not_found", true),
-            ("invalid_name", true),
-            ("unsupported", true),
+            ("not_found", false),
+            ("invalid_name", false),
+            ("unsupported", false),
             ("mismatch", false),
             ("stale", false),
             ("failed", false),
@@ -584,12 +615,68 @@ mod tests {
         let probe = SeedProbe {
             populated: true,
             bare_search_populated: false,
+            lookup_name_populated: true,
+            lookup_address_populated: true,
+            permission_audit_required: false,
+            permission_audit_populated: false,
             cursor_variants: 1,
+            bare_search_cursor_variants: 1,
         };
 
         assert!(
             require_seed_probe(budgets.profile(BudgetProfile::Production), "search", probe)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn production_seed_probe_requires_bare_search_cursor_and_both_lookup_kinds() {
+        use crate::budgets::{BudgetProfile, BudgetsFile};
+        use std::path::Path;
+
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/release-gate.toml");
+        let budgets = BudgetsFile::load(&path).unwrap();
+        let production = budgets.profile(BudgetProfile::Production);
+        let complete = SeedProbe {
+            populated: true,
+            bare_search_populated: true,
+            lookup_name_populated: true,
+            lookup_address_populated: true,
+            permission_audit_required: false,
+            permission_audit_populated: false,
+            cursor_variants: 1,
+            bare_search_cursor_variants: 1,
+        };
+
+        let mut no_bare_cursor = complete;
+        no_bare_cursor.bare_search_cursor_variants = 0;
+        assert!(
+            require_seed_probe(production, "search", no_bare_cursor)
+                .unwrap_err()
+                .to_string()
+                .contains("bare search")
+        );
+
+        let mut no_forward = complete;
+        no_forward.lookup_name_populated = false;
+        assert!(
+            require_seed_probe(production, "lookup", no_forward)
+                .unwrap_err()
+                .to_string()
+                .contains("forward name-kind")
+        );
+
+        let missing_audit = SeedProbe {
+            populated: true,
+            permission_audit_required: true,
+            permission_audit_populated: false,
+            ..SeedProbe::default()
+        };
+        assert!(
+            require_seed_probe(production, "permissions", missing_audit)
+                .unwrap_err()
+                .to_string()
+                .contains("retained-registration audit")
         );
     }
 }

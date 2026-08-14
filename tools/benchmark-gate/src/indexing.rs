@@ -27,7 +27,8 @@ mod publication;
 mod report;
 mod verdict;
 use deadline::{InterpretWalkMetrics, InterpretWalkOutcome};
-use report::{scale_failure_report, walk_failure_report};
+use publication::projection_name_count;
+use report::{head_reapply_failure_report, scale_failure_report, walk_failure_report};
 use verdict::{database_instance_identity_failures, projection_scale_failures};
 
 const PROJECTION_NAME_COUNT_SQL: &str = "SELECT count(*) FROM name_current WHERE provenance ->> 'chain_id' = $1 AND support_status = 'supported'";
@@ -90,7 +91,7 @@ pub async fn run(
 ) -> Result<IndexingReport> {
     let database_instance_identity = database::database_instance_identity(pool).await?;
     validate_input(pool, input, budgets).await?;
-    let name_current_rows = projection_name_count(pool, &input.chain_id).await?;
+    let name_current_rows = publication::projection_name_count(pool, &input.chain_id).await?;
     if name_current_rows < budgets.project_min_name_current_rows {
         let postflight_database_instance_identity =
             database::database_instance_identity(pool).await?;
@@ -125,15 +126,34 @@ pub async fn run(
     // This re-applies the published head; a true head-1 rewind needs Project capability
     // tracked by https://github.com/ensdomains/bigname/issues/467.
     let reapply_from = input.head_block;
-    let resume = project_marker(pool, &input.chain_id, reapply_from - 1).await?;
+    let resume = publication::project_marker(pool, &input.chain_id, reapply_from - 1).await?;
     let reapply_started = Instant::now();
-    let project_head_reapply_hydration_updated_rows = tokio::time::timeout(
-        Duration::from_millis(budgets.project_head_reapply_max_ms.saturating_mul(2)),
+    let head_reapply_timeout =
+        Duration::from_millis(budgets.project_head_reapply_max_ms.saturating_mul(2));
+    let project_head_reapply_result = tokio::time::timeout(
+        head_reapply_timeout,
         run_project_head_reapply(pool, input, reapply_from, resume),
     )
-    .await
-    .context("published-head re-apply and hydration exceeded twice their budget")??;
-    let project_head_reapply_ms = reapply_started.elapsed().as_millis();
+    .await;
+    let project_head_reapply_elapsed = reapply_started.elapsed();
+    let project_head_reapply_ms = project_head_reapply_elapsed.as_millis();
+    let project_head_reapply_hydration_updated_rows = match project_head_reapply_result {
+        Ok(result) => result?,
+        Err(_) => {
+            let postflight_database_instance_identity =
+                database::database_instance_identity(pool).await?;
+            return Ok(head_reapply_failure_report(
+                input,
+                budgets,
+                database_instance_identity,
+                postflight_database_instance_identity,
+                name_current_rows,
+                raw_logs,
+                density,
+                project_head_reapply_elapsed,
+            ));
+        }
+    };
 
     let walk_deadline = deadline::from_throughput_floor(
         walk_blocks,
@@ -446,7 +466,7 @@ async fn validate_input(pool: &PgPool, input: &IndexingInput, budgets: &GateBudg
         "Interpret walk range exceeds the selected head"
     );
     let walk_blocks = input.walk_to_block - input.walk_from_block + 1;
-    require_minimum_walk_blocks(walk_blocks, budgets.interpret_min_walk_blocks)?;
+    publication::require_minimum_walk_blocks(walk_blocks, budgets.interpret_min_walk_blocks)?;
     let canonical_blocks: i64 = sqlx::query_scalar(
         "SELECT count(*)
          FROM chain_lineage
@@ -465,21 +485,6 @@ async fn validate_input(pool: &PgPool, input: &IndexingInput, budgets: &GateBudg
         "Interpret walk requires one canonical lineage block at every height; found {canonical_blocks} of {walk_blocks}"
     );
     Ok(())
-}
-
-async fn project_marker(pool: &PgPool, chain_id: &str, block_number: i64) -> Result<ProjectMarker> {
-    let block_hash: String = sqlx::query_scalar(
-        "SELECT block_hash FROM chain_lineage WHERE chain_id = $1 AND block_number = $2 AND canonicality_state IN ('canonical', 'safe', 'finalized')",
-    )
-    .bind(chain_id)
-    .bind(block_number)
-    .fetch_one(pool)
-    .await
-    .context("failed to load published-head re-apply resume marker")?;
-    Ok(ProjectMarker {
-        number: block_number,
-        hash: block_hash,
-    })
 }
 
 fn rss_kib() -> Option<u64> {
@@ -509,23 +514,6 @@ fn reset_peak_rss_hwm() -> Result<()> {
     fs::write(PROC_SELF_CLEAR_REFS, "5").context(
         "failed to reset process VmHWM through /proc/self/clear_refs before the Interpret walk; the memory gate requires writable Linux procfs",
     )
-}
-
-fn require_minimum_walk_blocks(walk_blocks: i64, minimum: u64) -> Result<()> {
-    ensure!(
-        u64::try_from(walk_blocks).unwrap_or_default() >= minimum,
-        "Interpret walk contains {walk_blocks} blocks; release minimum is {minimum}"
-    );
-    Ok(())
-}
-
-async fn projection_name_count(pool: &PgPool, chain_id: &str) -> Result<u64> {
-    let count: i64 = sqlx::query_scalar(PROJECTION_NAME_COUNT_SQL)
-        .bind(chain_id)
-        .fetch_one(pool)
-        .await
-        .context("failed to count selected-chain names during projection benchmarking")?;
-    u64::try_from(count).context("name_current returned a negative row count")
 }
 
 #[cfg(test)]
@@ -625,9 +613,9 @@ mod tests {
 
     #[test]
     fn dense_walk_cannot_use_a_trivial_range() {
-        assert!(require_minimum_walk_blocks(100_000, 100_000).is_ok());
-        assert!(require_minimum_walk_blocks(99_999, 100_000).is_err());
-        assert!(require_minimum_walk_blocks(1, 100_000).is_err());
+        assert!(publication::require_minimum_walk_blocks(100_000, 100_000).is_ok());
+        assert!(publication::require_minimum_walk_blocks(99_999, 100_000).is_err());
+        assert!(publication::require_minimum_walk_blocks(1, 100_000).is_err());
     }
 
     #[test]

@@ -204,34 +204,65 @@ namespaces, and rows whose projection or referenced identity rows are not
 read-safe are excluded because the API cannot return them as request seeds.
 These floors leave headroom below the roughly 3.5 million names in the
 production dataset while excluding staging-sized databases. The JSON report
-records both API-visible supported-row totals and both floors. It varies names, addresses,
-search text, relations, history scopes, sort order, page size, and any cursors
-returned by seed requests, and uses the real resolver and namespace rows. The
+records both API-visible supported-row totals and both floors. Except for the
+primary-name live-RPC default described below, every exercised endpoint has a
+deterministically interleaved default request form alongside its parameterized
+forms. Default forms omit optional filters, omit `namespace` when
+the sampled name can be inferred to the same namespace, and omit `page_size` so
+the server default of 50 is exercised. Parameterized collection forms rotate
+page sizes 1, 5, 20, 50, and the documented maximum of 200. Permissions rotate
+the `address`, `name`, and `registration_id` read dimensions. When canonical
+retained registrations exist without a current name row, every other
+registration-ID variant uses one so the historical audit path is also timed.
+Production requires at least one such retained-registration corpus row and a
+populated retained-registration seed response;
+populated address or current-name permission reads cannot satisfy that audit
+evidence check.
+Address-name and
+address-history defaults omit `relation`, the address-name default also omits
+`q`, records defaults omit `keys`, events defaults omit name and namespace
+scoping, and reverse-lookup defaults omit the top-level `profile` plus address
+input `coin_type` and `relation`. The workload otherwise
+varies names, addresses, search text, relations, history scopes, sort order,
+page size, and any cursors returned by seed requests, and uses the real resolver
+and namespace rows. The
 address-name rotation retains the base listing request and deterministically
 mixes `include=role_summary`, `dedupe=registration`, and their combination into
 the timed requests. The sampled corpus does not identify addresses known to
 span repeated registrations, so registration-deduplicated variants use the
 same production-distribution address subjects as the other variants. The search
-workload keeps explicit-namespace requests for every seed and adds bare
-requests for a deterministic half; both forms cover prefix and contains
-matching, and production mode requires a populated bare-search seed response.
+workload gives equal deterministic shares to a fully default `q`-only form, a
+parameterized form with an inferred namespace, and an explicit-namespace form.
+The parameterized forms rotate prefix and contains matching, and production
+mode requires a populated bare-search seed response.
 Every documented response expansion rotates through the timed workload:
 record inventory, subname counts, permission lineage, address-name role
 summaries, all three address-name sort fields, both sort orders, both
 deduplication modes, and each resolver overview section.
-Cursor seeding uses those same requests, so a continuation retains its expansion
-parameters. Adding a response expansion to an exercised API route's query
-allowlist requires adding its values to the benchmark workload and coverage
-test in the same change.
+Cursor seeding uses those same default and parameterized requests, so a
+continuation retains its expansion parameters or default scope. Production
+requires a real continuation for every paginated route, including a populated
+bare-search continuation. If `B` base variants produce at least one cursor, the
+gate adds `ceil(B * 10 / 90)` resumed-cursor variants, spreads them evenly
+through the request list, and then cycles that list through the timed window.
+This gives resumed requests at least 10 percent of each complete request-list
+cycle instead of relegating them to a suffix that a short run might never
+reach. Each endpoint report records `base_request_variants`,
+`unique_resumed_cursor_variants`, `weighted_resumed_cursor_requests`, the
+10-percent target, and the resulting request-list percentage; a final partial
+cycle can differ by at most that partial cycle. Adding a response expansion to
+an exercised API route's query allowlist requires adding its values to the
+benchmark workload and coverage test in the same change.
 The first production run after the address-name coverage change may show higher
-tails because three quarters of those timed requests now add role-summary work,
+tails because three eighths of its base request variants add role-summary work,
 registration deduplication, or both; the earlier workload measured only the
-base listing shape.
-Bare requests are a minority of the mixed search pool, so a regression limited
-to the bare path can move p95 or p99 without moving p50. The first production
-run after this coverage was added may also show higher search tails: bare search
-derives the public namespace set for each request and revalidates it after the
-read, while the earlier workload measured explicit-namespace requests only.
+base listing shape. Search uses equal thirds for the fully default `q`-only
+form, a parameterized form with inferred namespaces, and an explicit-namespace
+form. Namespace inference therefore covers two thirds of its base variants and
+can affect p50 as well as the tails. The first production run after this
+coverage was added may show higher search latency: bare search derives the
+public namespace set for each request and revalidates it after the read, while
+the earlier workload measured explicit-namespace requests only.
 The lookup mix covers 1, 10, 100, 250, and 1,000 inputs per batch, with large
 batches weighted toward the tail. Each timing starts at dispatch, immediately
 before the request task is spawned, so executor queue delay after spawn is
@@ -414,10 +445,28 @@ serving database. Cursor seed requests cover top-level list cursors,
 per-result reverse-lookup cursors, and the resolver route's nested bound-name
 cursor.
 
+This certification assumes the deployed API connects directly to one stable
+PostgreSQL instance, matching the production `postgres:16-alpine` topology. Do
+not interpret the sampled `/healthz` identity as proof about every connection
+behind a database pooler or failover listener. Running either the API or the
+harness behind a pooler with multiple backends, a failover listener, or any
+other topology that can move serving connections between instances voids this
+gate's certification until
+[issue #474](https://github.com/ensdomains/bigname/issues/474) adds a
+per-serving-connection invariant. Under the supported direct topology, the
+preflight identity and every endpoint-boundary `/healthz` sample are a sanity
+check: a sampled mismatch is a named red.
+
 After every timed endpoint window, the harness repeats the Interpret namespace
 and chain membership, redo flag, PostgreSQL row-version, API build,
 content-hash, and running-database identity checks and rechecks the corpus
-connection.
+connection. It also compares the selected Project publication rows and the
+complete active public manifest authority snapshot with the preflight values.
+The Project comparison includes the published block, interpreter content hash,
+status, and row generation. The manifest comparison includes each manifest's
+identity, version, normalizer version, load time, payload, and latest finalized
+manifest event content, so a same-namespace and same-chain manifest rotation is
+still red.
 A build or database-identity change during the run is red even when every
 individual request succeeded. A failed boundary probe is recorded as a red,
 endpoint-named report failure rather than discarding the run's evidence. The
@@ -431,11 +480,16 @@ distinguished; the boundary checks limit that blind window to one route's
 measurement rather than the complete load sequence.
 
 Before timed load begins, production mode sends seed requests and refuses to
-run unless every route returns at least one populated result. Every paginated
-route must also return a real continuation cursor. If the initial seed prefix
-does not produce the required populated result or cursor, the harness continues
-through the bounded target-database corpus before declaring the route red; a resumed
-cursor request becomes part of the timed workload. For the records route,
+run unless every route returns at least one populated result. Status evidence
+requires root status `ready` and a non-empty chain map whose entries are all
+`ready`; an arbitrary `2xx` data object is insufficient. Lookup independently
+requires one populated forward name result and one populated reverse-address
+result. Primary-name evidence requires an indexed answer with status `ok`.
+Every paginated route must also return a real continuation cursor. If the
+initial seed prefix does not produce the required populated result or cursor,
+the harness continues through the bounded target-database corpus before
+declaring the route red; a resumed cursor request becomes part of the timed
+workload. For the records route,
 populated means at least one requested key has an `ok` answer, not merely that
 the name exists. For lookup, populated means at least one address-kind result
 has status `ok` and a non-empty `records` list; a forward name result or an
@@ -443,7 +497,30 @@ empty reverse result is not evidence that reverse lookup was measured. This
 prevents a fast empty-result workload from counting as release evidence. Timed
 records responses are also classified as populated or empty. At least 1 percent
 must contain an `ok` requested record, and the report records the observed
-populated share and its checked-in floor.
+populated share and its checked-in floor. Keyless default responses remain in
+the timed mix and are reported separately as populated or empty aggregate
+responses; they cannot satisfy the explicit-key populated-share floor.
+
+The timed name, primary-name, and lookup windows additionally validate response
+content after the latency clock has stopped. Production selects one request
+from each consecutive block of 100 and advances the selected offset by one in
+each block, so deterministic interleaved forms cannot alias to an unvalidated
+side of the rotation. Smoke validates every known-good response. Smoke may still
+exercise primary-name with an address fallback when its tiny fixture has no
+successful primary-name claim, but does not mislabel that fallback as indexed
+claim evidence. A supported exact-name sample must
+return `data.status=ok`, a primary-name sample must contain an indexed `ok`
+answer, and every sampled lookup input must return the matching name or address
+kind with populated `ok` evidence. Parsing and classification therefore cannot
+inflate the budgeted latency, while a sampled `2xx not_found`, `unsupported`,
+or malformed response is a named red. Each endpoint report records the sampling
+interval, validated count, and invalid count.
+
+Corpus cardinality and active-namespace shortfalls, seed transport or parsing
+failures, exhausted seed evidence, a reachable `/healthz` response missing
+`database.identity`, and a published-head Project re-apply or hydration timeout
+all produce a named red JSON report. They do not discard the evidence by
+exiting before report construction.
 
 The timed primary-name workload always sends `source=indexed`. Omitting
 `source` asks that route for both its indexed answer and live verification; for

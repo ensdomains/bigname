@@ -1,10 +1,11 @@
 use anyhow::{Result, bail, ensure};
 use reqwest::{Method, Url};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::corpus::Corpus;
 
 mod base_url;
+mod defaults;
 mod resolver;
 pub(in crate::api_load) use base_url::normalized_base_url;
 pub(crate) use base_url::report_base_url;
@@ -15,6 +16,8 @@ pub(super) struct RequestSpec {
     pub(super) method: Method,
     pub(super) url: Url,
     pub(super) body: Option<Value>,
+    pub(super) known_good_evidence: bool,
+    pub(super) required_permission_audit_evidence: bool,
 }
 
 const RESOLVER_INCLUDE_VARIANTS: [Option<&str>; 5] = [
@@ -32,114 +35,18 @@ pub(super) fn request_variants(
 ) -> Result<Vec<RequestSpec>> {
     let mut requests = Vec::new();
     match endpoint {
-        "lookup" => lookup_requests(base, corpus, &mut requests)?,
+        "lookup" => defaults::lookup_requests(base, corpus, &mut requests)?,
         "status" => requests.push(get(base, &["v2", "status"], &[])?),
-        "name" => {
-            for (namespace, name) in &corpus.names {
-                requests.push(get(
-                    base,
-                    &["v2", "names", name],
-                    &[("source", "indexed"), ("namespace", namespace)],
-                )?);
-            }
-        }
-        "records" => {
-            for (index, (namespace, name)) in corpus.names.iter().enumerate() {
-                let keys = if index % 2 == 0 {
-                    "addr:60"
-                } else {
-                    "text:avatar,text:description"
-                };
-                let mut query = vec![
-                    ("source", "indexed"),
-                    ("keys", keys),
-                    ("namespace", namespace.as_str()),
-                ];
-                if index % 2 == 0 {
-                    query.push(("include", "inventory"));
-                }
-                requests.push(get(base, &["v2", "names", name, "records"], &query)?);
-            }
-        }
-        "subnames" => {
-            let parents = if corpus.parents.is_empty() {
-                &corpus.names
-            } else {
-                &corpus.parents
-            };
-            for (index, (namespace, parent)) in parents.iter().enumerate() {
-                let mut query = vec![
-                    ("page_size", page_size(index)),
-                    ("namespace", namespace.as_str()),
-                ];
-                if index % 2 == 0 {
-                    query.push(("include", "counts"));
-                }
-                requests.push(get(base, &["v2", "names", parent, "subnames"], &query)?);
-            }
-        }
-        "name_history" => {
-            for (index, (namespace, name)) in corpus.names.iter().enumerate() {
-                requests.push(get(
-                    base,
-                    &["v2", "names", name, "history"],
-                    &[
-                        ("scope", history_scope(index)),
-                        ("page_size", page_size(index)),
-                        ("namespace", namespace),
-                    ],
-                )?);
-            }
-        }
-        "permissions" => permission_requests(base, corpus, &mut requests)?,
-        "address_names" => address_name_requests(base, corpus, &mut requests)?,
+        "name" => defaults::exact_name_requests(base, corpus, &mut requests)?,
+        "records" => defaults::record_requests(base, corpus, &mut requests)?,
+        "subnames" => defaults::subname_requests(base, corpus, &mut requests)?,
+        "name_history" => defaults::name_history_requests(base, corpus, &mut requests)?,
+        "permissions" => defaults::permission_requests(base, corpus, &mut requests)?,
+        "address_names" => defaults::address_name_requests(base, corpus, &mut requests)?,
         "primary_name" => primary_name_requests(base, corpus, &mut requests)?,
-        "address_history" => address_history_requests(base, corpus, &mut requests)?,
-        "search" => {
-            for (index, (namespace, name)) in corpus.names.iter().enumerate() {
-                let query = search_term(name);
-                let match_mode = if index % 2 == 0 { "prefix" } else { "contains" };
-                requests.push(get(
-                    base,
-                    &["v2", "search"],
-                    &[
-                        ("q", query.as_str()),
-                        ("match", match_mode),
-                        ("namespace", namespace),
-                        ("page_size", page_size(index)),
-                    ],
-                )?);
-                if index % 2 == 0 {
-                    let bare_match = if (index / 2) % 2 == 0 {
-                        "prefix"
-                    } else {
-                        "contains"
-                    };
-                    requests.push(get(
-                        base,
-                        &["v2", "search"],
-                        &[
-                            ("q", query.as_str()),
-                            ("match", bare_match),
-                            ("page_size", page_size(index)),
-                        ],
-                    )?);
-                }
-            }
-        }
-        "events" => {
-            for (index, (namespace, name)) in corpus.names.iter().enumerate() {
-                requests.push(get(
-                    base,
-                    &["v2", "events"],
-                    &[
-                        ("name", name),
-                        ("namespace", namespace),
-                        ("page_size", page_size(index)),
-                    ],
-                )?);
-            }
-        }
+        "address_history" => defaults::address_history_requests(base, corpus, &mut requests)?,
+        "search" => defaults::search_requests(base, corpus, &mut requests)?,
+        "events" => defaults::event_requests(base, corpus, &mut requests)?,
         "resolver" => {
             ensure!(
                 !corpus.resolvers.is_empty(),
@@ -148,9 +55,13 @@ pub(super) fn request_variants(
             for (index, target) in corpus.resolvers.iter().enumerate() {
                 for (variant, include) in RESOLVER_INCLUDE_VARIANTS.into_iter().enumerate() {
                     let request_index = index * RESOLVER_INCLUDE_VARIANTS.len() + variant;
-                    let mut query = vec![("page_size", page_size(request_index))];
+                    let mut query = Vec::new();
                     if let Some(include) = include {
                         query.push(("include", include));
+                        query.push((
+                            "page_size",
+                            defaults::parameterized_page_size(request_index),
+                        ));
                     }
                     requests.push(get(
                         base,
@@ -175,119 +86,6 @@ pub(super) fn request_variants(
     Ok(requests)
 }
 
-fn lookup_requests(base: &Url, corpus: &Corpus, requests: &mut Vec<RequestSpec>) -> Result<()> {
-    for variant in 0..100 {
-        let bucket = variant / 2;
-        let name_samples = if variant % 2 == 0 {
-            let namespace = &corpus.namespaces[bucket % corpus.namespaces.len()];
-            corpus
-                .names
-                .iter()
-                .filter(|(sample_namespace, _)| sample_namespace == namespace)
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        let corpus_len = if variant % 2 == 0 {
-            name_samples.len()
-        } else {
-            corpus.address_names.len()
-        };
-        let batch_size = lookup_batch_size(bucket, corpus_len);
-        let inputs = (0..batch_size)
-            .map(|offset| -> Result<Value> {
-                let index = (bucket * 97 + offset) % corpus_len;
-                Ok(if variant % 2 == 0 {
-                    json!({
-                        "id": format!("name-{variant}-{offset}"),
-                        "name": name_samples[index].1,
-                    })
-                } else {
-                    json!({
-                        "id": format!("address-{variant}-{offset}"),
-                        "address": corpus.address_names[index].0,
-                        "coin_type": 60,
-                        "relation": public_relation(&corpus.address_names[index].3)?,
-                        "page_size": 1 + index % 3,
-                    })
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let profile = if batch_size <= 10 && bucket % 3 == 0 {
-            "detail"
-        } else {
-            "feed"
-        };
-        let mut body = json!({"profile": profile, "inputs": inputs});
-        if variant % 2 == 0 {
-            body["namespace"] = Value::String(name_samples[0].0.clone());
-        }
-        requests.push(post(base, &["v2", "lookup"], body)?);
-    }
-    Ok(())
-}
-
-fn permission_requests(base: &Url, corpus: &Corpus, requests: &mut Vec<RequestSpec>) -> Result<()> {
-    let subjects = if corpus.permission_subjects.is_empty() {
-        corpus
-            .address_names
-            .iter()
-            .map(|sample| sample.0.as_str())
-            .collect::<Vec<_>>()
-    } else {
-        corpus
-            .permission_subjects
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-    };
-    for (index, address) in subjects.into_iter().enumerate() {
-        let mut query = vec![("address", address), ("page_size", page_size(index))];
-        if index % 2 == 0 {
-            query.push(("include", "lineage"));
-        }
-        requests.push(get(base, &["v2", "permissions"], &query)?);
-    }
-    Ok(())
-}
-
-fn address_name_requests(
-    base: &Url,
-    corpus: &Corpus,
-    requests: &mut Vec<RequestSpec>,
-) -> Result<()> {
-    for (index, (address, name, namespace, relation)) in corpus.address_names.iter().enumerate() {
-        let query = search_term(name);
-        let mut query_pairs = vec![
-            ("namespace", namespace.as_str()),
-            ("relation", public_relation(relation)?),
-            ("q", query.as_str()),
-            ("sort", ["name", "expires_at", "registered_at"][index % 3]),
-            ("order", if (index / 3) % 2 == 0 { "asc" } else { "desc" }),
-            ("page_size", page_size(index)),
-        ];
-        match (index / 6) % 4 {
-            0 => query_pairs.push(("dedupe", "name")),
-            1 => {
-                query_pairs.push(("dedupe", "name"));
-                query_pairs.push(("include", "role_summary"));
-            }
-            2 => query_pairs.push(("dedupe", "registration")),
-            3 => {
-                query_pairs.push(("include", "role_summary"));
-                query_pairs.push(("dedupe", "registration"));
-            }
-            _ => {}
-        }
-        requests.push(get(
-            base,
-            &["v2", "addresses", address, "names"],
-            &query_pairs,
-        )?);
-    }
-    Ok(())
-}
-
 fn primary_name_requests(
     base: &Url,
     corpus: &Corpus,
@@ -306,8 +104,9 @@ fn primary_name_requests(
             .map(|sample| (sample.0.as_str(), sample.1.as_str(), sample.2.as_str()))
             .collect::<Vec<_>>()
     };
+    let proven = !corpus.primary_names.is_empty();
     for (address, coin_type, namespace) in primary_names {
-        requests.push(get(
+        let mut request = get(
             base,
             &["v2", "addresses", address, "primary-name"],
             &[
@@ -315,27 +114,9 @@ fn primary_name_requests(
                 ("namespace", namespace),
                 ("coin_type", coin_type),
             ],
-        )?);
-    }
-    Ok(())
-}
-
-fn address_history_requests(
-    base: &Url,
-    corpus: &Corpus,
-    requests: &mut Vec<RequestSpec>,
-) -> Result<()> {
-    for (index, (address, _, namespace, relation)) in corpus.address_names.iter().enumerate() {
-        requests.push(get(
-            base,
-            &["v2", "addresses", address, "history"],
-            &[
-                ("namespace", namespace),
-                ("relation", public_relation(relation)?),
-                ("scope", history_scope(index)),
-                ("page_size", page_size(index)),
-            ],
-        )?);
+        )?;
+        request.known_good_evidence = proven;
+        requests.push(request);
     }
     Ok(())
 }
@@ -349,6 +130,8 @@ pub(super) fn get(base: &Url, segments: &[&str], query: &[(&str, &str)]) -> Resu
         method: Method::GET,
         url,
         body: None,
+        known_good_evidence: true,
+        required_permission_audit_evidence: false,
     })
 }
 
@@ -357,6 +140,8 @@ pub(super) fn post(base: &Url, segments: &[&str], body: Value) -> Result<Request
         method: Method::POST,
         url: with_path(base, segments)?,
         body: Some(body),
+        known_good_evidence: true,
+        required_permission_audit_evidence: false,
     })
 }
 
@@ -393,10 +178,6 @@ fn history_scope(index: usize) -> &'static str {
     ["name", "registration", "both"][index % 3]
 }
 
-pub(super) fn page_size(index: usize) -> &'static str {
-    ["1", "5", "20"][index % 3]
-}
-
 fn search_term(name: &str) -> String {
     let label = name.split('.').next().unwrap_or(name);
     label.chars().take(3).collect::<String>().to_lowercase()
@@ -419,7 +200,12 @@ mod tests {
     fn corpus_with_ens_base_eth_name() -> Corpus {
         Corpus {
             names: vec![("ens".to_owned(), "ordinary.base.eth".to_owned())],
-            address_names: Vec::new(),
+            address_names: vec![(
+                "0x0000000000000000000000000000000000000001".to_owned(),
+                "ordinary.base.eth".to_owned(),
+                "ens".to_owned(),
+                "token_holder".to_owned(),
+            )],
             parents: Vec::new(),
             permission_subjects: Vec::new(),
             primary_names: Vec::new(),
@@ -478,7 +264,11 @@ mod tests {
                 "{endpoint} must not infer Basenames from an ENS x.base.eth sample"
             );
         }
-        let lookup = request_variants(&base, &corpus, "lookup").unwrap();
+        let mut lookup_corpus = corpus.clone();
+        lookup_corpus
+            .names
+            .push(("ens".to_owned(), "inferable.eth".to_owned()));
+        let lookup = request_variants(&base, &lookup_corpus, "lookup").unwrap();
         assert_eq!(lookup[0].body.as_ref().unwrap()["namespace"], "ens");
     }
 
@@ -534,16 +324,14 @@ mod tests {
         let requests = request_variants(&base, &corpus, "search").unwrap();
         let combinations = requests
             .iter()
-            .map(|request| {
+            .filter_map(|request| {
                 let pairs = request.url.query_pairs().collect::<Vec<_>>();
                 let match_mode = pairs
                     .iter()
                     .find(|(key, _)| key == "match")
-                    .unwrap()
-                    .1
-                    .to_string();
+                    .map(|(_, value)| value.to_string())?;
                 let explicit_namespace = pairs.iter().any(|(key, _)| key == "namespace");
-                (match_mode, explicit_namespace)
+                Some((match_mode, explicit_namespace))
             })
             .collect::<std::collections::BTreeSet<_>>();
 
@@ -579,6 +367,11 @@ mod tests {
                 .query_pairs()
                 .any(|(key, value)| key == "source" && value == "indexed")
         }));
+        assert!(requests.iter().all(|request| request.known_good_evidence));
+
+        corpus.primary_names.clear();
+        let fallback = request_variants(&base, &corpus, "primary_name").unwrap();
+        assert!(fallback.iter().all(|request| !request.known_good_evidence));
     }
 }
 

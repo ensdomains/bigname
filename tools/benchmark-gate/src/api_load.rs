@@ -9,7 +9,7 @@ use crate::{
     database,
 };
 use anyhow::{Context, Result, ensure};
-use reqwest::{Client, Method};
+use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -18,25 +18,26 @@ mod corpus;
 mod preflight;
 mod probes;
 mod report;
+mod seeding;
+mod validation;
 pub(crate) mod workload;
 use corpus::{Corpus, load_table_scale};
-use preflight::{ApiBoundaryPreflight, load_interpret_redo_snapshot, recheck_api_boundary};
+use preflight::{ApiBoundaryPreflight, load_api_database_snapshot, recheck_api_boundary};
 use probes::require_seed_probe;
 pub use report::{ApiReport, EndpointReport, ResolverManifestCoverage};
-use report::{corpus_failure_report, preflight_failure_report};
+use report::{corpus_failure_report, endpoint_failure_report, preflight_failure_report};
+#[cfg(test)]
+use seeding::{SeedProbe, cursor_variants, endpoint_requires_cursor, response_is_populated};
+use seeding::{
+    aggregate_records_are_populated, prime_cursor_variants, requested_records_are_populated,
+};
 use workload::{RequestSpec, endpoint_requests, get, normalized_base_url};
 #[derive(Debug)]
 struct Sample {
     elapsed_micros: u128,
     success: bool,
     outcome: String,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct SeedProbe {
-    populated: bool,
-    bare_search_populated: bool,
-    cursor_variants: usize,
+    validation_failure: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -105,19 +106,23 @@ pub async fn run(
         .timeout(Duration::from_secs(30))
         .build()
         .context("failed to build API benchmark client")?;
-    let identity = load_api_target_identity(&client, &base).await?;
+    let (identity, health_failures) = load_api_preflight_identity(&client, &base).await?;
     let database_identity = database::database_instance_identity(pool).await?;
-    let redo_snapshot = load_interpret_redo_snapshot(pool).await?;
+    let database_snapshot = load_api_database_snapshot(pool).await?;
     let boundary_preflight = ApiBoundaryPreflight::new(
         &identity,
-        &redo_snapshot,
+        &database_snapshot,
         expected_build_sha,
         &database_identity,
     );
     let scale = load_table_scale(pool).await?;
-    let mut preflight_failures =
-        api_identity_failures(&identity, expected_build_sha, &database_identity);
-    preflight_failures.extend(redo_snapshot.active_failures());
+    let mut preflight_failures = health_failures;
+    preflight_failures.extend(api_identity_failures(
+        &identity,
+        expected_build_sha,
+        &database_identity,
+    ));
+    preflight_failures.extend(database_snapshot.active_failures());
     preflight_failures.extend(scale.failures(budgets));
     if !preflight_failures.is_empty() {
         return Ok(preflight_failure_report(
@@ -148,39 +153,73 @@ pub async fn run(
     let mut postflight_identity = None;
     let mut postflight_database_identity = None;
     for endpoint in &budgets.endpoints {
-        let mut requests = endpoint_requests(&base, &mut corpus, &endpoint.name)?;
-        ensure!(
-            !requests.is_empty(),
-            "endpoint {:?} has no request variants",
-            endpoint.name
-        );
-        let probe = prime_cursor_variants(
-            &client,
-            &endpoint.name,
-            &mut requests,
-            budgets.api_cursor_seed_count,
-        )
-        .await?;
-        require_seed_probe(budgets, &endpoint.name, probe)?;
-
-        if budgets.api_warmup_seconds > 0 {
-            let _ = execute_window(
-                &client,
-                Arc::from(requests.clone()),
-                budgets.api_target_qps,
-                budgets.api_warmup_seconds,
+        let requests = endpoint_requests(&base, &mut corpus, &endpoint.name)?;
+        let report = if requests.is_empty() {
+            endpoint_failure_report(
+                endpoint,
+                budgets,
+                format!("endpoint {:?} has no request variants", endpoint.name),
             )
-            .await?;
-        }
-        let request_variants = requests.len();
-        let (samples, elapsed) = execute_window(
-            &client,
-            Arc::from(requests),
-            budgets.api_target_qps,
-            budgets.api_duration_seconds,
-        )
-        .await?;
-        let report = build_endpoint_report(endpoint, request_variants, samples, elapsed, budgets);
+        } else {
+            match prime_cursor_variants(
+                &client,
+                &endpoint.name,
+                requests,
+                budgets.api_cursor_seed_count,
+                budgets.api_cursor_weight_percent,
+            )
+            .await
+            {
+                Err(error) => endpoint_failure_report(
+                    endpoint,
+                    budgets,
+                    format!("seed probing failed: {error:#}"),
+                ),
+                Ok(primed) => match require_seed_probe(budgets, &endpoint.name, primed.probe) {
+                    Err(error) => endpoint_failure_report(
+                        endpoint,
+                        budgets,
+                        format!("seed probing did not establish required evidence: {error:#}"),
+                    ),
+                    Ok(()) => {
+                        let requests = primed.requests;
+                        if budgets.api_warmup_seconds > 0 {
+                            let _ = execute_window(
+                                &client,
+                                Arc::from(requests.clone()),
+                                &endpoint.name,
+                                budgets.api_target_qps,
+                                budgets.api_warmup_seconds,
+                                None,
+                            )
+                            .await?;
+                        }
+                        let request_variants = requests.len();
+                        let (samples, elapsed) = execute_window(
+                            &client,
+                            Arc::from(requests),
+                            &endpoint.name,
+                            budgets.api_target_qps,
+                            budgets.api_duration_seconds,
+                            Some(budgets.api_validation_sample_every),
+                        )
+                        .await?;
+                        build_endpoint_report(
+                            endpoint,
+                            (
+                                request_variants,
+                                primed.base_variants,
+                                primed.unique_cursor_variants,
+                                primed.weighted_cursor_requests,
+                            ),
+                            samples,
+                            elapsed,
+                            budgets,
+                        )
+                    }
+                },
+            }
+        };
         failures.extend(
             report
                 .failures
@@ -246,123 +285,60 @@ async fn load_api_target_identity(
         .json()
         .await
         .context("failed to parse target API /healthz response")?;
+    health_identity(health, true).map(|(identity, _)| identity)
+}
+
+async fn load_api_preflight_identity(
+    client: &Client,
+    base: &reqwest::Url,
+) -> Result<(ApiTargetIdentity, Vec<String>)> {
+    let request = get(base, &["healthz"], &[])?;
+    let response = send(client, &request).await?;
+    ensure!(
+        response.status().is_success(),
+        "target API /healthz returned {}",
+        response.status()
+    );
+    let health: HealthResponse = response
+        .json()
+        .await
+        .context("failed to parse target API /healthz response")?;
+    health_identity(health, false)
+}
+
+fn health_identity(
+    health: HealthResponse,
+    require_database_identity: bool,
+) -> Result<(ApiTargetIdentity, Vec<String>)> {
+    let mut failures = Vec::new();
+    let database_identity = match health.database.identity {
+        Some(identity) => identity,
+        None if require_database_identity => {
+            anyhow::bail!("target API /healthz did not identify its database")
+        }
+        None => {
+            failures.push(
+                "target API /healthz was reachable but omitted database.identity; ensure its readiness and serving pools use the same direct PostgreSQL instance and rerun the gate"
+                    .to_owned(),
+            );
+            "<missing>".to_owned()
+        }
+    };
     Ok(ApiTargetIdentity {
         build_sha: health.identity.build_sha,
         interpreter_content_hash: health.identity.interpreter_content_hash,
-        database_identity: health
-            .database
-            .identity
-            .context("target API /healthz did not identify its database")?,
+        database_identity,
     })
-}
-
-async fn prime_cursor_variants(
-    client: &Client,
-    endpoint: &str,
-    requests: &mut Vec<RequestSpec>,
-    limit: usize,
-) -> Result<SeedProbe> {
-    let seeds = requests.clone();
-    let mut cursors = Vec::new();
-    let mut populated = false;
-    let mut bare_search_populated = false;
-    for (index, seed) in seeds.into_iter().enumerate() {
-        let prefix_complete = index >= limit;
-        let cursor_requirement_met = !endpoint_requires_cursor(endpoint) || !cursors.is_empty();
-        let population_requirement_met =
-            populated && (endpoint != "search" || bare_search_populated);
-        if prefix_complete && population_requirement_met && cursor_requirement_met {
-            break;
-        }
-        let response = send(client, &seed).await?;
-        if !response.status().is_success() {
-            continue;
-        }
-        let body: Value = response
-            .json()
-            .await
-            .context("failed to parse cursor-seed response")?;
-        let response_populated = response_is_populated(endpoint, &body);
-        populated |= response_populated;
-        if endpoint == "search" && !seed.url.query_pairs().any(|(key, _)| key == "namespace") {
-            bare_search_populated |= response_populated;
-        }
-        cursors.extend(cursor_variants(&seed, &body));
-    }
-    let cursor_variants = cursors.len();
-    requests.extend(cursors);
-    Ok(SeedProbe {
-        populated,
-        bare_search_populated,
-        cursor_variants,
-    })
-}
-
-fn endpoint_requires_cursor(endpoint: &str) -> bool {
-    matches!(
-        endpoint,
-        "lookup"
-            | "subnames"
-            | "name_history"
-            | "permissions"
-            | "address_names"
-            | "address_history"
-            | "search"
-            | "events"
-            | "resolver"
-    )
-}
-
-fn response_is_populated(endpoint: &str, body: &Value) -> bool {
-    match endpoint {
-        "lookup" => body
-            .get("data")
-            .and_then(Value::as_array)
-            .is_some_and(|results| {
-                results.iter().any(|result| {
-                    result.get("kind").and_then(Value::as_str) == Some("address")
-                        && result.get("status").and_then(Value::as_str) == Some("ok")
-                        && result
-                            .get("records")
-                            .and_then(Value::as_array)
-                            .is_some_and(|records| !records.is_empty())
-                })
-            }),
-        "subnames" | "name_history" | "permissions" | "address_names" | "address_history"
-        | "search" | "events" => body
-            .get("data")
-            .and_then(Value::as_array)
-            .is_some_and(|rows| !rows.is_empty()),
-        "primary_name" => body
-            .pointer("/data/answers")
-            .and_then(Value::as_array)
-            .is_some_and(|answers| {
-                answers
-                    .iter()
-                    .any(|answer| answer.get("status").and_then(Value::as_str) == Some("ok"))
-            }),
-        "resolver" => body
-            .pointer("/data/address")
-            .and_then(Value::as_str)
-            .is_some(),
-        "records" => body
-            .pointer("/data/records")
-            .and_then(Value::as_object)
-            .is_some_and(|records| {
-                records
-                    .values()
-                    .any(|record| record.get("status").and_then(Value::as_str) == Some("ok"))
-            }),
-        "status" | "name" | "namespace" => body.get("data").is_some(),
-        _ => false,
-    }
+    .map(|identity| (identity, failures))
 }
 
 async fn execute_window(
     client: &Client,
     requests: Arc<[RequestSpec]>,
+    endpoint: &str,
     target_qps: u64,
     duration_seconds: u64,
+    validation_sample_every: Option<usize>,
 ) -> Result<(Vec<Sample>, Duration)> {
     let total = target_qps.saturating_mul(duration_seconds);
     let total = usize::try_from(total).context("API request count exceeds platform size")?;
@@ -372,6 +348,7 @@ async fn execute_window(
     let mut tasks = JoinSet::new();
     let mut samples = Vec::with_capacity(total);
     let mut sent = 0usize;
+    let endpoint: Arc<str> = Arc::from(endpoint);
     for tick_number in 1..=tick_count {
         let expected_sent = usize::try_from(
             u64::try_from(total)
@@ -385,8 +362,16 @@ async fn execute_window(
         for _ in 0..batch {
             let request = requests[sent % requests.len()].clone();
             let client = client.clone();
+            let endpoint = endpoint.clone();
+            let validate = validation_sample_every.is_some_and(|every| {
+                validation_sample_is_due(sent, every)
+                    && request.known_good_evidence
+                    && validation::endpoint_is_sampled(endpoint.as_ref())
+            });
             let scheduled_start = Instant::now();
-            tasks.spawn(async move { sample_request(&client, &request, scheduled_start).await });
+            tasks.spawn(async move {
+                sample_request(&client, &request, &endpoint, scheduled_start, validate).await
+            });
             sent += 1;
         }
         while let Some(joined) = tasks.try_join_next() {
@@ -404,13 +389,24 @@ async fn execute_window(
     Ok((samples, started.elapsed()))
 }
 
+fn validation_sample_is_due(sent: usize, every: usize) -> bool {
+    let block = sent / every;
+    sent % every == block % every
+}
+
 fn build_endpoint_report(
     endpoint: &EndpointBudget,
-    request_variants: usize,
+    variant_counts: (usize, usize, usize, usize),
     samples: Vec<Sample>,
     elapsed: Duration,
     budgets: &GateBudgets,
 ) -> EndpointReport {
+    let (
+        request_variants,
+        base_request_variants,
+        unique_resumed_cursor_variants,
+        weighted_resumed_cursor_requests,
+    ) = variant_counts;
     let requests = samples.len();
     let successful_requests = samples.iter().filter(|sample| sample.success).count();
     let success_percent = successful_requests as f64 * 100.0 / requests.max(1) as f64;
@@ -424,6 +420,17 @@ fn build_endpoint_report(
         populated_responses.map(|populated| populated as f64 * 100.0 / requests.max(1) as f64);
     let achieved_qps = requests as f64 / elapsed.as_secs_f64().max(0.000_001);
     let mut outcomes = BTreeMap::new();
+    let validation_failures = samples
+        .iter()
+        .filter_map(|sample| sample.validation_failure.as_ref())
+        .cloned()
+        .collect::<Vec<_>>();
+    let validated_responses = samples
+        .iter()
+        .filter(|sample| {
+            sample.validation_failure.is_some() || sample.outcome.contains(":validated")
+        })
+        .count();
     for sample in &samples {
         *outcomes.entry(sample.outcome.clone()).or_insert(0) += 1;
     }
@@ -436,6 +443,13 @@ fn build_endpoint_report(
     let p95_ms = percentile(&durations, 95.0) / 1_000.0;
     let p99_ms = percentile(&durations, 99.0) / 1_000.0;
     let mut failures = Vec::new();
+    if !validation_failures.is_empty() {
+        let first = validation_failures.first().cloned().unwrap_or_default();
+        failures.push(format!(
+            "{} of {validated_responses} sampled response validations failed; first failure: {first}",
+            validation_failures.len()
+        ));
+    }
     if success_percent < budgets.api_min_success_percent {
         failures.push(format!(
             "success rate {success_percent:.3}% is below {:.3}%",
@@ -484,6 +498,16 @@ fn build_endpoint_report(
         target_p99_ms: endpoint.p99_ms,
         p99_ms,
         request_variants,
+        base_request_variants,
+        unique_resumed_cursor_variants,
+        weighted_resumed_cursor_requests,
+        target_resumed_cursor_percent: budgets.api_cursor_weight_percent,
+        actual_resumed_cursor_percent: weighted_resumed_cursor_requests as f64 * 100.0
+            / request_variants.max(1) as f64,
+        validation_sample_every: validation::endpoint_is_sampled(&endpoint.name)
+            .then_some(budgets.api_validation_sample_every),
+        validated_responses,
+        invalid_sampled_responses: validation_failures.len(),
         outcomes,
         green: failures.is_empty(),
         failures,
@@ -509,9 +533,11 @@ async fn send(client: &Client, request: &RequestSpec) -> Result<reqwest::Respons
 async fn sample_request(
     client: &Client,
     request: &RequestSpec,
+    endpoint: &str,
     scheduled_start: Instant,
+    validate: bool,
 ) -> Sample {
-    let (elapsed_micros, success, outcome) = match send(client, request).await {
+    let (elapsed_micros, success, outcome, validation_failure) = match send(client, request).await {
         Ok(response) => {
             let status = response.status();
             match response.bytes().await {
@@ -519,6 +545,12 @@ async fn sample_request(
                     let elapsed_micros = scheduled_start.elapsed().as_micros();
                     let success = status.is_success();
                     let mut outcome = status.as_u16().to_string();
+                    let validation_failure = (validate && success)
+                        .then(|| validation::validate_timed_response(endpoint, request, &body))
+                        .flatten();
+                    if validate && success && validation_failure.is_none() {
+                        outcome.push_str(":validated");
+                    }
                     if !success
                         && let Ok(body) = serde_json::from_slice::<Value>(&body)
                         && let Some(code) = body
@@ -530,21 +562,34 @@ async fn sample_request(
                         outcome.push_str(code);
                     }
                     if success && request.url.path().ends_with("/records") {
-                        let populated = serde_json::from_slice::<Value>(&body)
-                            .ok()
-                            .is_some_and(|body| response_is_populated("records", &body));
-                        outcome.push_str(if populated {
+                        let keyed = request.url.query_pairs().any(|(key, _)| key == "keys");
+                        let populated =
+                            serde_json::from_slice::<Value>(&body)
+                                .ok()
+                                .is_some_and(|body| {
+                                    if keyed {
+                                        requested_records_are_populated(request, &body)
+                                    } else {
+                                        aggregate_records_are_populated(&body)
+                                    }
+                                });
+                        outcome.push_str(if (keyed, populated) == (true, true) {
                             ":records_populated"
-                        } else {
+                        } else if keyed {
                             ":records_empty"
+                        } else if populated {
+                            ":records_aggregate_populated"
+                        } else {
+                            ":records_aggregate_empty"
                         });
                     }
-                    (elapsed_micros, success, outcome)
+                    (elapsed_micros, success, outcome, validation_failure)
                 }
                 Err(_) => (
                     scheduled_start.elapsed().as_micros(),
                     false,
                     "response_body_error".to_owned(),
+                    None,
                 ),
             }
         }
@@ -552,47 +597,15 @@ async fn sample_request(
             scheduled_start.elapsed().as_micros(),
             false,
             "transport_error".to_owned(),
+            None,
         ),
     };
     Sample {
         elapsed_micros,
         success,
         outcome,
+        validation_failure,
     }
-}
-
-fn cursor_variants(seed: &RequestSpec, body: &Value) -> Vec<RequestSpec> {
-    if seed.method == Method::POST && seed.url.path().ends_with("/v2/lookup") {
-        let Some(results) = body.get("data").and_then(Value::as_array) else {
-            return Vec::new();
-        };
-        return results
-            .iter()
-            .enumerate()
-            .find_map(|(index, result)| {
-                let cursor = result.pointer("/page/next_cursor")?.as_str()?;
-                let mut resumed = seed.clone();
-                resumed
-                    .body
-                    .as_mut()?
-                    .pointer_mut(&format!("/inputs/{index}"))?
-                    .as_object_mut()?
-                    .insert("cursor".to_owned(), Value::String(cursor.to_owned()));
-                Some(vec![resumed])
-            })
-            .unwrap_or_default();
-    }
-
-    let cursor = body
-        .pointer("/page/next_cursor")
-        .or_else(|| body.pointer("/data/bound_names/page/next_cursor"))
-        .and_then(Value::as_str);
-    let Some(cursor) = cursor else {
-        return Vec::new();
-    };
-    let mut resumed = seed.clone();
-    resumed.url.query_pairs_mut().append_pair("cursor", cursor);
-    vec![resumed]
 }
 
 #[cfg(test)]
@@ -607,6 +620,8 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use workload::get;
 
+    mod cursor_priming;
+    mod reporting;
     mod timing;
 
     #[test]
@@ -625,7 +640,7 @@ mod tests {
         assert!(!response_is_populated("permissions", &json!({"data": []})));
         assert!(response_is_populated(
             "primary_name",
-            &json!({"data": {"answers": [{"status": "ok"}]}})
+            &json!({"data": {"answers": [{"source": "indexed", "status": "ok"}]}})
         ));
         assert!(endpoint_requires_cursor("lookup"));
         assert!(endpoint_requires_cursor("resolver"));
@@ -689,142 +704,44 @@ mod tests {
     }
 
     #[test]
-    fn records_probe_requires_a_found_requested_record() {
+    fn seed_evidence_rejects_degraded_status_and_missing_indexed_claims() {
         assert!(!response_is_populated(
-            "records",
+            "status",
             &json!({
                 "data": {
-                    "records": {
-                        "addr:60": {"status": "not_found"},
-                        "text:avatar": {"status": "not_found"}
-                    }
+                    "status": "degraded",
+                    "chains": {"1": {"status": "ready"}}
+                }
+            })
+        ));
+        assert!(!response_is_populated(
+            "status",
+            &json!({
+                "data": {
+                    "status": "ready",
+                    "chains": {"1": {"status": "stale"}}
                 }
             })
         ));
         assert!(response_is_populated(
-            "records",
+            "status",
             &json!({
                 "data": {
-                    "records": {
-                        "addr:60": {"status": "not_found"},
-                        "text:avatar": {"status": "ok", "value": "ipfs://avatar"}
-                    }
+                    "status": "ready",
+                    "chains": {"1": {"status": "ready"}}
                 }
             })
         ));
-    }
 
-    #[tokio::test]
-    async fn cursor_priming_continues_past_the_fixed_prefix() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            for index in 0..3 {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = [0u8; 1024];
-                let _ = stream.read(&mut request).await.unwrap();
-                let body = if index < 2 {
-                    r#"{"data":[{"name":"one-page.eth"}]}"#
-                } else {
-                    r#"{"data":[{"name":"paginated.eth"}],"page":{"next_cursor":"later"}}"#
-                };
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
-                    body.len()
-                );
-                stream.write_all(response.as_bytes()).await.unwrap();
-            }
-        });
-        let base = normalized_base_url(&format!("http://{address}")).unwrap();
-        let mut requests = (0..3)
-            .map(|index| get(&base, &["v2", "events", &index.to_string()], &[]).unwrap())
-            .collect::<Vec<_>>();
-
-        let probe = prime_cursor_variants(&Client::new(), "events", &mut requests, 2)
-            .await
-            .unwrap();
-        server.abort();
-
-        assert!(probe.populated);
-        assert_eq!(probe.cursor_variants, 1);
-        assert_eq!(requests.len(), 4);
-        assert_eq!(requests.last().unwrap().url.query(), Some("cursor=later"));
-    }
-
-    #[tokio::test]
-    async fn cursor_priming_exhausts_the_corpus_without_inventing_a_cursor() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let served = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let server_served = Arc::clone(&served);
-        let server = tokio::spawn(async move {
-            for _ in 0..3 {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = [0u8; 1024];
-                let _ = stream.read(&mut request).await.unwrap();
-                server_served.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let body = r#"{"data":[{"name":"one-page.eth"}]}"#;
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
-                    body.len()
-                );
-                stream.write_all(response.as_bytes()).await.unwrap();
-            }
-        });
-        let base = normalized_base_url(&format!("http://{address}")).unwrap();
-        let mut requests = (0..3)
-            .map(|index| get(&base, &["v2", "events", &index.to_string()], &[]).unwrap())
-            .collect::<Vec<_>>();
-
-        let probe = prime_cursor_variants(&Client::new(), "events", &mut requests, 2)
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(2), server)
-            .await
-            .expect("cursor-exhaustion mock did not receive the bounded corpus within two seconds")
-            .unwrap();
-
-        assert!(probe.populated);
-        assert_eq!(served.load(std::sync::atomic::Ordering::Relaxed), 3);
-        assert_eq!(probe.cursor_variants, 0);
-        assert_eq!(requests.len(), 3);
-        let budgets = BudgetsFile::load(
-            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/release-gate.toml"),
-        )
-        .unwrap();
-        assert!(
-            require_seed_probe(budgets.profile(BudgetProfile::Production), "events", probe)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn preflight_failure_report_records_observed_totals_and_floors() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/release-gate.toml");
-        let budgets = BudgetsFile::load(&path).unwrap();
-        let production = budgets.profile(BudgetProfile::Production);
-        let report = preflight_failure_report(
-            corpus::TableScale {
-                name_current_rows: 50_000,
-                address_names_current_rows: 75_000,
-            },
-            production,
-            ApiTargetIdentity {
-                build_sha: "release".to_owned(),
-                interpreter_content_hash: bigname_content_hash::INTERPRETER_CONTENT_HASH.to_owned(),
-                database_identity: "keccak256:database".to_owned(),
-            },
-            "keccak256:database".to_owned(),
-            Some("release"),
-            vec!["name_current is below its floor".to_owned()],
-        );
-
-        assert!(!report.green);
-        assert_eq!(report.name_current_rows, 50_000);
-        assert_eq!(report.min_name_current_rows, 3_000_000);
-        assert_eq!(report.address_names_current_rows, 75_000);
-        assert_eq!(report.min_address_names_current_rows, 3_000_000);
-        assert!(report.endpoints.is_empty());
+        assert!(!response_is_populated(
+            "primary_name",
+            &json!({
+                "data": {"answers": [
+                    {"source": "indexed", "status": "not_found"},
+                    {"source": "verified", "status": "ok"}
+                ]}
+            })
+        ));
     }
 
     #[test]
@@ -918,9 +835,15 @@ mod tests {
             stream.write_all(response.as_bytes()).await.unwrap();
         });
         let base = normalized_base_url(&format!("http://{address}")).unwrap();
-        let request = get(&base, &["v2", "names", "empty.eth", "records"], &[]).unwrap();
+        let request = get(
+            &base,
+            &["v2", "names", "empty.eth", "records"],
+            &[("keys", "addr:60,text:avatar")],
+        )
+        .unwrap();
 
-        let sample = sample_request(&Client::new(), &request, Instant::now()).await;
+        let sample =
+            sample_request(&Client::new(), &request, "records", Instant::now(), false).await;
         server.await.unwrap();
 
         assert!(sample.success);
@@ -944,11 +867,17 @@ mod tests {
                 elapsed_micros: 1_000,
                 success: true,
                 outcome: "200:records_empty".to_owned(),
+                validation_failure: None,
             })
             .collect();
 
-        let report =
-            build_endpoint_report(endpoint, 100, samples, Duration::from_millis(1), production);
+        let report = build_endpoint_report(
+            endpoint,
+            (100, 100, 0, 0),
+            samples,
+            Duration::from_millis(1),
+            production,
+        );
 
         assert_eq!(report.populated_responses, Some(0));
         assert_eq!(report.populated_percent, Some(0.0));
@@ -957,6 +886,45 @@ mod tests {
                 .failures
                 .iter()
                 .any(|failure| failure.contains("populated records share"))
+        );
+    }
+
+    #[test]
+    fn sampled_in_band_validation_failure_makes_the_endpoint_red() {
+        let budgets = BudgetsFile::load(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/release-gate.toml"),
+        )
+        .unwrap();
+        let production = budgets.profile(BudgetProfile::Production);
+        let endpoint = production
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == "lookup")
+            .unwrap();
+        let samples = vec![Sample {
+            elapsed_micros: 1_000,
+            success: true,
+            outcome: "200".to_owned(),
+            validation_failure: Some(
+                "sampled lookup input \"forward\" did not return name-kind status ok".to_owned(),
+            ),
+        }];
+        let report = build_endpoint_report(
+            endpoint,
+            (1, 1, 0, 0),
+            samples,
+            Duration::from_secs_f64(1.0 / production.api_min_achieved_qps as f64),
+            production,
+        );
+
+        assert!(!report.green);
+        assert_eq!(report.validated_responses, 1);
+        assert_eq!(report.invalid_sampled_responses, 1);
+        assert!(
+            report
+                .failures
+                .iter()
+                .any(|failure| failure.contains("sampled response validations failed"))
         );
     }
 }

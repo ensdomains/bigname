@@ -2,7 +2,7 @@ use super::*;
 
 fn corpus_with_address_names() -> Corpus {
     Corpus {
-        names: (0..4)
+        names: (0..24)
             .map(|index| ("ens".to_owned(), format!("name-{index}.eth")))
             .collect(),
         address_names: (0..24)
@@ -15,10 +15,18 @@ fn corpus_with_address_names() -> Corpus {
                 )
             })
             .collect(),
-        parents: (0..4)
+        parents: (0..24)
             .map(|index| ("ens".to_owned(), format!("parent-{index}.eth")))
             .collect(),
-        permission_subjects: (0..4).map(|index| format!("0x{index:040x}")).collect(),
+        permission_subjects: (0..4)
+            .map(|index| super::super::corpus::PermissionTarget {
+                address: format!("0x{index:040x}"),
+                registration_id: format!("00000000-0000-0000-0000-{index:012}"),
+                retained_registration: index % 2 == 0,
+                namespace: "ens".to_owned(),
+                name: format!("name-{index}.eth"),
+            })
+            .collect(),
         primary_names: Vec::new(),
         resolvers: vec![ResolverTarget {
             chain_id: "ethereum-mainnet".to_owned(),
@@ -26,8 +34,8 @@ fn corpus_with_address_names() -> Corpus {
             resolver_address: "0x00000000000000000000000000000000000000ff".to_owned(),
         }],
         namespaces: vec!["ens".to_owned()],
-        names_by_namespace: [("ens".to_owned(), 4)].into_iter().collect(),
-        parents_by_namespace: [("ens".to_owned(), 4)].into_iter().collect(),
+        names_by_namespace: [("ens".to_owned(), 24)].into_iter().collect(),
+        parents_by_namespace: [("ens".to_owned(), 24)].into_iter().collect(),
         resolver_manifest_coverage: Vec::new(),
     }
 }
@@ -64,12 +72,12 @@ fn permissions_rotate_lineage_expansion() {
     assert_query_values("permissions", "include", &["lineage"]);
     let base = normalized_base_url("http://127.0.0.1:3000").unwrap();
     let requests = request_variants(&base, &corpus_with_address_names(), "permissions").unwrap();
-    assert!(
-        requests[0]
+    assert!(requests.iter().any(|request| {
+        request
             .url
             .query_pairs()
             .any(|(key, value)| key == "include" && value == "lineage")
-    );
+    }));
 }
 
 #[test]
@@ -122,6 +130,7 @@ fn address_name_variants_cover_role_summary_and_registration_dedupe() {
 
     let variant_sort_pairs = requests
         .iter()
+        .filter(|request| request.url.query_pairs().any(|(key, _)| key == "dedupe"))
         .map(|request| {
             let pairs = request.url.query_pairs().collect::<Vec<_>>();
             let include = pairs
@@ -163,6 +172,141 @@ fn address_name_variants_cover_role_summary_and_registration_dedupe() {
         variant_sort_pairs, expected,
         "every address-name enrichment variant must cover every documented sort path"
     );
+}
+
+#[test]
+fn every_documented_default_form_is_present() {
+    let base = normalized_base_url("http://127.0.0.1:3000").unwrap();
+    let corpus = corpus_with_address_names();
+
+    for endpoint in [
+        "status",
+        "name",
+        "records",
+        "subnames",
+        "name_history",
+        "address_names",
+        "address_history",
+        "events",
+        "resolver",
+        "namespace",
+    ] {
+        let requests = request_variants(&base, &corpus, endpoint).unwrap();
+        assert!(
+            requests.iter().any(|request| request.url.query().is_none()),
+            "{endpoint} must include its documented default request form"
+        );
+    }
+
+    let permissions = request_variants(&base, &corpus, "permissions").unwrap();
+    assert!(
+        permissions.iter().any(|request| {
+            let query = request.url.query_pairs().collect::<Vec<_>>();
+            query.len() == 1
+                && matches!(query[0].0.as_ref(), "address" | "name" | "registration_id")
+        }),
+        "permissions must include a dimension-only default request"
+    );
+
+    let search = request_variants(&base, &corpus, "search").unwrap();
+    assert!(
+        search.iter().any(|request| {
+            let query = request.url.query_pairs().collect::<Vec<_>>();
+            query.len() == 1 && query[0].0 == "q"
+        }),
+        "search must include its q-only default request"
+    );
+
+    let lookup = request_variants(&base, &corpus, "lookup").unwrap();
+    assert!(
+        lookup.iter().any(|request| {
+            request.body.as_ref().is_some_and(|body| {
+                body.get("profile").is_none()
+                    && body["inputs"].as_array().is_some_and(|inputs| {
+                        inputs.iter().any(|input| {
+                            input.get("address").is_some()
+                                && input.get("coin_type").is_none()
+                                && input.get("relation").is_none()
+                                && input.get("page_size").is_none()
+                        })
+                    })
+            })
+        }),
+        "lookup must include its default body and reverse input without profile, coin_type, relation, or page_size"
+    );
+    assert!(
+        lookup.iter().any(|request| {
+            request.body.as_ref().is_some_and(|body| {
+                body.get("namespace").is_none()
+                    && body["inputs"].as_array().is_some_and(|inputs| {
+                        inputs.iter().any(|input| input.get("name").is_some())
+                    })
+            })
+        }),
+        "lookup must include default forward inputs without namespace"
+    );
+}
+
+#[test]
+fn collection_pages_cover_omitted_default_and_documented_maximum() {
+    let base = normalized_base_url("http://127.0.0.1:3000").unwrap();
+    let corpus = corpus_with_address_names();
+    for endpoint in [
+        "subnames",
+        "name_history",
+        "permissions",
+        "address_names",
+        "address_history",
+        "search",
+        "events",
+        "resolver",
+    ] {
+        let requests = request_variants(&base, &corpus, endpoint).unwrap();
+        assert!(
+            requests
+                .iter()
+                .any(|request| !request.url.query_pairs().any(|(key, _)| key == "page_size")),
+            "{endpoint} must exercise the omitted server-default page size"
+        );
+        assert!(
+            requests.iter().any(|request| request
+                .url
+                .query_pairs()
+                .any(|(key, value)| key == "page_size" && value == "200")),
+            "{endpoint} must exercise the documented 200-row maximum page"
+        );
+    }
+}
+
+#[test]
+fn permissions_cover_every_documented_read_dimension() {
+    let base = normalized_base_url("http://127.0.0.1:3000").unwrap();
+    let requests = request_variants(&base, &corpus_with_address_names(), "permissions").unwrap();
+    let keys = requests
+        .iter()
+        .flat_map(|request| request.url.query_pairs().map(|(key, _)| key.into_owned()))
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for required in ["address", "name", "registration_id"] {
+        assert!(
+            keys.contains(required),
+            "permissions must rotate {required} reads"
+        );
+    }
+    assert!(requests.iter().any(|request| {
+        request.required_permission_audit_evidence
+            && request
+                .url
+                .query_pairs()
+                .any(|(key, _)| key == "registration_id")
+    }));
+    assert!(requests.iter().any(|request| {
+        !request.required_permission_audit_evidence
+            && request
+                .url
+                .query_pairs()
+                .any(|(key, _)| key == "registration_id")
+    }));
 }
 
 #[test]

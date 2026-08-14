@@ -17,7 +17,7 @@ async fn response_timing_includes_the_complete_body() {
     });
     let base = normalized_base_url(&format!("http://{address}")).unwrap();
     let request = get(&base, &["slow"], &[]).unwrap();
-    let sample = sample_request(&Client::new(), &request, Instant::now()).await;
+    let sample = sample_request(&Client::new(), &request, "namespace", Instant::now(), false).await;
     server.await.unwrap();
     assert!(sample.success);
     assert!(sample.elapsed_micros >= 40_000);
@@ -41,7 +41,14 @@ async fn response_timing_includes_pre_poll_queue_delay() {
     let scheduled_start = Instant::now();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let sample = sample_request(&Client::new(), &request, scheduled_start).await;
+    let sample = sample_request(
+        &Client::new(),
+        &request,
+        "namespace",
+        scheduled_start,
+        false,
+    )
+    .await;
     server.await.unwrap();
 
     assert!(
@@ -70,5 +77,22 @@ fn execute_window_captures_dispatch_time_before_spawning_the_request_task() {
         capture < spawn,
         "dispatch time must be captured before the request task enters the executor queue"
     );
-    assert!(execute_window.contains("sample_request(&client, &request, scheduled_start)"));
+    assert!(
+        execute_window
+            .contains("sample_request(&client, &request, &endpoint, scheduled_start, validate)")
+    );
+    assert!(execute_window.contains("request.known_good_evidence"));
+    assert!(source.contains("Some(budgets.api_validation_sample_every)"));
+}
+
+#[test]
+fn validation_sampling_rotates_across_interleaved_request_forms() {
+    let sampled = (0..400)
+        .filter(|sent| validation_sample_is_due(*sent, 100))
+        .collect::<Vec<_>>();
+
+    assert_eq!(sampled, [0, 101, 202, 303]);
+    assert!(sampled.iter().any(|sent| sent % 2 == 0));
+    assert!(sampled.iter().any(|sent| sent % 2 == 1));
+    assert!((0..10).all(|sent| validation_sample_is_due(sent, 1)));
 }
