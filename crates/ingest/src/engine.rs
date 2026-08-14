@@ -274,14 +274,12 @@ impl Engine {
                     )
                     .await?;
                 written_bytes = written_bytes.saturating_add(loaded.estimated_write_bytes);
-                if window_to == source_target_number {
-                    redo::require_loaded_boundary(
-                        &request.chain_id,
-                        &loaded.marker,
-                        &source_target,
-                    )?;
-                }
-                Some(loaded.marker)
+                let marker = if window_to == source_target_number {
+                    redo::adopt_loaded_boundary(&request.chain_id, loaded.marker, &source_target)?
+                } else {
+                    loaded.marker
+                };
+                Some(marker)
             } else if to >= source_target_number
                 && redo::must_reload_completed_source_boundary(
                     complete,
@@ -301,8 +299,11 @@ impl Engine {
                     )
                     .await?;
                 written_bytes = written_bytes.saturating_add(loaded.estimated_write_bytes);
-                redo::require_loaded_boundary(&request.chain_id, &loaded.marker, &source_target)?;
-                Some(loaded.marker)
+                Some(redo::adopt_loaded_boundary(
+                    &request.chain_id,
+                    loaded.marker,
+                    &source_target,
+                )?)
             } else if to >= source_target_number {
                 redo::reject_lineage_backed_boundary_change(
                     &self.pool,
@@ -325,25 +326,17 @@ impl Engine {
                 target: source_target,
             });
         }
-        let primary = primary_source(&request.sources)?;
-        let primary_progress = progress
-            .iter()
-            .find(|source| source.key == primary.key)
-            .ok_or_else(|| {
-                IngestError::data_integrity(format!(
-                    "redo for chain {} produced no progress for primary source {}",
-                    request.chain_id, primary.key
-                ))
-            })?;
-        let (current, target) = if complete && redo_source_target(primary, range_to) == range_to {
-            let current = primary_progress.current.clone().ok_or_else(|| {
-                IngestError::data_integrity(format!(
-                    "completed redo for chain {} produced no current boundary for primary source {}",
-                    request.chain_id, primary.key
-                ))
-            })?;
-            (current, primary_progress.target.clone())
+        let guarded_summary = if complete {
+            redo::completing_summary_from_boundary(&request.chain_id, &progress, range_to)?
         } else {
+            None
+        };
+        let primary = primary_source(&request.sources)?;
+        let (current, target) = if let Some(summary) = guarded_summary {
+            summary
+        } else {
+            // A valid range can end below every source's declared start block, so no
+            // source owns the range end and no boundary was loaded for the summary.
             let provider = self.provider(&request.chain_id, primary).await?;
             (
                 resolve_marker(&provider, to).await?,

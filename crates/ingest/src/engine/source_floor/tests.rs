@@ -315,8 +315,8 @@ async fn a_completed_multi_source_redo_reloads_an_earlier_source_boundary() -> A
             cursors: Vec::new(),
             redo_range: Some((seam - 255, seam + 1)),
             resume_current: Some(Marker {
-                number: seam,
-                hash: marker_hash(seam),
+                number: seam + 1,
+                hash: marker_hash(seam + 1),
             }),
         })
         .await
@@ -329,6 +329,59 @@ async fn a_completed_multi_source_redo_reloads_an_earlier_source_boundary() -> A
             .contains("failed to configure Coinbase SQL source"),
         "the observed error must come from entering the boundary load: {error}"
     );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn an_equal_height_redo_marker_uses_durable_lineage_evidence() -> AnyResult<()> {
+    let chain_id = "ingest-redo-equal-boundary";
+    let database = intake_database("ingest_redo_equal_boundary", chain_id).await?;
+    let durable = Marker {
+        number: 100,
+        hash: marker_hash(100),
+    };
+    let fresh = Marker {
+        number: 100,
+        hash: marker_hash(101),
+    };
+    sqlx::query(
+        "
+        INSERT INTO chain_lineage (
+            chain_id, block_hash, parent_hash, block_number,
+            block_timestamp, canonicality_state
+        )
+        VALUES ($1, $2, NULL, $3, now(), 'observed')
+        ",
+    )
+    .bind(chain_id)
+    .bind(&fresh.hash)
+    .bind(fresh.number)
+    .execute(database.pool())
+    .await?;
+
+    let error = crate::engine::redo::reject_lineage_backed_boundary_change(
+        database.pool(),
+        chain_id,
+        Some(&durable),
+        &fresh,
+    )
+    .await
+    .expect_err("an equal-height lineage-backed fork change must fail closed");
+    assert_eq!(error.kind(), ErrorKind::DataIntegrity);
+    assert!(
+        error
+            .to_string()
+            .contains(crate::REDO_BOUNDARY_DIVERGENCE_PREFIX),
+        "{error}"
+    );
+
+    crate::engine::redo::reject_lineage_backed_boundary_change(
+        database.pool(),
+        chain_id,
+        Some(&durable),
+        &durable,
+    )
+    .await?;
     database.cleanup().await
 }
 

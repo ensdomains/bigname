@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 
-use crate::{IngestError, Marker, REDO_BOUNDARY_DIVERGENCE_PREFIX, Result};
+use crate::{IngestError, Marker, REDO_BOUNDARY_DIVERGENCE_PREFIX, Result, SourceProgress};
 
 pub(super) fn must_reload_completed_source_boundary(
     completing: bool,
@@ -12,10 +12,10 @@ pub(super) fn must_reload_completed_source_boundary(
     completing
         && source_target_number >= range_from
         && source_target_number < range_to
-        && resume_current.is_some_and(|resume| resume.number >= source_target_number)
+        && resume_current.is_some_and(|resume| resume.number > source_target_number)
 }
 
-pub(super) fn require_loaded_boundary(
+fn require_loaded_boundary(
     chain_id: &str,
     loaded: &Marker,
     pre_load_target: &Marker,
@@ -27,6 +27,50 @@ pub(super) fn require_loaded_boundary(
         "{REDO_BOUNDARY_DIVERGENCE_PREFIX} for chain {chain_id} at block {}: loaded boundary hash {}, pre-load target hash {}; rerun the Ingest redo so it starts fresh and reloads this boundary under the current watch plan",
         pre_load_target.number, loaded.hash, pre_load_target.hash
     )))
+}
+
+pub(super) fn adopt_loaded_boundary(
+    chain_id: &str,
+    loaded: Marker,
+    pre_load_target: &Marker,
+) -> Result<Marker> {
+    require_loaded_boundary(chain_id, &loaded, pre_load_target)?;
+    Ok(loaded)
+}
+
+pub(super) fn completing_summary_from_boundary(
+    chain_id: &str,
+    progress: &[SourceProgress],
+    range_to: i64,
+) -> Result<Option<(Marker, Marker)>> {
+    let mut matching = progress
+        .iter()
+        .filter(|source| source.target.number == range_to);
+    let Some(first) = matching.next() else {
+        return Ok(None);
+    };
+    let first_marker = guarded_source_boundary(chain_id, first)?;
+    for source in matching {
+        let marker = guarded_source_boundary(chain_id, source)?;
+        if marker != first_marker {
+            return Err(IngestError::data_integrity(format!(
+                "{REDO_BOUNDARY_DIVERGENCE_PREFIX} for chain {chain_id} at block {range_to}: completing source {} boundary hash {}, completing source {} boundary hash {}; rerun the Ingest redo so it starts fresh and reloads this boundary under the current watch plan",
+                first.key, first_marker.hash, source.key, marker.hash
+            )));
+        }
+    }
+    Ok(Some((first_marker.clone(), first_marker.clone())))
+}
+
+fn guarded_source_boundary<'a>(chain_id: &str, source: &'a SourceProgress) -> Result<&'a Marker> {
+    let current = source.current.as_ref().ok_or_else(|| {
+        IngestError::data_integrity(format!(
+            "completed redo for chain {chain_id} produced no current boundary for source {}",
+            source.key
+        ))
+    })?;
+    require_loaded_boundary(chain_id, current, &source.target)?;
+    Ok(current)
 }
 
 pub(super) async fn reject_lineage_backed_boundary_change(
@@ -106,11 +150,18 @@ mod tests {
             Some(&resume),
             100
         ));
-        assert!(must_reload_completed_source_boundary(
+        assert!(!must_reload_completed_source_boundary(
             true,
             0,
             200,
             Some(&marker(100)),
+            100
+        ));
+        assert!(must_reload_completed_source_boundary(
+            true,
+            100,
+            200,
+            Some(&marker(101)),
             100
         ));
         assert!(!must_reload_completed_source_boundary(
@@ -120,5 +171,110 @@ mod tests {
             Some(&marker(100)),
             100
         ));
+    }
+
+    #[test]
+    fn a_reloaded_boundary_is_adopted_only_after_matching_the_pre_load_target() {
+        let loaded = marker(100);
+        let adopted = adopt_loaded_boundary("test-chain", loaded.clone(), &loaded)
+            .expect("an equal loaded marker must be adopted");
+        assert_eq!(adopted, loaded, "the load-returned marker must survive");
+
+        let error = adopt_loaded_boundary("test-chain", marker(101), &loaded)
+            .expect_err("a divergent loaded marker must fail closed");
+        assert_eq!(error.kind(), crate::ErrorKind::DataIntegrity);
+        assert!(
+            error.to_string().contains(REDO_BOUNDARY_DIVERGENCE_PREFIX),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn completing_summary_uses_the_source_that_owns_the_range_end() {
+        let range_end = marker(200);
+        let later_source_start = marker(300);
+        let summary = completing_summary_from_boundary(
+            "base-mainnet",
+            &[
+                SourceProgress {
+                    key: "base-coinbase".to_owned(),
+                    current: Some(range_end.clone()),
+                    target: range_end.clone(),
+                },
+                SourceProgress {
+                    key: "base-rpc".to_owned(),
+                    current: Some(later_source_start.clone()),
+                    target: later_source_start,
+                },
+            ],
+            range_end.number,
+        )
+        .expect("a guarded boundary source must produce the phase summary");
+
+        assert_eq!(summary, Some((range_end.clone(), range_end)));
+    }
+
+    #[test]
+    fn completing_summary_requires_all_range_end_sources_to_agree() {
+        let boundary = marker(200);
+        let matching = SourceProgress {
+            key: "base-coinbase".to_owned(),
+            current: Some(boundary.clone()),
+            target: boundary.clone(),
+        };
+        let summary = completing_summary_from_boundary(
+            "base-mainnet",
+            &[
+                matching.clone(),
+                SourceProgress {
+                    key: "base-rpc".to_owned(),
+                    current: Some(boundary.clone()),
+                    target: boundary.clone(),
+                },
+            ],
+            boundary.number,
+        )
+        .expect("matching seam sources must produce one boundary");
+        assert_eq!(summary, Some((boundary.clone(), boundary.clone())));
+
+        let divergent = Marker {
+            number: boundary.number,
+            hash: "other-hash".to_owned(),
+        };
+        let error = completing_summary_from_boundary(
+            "base-mainnet",
+            &[
+                matching,
+                SourceProgress {
+                    key: "base-rpc".to_owned(),
+                    current: Some(divergent.clone()),
+                    target: divergent,
+                },
+            ],
+            boundary.number,
+        )
+        .expect_err("different range-end source markers must fail closed");
+        assert_eq!(error.kind(), crate::ErrorKind::DataIntegrity);
+        assert!(
+            error.to_string().contains(REDO_BOUNDARY_DIVERGENCE_PREFIX),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn completing_summary_has_no_boundary_owner_below_every_source_start() {
+        assert_eq!(
+            completing_summary_from_boundary(
+                "test-chain",
+                &[SourceProgress {
+                    key: "future-rpc".to_owned(),
+                    current: None,
+                    target: marker(300),
+                }],
+                200,
+            )
+            .expect("the caller may use the no-owner fallback"),
+            None
+        );
     }
 }
