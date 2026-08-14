@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use anyhow::Result as AnyResult;
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
@@ -333,6 +336,90 @@ async fn a_completed_multi_source_redo_reloads_an_earlier_source_boundary() -> A
 }
 
 #[tokio::test]
+async fn an_equal_height_source_boundary_uses_durable_evidence_without_reloading() -> AnyResult<()>
+{
+    let database = intake_database("ingest_redo_equal_source_boundary", "base-mainnet").await?;
+    let endpoint = marker_resolution_endpoint().await?;
+    let engine = Engine::new(database.pool().clone());
+    let seam = crate::BASE_COINBASE_SEAM_BLOCK;
+
+    let outcome = engine
+        .run_batch(BatchRequest {
+            chain_id: "base-mainnet".to_owned(),
+            sources: vec![
+                SourceDescriptor {
+                    key: "base-coinbase".to_owned(),
+                    kind: "coinbase-sql".to_owned(),
+                    start_block: 0,
+                    endpoint: "coinbase-sql://must-not-be-reloaded".to_owned(),
+                },
+                SourceDescriptor {
+                    key: "base-rpc".to_owned(),
+                    kind: "rpc".to_owned(),
+                    start_block: seam,
+                    endpoint,
+                },
+            ],
+            cursors: Vec::new(),
+            redo_range: Some((seam - 255, seam + 1)),
+            resume_current: Some(Marker {
+                number: seam,
+                hash: marker_hash(seam),
+            }),
+        })
+        .await?;
+
+    let range_end = Marker {
+        number: seam + 1,
+        hash: marker_hash(seam + 1),
+    };
+    assert!(outcome.complete);
+    assert_eq!(outcome.current, range_end);
+    assert_eq!(outcome.target, range_end);
+    assert_eq!(
+        outcome.sources[0].current,
+        Some(Marker {
+            number: seam,
+            hash: marker_hash(seam),
+        })
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn a_completed_range_below_every_source_start_resolves_its_summary_once() -> AnyResult<()> {
+    let chain_id = "ingest-redo-no-range-end-owner";
+    let database = intake_database("ingest_redo_no_range_end_owner", chain_id).await?;
+    let (endpoint, range_end_resolutions) = changing_marker_endpoint(1).await?;
+    let engine = Engine::new(database.pool().clone());
+
+    let outcome = engine
+        .run_batch(BatchRequest {
+            chain_id: chain_id.to_owned(),
+            sources: vec![SourceDescriptor {
+                key: "future-rpc".to_owned(),
+                kind: "rpc".to_owned(),
+                start_block: 2,
+                endpoint,
+            }],
+            cursors: Vec::new(),
+            redo_range: Some((0, 1)),
+            resume_current: None,
+        })
+        .await?;
+
+    assert!(outcome.complete);
+    assert_eq!(outcome.current, outcome.target);
+    assert_eq!(outcome.current.number, 1);
+    assert_eq!(
+        range_end_resolutions.load(Ordering::SeqCst),
+        1,
+        "the no-owner summary must reuse one range-end resolution"
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn an_equal_height_redo_marker_uses_durable_lineage_evidence() -> AnyResult<()> {
     let chain_id = "ingest-redo-equal-boundary";
     let database = intake_database("ingest_redo_equal_boundary", chain_id).await?;
@@ -644,7 +731,62 @@ async fn marker_resolution_endpoint() -> AnyResult<String> {
     Ok(endpoint)
 }
 
+async fn changing_marker_endpoint(counted_number: i64) -> AnyResult<(String, Arc<AtomicUsize>)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("http://{}/", listener.local_addr()?);
+    let resolutions = Arc::new(AtomicUsize::new(0));
+    let server_resolutions = Arc::clone(&resolutions);
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let resolutions = Arc::clone(&server_resolutions);
+            tokio::spawn(async move {
+                while let Some(body) = read_request_body(&mut socket).await {
+                    let response = serde_json::from_str::<Value>(&body)
+                        .map_or(Value::Null, |request| {
+                            changing_marker_response(&request, counted_number, &resolutions)
+                        });
+                    let payload = response.to_string();
+                    let http = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    if socket.write_all(http.as_bytes()).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    Ok((endpoint, resolutions))
+}
+
+fn changing_marker_response(call: &Value, counted_number: i64, resolutions: &AtomicUsize) -> Value {
+    let mut response = marker_resolution_response(call);
+    let selector = call
+        .pointer("/params/0")
+        .and_then(Value::as_str)
+        .unwrap_or("0x0");
+    let number = selector
+        .strip_prefix("0x")
+        .and_then(|number| i64::from_str_radix(number, 16).ok())
+        .unwrap_or_default();
+    if call.get("method").and_then(Value::as_str) == Some("eth_getBlockByNumber")
+        && number == counted_number
+    {
+        let resolution = resolutions.fetch_add(1, Ordering::SeqCst) as i64;
+        response["result"]["hash"] = json!(marker_hash(number + resolution));
+    }
+    response
+}
+
 fn marker_resolution_response(call: &Value) -> Value {
+    if call.get("method").and_then(Value::as_str) == Some("eth_getLogs") {
+        return json!({
+            "jsonrpc": "2.0",
+            "id": call.get("id").cloned().unwrap_or_else(|| json!(1)),
+            "result": []
+        });
+    }
     let selector = call
         .pointer("/params/0")
         .and_then(Value::as_str)

@@ -73,6 +73,10 @@ The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
 runtime configuration is documented in
 [`production.md`](production.md) and [`development.md`](development.md).
+A directly launched API can configure its metrics listener with
+`BIGNAME_API_METRICS_BIND_ADDR`. The server Compose file instead fixes that
+container listener at `0.0.0.0:9464`; `BIGNAME_API_METRICS_HOST` and
+`BIGNAME_API_METRICS_PORT` change only its host port mapping.
 
 ## Phase-runner configuration
 
@@ -109,10 +113,10 @@ values reduce process memory and cause more indexed reads from
 through that read path. The setting does not change stored output or the
 [interpreter content hash](glossary.md#interpreter-content-hash).
 
-`BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR` configures the runner's Prometheus
-listener. It defaults to `127.0.0.1:9465` for a directly launched binary. The
-server Compose file sets the container listener to `0.0.0.0:9465` and publishes
-it on host loopback by default; `BIGNAME_PHASE_RUNNER_METRICS_HOST` and
+`BIGNAME_PHASE_RUNNER_METRICS_BIND_ADDR` configures the Prometheus listener for
+a directly launched runner and defaults to `127.0.0.1:9465`. The server Compose
+file fixes the container listener at `0.0.0.0:9465` and publishes it on host
+loopback by default; `BIGNAME_PHASE_RUNNER_METRICS_HOST` and
 `BIGNAME_PHASE_RUNNER_METRICS_PORT` change only that Compose port mapping. The
 listener serves `GET /metrics`. Every five seconds it reads phase progress,
 heartbeats, verification, unfinished repair work, and the published chain head

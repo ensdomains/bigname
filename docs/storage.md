@@ -414,8 +414,10 @@ boundary under the current [watch plan](glossary.md#watch-plan--watched-tuple)
 before cursor reconciliation can proceed. If that fresh hash has no retained
 lineage, a resume marker already at the redo end may instead let the phase
 summary adopt the fresh resolution; cursor reconciliation still refuses the
-lineage-lacking marker, so the next normal pass fails closed rather than
-publishing it.
+lineage-lacking marker, so it is never published as the live handoff or chain
+head. The next normal pass fails closed if the provider continues to report the
+divergent marker; if the provider returns to the durable fork, that pass can
+complete and publish the durable marker instead.
 This closes the last-boundary case; binding watch-plan evidence to facts at
 interior range heights remains tracked by issue #376.
 

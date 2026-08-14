@@ -335,13 +335,19 @@ impl Engine {
         let (current, target) = if let Some(summary) = guarded_summary {
             summary
         } else {
-            // A valid range can end below every source's declared start block, so no
-            // source owns the range end and no boundary was loaded for the summary.
             let provider = self.provider(&request.chain_id, primary).await?;
-            (
-                resolve_marker(&provider, to).await?,
-                resolve_marker(&provider, range_to).await?,
-            )
+            if complete {
+                // Library callers can supply a valid range that ends below every
+                // source's declared start block. The phase-runner admission path
+                // requires a source that owns the range end, so it cannot reach this.
+                let marker = resolve_marker(&provider, range_to).await?;
+                (marker.clone(), marker)
+            } else {
+                (
+                    resolve_marker(&provider, to).await?,
+                    resolve_marker(&provider, range_to).await?,
+                )
+            }
         };
         Ok(BatchOutcome {
             complete,
