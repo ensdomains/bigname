@@ -399,7 +399,7 @@ fn label_pairs() -> Vec<(String, String)> {
         .collect()
 }
 
-pub(super) async fn seed_serving_state(pool: &PgPool) -> Result<()> {
+pub(super) async fn normalize_serving_timestamps(pool: &PgPool) -> Result<()> {
     for table in ["name_current", "record_inventory_current"] {
         sqlx::query(&format!(
             "UPDATE {table}
@@ -416,6 +416,10 @@ pub(super) async fn seed_serving_state(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await?;
     }
+    Ok(())
+}
+
+pub(super) async fn seed_publication_state(pool: &PgPool) -> Result<()> {
     sqlx::query(
         "INSERT INTO chain_heads (chain_id, latest_block_hash, latest_block_number)
          VALUES ($1, $2, $3)",

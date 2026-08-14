@@ -67,8 +67,8 @@ The indexing half measures the existing Interpret and
 [Project](../glossary.md#projection) phase entrypoints. It requires a disposable
 database copy because all three operations write derived state:
 
-- one incremental Project tick at the selected head must finish within 1
-  second, the live poll interval, including canonical-head record hydration;
+- one published-head Project re-apply at the selected head must finish within
+  1 second, the live poll interval, including canonical-head record hydration;
 - a full Project rebuild must finish within 6 hours inside an operator-scheduled
   window of at least 8 hours, leaving at least 2 hours of headroom; the measured
   wall-clock includes canonical-head record hydration;
@@ -82,6 +82,14 @@ database copy because all three operations write derived state:
 - the Interpret walk must stay at or below 32 GiB peak RSS while using the
   configured 65,536-entry interpreter-state cache.
 
+The published-head re-apply starts from a copy whose selected head is already
+published, then measures Project deleting and rebuilding that head's affected
+projection rows. It is not a live head-minus-one to head transition. It does
+not observe first-time row insertion, newly affected-row discovery, or
+publication advancement; [issue #467](https://github.com/ensdomains/bigname/issues/467)
+tracks the missing production rewind capability needed to measure those costs.
+The checked-in budget remains attached to this narrower, reproducible quantity.
+
 The density check prevents a sparse historical range from producing a false
 green throughput result. The current-name floor prevents a staging-sized copy
 from producing a false-green full rebuild. The harness counts current names
@@ -89,13 +97,13 @@ before and after the rebuild, requires both totals to meet the floor, and
 records both totals and the floor. Immediately before the Interpret walk, the
 harness resets the Linux kernel's process high-water RSS counter to the current
 RSS through `/proc/self/clear_refs`; failure to reset it is a hard error. This
-excludes an earlier incremental Project tick or smoke-fixture setup while still
-including the process memory already resident when the walk starts. The 32 GiB
-cap uses the larger of the post-walk kernel `VmHWM` value and the existing 20 ms
-RSS sampler peak. The report records both inputs separately for diagnosis. It
-includes the bounded value cache introduced after the 94 GiB out-of-memory
-incident and the smaller protocol-state maps that remain resident; it is not
-merely the cache's estimated JSON size.
+excludes the earlier published-head Project re-apply or smoke-fixture setup
+while still including the process memory already resident when the walk starts.
+The 32 GiB cap uses the larger of the post-walk kernel `VmHWM` value and the
+existing 20 ms RSS sampler peak. The report records both inputs separately for
+diagnosis. It includes the bounded value cache introduced after the 94 GiB
+out-of-memory incident and the smaller protocol-state maps that remain
+resident; it is not merely the cache's estimated JSON size.
 
 The API half sends each Tier 1 and Tier 2 REST route in
 [`api-v2-routes.md`](../api-v2-routes.md) 2,000 requests per second for 60
@@ -105,10 +113,12 @@ address/name/relation combinations from the target projections, plus at least
 name claims. The resolver corpus is instead derived from the copy's active
 resolver [source-family](../glossary.md) manifests:
 `ens_v1_resolver_l1`, `ens_v2_resolver_l1`, and
-`basenames_base_resolver`. Before constructing requests, the gate independently
-selects the latest canonical `SourceManifestUpdated` event that Project could
-consume for each of those families at the copy's current head. It reconciles
-that event set in both directions with stored active manifest rows. A family
+`basenames_base_resolver`. Before constructing requests, the gate first selects
+the latest canonical `SourceManifestUpdated` event that Project could consume
+for each manifest ID at the copy's current head. Only after selecting the latest
+event per manifest does it scope reconciliation to those three resolver
+families. It reconciles that event set in both directions with stored active
+manifest rows. A family
 that Project admits from its latest event but whose stored row is missing or not
 active is red; a family deprecated in both places remains outside the workload.
 For every stored active row, the version, normalizer version, and payload must
@@ -128,10 +138,11 @@ row to both the manifest event and upgrade event. The row's recorded upgrade
 block number and hash must match that event, and its Project target cannot
 predate the upgrade. A valid empty declaration set is reportable as zero; a
 non-array value or an entry without an address is also preserved as a zero-count
-report row but makes the gate red as a malformed stored manifest payload. Every
-active resolver family must contribute at least one currently applicable,
-supported, API-visible request target; one healthy family cannot conceal zero
-ENSv2 coverage. The head must be a completed
+report row but makes the gate red as a malformed resolver-manifest payload. The
+failure names whether the stored row or the latest Project event supplied that
+payload. Every active resolver family must contribute at least one currently
+applicable, supported, API-visible request target; one healthy family cannot
+conceal zero ENSv2 coverage. The head must be a completed
 publication at the latest published/readable chain head under the
 API's [interpreter content hash](../glossary.md#interpreter-content-hash); a
 missing, running, stale, or invalidated head
@@ -194,11 +205,12 @@ run after this coverage was added may also show higher search tails: bare search
 derives the public namespace set for each request and revalidates it after the
 read, while the earlier workload measured explicit-namespace requests only.
 The lookup mix covers 1, 10, 100, 250, and 1,000 inputs per batch, with large
-batches weighted toward the tail. Timings end only after the complete response
-body has been read. The report contains achieved throughput, success rate, and
-p50, p95, and p99 for each route. Diagnostics, GraphQL compatibility, health, and documentation
-routes are outside this traffic gate; they retain their ordinary functional
-checks.
+batches weighted toward the tail. Each timing starts at its intended dispatch,
+before the request task is spawned, so executor queue delay is included. It ends
+only after the complete response body has been read. The report contains
+achieved throughput, success rate, and p50, p95, and p99 for each route.
+Diagnostics, GraphQL compatibility, health, and documentation routes are
+outside this traffic gate; they retain their ordinary functional checks.
 
 `POST /v2/lookup` keeps the latency-sensitive 5/10/25 ms p50/p95/p99 limits.
 Point reads use either 10/25/50 ms or 25/75/150 ms limits. List reads use
@@ -316,8 +328,8 @@ so a replacement connection is refused before it can query. The pool retries a
 refused replacement until its deadline, so a mid-run instance or marker
 mismatch may surface as a pool timeout rather than the startup check's specific
 message. It does not claim to detect an in-place logical restore that preserves
-the database instance identity. The incremental tick runs first, the Interpret
-redo runs second, and
+the database instance identity. The published-head Project re-apply runs first,
+the Interpret redo runs second, and
 the full Project rebuild runs last so the rebuilt projections match the
 interpreted copy. The report's pre/post opaque database identity fields are
 recorded evidence and a defense-in-depth comparison. In the supported stable

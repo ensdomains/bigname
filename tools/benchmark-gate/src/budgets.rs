@@ -46,7 +46,7 @@ pub struct BudgetsFile {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct GateBudgets {
-    pub project_tick_max_ms: u64,
+    pub project_head_reapply_max_ms: u64,
     pub project_rebuild_max_seconds: u64,
     pub interpret_min_blocks_per_hour: u64,
     pub interpret_max_peak_rss_mib: u64,
@@ -119,7 +119,10 @@ impl BudgetsFile {
 impl GateBudgets {
     fn validate(&self, profile: &str, expected_endpoints: &[&str]) -> Result<()> {
         for (name, value) in [
-            ("project_tick_max_ms", self.project_tick_max_ms),
+            (
+                "project_head_reapply_max_ms",
+                self.project_head_reapply_max_ms,
+            ),
             (
                 "project_rebuild_max_seconds",
                 self.project_rebuild_max_seconds,
@@ -213,7 +216,7 @@ mod tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/release-gate.toml");
         let budgets = BudgetsFile::load(&path).expect("checked-in budgets must be valid");
         assert_eq!(budgets.production.api_target_qps, 2_000);
-        assert_eq!(budgets.production.project_tick_max_ms, 1_000);
+        assert_eq!(budgets.production.project_head_reapply_max_ms, 1_000);
         assert_eq!(budgets.production.project_min_name_current_rows, 3_000_000);
         assert_eq!(budgets.production.api_min_name_current_rows, 3_000_000);
         assert_eq!(

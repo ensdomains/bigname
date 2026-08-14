@@ -22,6 +22,8 @@ use sqlx::PgPool;
 
 use crate::{budgets::GateBudgets, database};
 
+mod publication;
+
 const PROJECTION_NAME_COUNT_SQL: &str = "SELECT count(*) FROM name_current WHERE provenance ->> 'chain_id' = $1 AND support_status = 'supported'";
 const PROC_SELF_STATUS: &str = "/proc/self/status";
 const PROC_SELF_CLEAR_REFS: &str = "/proc/self/clear_refs";
@@ -52,9 +54,9 @@ pub struct IndexingReport {
     pub pre_rebuild_name_current_rows: u64,
     pub post_rebuild_name_current_rows: u64,
     pub min_name_current_rows: u64,
-    pub project_tick_ms: u128,
-    pub project_tick_max_ms: u64,
-    pub project_tick_hydration_updated_rows: usize,
+    pub project_head_reapply_ms: u128,
+    pub project_head_reapply_max_ms: u64,
+    pub project_head_reapply_hydration_updated_rows: usize,
     pub project_rebuild_seconds: f64,
     pub project_rebuild_max_seconds: u64,
     pub project_rebuild_completed: bool,
@@ -110,16 +112,18 @@ pub async fn run(
     .context("failed to count dense-era raw logs")?;
     let density = raw_logs as f64 * 1_000.0 / walk_blocks as f64;
 
-    let tick_from = input.head_block;
-    let resume = project_marker(pool, &input.chain_id, tick_from - 1).await?;
-    let tick_started = Instant::now();
-    let project_tick_hydration_updated_rows = tokio::time::timeout(
-        Duration::from_millis(budgets.project_tick_max_ms.saturating_mul(2)),
-        run_project_tick(pool, input, tick_from, resume),
+    // This re-applies the published head; a true head-1 rewind needs Project capability
+    // tracked by https://github.com/ensdomains/bigname/issues/467.
+    let reapply_from = input.head_block;
+    let resume = project_marker(pool, &input.chain_id, reapply_from - 1).await?;
+    let reapply_started = Instant::now();
+    let project_head_reapply_hydration_updated_rows = tokio::time::timeout(
+        Duration::from_millis(budgets.project_head_reapply_max_ms.saturating_mul(2)),
+        run_project_head_reapply(pool, input, reapply_from, resume),
     )
     .await
-    .context("incremental projection tick and canonical-head hydration exceeded twice their release budget")??;
-    let project_tick_ms = tick_started.elapsed().as_millis();
+    .context("published-head re-apply and hydration exceeded twice their budget")??;
+    let project_head_reapply_ms = reapply_started.elapsed().as_millis();
 
     let interpret_walk =
         run_interpret_walk(pool, input, budgets.interpret_state_cache_entries).await?;
@@ -158,10 +162,10 @@ pub async fn run(
             budgets.dense_min_raw_logs_per_1000_blocks
         ));
     }
-    if project_tick_ms > u128::from(budgets.project_tick_max_ms) {
+    if project_head_reapply_ms > u128::from(budgets.project_head_reapply_max_ms) {
         failures.push(format!(
-            "incremental projection tick took {project_tick_ms}ms; budget is {}ms",
-            budgets.project_tick_max_ms
+            "published-head projection re-apply took {project_head_reapply_ms}ms; budget is {}ms",
+            budgets.project_head_reapply_max_ms
         ));
     }
     if !project_rebuild_completed {
@@ -203,9 +207,9 @@ pub async fn run(
         pre_rebuild_name_current_rows: name_current_rows,
         post_rebuild_name_current_rows,
         min_name_current_rows: budgets.project_min_name_current_rows,
-        project_tick_ms,
-        project_tick_max_ms: budgets.project_tick_max_ms,
-        project_tick_hydration_updated_rows,
+        project_head_reapply_ms,
+        project_head_reapply_max_ms: budgets.project_head_reapply_max_ms,
+        project_head_reapply_hydration_updated_rows,
         project_rebuild_seconds,
         project_rebuild_max_seconds: budgets.project_rebuild_max_seconds,
         project_rebuild_completed,
@@ -253,9 +257,9 @@ fn scale_failure_report(
         pre_rebuild_name_current_rows: name_current_rows,
         post_rebuild_name_current_rows: 0,
         min_name_current_rows: budgets.project_min_name_current_rows,
-        project_tick_ms: 0,
-        project_tick_max_ms: budgets.project_tick_max_ms,
-        project_tick_hydration_updated_rows: 0,
+        project_head_reapply_ms: 0,
+        project_head_reapply_max_ms: budgets.project_head_reapply_max_ms,
+        project_head_reapply_hydration_updated_rows: 0,
         project_rebuild_seconds: 0.0,
         project_rebuild_max_seconds: budgets.project_rebuild_max_seconds,
         project_rebuild_completed: false,
@@ -273,27 +277,24 @@ fn scale_failure_report(
     }
 }
 
-async fn run_project_tick(
+async fn run_project_head_reapply(
     pool: &PgPool,
     input: &IndexingInput,
-    tick_from: i64,
+    reapply_from: i64,
     resume: ProjectMarker,
 ) -> Result<usize> {
     let outcome = ProjectEngine::new(pool.clone())
         .run_batch(ProjectRequest {
             chain_id: input.chain_id.clone(),
             target_block: input.head_block,
-            affected_from_block: tick_from,
+            affected_from_block: reapply_from,
             affected_to_block: input.head_block,
             resume_current: Some(resume),
             mode: ProjectMode::Normal,
         })
         .await
-        .context("incremental projection tick failed")?;
-    ensure!(
-        outcome.complete,
-        "incremental projection tick did not complete"
-    );
+        .context("published-head projection re-apply failed")?;
+    ensure!(outcome.complete, "published-head re-apply did not complete");
     hydrate_project_head(pool, input, &outcome.current).await
 }
 
@@ -418,8 +419,9 @@ async fn validate_input(pool: &PgPool, input: &IndexingInput, budgets: &GateBudg
     );
     ensure!(
         input.head_block > 0,
-        "head block must be greater than zero for an incremental tick"
+        "head block must be greater than zero for a published-head projection re-apply"
     );
+    publication::require_published_head(pool, &input.chain_id, input.head_block).await?;
     ensure!(
         input.walk_from_block >= 0 && input.walk_to_block >= input.walk_from_block,
         "invalid Interpret walk range"
@@ -447,23 +449,6 @@ async fn validate_input(pool: &PgPool, input: &IndexingInput, budgets: &GateBudg
         canonical_blocks == walk_blocks,
         "Interpret walk requires one canonical lineage block at every height; found {canonical_blocks} of {walk_blocks}"
     );
-    if input.hydration_rpc_urls.is_some() {
-        let selected_is_current_head: bool = sqlx::query_scalar(
-            "SELECT EXISTS (
-                 SELECT 1 FROM chain_heads
-                 WHERE chain_id = $1 AND latest_block_number = $2
-             )",
-        )
-        .bind(&input.chain_id)
-        .bind(input.head_block)
-        .fetch_one(pool)
-        .await
-        .context("failed to validate the selected canonical hydration head")?;
-        ensure!(
-            selected_is_current_head,
-            "selected rebuild head is not chain_heads.latest_block_number"
-        );
-    }
     Ok(())
 }
 
@@ -475,7 +460,7 @@ async fn project_marker(pool: &PgPool, chain_id: &str, block_number: i64) -> Res
     .bind(block_number)
     .fetch_one(pool)
     .await
-    .context("failed to load incremental projection resume marker")?;
+    .context("failed to load published-head re-apply resume marker")?;
     Ok(ProjectMarker {
         number: block_number,
         hash: block_hash,
@@ -550,6 +535,9 @@ fn database_instance_identity_failures(preflight: &str, postflight: &str) -> Vec
         vec!["database instance identity changed during the indexing benchmark".to_owned()]
     }
 }
+
+#[cfg(test)]
+mod publication_tests;
 
 #[cfg(test)]
 mod tests {
@@ -690,7 +678,7 @@ mod tests {
         assert_eq!(report.pre_rebuild_name_current_rows, 50_000);
         assert_eq!(report.post_rebuild_name_current_rows, 0);
         assert_eq!(report.min_name_current_rows, 3_000_000);
-        assert_eq!(report.project_tick_ms, 0);
+        assert_eq!(report.project_head_reapply_ms, 0);
     }
 
     #[test]

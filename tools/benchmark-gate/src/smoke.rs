@@ -70,6 +70,7 @@ async fn run_in_scratch(
     let writer = smoke_writer_pool(scratch_url).await?;
     fixture::seed(&writer).await?;
     prepare_existing_projection(&writer).await?;
+    fixture::seed_publication_state(&writer).await?;
 
     let indexing = indexing::run(
         &writer,
@@ -83,7 +84,7 @@ async fn run_in_scratch(
         budgets,
     )
     .await?;
-    fixture::seed_serving_state(&writer).await?;
+    fixture::normalize_serving_timestamps(&writer).await?;
 
     let (api_addr, metrics_addr) = reserve_addresses().await?;
     let mut api = spawn_api(api_binary, scratch_url, &api_addr, &metrics_addr)?;
@@ -260,6 +261,7 @@ mod tests {
         let writer = smoke_writer_pool(&scratch_url).await.unwrap();
         fixture::seed(&writer).await.unwrap();
         prepare_existing_projection(&writer).await.unwrap();
+        fixture::seed_publication_state(&writer).await.unwrap();
         let budgets = BudgetsFile::load(
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/release-gate.toml"),
         )

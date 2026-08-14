@@ -1803,6 +1803,128 @@ async fn null_resolver_contracts_report_a_zero_declared_family() {
     database.cleanup().await.unwrap();
 }
 
+#[tokio::test]
+async fn malformed_event_only_resolver_manifest_names_its_actual_authority() {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("benchmark_event_only_malformed_resolver").pool_max_connections(1),
+    )
+    .await
+    .unwrap();
+    tests::install_name_visibility_schema(database.pool()).await;
+    let manifest = CheckedInResolverManifest {
+        namespace: "ens".to_owned(),
+        chain_id: "ethereum-mainnet".to_owned(),
+        source_family: "ens_v1_resolver_l1".to_owned(),
+        payload: serde_json::json!({"contracts": null}),
+        addresses: Vec::new(),
+    };
+    insert_resolver_manifest(database.pool(), &manifest).await;
+    sqlx::query("UPDATE manifest_versions SET rollout_status = 'deprecated'")
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+    let coverage = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+    let malformed = coverage
+        .failures
+        .iter()
+        .find(|failure| failure.contains("contracts is absent or is not an array"))
+        .expect("the malformed event-side manifest must be reported");
+
+    assert!(
+        malformed.contains("latest Project manifest event"),
+        "{malformed}"
+    );
+    assert!(
+        !malformed.contains("active stored resolver manifest"),
+        "{malformed}"
+    );
+    database.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn malformed_latest_event_payload_is_not_attributed_to_the_stored_row() {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("benchmark_malformed_latest_event_authority")
+            .pool_max_connections(1),
+    )
+    .await
+    .unwrap();
+    tests::install_name_visibility_schema(database.pool()).await;
+    let manifest = CheckedInResolverManifest {
+        namespace: "ens".to_owned(),
+        chain_id: "ethereum-mainnet".to_owned(),
+        source_family: "ens_v1_resolver_l1".to_owned(),
+        payload: serde_json::json!({"contracts": []}),
+        addresses: Vec::new(),
+    };
+    insert_resolver_manifest(database.pool(), &manifest).await;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET after_state = jsonb_set(
+             after_state,
+             '{manifest_payload}',
+             '{\"contracts\": null}'::jsonb
+         )",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+
+    let coverage = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+    let malformed = coverage
+        .failures
+        .iter()
+        .find(|failure| failure.contains("contracts is absent or is not an array"))
+        .expect("the malformed latest-event payload must be reported");
+
+    assert!(
+        malformed.contains("latest Project manifest event"),
+        "{malformed}"
+    );
+    assert!(
+        !malformed.contains("active stored resolver manifest"),
+        "{malformed}"
+    );
+    database.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn malformed_resolver_failures_remain_distinct_per_manifest() {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("benchmark_distinct_malformed_resolvers").pool_max_connections(1),
+    )
+    .await
+    .unwrap();
+    tests::install_name_visibility_schema(database.pool()).await;
+    let manifest = CheckedInResolverManifest {
+        namespace: "ens".to_owned(),
+        chain_id: "ethereum-mainnet".to_owned(),
+        source_family: "ens_v1_resolver_l1".to_owned(),
+        payload: serde_json::json!({"contracts": null}),
+        addresses: Vec::new(),
+    };
+    insert_resolver_manifest(database.pool(), &manifest).await;
+    insert_resolver_manifest(database.pool(), &manifest).await;
+
+    let coverage = super::resolver_coverage::load(database.pool())
+        .await
+        .unwrap();
+    let malformed = coverage
+        .failures
+        .iter()
+        .filter(|failure| failure.contains("contracts is absent or is not an array"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(malformed.len(), 2, "{:?}", coverage.failures);
+    assert_ne!(malformed[0], malformed[1]);
+    database.cleanup().await.unwrap();
+}
+
 async fn seeded_database(label: &str) -> TestDatabase {
     let database = TestDatabase::create(TestDatabaseConfig::new(label).pool_max_connections(1))
         .await

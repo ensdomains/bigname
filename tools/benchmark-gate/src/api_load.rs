@@ -385,7 +385,8 @@ async fn execute_window(
         for _ in 0..batch {
             let request = requests[sent % requests.len()].clone();
             let client = client.clone();
-            tasks.spawn(async move { sample_request(&client, &request).await });
+            let scheduled_start = Instant::now();
+            tasks.spawn(async move { sample_request(&client, &request, scheduled_start).await });
             sent += 1;
         }
         while let Some(joined) = tasks.try_join_next() {
@@ -505,14 +506,17 @@ async fn send(client: &Client, request: &RequestSpec) -> Result<reqwest::Respons
     builder.send().await.context("API benchmark request failed")
 }
 
-async fn sample_request(client: &Client, request: &RequestSpec) -> Sample {
-    let started = Instant::now();
+async fn sample_request(
+    client: &Client,
+    request: &RequestSpec,
+    scheduled_start: Instant,
+) -> Sample {
     let (elapsed_micros, success, outcome) = match send(client, request).await {
         Ok(response) => {
             let status = response.status();
             match response.bytes().await {
                 Ok(body) => {
-                    let elapsed_micros = started.elapsed().as_micros();
+                    let elapsed_micros = scheduled_start.elapsed().as_micros();
                     let success = status.is_success();
                     let mut outcome = status.as_u16().to_string();
                     if !success
@@ -538,14 +542,14 @@ async fn sample_request(client: &Client, request: &RequestSpec) -> Sample {
                     (elapsed_micros, success, outcome)
                 }
                 Err(_) => (
-                    started.elapsed().as_micros(),
+                    scheduled_start.elapsed().as_micros(),
                     false,
                     "response_body_error".to_owned(),
                 ),
             }
         }
         Err(_) => (
-            started.elapsed().as_micros(),
+            scheduled_start.elapsed().as_micros(),
             false,
             "transport_error".to_owned(),
         ),
@@ -599,6 +603,8 @@ mod tests {
     use std::path::Path;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use workload::{get, post};
+
+    mod timing;
 
     #[test]
     fn percentile_uses_nearest_rank() {
@@ -920,29 +926,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn response_timing_includes_the_complete_body() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0u8; 1024];
-            let _ = stream.read(&mut request).await.unwrap();
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n")
-                .await
-                .unwrap();
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            stream.write_all(b"done").await.unwrap();
-        });
-        let base = normalized_base_url(&format!("http://{address}")).unwrap();
-        let request = get(&base, &["slow"], &[]).unwrap();
-        let sample = sample_request(&Client::new(), &request).await;
-        server.await.unwrap();
-        assert!(sample.success);
-        assert!(sample.elapsed_micros >= 40_000);
-    }
-
-    #[tokio::test]
     async fn timed_records_sample_classifies_an_all_not_found_response_as_empty() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -960,7 +943,7 @@ mod tests {
         let base = normalized_base_url(&format!("http://{address}")).unwrap();
         let request = get(&base, &["v2", "names", "empty.eth", "records"], &[]).unwrap();
 
-        let sample = sample_request(&Client::new(), &request).await;
+        let sample = sample_request(&Client::new(), &request, Instant::now()).await;
         server.await.unwrap();
 
         assert!(sample.success);

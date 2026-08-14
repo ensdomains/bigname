@@ -224,9 +224,9 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS permissions_current_resource_wrapper_exp
 ```
 
 Record this manual index step, its start/end times, validity check, and the
-pre/post Project tick measurements in the release record for the shared
-re-derivation boundary, alongside the complete artifact set. These indexes are
-additive; rollback may leave them in place.
+pre/post published-head Project re-apply measurements in the release record for
+the shared re-derivation boundary, alongside the complete artifact set. These
+indexes are additive; rollback may leave them in place.
 
 1. stop the API and phase runner;
 2. take and verify a database backup;

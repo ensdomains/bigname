@@ -3,7 +3,7 @@ version = 1
 # Production release policy. These values are the release gate, not examples.
 # Changing one requires the same review as changing the harness that enforces it.
 [production]
-project_tick_max_ms = 1000
+project_head_reapply_max_ms = 1000
 project_rebuild_max_seconds = 21600
 interpret_min_blocks_per_hour = 500000
 interpret_max_peak_rss_mib = 32768
@@ -113,7 +113,7 @@ p99_ms = 25
 # The smoke profile checks the production harness end to end against an isolated
 # database created inside scripts/test-db. It is not production performance evidence.
 [smoke]
-project_tick_max_ms = 5000
+project_head_reapply_max_ms = 5000
 project_rebuild_max_seconds = 30
 interpret_min_blocks_per_hour = 1
 interpret_max_peak_rss_mib = 2048
