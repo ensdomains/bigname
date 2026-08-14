@@ -249,6 +249,7 @@ impl Engine {
         let to = from.map_or(range_to, |from| {
             from.saturating_add(BLOCKS_PER_BATCH - 1).min(range_to)
         });
+        let complete = to >= range_to;
         let mut written_bytes = 0u64;
         let mut progress = Vec::with_capacity(request.sources.len());
 
@@ -273,6 +274,34 @@ impl Engine {
                     )
                     .await?;
                 written_bytes = written_bytes.saturating_add(loaded.estimated_write_bytes);
+                if window_to == source_target_number {
+                    redo::require_loaded_boundary(
+                        &request.chain_id,
+                        &loaded.marker,
+                        &source_target,
+                    )?;
+                }
+                Some(loaded.marker)
+            } else if to >= source_target_number
+                && redo::must_reload_completed_source_boundary(
+                    complete,
+                    range_from,
+                    range_to,
+                    request.resume_current.as_ref(),
+                    source_target_number,
+                )
+            {
+                let loaded = self
+                    .load_window(
+                        &request.chain_id,
+                        source,
+                        &request.sources,
+                        source_target_number,
+                        source_target_number,
+                    )
+                    .await?;
+                written_bytes = written_bytes.saturating_add(loaded.estimated_write_bytes);
+                redo::require_loaded_boundary(&request.chain_id, &loaded.marker, &source_target)?;
                 Some(loaded.marker)
             } else if to >= source_target_number {
                 redo::reject_lineage_backed_boundary_change(
@@ -296,16 +325,31 @@ impl Engine {
                 target: source_target,
             });
         }
-        let complete = to >= range_to;
         let primary = primary_source(&request.sources)?;
-        let provider = self.provider(&request.chain_id, primary).await?;
-        let current = resolve_marker(&provider, to).await?;
-        let target = resolve_marker(&provider, range_to).await?;
-        if complete {
-            for source in &mut progress {
-                source.current = Some(source.target.clone());
-            }
-        }
+        let primary_progress = progress
+            .iter()
+            .find(|source| source.key == primary.key)
+            .ok_or_else(|| {
+                IngestError::data_integrity(format!(
+                    "redo for chain {} produced no progress for primary source {}",
+                    request.chain_id, primary.key
+                ))
+            })?;
+        let (current, target) = if complete && redo_source_target(primary, range_to) == range_to {
+            let current = primary_progress.current.clone().ok_or_else(|| {
+                IngestError::data_integrity(format!(
+                    "completed redo for chain {} produced no current boundary for primary source {}",
+                    request.chain_id, primary.key
+                ))
+            })?;
+            (current, primary_progress.target.clone())
+        } else {
+            let provider = self.provider(&request.chain_id, primary).await?;
+            (
+                resolve_marker(&provider, to).await?,
+                resolve_marker(&provider, range_to).await?,
+            )
+        };
         Ok(BatchOutcome {
             complete,
             current,

@@ -383,13 +383,20 @@ live handoff when it changes an active Ingest row to `completed`; this makes a
 later re-add resume from the preserved source cursors even if an older runner
 stopped between its formerly separate summary and cursor writes.
 
-When a bounded Ingest redo replaces the hash at a source cursor's latest stored
-height, and the per-source progress proves that height was inside the completed
-redo range, redo completion updates that cursor hash only when matching block
-lineage already records that height and hash. The cursor update and phase
-summary share one transaction. The previous live handoff remains in place until
-the next normal Ingest pass confirms the reconciled cursor and publishes the
-replacement handoff.
+When a bounded Ingest redo loads a window through a source's boundary, its
+completion progress and phase summary use the boundary marker returned by that
+load. The marker must match the source target resolved before the load; a
+different hash at the same boundary height fails the redo instead of
+substituting the pre-load target for the loaded marker. In a multi-source redo,
+the final batch reloads an in-range source boundary below the overall redo end
+when durable phase progress has reached or passed it, so its completion evidence
+also comes from the current
+[watch plan](glossary.md#watch-plan--watched-tuple). When the per-source progress
+proves that boundary was inside the completed redo range, redo completion
+updates the source cursor only when matching block lineage already records that
+height and hash. The cursor update and phase summary share one transaction. The
+previous live handoff remains in place until the next normal Ingest pass
+confirms the reconciled cursor and publishes the replacement handoff.
 
 Retained lineage alone does not authorize that reconciliation when an
 interrupted redo has already advanced past its last boundary. If the provider

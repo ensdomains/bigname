@@ -2,8 +2,9 @@
 mod support;
 
 use std::{
+    collections::VecDeque,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -744,6 +745,274 @@ async fn resumed_ingest_redo_reloads_a_divergent_boundary_under_the_current_watc
             Some(BLOCK_1_SECOND_REORG.to_owned()),
         )
     );
+    server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn fresh_ingest_redo_rejects_a_loaded_boundary_that_diverges_from_target() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_ingest_redo_loaded_boundary").await?;
+    let chain_id = "rpc-ingest-redo-loaded-boundary";
+    seed_watch_set(scratch.pool(), chain_id).await?;
+    let (endpoint, rpc_state, server) = spawn_watch_plan_boundary_rpc().await?;
+    let configured_chain = ChainConfig::new(
+        chain_id,
+        vec![SourceConfig::new(
+            chain_id,
+            "rpc",
+            "rpc",
+            SeedBasis::NewSignatureRange,
+            0,
+            endpoint,
+        )?],
+        false,
+    )?;
+    let runner = production_ingest_runner(scratch.runner(), "redo-loaded-boundary-runner")?;
+
+    rpc_state.hash_epoch.store(2, Ordering::SeqCst);
+    run_until_ingest_handoff(
+        runner.clone(),
+        configured_chain.clone(),
+        scratch.pool(),
+        BLOCK_1_SECOND_REORG,
+    )
+    .await?;
+    assert_eq!(
+        raw_log_count(scratch.pool(), chain_id, BLOCK_1_SECOND_REORG, CONTRACT).await?,
+        1
+    );
+    assert_eq!(
+        raw_log_count(
+            scratch.pool(),
+            chain_id,
+            BLOCK_1_SECOND_REORG,
+            SIBLING_CONTRACT,
+        )
+        .await?,
+        0
+    );
+
+    rpc_state.hash_epoch.store(0, Ordering::SeqCst);
+    runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    run_until_ingest_handoff(
+        runner.clone(),
+        configured_chain.clone(),
+        scratch.pool(),
+        BLOCK_1,
+    )
+    .await?;
+    widen_watch_set(scratch.pool(), chain_id).await?;
+
+    rpc_state.script_boundary_epochs([2, 1, 1, 2, 2]);
+    rpc_state.boundary_log_calls.store(0, Ordering::SeqCst);
+    let redo_result = runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await;
+    let state_after_redo = load_redo_and_cursor_hashes(scratch.pool(), chain_id).await?;
+    let scripted_calls_after_redo = 5 - rpc_state.scripted_epochs_remaining();
+    let b_fact_after_redo =
+        raw_log_count(scratch.pool(), chain_id, BLOCK_1_REORG, SIBLING_CONTRACT).await?;
+    let c_fact_after_redo = raw_log_count(
+        scratch.pool(),
+        chain_id,
+        BLOCK_1_SECOND_REORG,
+        SIBLING_CONTRACT,
+    )
+    .await?;
+    if redo_result.is_ok() {
+        run_until_ingest_handoff(
+            runner.clone(),
+            configured_chain.clone(),
+            scratch.pool(),
+            BLOCK_1_SECOND_REORG,
+        )
+        .await?;
+    }
+    let published_after_redo: (i64, String) = sqlx::query_as(
+        "SELECT latest_block_number, latest_block_hash
+         FROM chain_heads WHERE chain_id = $1",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    let redo_error = redo_result.expect_err(&format!(
+        "redo reported the pre-load target instead of the loaded boundary: \
+         state={state_after_redo:?}, scripted_boundary_calls={scripted_calls_after_redo}, \
+         loaded_b_fact={b_fact_after_redo}, reported_c_fact={c_fact_after_redo}, \
+         published={published_after_redo:?}"
+    ));
+    assert_eq!(redo_error.kind(), ErrorKind::DataIntegrity);
+    let message = redo_error.to_string();
+    for expected in [
+        chain_id,
+        "block 1",
+        BLOCK_1_REORG,
+        BLOCK_1_SECOND_REORG,
+        "rerun the Ingest redo",
+        "current watch plan",
+    ] {
+        assert!(
+            message.contains(expected),
+            "missing {expected:?} in {message}"
+        );
+    }
+    assert_eq!(scripted_calls_after_redo, 3);
+    assert_eq!(
+        state_after_redo,
+        (true, None, None, Some(BLOCK_1.to_owned()))
+    );
+    assert_eq!(published_after_redo, (1, BLOCK_1.to_owned()));
+    assert_eq!(b_fact_after_redo, 1);
+    assert_eq!(c_fact_after_redo, 0);
+
+    rpc_state.clear_boundary_script();
+    rpc_state.hash_epoch.store(2, Ordering::SeqCst);
+    rpc_state.boundary_log_calls.store(0, Ordering::SeqCst);
+    runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert!(rpc_state.boundary_log_calls.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        raw_log_count(
+            scratch.pool(),
+            chain_id,
+            BLOCK_1_SECOND_REORG,
+            SIBLING_CONTRACT,
+        )
+        .await?,
+        1,
+        "the consistent rerun must store the widened fact for the boundary it reports"
+    );
+    run_until_ingest_handoff(
+        runner,
+        configured_chain,
+        scratch.pool(),
+        BLOCK_1_SECOND_REORG,
+    )
+    .await?;
+    assert_eq!(
+        load_ingest_boundary_state(scratch.pool(), chain_id).await?,
+        (
+            "completed".to_owned(),
+            Some(BLOCK_1_SECOND_REORG.to_owned()),
+            Some(BLOCK_1_SECOND_REORG.to_owned()),
+            Some(BLOCK_1_SECOND_REORG.to_owned()),
+            2,
+            Some(1),
+            Some(1),
+            Some(BLOCK_1_SECOND_REORG.to_owned()),
+        )
+    );
+    server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn fresh_ingest_redo_reports_the_boundary_returned_by_the_load() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_ingest_redo_loaded_report").await?;
+    let chain_id = "rpc-ingest-redo-loaded-report";
+    seed_watch_set(scratch.pool(), chain_id).await?;
+    let (endpoint, rpc_state, server) = spawn_watch_plan_boundary_rpc().await?;
+    let configured_chain = ChainConfig::new(
+        chain_id,
+        vec![SourceConfig::new(
+            chain_id,
+            "rpc",
+            "rpc",
+            SeedBasis::NewSignatureRange,
+            0,
+            endpoint,
+        )?],
+        false,
+    )?;
+    let runner = production_ingest_runner(scratch.runner(), "redo-loaded-report-runner")?;
+
+    rpc_state.hash_epoch.store(2, Ordering::SeqCst);
+    run_until_ingest_handoff(
+        runner.clone(),
+        configured_chain.clone(),
+        scratch.pool(),
+        BLOCK_1_SECOND_REORG,
+    )
+    .await?;
+    assert_eq!(
+        raw_log_count(
+            scratch.pool(),
+            chain_id,
+            BLOCK_1_SECOND_REORG,
+            SIBLING_CONTRACT,
+        )
+        .await?,
+        0
+    );
+
+    rpc_state.hash_epoch.store(0, Ordering::SeqCst);
+    runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    widen_watch_set(scratch.pool(), chain_id).await?;
+
+    rpc_state.script_boundary_epochs([1, 1, 1, 2, 2]);
+    runner
+        .redo(
+            &configured_chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(1, 1)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert_eq!(
+        load_ingest_boundary_state(scratch.pool(), chain_id).await?,
+        (
+            "completed".to_owned(),
+            Some(BLOCK_1_REORG.to_owned()),
+            Some(BLOCK_1_REORG.to_owned()),
+            Some(BLOCK_1_SECOND_REORG.to_owned()),
+            2,
+            Some(1),
+            Some(1),
+            Some(BLOCK_1_REORG.to_owned()),
+        ),
+        "redo completion must report the marker returned by its boundary load"
+    );
+    assert_eq!(rpc_state.scripted_epochs_remaining(), 2);
+    assert_eq!(
+        raw_log_count(scratch.pool(), chain_id, BLOCK_1_REORG, SIBLING_CONTRACT).await?,
+        1
+    );
+    assert_eq!(
+        raw_log_count(
+            scratch.pool(),
+            chain_id,
+            BLOCK_1_SECOND_REORG,
+            SIBLING_CONTRACT,
+        )
+        .await?,
+        0
+    );
+
     server.abort();
     scratch.cleanup().await
 }
@@ -2712,6 +2981,47 @@ async fn spawn_hash_switchable_rpc() -> Result<(String, Arc<AtomicU8>, tokio::ta
 struct WatchPlanBoundaryRpcState {
     hash_epoch: Arc<AtomicU8>,
     boundary_log_calls: Arc<AtomicUsize>,
+    scripted_boundary_epochs: Arc<Mutex<VecDeque<u8>>>,
+}
+
+impl WatchPlanBoundaryRpcState {
+    fn script_boundary_epochs(&self, epochs: impl IntoIterator<Item = u8>) {
+        *self
+            .scripted_boundary_epochs
+            .lock()
+            .expect("boundary epoch script lock") = epochs.into_iter().collect();
+    }
+
+    fn scripted_epochs_remaining(&self) -> usize {
+        self.scripted_boundary_epochs
+            .lock()
+            .expect("boundary epoch script lock")
+            .len()
+    }
+
+    fn clear_boundary_script(&self) {
+        self.scripted_boundary_epochs
+            .lock()
+            .expect("boundary epoch script lock")
+            .clear();
+    }
+
+    fn response_epoch(&self, request: &Value) -> u8 {
+        let fallback = self.hash_epoch.load(Ordering::SeqCst);
+        let boundary_number = request["method"] == "eth_getBlockByNumber"
+            && request.pointer("/params/0").and_then(Value::as_str) == Some("0x1");
+        if !boundary_number {
+            return fallback;
+        }
+        let epoch = self
+            .scripted_boundary_epochs
+            .lock()
+            .expect("boundary epoch script lock")
+            .pop_front()
+            .unwrap_or(fallback);
+        self.hash_epoch.store(epoch, Ordering::SeqCst);
+        epoch
+    }
 }
 
 async fn spawn_watch_plan_boundary_rpc() -> Result<(
@@ -2724,6 +3034,7 @@ async fn spawn_watch_plan_boundary_rpc() -> Result<(
     let state = WatchPlanBoundaryRpcState {
         hash_epoch: Arc::new(AtomicU8::new(0)),
         boundary_log_calls: Arc::new(AtomicUsize::new(0)),
+        scripted_boundary_epochs: Arc::new(Mutex::new(VecDeque::new())),
     };
     let server_state = state.clone();
     let server = tokio::spawn(async move {
@@ -2743,25 +3054,19 @@ async fn watch_plan_boundary_rpc(
     State(state): State<WatchPlanBoundaryRpcState>,
     Json(request): Json<Value>,
 ) -> Json<Value> {
-    let hash_epoch = state.hash_epoch.load(Ordering::SeqCst);
     if let Some(requests) = request.as_array() {
         return Json(Value::Array(
             requests
                 .iter()
-                .map(|request| watch_plan_boundary_rpc_response(request, hash_epoch, &state))
+                .map(|request| watch_plan_boundary_rpc_response(request, &state))
                 .collect(),
         ));
     }
-    Json(watch_plan_boundary_rpc_response(
-        &request, hash_epoch, &state,
-    ))
+    Json(watch_plan_boundary_rpc_response(&request, &state))
 }
 
-fn watch_plan_boundary_rpc_response(
-    request: &Value,
-    hash_epoch: u8,
-    state: &WatchPlanBoundaryRpcState,
-) -> Value {
+fn watch_plan_boundary_rpc_response(request: &Value, state: &WatchPlanBoundaryRpcState) -> Value {
+    let hash_epoch = state.response_epoch(request);
     let mut response = hash_switchable_rpc_response(request, hash_epoch);
     let method = request["method"].as_str().unwrap_or_default();
     let epoch_boundary = match hash_epoch {

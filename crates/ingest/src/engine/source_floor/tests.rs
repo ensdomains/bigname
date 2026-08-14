@@ -288,6 +288,50 @@ async fn a_warehouse_source_is_planned_without_asking_it_for_a_floor() -> AnyRes
     database.cleanup().await
 }
 
+#[tokio::test]
+async fn a_completed_multi_source_redo_reloads_an_earlier_source_boundary() -> AnyResult<()> {
+    let database = intake_database("ingest_redo_earlier_source_boundary", "base-mainnet").await?;
+    let endpoint = marker_resolution_endpoint().await?;
+    let engine = Engine::new(database.pool().clone());
+    let seam = crate::BASE_COINBASE_SEAM_BLOCK;
+
+    let error = engine
+        .run_batch(BatchRequest {
+            chain_id: "base-mainnet".to_owned(),
+            sources: vec![
+                SourceDescriptor {
+                    key: "base-coinbase".to_owned(),
+                    kind: "coinbase-sql".to_owned(),
+                    start_block: 0,
+                    endpoint: "coinbase-sql://must-be-reloaded".to_owned(),
+                },
+                SourceDescriptor {
+                    key: "base-rpc".to_owned(),
+                    kind: "rpc".to_owned(),
+                    start_block: seam,
+                    endpoint,
+                },
+            ],
+            cursors: Vec::new(),
+            redo_range: Some((seam - 255, seam + 1)),
+            resume_current: Some(Marker {
+                number: seam,
+                hash: marker_hash(seam),
+            }),
+        })
+        .await
+        .expect_err("the final batch must attempt to reload the earlier Coinbase boundary");
+
+    assert_eq!(error.kind(), ErrorKind::Configuration);
+    assert!(
+        error
+            .to_string()
+            .contains("failed to configure Coinbase SQL source"),
+        "the observed error must come from entering the boundary load: {error}"
+    );
+    database.cleanup().await
+}
+
 #[cfg(feature = "reth-db")]
 #[tokio::test]
 async fn planning_reads_the_floor_from_the_configured_datadir() -> AnyResult<()> {
@@ -407,6 +451,10 @@ fn a_marker_at_the_top_of_the_block_space_plans_nothing() {
 }
 
 async fn single_block_database(name: &str) -> AnyResult<TestDatabase> {
+    intake_database(name, RACE_CHAIN).await
+}
+
+async fn intake_database(name: &str, chain_id: &str) -> AnyResult<TestDatabase> {
     let database = TestDatabase::create(TestDatabaseConfig::new(name)).await?;
     for schema in [
         include_str!("../../../../../schema-v2/baseline/01_chain.sql"),
@@ -427,12 +475,12 @@ async fn single_block_database(name: &str) -> AnyResult<TestDatabase> {
                 'ensip15@ens-normalize-0.1.1', 'fixture.toml', $2)
         ",
     )
-    .bind(RACE_CHAIN)
+    .bind(chain_id)
     .bind(json!({
         "manifest_version": 1,
         "namespace": "test",
         "source_family": "test_floor",
-        "chain": RACE_CHAIN,
+        "chain": chain_id,
         "deployment_epoch": "fixture",
         "rollout_status": "active",
         "normalizer_version": "ensip15@ens-normalize-0.1.1",
@@ -462,7 +510,7 @@ async fn single_block_database(name: &str) -> AnyResult<TestDatabase> {
     .await?;
     let manifest_id: i64 =
         sqlx::query_scalar("SELECT manifest_id FROM manifest_versions WHERE chain_id = $1")
-            .bind(RACE_CHAIN)
+            .bind(chain_id)
             .fetch_one(database.pool())
             .await?;
     let contract_id = uuid::Uuid::new_v4();
@@ -475,7 +523,7 @@ async fn single_block_database(name: &str) -> AnyResult<TestDatabase> {
         ",
     )
     .bind(contract_id)
-    .bind(RACE_CHAIN)
+    .bind(chain_id)
     .execute(database.pool())
     .await?;
     sqlx::query(
@@ -489,7 +537,7 @@ async fn single_block_database(name: &str) -> AnyResult<TestDatabase> {
         ",
     )
     .bind(manifest_id)
-    .bind(RACE_CHAIN)
+    .bind(chain_id)
     .bind(contract_id)
     .bind(RACE_ADDRESS)
     .execute(database.pool())
@@ -504,12 +552,68 @@ async fn single_block_database(name: &str) -> AnyResult<TestDatabase> {
         ",
     )
     .bind(contract_id)
-    .bind(RACE_CHAIN)
+    .bind(chain_id)
     .bind(RACE_ADDRESS)
     .bind(manifest_id)
     .execute(database.pool())
     .await?;
     Ok(database)
+}
+
+async fn marker_resolution_endpoint() -> AnyResult<String> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("http://{}/", listener.local_addr()?);
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                while let Some(body) = read_request_body(&mut socket).await {
+                    let response =
+                        serde_json::from_str::<Value>(&body).map_or(Value::Null, |request| {
+                            match request {
+                                Value::Array(calls) => Value::Array(
+                                    calls.iter().map(marker_resolution_response).collect(),
+                                ),
+                                single => marker_resolution_response(&single),
+                            }
+                        });
+                    let payload = response.to_string();
+                    let http = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    if socket.write_all(http.as_bytes()).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    Ok(endpoint)
+}
+
+fn marker_resolution_response(call: &Value) -> Value {
+    let selector = call
+        .pointer("/params/0")
+        .and_then(Value::as_str)
+        .unwrap_or("0x0");
+    let number = selector
+        .strip_prefix("0x")
+        .and_then(|number| i64::from_str_radix(number, 16).ok())
+        .unwrap_or_default();
+    json!({
+        "jsonrpc": "2.0",
+        "id": call.get("id").cloned().unwrap_or_else(|| json!(1)),
+        "result": {
+            "hash": marker_hash(number),
+            "parentHash": marker_hash(number.saturating_sub(1)),
+            "number": format!("0x{number:x}"),
+            "timestamp": "0x65"
+        }
+    })
+}
+
+fn marker_hash(number: i64) -> String {
+    format!("0x{number:064x}")
 }
 
 /// Serves one canonical block, enough for a batch to plan, fetch, and try to store.
